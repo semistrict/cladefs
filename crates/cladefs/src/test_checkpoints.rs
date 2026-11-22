@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What cladefs's tests share of waiting for a writer's checkpoints (TASK-339): a store's uploader
+//! What cladefs's tests share of waiting for a writer's checkpoints (TASK-339): a cell's uploader
 //! writes a checkpoint every so many segments ([`local_cell::upload::CHECKPOINT_EVERY`]) once it
 //! has uploaded them, after the commits that made them returned. A collector's pass that lists the
 //! bucket before the checkpoint lands reads the cell's state from before it, and keeps what the
@@ -25,28 +25,28 @@ pub(crate) async fn newest(bucket: &ObjectBucket, cell: crate::CellId) -> Option
         .max()
 }
 
-/// Runs `commits`, which commit `store` into a checkpoint, and waits for its writer's checkpoint
+/// Runs `commits`, which commit `cell` into a checkpoint, and waits for its writer's checkpoint
 /// past the newest before them to be in `bucket`, 60 s at most.
-pub(crate) async fn after(store: &OpenCell, bucket: &ObjectBucket, commits: impl AsyncFnOnce()) {
-    let before = newest(bucket, store.cell()).await;
+pub(crate) async fn after(cell: &OpenCell, bucket: &ObjectBucket, commits: impl AsyncFnOnce()) {
+    let before = newest(bucket, cell.cell()).await;
     commits().await;
     let deadline = Instant::now() + Duration::from_secs(60);
-    while newest(bucket, store.cell()).await <= before {
+    while newest(bucket, cell.cell()).await <= before {
         assert!(
             Instant::now() < deadline,
             "cell {}'s writer checkpointed nothing past {before:?} within 60 s",
-            store.cell()
+            cell.cell()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
-/// Commits `store` [`local_cell::upload::CHECKPOINT_EVERY`] times, a segment each, and waits for
+/// Commits `cell` [`local_cell::upload::CHECKPOINT_EVERY`] times, a segment each, and waits for
 /// the checkpoint they make to be in `bucket` ([`after`]).
-pub(crate) async fn checkpointed(store: &OpenCell, bucket: &ObjectBucket) {
-    after(store, bucket, async || {
+pub(crate) async fn checkpointed(cell: &OpenCell, bucket: &ObjectBucket) {
+    after(cell, bucket, async || {
         for _ in 0..local_cell::upload::CHECKPOINT_EVERY {
-            store.commit(None).await.unwrap();
+            cell.commit(None).await.unwrap();
         }
     })
     .await;

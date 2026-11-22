@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What importing an image costs the importer, without a store on disk: layers made in memory
+//! What importing an image costs the importer, without a cell on disk: layers made in memory
 //! (`cladefs::import::testing`), applied in turn to a filesystem in memory, each timed. They are
 //! the layers that cost building a base the most:
 //!
@@ -66,8 +66,8 @@ async fn apply(importer: &mut Importer, name: &str, layer: &[u8], count: usize, 
 }
 
 fn main() {
-    // cladefs: its stores encrypted, under the tests' KMS unless its environment names a KMS or gives
-    // a master key: a real host's KMS adds its calls (TASK-411.28).
+    // cladefs: its cells encrypted, under the tests' KMS unless its environment names a KMS or
+    // gives a master key: a real host's KMS adds its calls (TASK-411.28).
     cladefs::bucket::testing::encrypted();
     let mut args = std::env::args().skip(1);
     let files: usize = args.next().map_or(20_000, |n| n.parse().unwrap());

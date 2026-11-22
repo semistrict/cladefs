@@ -2,27 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: an ephemeral cell's store (doc-25, TASK-698.2): a child of a version of a cell kept in
+//! cladefs: an ephemeral cell (doc-25, TASK-698.2): a child of a version of a cell kept in
 //! the bucket, kept on this host's disk alone, never framed nor uploaded. Its parent's version is
 //! its lower layer, read as every fork reads its origin; its own extents are its upper layer, in
 //! its segments, raw.
 //!
-//! - **Its segments** close as any store's do, and stay raw ([`Segments`]'s `Raw` phase): read from
+//! - **Its segments** close as any cell's do, and stay raw ([`Segments`]'s `Raw` phase): read from
 //!   their raw files, their logs beside them, as recovery closes again a segment a crash left
 //!   torn. Its extents are all in segments: none is stored on its own.
-//! - **Its local checkpoint**, `local-checkpoint` ([`LocalCheckpoint`]): its state as of the last segment a checkpoint covered, what it
-//!   holds over its parent's version: its own extents, where they are, and those of its parent's
-//!   it freed, with its root, its next sequence number, the sequence numbers it spent and its
-//!   capacity; the headers of its kept segments' logs, which say how their raw files are
-//!   encrypted; the runs its last checkpoint gave back; and its keys, its caller's, wrapped.
+//! - **Its local checkpoint**, `local-checkpoint` ([`LocalCheckpoint`]): its state as of the last
+//!   segment a checkpoint covered, what it holds over its parent's version: its own extents, where
+//!   they are, and those of its parent's it freed, with its root, its next sequence number, the
+//!   sequence numbers it spent and its capacity; the headers of its kept segments' logs, which say
+//!   how their raw files are encrypted; the runs its last checkpoint gave back; and its keys, its
+//!   caller's, wrapped.
 //! - **A checkpoint** ([`LocalCell::checkpoint`]) covers the closed segments whose commits are
-//!   local, in order: their footers applied to the local checkpoint, the local checkpoint written whole, then their raw
-//!   files moved to `kept/` and their logs removed, then the write-ahead log's start moved past
-//!   them, as an acknowledgement moves it. What they freed of the cell's own extents is given back
-//!   ([`crate::File::punch`]) once nothing reads it: no view, kept extents letting go of them as
-//!   for the bucket's. A crash between the local checkpoint and the rest is finished by the next opening
-//!   ([`settle`]), before its write-ahead log is recovered, which would take a segment the start
-//!   covers for one the bucket acknowledged.
+//!   local, in order: their footers applied to the local checkpoint, the local checkpoint written
+//!   whole, then their raw files moved to `kept/` and their logs removed, then the write-ahead
+//!   log's start moved past them, as an acknowledgement moves it. What they freed of the cell's own
+//!   extents is given back ([`crate::File::punch`]) once nothing reads it: no view, kept extents
+//!   letting go of them as for the bucket's. A crash between the local checkpoint and the rest is
+//!   finished by the next opening ([`settle`]), before its write-ahead log is recovered, which
+//!   would take a segment the start covers for one the bucket acknowledged.
 //! - **Recovery** applies the local checkpoint over its parent's version, which the opener gives
 //!   ([`EphemeralOpening::parent`]), then the footers recovery folds of the logs of the segments
 //!   after it, as it closes them again ([`crate::wal::recover`]); and gives back again the runs the
@@ -48,8 +49,8 @@ pub struct Parent {
     pub at: u64,
 }
 
-/// An ephemeral cell's local checkpoint (see the module's docs): its state, as of the last segment a checkpoint
-/// covered, over its parent's version.
+/// An ephemeral cell's local checkpoint (see the module's docs): its state, as of the last segment
+/// a checkpoint covered, over its parent's version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalCheckpoint {
     parent: Parent,
@@ -76,9 +77,10 @@ pub struct LocalCheckpoint {
 const MAGIC: &[u8; 8] = b"cfsbase1";
 
 impl LocalCheckpoint {
-    /// The local checkpoint of a new ephemeral cell, forked from `parent`, whose state at the version, as its
-    /// child's, is `state`, its extents its parent's (`bucket_cell::State::inheriting` makes such);
-    /// `keys` its keys, wrapped, as its caller keeps them.
+    /// The local checkpoint of a new ephemeral cell, forked from `parent`, whose state at the
+    /// version, as its child's, is `state`, its extents its parent's
+    /// (`bucket_cell::State::inheriting` makes such); `keys` its keys, wrapped, as its caller keeps
+    /// them.
     pub fn fork(parent: Parent, state: &bucket_cell::State, keys: Vec<u8>) -> Self {
         Self {
             parent,
@@ -152,11 +154,11 @@ pub(crate) fn key(cell: CellId, number: u64) -> String {
     bucket_cell::layout::segment(cell, number, 0)
 }
 
-/// Finishes in `dir`, an ephemeral cell's store, `cell`'s, a checkpoint a crash cut short (see the
-/// module's docs): the raw files of the segments its local checkpoint covers moved to `kept/`, or removed if it
-/// keeps none of them, their logs removed, and the write-ahead log's start its local checkpoint's last commit.
-/// Before its write-ahead log is recovered, which would take a segment the start covers for one
-/// the bucket acknowledged, and remove it.
+/// Finishes in `dir`, an ephemeral cell, `cell`'s, a checkpoint a crash cut short (see the module's
+/// docs): the raw files of the segments its local checkpoint covers moved to `kept/`, or removed if
+/// it keeps none of them, their logs removed, and the write-ahead log's start its local
+/// checkpoint's last commit. Before its write-ahead log is recovered, which would take a segment
+/// the start covers for one the bucket acknowledged, and remove it.
 pub(crate) fn settle<D: Dir>(dir: &D, cell: CellId) -> Result<(), Error> {
     let checkpoint = LocalCheckpoint::read(dir)?;
     if let Some(through) = checkpoint.through {
@@ -180,10 +182,11 @@ pub(crate) fn settle<D: Dir>(dir: &D, cell: CellId) -> Result<(), Error> {
     Ok(())
 }
 
-/// What an ephemeral cell's store opens with, besides its directory ([`Recovering::open_ephemeral`]).
+/// What an ephemeral cell opens with, besides its directory ([`Recovering::open_ephemeral`]).
 pub struct EphemeralOpening {
-    /// Its parent's state at the version it was forked from ([`LocalCheckpoint::parent`]), as decoded once for
-    /// every fork of it ([`bucket_cell::Recovered::layer`]): its extents its lower layer.
+    /// Its parent's state at the version it was forked from ([`LocalCheckpoint::parent`]), as
+    /// decoded once for every fork of it ([`bucket_cell::Recovered::layer`]): its extents its lower
+    /// layer.
     pub parent: Arc<bucket_cell::State>,
     /// Its keys: its own DEK, which its segments are encrypted under, and those it inherits.
     pub keys: Arc<Ring>,
@@ -213,8 +216,8 @@ impl Places for Based {
     }
 }
 
-/// An open ephemeral cell's local checkpoint as it stands (see the module's docs), which its checkpoints move
-/// on, one at a time.
+/// An open ephemeral cell's local checkpoint as it stands (see the module's docs), which its
+/// checkpoints move on, one at a time.
 pub(crate) struct Ephemeral {
     parent: Parent,
     based: bucket_cell::State<Based>,
@@ -272,21 +275,21 @@ impl Ephemeral {
 pub(crate) const CHECKPOINT_SEGMENTS: usize = 8;
 
 impl<D: Dir> Recovering<D> {
-    /// Whether it is an ephemeral cell's store (doc-25, TASK-698.2), which opens as one
+    /// Whether it is an ephemeral cell (doc-25, TASK-698.2), which opens as one
     /// ([`Recovering::open_ephemeral`]).
     pub fn is_ephemeral(&self) -> bool {
         self.file.ephemeral
     }
 
-    /// Its local checkpoint, of an ephemeral cell's store: what its opener reads its parent's state and its
+    /// Its local checkpoint, of an ephemeral cell: what its opener reads its parent's state and its
     /// keys of.
     pub fn local_checkpoint(&self) -> Result<LocalCheckpoint, Error> {
-        ensure!(self.file.ephemeral, "cell {}'s store is no ephemeral cell's", self.file.cell);
+        ensure!(self.file.ephemeral, "cell {} is no ephemeral cell's", self.file.cell);
         LocalCheckpoint::read(&*self.dir)
     }
 
-    /// Opens an ephemeral cell's store as `opening` says (see the module's docs): its local checkpoint over its
-    /// parent's version, then its segments' logs after it, closed again; another segment opens,
+    /// Opens an ephemeral cell as `opening` says (see the module's docs): its local checkpoint over
+    /// its parent's version, then its segments' logs after it, closed again; another segment opens,
     /// past them. Its extents are all in segments: `options`' large extents are none.
     pub fn open_ephemeral(
         self,
@@ -295,18 +298,19 @@ impl<D: Dir> Recovering<D> {
     ) -> Result<LocalCell<D>, Error> {
         let Self { dir, taken, claim, file, wal: recovered } = self;
         let CellFile { block_size, cell, bucket, capacity, kind, version, ephemeral, .. } = file;
-        ensure!(ephemeral, "cell {cell}'s store is no ephemeral cell's");
-        ensure!(version.is_none(), "an ephemeral cell's store is at no version");
+        ensure!(ephemeral, "cell {cell} is no ephemeral cell's");
+        ensure!(version.is_none(), "an ephemeral cell is at no version");
         options.large_extent = u64::MAX;
         let EphemeralOpening { parent, keys, cache, held } = opening;
         let checkpoint = LocalCheckpoint::read(&*dir)?;
         let framed = recovered.segments.iter().find(|(_, n)| !recovered.closing.contains_key(n));
-        ensure!(framed.is_none(), "ephemeral cell {cell}'s store holds a framed segment");
+        ensure!(framed.is_none(), "ephemeral cell {cell} holds a framed segment");
         let segment = |number| SegmentId { cell: cell.id, number };
         // Its segments closed again hold their commits' runs, which their logs alone may have held.
         recovered.restore_raw(&*dir, cell, &keys)?;
 
-        // Its extents: its parent's version's, its local checkpoint's over them, its log's over those.
+        // Its extents: its parent's version's, its local checkpoint's over them, its log's over
+        // those.
         let mut by_key = HashMap::new();
         for &number in checkpoint.kept.keys() {
             by_key.insert(key(cell, number), segment(number));
@@ -431,9 +435,9 @@ fn punch<F: File>(raw: &F, segment: SegmentId, offset: u64, len: u64) {
 }
 
 impl<D: Dir> LocalCell<D> {
-    /// cladefs: makes a new ephemeral cell's store in `dir` (doc-25, TASK-698.2), as
-    /// [`LocalCell::make`] does, its description naming `bucket`, its parent's, which its parent's
-    /// extents are read in, and `kind`, its cell's; and `local-checkpoint`, its local checkpoint, its parent's version's
+    /// cladefs: makes a new ephemeral cell in `dir` (doc-25, TASK-698.2), as [`LocalCell::make`]
+    /// does, its description naming `bucket`, its parent's, which its parent's extents are read in,
+    /// and `kind`, its cell's; and `local-checkpoint`, its local checkpoint, its parent's version's
     /// state at the fork. Unmade until its maker says it is whole ([`LocalCell::made`]).
     pub fn make_ephemeral(
         dir: &D,
@@ -455,10 +459,10 @@ impl<D: Dir> LocalCell<D> {
         self.ephemeral.is_some()
     }
 
-    /// cladefs: of an ephemeral cell, covers the closed segments whose commits are local, in order, if
-    /// there are [`CHECKPOINT_SEGMENTS`] of them, or any if `drain` (see the module's docs): returns
-    /// whether it covered any. Nothing, of a cell kept in the bucket. A failure fails the store, as
-    /// what it holds may be ahead of its files.
+    /// cladefs: of an ephemeral cell, covers the closed segments whose commits are local, in order,
+    /// if there are [`CHECKPOINT_SEGMENTS`] of them, or any if `drain` (see the module's docs):
+    /// returns whether it covered any. Nothing, of a cell kept in the bucket. A failure fails the
+    /// cell, as what it holds may be ahead of its files.
     pub async fn checkpoint(&self, drain: bool) -> Result<bool, Error> {
         let Some(ephemeral) = &self.ephemeral else { return Ok(false) };
         // cladefs: the flush's lock first, as a flush takes it, then the cell's own: the segments
@@ -494,8 +498,8 @@ impl<D: Dir> LocalCell<D> {
                 .collect();
             (covered, headers)
         };
-        // The local checkpoint, its footers applied; what they let go of among its own extents' runs, each
-        // where it was, to give back.
+        // The local checkpoint, its footers applied; what they let go of among its own extents'
+        // runs, each where it was, to give back.
         let before = ephemeral.based.extents.own.clone();
         for (number, footer) in &covered {
             ephemeral.based.apply_contents(*number, 0, &footer.contents);
@@ -526,8 +530,8 @@ impl<D: Dir> LocalCell<D> {
             .filter(|(extent, at)| after.get(extent) != Some(at))
             .filter_map(|(_, at)| Some((*numbers.get(&at.key)?, at.offset, at.len)))
             .collect();
-        // Their raw files hold their commits' runs, which a flush that sealed little made durable in
-        // their logs alone, which go.
+        // Their raw files hold their commits' runs, which a flush that sealed little made durable
+        // in their logs alone, which go.
         for (number, _) in &covered {
             let raw = self.lock().segments.raw_file(&*self.dir, segment(*number))?;
             raw.sync().with_context(|| format!("syncing {:?}", segment(*number)))?;

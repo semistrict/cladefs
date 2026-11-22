@@ -4,7 +4,7 @@
  * Memory management, faked at the level fs/dax.c meets it: pages of the window, with the
  * references and map counts it reads; and a mapping's page tables, a PTE and a PMD array in each
  * VMA, which only the sim's user accesses read (kernel/mm.c). There is no TLB and no MMU behind
- * them: a user store looks its PTE up and is done, as one step.
+ * them: a user write looks its PTE up and is done, as one step.
  */
 #ifndef _SIM_MM_H
 #define _SIM_MM_H

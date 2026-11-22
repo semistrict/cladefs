@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The store's behaviour, in memory and in a directory of the host's.
+//! The cell's behaviour, in memory and in a directory of the host's.
 
 mod common;
 
@@ -19,7 +19,7 @@ use storage_device::{ExtentId, NoExtent, OtherCell, SealedExtent};
 
 const BLOCK: usize = 4096;
 const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
-/// The most bytes an extent holds: doc-4's `max_extent`, the store's default.
+/// The most bytes an extent holds: doc-4's `max_extent`, the cell's default.
 const MAX_EXTENT: u64 = 64 << 20;
 
 /// Small segments and large extents, so that tests make several of each.
@@ -34,8 +34,8 @@ const OPTIONS: Options = Options {
     held_most: 256 << 10,
 };
 
-/// The chain of a writer of the cell in object storage, whose segments the store closes: that of
-/// a store opened where the bucket holds nothing of its cell (`Opening::new`).
+/// The chain of a writer of the cell in object storage, whose segments the cell closes: that of
+/// a cell opened where the bucket holds nothing of its cell (`Opening::new`).
 const WRITER: Chain = Chain::new(CELL, 0, 0, 0);
 
 fn extent(sequence: u64) -> ExtentId {
@@ -57,7 +57,7 @@ fn create<D: Dir>(dir: D, capacity: u64) -> LocalCell<D> {
     LocalCell::create(dir, description, OPTIONS).unwrap()
 }
 
-/// cladefs: the store in `dir`, opened where the bucket holds `state` of its cell, its writer's
+/// cladefs: the cell in `dir`, opened where the bucket holds `state` of its cell, its writer's
 /// chain `chain` (TASK-165.9), its head naming the segments before the chain's, of its epoch.
 fn opened_on(dir: MemDir, state: bucket_cell::State, chain: Chain) -> LocalCell<MemDir> {
     let head = bucket_cell::layout::Head::default().holding(chain.epoch(), chain.next_segment());
@@ -67,7 +67,7 @@ fn opened_on(dir: MemDir, state: bucket_cell::State, chain: Chain) -> LocalCell<
     LocalCell::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 
-/// cladefs: a new store in `dir`, of `capacity` bytes, made whole, opened as [`opened_on`] opens it.
+/// cladefs: a new cell in `dir`, of `capacity` bytes, made whole, opened as [`opened_on`] opens it.
 fn created_on(
     dir: MemDir,
     capacity: u64,
@@ -76,14 +76,14 @@ fn created_on(
 ) -> LocalCell<MemDir> {
     let description = Description { block_size: BLOCK as u32, capacity, cell: CELL };
     LocalCell::make(&dir, description, None, None).unwrap();
-    let store = opened_on(dir, state, chain);
-    store.made().unwrap();
-    store
+    let cell = opened_on(dir, state, chain);
+    cell.made().unwrap();
+    cell
 }
 
-fn read<D: Dir>(store: &LocalCell<D>, extent: ExtentId, offset: u64, len: usize) -> Vec<u8> {
+fn read<D: Dir>(cell: &LocalCell<D>, extent: ExtentId, offset: u64, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    store.read(extent, offset, &mut data).unwrap();
+    cell.read(extent, offset, &mut data).unwrap();
     data
 }
 
@@ -95,54 +95,54 @@ fn error_is<E: std::error::Error + PartialEq + Send + Sync + 'static>(
     assert_eq!(error.downcast_ref::<E>(), Some(&expected), "{error:?}");
 }
 
-/// Writes, reads, commits and reopens a store in `dir`, which `reopen` opens again.
+/// Writes, reads, commits and reopens a cell in `dir`, which `reopen` opens again.
 async fn reads_what_was_written<D: Dir>(dir: D, reopen: impl Fn(&D) -> D) {
-    let store = create(dir, 64 << 20);
+    let cell = create(dir, 64 << 20);
     // Small extents, in segments, one in pieces, and a large one, in a file of its own.
-    store.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
-    store.write(extent(2), 2 * BLOCK as u64, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.write(extent(2), 0, &pattern(3, 0, BLOCK)).await.unwrap();
-    store.write(extent(2), 2 * BLOCK as u64, &pattern(4, 0, BLOCK)).await.unwrap();
-    store.write(extent(3), 0, &pattern(5, 0, 40 << 10)).await.unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
+    cell.write(extent(2), 2 * BLOCK as u64, &pattern(2, 0, BLOCK)).await.unwrap();
+    cell.write(extent(2), 0, &pattern(3, 0, BLOCK)).await.unwrap();
+    cell.write(extent(2), 2 * BLOCK as u64, &pattern(4, 0, BLOCK)).await.unwrap();
+    cell.write(extent(3), 0, &pattern(5, 0, 40 << 10)).await.unwrap();
 
-    let check = |store: &LocalCell<D>| {
-        assert_eq!(read(store, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
+    let check = |cell: &LocalCell<D>| {
+        assert_eq!(read(cell, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
         // Blocks never written read as zeros, within an extent and past its end; the later of
         // two writes of a block holds.
         assert_eq!(
-            read(store, extent(2), 0, 4 * BLOCK),
+            read(cell, extent(2), 0, 4 * BLOCK),
             [pattern(3, 0, BLOCK), vec![0; BLOCK], pattern(4, 0, BLOCK), vec![0; BLOCK]].concat()
         );
         assert_eq!(
-            read(store, extent(3), BLOCK as u64, 40 << 10),
+            read(cell, extent(3), BLOCK as u64, 40 << 10),
             [pattern(5, BLOCK, 36 << 10), vec![0; BLOCK]].concat()
         );
         assert_eq!(
-            store.extents().unwrap(),
+            cell.extents().unwrap(),
             vec![
                 (extent(1), 3 * BLOCK as u64),
                 (extent(2), 3 * BLOCK as u64),
                 (extent(3), 40 << 10)
             ]
         );
-        assert_eq!(store.info().unwrap().used, 64 << 10);
-        assert_eq!(store.info().unwrap().next_sequence, 4);
-        error_is(store.read(extent(4), 0, &mut [0; BLOCK]), NoExtent(extent(4)));
+        assert_eq!(cell.info().unwrap().used, 64 << 10);
+        assert_eq!(cell.info().unwrap().next_sequence, 4);
+        error_is(cell.read(extent(4), 0, &mut [0; BLOCK]), NoExtent(extent(4)));
     };
-    check(&store);
-    assert_eq!(store.usage().unwrap().own_bytes, 40 << 10);
-    store.commit(Some(b"root")).await.unwrap();
-    check(&store);
+    check(&cell);
+    assert_eq!(cell.usage().unwrap().own_bytes, 40 << 10);
+    cell.commit(Some(b"root")).await.unwrap();
+    check(&cell);
 
     // Uncommitted writes and frees are gone after reopening.
-    store.write(extent(9), 0, &pattern(9, 0, BLOCK)).await.unwrap();
-    store.free(extent(1)).unwrap();
-    let dir = reopen(store.dir());
-    drop(store);
-    let store = LocalCell::open(dir, OPTIONS).unwrap();
-    check(&store);
-    assert_eq!(store.root().unwrap(), b"root");
-    assert!(store.last_commit().unwrap() >= 1);
+    cell.write(extent(9), 0, &pattern(9, 0, BLOCK)).await.unwrap();
+    cell.free(extent(1)).unwrap();
+    let dir = reopen(cell.dir());
+    drop(cell);
+    let cell = LocalCell::open(dir, OPTIONS).unwrap();
+    check(&cell);
+    assert_eq!(cell.root().unwrap(), b"root");
+    assert!(cell.last_commit().unwrap() >= 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -158,26 +158,40 @@ async fn reads_what_was_written_on_the_host() {
         .await;
 }
 
-/// Extents are written once: commits seal them. A store writes only its cell's extents.
+/// Extents are written once: commits seal them. A cell writes only its cell's extents.
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_once() {
-    let store = create(MemDir::new(), 1 << 20);
-    assert!(!store.has_open().unwrap());
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.write(extent(1), BLOCK as u64, &[2; BLOCK]).await.unwrap();
-    assert!(store.has_open().unwrap());
-    store.commit(None).await.unwrap();
-    assert!(!store.has_open().unwrap());
-    error_is(store.write(extent(1), 2 * BLOCK as u64, &[3; BLOCK]).await, SealedExtent(extent(1)));
+    let cell = create(MemDir::new(), 1 << 20);
+    assert!(!cell.has_open().unwrap());
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.write(extent(1), BLOCK as u64, &[2; BLOCK]).await.unwrap();
+    assert!(cell.has_open().unwrap());
+    cell.commit(None).await.unwrap();
+    assert!(!cell.has_open().unwrap());
+    error_is(cell.write(extent(1), 2 * BLOCK as u64, &[3; BLOCK]).await, SealedExtent(extent(1)));
     error_is(
-        store.write(ExtentId::new(CELL.id + 1, 1), 0, &[3; BLOCK]).await,
+        cell.write(ExtentId::new(CELL.id + 1, 1), 0, &[3; BLOCK]).await,
         OtherCell(ExtentId::new(CELL.id + 1, 1)),
     );
-    assert!(store.write(extent(2), 1, &[3; BLOCK]).await.is_err(), "unaligned");
-    assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), [[1; BLOCK], [2; BLOCK]].concat());
+    assert!(cell.write(extent(2), 1, &[3; BLOCK]).await.is_err(), "unaligned");
+    assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), [[1; BLOCK], [2; BLOCK]].concat());
 }
 
-/// cladefs: an extent freed once sealed is written no more, nor opened, though the store holds it
+/// Board 2762: no cell writes an extent of the last sequence, past which no next sequence is: a
+/// write of one is refused, its next sequence as it was, and the cell goes on. Written, it wrapped
+/// the next sequence to 0 (release) or panicked under the state lock (checked builds).
+#[tokio::test(flavor = "multi_thread")]
+async fn extents_of_the_last_sequence_are_refused() {
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    let last = extent(u64::MAX);
+    error_is(cell.write(last, 0, &[2; BLOCK]).await, local_cell::LastSequence(last));
+    assert_eq!(cell.info().unwrap().next_sequence, 2);
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(1), 0, BLOCK), [1; BLOCK]);
+}
+
+/// cladefs: an extent freed once sealed is written no more, nor opened, though the cell holds it
 /// no longer, nor once it opens again, from its deltas or its checkpoint: forks, views and caches
 /// that hold it by its ID would take another's data for it (TASK-79.6). One freed while open,
 /// which nothing but its writer saw, may be written again; and one never written, though below
@@ -186,46 +200,43 @@ async fn writes_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn freed_extents_are_written_no_more() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.free(extent(1)).unwrap();
-    error_is(store.write(extent(1), 0, &[3; BLOCK]).await, SpentExtent(extent(1)));
-    store.commit(None).await.unwrap();
-    error_is(store.write(extent(1), 0, &[3; BLOCK]).await, SpentExtent(extent(1)));
-    error_is(store.write(extent(2), 0, &[3; BLOCK]).await, SealedExtent(extent(2)));
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.free(extent(1)).unwrap();
+    error_is(cell.write(extent(1), 0, &[3; BLOCK]).await, SpentExtent(extent(1)));
+    cell.commit(None).await.unwrap();
+    error_is(cell.write(extent(1), 0, &[3; BLOCK]).await, SpentExtent(extent(1)));
+    error_is(cell.write(extent(2), 0, &[3; BLOCK]).await, SealedExtent(extent(2)));
 
-    store.write(extent(4), 0, &[4; BLOCK]).await.unwrap();
-    store.free(extent(4)).unwrap();
-    store.write(extent(4), 0, &[5; BLOCK]).await.unwrap();
-    store.write(extent(5), 0, &[5; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(4), 0, &[4; BLOCK]).await.unwrap();
+    cell.free(extent(4)).unwrap();
+    cell.write(extent(4), 0, &[5; BLOCK]).await.unwrap();
+    cell.write(extent(5), 0, &[5; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
 
     // From its deltas; then from the checkpoint that opening wrote.
-    let store = reopened(store, &dir);
-    error_is(store.write(extent(1), 0, &[6; BLOCK]).await, SpentExtent(extent(1)));
-    store.free(extent(2)).unwrap();
-    store.commit(None).await.unwrap();
-    let store = reopened(store, &dir);
+    let cell = reopened(cell, &dir);
+    error_is(cell.write(extent(1), 0, &[6; BLOCK]).await, SpentExtent(extent(1)));
+    cell.free(extent(2)).unwrap();
+    cell.commit(None).await.unwrap();
+    let cell = reopened(cell, &dir);
     for sequence in [1, 2] {
-        error_is(
-            store.write(extent(sequence), 0, &[6; BLOCK]).await,
-            SpentExtent(extent(sequence)),
-        );
+        error_is(cell.write(extent(sequence), 0, &[6; BLOCK]).await, SpentExtent(extent(sequence)));
     }
-    store.write(extent(3), 0, &[7; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(read(&store, extent(3), 0, BLOCK), [7; BLOCK]);
-    assert_eq!(read(&store, extent(4), 0, BLOCK), [5; BLOCK]);
+    cell.write(extent(3), 0, &[7; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(3), 0, BLOCK), [7; BLOCK]);
+    assert_eq!(read(&cell, extent(4), 0, BLOCK), [5; BLOCK]);
 }
 
-/// The store holds at most its capacity, and frees make room.
+/// The cell holds at most its capacity, and frees make room.
 #[tokio::test(flavor = "multi_thread")]
 async fn capacity() {
-    let store = create(MemDir::new(), 64 << 10);
-    store.write(extent(1), 0, &[1; 48 << 10]).await.unwrap();
-    let full = store.write(extent(2), 0, &[2; 32 << 10]).await;
+    let cell = create(MemDir::new(), 64 << 10);
+    cell.write(extent(1), 0, &[1; 48 << 10]).await.unwrap();
+    let full = cell.write(extent(2), 0, &[2; 32 << 10]).await;
     // Which bound refused it, and its numbers (TASK-79.105).
     assert_eq!(
         format!("{:#}", full.as_ref().unwrap_err()),
@@ -233,12 +244,12 @@ async fn capacity() {
          store is full"
     );
     error_is(full, NoSpace);
-    assert_eq!(store.info().unwrap().available, 16 << 10);
-    store.free(extent(1)).unwrap();
-    store.free(extent(1)).expect("freeing a freed extent failed");
-    store.write(extent(2), 0, &[2; 32 << 10]).await.unwrap();
+    assert_eq!(cell.info().unwrap().available, 16 << 10);
+    cell.free(extent(1)).unwrap();
+    cell.free(extent(1)).expect("freeing a freed extent failed");
+    cell.write(extent(2), 0, &[2; 32 << 10]).await.unwrap();
     // Freeing doesn't make sequence numbers available again.
-    assert_eq!(store.info().unwrap().next_sequence, 3);
+    assert_eq!(cell.info().unwrap().next_sequence, 3);
 }
 
 /// Freed extents' files, and segments whose extents are all freed, are removed once the frees are
@@ -246,18 +257,18 @@ async fn capacity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn frees_remove_files() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
+    let cell = create(dir.clone(), 1 << 20);
     // Fills the first segment, so that the commit starts another.
     for sequence in 0..16 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
-    store.write(extent(16), 0, &pattern(16, 0, 32 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    cell.write(extent(16), 0, &pattern(16, 0, 32 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     // The first segment, closed, and the next, open.
     // cladefs: segments' files, not the next segment's, placed ahead of it (TASK-384).
     let segments = async || {
-        let count = async |kind| segment_files(&store, &dir, kind).await.len();
+        let count = async |kind| segment_files(&cell, &dir, kind).await.len();
         (count("segments").await, count("open-segments").await)
     };
     assert_eq!(segments().await, (1, 1));
@@ -265,19 +276,19 @@ async fn frees_remove_files() {
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 
     for sequence in 0..=16 {
-        store.free(extent(sequence)).unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
     // cladefs: not until the frees are committed, and the segment is acknowledged in the bucket,
     // the write-ahead log keeping it until then (TASK-165.9).
     assert_eq!(segments().await, (1, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     assert_eq!(segments().await, (1, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
-    error_is(store.read(extent(16), 0, &mut [0; BLOCK]), NoExtent(extent(16)));
-    let closed = closed_one(&store).await;
-    store.acknowledged(closed.number).await.unwrap();
-    store.commit(None).await.unwrap();
+    error_is(cell.read(extent(16), 0, &mut [0; BLOCK]), NoExtent(extent(16)));
+    let closed = closed_one(&cell).await;
+    cell.acknowledged(closed.number).await.unwrap();
+    cell.commit(None).await.unwrap();
     assert_eq!(segments().await, (0, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
@@ -289,28 +300,28 @@ async fn frees_remove_files() {
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_close_framed_by_the_commits_flush() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
+    let cell = create(dir.clone(), 1 << 20);
     for sequence in 0..17 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
-    store.commit_ordered(None).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
     // cladefs: segments' files, not the next segment's, placed ahead of it (TASK-384).
-    let count = async |kind| segment_files(&store, &dir, kind).await.len();
+    let count = async |kind| segment_files(&cell, &dir, kind).await.len();
     // Closed, and the next open: its raw file stays until the commit is durable.
     assert_eq!(count("open-segments").await, 2);
-    let reads = || (0..17).map(|sequence| read(&store, extent(sequence), 0, BLOCK));
+    let reads = || (0..17).map(|sequence| read(&cell, extent(sequence), 0, BLOCK));
     let written: Vec<_> = (0..17).map(|sequence| pattern(sequence as u8, 0, BLOCK)).collect();
     assert_eq!(reads().collect::<Vec<_>>(), written);
     // Not the uploader's until its commit is durable (TASK-165.9).
-    assert!(store.closed(usize::MAX).await.unwrap().is_empty());
+    assert!(cell.closed(usize::MAX).await.unwrap().is_empty());
 
     // cladefs: framed, then its commit's flush: its raw file the spare, the segment after the next
     // one's placed ahead of it as the next opened, before, its raw file made anew (TASK-384).
-    store.wait_framed().await.unwrap();
-    store.flush().await.unwrap();
+    cell.wait_framed().await.unwrap();
+    cell.flush().await.unwrap();
     assert_eq!((count("segments").await, count("open-segments").await), (1, 1));
     assert_eq!(reads().collect::<Vec<_>>(), written);
-    let closed = store.closed(usize::MAX).await.unwrap();
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     let data = extent_frame::data(
         &segment.bytes().unwrap(),
@@ -320,9 +331,9 @@ async fn segments_close_framed_by_the_commits_flush() {
     assert_eq!(&data[..BLOCK], &pattern(0, 0, BLOCK)[..]);
 }
 
-/// The one segment `store` closed whose commits are durable, which [`LocalCell::closed`] gives.
-async fn closed_one(store: &LocalCell<MemDir>) -> Closed<MemFile> {
-    let closed = store.closed(usize::MAX).await.unwrap();
+/// The one segment `cell` closed whose commits are durable, which [`LocalCell::closed`] gives.
+async fn closed_one(cell: &LocalCell<MemDir>) -> Closed<MemFile> {
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let count = closed.len();
     let [closed] = <[_; 1]>::try_from(closed).unwrap_or_else(|_| panic!("{count} segments closed"));
     closed
@@ -336,20 +347,20 @@ async fn closed_one(store: &LocalCell<MemDir>) -> Closed<MemFile> {
 async fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     use extent_frame::segment::{Location, extent_key};
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert!(store.closed(usize::MAX).await.unwrap().is_empty());
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(cell.closed(usize::MAX).await.unwrap().is_empty());
 
     for sequence in 2..=16 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
-    store.write(extent(17), 0, &pattern(17, 0, 32 << 10)).await.unwrap();
+    cell.write(extent(17), 0, &pattern(17, 0, 32 << 10)).await.unwrap();
     // Filling its segment, which it closes; not taken until durable.
-    store.commit_ordered(Some(b"root")).await.unwrap();
-    assert!(store.closed(usize::MAX).await.unwrap().is_empty());
-    store.flush().await.unwrap();
-    let writing = closed_one(&store).await;
+    cell.commit_ordered(Some(b"root")).await.unwrap();
+    assert!(cell.closed(usize::MAX).await.unwrap().is_empty());
+    cell.flush().await.unwrap();
+    let writing = closed_one(&cell).await;
     let written: Vec<_> =
         writing.footer.contents.extents.iter().map(|&(extent, _, len)| (extent, len)).collect();
     let blocks: Vec<_> = (1..=16).map(|sequence| (extent(sequence), BLOCK as u64)).collect();
@@ -362,17 +373,17 @@ async fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     assert_eq!(writing.footer.own().collect::<Vec<_>>(), [(extent(17), own)]);
     let (frees, root) = (&writing.footer.contents.frees, &writing.footer.contents.root);
     assert_eq!((frees.clone(), root.clone()), (vec![], Some(b"root".to_vec())));
-    assert_eq!(store.wal_bytes().unwrap(), 16 * BLOCK as u64 + (32 << 10));
+    assert_eq!(cell.wal_bytes().unwrap(), 16 * BLOCK as u64 + (32 << 10));
 
     for sequence in 1..=17 {
-        store.free(extent(sequence)).unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
-    store.commit(None).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    let freeing = closed_one(&store).await;
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let freeing = closed_one(&cell).await;
     assert_eq!(freeing.footer.contents.frees, (1..=17).map(extent).collect::<Vec<_>>());
-    // Freed: the store's users read them not, the log holds them, which the uploader reads.
-    error_is(store.read(extent(17), 0, &mut [0; BLOCK]), NoExtent(extent(17)));
+    // Freed: the cell's users read them not, the log holds them, which the uploader reads.
+    error_is(cell.read(extent(17), 0, &mut [0; BLOCK]), NoExtent(extent(17)));
     let [(_, own_bytes)] = &writing.own_bytes().unwrap()[..] else { panic!("no extent's own") };
     assert_eq!(
         extent_frame::data(own_bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap(),
@@ -384,16 +395,16 @@ async fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     )
     .unwrap();
     assert_eq!(&data[2 * BLOCK..3 * BLOCK], &pattern(3, 0, BLOCK)[..]);
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
     let segments = dir.list(&of("segments", CELL.id)).unwrap().len();
 
     // Acknowledged, they go.
     for closed in [writing, freeing] {
-        store.acknowledged(closed.number).await.unwrap();
+        cell.acknowledged(closed.number).await.unwrap();
     }
-    assert_eq!(store.wal_bytes().unwrap(), 0);
-    store.commit(None).await.unwrap();
+    assert_eq!(cell.wal_bytes().unwrap(), 0);
+    cell.commit(None).await.unwrap();
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
     assert!(dir.list(&of("segments", CELL.id)).unwrap().len() < segments);
 }
@@ -403,7 +414,7 @@ fn bucket_location(key: &str, offset: u64, len: u64) -> Location {
     Location { key: key.to_owned(), offset, len }
 }
 
-/// cladefs: a store holds the extents the bucket holds of its cell as of its opening: recovered
+/// cladefs: a cell holds the extents the bucket holds of its cell as of its opening: recovered
 /// there, read there, at their locations there, which a read's error names, and freed like others
 /// (TASK-165.8, TASK-165.9).
 #[tokio::test(flavor = "multi_thread")]
@@ -415,32 +426,32 @@ async fn extents_the_bucket_holds_are_held_without_their_data() {
     state.extents.insert(extent(5), location.clone());
     state.extents.insert(ExtentId::new(CELL.id + 1, 9), other);
     state.next_sequence = 6;
-    let check = async |store: &LocalCell<MemDir>| {
-        assert_eq!(store.extent(extent(5)).unwrap(), Some((3 * BLOCK as u64, false)));
+    let check = async |cell: &LocalCell<MemDir>| {
+        assert_eq!(cell.extent(extent(5)).unwrap(), Some((3 * BLOCK as u64, false)));
         let in_bucket = BucketData { extent: extent(5), location: location.clone() };
-        error_is(store.read(extent(5), 0, &mut [0; BLOCK]), in_bucket);
-        assert_eq!(store.place(extent(5)).unwrap(), Some(Place::Bucket(location.clone())));
-        assert_eq!(store.info().unwrap().used, 4 * BLOCK as u64);
-        assert_eq!(store.info().unwrap().next_sequence, 6);
+        error_is(cell.read(extent(5), 0, &mut [0; BLOCK]), in_bucket);
+        assert_eq!(cell.place(extent(5)).unwrap(), Some(Place::Bucket(location.clone())));
+        assert_eq!(cell.info().unwrap().used, 4 * BLOCK as u64);
+        assert_eq!(cell.info().unwrap().next_sequence, 6);
         // Sealed.
-        error_is(store.write(extent(5), 0, &[0; BLOCK]).await, SealedExtent(extent(5)));
+        error_is(cell.write(extent(5), 0, &[0; BLOCK]).await, SealedExtent(extent(5)));
     };
-    let store = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
-    check(&store).await;
-    drop(store);
-    let store = opened_on(dir, state, WRITER);
-    check(&store).await;
-    store.free(extent(5)).unwrap();
-    store.commit(None).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    assert_eq!(closed_one(&store).await.footer.contents.frees, [extent(5)]);
-    error_is(store.read(extent(5), 0, &mut [0; BLOCK]), NoExtent(extent(5)));
+    let cell = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
+    check(&cell).await;
+    drop(cell);
+    let cell = opened_on(dir, state, WRITER);
+    check(&cell).await;
+    cell.free(extent(5)).unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    assert_eq!(closed_one(&cell).await.footer.contents.frees, [extent(5)]);
+    error_is(cell.read(extent(5), 0, &mut [0; BLOCK]), NoExtent(extent(5)));
 }
 
-/// cladefs: commits append their records to the open segment's log, its alone, and the store opened
+/// cladefs: commits append their records to the open segment's log, its alone, and the cell opened
 /// again holds them all (TASK-165.9). The logs of the segments the commits closed go once their
 /// framed files are durable, after the commits return (framings run off them, TASK-165.9, and
-/// make their framed files durable on a thread of the store's, TASK-310): counted once the store
+/// make their framed files durable on a thread of the cell's, TASK-310): counted once the cell
 /// settled. Here none is made durable until the commits are made, as on a busy disk; counted at
 /// once, as the test did, the closed segments' logs were still there, (12, 0), and on a CI
 /// runner two had gone together, two spares kept, (1, 2); so too before TASK-310 with framings
@@ -450,7 +461,7 @@ async fn commits_reopen_from_their_logs() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
+    let cell = create(dir.clone(), 64 << 20);
     let (go, gone) = channel::<()>();
     let gone = Mutex::new(gone);
     let held = fail::FailGuard::with_callback("segments::making_durable", move || {
@@ -458,98 +469,98 @@ async fn commits_reopen_from_their_logs() {
     })
     .unwrap();
     for sequence in 0..200 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
         if sequence % 3 == 0 {
-            store.free(extent(sequence)).unwrap();
+            cell.free(extent(sequence)).unwrap();
         }
-        store.commit(Some(format!("root {sequence}").as_bytes())).await.unwrap();
+        cell.commit(Some(format!("root {sequence}").as_bytes())).await.unwrap();
     }
     drop((go, held));
-    settled(&store).await;
-    store.prepared().await.unwrap();
+    settled(&cell).await;
+    cell.prepared().await.unwrap();
     // The open segment's log, and under spares' names the logs of segments gone kept as spares,
     // two at most (TASK-301), and the next segment's, prepared (TASK-333), placed under its name
     // (TASK-384): a segment opened takes the one prepared, else a spare. The closed segments' logs
     // went together once settled, their framed files durable at last: two kept.
-    let logs = async |store: &LocalCell<MemDir>| {
+    let logs = async |cell: &LocalCell<MemDir>| {
         let names = dir.list(&of("logs", CELL.id)).unwrap();
         let spares = names.iter().filter(|name| name.starts_with("spare-")).count();
-        (segment_files(store, &dir, "logs").await.len(), store.placed().is_some(), spares)
+        (segment_files(cell, &dir, "logs").await.len(), cell.placed().is_some(), spares)
     };
-    assert_eq!(logs(&store).await, (1, true, 2));
-    drop(store);
-    let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-    store.prepared().await.unwrap();
+    assert_eq!(logs(&cell).await, (1, true, 2));
+    drop(cell);
+    let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+    cell.prepared().await.unwrap();
     // The opening's open segment took a spare; the log of the one it closed again went, and the
     // next's, placed ahead of it, holding nothing (TASK-384).
-    assert_eq!(logs(&store).await, (1, false, 1));
-    assert_eq!(store.root().unwrap(), b"root 199");
-    assert_eq!(store.last_commit().unwrap(), 200);
+    assert_eq!(logs(&cell).await, (1, false, 1));
+    assert_eq!(cell.root().unwrap(), b"root 199");
+    assert_eq!(cell.last_commit().unwrap(), 200);
     let held: Vec<u64> =
-        store.extents().unwrap().iter().map(|(extent, _)| extent.sequence).collect();
+        cell.extents().unwrap().iter().map(|(extent, _)| extent.sequence).collect();
     assert_eq!(held, (0..200).filter(|sequence| sequence % 3 != 0).collect::<Vec<_>>());
     for sequence in held {
-        assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+        assert_eq!(read(&cell, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
     }
 }
 
-/// What a store holds as of its last commit, as its users see it: its epoch, root and next
+/// What a cell holds as of its last commit, as its users see it: its epoch, root and next
 /// sequence number, its extents with their lengths and where they are, and what it spent.
 type Held = (u64, Vec<u8>, u64, Vec<(ExtentId, u64, Place)>, extent_frame::spent::Spent);
 
-/// What `store` holds ([`Held`]), its open segment closed by a commit.
-async fn closed_state<D: Dir>(store: &LocalCell<D>) -> Held {
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    settled(store).await;
-    let next_sequence = store.info().unwrap().next_sequence;
-    let (epoch, root) = (store.last_commit().unwrap(), store.root().unwrap());
-    (epoch, root, next_sequence, store.places().unwrap(), store.spent().unwrap())
+/// What `cell` holds ([`Held`]), its open segment closed by a commit.
+async fn closed_state<D: Dir>(cell: &LocalCell<D>) -> Held {
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    settled(cell).await;
+    let next_sequence = cell.info().unwrap().next_sequence;
+    let (epoch, root) = (cell.last_commit().unwrap(), cell.root().unwrap());
+    (epoch, root, next_sequence, cell.places().unwrap(), cell.spent().unwrap())
 }
 
-/// cladefs: `store` once the segments its commits closed are framed, and the raw files and logs of
+/// cladefs: `cell` once the segments its commits closed are framed, and the raw files and logs of
 /// those whose commits are durable are gone: as a flush after their framings leaves it, none of
 /// which a flush waits for (TASK-165.9).
-async fn settled<D: Dir>(store: &LocalCell<D>) {
-    store.wait_framed().await.unwrap();
-    store.flush().await.unwrap();
+async fn settled<D: Dir>(cell: &LocalCell<D>) {
+    cell.wait_framed().await.unwrap();
+    cell.flush().await.unwrap();
 }
 
-/// What `store`, of `dir`, holds once opened again, its write-ahead log's footers replayed
+/// What `cell`, of `dir`, holds once opened again, its write-ahead log's footers replayed
 /// (TASK-165.9): what [`closed_state`] said.
-fn reopened_state(store: LocalCell<MemDir>, dir: &MemDir) -> (Held, LocalCell<MemDir>) {
-    let store = reopened(store, dir);
-    let next_sequence = store.info().unwrap().next_sequence;
-    let (epoch, root) = (store.last_commit().unwrap(), store.root().unwrap());
-    let held = (epoch, root, next_sequence, store.places().unwrap(), store.spent().unwrap());
-    (held, store)
+fn reopened_state(cell: LocalCell<MemDir>, dir: &MemDir) -> (Held, LocalCell<MemDir>) {
+    let cell = reopened(cell, dir);
+    let next_sequence = cell.info().unwrap().next_sequence;
+    let (epoch, root) = (cell.last_commit().unwrap(), cell.root().unwrap());
+    let held = (epoch, root, next_sequence, cell.places().unwrap(), cell.spent().unwrap());
+    (held, cell)
 }
 
-/// cladefs: an extent freed while open, which no commit held, is not spent: the store writes it
-/// again, and so does the store opened again, its write-ahead log's footers spending those freed
-/// once sealed alone, as the store does (TASK-160.15, TASK-165.9). One sealed, and freed by a
+/// cladefs: an extent freed while open, which no commit held, is not spent: the cell writes it
+/// again, and so does the cell opened again, its write-ahead log's footers spending those freed
+/// once sealed alone, as the cell does (TASK-160.15, TASK-165.9). One sealed, and freed by a
 /// later commit of the same segment, is spent, though no footer names it held.
 #[tokio::test(flavor = "multi_thread")]
-async fn reopening_spends_what_the_store_spends() {
+async fn reopening_spends_what_the_cell_spends() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
+    let cell = create(dir.clone(), 1 << 20);
     for (sequence, len) in [(1, BLOCK), (2, BLOCK), (3, 40 << 10)] {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, len)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, len)).await.unwrap();
     }
     // Freed open, in segments and in a raw file of its own.
-    store.free(extent(2)).unwrap();
-    store.free(extent(3)).unwrap();
-    store.commit(None).await.unwrap();
+    cell.free(extent(2)).unwrap();
+    cell.free(extent(3)).unwrap();
+    cell.commit(None).await.unwrap();
     // Sealed, then freed.
-    store.free(extent(1)).unwrap();
-    let state = closed_state(&store).await;
+    cell.free(extent(1)).unwrap();
+    let state = closed_state(&cell).await;
     assert_eq!(state.4.runs().collect::<Vec<_>>(), [(1, 2)]);
-    let (reopened, store) = reopened_state(store, &dir);
+    let (reopened, cell) = reopened_state(cell, &dir);
     // Its next sequence past what it holds, none: those freed, its next writer's floor is past.
     let (epoch, root, _, places, spent) = state;
     assert_eq!(reopened, (epoch, root, 0, places, spent));
     for sequence in [2, 3] {
-        store.write(extent(sequence), 0, &pattern(9, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(9, 0, BLOCK)).await.unwrap();
     }
 }
 
@@ -557,20 +568,20 @@ async fn reopening_spends_what_the_store_spends() {
 /// large, in a file of its own.
 #[tokio::test(flavor = "multi_thread")]
 async fn sealed_extents_are_one_run_each() {
-    let store = create(MemDir::new(), 1 << 20);
+    let open_cell = create(MemDir::new(), 1 << 20);
     // Interleaved, and rewritten, and with a hole.
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.write(extent(1), BLOCK as u64, &pattern(1, BLOCK, BLOCK)).await.unwrap();
-    store.write(extent(1), 0, &pattern(3, 0, BLOCK)).await.unwrap();
-    store.write(extent(3), 2 * BLOCK as u64, &pattern(4, 0, BLOCK)).await.unwrap();
+    open_cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    open_cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    open_cell.write(extent(1), BLOCK as u64, &pattern(1, BLOCK, BLOCK)).await.unwrap();
+    open_cell.write(extent(1), 0, &pattern(3, 0, BLOCK)).await.unwrap();
+    open_cell.write(extent(3), 2 * BLOCK as u64, &pattern(4, 0, BLOCK)).await.unwrap();
     // Small at first, large at its seal.
-    store.write(extent(4), 0, &pattern(5, 0, BLOCK)).await.unwrap();
-    store.write(extent(4), BLOCK as u64, &pattern(5, BLOCK, 32 << 10)).await.unwrap();
-    assert_eq!(store.places().unwrap()[0].2, Place::Pieces);
-    store.commit(None).await.unwrap();
+    open_cell.write(extent(4), 0, &pattern(5, 0, BLOCK)).await.unwrap();
+    open_cell.write(extent(4), BLOCK as u64, &pattern(5, BLOCK, 32 << 10)).await.unwrap();
+    assert_eq!(open_cell.places().unwrap()[0].2, Place::Pieces);
+    open_cell.commit(None).await.unwrap();
 
-    let places = store.places().unwrap();
+    let places = open_cell.places().unwrap();
     for (extent, len, place) in &places[..3] {
         let Place::Run { cell, offset, .. } = place else { panic!("{extent:?} is {place:?}") };
         assert_eq!((*cell, offset % BLOCK as u64), (CELL.id, 0), "{extent:?} at {offset}");
@@ -578,56 +589,56 @@ async fn sealed_extents_are_one_run_each() {
     }
     assert_eq!(places[3], (extent(4), (32 << 10) + BLOCK as u64, Place::Own));
     assert_eq!(
-        read(&store, extent(1), 0, 2 * BLOCK),
+        read(&open_cell, extent(1), 0, 2 * BLOCK),
         [pattern(3, 0, BLOCK), pattern(1, BLOCK, BLOCK)].concat()
     );
-    assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
+    assert_eq!(read(&open_cell, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
     assert_eq!(
-        read(&store, extent(3), 0, 3 * BLOCK),
+        read(&open_cell, extent(3), 0, 3 * BLOCK),
         [vec![0; 2 * BLOCK], pattern(4, 0, BLOCK)].concat()
     );
-    assert_eq!(read(&store, extent(4), BLOCK as u64, 32 << 10), pattern(5, BLOCK, 32 << 10));
-    let check = |store: &LocalCell<MemDir>| assert_eq!(store.places().unwrap(), places);
-    check(&store);
-    let dir = store.dir().clone();
-    drop(store);
+    assert_eq!(read(&open_cell, extent(4), BLOCK as u64, 32 << 10), pattern(5, BLOCK, 32 << 10));
+    let check = |open_cell: &LocalCell<MemDir>| assert_eq!(open_cell.places().unwrap(), places);
+    check(&open_cell);
+    let dir = open_cell.dir().clone();
+    drop(open_cell);
     check(&LocalCell::open(dir, OPTIONS).unwrap());
 }
 
 /// Segments close when full, when old, when asked to, and at a version, their footers after their
-/// data; and the cell's state is the replay of its write-ahead log's footers, which the store
+/// data; and the cell's state is the replay of its write-ahead log's footers, which the cell
 /// opened again holds (TASK-165.9), and which its audit checks at each closing.
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_hold_the_cells_history() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
+    let cell = create(dir.clone(), 64 << 20);
     // Closed, and open; cladefs: not the next segment's, placed ahead of it (TASK-384).
-    let segments = async |store: &LocalCell<MemDir>| {
+    let segments = async |cell: &LocalCell<MemDir>| {
         dir.list(&of("segments", CELL.id)).unwrap().len()
-            + segment_files(store, &dir, "open-segments").await.len()
+            + segment_files(cell, &dir, "open-segments").await.len()
     };
-    store.write(extent(0), 0, &pattern(0, 0, BLOCK)).await.unwrap();
-    store.commit(Some(b"one")).await.unwrap();
-    assert_eq!(segments(&store).await, 1);
+    cell.write(extent(0), 0, &pattern(0, 0, BLOCK)).await.unwrap();
+    cell.commit(Some(b"one")).await.unwrap();
+    assert_eq!(segments(&cell).await, 1);
     // Asked to.
-    let state = closed_state(&store).await;
-    assert_eq!(segments(&store).await, 2);
-    let (reopened, store) = reopened_state(store, &dir);
+    let state = closed_state(&cell).await;
+    assert_eq!(segments(&cell).await, 2);
+    let (reopened, cell) = reopened_state(cell, &dir);
     assert_eq!(reopened, state);
 
     // Full: 64 KiB of extents, freed and kept.
     for sequence in 1..=40 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
         if sequence % 3 == 0 {
-            store.free(extent(sequence)).unwrap();
+            cell.free(extent(sequence)).unwrap();
         }
-        store.commit(Some(format!("root {sequence}").as_bytes())).await.unwrap();
+        cell.commit(Some(format!("root {sequence}").as_bytes())).await.unwrap();
     }
-    assert!(segments(&store).await > 2, "no segment filled");
-    store.free(extent(0)).unwrap();
-    store.commit(None).await.unwrap();
-    let state = closed_state(&store).await;
-    let (reopened, store) = reopened_state(store, &dir);
+    assert!(segments(&cell).await > 2, "no segment filled");
+    cell.free(extent(0)).unwrap();
+    cell.commit(None).await.unwrap();
+    let state = closed_state(&cell).await;
+    let (reopened, cell) = reopened_state(cell, &dir);
     assert_eq!(reopened, state);
     // A run's data is in its segment, framed, where its footer says.
     let (_, _, place) = state.3.iter().find(|(id, ..)| *id == extent(40)).unwrap();
@@ -639,20 +650,20 @@ async fn closed_segments_hold_the_cells_history() {
     assert_eq!(data[offset as usize..][..BLOCK], pattern(40, 0, BLOCK));
 
     // Old.
-    drop(store);
+    drop(cell);
     let options = Options { segment_age: std::time::Duration::ZERO, ..OPTIONS };
-    let store = LocalCell::open(dir.clone(), options).unwrap();
-    let before = segments(&store).await;
-    store.write(extent(50), 0, &pattern(50, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
-    assert_eq!(segments(&store).await, before + 1);
+    let cell = LocalCell::open(dir.clone(), options).unwrap();
+    let before = segments(&cell).await;
+    cell.write(extent(50), 0, &pattern(50, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
+    assert_eq!(segments(&cell).await, before + 1);
 
     // At a version.
-    store.write(extent(51), 0, &pattern(51, 0, BLOCK)).await.unwrap();
-    store.commit_version(NewVersion { id: 1, keep_last: None }, false).await.unwrap();
-    let places = store.places().unwrap();
-    let (reopened, _) = reopened_state(store, &dir);
+    cell.write(extent(51), 0, &pattern(51, 0, BLOCK)).await.unwrap();
+    cell.commit_version(NewVersion { id: 1, keep_last: None }, false).await.unwrap();
+    let places = cell.places().unwrap();
+    let (reopened, _) = reopened_state(cell, &dir);
     assert_eq!(reopened.3, places);
 }
 
@@ -663,20 +674,20 @@ async fn closed_segments_hold_the_cells_history() {
 async fn closed_segments_reopen_on_the_host() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let open = || HostDir::new(temp.path()).unwrap();
-    let store = create(open(), 64 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
-    let state = closed_state(&store).await;
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.commit(Some(b"root")).await.unwrap();
-    drop(store);
-    let store = LocalCell::open(open(), OPTIONS).unwrap();
-    assert_eq!(read(&store, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
-    assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
-    assert!(store.last_commit().unwrap() > state.0);
-    let state = closed_state(&store).await;
-    drop(store);
-    let store = LocalCell::open(open(), OPTIONS).unwrap();
-    assert_eq!(closed_state(&store).await.3, state.3);
+    let cell = create(open(), 64 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
+    let state = closed_state(&cell).await;
+    cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    cell.commit(Some(b"root")).await.unwrap();
+    drop(cell);
+    let cell = LocalCell::open(open(), OPTIONS).unwrap();
+    assert_eq!(read(&cell, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
+    assert_eq!(read(&cell, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
+    assert!(cell.last_commit().unwrap() > state.0);
+    let state = closed_state(&cell).await;
+    drop(cell);
+    let cell = LocalCell::open(open(), OPTIONS).unwrap();
+    assert_eq!(closed_state(&cell).await.3, state.3);
 }
 
 /// Closed segments and sealed extents are stored compressed, but for parts that do not compress,
@@ -686,7 +697,7 @@ async fn closed_segments_and_sealed_extents_are_compressed() {
     let dir = MemDir::new();
     let options = Options { segment_size: 4 << 20, large_extent: 8 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     let mib = 1 << 20;
     // In segments, compressible and not, across parts; and on their own, compressible and not.
     let contents = [
@@ -697,52 +708,52 @@ async fn closed_segments_and_sealed_extents_are_compressed() {
         (extent(5), [noise(5, 8 * mib), pattern(5, 0, mib)].concat()),
     ];
     for (extent, data) in &contents {
-        store.write(*extent, 0, data).await.unwrap();
+        cell.write(*extent, 0, data).await.unwrap();
     }
-    let reads = |store: &LocalCell<MemDir>| {
+    let reads = |cell: &LocalCell<MemDir>| {
         for (extent, data) in &contents {
-            assert!(read(store, *extent, 0, data.len()) == *data, "{extent:?}");
+            assert!(read(cell, *extent, 0, data.len()) == *data, "{extent:?}");
             // A range across parts.
             let (at, len) = (mib - 2 * BLOCK, 5 * BLOCK);
             if data.len() >= at + len {
-                let range = read(store, *extent, at as u64, len);
+                let range = read(cell, *extent, at as u64, len);
                 assert!(range == data[at..at + len], "{extent:?} at {at}");
             }
         }
     };
-    reads(&store);
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    reads(&store);
+    reads(&cell);
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    reads(&cell);
 
     // Framed on a thread of its own, made durable on another: its framed file's size counts once
     // its framing ends, which the commit waits not for (TASK-310).
-    store.wait_framed().await.unwrap();
-    let usage = store.usage().unwrap();
+    cell.wait_framed().await.unwrap();
+    let usage = cell.usage().unwrap();
     let in_segments: u64 = contents[..3].iter().map(|(_, data)| data.len() as u64).sum();
     assert_eq!((usage.segment_bytes, usage.own_bytes), (in_segments, 18 * mib as u64));
     // The noise takes what it is, the patterns next to nothing.
     let noise_bytes = (mib + 8 * BLOCK + 8 * mib) as u64;
     assert!(usage.disk_bytes >= noise_bytes, "{usage:?}");
     assert!(usage.disk_bytes < noise_bytes + 3 * mib as u64 / 10, "{usage:?}");
-    drop(store);
-    let store = LocalCell::open(dir, options).unwrap();
-    reads(&store);
-    assert_eq!(store.usage().unwrap().disk_bytes, usage.disk_bytes);
+    drop(cell);
+    let cell = LocalCell::open(dir, options).unwrap();
+    reads(&cell);
+    assert_eq!(cell.usage().unwrap().disk_bytes, usage.disk_bytes);
 }
 
-/// A store full of data that compresses takes a fraction of it on disk.
+/// A cell full of data that compresses takes a fraction of it on disk.
 #[tokio::test(flavor = "multi_thread")]
 async fn compressible_data_takes_less_disk() {
-    let store = create(MemDir::new(), 64 << 20);
+    let cell = create(MemDir::new(), 64 << 20);
     for sequence in 0..64 {
         let len = if sequence % 8 == 7 { 64 << 10 } else { 4 * BLOCK };
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, len)).await.unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, len)).await.unwrap();
+        cell.commit(None).await.unwrap();
     }
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    let usage = store.usage().unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    let usage = cell.usage().unwrap();
     let held = usage.segment_bytes + usage.own_bytes;
     assert_eq!(held, 56 * 4 * BLOCK as u64 + 8 * (64 << 10));
     assert!(usage.disk_bytes * 4 < held, "{usage:?}");
@@ -759,14 +770,14 @@ async fn compressible_data_takes_less_disk() {
 async fn segments_closed_by_commits_are_their_records_once_framed() {
     for seed in 0..16 {
         let dir = MemDir::serial();
-        let store = create(dir.clone(), 64 << 20);
-        store.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
-        store.commit(Some(b"one")).await.unwrap();
-        store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit_ordered(Some(b"two")).await.unwrap();
+        let cell = create(dir.clone(), 64 << 20);
+        cell.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
+        cell.commit(Some(b"one")).await.unwrap();
+        cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit_ordered(Some(b"two")).await.unwrap();
         let crashed = dir.crash(seed);
-        drop(store);
+        drop(cell);
         // The opening's open segment is past every one the crash kept a file of: segment 1's,
         // opened, and cladefs: segment 2's, placed ahead of it (TASK-384).
         let kept = ["segments", "open-segments", "logs"].iter().flat_map(|kind| {
@@ -774,10 +785,10 @@ async fn segments_closed_by_commits_are_their_records_once_framed() {
             names.into_iter().filter_map(|name| base32_id::parse_padded(&name))
         });
         let open = Padded(kept.max().unwrap() + 1).to_string();
-        let store = LocalCell::open(crashed.clone(), OPTIONS).unwrap();
-        assert_eq!(store.root().unwrap(), b"two", "seed {seed}");
-        assert_eq!(read(&store, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
-        assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
+        let cell = LocalCell::open(crashed.clone(), OPTIONS).unwrap();
+        assert_eq!(cell.root().unwrap(), b"two", "seed {seed}");
+        assert_eq!(read(&cell, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
+        assert_eq!(read(&cell, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
         assert_eq!(crashed.list(&of("open-segments", CELL.id)).unwrap(), [open], "seed {seed}");
     }
 }
@@ -789,14 +800,14 @@ async fn segments_closed_by_commits_are_their_records_once_framed() {
 async fn segments_closed_between_commits_survive_crashes_closing_them_again() {
     for seed in 0..64 {
         let dir = MemDir::serial();
-        let store = create(dir.clone(), 1 << 20);
-        store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
-        store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-        store.commit_ordered(None).await.unwrap();
-        assert!(store.close_now().await.unwrap());
+        let cell = create(dir.clone(), 1 << 20);
+        cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
+        cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+        cell.commit_ordered(None).await.unwrap();
+        assert!(cell.close_now().await.unwrap());
         let crashed = dir.crash(seed);
-        drop(store);
+        drop(cell);
         // An opening stopped after each of its first operations, as by a crash, then another.
         for operations in 0.. {
             let opening = crashed.crash(seed);
@@ -823,45 +834,45 @@ async fn segments_closed_between_commits_survive_crashes_closing_them_again() {
 async fn segments_closed_between_commits_survive_crashes_framing_them() {
     for seed in 0..64 {
         let dir = MemDir::serial();
-        let store = create(dir.clone(), 1 << 20);
+        let cell = create(dir.clone(), 1 << 20);
         for sequence in 0..4 {
-            store.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
+            cell.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
         }
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
         // The next segment's raw file made, the framed file written, then its sync fails.
         dir.fail_after(Some(3));
-        assert!(store.close_now().await.is_err(), "seed {seed}: the closing went on");
+        assert!(cell.close_now().await.is_err(), "seed {seed}: the closing went on");
         dir.fail_after(None);
         let crashed = dir.crash(seed);
-        drop(store);
-        let store = LocalCell::open(crashed, OPTIONS).unwrap();
+        drop(cell);
+        let cell = LocalCell::open(crashed, OPTIONS).unwrap();
         for sequence in 0..4 {
-            let data = read(&store, extent(sequence), 0, BLOCK);
+            let data = read(&cell, extent(sequence), 0, BLOCK);
             assert!(data == noise(sequence, BLOCK), "seed {seed}: extent {sequence} differs");
         }
     }
 }
 
-/// cladefs: so too if the cell is opened again in the same process, its store failed as the
+/// cladefs: so too if the cell is opened again in the same process, its cell failed as the
 /// framed file's sync did: the opening makes the framed file durable before its raw file goes,
 /// whatever a crash after it then keeps (TASK-79.33).
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_closed_between_commits_survive_failures_framing_them() {
     for seed in 0..64 {
         let dir = MemDir::serial();
-        let store = create(dir.clone(), 1 << 20);
+        let cell = create(dir.clone(), 1 << 20);
         for sequence in 0..4 {
-            store.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
+            cell.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
         }
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
         dir.fail_after(Some(3));
-        assert!(store.close_now().await.is_err(), "seed {seed}: the closing went on");
+        assert!(cell.close_now().await.is_err(), "seed {seed}: the closing went on");
         dir.fail_after(None);
-        drop(store);
+        drop(cell);
         drop(LocalCell::open(dir.clone(), OPTIONS).unwrap());
-        let store = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
+        let cell = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
         for sequence in 0..4 {
-            let data = read(&store, extent(sequence), 0, BLOCK);
+            let data = read(&cell, extent(sequence), 0, BLOCK);
             assert!(data == noise(sequence, BLOCK), "seed {seed}: extent {sequence} differs");
         }
     }
@@ -877,22 +888,22 @@ async fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_aft
     let path = |kind| format!("{}/{}", of(kind, CELL.id), Padded(0));
     for seed in 0..16 {
         let dir = MemDir::serial();
-        let store = create(dir.clone(), 1 << 20);
-        store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
-        store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-        store.commit_ordered(None).await.unwrap();
-        assert!(store.close_now().await.unwrap());
+        let cell = create(dir.clone(), 1 << 20);
+        cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
+        cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+        cell.commit_ordered(None).await.unwrap();
+        assert!(cell.close_now().await.unwrap());
         let crashed = dir.crash(seed);
         assert!(dir.open(&path("open-segments"), true).is_ok(), "seed {seed}: the raw file went");
         assert!(dir.open(&path("logs"), false).is_ok(), "seed {seed}: the log went");
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
         assert!(dir.open(&path("open-segments"), true).is_err(), "seed {seed}: the raw file stays");
         assert!(dir.open(&path("logs"), false).is_err(), "seed {seed}: the log stays");
-        drop(store);
-        let store = LocalCell::open(crashed.clone(), OPTIONS).unwrap();
-        assert_eq!(store.last_commit().unwrap(), 2, "seed {seed}");
-        assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
+        drop(cell);
+        let cell = LocalCell::open(crashed.clone(), OPTIONS).unwrap();
+        assert_eq!(cell.last_commit().unwrap(), 2, "seed {seed}");
+        assert_eq!(read(&cell, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
         let framed = local_cell::read_whole(&crashed.open(&path("segments"), true).unwrap());
         let footer =
             extent_frame::footer(&framed.unwrap(), &extent_frame::NoKeys).unwrap().to_vec();
@@ -907,14 +918,14 @@ async fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_aft
 async fn locating_parts_stored_compressed() {
     let options = Options { segment_size: 4 << 20, large_extent: 8 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, options).unwrap();
-    store.write(extent(1), 0, &pattern(1, 0, 16 * BLOCK)).await.unwrap();
-    store.write(extent(2), 0, &noise(2, 16 * BLOCK)).await.unwrap();
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    let cell = LocalCell::create(MemDir::new(), description, options).unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, 16 * BLOCK)).await.unwrap();
+    cell.write(extent(2), 0, &noise(2, 16 * BLOCK)).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     let kinds = |extent| -> Vec<&'static str> {
-        (store.locate(extent, 4 * BLOCK as u64, 2 * BLOCK as u64).unwrap().iter())
+        (cell.locate(extent, 4 * BLOCK as u64, 2 * BLOCK as u64).unwrap().iter())
             .map(|part| match part {
                 Located::Data { .. } => "data",
                 Located::Packed { .. } => "packed",
@@ -926,21 +937,21 @@ async fn locating_parts_stored_compressed() {
     // Both in the segment's first part, which compresses.
     assert_eq!(kinds(extent(1)), ["packed"]);
     let [Located::Packed { part, skip, len }] =
-        &store.locate(extent(1), 0, BLOCK as u64).unwrap()[..]
+        &cell.locate(extent(1), 0, BLOCK as u64).unwrap()[..]
     else {
         panic!("not packed");
     };
     assert_eq!((*skip, *len, part.read_range().start % BLOCK as u64), (0, BLOCK as u64, 0));
-    // Its range read, as a reader bypassing the store reads it, unpacks to its data.
+    // Its range read, as a reader bypassing the cell reads it, unpacks to its data.
     let range = part.read_range();
     let mut bytes = local_cell::Aligned::new((range.end - range.start) as usize);
     part.file.read_at(bytes.as_mut_slice(), range.start).unwrap();
-    assert_eq!(store.unpack(part, bytes).unwrap()[..16 * BLOCK], pattern(1, 0, 16 * BLOCK));
-    let unpacked = store.read_packed(part).unwrap();
+    assert_eq!(cell.unpack(part, bytes).unwrap()[..16 * BLOCK], pattern(1, 0, 16 * BLOCK));
+    let unpacked = cell.read_packed(part).unwrap();
     assert_eq!(unpacked[..16 * BLOCK], pattern(1, 0, 16 * BLOCK));
     assert_eq!(kinds(extent(1)), ["unpacked"]);
     assert_eq!(kinds(extent(2)), ["unpacked"]);
-    assert_eq!(read(&store, extent(2), 0, 16 * BLOCK), noise(2, 16 * BLOCK));
+    assert_eq!(read(&cell, extent(2), 0, 16 * BLOCK), noise(2, 16 * BLOCK));
 }
 
 /// cladefs: a resize is a commit of its own, which seals nothing, a segment's footer saying it, as
@@ -948,30 +959,30 @@ async fn locating_parts_stored_compressed() {
 /// resized it (TASK-165.3, TASK-165.9). The extents open stay open.
 #[tokio::test(flavor = "multi_thread")]
 async fn resizes_are_commits_of_their_own() {
-    let store = create(MemDir::new(), 1 << 20);
-    let capacity = async |store: &LocalCell<MemDir>| {
-        store.close_now().await.unwrap();
-        store.flush().await.unwrap();
-        closed_one(store).await.footer.contents.capacity
+    let cell = create(MemDir::new(), 1 << 20);
+    let capacity = async |cell: &LocalCell<MemDir>| {
+        cell.close_now().await.unwrap();
+        cell.flush().await.unwrap();
+        closed_one(cell).await.footer.contents.capacity
     };
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    let epoch = store.last_commit().unwrap();
-    store.set_capacity(2 << 20).await.unwrap();
-    store.set_capacity(3 << 20).await.unwrap();
-    assert_eq!(store.last_commit().unwrap(), epoch + 2);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    let epoch = cell.last_commit().unwrap();
+    cell.set_capacity(2 << 20).await.unwrap();
+    cell.set_capacity(3 << 20).await.unwrap();
+    assert_eq!(cell.last_commit().unwrap(), epoch + 2);
     // Open still: written on, sealed by a commit.
-    assert_eq!(store.extent(extent(1)).unwrap(), Some((BLOCK as u64, true)));
-    store.write(extent(1), BLOCK as u64, &pattern(1, BLOCK, BLOCK)).await.unwrap();
-    assert_eq!(capacity(&store).await, Some(3 << 20));
-    store.commit(None).await.unwrap();
-    assert_eq!(capacity(&store).await, None);
-    store.set_capacity(4 << 20).await.unwrap();
-    assert_eq!(capacity(&store).await, Some(4 << 20));
-    assert_eq!(store.info().unwrap().capacity, 4 << 20);
-    assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(1, 0, 2 * BLOCK));
+    assert_eq!(cell.extent(extent(1)).unwrap(), Some((BLOCK as u64, true)));
+    cell.write(extent(1), BLOCK as u64, &pattern(1, BLOCK, BLOCK)).await.unwrap();
+    assert_eq!(capacity(&cell).await, Some(3 << 20));
+    cell.commit(None).await.unwrap();
+    assert_eq!(capacity(&cell).await, None);
+    cell.set_capacity(4 << 20).await.unwrap();
+    assert_eq!(capacity(&cell).await, Some(4 << 20));
+    assert_eq!(cell.info().unwrap().capacity, 4 << 20);
+    assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), pattern(1, 0, 2 * BLOCK));
 }
 
-/// cladefs: opened by a writer, the store closes its segments for the writer, as object storage
+/// cladefs: opened by a writer, the cell closes its segments for the writer, as object storage
 /// keeps them: numbered on from where the writer's chain is, each following the one before, its
 /// commits tagged with the writer's epoch, its extents of their own at the writer's keys; and
 /// keeps each, once its commits are durable, for the uploader, until it is uploaded. Opened as
@@ -981,25 +992,25 @@ async fn segments_close_for_the_writer_of_their_chain() {
     use extent_frame::segment::{Footer, Location, extent_key, tag};
     let dir = MemDir::new();
     let state = bucket_cell::State::new(CELL);
-    let store = created_on(dir.clone(), 1 << 20, state, Chain::new(CELL, 3, 5, 100));
-    drop(store);
+    let cell = created_on(dir.clone(), 1 << 20, state, Chain::new(CELL, 3, 5, 100));
+    drop(cell);
     let other = bucket_cell::State::new(bucket_cell::layout::test_cell(CELL.id + 1));
     let opening = Opening::new(bucket_cell::layout::test_cell(CELL.id + 1));
     let refused =
         LocalCell::recover(dir.clone()).unwrap().open(OPTIONS, Opening { state: other, ..opening });
     assert_eq!(refused.err().unwrap().to_string(), "cell 1/7 opened as 1/8");
-    let store = opened_on(dir.clone(), bucket_cell::State::new(CELL), Chain::new(CELL, 3, 5, 100));
+    let cell = opened_on(dir.clone(), bucket_cell::State::new(CELL), Chain::new(CELL, 3, 5, 100));
     // Nothing committed since the last closing, nothing to close.
-    assert!(!store.close_now().await.unwrap());
+    assert!(!cell.close_now().await.unwrap());
 
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.write(extent(2), 0, &pattern(2, 0, 32 << 10)).await.unwrap();
-    store.commit_ordered(Some(b"one")).await.unwrap();
-    assert!(store.close_now().await.unwrap());
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.write(extent(2), 0, &pattern(2, 0, 32 << 10)).await.unwrap();
+    cell.commit_ordered(Some(b"one")).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
     // Not until its commit is durable.
-    assert!(store.closed(usize::MAX).await.unwrap().is_empty());
-    store.flush().await.unwrap();
-    let closed = store.closed(usize::MAX).await.unwrap();
+    assert!(cell.closed(usize::MAX).await.unwrap().is_empty());
+    cell.flush().await.unwrap();
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [first] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     let own = Location { key: extent_key(CELL, 3, 5, extent(2)), offset: 0, len: 32 << 10 };
     assert_eq!(
@@ -1043,10 +1054,10 @@ async fn segments_close_for_the_writer_of_their_chain() {
     );
 
     // The next follows it; a version's names the version.
-    store.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
+    cell.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
     let version = NewVersion { id: 1, keep_last: None };
-    store.commit_version(version, false).await.unwrap();
-    let closed = store.closed(usize::MAX).await.unwrap();
+    cell.commit_version(version, false).await.unwrap();
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     assert_eq!((second.footer.segment, second.footer.epoch), (6, 3));
     assert_eq!(
@@ -1055,13 +1066,13 @@ async fn segments_close_for_the_writer_of_their_chain() {
     );
 
     // Freed, its extents' data goes once released, but the segment stays until uploaded.
-    store.free(extent(1)).unwrap();
-    store.commit(None).await.unwrap();
-    store.commit(None).await.unwrap();
-    let held = store.usage().unwrap().segments;
-    store.acknowledged(first.number).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.usage().unwrap().segments, held - 1);
+    cell.free(extent(1)).unwrap();
+    cell.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
+    let held = cell.usage().unwrap().segments;
+    cell.acknowledged(first.number).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.usage().unwrap().segments, held - 1);
 }
 
 /// cladefs: a segment closed between commits holds what the commits made, as of the last: not
@@ -1069,81 +1080,81 @@ async fn segments_close_for_the_writer_of_their_chain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_closed_between_commits_hold_the_last_commits_state() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Since: one freed, another written.
-    store.free(extent(1)).unwrap();
-    store.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    let closed = store.closed(usize::MAX).await.unwrap();
+    cell.free(extent(1)).unwrap();
+    cell.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [first] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     let listed: Vec<_> = first.footer.contents.extents.iter().map(|(extent, ..)| *extent).collect();
     assert_eq!((listed, first.footer.contents.frees.clone()), (vec![extent(1), extent(2)], vec![]));
-    store.commit(None).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    let closed = store.closed(usize::MAX).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     let listed: Vec<_> =
         second.footer.contents.extents.iter().map(|(extent, ..)| *extent).collect();
     assert_eq!((listed, second.footer.contents.frees.clone()), (vec![extent(3)], vec![extent(1)]));
-    assert_eq!(read(&store, extent(3), 0, BLOCK), pattern(3, 0, BLOCK));
+    assert_eq!(read(&cell, extent(3), 0, BLOCK), pattern(3, 0, BLOCK));
 }
 
 /// cladefs (TASK-79.19): the uploader takes so many of the segments closed at once, oldest first;
-/// the rest wait in the store for its next take.
+/// the rest wait in the cell for its next take.
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_are_taken_so_many_at_once() {
-    let store = create(MemDir::new(), 1 << 20);
+    let cell = create(MemDir::new(), 1 << 20);
     for sequence in 1..=3 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
     }
     let taken = async |limit| -> Vec<u64> {
-        store.closed(limit).await.unwrap().iter().map(|closed| closed.last()).collect()
+        cell.closed(limit).await.unwrap().iter().map(|closed| closed.last()).collect()
     };
     assert_eq!(taken(2).await, [1, 2]);
     assert_eq!(taken(2).await, [3]);
     assert_eq!(taken(2).await, Vec::<u64>::new());
 }
 
-/// A store's capacity grows, and shrinks no lower than what it holds, durably: the store reopened
+/// A cell's capacity grows, and shrinks no lower than what it holds, durably: the cell reopened
 /// has it, and a fork inherits it.
 #[tokio::test(flavor = "multi_thread")]
 async fn capacity_resizes() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 128 << 10);
-    store.write(extent(1), 0, &pattern(1, 0, 64 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
-    error_is(store.write(extent(2), 0, &pattern(2, 0, 96 << 10)).await, NoSpace);
-    store.set_capacity(256 << 10).await.unwrap();
+    let cell = create(dir.clone(), 128 << 10);
+    cell.write(extent(1), 0, &pattern(1, 0, 64 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    error_is(cell.write(extent(2), 0, &pattern(2, 0, 96 << 10)).await, NoSpace);
+    cell.set_capacity(256 << 10).await.unwrap();
     assert_eq!(
-        (store.info().unwrap().capacity, store.info().unwrap().available),
+        (cell.info().unwrap().capacity, cell.info().unwrap().available),
         (256 << 10, 192 << 10)
     );
-    store.write(extent(2), 0, &pattern(2, 0, 96 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(2), 0, &pattern(2, 0, 96 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
     let held = (64 + 96) << 10;
-    let refused = store.set_capacity(held - BLOCK as u64).await.unwrap_err();
+    let refused = cell.set_capacity(held - BLOCK as u64).await.unwrap_err();
     assert_eq!(
         refused.downcast_ref::<TooSmall>(),
         Some(&TooSmall { capacity: held - BLOCK as u64, held })
     );
-    assert!(store.set_capacity(BLOCK as u64 - 1).await.is_err());
-    store.set_capacity(held).await.unwrap();
-    assert_eq!(store.info().unwrap().available, 0);
+    assert!(cell.set_capacity(BLOCK as u64 - 1).await.is_err());
+    cell.set_capacity(held).await.unwrap();
+    assert_eq!(cell.info().unwrap().available, 0);
     // cladefs: durable, though no commit came since, the index holding it (TASK-165.7).
-    drop(store);
-    let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-    assert_eq!(store.info().unwrap().capacity, held);
-    store.set_capacity(2 * held).await.unwrap();
-    store.commit(None).await.unwrap();
-    drop(store);
-    let store = LocalCell::open(dir, OPTIONS).unwrap();
-    assert_eq!(store.info().unwrap().capacity, 2 * held);
-    assert_eq!(read(&store, extent(2), 0, 96 << 10), pattern(2, 0, 96 << 10));
+    drop(cell);
+    let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+    assert_eq!(cell.info().unwrap().capacity, held);
+    cell.set_capacity(2 * held).await.unwrap();
+    cell.commit(None).await.unwrap();
+    drop(cell);
+    let cell = LocalCell::open(dir, OPTIONS).unwrap();
+    assert_eq!(cell.info().unwrap().capacity, 2 * held);
+    assert_eq!(read(&cell, extent(2), 0, 96 << 10), pattern(2, 0, 96 << 10));
 }
 
 /// cladefs: a framed copy is written back a MiB at a time, each waited for, before it is synced,
@@ -1159,7 +1170,7 @@ async fn framings_write_back_as_they_go() {
     let dir = MemDir::new();
     let options = Options { segment_size: 32 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     // Half noise, half zeros: a copy of about half the data.
     let len = 16 << 10;
     let data = |sequence| {
@@ -1169,14 +1180,14 @@ async fn framings_write_back_as_they_go() {
     };
     let in_place = local_cell::segments_framed_in_place();
     for sequence in 1..=1536 {
-        store.write(extent(sequence), 0, &data(sequence)).await.unwrap();
+        cell.write(extent(sequence), 0, &data(sequence)).await.unwrap();
         if sequence % 16 == 0 {
-            store.commit(None).await.unwrap();
+            cell.commit(None).await.unwrap();
         }
     }
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    store.wait_framed().await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    cell.wait_framed().await.unwrap();
     assert_eq!(local_cell::segments_framed_in_place(), in_place, "framed in a copy");
     let framed = dir.open(&format!("{}/{}", of("segments", CELL.id), Padded(0)), true).unwrap();
     let size = framed.size().unwrap();
@@ -1184,7 +1195,7 @@ async fn framings_write_back_as_they_go() {
     // A commit's sync: its 16 extents of 16 KiB, and its record, MACed (TASK-411.5).
     assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 603 + 32);
     for sequence in 1..=1536 {
-        assert_eq!(read(&store, extent(sequence), 0, len), data(sequence));
+        assert_eq!(read(&cell, extent(sequence), 0, len), data(sequence));
     }
 }
 
@@ -1195,7 +1206,7 @@ async fn framings_write_back_as_they_go() {
 /// turn, which synced 100 MB at once in 250-420 ms (GCE r954); its writing back begun but not
 /// waited for filled the disk's queue as well, syncs waiting behind it up to 0.6 s (r956,
 /// TASK-221). Red with nothing written back until the flush. cladefs: what the sync has left is
-/// what the store's page cache holds dirty (TASK-433), here one that would hold all 32 MiB.
+/// what the cell's page cache holds dirty (TASK-433), here one that would hold all 32 MiB.
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_are_written_back_as_they_go() {
     let big = 64 << 20;
@@ -1204,27 +1215,27 @@ async fn writes_are_written_back_as_they_go() {
     let dir = MemDir::with_cache(pages);
     let options = Options { segment_size: 64 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     let len = 16 << 10;
     for sequence in 1..=2048 {
-        store.write(extent(sequence), 0, &noise(sequence, len)).await.unwrap();
+        cell.write(extent(sequence), 0, &noise(sequence, len)).await.unwrap();
     }
     assert_eq!(dir.cache().usage().peak_dirty, 9 << 20);
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     for sequence in 1..=2048 {
-        assert_eq!(read(&store, extent(sequence), 0, len), noise(sequence, len));
+        assert_eq!(read(&cell, extent(sequence), 0, len), noise(sequence, len));
     }
 }
 
-/// cladefs: the framing of segment 0, which the commit after `store`'s first closes, held where its
+/// cladefs: the framing of segment 0, which the commit after `cell`'s first closes, held where its
 /// framed file is created, not yet written, until the returned sender says go or drops: its
 /// framing begun once this returns.
-async fn framing_held(store: &LocalCell<MemDir>) -> (std::sync::mpsc::Sender<()>, fail::FailGuard) {
+async fn framing_held(cell: &LocalCell<MemDir>) -> (std::sync::mpsc::Sender<()>, fail::FailGuard) {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.flush().await.unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.flush().await.unwrap();
     let (waiting, waits) = channel();
     let (go, gone) = channel::<()>();
     let gone = Mutex::new(gone);
@@ -1233,9 +1244,9 @@ async fn framing_held(store: &LocalCell<MemDir>) -> (std::sync::mpsc::Sender<()>
         let _ = gone.lock().unwrap().recv();
     })
     .unwrap();
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
     waits.recv().unwrap();
     (go, guard)
 }
@@ -1247,9 +1258,9 @@ async fn framing_held(store: &LocalCell<MemDir>) -> (std::sync::mpsc::Sender<()>
 #[tokio::test(flavor = "multi_thread")]
 async fn commits_in_segments_being_framed_are_durable_in_their_raw_files_and_logs() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
-    let (go, guard) = framing_held(&store).await;
-    store.flush().await.unwrap();
+    let cell = create(dir.clone(), 64 << 20);
+    let (go, guard) = framing_held(&cell).await;
+    cell.flush().await.unwrap();
     for seed in 0..16 {
         let reopened = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
         assert_eq!(reopened.last_commit().unwrap(), 2, "seed {seed}");
@@ -1271,15 +1282,15 @@ async fn commits_in_segments_being_framed_are_durable_in_their_raw_files_and_log
 #[tokio::test(flavor = "multi_thread")]
 async fn raw_files_and_logs_stay_until_their_framed_files_are_synced() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
-    let (go, guard) = framing_held(&store).await;
-    store.flush().await.unwrap();
+    let cell = create(dir.clone(), 64 << 20);
+    let (go, guard) = framing_held(&cell).await;
+    cell.flush().await.unwrap();
     let name = Padded(0).to_string();
     let held = |kind: &str| dir.list(&of(kind, CELL.id)).unwrap().contains(&name);
     assert!(held("open-segments") && held("logs"), "segment 0's raw file or log went, unframed");
     go.send(()).unwrap();
     drop(guard);
-    settled(&store).await;
+    settled(&cell).await;
     assert!(!held("open-segments") && !held("logs"), "segment 0's raw file or log stayed, framed");
     for seed in 0..16 {
         let reopened = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
@@ -1294,7 +1305,7 @@ async fn raw_files_and_logs_stay_until_their_framed_files_are_synced() {
     }
 }
 
-/// cladefs: the bytes the process's stores wrote of extents' own files, framed, since `before`
+/// cladefs: the bytes the process's cells wrote of extents' own files, framed, since `before`
 /// (`local_cell::written`): the tests of a process are its own (cargo nextest's).
 fn own_written_since(before: local_cell::Written) -> usize {
     (local_cell::written().own - before.own) as usize
@@ -1305,12 +1316,12 @@ fn names(dir: &MemDir, kind: &str) -> Vec<String> {
     dir.list(&of(kind, CELL.id)).unwrap()
 }
 
-/// cladefs: the names of the cell's files of `kind` in `dir`, `store`'s, but for spare logs
+/// cladefs: the names of the cell's files of `kind` in `dir`, `cell`'s, but for spare logs
 /// (TASK-301) and the next segment's raw file and log, placed ahead of it (`LocalCell::placed`,
 /// TASK-384), once the preparation of them ended.
-async fn segment_files(store: &LocalCell<MemDir>, dir: &MemDir, kind: &str) -> Vec<String> {
-    store.prepared().await.unwrap();
-    let placed = store.placed().map(|number| Padded(number).to_string());
+async fn segment_files(cell: &LocalCell<MemDir>, dir: &MemDir, kind: &str) -> Vec<String> {
+    cell.prepared().await.unwrap();
+    let placed = cell.placed().map(|number| Padded(number).to_string());
     let ours = |name: &String| !name.starts_with("spare-") && placed.as_ref() != Some(name);
     names(dir, kind).into_iter().filter(ours).collect()
 }
@@ -1324,11 +1335,11 @@ async fn segment_files(store: &LocalCell<MemDir>, dir: &MemDir, kind: &str) -> V
 #[tokio::test(flavor = "multi_thread")]
 async fn incompressible_large_extents_are_framed_in_place() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 4 << 20);
+    let cell = create(dir.clone(), 4 << 20);
     let data = noise(1, 3 * OPTIONS.large_extent as usize + BLOCK);
-    store.write(extent(1), 0, &data).await.unwrap();
+    cell.write(extent(1), 0, &data).await.unwrap();
     let before = local_cell::written();
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     // cladefs: its footer names it (TASK-411.3).
     let footer = bucket_cell::layout::encode(&extent(1));
     let framed = extent_frame::framed(&data, &footer, bucket_cell::testing::encrypting(CELL));
@@ -1336,8 +1347,8 @@ async fn incompressible_large_extents_are_framed_in_place() {
     let name = Padded(1).to_string();
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
     assert_eq!(names(&dir, "extents"), vec![name]);
-    assert!(read(&store, extent(1), 0, data.len()) == data, "extent 1 reads otherwise");
-    drop(store);
+    assert!(read(&cell, extent(1), 0, data.len()) == data, "extent 1 reads otherwise");
+    drop(cell);
     for seed in 0..16 {
         let reopened = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
         assert_eq!(reopened.last_commit().unwrap(), 1, "seed {seed}");
@@ -1361,24 +1372,24 @@ async fn bursts_past_a_segment_between_commits_are_sealed_where_they_are() {
     // Segments full once they hold a segment's size and an extent's most, as small here.
     let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
-    store.write(extent(1), 0, &noise(1, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
+    cell.write(extent(1), 0, &noise(1, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
     let (extents, len) = (8 * OPTIONS.segment_size as usize / (2 * BLOCK), 2 * BLOCK);
     for sequence in 2..=extents as u64 {
-        store.write(extent(sequence), 0, &noise(sequence, len)).await.unwrap();
+        cell.write(extent(sequence), 0, &noise(sequence, len)).await.unwrap();
     }
     let before = (local_cell::written(), local_cell::segments_framed_in_place());
     let (before, framed_before) = before;
     // The open segment closes with the commit too, which ends in it.
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     let after = local_cell::written();
     let copied = (after.own + after.copied) - (before.own + before.copied);
     assert_eq!(copied, 0, "copied");
     assert_eq!((names(&dir, "extents"), names(&dir, "open-extents")), (vec![], vec![]));
-    let closed = store.closed(usize::MAX).await.unwrap();
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let continued = |closed: &local_cell::Closed<MemFile>| {
         let contents = &closed.footer.contents;
         (contents.commits.clone(), contents.continued.as_ref().map(|c| c.commit))
@@ -1392,7 +1403,7 @@ async fn bursts_past_a_segment_between_commits_are_sealed_where_they_are() {
     assert_eq!(in_place as usize, closed.len(), "framed in place");
     let framed = after.framed - before.framed;
     assert!(framed < (closed.len() * BLOCK) as u64, "framed {framed}");
-    drop(store);
+    drop(cell);
     for seed in 0..4 {
         let reopened = LocalCell::open(dir.crash(seed), options).unwrap();
         assert_eq!(reopened.last_commit().unwrap(), 2, "seed {seed}");
@@ -1414,7 +1425,7 @@ async fn segments_compressing_little_are_framed_in_place() {
     for (every, in_place) in [(16, true), (1, false)] {
         let every = every as u64;
         let dir = MemDir::new();
-        let store = LocalCell::create(dir.clone(), description, options).unwrap();
+        let cell = LocalCell::create(dir.clone(), description, options).unwrap();
         let (extents, len) = (4 * OPTIONS.segment_size as usize / (2 * BLOCK), 2 * BLOCK);
         // Every `every`th extent compresses, the first of each segment's.
         let data = |sequence: u64| match sequence % every == 1 % every {
@@ -1422,17 +1433,17 @@ async fn segments_compressing_little_are_framed_in_place() {
             false => noise(sequence, len),
         };
         for sequence in 1..=extents as u64 {
-            store.write(extent(sequence), 0, &data(sequence)).await.unwrap();
+            cell.write(extent(sequence), 0, &data(sequence)).await.unwrap();
         }
         let framed = local_cell::segments_framed_in_place();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
-        settled(&store).await;
-        let closed = store.closed(usize::MAX).await.unwrap().len() as u64;
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
+        settled(&cell).await;
+        let closed = cell.closed(usize::MAX).await.unwrap().len() as u64;
         let framed = local_cell::segments_framed_in_place() - framed;
         assert_eq!(framed, if in_place { closed } else { 0 }, "one in {every} compressing");
         assert!(closed >= 2, "{closed} segments closed");
-        drop(store);
+        drop(cell);
         let reopened = LocalCell::open(dir.crash(0), options).unwrap();
         for sequence in 1..=extents as u64 {
             let read = read(&reopened, extent(sequence), 0, len);
@@ -1442,11 +1453,12 @@ async fn segments_compressing_little_are_framed_in_place() {
 }
 
 /// cladefs TASK-343: a segment holding noise, then extents' holes, as Hunt's hostile VM process's
-/// did (3 MiB of its fills' noise, then 2.6 MB of zeros its sparse extents' commit sealed in one run
-/// each), is framed in a copy, compressed, its holes taking nothing; not in place, raw, which kept
-/// the holes, bytes no write of the tenant's was admitted for, on its disk past its limit (Hunt
-/// run 42949975683). Red with in-place framing decided by every eighth MiB part's compression: the
-/// first part alone, of noise. Its extents read as written, before and after a crash.
+/// did (3 MiB of its fills' noise, then 2.6 MB of zeros its sparse extents' commit sealed in one
+/// run each), is framed in a copy, compressed, its holes taking nothing; not in place, raw, which
+/// kept the holes, bytes no write of the tenant's was admitted for, on its disk past its limit
+/// (Hunt run 42949975683). Red with in-place framing decided by every eighth MiB part's
+/// compression: the first part alone, of noise. Its extents read as written, before and after a
+/// crash.
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_of_noise_then_holes_are_framed_compressed() {
     const MIB: usize = 1 << 20;
@@ -1458,19 +1470,19 @@ async fn segments_of_noise_then_holes_are_framed_compressed() {
     };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let dir = MemDir::new();
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     for sequence in 1..=3 {
-        store.write(extent(sequence), 0, &noise(sequence, MIB)).await.unwrap();
+        cell.write(extent(sequence), 0, &noise(sequence, MIB)).await.unwrap();
     }
     // A block at the end of each of three extents of a MiB: a MiB's hole before each.
     for sequence in 4..=6 {
-        store.write(extent(sequence), (MIB - BLOCK) as u64, &noise(sequence, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), (MIB - BLOCK) as u64, &noise(sequence, BLOCK)).await.unwrap();
     }
     let framed = local_cell::segments_framed_in_place();
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
-    assert!(!store.closed(usize::MAX).await.unwrap().is_empty(), "no segment closed");
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
+    assert!(!cell.closed(usize::MAX).await.unwrap().is_empty(), "no segment closed");
     assert_eq!(local_cell::segments_framed_in_place() - framed, 0, "framed in place");
     let expect = |sequence: u64| match sequence {
         1..=3 => noise(sequence, MIB),
@@ -1481,9 +1493,9 @@ async fn segments_of_noise_then_holes_are_framed_compressed() {
         }
     };
     for sequence in 1..=6 {
-        assert!(read(&store, extent(sequence), 0, MIB) == expect(sequence), "{sequence}");
+        assert!(read(&cell, extent(sequence), 0, MIB) == expect(sequence), "{sequence}");
     }
-    drop(store);
+    drop(cell);
     let reopened = LocalCell::open(dir.crash(0), options).unwrap();
     for sequence in 1..=6 {
         assert!(read(&reopened, extent(sequence), 0, MIB) == expect(sequence), "{sequence}");
@@ -1495,8 +1507,9 @@ async fn segments_of_noise_then_holes_are_framed_compressed() {
 /// one whose parts were let go of to make room, as a daemon's governor lets them go, reads them
 /// back and packs them as before: framed alike, byte for byte, either way. Held parts are derived:
 /// a crash as a closing between commits frames it, before its framed file is durable, keeps the
-/// commits in the raw file and log, as before, whatever was held. Before, a framing in a copy read its whole raw file back as it closed, seconds
-/// after the guest wrote it, from a disk eight VMs keep busy once the host had let its pages go.
+/// commits in the raw file and log, as before, whatever was held. Before, a framing in a copy read
+/// its whole raw file back as it closed, seconds after the guest wrote it, from a disk eight VMs
+/// keep busy once the host had let its pages go.
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_framed_in_copies_take_their_parts_held() {
     use local_cell::HeldParts;
@@ -1518,13 +1531,13 @@ async fn segments_framed_in_copies_take_their_parts_held() {
         LocalCell::make(&dir, description, None, None).unwrap();
         let held = HeldParts::new();
         let opening = Opening { held: Some(held.clone()), ..Opening::new(CELL) };
-        let store = LocalCell::recover_unmade(dir.clone()).unwrap().open(options, opening).unwrap();
-        store.made().unwrap();
-        assert!(Arc::ptr_eq(store.held_parts(), &held));
+        let cell = LocalCell::recover_unmade(dir.clone()).unwrap().open(options, opening).unwrap();
+        cell.made().unwrap();
+        assert!(Arc::ptr_eq(cell.held_parts(), &held));
         for sequence in 1..=7 {
-            store.write(extent(sequence), 0, &data(sequence)).await.unwrap();
+            cell.write(extent(sequence), 0, &data(sequence)).await.unwrap();
         }
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
         let holding = held.counts();
         if evicted {
             assert_eq!(held.evict_to(0), holding.bytes);
@@ -1539,19 +1552,19 @@ async fn segments_framed_in_copies_take_their_parts_held() {
             .unwrap()
         };
         let before = local_cell::framing_reads().0;
-        assert!(store.close_now().await.unwrap(), "closed between commits");
-        settled(&store).await;
+        assert!(cell.close_now().await.unwrap(), "closed between commits");
+        settled(&cell).await;
         drop(guard);
         let read_back = local_cell::framing_reads().0 - before;
         for sequence in 1..=7 {
-            assert!(read(&store, extent(sequence), 0, data(sequence).len()) == data(sequence));
+            assert!(read(&cell, extent(sequence), 0, data(sequence).len()) == data(sequence));
         }
         let segments = names(&dir, "segments");
         assert_eq!(segments.len(), 1, "{segments:?}");
         let path = format!("{}/{}", of("segments", CELL.id), segments[0]);
         let bytes = local_cell::read_whole(&dir.open(&path, true).unwrap()).unwrap();
         assert!(bytes.len() < 4 * MIB, "a copy, compressed: {} bytes", bytes.len());
-        drop(store);
+        drop(cell);
         let crashes = std::mem::take(&mut *crashes.lock().unwrap());
         assert_eq!(crashes.len(), 4);
         for (seed, crashed) in crashes.into_iter().enumerate() {
@@ -1580,7 +1593,7 @@ async fn segments_framed_in_copies_take_their_parts_held() {
         (stored, extent_frame::data(bytes, &keys).unwrap())
     };
     assert!(opened(&bytes) == opened(&evicted_bytes), "framed otherwise, held or not");
-    // A directory whose I/O runs on the store's threads: its parts packed ahead on threads of
+    // A directory whose I/O runs on the cell's threads: its parts packed ahead on threads of
     // their own, at the host's lowest priority, held as they are packed, or read and packed by the
     // framing, if not yet: framed alike whichever.
     let (concurrent_bytes, _, _, concurrent_after) = framed(false, MemDir::new()).await;
@@ -1600,7 +1613,7 @@ async fn copies_past_the_open_segments_room_go_on_in_the_next() {
     let dir = MemDir::new();
     let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     // Two extents at a time, a block of each in turn: each in pieces, other writes between.
     let (extents, blocks) = (8 * OPTIONS.segment_size as usize / (2 * BLOCK), 2);
     let data = |sequence: u64| noise(sequence, blocks * BLOCK);
@@ -1608,24 +1621,23 @@ async fn copies_past_the_open_segments_room_go_on_in_the_next() {
         for block in 0..blocks {
             for sequence in [pair, pair + 1] {
                 let at = block * BLOCK;
-                store
-                    .write(extent(sequence), at as u64, &data(sequence)[at..at + BLOCK])
+                cell.write(extent(sequence), at as u64, &data(sequence)[at..at + BLOCK])
                     .await
                     .unwrap();
             }
         }
     }
     let before = local_cell::written();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     let after = local_cell::written();
     assert_eq!(after.own - before.own, 0, "own files written");
     assert_eq!(after.copied - before.copied, (extents * blocks * BLOCK) as u64, "copied");
     assert_eq!(names(&dir, "extents"), Vec::<String>::new());
     for sequence in 1..=extents as u64 {
-        assert!(read(&store, extent(sequence), 0, blocks * BLOCK) == data(sequence), "{sequence}");
+        assert!(read(&cell, extent(sequence), 0, blocks * BLOCK) == data(sequence), "{sequence}");
     }
-    drop(store);
+    drop(cell);
     let reopened = LocalCell::open(dir.crash(0), options).unwrap();
     for sequence in 1..=extents as u64 {
         let read = read(&reopened, extent(sequence), 0, blocks * BLOCK);
@@ -1640,14 +1652,14 @@ async fn copies_past_the_open_segments_room_go_on_in_the_next() {
 #[tokio::test(flavor = "multi_thread")]
 async fn compressible_large_extents_are_framed_in_copies() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
+    let cell = create(dir.clone(), 64 << 20);
     let compressible = pattern(1, 0, 3 * OPTIONS.large_extent as usize + BLOCK);
     let mut mixed = noise(2, 16 << 20);
     mixed.extend(pattern(2, 0, 1 << 20));
     for (sequence, data) in [(1, &compressible), (2, &mixed)] {
-        store.write(extent(sequence), 0, data).await.unwrap();
+        cell.write(extent(sequence), 0, data).await.unwrap();
         let before = local_cell::written();
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
         let footer = bucket_cell::layout::encode(&extent(sequence));
         let framed = extent_frame::framed(data, &footer, bucket_cell::testing::encrypting(CELL));
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
@@ -1655,7 +1667,7 @@ async fn compressible_large_extents_are_framed_in_copies() {
     }
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
     assert_eq!(names(&dir, "extents"), vec![Padded(1).to_string(), Padded(2).to_string()]);
-    drop(store);
+    drop(cell);
     let reopened = LocalCell::open(dir.crash(0), OPTIONS).unwrap();
     for (sequence, data) in [(1, &compressible), (2, &mixed)] {
         assert!(read(&reopened, extent(sequence), 0, data.len()) == *data, "extent {sequence}");
@@ -1672,12 +1684,12 @@ async fn extents_framed_in_place_survive_crashes_framing_them() {
     let (first, second) = (noise(1, len), noise(2, len));
     for operations in 0.. {
         let dir = MemDir::serial();
-        let store = create(dir.clone(), 4 << 20);
-        store.write(extent(1), 0, &first).await.unwrap();
-        store.commit(None).await.unwrap();
-        store.write(extent(2), 0, &second).await.unwrap();
+        let cell = create(dir.clone(), 4 << 20);
+        cell.write(extent(1), 0, &first).await.unwrap();
+        cell.commit(None).await.unwrap();
+        cell.write(extent(2), 0, &second).await.unwrap();
         dir.fail_after(Some(operations));
-        let committed = store.commit(None).await;
+        let committed = cell.commit(None).await;
         dir.fail_after(None);
         for seed in 0..4 {
             let reopened = LocalCell::open(dir.crash(seed), OPTIONS);
@@ -1694,7 +1706,7 @@ async fn extents_framed_in_place_survive_crashes_framing_them() {
                 "{at}: extent 2, durable or not"
             );
         }
-        drop(store);
+        drop(cell);
         if committed.is_ok() {
             break;
         }
@@ -1714,16 +1726,16 @@ async fn segments_framed_in_place_survive_crashes_framing_them() {
     for operations in 0.. {
         let dir = MemDir::serial();
         let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
-        let store = LocalCell::create(dir.clone(), description, options).unwrap();
-        store.write(extent(1), 0, &first).await.unwrap();
-        store.commit(None).await.unwrap();
+        let cell = LocalCell::create(dir.clone(), description, options).unwrap();
+        cell.write(extent(1), 0, &first).await.unwrap();
+        cell.commit(None).await.unwrap();
         for sequence in 2..=extents as u64 {
-            store.write(extent(sequence), 0, &noise(sequence, len)).await.unwrap();
+            cell.write(extent(sequence), 0, &noise(sequence, len)).await.unwrap();
         }
         let framed = local_cell::segments_framed_in_place();
         dir.fail_after(Some(operations));
-        store.close_segment().unwrap();
-        let committed = store.commit(None).await;
+        cell.close_segment().unwrap();
+        let committed = cell.commit(None).await;
         dir.fail_after(None);
         for seed in 0..4 {
             let reopened = LocalCell::open(dir.crash(seed), options);
@@ -1740,7 +1752,7 @@ async fn segments_framed_in_place_survive_crashes_framing_them() {
                 assert_eq!(durable, intact, "{at}: extent {sequence}, durable or not");
             }
         }
-        drop(store);
+        drop(cell);
         if committed.is_ok() {
             assert!(local_cell::segments_framed_in_place() > framed, "none framed in place");
             break;
@@ -1773,16 +1785,16 @@ async fn segments_made_durable_together_survive_crashes_making_them_durable() {
     for operations in 0.. {
         let dir = MemDir::serial();
         let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
-        let store = LocalCell::create(dir.clone(), description, options).unwrap();
-        store.write(extent(1), 0, &first).await.unwrap();
-        store.commit(None).await.unwrap();
+        let cell = LocalCell::create(dir.clone(), description, options).unwrap();
+        cell.write(extent(1), 0, &first).await.unwrap();
+        cell.commit(None).await.unwrap();
         for sequence in 2..2 + extents {
-            store.write(extent(sequence), 0, &data(sequence)).await.unwrap();
+            cell.write(extent(sequence), 0, &data(sequence)).await.unwrap();
         }
         let before = local_cell::timings();
         dir.fail_after(Some(operations));
-        store.close_segment().unwrap();
-        let committed = store.commit(None).await;
+        cell.close_segment().unwrap();
+        let committed = cell.commit(None).await;
         dir.fail_after(None);
         for seed in 0..16 {
             let reopened = LocalCell::open(dir.crash(seed), options);
@@ -1799,7 +1811,7 @@ async fn segments_made_durable_together_survive_crashes_making_them_durable() {
                 assert_eq!(durable, intact, "{at}: extent {sequence}, durable or not");
             }
         }
-        drop(store);
+        drop(cell);
         if committed.is_ok() {
             let after = local_cell::timings();
             let batches = after.durable.count - before.durable.count;
@@ -1822,10 +1834,10 @@ async fn framings_wait_for_no_other_framings_syncs() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.flush().await.unwrap();
+    let cell = create(dir.clone(), 64 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.flush().await.unwrap();
     let before = local_cell::timings();
     // Each framing, as it makes its framed file; each making durable, held until told to go.
     let (framing, framings) = channel();
@@ -1842,17 +1854,17 @@ async fn framings_wait_for_no_other_framings_syncs() {
         let _ = gone.lock().unwrap().recv();
     })
     .unwrap();
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
     framings.recv().unwrap();
     held.recv().unwrap();
     // Segment 0 being made durable, held: segment 1 closes, and is framed meanwhile.
-    store.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
     framings.recv().unwrap();
-    assert_eq!(store.framing(), [0, 1], "framed, neither durable yet");
+    assert_eq!(cell.framing(), [0, 1], "framed, neither durable yet");
     let raw = |number: u64| {
         let name = Padded(number).to_string();
         let held = |kind: &str| dir.list(&of(kind, CELL.id)).unwrap().contains(&name);
@@ -1860,8 +1872,8 @@ async fn framings_wait_for_no_other_framings_syncs() {
     };
     assert!(raw(0) && raw(1), "a raw file or log went before its framed file was durable");
     drop(go);
-    settled(&store).await;
-    assert!(store.framing().is_empty(), "framings still running, settled");
+    settled(&cell).await;
+    assert!(cell.framing().is_empty(), "framings still running, settled");
     assert!(!raw(0) && !raw(1), "a raw file or log stayed, its framed file durable");
     let after = local_cell::timings();
     assert_eq!(after.durable.count - before.durable.count, 2, "segment 1 waited for segment 0");
@@ -1891,60 +1903,60 @@ async fn framings_wait_for_no_other_framings_syncs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_made_durable_sync_no_entries_a_flush_synced() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    let cell = create(dir.clone(), 64 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     for sequence in 2..6 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
-        settled(&store).await;
-        // cladefs: and the next segment placed, its entries synced by the store's opener, on a
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
+        settled(&cell).await;
+        // cladefs: and the next segment placed, its entries synced by the cell's opener, on a
         // thread of its own, before the closing and after it, so that it counts those of the next
         // after it alone (TASK-384).
-        store.prepared().await.unwrap();
+        cell.prepared().await.unwrap();
         let before = dir.io().synced_dirs;
-        store.close_segment().unwrap();
-        store.commit_ordered(None).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit_ordered(None).await.unwrap();
         // Framed and made durable, then the commit's flush.
-        store.wait_framed().await.unwrap();
-        store.flush().await.unwrap();
-        store.prepared().await.unwrap();
+        cell.wait_framed().await.unwrap();
+        cell.flush().await.unwrap();
+        cell.prepared().await.unwrap();
         let synced = dir.io().synced_dirs - before;
         assert_eq!(synced, 3, "closing after extent {sequence}: directories synced");
     }
 }
 
-/// cladefs: a segment opened from its raw file and log placed ahead of it, their entries made durable
-/// off the commits by the store's opener, costs the commits' flush no directory: before, each
-/// segment opened had its commits' next flush sync the directories of raw files and logs, each a
-/// commit of the host's journal, which a durable commit, closing a segment and opening the next
+/// cladefs: a segment opened from its raw file and log placed ahead of it, their entries made
+/// durable off the commits by the cell's opener, costs the commits' flush no directory: before,
+/// each segment opened had its commits' next flush sync the directories of raw files and logs, each
+/// a commit of the host's journal, which a durable commit, closing a segment and opening the next
 /// for its upload, waited for every time (TASK-384, `durable_commits_through_the_daemon`). Red so
 /// with the entries left unsynced, or the segment opened unplaced.
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_opened_ahead_cost_their_commits_flushes_no_directory() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    let cell = create(dir.clone(), 64 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     for sequence in 2..6 {
-        store.prepared().await.unwrap();
-        let next = store.placed().expect("the next segment placed");
-        store.close_segment().unwrap();
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.commit_ordered(None).await.unwrap();
+        cell.prepared().await.unwrap();
+        let next = cell.placed().expect("the next segment placed");
+        cell.close_segment().unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.commit_ordered(None).await.unwrap();
         // Framed and made durable, and the segment after placed, their syncs apart.
-        store.wait_framed().await.unwrap();
-        store.prepared().await.unwrap();
-        assert_eq!(store.placed(), Some(next + 1), "the segment after the one opened, placed");
+        cell.wait_framed().await.unwrap();
+        cell.prepared().await.unwrap();
+        assert_eq!(cell.placed(), Some(next + 1), "the segment after the one opened, placed");
         let before = dir.io().synced_dirs;
-        store.flush().await.unwrap();
+        cell.flush().await.unwrap();
         let synced = dir.io().synced_dirs - before;
         assert_eq!(synced, 0, "segment {next}'s commits' flush: directories synced");
     }
     for sequence in 1..6 {
-        assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+        assert_eq!(read(&cell, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
     }
 }
 
@@ -1958,12 +1970,12 @@ async fn preparations_overtaken_go_on_as_the_next_segments() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
-    store.prepared().await.unwrap();
-    let next = store.placed().expect("the next segment placed");
+    let cell = create(dir.clone(), 64 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
+    cell.prepared().await.unwrap();
+    let next = cell.placed().expect("the next segment placed");
     // The preparation of the segment after it held, as a loaded host's opener thread is, while
     // commits open it and the one after.
     let (go, gone) = channel::<()>();
@@ -1973,55 +1985,55 @@ async fn preparations_overtaken_go_on_as_the_next_segments() {
     })
     .unwrap();
     for sequence in 2..4 {
-        store.close_segment().unwrap();
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
     }
     drop((go, held));
-    store.prepared().await.unwrap();
-    assert_eq!(store.placed(), Some(next + 2), "the segment after the open one, placed");
-    settled(&store).await;
+    cell.prepared().await.unwrap();
+    assert_eq!(cell.placed(), Some(next + 2), "the segment after the open one, placed");
+    settled(&cell).await;
     for sequence in 1..4 {
-        assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+        assert_eq!(read(&cell, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
     }
 }
 
-/// cladefs: a store prepares the next segment's log once a flush made commits durable, a store that
+/// cladefs: a cell prepares the next segment's log once a flush made commits durable, a cell that
 /// writes, not as it opens (TASK-333): one that only reads, as a fork a daemon serves, prepares
 /// none, nor holds a file open for it, its flushes making nothing durable. Every fork the daemon
 /// served took one, and a file held open (`serves_hundreds_of_forks_of_a_base`).
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_that_only_read_prepare_no_log() {
+async fn cells_that_only_read_prepare_no_log() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
+    let cell = create(dir.clone(), 64 << 20);
     let logs = || dir.list(&of("logs", CELL.id)).unwrap().len();
     // Its open segment's log alone, flushed, nothing durable.
-    store.flush().await.unwrap();
-    store.prepared().await.unwrap();
+    cell.flush().await.unwrap();
+    cell.prepared().await.unwrap();
     assert_eq!(logs(), 1, "the next segment's log prepared, nothing durable");
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.prepared().await.unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.prepared().await.unwrap();
     assert_eq!(logs(), 2, "the next segment's log not prepared, a commit durable");
 }
 
-/// cladefs: the uploader takes a segment once its framing wrote its framed file, not once it made it
-/// durable, which its raw file and log stand for meanwhile, until the commits its footer names are
-/// (TASK-384): a durable commit waited, one after another, for the framed file's sync and its
+/// cladefs: the uploader takes a segment once its framing wrote its framed file, not once it made
+/// it durable, which its raw file and log stand for meanwhile, until the commits its footer names
+/// are (TASK-384): a durable commit waited, one after another, for the framed file's sync and its
 /// directory's, each a commit of the host's journal, before its upload began. A crash anywhere
-/// before the framed file is durable keeps every commit: as the store's write-ahead log holds them,
-/// if the bucket has not acknowledged the segment, or as the bucket does, once it has, the store
-/// not told so yet. The store hears of the acknowledgement once the framed file is durable, which
-/// it waits for, and lets the segment's files go then, as before; and a crash after keeps them too.
+/// before the framed file is durable keeps every commit: as the cell's write-ahead log holds them,
+/// if the bucket has not acknowledged the segment, or as the bucket does, once it has, the cell not
+/// told so yet. The cell hears of the acknowledgement once the framed file is durable, which it
+/// waits for, and lets the segment's files go then, as before; and a crash after keeps them too.
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_upload_before_their_framed_files_are_durable() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let store = created_on(dir.clone(), 1 << 20, bucket_cell::State::new(CELL), WRITER);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
+    let cell = created_on(dir.clone(), 1 << 20, bucket_cell::State::new(CELL), WRITER);
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Its making durable held until told to go.
     let (holding, held) = channel();
     let (go, gone) = channel::<()>();
@@ -2031,18 +2043,18 @@ async fn segments_upload_before_their_framed_files_are_durable() {
         let _ = gone.lock().unwrap().recv();
     })
     .unwrap();
-    assert!(store.close_for_upload(false).await.unwrap());
+    assert!(cell.close_for_upload(false).await.unwrap());
     held.recv().unwrap();
-    store.flush().await.unwrap();
-    let closed = store.closed(usize::MAX).await.unwrap();
+    cell.flush().await.unwrap();
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    assert_eq!(store.framing(), [0], "taken for the upload, its framed file not durable");
+    assert_eq!(cell.framing(), [0], "taken for the upload, its framed file not durable");
     let framed = Padded(segment.number).to_string();
     assert!(!names(&dir, "segments").contains(&framed), "its framed file named its own");
     let mut landed = bucket_cell::State::new(CELL);
     landed.apply(&segment.footer);
     let chain = WRITER.admit(&segment.footer).unwrap();
-    // What a store opened on what the bucket holds, crashed at `seed`, holds: both extents, here,
+    // What a cell opened on what the bucket holds, crashed at `seed`, holds: both extents, here,
     // or in the bucket, once it landed there.
     let check = |seed: u64, bucket: &bucket_cell::State, chain: Chain| {
         let reopened = opened_on(dir.crash(seed), bucket.clone(), chain);
@@ -2066,8 +2078,8 @@ async fn segments_upload_before_their_framed_files_are_durable() {
     }
     drop(go);
     drop(durable);
-    store.acknowledged(segment.number).await.unwrap();
-    assert!(store.framing().is_empty(), "its framing ended, durable, before it was heard");
+    cell.acknowledged(segment.number).await.unwrap();
+    assert!(cell.framing().is_empty(), "its framing ended, durable, before it was heard");
     assert!(!names(&dir, "segments").contains(&framed), "acknowledged, it left");
     for seed in 0..16 {
         check(seed, &landed, chain);
@@ -2079,30 +2091,30 @@ fn open_fds() -> usize {
     std::fs::read_dir("/dev/fd").unwrap().count()
 }
 
-/// A store keeps no more segments' files open than its options say, however many segments its
-/// commits close: closing one each, as a store uploading to object storage does on every sync,
+/// A cell keeps no more segments' files open than its options say, however many segments its
+/// commits close: closing one each, as a cell uploading to object storage does on every sync,
 /// once ran a daemon out of file descriptors.
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_keep_no_more_files_open_than_allowed() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let store = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
+    let cell = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
     let mut open = Vec::new();
     for sequence in 1..=40 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
         // cladefs: framed, which no commit waits for: a segment being framed holds its raw file and
         // log open till then (TASK-165.9); and the next segment's placed ahead of it (TASK-384).
-        settled(&store).await;
-        store.prepared().await.unwrap();
+        settled(&cell).await;
+        cell.prepared().await.unwrap();
         open.push(open_fds());
     }
     assert_eq!(open[39], open[9], "{open:?}");
-    assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(1, 0, BLOCK));
-    assert_eq!(read(&store, extent(40), 0, BLOCK), pattern(40, 0, BLOCK));
+    assert_eq!(read(&cell, extent(1), 0, BLOCK), pattern(1, 0, BLOCK));
+    assert_eq!(read(&cell, extent(40), 0, BLOCK), pattern(40, 0, BLOCK));
 }
 
-/// What a store's files did, by the directory each is in: their syncs that let their pages go
+/// What a cell's files did, by the directory each is in: their syncs that let their pages go
 /// from the host's page cache, of those of extents' data, as a host's do, written through it
 /// (`HostFile::sync`); and the bytes read.
 #[derive(Default)]
@@ -2111,7 +2123,7 @@ struct Counts {
     read: BTreeMap<String, u64>,
 }
 
-/// cladefs: a store's directory in memory whose files count what they do ([`Counts`]).
+/// cladefs: a cell directory in memory whose files count what they do ([`Counts`]).
 #[derive(Clone)]
 struct Counting {
     dir: MemDir,
@@ -2228,14 +2240,14 @@ impl Dir for Counting {
 #[tokio::test(flavor = "multi_thread")]
 async fn durable_commits_keep_the_open_segments_pages_cached() {
     let dir = Counting::new();
-    let store = create(dir.clone(), 1 << 20);
+    let cell = create(dir.clone(), 1 << 20);
     for sequence in 1..=8 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
     }
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     assert_eq!(dir.drops(), BTreeMap::from([("segments".to_owned(), 1)]));
 }
 
@@ -2246,19 +2258,19 @@ async fn durable_commits_keep_the_open_segments_pages_cached() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cells_open_reading_the_tails_of_their_logs_segments() {
     let dir = Counting::new();
-    let store = create(dir.clone(), 1 << 20);
+    let cell = create(dir.clone(), 1 << 20);
     for sequence in 0..16 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
     }
-    drop(store);
+    drop(cell);
     // None yet: commits closed them, from their raw files.
     let segments_read = || dir.read().get("segments").copied().unwrap_or(0);
     assert_eq!(segments_read(), 0);
-    let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+    let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
     assert_eq!(segments_read(), 16 * 3 * BLOCK as u64);
-    assert_eq!(store.extents().unwrap().len(), 16);
+    assert_eq!(cell.extents().unwrap().len(), 16);
 }
 
 /// The host's page size.
@@ -2288,28 +2300,28 @@ fn cached_pages(path: &std::path::Path) -> usize {
     }
 }
 
-/// cladefs: on Linux, no file of a store's holds pages in the host's page cache, its writes and its
+/// cladefs: on Linux, no file of a cell's holds pages in the host's page cache, its writes and its
 /// reads going around it (`O_DIRECT`), what is held held in the process's own page cache
 /// (`local_cell::pages`, TASK-433): the open segment's raw file as durable commits write it, its
-/// log, and the segment's framed file once framed. Until TASK-433 the raw file's pages stayed in the
-/// host's page cache through durable commits (TASK-92.23), which this tested.
+/// log, and the segment's framed file once framed. Until TASK-433 the raw file's pages stayed in
+/// the host's page cache through durable commits (TASK-92.23), which this tested.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_files_hold_no_pages_in_the_hosts_page_cache() {
+async fn cell_files_hold_no_pages_in_the_hosts_page_cache() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let store = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
+    let cell = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
     for sequence in 1..=8 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
     }
     // Written back, so that the files hold what was written, written around the host's cache.
     local_cell::pages::shared().write_back_all().unwrap();
     let path = |kind| temp.path().join(of(kind, CELL.id)).join(Padded(0).to_string());
     assert_eq!(cached_pages(&path("open-segments")), 0, "the open segment's pages cached");
     assert_eq!(cached_pages(&path("logs")), 0, "the open segment's log's pages cached");
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    settled(&store).await;
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
     assert_eq!(cached_pages(&path("segments")), 0, "the framed segment's pages cached");
 }
 
@@ -2319,14 +2331,14 @@ const SMALL_SEGMENTS: Options = Options { max_extent: 64 << 10, ..OPTIONS };
 /// The most bytes of data a segment of [`SMALL_SEGMENTS`] holds: a segment's, and an extent's.
 const SEGMENT_LIMIT: u64 = 128 << 10;
 
-/// cladefs: the bytes of `store`'s segments' data no extent is in, no write being in progress, and
+/// cladefs: the bytes of `cell`'s segments' data no extent is in, no write being in progress, and
 /// of the frees it keeps for the bucket alone, until acknowledged there (TASK-165.9).
-fn dead_bytes(store: &LocalCell<MemDir>) -> u64 {
-    let usage = store.usage().unwrap();
+fn dead_bytes(cell: &LocalCell<MemDir>) -> u64 {
+    let usage = cell.usage().unwrap();
     usage.segment_bytes - usage.live_bytes + usage.kept_bytes - usage.kept_for_views
 }
 
-/// The bytes of data of each of the cell's segments in `dir`, `store`'s: open ones' raw files,
+/// The bytes of data of each of the cell's segments in `dir`: open ones' raw files,
 /// closed ones' framed data. Not the framed file of a segment being framed behind what closed it,
 /// which may not be written yet, and whose raw file holds its data until its framing ends
 /// (TASK-189): named its own until it is durable (`framing-`, TASK-310).
@@ -2351,24 +2363,24 @@ fn segment_data(dir: &MemDir) -> Vec<u64> {
     lens
 }
 
-/// TASK-189: reading the cell's segments beside the store between writes, as [`segment_data`]
+/// TASK-189: reading the cell's segments beside the cell between writes, as [`segment_data`]
 /// does, reads no framed file a framing has created and not yet written: a commit closed the
 /// segments writes filled, and framed them behind, on a thread of its own (TASK-92.41).
 /// Each framing waits at the failpoint between its file's creation and its write while the helper
 /// reads: read so, unskipped, the file was empty, `Corrupt("an object's trailer")`, as in CI run
 /// 42105764695. The failpoint is the process's, as nextest gives each test.
 #[tokio::test(flavor = "multi_thread")]
-async fn segments_read_beside_the_store_skip_framed_files_being_written() {
+async fn segments_read_beside_the_cell_skip_framed_files_being_written() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
-    store.write(extent(96), 0, &block(96)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(96), 0, &block(96)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Each framing says it waits, its file created, and waits until let go: or until the test
-    // stops, failing, its channels dropped, so that the store's drop, waiting for its framings,
+    // stops, failing, its channels dropped, so that the cell's drop, waiting for its framings,
     // ends.
     let (waiting, waits) = channel();
     let (go, gone) = channel::<()>();
@@ -2380,12 +2392,12 @@ async fn segments_read_beside_the_store_skip_framed_files_being_written() {
     .unwrap();
     let (mut seen, mut reads) = (BTreeSet::new(), 0);
     for sequence in 0..48 {
-        store.write(extent(sequence), 0, &block(sequence)).await.unwrap();
+        cell.write(extent(sequence), 0, &block(sequence)).await.unwrap();
     }
     // cladefs: the segments filled, framed behind the commit closing them (TASK-92.41).
-    store.commit_ordered(None).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
     loop {
-        let begun: Vec<u64> = (store.framing().into_iter()).filter(|n| seen.insert(*n)).collect();
+        let begun: Vec<u64> = (cell.framing().into_iter()).filter(|n| seen.insert(*n)).collect();
         if begun.is_empty() {
             break;
         }
@@ -2399,41 +2411,41 @@ async fn segments_read_beside_the_store_skip_framed_files_being_written() {
     }
     drop(guard);
     assert!(reads > 1, "no segments framed behind a commit");
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     for sequence in 0..48 {
-        assert!(read(&store, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
+        assert!(read(&cell, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
     }
 }
 
 /// TASK-150.2: a segment writes filled, holding a commit's data, goes to the uploader with no
 /// commit after it: the uploader's closing between commits closes it, and frames it, as nothing
-/// else would until the guest next commits, which a sync of the store, or a fork, waiting for that
+/// else would until the guest next commits, which a sync of the cell, or a fork, waiting for that
 /// commit's upload, may not live to see (TASK-92.41). It reads as before, and the next commit
 /// copies out of it what was written since the commit before.
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_filled_go_to_the_uploader_with_no_commit_after() {
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir, description, SMALL_SEGMENTS).unwrap();
+    let cell = LocalCell::create(dir, description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
-    store.write(extent(0), 0, &block(0)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(0), 0, &block(0)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Past what a segment holds, no commit with them.
     for sequence in 1..48 {
-        store.write(extent(sequence), 0, &block(sequence)).await.unwrap();
+        cell.write(extent(sequence), 0, &block(sequence)).await.unwrap();
     }
 
-    store.flush().await.unwrap();
-    assert_eq!(store.closed(8).await.unwrap().len(), 0, "a segment closed before the uploader's");
-    assert!(store.close_now().await.unwrap(), "the segment filled, holding the commit, not closed");
-    let lasts: Vec<u64> = store.closed(8).await.unwrap().iter().map(Closed::last).collect();
+    cell.flush().await.unwrap();
+    assert_eq!(cell.closed(8).await.unwrap().len(), 0, "a segment closed before the uploader's");
+    assert!(cell.close_now().await.unwrap(), "the segment filled, holding the commit, not closed");
+    let lasts: Vec<u64> = cell.closed(8).await.unwrap().iter().map(Closed::last).collect();
     assert_eq!(lasts, [1]);
     for sequence in 0..48 {
-        assert!(read(&store, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
+        assert!(read(&cell, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
     }
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     for sequence in 0..48 {
-        assert!(read(&store, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
+        assert!(read(&cell, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
     }
 }
 
@@ -2445,34 +2457,28 @@ async fn segments_filled_go_to_the_uploader_with_no_commit_after() {
 async fn interval_closings_leave_segments_being_filled() {
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir, description, SMALL_SEGMENTS).unwrap();
+    let cell = LocalCell::create(dir, description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
-    store.write(extent(0), 0, &block(0)).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.write(extent(1), 0, &block(1)).await.unwrap();
-    assert!(
-        store.close_now_unless_filling().await.unwrap(),
-        "a segment written little since, open"
-    );
-    store.write(extent(2), 0, &block(2)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(0), 0, &block(0)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.write(extent(1), 0, &block(1)).await.unwrap();
+    assert!(cell.close_now_unless_filling().await.unwrap(), "a segment written little since, open");
+    cell.write(extent(2), 0, &block(2)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Past what a segment holds: it fills.
     for sequence in 3..48 {
-        store.write(extent(sequence), 0, &block(sequence)).await.unwrap();
+        cell.write(extent(sequence), 0, &block(sequence)).await.unwrap();
     }
-    assert!(!store.close_now_unless_filling().await.unwrap(), "a segment filled, closed");
-    assert!(store.close_now().await.unwrap(), "a segment filled, holding a commit, left open");
+    assert!(!cell.close_now_unless_filling().await.unwrap(), "a segment filled, closed");
+    assert!(cell.close_now().await.unwrap(), "a segment filled, holding a commit, left open");
     // The open one, past 8 MiB written since the last commit.
     let options = Options { max_extent: 16 << 20, large_extent: 16 << 20, ..OPTIONS };
-    let store = LocalCell::create(MemDir::new(), description, options).unwrap();
-    store.write(extent(0), 0, &block(0)).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.write(extent(1), 0, &vec![1; 9 << 20]).await.unwrap();
-    assert!(!store.close_now_unless_filling().await.unwrap(), "a segment being filled, closed");
-    assert!(
-        store.close_now().await.unwrap(),
-        "a segment being filled, holding a commit, left open"
-    );
+    let cell = LocalCell::create(MemDir::new(), description, options).unwrap();
+    cell.write(extent(0), 0, &block(0)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.write(extent(1), 0, &vec![1; 9 << 20]).await.unwrap();
+    assert!(!cell.close_now_unless_filling().await.unwrap(), "a segment being filled, closed");
+    assert!(cell.close_now().await.unwrap(), "a segment being filled, holding a commit, left open");
 }
 
 /// The open segment takes writes until it holds a segment and an extent, `Options::segment_size`
@@ -2480,27 +2486,27 @@ async fn interval_closings_leave_segments_being_filled() {
 /// grows past, however much is written between commits (TASK-79.2). Full, holding commits' data or
 /// not, it waits for the next commit, which seals the extents in it where they are, none in a file
 /// of its own, and closes it, the commit going on past it (TASK-92.41). Every extent reads as
-/// written meanwhile, and once committed, and so after opening the store again.
+/// written meanwhile, and once committed, and so after opening the cell again.
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_hold_a_segment_and_an_extent_at_most() {
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
-    let check = |store: &LocalCell<MemDir>, sequences: std::ops::Range<u64>| {
+    let check = |cell: &LocalCell<MemDir>, sequences: std::ops::Range<u64>| {
         for sequence in sequences {
-            assert!(read(store, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
+            assert!(read(cell, extent(sequence), 0, BLOCK) == block(sequence), "{sequence}");
         }
     };
     // 192 KiB of blocks, no commit's data with them.
     for sequence in 0..48 {
-        store.write(extent(sequence), 0, &block(sequence)).await.unwrap();
+        cell.write(extent(sequence), 0, &block(sequence)).await.unwrap();
         let lens = segment_data(&dir);
         assert!(lens.iter().all(|len| *len <= SEGMENT_LIMIT), "segments of {lens:?}");
     }
-    check(&store, 0..48);
-    store.commit(None).await.unwrap();
-    check(&store, 0..48);
+    check(&cell, 0..48);
+    cell.commit(None).await.unwrap();
+    check(&cell, 0..48);
     let lens = segment_data(&dir);
     assert!(lens.iter().all(|len| *len <= SEGMENT_LIMIT), "segments of {lens:?}");
     let own = dir.list(&of("extents", CELL.id)).unwrap();
@@ -2508,21 +2514,20 @@ async fn segments_hold_a_segment_and_an_extent_at_most() {
 
     // A commit's data in the open segment, then another 192 KiB of blocks: the segment holding it
     // fills as they come, and closes with the commit after.
-    store.write(extent(96), 0, &block(96)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(96), 0, &block(96)).await.unwrap();
+    cell.commit(None).await.unwrap();
     for sequence in 48..96 {
-        store.write(extent(sequence), 0, &block(sequence)).await.unwrap();
+        cell.write(extent(sequence), 0, &block(sequence)).await.unwrap();
         let lens = segment_data(&dir);
         assert!(lens.iter().all(|len| *len <= SEGMENT_LIMIT), "segments of {lens:?}");
     }
-    store.commit(None).await.unwrap();
-    check(&store, 0..97);
-    let lasts: Vec<u64> =
-        store.closed(usize::MAX).await.unwrap().iter().map(Closed::last).collect();
+    cell.commit(None).await.unwrap();
+    check(&cell, 0..97);
+    let lasts: Vec<u64> = cell.closed(usize::MAX).await.unwrap().iter().map(Closed::last).collect();
     assert_eq!(lasts, [1, 1, 3, 3]);
     let lens = segment_data(&dir);
     assert!(lens.iter().all(|len| *len <= SEGMENT_LIMIT), "segments of {lens:?}");
-    drop(store);
+    drop(cell);
     check(&LocalCell::open(dir.clone(), SMALL_SEGMENTS).unwrap(), 0..97);
 }
 
@@ -2533,15 +2538,15 @@ async fn segments_hold_a_segment_and_an_extent_at_most() {
 async fn segments_set_aside_leave_the_cell_its_footers() {
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     // 192 KiB of blocks after the checkpoint the cell opened with, which names segment 0.
     for sequence in 0..48 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
     assert_eq!(dir.list(&of("segments", CELL.id)).unwrap(), Vec::<String>::new());
-    let state = closed_state(&store).await;
+    let state = closed_state(&cell).await;
     assert_eq!(state.0, 1);
-    assert_eq!(reopened_state(store, &dir).0, state);
+    assert_eq!(reopened_state(cell, &dir).0, state);
 }
 
 /// An extent written again and again between commits takes no segment past a segment and an
@@ -2552,22 +2557,22 @@ async fn segments_set_aside_leave_the_cell_its_footers() {
 async fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     for seed in 0..64 {
-        store.write(extent(1), 0, &pattern(seed, 0, 2 * BLOCK)).await.unwrap();
+        cell.write(extent(1), 0, &pattern(seed, 0, 2 * BLOCK)).await.unwrap();
         let lens = segment_data(&dir);
         assert!(lens.iter().all(|len| *len <= SEGMENT_LIMIT), "segments of {lens:?}");
     }
-    assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
-    store.commit(None).await.unwrap();
-    settled(&store).await;
-    assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
+    assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
+    cell.commit(None).await.unwrap();
+    settled(&cell).await;
+    assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
     let place = Place::Run { cell: CELL.id, number: 4, offset: 0 };
-    assert_eq!(store.place(extent(1)).unwrap(), Some(place));
+    assert_eq!(cell.place(extent(1)).unwrap(), Some(place));
     let segments: Vec<String> = (0..4).map(|number| Padded(number).to_string()).collect();
-    assert_eq!(segment_files(&store, &dir, "open-segments").await, ["0000000000004"]);
+    assert_eq!(segment_files(&cell, &dir, "open-segments").await, ["0000000000004"]);
     assert_eq!(dir.list(&of("segments", CELL.id)).unwrap(), segments);
-    for closed in store.closed(usize::MAX).await.unwrap() {
+    for closed in cell.closed(usize::MAX).await.unwrap() {
         let data = extent_frame::data(
             &closed.bytes().unwrap(),
             &bucket_cell::testing::ring([CELL]).of(CELL.id),
@@ -2575,35 +2580,35 @@ async fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
         .unwrap();
         assert_eq!(data.len(), 0, "segment {}, no extent's data in it, framed", closed.number);
     }
-    let store = reopened(store, &dir);
-    assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
+    let cell = reopened(cell, &dir);
+    assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
 }
 
 /// Rewrites of an open extent take room in segments, which no extent holds once the extent is
 /// sealed: past the capacity's worth, they count as used, until the commit sealing the extent
 /// takes them back, which is the writer's to make (TASK-79.2); then they are dead space, which
-/// takes no room, and which leaves the store with its segment, once acknowledged in the bucket
+/// takes no room, and which leaves the cell with its segment, once acknowledged in the bucket
 /// (TASK-165.8). So a guest rewriting a block between commits takes twice its capacity of the
 /// host's disk at most until it commits.
 #[tokio::test(flavor = "multi_thread")]
 async fn rewrites_past_the_capacity_count_as_used() {
     let capacity = 64 * BLOCK as u64;
-    let store = create(MemDir::new(), capacity);
+    let cell = create(MemDir::new(), capacity);
     // The first write, and the capacity's worth of rewrites, less the block the extent holds.
     for seed in 0..128 {
-        store.write(extent(1), 0, &pattern(seed, 0, BLOCK)).await.unwrap();
+        cell.write(extent(1), 0, &pattern(seed, 0, BLOCK)).await.unwrap();
     }
-    assert_eq!(store.info().unwrap().available, 0);
-    error_is(store.write(extent(1), 0, &pattern(128, 0, BLOCK)).await, NoSpace);
-    error_is(store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await, NoSpace);
-    assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(127, 0, BLOCK));
+    assert_eq!(cell.info().unwrap().available, 0);
+    error_is(cell.write(extent(1), 0, &pattern(128, 0, BLOCK)).await, NoSpace);
+    error_is(cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await, NoSpace);
+    assert_eq!(read(&cell, extent(1), 0, BLOCK), pattern(127, 0, BLOCK));
     // Sealed, the extent leaves them in a segment no extent holds but it, which takes none of the
-    // room: it leaves the store once acknowledged in the bucket (TASK-165.8).
-    store.commit(None).await.unwrap();
-    assert_eq!(dead_bytes(&store), 128 * BLOCK as u64);
-    assert_eq!(store.info().unwrap().available, capacity - BLOCK as u64);
-    store.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-    assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(127, 0, BLOCK));
+    // room: it leaves the cell once acknowledged in the bucket (TASK-165.8).
+    cell.commit(None).await.unwrap();
+    assert_eq!(dead_bytes(&cell), 128 * BLOCK as u64);
+    assert_eq!(cell.info().unwrap().available, capacity - BLOCK as u64);
+    cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+    assert_eq!(read(&cell, extent(1), 0, BLOCK), pattern(127, 0, BLOCK));
 }
 
 /// cladefs: what frees of extents open let go of, of what writes since the last commit wrote,
@@ -2614,140 +2619,140 @@ async fn rewrites_past_the_capacity_count_as_used() {
 #[tokio::test(flavor = "multi_thread")]
 async fn frees_of_open_extents_past_the_capacity_count_as_used() {
     let capacity = 64 * BLOCK as u64;
-    let store = create(MemDir::new(), capacity);
+    let cell = create(MemDir::new(), capacity);
     // Blocks written and freed; blocks written, written over and freed; and extents in raw files
     // of their own, of 8 blocks, written and freed: twice the capacity's worth, 512 KiB.
     for sequence in 0..32 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.free(extent(sequence)).unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
     for sequence in 32..48 {
-        store.write(extent(sequence), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-        store.write(extent(sequence), 0, &pattern(2, 0, BLOCK)).await.unwrap();
-        store.free(extent(sequence)).unwrap();
+        cell.write(extent(sequence), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(2, 0, BLOCK)).await.unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
     for sequence in 48..56 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, 8 * BLOCK)).await.unwrap();
-        store.free(extent(sequence)).unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, 8 * BLOCK)).await.unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
-    error_is(store.write(extent(56), 0, &pattern(56, 0, BLOCK)).await, NoSpace);
-    assert_eq!(store.info().unwrap().available, 0);
+    error_is(cell.write(extent(56), 0, &pattern(56, 0, BLOCK)).await, NoSpace);
+    assert_eq!(cell.info().unwrap().available, 0);
     // The commit takes it back: nothing holds it, as no commit did.
-    store.commit(None).await.unwrap();
-    assert_eq!(store.info().unwrap().available, capacity);
-    store.write(extent(56), 0, &pattern(56, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(read(&store, extent(56), 0, BLOCK), pattern(56, 0, BLOCK));
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.info().unwrap().available, capacity);
+    cell.write(extent(56), 0, &pattern(56, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(56), 0, BLOCK), pattern(56, 0, BLOCK));
 }
 
 /// Writes, a commit, and frees of all but one of the extents written, and a commit: a segment
 /// closed, which one extent pins. Of data that does not compress, so that what no extent is in
 /// takes as much of the host's disk as it is.
-async fn churn(store: &LocalCell<MemDir>, first: u64) {
+async fn churn(cell: &LocalCell<MemDir>, first: u64) {
     for sequence in first..first + 16 {
-        store.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
     }
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
     for sequence in first + 1..first + 16 {
-        store.free(extent(sequence)).unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
-    store.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
 }
 
 /// What the cell's segments hold that no extent is in, freed, is dead space until its segments
-/// leave the store, acknowledged in the bucket, which takes none of the cell's room, past the
+/// leave the cell, acknowledged in the bucket, which takes none of the cell's room, past the
 /// capacity's worth too: the bucket's collector's to take back, which the cell's writer can't
 /// make room for (TASK-79.2, TASK-165.8).
 #[tokio::test(flavor = "multi_thread")]
 async fn freed_space_is_dead_space_taking_no_room() {
     let capacity = 64 * BLOCK as u64;
-    let store = create(MemDir::new(), capacity);
+    let cell = create(MemDir::new(), capacity);
     for cycle in 0..4 {
-        churn(&store, 16 * cycle).await;
+        churn(&cell, 16 * cycle).await;
     }
     // 240 KiB freed: within the capacity's worth.
-    assert_eq!(dead_bytes(&store), 60 * BLOCK as u64);
-    assert_eq!(store.info().unwrap().available, capacity - 4 * BLOCK as u64);
-    churn(&store, 64).await;
+    assert_eq!(dead_bytes(&cell), 60 * BLOCK as u64);
+    assert_eq!(cell.info().unwrap().available, capacity - 4 * BLOCK as u64);
+    churn(&cell, 64).await;
     // 300 KiB freed: past the capacity's worth.
-    assert_eq!(dead_bytes(&store), 75 * BLOCK as u64);
-    assert_eq!(store.info().unwrap().available, capacity - 5 * BLOCK as u64);
-    error_is(store.write(extent(100), 0, &vec![1; 60 * BLOCK]).await, NoSpace);
-    store.write(extent(100), 0, &vec![1; 59 * BLOCK]).await.unwrap();
-    store.free(extent(100)).unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.info().unwrap().available, capacity - 5 * BLOCK as u64);
+    assert_eq!(dead_bytes(&cell), 75 * BLOCK as u64);
+    assert_eq!(cell.info().unwrap().available, capacity - 5 * BLOCK as u64);
+    error_is(cell.write(extent(100), 0, &vec![1; 60 * BLOCK]).await, NoSpace);
+    cell.write(extent(100), 0, &vec![1; 59 * BLOCK]).await.unwrap();
+    cell.free(extent(100)).unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.info().unwrap().available, capacity - 5 * BLOCK as u64);
 }
 
 /// cladefs: what the cell's segments hold that no extent is in, freed, takes none of the room the
-/// cell's writes need, however much it is: it leaves the store with its segments, acknowledged
+/// cell's writes need, however much it is: it leaves the cell with its segments, acknowledged
 /// in the bucket, whose collector takes it back (TASK-165.8). Here it gathers commit by commit,
 /// past twice the capacity (TASK-79.2).
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_space_takes_none_of_the_room_writes_need() {
     let capacity = 64 * BLOCK as u64;
-    let store = create(MemDir::new(), capacity);
+    let cell = create(MemDir::new(), capacity);
     // Ten segments, each pinned by one extent: 600 KiB freed, more than twice the capacity.
     for cycle in 0..10 {
-        churn(&store, 16 * cycle).await;
+        churn(&cell, 16 * cycle).await;
     }
-    assert_eq!(dead_bytes(&store), 150 * BLOCK as u64);
-    assert_eq!(store.info().unwrap().available, capacity - 10 * BLOCK as u64);
+    assert_eq!(dead_bytes(&cell), 150 * BLOCK as u64);
+    assert_eq!(cell.info().unwrap().available, capacity - 10 * BLOCK as u64);
     // All the room left.
-    store.write(extent(200), 0, &pattern(200, 0, 54 * BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(dead_bytes(&store), 150 * BLOCK as u64);
-    assert_eq!(store.info().unwrap().available, 0);
-    error_is(store.write(extent(201), 0, &pattern(201, 0, BLOCK)).await, NoSpace);
+    cell.write(extent(200), 0, &pattern(200, 0, 54 * BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(dead_bytes(&cell), 150 * BLOCK as u64);
+    assert_eq!(cell.info().unwrap().available, 0);
+    error_is(cell.write(extent(201), 0, &pattern(201, 0, BLOCK)).await, NoSpace);
     for sequence in (0..160).step_by(16) {
-        assert!(read(&store, extent(sequence), 0, BLOCK) == noise(sequence, BLOCK), "{sequence}");
+        assert!(read(&cell, extent(sequence), 0, BLOCK) == noise(sequence, BLOCK), "{sequence}");
     }
-    assert_eq!(read(&store, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
+    assert_eq!(read(&cell, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
 }
 
 /// cladefs: an uploader keeps the frees of a guest writing and freeing files until it has uploaded
 /// the segments holding them, and lets go of them at once, the cell's dead space past twice its
 /// capacity of a sudden. Counted as used past the capacity's worth, the dead space found the
-/// guest's next write, a journal write of Fxfs's, refused (`ENOSPC`), the store a tenth used: the
-/// guest's filesystem failed (TASK-79.2). The segments, acknowledged, leave the store, what is
+/// guest's next write, a journal write of Fxfs's, refused (`ENOSPC`), the cell a tenth used: the
+/// guest's filesystem failed (TASK-79.2). The segments, acknowledged, leave the cell, what is
 /// live of them read in the bucket, and the dead space with them (TASK-165.8): the write takes
 /// the room the extents leave it.
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_space_the_uploader_lets_go_takes_none_of_the_room() {
     let capacity = 64 * BLOCK as u64;
-    let store = create(MemDir::new(), capacity);
+    let cell = create(MemDir::new(), capacity);
     // Ten segments, each pinned by one extent, what is freed in them kept for the bucket.
     for cycle in 0..10 {
-        churn(&store, 16 * cycle).await;
+        churn(&cell, 16 * cycle).await;
     }
-    assert_eq!(dead_bytes(&store), 150 * BLOCK as u64);
+    assert_eq!(dead_bytes(&cell), 150 * BLOCK as u64);
     // Acknowledged, and released: 600 KiB let go of at once, more than twice the capacity, with
     // the segments.
-    for closed in store.closed(usize::MAX).await.unwrap() {
-        store.acknowledged(closed.number).await.unwrap();
+    for closed in cell.closed(usize::MAX).await.unwrap() {
+        cell.acknowledged(closed.number).await.unwrap();
     }
     // The write the next commit comes with, of all the room the extents leave.
-    store.write(extent(200), 0, &pattern(200, 0, 54 * BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(200), 0, &pattern(200, 0, 54 * BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // But the frees of the last churn's commit, its segment open still, kept until the bucket
     // acknowledges it, their data there.
-    assert_eq!(dead_bytes(&store), 15 * BLOCK as u64);
-    assert_eq!(store.usage().unwrap().segments, 1);
-    assert_eq!(store.info().unwrap().available, 0);
+    assert_eq!(dead_bytes(&cell), 15 * BLOCK as u64);
+    assert_eq!(cell.usage().unwrap().segments, 1);
+    assert_eq!(cell.info().unwrap().available, 0);
     for sequence in (0..160).step_by(16) {
-        let place = store.place(extent(sequence)).unwrap();
+        let place = cell.place(extent(sequence)).unwrap();
         assert!(matches!(place, Some(Place::Bucket(_))), "{sequence} at {place:?}");
     }
-    assert_eq!(read(&store, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
+    assert_eq!(read(&cell, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
 }
 
 /// cladefs: the bytes the cell's files of extents' data take of the host's disk: its segments',
-/// open and closed, and its extents' own files and raw files (TASK-79.89), in `dir`, `store`'s.
-/// Once the store is idle (TASK-463): a framing made durable behind a commit renamed its segment's
+/// open and closed, and its extents' own files and raw files (TASK-79.89), in `dir`, `cell`'s.
+/// Once the cell is idle (TASK-463): a framing made durable behind a commit renamed its segment's
 /// framed file its own between this listing it and opening it, which failed `NotFound` (CI run
 /// 43729753505).
-async fn data_files(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
-    store.wait_idle().await.unwrap();
+async fn data_files(cell: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
+    cell.wait_idle().await.unwrap();
     let mut bytes = 0;
     for kind in ["segments", "open-segments", "extents", "open-extents"] {
         for name in dir.list(&of(kind, CELL.id)).unwrap() {
@@ -2760,8 +2765,8 @@ async fn data_files(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
 
 /// cladefs: a guest writing a segment of blocks of data that does not compress at each commit, and
 /// freeing all but two of them at the next, which pin the segment, until it lets go of them too,
-/// twenty-one commits later; its uploader acknowledging each segment the store closes, and
-/// releasing each commit, as it goes. Each segment acknowledged leaves the store, its extents read
+/// twenty-one commits later; its uploader acknowledging each segment the cell closes, and
+/// releasing each commit, as it goes. Each segment acknowledged leaves the cell, its extents read
 /// in the bucket from then on: what the pins hold, and what the frees left, is the bucket's, whose
 /// collector takes it back (TASK-165.8). Once the uploader has caught up, the cell's files are
 /// none but its open segment's, which the commit that closed the last left empty. Before, they
@@ -2771,10 +2776,10 @@ async fn data_files(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
 async fn acknowledged_segments_leave_a_churning_guests_files() {
     let capacity = 64 * BLOCK as u64;
     let dir = MemDir::new();
-    let store = create(dir.clone(), capacity);
+    let cell = create(dir.clone(), capacity);
     let mut live = BTreeSet::new();
     let free = |live: &mut BTreeSet<u64>, sequence: u64| {
-        store.free(extent(sequence)).unwrap();
+        cell.free(extent(sequence)).unwrap();
         live.remove(&sequence);
     };
     for cycle in 0..100 {
@@ -2790,19 +2795,19 @@ async fn acknowledged_segments_leave_a_churning_guests_files() {
             free(&mut live, pins + 1);
         }
         for sequence in first..first + 16 {
-            store.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
+            cell.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
             live.insert(sequence);
         }
-        store.commit(None).await.unwrap();
-        store.flush().await.unwrap();
-        for closed in store.closed(usize::MAX).await.unwrap() {
-            store.acknowledged(closed.number).await.unwrap();
+        cell.commit(None).await.unwrap();
+        cell.flush().await.unwrap();
+        for closed in cell.closed(usize::MAX).await.unwrap() {
+            cell.acknowledged(closed.number).await.unwrap();
         }
-        settled(&store).await;
-        assert_eq!(data_files(&store, &dir).await, 0, "the files after cycle {cycle}");
+        settled(&cell).await;
+        assert_eq!(data_files(&cell, &dir).await, 0, "the files after cycle {cycle}");
     }
     for sequence in live {
-        let place = store.place(extent(sequence)).unwrap();
+        let place = cell.place(extent(sequence)).unwrap();
         assert!(matches!(place, Some(Place::Bucket(_))), "{sequence} at {place:?}");
     }
 }
@@ -2818,35 +2823,35 @@ async fn acknowledged_segments_leave_a_churning_guests_files() {
 async fn uploader_lagging(acknowledges: bool) -> u64 {
     let capacity = 64 * BLOCK as u64;
     let dir = MemDir::new();
-    let store = create(dir.clone(), capacity);
+    let cell = create(dir.clone(), capacity);
     for cycle in 0..40 {
         let first = 17 * cycle;
         for sequence in first..first + 16 {
-            store.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
+            cell.write(extent(sequence), 0, &noise(sequence, BLOCK)).await.unwrap();
         }
-        store.write(extent(first + 16), 0, &noise(first + 16, 8 * BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(first + 16), 0, &noise(first + 16, 8 * BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
         for sequence in first..first + 17 {
-            store.free(extent(sequence)).unwrap();
+            cell.free(extent(sequence)).unwrap();
         }
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
         if acknowledges {
-            for closed in store.closed(usize::MAX).await.unwrap() {
-                store.acknowledged(closed.number).await.unwrap();
+            for closed in cell.closed(usize::MAX).await.unwrap() {
+                cell.acknowledged(closed.number).await.unwrap();
             }
         }
     }
-    let files = data_files(&store, &dir).await;
-    for closed in store.closed(usize::MAX).await.unwrap() {
-        store.acknowledged(closed.number).await.unwrap();
+    let files = data_files(&cell, &dir).await;
+    for closed in cell.closed(usize::MAX).await.unwrap() {
+        cell.acknowledged(closed.number).await.unwrap();
     }
-    store.commit(None).await.unwrap();
-    assert_eq!(data_files(&store, &dir).await, 0);
+    cell.commit(None).await.unwrap();
+    assert_eq!(data_files(&cell, &dir).await, 0);
     files
 }
 
 /// cladefs: `uploader_lagging`, its uploader acknowledging nothing, nor releasing anything: the
-/// cell's files take ten times the capacity, which no bound of the store's refuses writes for
+/// cell's files take ten times the capacity, which no bound of the cell's refuses writes for
 /// (TASK-79.89).
 #[tokio::test(flavor = "multi_thread")]
 async fn what_an_uploader_keeps_stays_until_acknowledged() {
@@ -2854,7 +2859,7 @@ async fn what_an_uploader_keeps_stays_until_acknowledged() {
     assert!(files > 10 * 64 * BLOCK as u64, "{files} bytes of files");
 }
 
-/// cladefs: `uploader_lagging`, its uploader acknowledging the segments as the store closes them,
+/// cladefs: `uploader_lagging`, its uploader acknowledging the segments as the cell closes them,
 /// and releasing nothing: the frees it keeps, in the bucket, hold no file of the cell's
 /// (TASK-165.8).
 #[tokio::test(flavor = "multi_thread")]
@@ -2862,26 +2867,26 @@ async fn frees_kept_in_segments_acknowledged_hold_no_file() {
     assert_eq!(uploader_lagging(true).await, 0);
 }
 
-/// cladefs: a cell opened again in the same process lets go of the segments its last store set
+/// cladefs: a cell opened again in the same process lets go of the segments its last cell set
 /// aside, full, or left open, holding only what writes after its last commit wrote: they go, as
-/// opening the store would remove them (TASK-79.2).
+/// opening the cell would remove them (TASK-79.2).
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_no_cell_holds_go_as_cells_open() {
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
+    let cell = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Two segments' worth after the commit, the first set aside.
     for sequence in 2..50 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
-    drop(store);
-    let store = LocalCell::open(dir.clone(), SMALL_SEGMENTS).unwrap();
-    assert_eq!(store.extents().unwrap(), [(extent(1), BLOCK as u64)]);
+    drop(cell);
+    let cell = LocalCell::open(dir.clone(), SMALL_SEGMENTS).unwrap();
+    assert_eq!(cell.extents().unwrap(), [(extent(1), BLOCK as u64)]);
     let segments = dir.list(&of("segments", CELL.id)).unwrap();
     assert_eq!(segments, ["0000000000000"]);
-    assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(1, 0, BLOCK));
+    assert_eq!(read(&cell, extent(1), 0, BLOCK), pattern(1, 0, BLOCK));
 }
 
 /// A write in progress reserves the room it may take, which counts against the capacity until it
@@ -2889,92 +2894,92 @@ async fn segments_no_cell_holds_go_as_cells_open() {
 /// enough to the byte (TASK-44.1).
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_reserve_room_until_done() {
-    let store = create(MemDir::new(), 64 << 10);
-    let first = store.begin_write(extent(1), 0, 24 << 10).await.unwrap();
-    error_is(store.write(extent(2), 0, &[2; 44 << 10]).await, NoSpace);
+    let cell = create(MemDir::new(), 64 << 10);
+    let first = cell.begin_write(extent(1), 0, 24 << 10).await.unwrap();
+    error_is(cell.write(extent(2), 0, &[2; 44 << 10]).await, NoSpace);
     drop(first);
-    store.write(extent(2), 0, &[2; 44 << 10]).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(2), 0, &[2; 44 << 10]).await.unwrap();
+    cell.commit(None).await.unwrap();
     // To the byte: what is left, exactly.
-    store.write(extent(3), 0, &[3; 16 << 10]).await.unwrap();
-    store.write(extent(4), 0, &[4; 4 << 10]).await.unwrap();
-    assert_eq!(store.info().unwrap().available, 0);
-    error_is(store.write(extent(5), 0, &[5; BLOCK]).await, NoSpace);
+    cell.write(extent(3), 0, &[3; 16 << 10]).await.unwrap();
+    cell.write(extent(4), 0, &[4; 4 << 10]).await.unwrap();
+    assert_eq!(cell.info().unwrap().available, 0);
+    error_is(cell.write(extent(5), 0, &[5; BLOCK]).await, NoSpace);
 }
 
 /// Begins a write of `data` at `offset` in `extent`, and writes it to its file, unfinished: a
 /// write in flight, which a free may race (TASK-79.1).
 async fn in_flight<'a>(
-    store: &'a LocalCell<MemDir>,
+    cell: &'a LocalCell<MemDir>,
     extent: ExtentId,
     offset: u64,
     data: &[u8],
 ) -> local_cell::Write<'a, MemDir> {
-    let write = store.begin_write(extent, offset, data.len() as u64).await.unwrap();
+    let write = cell.begin_write(extent, offset, data.len() as u64).await.unwrap();
     write.write(data, 0).unwrap();
     write
 }
 
-/// The store, reopened from `dir` once `store` is gone: what it made durable.
-fn reopened(store: LocalCell<MemDir>, dir: &MemDir) -> LocalCell<MemDir> {
-    drop(store);
+/// The cell, reopened from `dir` once `cell` is gone: what it made durable.
+fn reopened(cell: LocalCell<MemDir>, dir: &MemDir) -> LocalCell<MemDir> {
+    drop(cell);
     LocalCell::open(dir.clone(), OPTIONS).unwrap()
 }
 
 /// A write in flight to an extent freed meanwhile, which the extent's next write placed in the
 /// open segment rather than its file of its own, is dropped as it finishes: the extent holds what
-/// was written after the free, and the store goes on, commits and opens again (TASK-79.1).
+/// was written after the free, and the cell goes on, commits and opens again (TASK-79.1).
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_finishing_after_their_extents_free_and_rewrite_are_dropped() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    let freed = in_flight(&store, extent(1), 0, &pattern(1, 0, 40 << 10)).await;
-    store.free(extent(1)).unwrap();
-    store.write(extent(1), BLOCK as u64, &pattern(2, 0, BLOCK)).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    let freed = in_flight(&cell, extent(1), 0, &pattern(1, 0, 40 << 10)).await;
+    cell.free(extent(1)).unwrap();
+    cell.write(extent(1), BLOCK as u64, &pattern(2, 0, BLOCK)).await.unwrap();
     freed.finish();
     let written = [vec![0; BLOCK], pattern(2, 0, BLOCK)].concat();
-    assert!(read(&store, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
-    store.commit(None).await.unwrap();
-    let store = reopened(store, &dir);
-    assert_eq!(store.extents().unwrap(), [(extent(1), 2 * BLOCK as u64)]);
-    assert!(read(&store, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
+    assert!(read(&cell, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
+    cell.commit(None).await.unwrap();
+    let cell = reopened(cell, &dir);
+    assert_eq!(cell.extents().unwrap(), [(extent(1), 2 * BLOCK as u64)]);
+    assert!(read(&cell, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
 }
 
 /// A write in flight to an extent freed meanwhile, and not written since, is dropped as it
-/// finishes: the store holds no such extent, commits, and opens again (TASK-79.1).
+/// finishes: the cell holds no such extent, commits, and opens again (TASK-79.1).
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_finishing_after_their_extents_free_are_dropped() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    let freed = in_flight(&store, extent(1), 0, &pattern(1, 0, 40 << 10)).await;
-    store.free(extent(1)).unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    let freed = in_flight(&cell, extent(1), 0, &pattern(1, 0, 40 << 10)).await;
+    cell.free(extent(1)).unwrap();
     freed.finish();
-    assert_eq!(store.extent(extent(1)).unwrap(), None);
-    assert_eq!(store.info().unwrap().used, 0);
-    store.commit(None).await.unwrap();
-    let store = reopened(store, &dir);
-    assert_eq!(store.extents().unwrap(), []);
+    assert_eq!(cell.extent(extent(1)).unwrap(), None);
+    assert_eq!(cell.info().unwrap().used, 0);
+    cell.commit(None).await.unwrap();
+    let cell = reopened(cell, &dir);
+    assert_eq!(cell.extents().unwrap(), []);
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
 /// Extents freed while open, and written anew, are held by the commit that seals them: the footer
 /// of its segment names them among the extents it seals, in the segment or in files of their own,
-/// and not among those it frees, which readers of footers apply after those, the store opened
+/// and not among those it frees, which readers of footers apply after those, the cell opened
 /// again or object storage (TASK-79.1).
 #[tokio::test(flavor = "multi_thread")]
 async fn footers_hold_extents_freed_open_and_written_anew() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
+    let cell = create(dir.clone(), 1 << 20);
     let lens = [BLOCK, 40 << 10];
     for (sequence, len) in (1..).zip(lens) {
-        store.write(extent(sequence), 0, &pattern(1, 0, len)).await.unwrap();
-        store.free(extent(sequence)).unwrap();
-        store.write(extent(sequence), 0, &pattern(2, 0, len)).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(1, 0, len)).await.unwrap();
+        cell.free(extent(sequence)).unwrap();
+        cell.write(extent(sequence), 0, &pattern(2, 0, len)).await.unwrap();
     }
-    let state = closed_state(&store).await;
+    let state = closed_state(&cell).await;
     assert_eq!(state.3.len(), 2);
-    assert_eq!(reopened_state(store, &dir).0, state);
+    assert_eq!(reopened_state(cell, &dir).0, state);
 }
 
 /// A write in flight to an extent freed meanwhile, written again in the open segment as it was
@@ -2982,17 +2987,17 @@ async fn footers_hold_extents_freed_open_and_written_anew() {
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_finishing_after_their_extents_free_land_nothing_in_its_next_writes() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    let freed = in_flight(&store, extent(1), 0, &pattern(1, 0, BLOCK)).await;
-    store.free(extent(1)).unwrap();
-    store.write(extent(1), BLOCK as u64, &pattern(2, 0, BLOCK)).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    let freed = in_flight(&cell, extent(1), 0, &pattern(1, 0, BLOCK)).await;
+    cell.free(extent(1)).unwrap();
+    cell.write(extent(1), BLOCK as u64, &pattern(2, 0, BLOCK)).await.unwrap();
     freed.finish();
     let written = [vec![0; BLOCK], pattern(2, 0, BLOCK)].concat();
-    assert!(read(&store, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
-    store.commit(None).await.unwrap();
-    assert_eq!(store.usage().unwrap().live_bytes, 2 * BLOCK as u64);
-    let store = reopened(store, &dir);
-    assert!(read(&store, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
+    assert!(read(&cell, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.usage().unwrap().live_bytes, 2 * BLOCK as u64);
+    let cell = reopened(cell, &dir);
+    assert!(read(&cell, extent(1), 0, 2 * BLOCK) == written, "the extent reads other data");
 }
 
 /// An abandoned write to a large extent, never written since, leaves its raw file to no one: the
@@ -3000,13 +3005,13 @@ async fn writes_finishing_after_their_extents_free_land_nothing_in_its_next_writ
 #[tokio::test(flavor = "multi_thread")]
 async fn abandoned_writes_leave_no_raw_files() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    drop(store.begin_write(extent(1), 0, 40 << 10).await.unwrap());
-    store.commit(None).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    drop(cell.begin_write(extent(1), 0, 40 << 10).await.unwrap());
+    cell.commit(None).await.unwrap();
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
-    store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
+    cell.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
 }
 
 /// An abandoned write to a large extent, never written since, then a commit only ordered: the
@@ -3015,15 +3020,15 @@ async fn abandoned_writes_leave_no_raw_files() {
 #[tokio::test(flavor = "multi_thread")]
 async fn abandoned_writes_leave_no_raw_files_to_writes_before_the_flush() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    drop(store.begin_write(extent(1), 0, 40 << 10).await.unwrap());
-    store.commit_ordered(None).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    drop(cell.begin_write(extent(1), 0, 40 << 10).await.unwrap());
+    cell.commit_ordered(None).await.unwrap();
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
-    store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert!(read(&store, extent(1), 0, 40 << 10) == pattern(1, 0, 40 << 10), "other data");
-    let store = reopened(store, &dir);
-    assert!(read(&store, extent(1), 0, 40 << 10) == pattern(1, 0, 40 << 10), "other data");
+    cell.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(read(&cell, extent(1), 0, 40 << 10) == pattern(1, 0, 40 << 10), "other data");
+    let cell = reopened(cell, &dir);
+    assert!(read(&cell, extent(1), 0, 40 << 10) == pattern(1, 0, 40 << 10), "other data");
 }
 
 /// A large extent freed while open is written anew, large again, before any commit: the raw file
@@ -3032,15 +3037,15 @@ async fn abandoned_writes_leave_no_raw_files_to_writes_before_the_flush() {
 #[tokio::test(flavor = "multi_thread")]
 async fn large_extents_freed_open_are_written_anew_at_once() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
-    store.free(extent(1)).unwrap();
-    store.write(extent(1), 0, &pattern(2, 0, 40 << 10)).await.unwrap();
-    assert!(read(&store, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
-    store.commit(None).await.unwrap();
-    assert_eq!(store.place(extent(1)).unwrap(), Some(Place::Own));
-    let store = reopened(store, &dir);
-    assert!(read(&store, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
+    cell.free(extent(1)).unwrap();
+    cell.write(extent(1), 0, &pattern(2, 0, 40 << 10)).await.unwrap();
+    assert!(read(&cell, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.place(extent(1)).unwrap(), Some(Place::Own));
+    let cell = reopened(cell, &dir);
+    assert!(read(&cell, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
@@ -3051,34 +3056,34 @@ async fn large_extents_freed_open_are_written_anew_at_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_finishing_after_their_large_extents_free_and_rewrite_are_dropped() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    let freed = in_flight(&store, extent(1), 0, &pattern(1, 0, 40 << 10)).await;
-    store.free(extent(1)).unwrap();
-    store.write(extent(1), 0, &pattern(2, 0, 40 << 10)).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    let freed = in_flight(&cell, extent(1), 0, &pattern(1, 0, 40 << 10)).await;
+    cell.free(extent(1)).unwrap();
+    cell.write(extent(1), 0, &pattern(2, 0, 40 << 10)).await.unwrap();
     freed.finish();
-    assert!(read(&store, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
-    store.commit(None).await.unwrap();
-    assert_eq!(store.place(extent(1)).unwrap(), Some(Place::Own));
-    let store = reopened(store, &dir);
-    assert!(read(&store, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
+    assert!(read(&cell, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.place(extent(1)).unwrap(), Some(Place::Own));
+    let cell = reopened(cell, &dir);
+    assert!(read(&cell, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
 }
 
-/// A cell whose store failed, opened again in the same process, takes writes to the extents the
-/// failed store had open, whose raw files go as it opens (TASK-79.5).
+/// A cell whose cell failed, opened again in the same process, takes writes to the extents the
+/// failed cell had open, whose raw files go as it opens (TASK-79.5).
 #[tokio::test(flavor = "multi_thread")]
 async fn cells_opened_again_after_a_failure_leave_no_raw_files() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
     dir.fail_after(Some(0));
-    assert_eq!(store.commit(None).await.unwrap_err().to_string(), "committing the extent store");
+    assert_eq!(cell.commit(None).await.unwrap_err().to_string(), "committing the extent store");
     dir.fail_after(None);
-    drop(store);
-    let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+    drop(cell);
+    let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
-    store.write(extent(1), 0, &pattern(2, 0, 40 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(2, 0, 40 << 10));
+    cell.write(extent(1), 0, &pattern(2, 0, 40 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(1), 0, 40 << 10), pattern(2, 0, 40 << 10));
 }
 
 /// A cell whose flush failed, opened again in the same process as of its last durable commit,
@@ -3087,46 +3092,46 @@ async fn cells_opened_again_after_a_failure_leave_no_raw_files() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cells_opened_again_after_a_failed_flush_keep_what_they_hold() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.free(extent(1)).unwrap();
-    store.commit_ordered(None).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &pattern(1, 0, 40 << 10)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.free(extent(1)).unwrap();
+    cell.commit_ordered(None).await.unwrap();
     dir.fail_after(Some(0));
-    assert_eq!(store.flush().await.unwrap_err().to_string(), "committing the extent store");
+    assert_eq!(cell.flush().await.unwrap_err().to_string(), "committing the extent store");
     dir.fail_after(None);
-    drop(store);
-    let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-    assert_eq!(store.last_commit().unwrap(), 1);
-    store.commit(None).await.unwrap();
-    assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
+    drop(cell);
+    let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+    assert_eq!(cell.last_commit().unwrap(), 1);
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
 }
 
-/// cladefs: a store of eight closed segments, an extent in each, which keeps the files of
+/// cladefs: a cell of eight closed segments, an extent in each, which keeps the files of
 /// `open_files` of them open.
 async fn eight_segments(open_files: usize) -> (MemDir, LocalCell<MemDir>) {
     let dir = MemDir::new();
     let options = Options { open_files, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     for sequence in 0..8 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
     }
-    settled(&store).await;
+    settled(&cell).await;
     // cladefs: and the next segment's log prepared, whose spare its preparation opens (TASK-333).
-    store.prepared().await.unwrap();
-    (dir, store)
+    cell.prepared().await.unwrap();
+    (dir, cell)
 }
 
-/// The files opened, and the bytes read, reading, through `store`, the extents of a store
+/// The files opened, and the bytes read, reading, through `cell`, the extents of a cell
 /// [`eight_segments`] made: three again and again, and each of the others once between.
-fn opened_reading(dir: &MemDir, store: &LocalCell<MemDir>) -> (u64, u64) {
+fn opened_reading(dir: &MemDir, cell: &LocalCell<MemDir>) -> (u64, u64) {
     let before = dir.io();
     for other in 3..8 {
         for sequence in [0, 1, 2, other] {
-            assert_eq!(read(store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+            assert_eq!(read(cell, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
         }
     }
     let after = dir.io();
@@ -3139,32 +3144,32 @@ fn opened_reading(dir: &MemDir, store: &LocalCell<MemDir>) -> (u64, u64) {
 /// not its footer, a block, as each part's first read does (TASK-92.2).
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_files_close_least_lately_read_first() {
-    let (dir, store) = eight_segments(4).await;
-    assert_eq!(opened_reading(&dir, &store), (8, 16 * BLOCK as u64));
+    let (dir, cell) = eight_segments(4).await;
+    assert_eq!(opened_reading(&dir, &cell), (8, 16 * BLOCK as u64));
 }
 
 /// An extent written past its end grows by what the write adds, no more.
 #[tokio::test(flavor = "multi_thread")]
 async fn extending_an_extent_counts_its_growth() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; 2 * BLOCK]).await.unwrap();
-    store.write(extent(1), BLOCK as u64, &[2; 2 * BLOCK]).await.unwrap();
-    assert_eq!(store.info().unwrap().used, 3 * BLOCK as u64);
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; 2 * BLOCK]).await.unwrap();
+    cell.write(extent(1), BLOCK as u64, &[2; 2 * BLOCK]).await.unwrap();
+    assert_eq!(cell.info().unwrap().used, 3 * BLOCK as u64);
 }
 
 /// A shrink counts the room writes in progress reserve, as held.
 #[tokio::test(flavor = "multi_thread")]
 async fn shrinks_count_writes_in_progress() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; 4 * BLOCK]).await.unwrap();
-    let write = store.begin_write(extent(2), 0, 2 * BLOCK as u64).await.unwrap();
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; 4 * BLOCK]).await.unwrap();
+    let write = cell.begin_write(extent(2), 0, 2 * BLOCK as u64).await.unwrap();
     let held = 6 * BLOCK as u64;
-    let refused = store.set_capacity(held - BLOCK as u64).await.unwrap_err();
+    let refused = cell.set_capacity(held - BLOCK as u64).await.unwrap_err();
     assert_eq!(
         refused.downcast_ref::<TooSmall>(),
         Some(&TooSmall { capacity: held - BLOCK as u64, held })
     );
-    store.set_capacity(held).await.unwrap();
+    cell.set_capacity(held).await.unwrap();
     drop(write);
 }
 
@@ -3172,27 +3177,27 @@ async fn shrinks_count_writes_in_progress() {
 /// came, of none.
 #[tokio::test(flavor = "multi_thread")]
 async fn newer_commits_are_heard_of() {
-    let store = create(MemDir::new(), 1 << 20);
+    let cell = create(MemDir::new(), 1 << 20);
     for _ in 0..3 {
-        store.commit(None).await.unwrap();
+        cell.commit(None).await.unwrap();
     }
-    let epoch = store.last_commit().unwrap();
-    assert_eq!(store.newer(epoch, std::time::Duration::ZERO).await, None);
-    store.commit(None).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.newer(epoch, std::time::Duration::ZERO).await, Some(epoch + 2));
+    let epoch = cell.last_commit().unwrap();
+    assert_eq!(cell.newer(epoch, std::time::Duration::ZERO).await, None);
+    cell.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.newer(epoch, std::time::Duration::ZERO).await, Some(epoch + 2));
 }
 
 /// cladefs: ordered commits wait for a flush to make them durable, and say so.
 #[tokio::test(flavor = "multi_thread")]
 async fn ordered_commits_are_pending_until_flushed() {
-    let store = create(MemDir::new(), 1 << 20);
-    assert!(!store.flush_pending());
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.commit_ordered(None).await.unwrap();
-    assert!(store.flush_pending());
-    store.flush().await.unwrap();
-    assert!(!store.flush_pending());
+    let cell = create(MemDir::new(), 1 << 20);
+    assert!(!cell.flush_pending());
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
+    assert!(cell.flush_pending());
+    cell.flush().await.unwrap();
+    assert!(!cell.flush_pending());
 }
 
 /// Where an extent's data is: one run in a segment, once sealed in one write, cladefs: or in writes
@@ -3200,26 +3205,26 @@ async fn ordered_commits_are_pending_until_flushed() {
 /// file if large.
 #[tokio::test(flavor = "multi_thread")]
 async fn places_of_extents() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; 2 * BLOCK]).await.unwrap();
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; 2 * BLOCK]).await.unwrap();
     // Its second block first.
-    store.write(extent(2), BLOCK as u64, &[2; BLOCK]).await.unwrap();
-    store.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
-    store.write(extent(3), BLOCK as u64, &[3; BLOCK]).await.unwrap();
-    store.write(extent(4), 0, &[4; 40 << 10]).await.unwrap();
-    store.write(extent(6), 0, &[6; BLOCK]).await.unwrap();
-    store.write(extent(6), BLOCK as u64, &[6; BLOCK]).await.unwrap();
+    cell.write(extent(2), BLOCK as u64, &[2; BLOCK]).await.unwrap();
+    cell.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
+    cell.write(extent(3), BLOCK as u64, &[3; BLOCK]).await.unwrap();
+    cell.write(extent(4), 0, &[4; 40 << 10]).await.unwrap();
+    cell.write(extent(6), 0, &[6; BLOCK]).await.unwrap();
+    cell.write(extent(6), BLOCK as u64, &[6; BLOCK]).await.unwrap();
     assert_eq!(
-        store.place(extent(1)).unwrap(),
+        cell.place(extent(1)).unwrap(),
         Some(Place::Run { cell: CELL.id, number: 0, offset: 0 })
     );
-    assert_eq!(store.place(extent(2)).unwrap(), Some(Place::Pieces));
+    assert_eq!(cell.place(extent(2)).unwrap(), Some(Place::Pieces));
     // Not from its start.
-    assert_eq!(store.place(extent(3)).unwrap(), Some(Place::Pieces));
-    assert_eq!(store.place(extent(4)).unwrap(), Some(Place::Own));
-    assert_eq!(store.place(extent(5)).unwrap(), None);
+    assert_eq!(cell.place(extent(3)).unwrap(), Some(Place::Pieces));
+    assert_eq!(cell.place(extent(4)).unwrap(), Some(Place::Own));
+    assert_eq!(cell.place(extent(5)).unwrap(), None);
     assert_eq!(
-        store.place(extent(6)).unwrap(),
+        cell.place(extent(6)).unwrap(),
         Some(Place::Run { cell: CELL.id, number: 0, offset: 5 * BLOCK as u64 })
     );
 }
@@ -3229,23 +3234,23 @@ async fn places_of_extents() {
 /// acknowledged, they count no more (TASK-165.9).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_lag_counts_the_logs_bytes_not_acknowledged() {
-    let store = create(MemDir::new(), 1 << 20);
+    let cell = create(MemDir::new(), 1 << 20);
     for (sequence, len) in [(1, BLOCK), (2, 2 * BLOCK), (3, 40 << 10)] {
-        store.write(extent(sequence), 0, &vec![sequence as u8; len]).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(extent(sequence), 0, &vec![sequence as u8; len]).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
     }
-    assert_eq!(store.wal_bytes().unwrap(), 3 * BLOCK as u64 + (40 << 10));
-    let closed = store.closed(usize::MAX).await.unwrap();
-    store.acknowledged(closed[0].number).await.unwrap();
-    assert_eq!(store.wal_bytes().unwrap(), 2 * BLOCK as u64 + (40 << 10));
+    assert_eq!(cell.wal_bytes().unwrap(), 3 * BLOCK as u64 + (40 << 10));
+    let closed = cell.closed(usize::MAX).await.unwrap();
+    cell.acknowledged(closed[0].number).await.unwrap();
+    assert_eq!(cell.wal_bytes().unwrap(), 2 * BLOCK as u64 + (40 << 10));
     // In order only.
-    assert!(store.acknowledged(closed[2].number).await.is_err());
+    assert!(cell.acknowledged(closed[2].number).await.is_err());
     // The open segment's, committed in it, and on their own.
-    store.write(extent(4), 0, &[4; BLOCK]).await.unwrap();
-    store.write(extent(5), 0, &[5; 40 << 10]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.wal_bytes().unwrap(), 3 * BLOCK as u64 + (80 << 10));
+    cell.write(extent(4), 0, &[4; BLOCK]).await.unwrap();
+    cell.write(extent(5), 0, &[5; 40 << 10]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.wal_bytes().unwrap(), 3 * BLOCK as u64 + (80 << 10));
 }
 
 /// cladefs: an uploader starting while commits wait to be made durable takes no segment of the
@@ -3253,28 +3258,28 @@ async fn the_lag_counts_the_logs_bytes_not_acknowledged() {
 /// (TASK-165.9).
 #[tokio::test(flavor = "multi_thread")]
 async fn uploads_started_with_commits_pending_take_only_durable_ones() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.commit_ordered(None).await.unwrap();
-    store.commit_ordered(None).await.unwrap();
-    store.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
-    store.commit_ordered(None).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    assert!(store.closed(usize::MAX).await.unwrap().is_empty());
-    store.flush().await.unwrap();
-    assert_eq!(closed_one(&store).await.last(), 3);
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
+    cell.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    assert!(cell.closed(usize::MAX).await.unwrap().is_empty());
+    cell.flush().await.unwrap();
+    assert_eq!(closed_one(&cell).await.last(), 3);
 }
 
 /// A closed segment's last commit is the commit that closed it.
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_know_their_last_commit() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    let closed = store.closed(usize::MAX).await.unwrap();
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.write(extent(2), 0, &[2; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = cell.closed(usize::MAX).await.unwrap();
     let [closed] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     assert_eq!(closed.last(), 2);
 }
@@ -3284,15 +3289,15 @@ async fn closed_segments_know_their_last_commit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn files_freed_between_commits_go_across_closings() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.write(extent(2), 0, &[2; 40 << 10]).await.unwrap();
-    store.free(extent(2)).unwrap();
-    assert!(store.close_now().await.unwrap());
+    let cell = create(dir.clone(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    cell.write(extent(2), 0, &[2; 40 << 10]).await.unwrap();
+    cell.free(extent(2)).unwrap();
+    assert!(cell.close_now().await.unwrap());
     // Nothing committed since: nothing to close.
-    assert!(!store.close_now().await.unwrap());
-    store.commit(None).await.unwrap();
+    assert!(!cell.close_now().await.unwrap());
+    cell.commit(None).await.unwrap();
     assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
@@ -3300,13 +3305,13 @@ async fn files_freed_between_commits_go_across_closings() {
 /// it so, and the bytes it wrote count it so.
 #[tokio::test(flavor = "multi_thread")]
 async fn commits_list_each_extent_written_once() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.write(extent(1), BLOCK as u64, &[1; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    assert_eq!(store.wal_bytes().unwrap(), 2 * BLOCK as u64);
-    let written = closed_one(&store).await.footer.contents.extents;
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.write(extent(1), BLOCK as u64, &[1; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    assert_eq!(cell.wal_bytes().unwrap(), 2 * BLOCK as u64);
+    let written = closed_one(&cell).await.footer.contents.extents;
     assert_eq!(
         written.iter().map(|&(extent, _, len)| (extent, len)).collect::<Vec<_>>(),
         [(extent(1), 2 * BLOCK as u64)]
@@ -3319,25 +3324,25 @@ async fn commits_list_each_extent_written_once() {
 async fn empty_segments_close_not() {
     let options = Options { segment_age: std::time::Duration::ZERO, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, options).unwrap();
-    store.commit(None).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.closed(usize::MAX).await.unwrap().len(), 0);
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.closed(usize::MAX).await.unwrap().len(), 1);
+    let cell = LocalCell::create(MemDir::new(), description, options).unwrap();
+    cell.commit(None).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.closed(usize::MAX).await.unwrap().len(), 0);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.closed(usize::MAX).await.unwrap().len(), 1);
 }
 
 /// Sealing an extent written in pieces moves its data to one run: what is live in the segments is
 /// its length, once.
 #[tokio::test(flavor = "multi_thread")]
 async fn sealing_moves_pieces_live_once() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), BLOCK as u64, &[1; BLOCK]).await.unwrap();
-    store.write(extent(1), 0, &[2; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.usage().unwrap().live_bytes, 2 * BLOCK as u64);
-    assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), [[2; BLOCK], [1; BLOCK]].concat());
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), BLOCK as u64, &[1; BLOCK]).await.unwrap();
+    cell.write(extent(1), 0, &[2; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.usage().unwrap().live_bytes, 2 * BLOCK as u64);
+    assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), [[2; BLOCK], [1; BLOCK]].concat());
 }
 
 /// cladefs: an extent written in runs one after another in the open segment, as the guest's device
@@ -3351,39 +3356,39 @@ async fn extents_written_in_runs_seal_where_they_are() {
     let options = Options { segment_size: 32 << 20, large_extent: 4 << 20, ..OPTIONS };
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(dir.clone(), description, options).unwrap();
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
     let data = |sequence| pattern(sequence as u8, 0, MIB);
-    store.write(extent(1), 0, &data(1)[..MAX_IO]).await.unwrap();
-    store.write(extent(1), MAX_IO as u64, &data(1)[MAX_IO..]).await.unwrap();
-    let first = in_flight(&store, extent(2), 0, &data(2)[..MAX_IO]).await;
-    let second = in_flight(&store, extent(2), MAX_IO as u64, &data(2)[MAX_IO..]).await;
+    cell.write(extent(1), 0, &data(1)[..MAX_IO]).await.unwrap();
+    cell.write(extent(1), MAX_IO as u64, &data(1)[MAX_IO..]).await.unwrap();
+    let first = in_flight(&cell, extent(2), 0, &data(2)[..MAX_IO]).await;
+    let second = in_flight(&cell, extent(2), MAX_IO as u64, &data(2)[MAX_IO..]).await;
     second.finish();
     first.finish();
-    // cladefs: the commit's I/O alone: not the framer's reads of the parts written whole, looking at
-    // them ahead as the segment fills, which the writes queued, and which may land in the commit
+    // cladefs: the commit's I/O alone: not the framer's reads of the parts written whole, looking
+    // at them ahead as the segment fills, which the writes queued, and which may land in the commit
     // otherwise (TASK-400, TASK-423).
-    store.wait_looked_ahead().await;
+    cell.wait_looked_ahead().await;
     let before = dir.io();
-    store.commit_ordered(None).await.unwrap();
+    cell.commit_ordered(None).await.unwrap();
     let sealed = dir.io();
     assert_eq!((sealed.read - before.read, sealed.written - before.written), (0, 0));
     let runs = [(1, 0), (2, MIB as u64)].map(|(sequence, offset)| {
         (extent(sequence), MIB as u64, Place::Run { cell: CELL.id, number: 0, offset })
     });
-    assert_eq!(store.places().unwrap(), runs);
-    store.flush().await.unwrap();
-    drop(store);
-    let store = LocalCell::open(dir, options).unwrap();
-    assert_eq!(store.places().unwrap(), runs);
+    assert_eq!(cell.places().unwrap(), runs);
+    cell.flush().await.unwrap();
+    drop(cell);
+    let cell = LocalCell::open(dir, options).unwrap();
+    assert_eq!(cell.places().unwrap(), runs);
     for sequence in 1..=2 {
-        assert!(read(&store, extent(sequence), 0, MIB) == data(sequence), "{sequence} differs");
+        assert!(read(&cell, extent(sequence), 0, MIB) == data(sequence), "{sequence} differs");
     }
 }
 
-/// cladefs: once `LocalCell::close` returns, the store reads its directory no more: a look ahead
-/// reading a part written whole when the store closed (on the framer's thread, holding no lock,
-/// TASK-400) ends before close returns. It read on after, and a store opened on the directory
-/// meanwhile counted up to a part of the closed store's reads as its opening's (TASK-426).
+/// cladefs: once `LocalCell::close` returns, the cell reads its directory no more: a look ahead
+/// reading a part written whole when the cell closed (on the framer's thread, holding no lock,
+/// TASK-400) ends before close returns. It read on after, and a cell opened on the directory
+/// meanwhile counted up to a part of the closed cell's reads as its opening's (TASK-426).
 #[tokio::test(flavor = "multi_thread")]
 async fn close_waits_for_a_look_ahead_reading() {
     use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -3391,24 +3396,24 @@ async fn close_waits_for_a_look_ahead_reading() {
     const MIB: usize = 1 << 20;
     let options = Options { segment_size: 32 << 20, large_extent: 4 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(MemDir::new(), description, options).unwrap());
+    let cell = Arc::new(LocalCell::create(MemDir::new(), description, options).unwrap());
     let (reading, looking) = channel();
     let (go, gone) = channel::<()>();
     let (reading, gone) = (Mutex::new(reading), Mutex::new(gone));
     let released = Arc::new(AtomicBool::new(false));
-    let held = fail::FailGuard::with_callback("store::looking_ahead", move || {
+    let held = fail::FailGuard::with_callback("cell::looking_ahead", move || {
         let _ = reading.lock().unwrap().send(());
         let _ = gone.lock().unwrap().recv();
     })
     .unwrap();
     // Its first parts, written whole: looks ahead at them queued, the first reading, held.
-    store.write(extent(1), 0, &pattern(1, 0, 2 * MIB)).await.unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, 2 * MIB)).await.unwrap();
     looking.recv().unwrap();
     let (closed, closing) = channel();
     let closer = tokio::spawn({
-        let (store, released) = (store.clone(), released.clone());
+        let (cell, released) = (cell.clone(), released.clone());
         async move {
-            store.close().await.unwrap();
+            cell.close().await.unwrap();
             closed.send(released.load(Ordering::SeqCst)).unwrap();
         }
     });
@@ -3424,11 +3429,11 @@ async fn close_waits_for_a_look_ahead_reading() {
 #[tokio::test(flavor = "multi_thread")]
 async fn extents_larger_than_a_framing_chunk_seal_whole() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 64 << 20);
+    let cell = create(dir.clone(), 64 << 20);
     let data = pattern(9, 0, (17 << 20) + BLOCK);
-    store.write(extent(1), 0, &data).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.usage().unwrap().own_bytes, data.len() as u64);
+    cell.write(extent(1), 0, &data).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.usage().unwrap().own_bytes, data.len() as u64);
     // Its file frames its data, no more.
     let file = dir.open(&format!("{}/{}", of("extents", CELL.id), Padded(1)), true).unwrap();
     let mut framed = vec![0; file.size().unwrap() as usize];
@@ -3437,16 +3442,16 @@ async fn extents_larger_than_a_framing_chunk_seal_whole() {
         extent_frame::data(&framed, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap().len(),
         data.len()
     );
-    drop(store);
-    let store = LocalCell::open(dir, OPTIONS).unwrap();
-    assert!(read(&store, extent(1), 0, data.len()) == data, "the extent reads other data");
+    drop(cell);
+    let cell = LocalCell::open(dir, OPTIONS).unwrap();
+    assert!(read(&cell, extent(1), 0, data.len()) == data, "the extent reads other data");
 }
 
 /// Zero bytes are no write.
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_byte_writes_are_refused() {
-    let store = create(MemDir::new(), 1 << 20);
-    assert!(store.write(extent(1), 0, &[]).await.is_err());
+    let cell = create(MemDir::new(), 1 << 20);
+    assert!(cell.write(extent(1), 0, &[]).await.is_err());
 }
 
 /// A write, or a read, ends within the most bytes an extent holds, doc-4's `max_extent`: one past
@@ -3454,34 +3459,34 @@ async fn zero_byte_writes_are_refused() {
 /// would hold whole in memory, however long the guest made it (TASK-79.2).
 #[tokio::test(flavor = "multi_thread")]
 async fn io_ends_within_the_most_an_extent_holds() {
-    let store = create(MemDir::new(), 1 << 40);
+    let cell = create(MemDir::new(), 1 << 40);
     let refused = |result: Result<(), anyhow::Error>| result.expect_err("succeeded").to_string();
-    let past = refused(store.write(extent(1), MAX_EXTENT, &[1; BLOCK]).await);
+    let past = refused(cell.write(extent(1), MAX_EXTENT, &[1; BLOCK]).await);
     assert_eq!(past, format!("{BLOCK} bytes at {MAX_EXTENT}: past the most an extent holds"));
     let too_long = TooLong { offset: MAX_EXTENT, len: BLOCK as u64 };
-    error_is(store.write(extent(1), MAX_EXTENT, &[1; BLOCK]).await, too_long);
+    error_is(cell.write(extent(1), MAX_EXTENT, &[1; BLOCK]).await, too_long);
     // Its end past the largest offset.
     let wrapping = u64::MAX - (BLOCK as u64 - 1);
-    let wrapped = refused(store.write(extent(1), wrapping, &[1; 2 * BLOCK]).await);
+    let wrapped = refused(cell.write(extent(1), wrapping, &[1; 2 * BLOCK]).await);
     let expected = format!("{} bytes at {wrapping}: past the most an extent holds", 2 * BLOCK);
     assert_eq!(wrapped, expected);
-    assert_eq!(refused(store.read(extent(1), wrapping, &mut [0; 2 * BLOCK])), expected);
-    assert_eq!(store.extents().unwrap(), []);
+    assert_eq!(refused(cell.read(extent(1), wrapping, &mut [0; 2 * BLOCK])), expected);
+    assert_eq!(cell.extents().unwrap(), []);
     // To its end, the most.
-    store.write(extent(1), MAX_EXTENT - BLOCK as u64, &[1; BLOCK]).await.unwrap();
-    assert_eq!(store.extents().unwrap(), [(extent(1), MAX_EXTENT)]);
+    cell.write(extent(1), MAX_EXTENT - BLOCK as u64, &[1; BLOCK]).await.unwrap();
+    assert_eq!(cell.extents().unwrap(), [(extent(1), MAX_EXTENT)]);
 }
 
 /// cladefs: what goes to the open segment is whole sectors of 4 KiB, which it is to be encrypted in
 /// (doc-16, TASK-411.8): a write of an extent stored in segments at an offset, or of a length, that
-/// is not, though whole blocks of a store of smaller blocks, is refused, writing nothing; a large
+/// is not, though whole blocks of a cell of smaller blocks, is refused, writing nothing; a large
 /// extent, in a file of its own, takes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_to_segments_are_whole_sectors() {
     let description = Description { block_size: 512, capacity: 1 << 30, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
+    let cell = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
     let refused = async |offset: u64, len: usize| {
-        let error = store.write(extent(1), offset, &vec![1; len]).await.expect_err("succeeded");
+        let error = cell.write(extent(1), offset, &vec![1; len]).await.expect_err("succeeded");
         (error.downcast_ref::<Unsectored>().copied(), error.to_string())
     };
     let message = |offset, len| {
@@ -3493,132 +3498,132 @@ async fn writes_to_segments_are_whole_sectors() {
     assert_eq!(refused(512, BLOCK).await, (Some(at), message(512, BLOCK)));
     let of = Unsectored { offset: 0, len: BLOCK as u64 + 512 };
     assert_eq!(refused(0, BLOCK + 512).await, (Some(of), message(0, BLOCK + 512)));
-    assert_eq!(store.extents().unwrap(), []);
+    assert_eq!(cell.extents().unwrap(), []);
     // Whole sectors go where the first would have, at the open segment's start.
-    store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
     assert_eq!(
-        store.place(extent(1)).unwrap(),
+        cell.place(extent(1)).unwrap(),
         Some(Place::Run { cell: CELL.id, number: 0, offset: 0 })
     );
-    // Large, in a file of its own: not a segment's; whole sectors too, as its raw file, encrypted, takes
-    // them alone (TASK-411.5).
+    // Large, in a file of its own: not a segment's; whole sectors too, as its raw file, encrypted,
+    // takes them alone (TASK-411.5).
     let large = OPTIONS.large_extent as usize + BLOCK;
-    let unsectored = store.write(extent(2), 0, &vec![2; large + 512]).await.expect_err("succeeded");
+    let unsectored = cell.write(extent(2), 0, &vec![2; large + 512]).await.expect_err("succeeded");
     let at = Unsectored { offset: 0, len: large as u64 + 512 };
     assert_eq!(unsectored.downcast_ref::<Unsectored>().copied(), Some(at));
-    store.write(extent(2), 0, &vec![2; large]).await.unwrap();
-    store.commit(None).await.unwrap();
-    assert_eq!(store.place(extent(2)).unwrap(), Some(Place::Own));
-    assert_eq!(read(&store, extent(2), 0, large), vec![2; large]);
+    cell.write(extent(2), 0, &vec![2; large]).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.place(extent(2)).unwrap(), Some(Place::Own));
+    assert_eq!(read(&cell, extent(2), 0, large), vec![2; large]);
 }
 
 /// What is read past an extent's end, or where nothing was written, reads as zeros, whatever the
 /// buffer held.
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_past_an_extents_end_are_zeros() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), BLOCK as u64, &[1; BLOCK]).await.unwrap();
-    store.write(extent(2), 0, &[2; 40 << 10]).await.unwrap();
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), BLOCK as u64, &[1; BLOCK]).await.unwrap();
+    cell.write(extent(2), 0, &[2; 40 << 10]).await.unwrap();
     for (extent, len) in [(extent(1), 2 * BLOCK), (extent(2), 40 << 10)] {
         let mut data = vec![0xff; len + 2 * BLOCK];
-        store.read(extent, 0, &mut data).unwrap();
+        cell.read(extent, 0, &mut data).unwrap();
         assert!(data[len..].iter().all(|byte| *byte == 0), "past {extent:?}'s end");
     }
     let mut data = vec![0xff; 3 * BLOCK];
-    store.read(extent(1), 0, &mut data).unwrap();
+    cell.read(extent(1), 0, &mut data).unwrap();
     assert_eq!(data, [vec![0; BLOCK], vec![1; BLOCK], vec![0; BLOCK]].concat());
 }
 
-/// A commit that fails part way, which leaves the store's state ahead of its files, fails the store:
+/// A commit that fails part way, which leaves the cell's state ahead of its files, fails the cell:
 /// it does nothing more, though its file system works again. Here the file system fails the
 /// commit's first change to it: the creation of the next open segment's file as the commit closes
 /// the last. cladefs: not that of the index file a checkpoint begins, which the commit's flush
-/// makes (`checkpoints_failing_in_their_flushes_fail_the_store`, TASK-92.56). Nor a seal's copy of
+/// makes (`checkpoints_failing_in_their_flushes_fail_the_cell`, TASK-92.56). Nor a seal's copy of
 /// an extent written in two writes, its second block first, which are not one run: the copy lands
-/// in the store's page cache, the file system untouched, and the flush after fails (TASK-433).
+/// in the cell's page cache, the file system untouched, and the flush after fails (TASK-433).
 #[tokio::test(flavor = "multi_thread")]
-async fn commits_failing_part_way_fail_the_store() {
+async fn commits_failing_part_way_fail_the_cell() {
     let created = || {
         let dir = MemDir::new();
         let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-        let store = LocalCell::create(dir.clone(), description, OPTIONS).unwrap();
-        (dir, store)
+        let cell = LocalCell::create(dir.clone(), description, OPTIONS).unwrap();
+        (dir, cell)
     };
     let sealing = async || {
-        let (dir, store) = created();
-        store.write(extent(1), BLOCK as u64, &[2; BLOCK]).await.unwrap();
-        store.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
-        (dir, store)
+        let (dir, cell) = created();
+        cell.write(extent(1), BLOCK as u64, &[2; BLOCK]).await.unwrap();
+        cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+        (dir, cell)
     };
     let closing = || {
-        let (dir, store) = created();
-        store.close_segment().unwrap();
-        (dir, store)
+        let (dir, cell) = created();
+        cell.close_segment().unwrap();
+        (dir, cell)
     };
     let failure = |result: Result<(), anyhow::Error>| result.unwrap_err().to_string();
-    let (dir, store) = sealing().await;
+    let (dir, cell) = sealing().await;
     dir.fail_after(Some(0));
-    store.commit_ordered(None).await.unwrap();
-    assert_eq!(failure(store.flush().await), "committing the extent store");
+    cell.commit_ordered(None).await.unwrap();
+    assert_eq!(failure(cell.flush().await), "committing the extent store");
     for budget in [Some(0), None] {
         dir.fail_after(budget);
         let failed = "the extent store failed: committing the extent store: appending commits' \
                       records: the file system crashed";
-        assert_eq!(failure(store.commit(None).await), failed);
-        assert_eq!(failure(store.read(extent(1), 0, &mut [0; BLOCK])), failed);
+        assert_eq!(failure(cell.commit(None).await), failed);
+        assert_eq!(failure(cell.read(extent(1), 0, &mut [0; BLOCK])), failed);
     }
-    for (dir, store) in [closing()] {
+    for (dir, cell) in [closing()] {
         dir.fail_after(Some(0));
-        let failed = store.commit_ordered(None).await.unwrap_err();
+        let failed = cell.commit_ordered(None).await.unwrap_err();
         assert_eq!(failed.to_string(), "committing the extent store");
         for budget in [Some(0), None] {
             dir.fail_after(budget);
             // cladefs: saying why (TASK-165.9).
             let failed = "the extent store failed: the file system crashed";
-            assert_eq!(failure(store.commit(None).await), failed);
-            assert_eq!(failure(store.read(extent(1), 0, &mut [0; BLOCK])), failed);
-            assert_eq!(failure(store.last_commit().map(drop)), failed);
+            assert_eq!(failure(cell.commit(None).await), failed);
+            assert_eq!(failure(cell.read(extent(1), 0, &mut [0; BLOCK])), failed);
+            assert_eq!(failure(cell.last_commit().map(drop)), failed);
         }
     }
 }
 
 /// cladefs: an ordered commit's record waits for its flush, which appends it to the open segment's
-/// log: a crash before leaves the store as of the commit before; its flush failing fails the
-/// store, as a flush failing does, its state ahead of its files (TASK-165.9).
+/// log: a crash before leaves the cell as of the commit before; its flush failing fails the
+/// cell, as a flush failing does, its state ahead of its files (TASK-165.9).
 #[tokio::test(flavor = "multi_thread")]
-async fn logs_failing_in_their_flushes_fail_the_store() {
+async fn logs_failing_in_their_flushes_fail_the_cell() {
     let dir = MemDir::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.commit_ordered(Some(b"ordered")).await.unwrap();
+    let cell = create(dir.clone(), 1 << 20);
+    cell.commit_ordered(Some(b"ordered")).await.unwrap();
     assert_eq!(LocalCell::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap(), 0);
     dir.fail_after(Some(0));
     let failure = |result: Result<(), anyhow::Error>| result.unwrap_err().to_string();
-    assert_eq!(failure(store.flush().await), "committing the extent store");
+    assert_eq!(failure(cell.flush().await), "committing the extent store");
     dir.fail_after(None);
     let failed = "the extent store failed: committing the extent store: appending commits' \
                   records: the file system crashed";
-    assert_eq!(failure(store.commit(None).await), failed);
-    assert_eq!(failure(store.flush().await), failed);
+    assert_eq!(failure(cell.commit(None).await), failed);
+    assert_eq!(failure(cell.flush().await), failed);
 }
 
 /// Parts stored compressed are unpacked once while they are kept unpacked, those read last.
-/// cladefs: as many as the process keeps, 64 MiB of them, every store's together, which it counts
+/// cladefs: as many as the process keeps, 64 MiB of them, every cell's together, which it counts
 /// (TASK-603).
 #[tokio::test(flavor = "multi_thread")]
 async fn parts_read_again_are_unpacked_once() {
     const PART: usize = 1 << 20;
     const PARTS: usize = 80;
     let description = Description { block_size: BLOCK as u32, capacity: 128 << 20, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
+    let cell = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
     // Two extents of half of them each, as an extent holds 64 MiB at most.
     const HALF: usize = PARTS / 2;
-    store.write(extent(1), 0, &pattern(1, 0, HALF * PART)).await.unwrap();
-    store.write(extent(2), 0, &pattern(1, HALF * PART, HALF * PART)).await.unwrap();
-    store.commit(None).await.unwrap();
+    cell.write(extent(1), 0, &pattern(1, 0, HALF * PART)).await.unwrap();
+    cell.write(extent(2), 0, &pattern(1, HALF * PART, HALF * PART)).await.unwrap();
+    cell.commit(None).await.unwrap();
     let read_part = |part: usize| {
         let (sequence, within) = (1 + (part / HALF) as u64, part % HALF);
-        read(&store, extent(sequence), (within * PART) as u64, BLOCK)
+        read(&cell, extent(sequence), (within * PART) as u64, BLOCK)
     };
     let unpacks = || local_cell::unpacks();
     let before = unpacks();
@@ -3638,12 +3643,12 @@ async fn parts_read_again_are_unpacked_once() {
     assert_eq!(unpacks() - before, PARTS as u64 + 1);
 }
 
-/// cladefs: a store's bytes, and its extents, are its cell's own, of the extents it wrote, or
+/// cladefs: a cell's bytes, and its extents, are its cell's own, of the extents it wrote, or
 /// inherited from the cells it was forked from, which it holds in the bucket (TASK-165.7), as
 /// they write, grow and free, and opened again (TASK-49); the extents counted as they come and go
 /// (TASK-454).
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_tell_their_own_bytes_from_those_inherited() {
+async fn cells_tell_their_own_bytes_from_those_inherited() {
     let parent = CELL.id + 1;
     let dir = MemDir::new();
     let mut state = bucket_cell::State::new(CELL);
@@ -3653,65 +3658,65 @@ async fn stores_tell_their_own_bytes_from_those_inherited() {
         state.extents.insert(ExtentId::new(parent, sequence), location);
     }
     // Own bytes and inherited, own extents and inherited.
-    let held = |store: &LocalCell<MemDir>| {
-        let info = store.info().unwrap();
+    let held = |cell: &LocalCell<MemDir>| {
+        let info = cell.info().unwrap();
         (info.own, info.inherited, info.own_extents, info.inherited_extents)
     };
     let block = BLOCK as u64;
-    let store = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
-    assert_eq!(held(&store), (0, 5 * block, 0, 2));
-    store.write(extent(1), 0, &[3; BLOCK]).await.unwrap();
-    store.write(extent(2), 0, &[4; 40 << 10]).await.unwrap();
+    let cell = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
+    assert_eq!(held(&cell), (0, 5 * block, 0, 2));
+    cell.write(extent(1), 0, &[3; BLOCK]).await.unwrap();
+    cell.write(extent(2), 0, &[4; 40 << 10]).await.unwrap();
     // Written again, and grown: no more extents.
-    store.write(extent(1), 0, &[5; BLOCK]).await.unwrap();
-    store.write(extent(2), 40 << 10, &[6; BLOCK]).await.unwrap();
-    assert_eq!(held(&store), (block + (44 << 10), 5 * block, 2, 2));
-    store.free(ExtentId::new(parent, 1)).unwrap();
-    store.free(extent(2)).unwrap();
+    cell.write(extent(1), 0, &[5; BLOCK]).await.unwrap();
+    cell.write(extent(2), 40 << 10, &[6; BLOCK]).await.unwrap();
+    assert_eq!(held(&cell), (block + (44 << 10), 5 * block, 2, 2));
+    cell.free(ExtentId::new(parent, 1)).unwrap();
+    cell.free(extent(2)).unwrap();
     // Freed again: held no more already.
-    store.free(extent(2)).unwrap();
-    assert_eq!(held(&store), (block, 3 * block, 1, 1));
-    store.commit(None).await.unwrap();
-    assert_eq!(held(&store), (block, 3 * block, 1, 1));
-    drop(store);
+    cell.free(extent(2)).unwrap();
+    assert_eq!(held(&cell), (block, 3 * block, 1, 1));
+    cell.commit(None).await.unwrap();
+    assert_eq!(held(&cell), (block, 3 * block, 1, 1));
+    drop(cell);
     assert_eq!(held(&opened_on(dir, state, WRITER)), (block, 3 * block, 1, 1));
 }
 
 /// TASK-295: a write-ahead log dropped, as `cladefsctl take` drops one another writer's commits
-/// moved the cell on from, stays dropped whatever a crash after it keeps: the store's cell is
+/// moved the cell on from, stays dropped whatever a crash after it keeps: the cell is
 /// what it committed since, and none of the log's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_log_stays_dropped_through_a_crash() {
     for seed in 0..64 {
         let dir = MemDir::new();
-        let store = create(dir.clone(), 64 << 20);
+        let cell = create(dir.clone(), 64 << 20);
         for sequence in 1..=2 {
-            store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-            store.close_segment().unwrap();
-            store.commit(None).await.unwrap();
+            cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+            cell.close_segment().unwrap();
+            cell.commit(None).await.unwrap();
         }
-        drop(store);
+        drop(cell);
         let mut recovering = LocalCell::recover(dir.clone()).unwrap();
         recovering.drop_wal().unwrap();
         // Its commit in its open segment: no segment framed since, whose directory's sync would
         // make the drop's removals durable too.
-        let store = recovering.open(OPTIONS, Opening::new(CELL)).unwrap();
-        store.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
-        store.commit(None).await.unwrap();
+        let cell = recovering.open(OPTIONS, Opening::new(CELL)).unwrap();
+        cell.write(extent(3), 0, &pattern(3, 0, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
         let crashed = dir.crash(seed);
-        drop(store);
+        drop(cell);
         let reopened = LocalCell::open(crashed, OPTIONS).unwrap();
         assert_eq!(reopened.extents().unwrap(), [(extent(3), BLOCK as u64)], "seed {seed}");
     }
 }
 
-/// TASK-359: a store whose directory is on another filesystem than the host's cache is refused
+/// TASK-359: a cell whose directory is on another filesystem than the host's cache is refused
 /// as it opens: what the bucket acknowledged goes into the cache by renames, which can't cross
 /// filesystems, and every read of it would go to the bucket. On Linux, /dev/shm (tmpfs) and the
 /// target directory (on disk) are two.
 #[cfg(target_os = "linux")]
 #[test]
-fn stores_elsewhere_than_the_hosts_cache_are_refused() {
+fn cells_elsewhere_than_the_hosts_cache_are_refused() {
     use std::os::unix::fs::MetadataExt as _;
     let cached = tempfile::tempdir_in("/dev/shm").unwrap();
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
@@ -3727,7 +3732,7 @@ fn stores_elsewhere_than_the_hosts_cache_are_refused() {
     assert_eq!(
         refused.to_string(),
         format!(
-            "the store is on another filesystem than the host's cache at {}: the store's \
+            "the cell is on another filesystem than the host's cache at {}: the cell's \
              segments go into the cache by renaming them",
             cache_dir.display()
         )

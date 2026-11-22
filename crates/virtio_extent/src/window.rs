@@ -5,7 +5,7 @@
 //! The device's DAX window: guest physical addresses the VMM reserves for it (a BAR of the
 //! device's own, which a virtio-PCI transport describes with a shared memory capability), backed
 //! by anonymous host memory that the hypervisor maps there, a memory slot of its own. cladefs's
-//! extent daemon owns the window: the device hands the host memory to the store's connection,
+//! extent daemon owns the window: the device hands the host memory to the cell's connection,
 //! which maps the window's pages there from the daemon's memory, and serves the faults the
 //! hypervisor takes on the rest.
 //!
@@ -92,7 +92,7 @@ impl Drop for Slot {
 
 /// Anonymous host memory of the window's size, aligned as the window is, so that the hypervisor
 /// maps it for the guest with huge pages where the daemon's are. Unmapped on drop. cladefs:
-/// inaccessible until the store's connection takes it over, as once it lets it go (TASK-79.8): a
+/// inaccessible until the cell's connection takes it over, as once it lets it go (TASK-79.8): a
 /// guest's accesses meanwhile, as before it sets DRIVER_OK, fault, rather than growing its VMM's
 /// memory by the window's size.
 #[derive(Debug)]
@@ -101,7 +101,7 @@ struct HostMemory {
     len: usize,
 }
 
-// SAFETY: The mapping is only an address range, which the store's connection maps pages into.
+// SAFETY: The mapping is only an address range, which the cell's connection maps pages into.
 unsafe impl Send for HostMemory {}
 
 impl HostMemory {
@@ -201,18 +201,18 @@ impl WindowMemory {
         self.guest.len
     }
 
-    /// Creates `store`'s DAX window in the window's host memory, which its connection takes over:
+    /// Creates `cell`'s DAX window in the window's host memory, which its connection takes over:
     /// a writer's copies on write, of `private_max` pages at most; a follower's, of none, copies
-    /// nothing (backlog doc-13). `prefault` maps the window's pages for the guest as the store maps
+    /// nothing (backlog doc-13). `prefault` maps the window's pages for the guest as the cell maps
     /// them, if given.
     ///
     /// # Safety
     ///
-    /// The window outlives `store`'s connection, whose fault thread serves the window's host
-    /// memory: the store is dropped first.
+    /// The window outlives `cell`'s connection, whose fault thread serves the window's host
+    /// memory: the cell is dropped first.
     pub(crate) unsafe fn create(
         &self,
-        store: &cladefs::CellClient,
+        cell: &cladefs::CellClient,
         prefault: Option<Arc<dyn PrefaultGuestMemory>>,
         private_max: u64,
     ) -> Result<(), cladefs::Error> {
@@ -220,14 +220,9 @@ impl WindowMemory {
             Arc::new(WindowPrefault { guest_addr: self.guest_addr(), prefault })
         });
         // SAFETY: The window's host memory is the device's, which only the guest accesses, and
-        // which outlives the store's connection, as the caller says.
+        // which outlives the cell's connection, as the caller says.
         unsafe {
-            store.create_dax_window_in_host_memory(
-                self.host.base,
-                self.len(),
-                prefault,
-                private_max,
-            )
+            cell.create_dax_window_in_host_memory(self.host.base, self.len(), prefault, private_max)
         }
     }
 }
@@ -258,7 +253,7 @@ pub fn dax_window_at(gpa: u64) -> Option<(u64, usize)> {
     Some((offset, host + usize::try_from(offset).expect("a window fits in memory")))
 }
 
-/// Has `prefault` map the pages the store maps into the window, at the window's guest address.
+/// Has `prefault` map the pages the cell maps into the window, at the window's guest address.
 struct WindowPrefault {
     guest_addr: u64,
     prefault: Arc<dyn PrefaultGuestMemory>,

@@ -121,7 +121,7 @@ fn unmount() {
     assert_eq!(ret, 0, "umount: {}", std::io::Error::last_os_error());
 }
 
-/// cladefs: what a coverage kernel counted of fs/cladefs so far, copied to the store for the host:
+/// cladefs: what a coverage kernel counted of fs/cladefs so far, copied to the cell for the host:
 /// a kernel without gcov has no such directory in debugfs, and leaves nothing (TASK-119.14).
 fn save_coverage() {
     const DEBUGFS: &CStr = c"/sys/kernel/debug";
@@ -356,7 +356,7 @@ impl Pauses {
             if let Some(child) = child {
                 let mut status = 0;
                 let ended = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-                assert_ne!(ended, child, "the storer ended ({status:#x}) before step {step:#x}");
+                assert_ne!(ended, child, "the writer ended ({status:#x}) before step {step:#x}");
             }
             assert!(std::time::Instant::now() < deadline, "no task waits at step {step:#x}");
             std::thread::sleep(std::time::Duration::from_millis(1));

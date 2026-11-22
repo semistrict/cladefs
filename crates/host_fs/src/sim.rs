@@ -7,12 +7,12 @@
 //! A disk is a tree of inodes from its root, `/`: files, holding bytes, and directories, holding
 //! entries, each a name and an inode. What is durable is a file's bytes as of its last sync, a
 //! directory's entries of files as of its last sync, and directories once made, as
-//! `local_cell::MemDir` has them, the model the stores' own crash tests are written to; what
+//! `local_cell::MemDir` has them, the model the cells' own crash tests are written to; what
 //! changed since, files' writes, and directories' entries made, removed or renamed, each in order,
 //! are kept beside. A crash ([`Disk::crashed`]) keeps what was
 //! durable and any of what changed since, as the seed says, each change kept or not in order, each
-//! block of each write whole, not at all, garbage, or torn; what no directory's entry names after
-//! goes. No symbolic links; paths are absolute, a relative one taken from the root.
+//! block of each write whole, not at all, garbage, or torn, its garbage in the bytes it changes
+//! alone (powersafe overwrite: [`garbled`]); what no directory's entry names after goes. No symbolic links; paths are absolute, a relative one taken from the root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -23,6 +23,22 @@ use std::time::SystemTime;
 
 /// The granularity of a crash: a write survives it in blocks of this size, each whole or not.
 const BLOCK: usize = 512;
+
+/// `on`, the disk's bytes of a block a crash cut `written` short in, as garbage: those `written`
+/// changes, at random; those it writes as they were, as they were. A crash damages no byte a
+/// write leaves as it is, the sector's others included: powersafe overwrite, as SQLite assumes
+/// of Linux's disks by default (`SQLITE_IOCAP_POWERSAFE_OVERWRITE`), and cladefs too (board 5890,
+/// decision-3): a log's append, its page cache writing back whole pages, writes again the
+/// sector holding the end of the last record synced.
+fn garbled(on: &mut [u8], written: &[u8], rng: &mut Rng) {
+    let mut noise = vec![0; on.len()];
+    rng.fill(&mut noise);
+    for ((byte, &new), noise) in on.iter_mut().zip(written).zip(noise) {
+        if *byte != new {
+            *byte = noise;
+        }
+    }
+}
 
 /// The blocks a file gives back ([`punch_hole`](crate::punch_hole)), and counts allocated.
 const HOLE: u64 = 4096;
@@ -227,7 +243,7 @@ impl Fs {
             return Err(errno(libc::EEXIST));
         }
         let made = self.make(Inode::Dir(DirData::default()));
-        // Durable at once, as the stores' own simulations have directories (`local_cell::MemDir`),
+        // Durable at once, as the cells' own simulations have directories (`local_cell::MemDir`),
         // and as a journaling file system's next sync of anything makes it.
         let parent = self.dir(parent)?;
         parent.entries.insert(name.clone(), made);
@@ -364,7 +380,7 @@ impl Fs {
                                     let into = &mut data[start..start + block.len()];
                                     match fate {
                                         1 => into.copy_from_slice(block),
-                                        2 => rng.fill(into),
+                                        2 => garbled(into, block, rng),
                                         _ => {
                                             let half = block.len() / 2;
                                             into[..half].copy_from_slice(&block[..half]);
@@ -476,6 +492,64 @@ fn with<T>(work: impl FnOnce(&mut Fs) -> io::Result<T>) -> io::Result<T> {
     let disk = disk();
     let mut fs = disk.fs.lock().unwrap();
     work(&mut fs)
+}
+
+/// cladefs: calls that change a simulated host's disk failing as the seed says, before they change
+/// anything, as a disk's errors fail them (board 5654): so that the daemon's protocols of marker
+/// files, renames and syncs are simulated failing partway with their host running on, as they are
+/// crashing.
+pub mod faults {
+    /// How often a call that changes a host's disk fails: `fail` of them, as the seed draws it,
+    /// with `EIO`, or, as often, a call adding data with `ENOSPC`. A call that only reads, or
+    /// looks, never does.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Odds {
+        pub fail: f64,
+    }
+
+    impl Odds {
+        /// None: every call as the disk has it.
+        pub const NONE: Self = Self { fail: 0.0 };
+    }
+
+    /// Has the calls of every host's disk of this simulation fail from now on as `odds` says:
+    /// [`Odds::NONE`] heals them.
+    pub fn set(odds: Odds) {
+        let simulation = std::thread::current().id();
+        let mut all = super::ODDS.lock().unwrap();
+        all.retain(|(of, _)| *of != simulation);
+        if odds != Odds::NONE {
+            all.push((simulation, odds));
+        }
+    }
+}
+
+/// The odds the disks' calls fail at ([`faults::set`]), of each simulation: by its thread, as madsim
+/// runs each on one, so that simulations sharing a process don't share them.
+static ODDS: Mutex<Vec<(std::thread::ThreadId, faults::Odds)>> = Mutex::new(Vec::new());
+
+/// Fails `what`, a call changing a simulated host's disk, adding data if `adds`, as the odds say:
+/// drawn only while they are above none, so that a seed's run with none draws as before; and
+/// only on a host's node, the simulation's own calls never.
+fn faulted(what: std::fmt::Arguments<'_>, adds: bool) -> io::Result<()> {
+    use madsim::rand::Rng as _;
+    let simulation = std::thread::current().id();
+    let odds = ODDS.lock().unwrap().iter().find(|(of, _)| *of == simulation).map(|(_, odds)| *odds);
+    let Some(odds) = odds.filter(|odds| odds.fail > 0.0) else { return Ok(()) };
+    if madsim::runtime::Handle::try_current().is_err() {
+        return Ok(());
+    }
+    let mut rng = madsim::rand::thread_rng();
+    if !rng.gen_bool(odds.fail.min(1.0)) {
+        return Ok(());
+    }
+    let code = match adds && rng.gen_bool(0.5) {
+        true => libc::ENOSPC,
+        false => libc::EIO,
+    };
+    let error = errno(code);
+    log::warn!("host_fs: {what}, failed as the seed says: {error}");
+    Err(error)
 }
 
 /// What a file of a disk is: a file, or a directory.
@@ -651,6 +725,7 @@ impl OpenOptions {
                     && let Ok(file) = fs.file(inode)
                     && !file.data.is_empty()
                 {
+                    faulted(format_args!("truncating {}", path.display()), false)?;
                     file.set_len(0);
                 }
                 inode
@@ -659,6 +734,7 @@ impl OpenOptions {
                 if err.raw_os_error() == Some(libc::ENOENT) && (self.create || self.create_new) =>
             {
                 let (parent, name) = fs.parent(path)?;
+                faulted(format_args!("creating {}", path.display()), true)?;
                 let mut file = FileData::new();
                 file.links = 1;
                 let made = fs.make(Inode::File(file));
@@ -717,7 +793,10 @@ impl File {
 
     pub fn set_len(&self, len: u64) -> io::Result<()> {
         self.with(|fs| {
-            fs.file(self.inode)?.set_len(len as usize);
+            let file = fs.file(self.inode)?;
+            let adds = len as usize > file.data.len();
+            faulted(format_args!("setting inode {}'s length to {len}", self.inode), adds)?;
+            file.set_len(len as usize);
             Ok(())
         })
     }
@@ -725,6 +804,7 @@ impl File {
     /// Makes its bytes durable, or, of a directory, its entries.
     pub fn sync_all(&self) -> io::Result<()> {
         self.with(|fs| {
+            faulted(format_args!("syncing inode {}", self.inode), false)?;
             match fs.inodes.get_mut(&self.inode) {
                 Some(Inode::File(file)) => file.sync(),
                 Some(Inode::Dir(dir)) => {
@@ -766,6 +846,7 @@ impl File {
             if offset >= end {
                 return Ok(());
             }
+            faulted(format_args!("punching inode {} at {offset}", self.inode), false)?;
             let zeros = vec![0; (end - offset) as usize];
             file.write(offset as usize, &zeros);
             for block in offset.div_ceil(HOLE)..end / HOLE {
@@ -888,7 +969,11 @@ pub fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
 }
 
 pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
-    with(|fs| fs.create_dir(path.as_ref()))
+    let path = path.as_ref();
+    with(|fs| {
+        faulted(format_args!("making the directory {}", path.display()), true)?;
+        fs.create_dir(path)
+    })
 }
 
 pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
@@ -899,7 +984,10 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             match fs.lookup(&at) {
                 Ok(inode) if matches!(fs.inodes.get(&inode), Some(Inode::Dir(_))) => {}
                 Ok(_) => return Err(errno(libc::EEXIST)),
-                Err(_) => fs.create_dir(&at)?,
+                Err(_) => {
+                    faulted(format_args!("making the directory {}", at.display()), true)?;
+                    fs.create_dir(&at)?
+                }
             }
         }
         Ok(())
@@ -907,23 +995,43 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
-    with(|fs| fs.remove(path.as_ref(), false))
+    let path = path.as_ref();
+    with(|fs| {
+        faulted(format_args!("removing {}", path.display()), false)?;
+        fs.remove(path, false)
+    })
 }
 
 pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
-    with(|fs| fs.remove(path.as_ref(), true))
+    let path = path.as_ref();
+    with(|fs| {
+        faulted(format_args!("removing the directory {}", path.display()), false)?;
+        fs.remove(path, true)
+    })
 }
 
 pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
-    with(|fs| fs.remove_all(path.as_ref()))
+    let path = path.as_ref();
+    with(|fs| {
+        faulted(format_args!("removing {} and all in it", path.display()), false)?;
+        fs.remove_all(path)
+    })
 }
 
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
-    with(|fs| fs.rename(from.as_ref(), to.as_ref()))
+    let (from, to) = (from.as_ref(), to.as_ref());
+    with(|fs| {
+        faulted(format_args!("renaming {} to {}", from.display(), to.display()), false)?;
+        fs.rename(from, to)
+    })
 }
 
 pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     with(|fs| {
+        faulted(
+            format_args!("linking {} at {}", from.as_ref().display(), to.as_ref().display()),
+            true,
+        )?;
         let inode = fs.lookup(from.as_ref())?;
         fs.file(inode)?;
         let (parent, name) = fs.parent(to.as_ref())?;
@@ -1011,6 +1119,8 @@ impl FileExt for File {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
         self.with(|fs| {
+            let len = buf.len();
+            faulted(format_args!("writing {len} bytes of inode {} at {offset}", self.inode), true)?;
             fs.file(self.inode)?.write(offset as usize, buf);
             Ok(buf.len())
         })

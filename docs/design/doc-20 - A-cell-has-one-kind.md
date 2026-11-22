@@ -32,13 +32,13 @@ kind, and nothing inside it is named apart. Supersedes doc-19 and doc-18's whole
   writes the record naming them, last. The VM is paused, so the versions agree with no
   coordination; one cut short writes no record, and its versions are dropped. No bucket round trip
   and no cross-host coordination.
-- **A copy** is a store holding a version, which nothing writes: forks of the version are made
-  from it, on the version's host or, made there first (`CreateStore` with the version), on any
+- **A copy** is a cell holding a version, which nothing writes: forks of the version are made
+  from it, on the version's host or, made there first (`CreateCell` with the version), on any
   other. A VM snapshot's restores fork its copies.
 - **An origin** is where a child was forked from: its parent and the segment the version closed.
   The collector keeps an origin's state while children in other cells live on it.
 - **A cell's ID is unique in its bucket**, given by the bucket's allocator, and is its branch's ID
-  too: no caller names a new cell (`CreateStore` with a cell of 0, the FUSE mount's `Attach` of a
+  too: no caller names a new cell (`CreateCell` with a cell of 0, the FUSE mount's `Attach` of a
   cell of 0).
 - **An extent ID** names the cell that wrote the extent and the sequence number it gave it: an
   Fxfs volume over a read-only base reads extents of another cell, which only the first half tells
@@ -48,7 +48,7 @@ kind, and nothing inside it is named apart. Supersedes doc-19 and doc-18's whole
 
 A cell holding several disks needed either a log for each, so that a version of the whole cell
 took N pauses, N commits, N uploads, N head swaps and an object naming them (doc-18), or one log
-for all of them (doc-19), which moved the several disks into the store's core: per-disk
+for all of them (doc-19), which moved the several disks into the cell's core: per-disk
 uncommitted changes, space and roots, numbers packed into extent IDs, a rule for closing segments
 others still write in, and handles to keep them apart. The branch that built doc-19 grew the code
 by about 3,700 lines. A paused VM needs none of it: a VM snapshot's versions agree because nothing

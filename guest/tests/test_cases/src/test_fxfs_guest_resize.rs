@@ -6,24 +6,24 @@
 // (cladefs's TASK-37).
 //
 // The host boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which
-// CLADEFS_GUEST_KERNEL names, with an extent-store device on a new store, which
+// CLADEFS_GUEST_KERNEL names, with an extent-store device on a new cell, which
 // the guest formats as it mounts it. Then, step by step, as the guest asks over
-// vsock, the host resizes the store through cladefs's extent daemon, as cladefsctl
-// resize does, and answers there: it grows the store, which the guest's statfs and
+// vsock, the host resizes the cell through cladefs's extent daemon, as cladefsctl
+// resize does, and answers there: it grows the cell, which the guest's statfs and
 // allocator take while mounted, the guest then writing more than the first size
 // held; shrinks it, above what the filesystem holds, which the guest agrees to;
-// and fails to shrink it below what the store holds. Remounted, the filesystem
-// has the size it was resized to, and so has the store, once the VM exits.
+// and fails to shrink it below what the cell holds. Remounted, the filesystem
+// has the size it was resized to, and so has the cell, once the VM exits.
 
 use macros::{guest, host};
 
 pub struct TestFxfsGuestResize;
 
 const MIB: u64 = 1 << 20;
-/// The store's capacity as the VM starts.
+/// The cell's capacity as the VM starts.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const CAPACITY: u64 = 64 * MIB;
-/// The resizes, in order: each step's name, and the capacity the host resizes the store to.
+/// The resizes, in order: each step's name, and the capacity the host resizes the cell to.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const STEPS: [(&str, u64); 3] =
     [("grow", 256 * MIB), ("shrink", 200 * MIB), ("too-small", 32 * MIB)];
@@ -43,9 +43,9 @@ mod host {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    /// Resizes the store at `store` through the daemon at `cladefsd` as the guest asks, at each
+    /// Resizes the cell at `cell_dir` through the daemon at `cladefsd` as the guest asks, at each
     /// step, on the connection `listener` takes, and answers with the outcome.
-    fn resize_steps(listener: UnixListener, store: &Path, cladefsd: &Path) -> std::io::Result<()> {
+    fn resize_steps(listener: UnixListener, cell_dir: &Path, cladefsd: &Path) -> std::io::Result<()> {
         let (stream, _) = listener.accept()?;
         let mut answers = stream.try_clone()?;
         let mut asked = BufReader::new(stream).lines();
@@ -53,7 +53,7 @@ mod host {
             let Some(line) = asked.next() else { return Ok(()) };
             assert_eq!(line?, step, "the steps in order");
             let resized = crate::common::control(cladefsd)
-                .and_then(|daemon| daemon.resize_cell(store, capacity));
+                .and_then(|daemon| daemon.resize_cell(cell_dir, capacity));
             let outcome = match resized {
                 Ok(()) => "ok".to_owned(),
                 Err(err) => {
@@ -76,20 +76,20 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let store = test_setup.tmp_dir.join("extents");
+            let cell_dir = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let cladefsd = std::path::PathBuf::from(
                 std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &store, CAPACITY, 0)?;
+            vm.cell("extents", &cell_dir, CAPACITY, 0)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-resize-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
             vm.vsock(&uds);
-            let resizing = store.clone();
+            let resizing = cell_dir.clone();
             std::thread::spawn(move || {
                 if let Err(err) = resize_steps(listener, &resizing, &cladefsd) {
                     eprintln!("resizing: {err}");
@@ -103,11 +103,11 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            let store = local_cell::upload::wait_on(cladefs::OpenCell::open(
+            let cell = local_cell::upload::wait_on(cladefs::OpenCell::open(
                 test_setup.tmp_dir.join("extents"),
             ))
             .expect("open the extent store");
-            assert_eq!(store.info().unwrap().capacity, STEPS[1].1);
+            assert_eq!(cell.info().unwrap().capacity, STEPS[1].1);
             TestOutcome::Pass
         }
     }
@@ -150,7 +150,7 @@ mod guest {
     }
 
     /// Waits for statfs to say the filesystem's size is `expected`: the device's configuration
-    /// change reaches the filesystem soon after the host resizes the store.
+    /// change reaches the filesystem soon after the host resizes the cell.
     fn wait_for_size(expected: u64) {
         let start = Instant::now();
         while size() != expected {
@@ -221,7 +221,7 @@ mod guest {
             assert_eq!(host.resize(step), "ok");
             wait_for_size(shrunk);
 
-            // Not below what the store holds.
+            // Not below what the cell holds.
             let (step, _) = STEPS[2];
             assert_eq!(host.resize(step), libc::ENOSPC.to_string());
             assert_eq!(size(), shrunk);

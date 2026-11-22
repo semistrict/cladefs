@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A store crashes at random versions of random workloads, and recovers to a prefix of its commits:
+//! A cell crashes at random versions of random workloads, and recovers to a prefix of its commits:
 //! exactly the extents and root of an epoch at least as late as the last commit made durable, by
 //! a durable commit or a flush of commits only ordered; cladefs: as its open segment closes between
 //! commits too, as an uploader has it close.
 //!
-//! cladefs: a round is a function of its seed (TASK-79.79): its store does its I/O on the test's
+//! cladefs: a round is a function of its seed (TASK-79.79): its cell does its I/O on the test's
 //! thread alone, none on threads of its own ([`MemDir::serial`]), so that the operation its file
 //! system fails from, and what the crash keeps, are the same each time it is run. The Shuttle tests
-//! run the same rounds ([`rounds`]) with the store's threads, which frame the segments commits
+//! run the same rounds ([`rounds`]) with the cell's threads, which frame the segments commits
 //! close, and sync a flush's files at once, while the workload goes on: on Shuttle's schedules,
 //! seeded by the rounds, so that each is still a function of its seed (tests/shuttle/crash.rs).
 
@@ -43,7 +43,7 @@ async fn recovers_a_prefix_of_its_commits() {
     assert!(spanning > ROUNDS, "{spanning} commits spanned segments in {ROUNDS} rounds");
 }
 
-/// cladefs: a store keeping its cell in a bucket, crashing as its uploader uploads, recovers from
+/// cladefs: a cell keeping its cell in a bucket, crashing as its uploader uploads, recovers from
 /// the bucket alone at least what its uploader acknowledged, and from its disk at least what it
 /// made durable (TASK-165.9's AC #4); the host's collector passing over the bucket all along, cut
 /// in a pass as it crashes, or before, and a full pass after (TASK-291.2); then passes alone,
@@ -59,8 +59,8 @@ async fn recovers_from_its_bucket_with_and_without_its_disk() {
         compacted += found.compacted as u64;
         deleted += found.deleted as u64;
     }
-    // The crashes hit uploads under way, and stores whose disks held more than the bucket; the
-    // collector's cuts, passes under way; and its passes compacted and deleted what the stores
+    // The crashes hit uploads under way, and cells whose disks held more than the bucket; the
+    // collector's cuts, passes under way; and its passes compacted and deleted what the cells
     // had uploaded. cladefs: each round waits for an upload early in its workload, so that most
     // acknowledge a commit whatever the build's speed (board 1738): 82 to 88 of 100 did on the
     // Mac, debug or optimized.
@@ -76,8 +76,8 @@ async fn recovers_from_its_bucket_with_and_without_its_disk() {
     assert!(spanning > KEPT_ROUNDS, "{spanning} commits spanned segments in {KEPT_ROUNDS} rounds");
 }
 
-/// cladefs: a store's opening cut by a crash at each of its writes in turn leaves what opens again
-/// to at least what the store made durable (TASK-165.9).
+/// cladefs: a cell's opening cut by a crash at each of its writes in turn leaves what opens again
+/// to at least what the cell made durable (TASK-165.9).
 #[tokio::test(flavor = "multi_thread")]
 async fn openings_cut_at_each_write_open_again() {
     let mut writes = 0;

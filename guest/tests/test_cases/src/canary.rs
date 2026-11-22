@@ -5,8 +5,8 @@
 //! cladefs: the guest tests' known plaintext (TASK-411.15): bytes that don't compress, the same in
 //! every build of the host's half and the guest's, which cases write into their guests'
 //! filesystems (fxfs-guest's file, fxfs-guest-checks' mapped file), and the harness looks for where
-//! stores keep data, their directories, their buckets and part caches (`crate::encrypted`): in a run
-//! whose stores are encrypted, it finds none. Not compressible, so that a store in the clear keeps it
+//! cells keep data, their directories, their buckets and part caches (`crate::encrypted`): in a run
+//! whose cells are encrypted, it finds none. Not compressible, so that a cell in the clear keeps it
 //! as written in its bucket's objects too, whose parts are compressed where that pays, not only in
 //! its raw files.
 

@@ -24,20 +24,21 @@ fn provider(exporter: &InMemorySpanExporter) -> SdkTracerProvider {
         .build()
 }
 
-/// Writes 2 blocks, reads them back and commits them, uploaded,, in a store a daemon serves, as a VM
-/// process would: returns the store's cell.
+/// Writes 2 blocks, reads them back and commits them, uploaded,, in a cell a daemon serves, as a VM
+/// process would: returns the cell.
 fn write_read_commit() -> crate::CellId {
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 20);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 20);
     let cell = super::cell_at(&dir.path().join("store"));
     let extent = ExtentId { cell: cell.id, sequence: 1 };
     // TASK-260: the write for the guest's request 42.
-    let guest =
-        std::num::NonZeroU64::new(42).map(|guest| crate::request::RequestId { guest, store: None });
-    crate::request::within_now(guest, || write(&store, extent, 0, &pattern(1, 2 * BLOCK))).unwrap();
-    assert_eq!(read(&store, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
-    store.commit(Some(b"root")).unwrap();
-    drop(store);
+    let guest = std::num::NonZeroU64::new(42)
+        .map(|guest| crate::request::RequestId { guest, open_cell: None });
+    crate::request::within_now(guest, || write(&client, extent, 0, &pattern(1, 2 * BLOCK)))
+        .unwrap();
+    assert_eq!(read(&client, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
+    client.commit(Some(b"root")).unwrap();
+    drop(client);
     served.join().unwrap();
     cell
 }
@@ -69,7 +70,7 @@ fn attribute(span: &SpanData, key: &str) -> Option<Value> {
     span.attributes.iter().find(|kv| kv.key.as_str() == key).map(|kv| kv.value.clone())
 }
 
-/// A request served is a trace's root, named by its kind, which says the store's cell and what
+/// A request served is a trace's root, named by its kind, which says the cell and what
 /// it asked for; a durable commit's span has its phases as children, sealing, writing, the flush
 /// and the wait for object storage; and the upload of its segment is a span whose children are
 /// the bucket's requests.

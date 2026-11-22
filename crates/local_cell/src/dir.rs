@@ -2,31 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The file system a store lives in: a directory of the host's ([`HostDir`]), or of memory
+//! The file system a cell lives in: a directory of the host's ([`HostDir`]), or of memory
 //! ([`MemDir`](crate::MemDir)), which can simulate crashes.
 
 use host_fs::OpenOptions;
 use host_fs::OpenOptionsExt as _;
 use std::collections::BTreeMap;
 use std::io;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// A file of a store.
+/// A file of a cell.
 pub trait File: Send + Sync + 'static {
     /// Reads `buf.len()` bytes at `offset`. Bytes past the file's end read as zeros.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
 
-    /// cladefs: reads as [`File::read_at`] does, but, on Linux, through the host's page cache, which
-    /// `read_at` bypasses. The store reads its raw files so: the open segment's, those of segments
-    /// being framed or filled, and open extents' own. It wrote them lately, through the cache,
-    /// which holds their pages still, dirty or not yet let go; a read bypassing the cache writes
-    /// back the dirty ones it reads first, waiting for the host's disk. Under pgbench's load, a
-    /// commit copying the extents written in pieces waited about 4 ms a MiB for it, up to 400 ms,
-    /// holding every write back; and a closed segment's framing, reading its 20-35 MiB, took a
-    /// median 100-190 ms to read them, 6-19 ms through the cache (TASK-91.17, TASK-79.93). On
-    /// macOS this reads around the cache as `read_at` does: a file's two descriptors there share
+    /// cladefs: reads as [`File::read_at`] does, but, on Linux, through the host's page cache,
+    /// which `read_at` bypasses. The cell reads its raw files so: the open segment's, those of
+    /// segments being framed or filled, and open extents' own. It wrote them lately, through the
+    /// cache, which holds their pages still, dirty or not yet let go; a read bypassing the cache
+    /// writes back the dirty ones it reads first, waiting for the host's disk. Under pgbench's
+    /// load, a commit copying the extents written in pieces waited about 4 ms a MiB for it, up to
+    /// 400 ms, holding every write back; and a closed segment's framing, reading its 20-35 MiB,
+    /// took a median 100-190 ms to read them, 6-19 ms through the cache (TASK-91.17, TASK-79.93).
+    /// On macOS this reads around the cache as `read_at` does: a file's two descriptors there share
     /// `F_NOCACHE`.
     fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         self.read_at(buf, offset)
@@ -35,12 +34,12 @@ pub trait File: Send + Sync + 'static {
     /// Writes `buf` at `offset`.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
 
-    /// cladefs: has the host write the `len` bytes at `offset` back to its disk, written through its
-    /// page cache, and waits for them; durable only once synced. A writer of a large file writes
-    /// it back so, a piece at a time, as it writes, that the sync after has little left: a sync of
-    /// a whole framed segment's data at once filled the disk's queue, which the syncs a daemon's
-    /// turn makes its guests' commits durable with waited behind, up to a second under pgbench
-    /// (GCE r728, TASK-165.9). A host that writes back as it pleases does nothing.
+    /// cladefs: has the host write the `len` bytes at `offset` back to its disk, written through
+    /// its page cache, and waits for them; durable only once synced. A writer of a large file
+    /// writes it back so, a piece at a time, as it writes, that the sync after has little left: a
+    /// sync of a whole framed segment's data at once filled the disk's queue, which the syncs a
+    /// daemon's turn makes its guests' commits durable with waited behind, up to a second under
+    /// pgbench (GCE r728, TASK-165.9). A host that writes back as it pleases does nothing.
     fn write_back(&self, _offset: u64, _len: u64) -> io::Result<()> {
         Ok(())
     }
@@ -66,10 +65,10 @@ pub trait File: Send + Sync + 'static {
     /// (TASK-92.23).
     fn sync_cached(&self) -> io::Result<()>;
 
-    /// cladefs: gives the `len` bytes at `offset`, whole blocks, back to the host's disk, keeping the
-    /// file's size: they read as zeros from now on (doc-25, TASK-698.2). An ephemeral cell's kept
-    /// segments give back so the runs of the extents freed in them, which nothing reads again. A
-    /// file that can't refuses (`Unsupported`), giving nothing back.
+    /// cladefs: gives the `len` bytes at `offset`, whole blocks, back to the host's disk, keeping
+    /// the file's size: they read as zeros from now on (doc-25, TASK-698.2). An ephemeral cell's
+    /// kept segments give back so the runs of the extents freed in them, which nothing reads again.
+    /// A file that can't refuses (`Unsupported`), giving nothing back.
     fn punch(&self, _offset: u64, _len: u64) -> io::Result<()> {
         Err(io::ErrorKind::Unsupported.into())
     }
@@ -97,7 +96,7 @@ pub struct DirFile {
     pub dir: bool,
 }
 
-/// The directory a store lives in, with what the store needs of its file system. Paths are
+/// The directory a cell lives in, with what the cell needs of its file system. Paths are
 /// relative to it: a file's name, or a subdirectory's and a file's, joined by `/`. `""` is the
 /// directory itself.
 pub trait Dir: Send + Sync + 'static {
@@ -114,8 +113,8 @@ pub trait Dir: Send + Sync + 'static {
     /// Removes the file at `path`.
     fn remove(&self, path: &str) -> io::Result<()>;
 
-    /// cladefs: renames the file at `from` to `to`, which is not there, at once: in one directory, a
-    /// crash leaves it at one or the other, as `sync_dir` makes durable (TASK-301); from one
+    /// cladefs: renames the file at `from` to `to`, which is not there, at once: in one directory,
+    /// a crash leaves it at one or the other, as `sync_dir` makes durable (TASK-301); from one
     /// directory to another, its entry in each is durable once that directory is synced, so that a
     /// crash may leave it at both, or at neither (TASK-310). By default, unsupported.
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -133,11 +132,11 @@ pub trait Dir: Send + Sync + 'static {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
-    /// cladefs: writes `bytes` as the file at `path`, whole or not at all: a file written and synced
-    /// beside it, renamed over any there, at once, as [`Dir::rename`] renames, so that a crash leaves
-    /// the one there before or this, never neither, and this once its directory is synced
-    /// (TASK-539.3). Failing, it changed nothing at `path`. What the records beside a store's files
-    /// are written by: its description, and cladefs's own, each synced so.
+    /// cladefs: writes `bytes` as the file at `path`, whole or not at all: a file written and
+    /// synced beside it, renamed over any there, at once, as [`Dir::rename`] renames, so that a
+    /// crash leaves the one there before or this, never neither, and this once its directory is
+    /// synced (TASK-539.3). Failing, it changed nothing at `path`. What the records beside a cell's
+    /// files are written by: its description, and cladefs's own, each synced so.
     fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()>;
 
     /// Creates the directory at `path`.
@@ -146,7 +145,7 @@ pub trait Dir: Send + Sync + 'static {
     /// The names of the files in the directory at `path`.
     fn list(&self, path: &str) -> io::Result<Vec<String>>;
 
-    /// cladefs: every file and directory it holds, at any depth, but itself: what a store's
+    /// cladefs: every file and directory it holds, at any depth, but itself: what a cell's
     /// footprint counts as its first opening begins ([`crate::footprint`], TASK-539.4). By
     /// default, unsupported.
     fn entries(&self) -> io::Result<Vec<DirFile>> {
@@ -160,8 +159,8 @@ pub trait Dir: Send + Sync + 'static {
     fn barrier(&self) -> io::Result<()>;
 
     /// Takes the directory for this process, against other processes' takings of it: what a
-    /// process holds while it has cells of the store open, or opens or deletes them, so that
-    /// two processes never change one store at once. It waits a while for another process to let
+    /// process holds while it has the cell open, or opens or deletes it, so that two
+    /// processes never change one cell at once. It waits a while for another process to let
     /// it go, as one whose last cell is closing does. A directory no other process sees takes
     /// nothing.
     fn take(&self) -> io::Result<()> {
@@ -171,9 +170,9 @@ pub trait Dir: Send + Sync + 'static {
     /// Lets the directory go, once taken ([`Dir::take`]).
     fn let_go(&self) {}
 
-    /// cladefs: claims the directory's store for one store open in this process: what refuses a
+    /// cladefs: claims the directory's cell for one cell open in this process: what refuses a
     /// second opening of it, or its deletion while open, at once, rather than wait for itself
-    /// (TASK-165.7). One claimed by a store closing it waits for, a while: a store let go of in
+    /// (TASK-165.7). One claimed by a cell closing it waits for, a while: a cell let go of in
     /// this process closes on whatever thread drops it last, its last commits made durable, which
     /// takes seconds on a busy disk, and an opening of it then is no second opening (TASK-648). A
     /// directory no other opening sees claims nothing.
@@ -181,7 +180,7 @@ pub trait Dir: Send + Sync + 'static {
         Ok(())
     }
 
-    /// cladefs: says the store claimed is closing ([`Dir::claim`]): an opening of it waits for its
+    /// cladefs: says the cell claimed is closing ([`Dir::claim`]): an opening of it waits for its
     /// claim to go, rather than fail.
     fn closing(&self) {}
 
@@ -189,7 +188,7 @@ pub trait Dir: Send + Sync + 'static {
     fn unclaim(&self) {}
 
     /// cladefs: gives the file at `path` to `to`, by its path on the host's filesystem, which `to`
-    /// takes it from, by a rename, or not: as a store's file leaving it goes into the host's cache
+    /// takes it from, by a rename, or not: as a cell's file leaving it goes into the host's cache
     /// of objects (TASK-165.8). Returns whether `to` took it, which goes from the directory then,
     /// as a removal would take it; a directory not on the host's filesystem gives nothing.
     fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
@@ -197,7 +196,7 @@ pub trait Dir: Send + Sync + 'static {
         Ok(false)
     }
 
-    /// cladefs: whether the store may do I/O in the directory on threads of its own, alongside its
+    /// cladefs: whether the cell may do I/O in the directory on threads of its own, alongside its
     /// callers': framing a closed segment off the commit that closed it (TASK-41), and syncing a
     /// flush's files at once (TASK-92.42). Without, its callers' threads do all of it, one
     /// operation at a time, in an order their calls alone decide: as a directory needs that fails
@@ -207,19 +206,19 @@ pub trait Dir: Send + Sync + 'static {
         true
     }
 
-    /// cladefs: the disk the directory is on, whose counters its store's files charge and whose
+    /// cladefs: the disk the directory is on, whose counters its cell's files charge and whose
     /// governor admits its writes against (doc-22): none for a directory no disk counts.
     fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
         None
     }
 
-    /// cladefs: the footprint its store's files are counted in, if they are ([`crate::Metered`]).
+    /// cladefs: the footprint its cell's files are counted in, if they are ([`crate::Metered`]).
     fn footprint(&self) -> Option<&Arc<crate::footprint::Footprint>> {
         None
     }
 }
 
-/// The whole of `file`, read as it is: a store's file that holds no extents' data, whose reads
+/// The whole of `file`, read as it is: a cell's file that holds no extents' data, whose reads
 /// need not be aligned.
 pub(crate) fn read_file<F: File>(file: &F) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; file.size()? as usize];
@@ -239,33 +238,32 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 ///
 /// cladefs: every file of it bypasses the host's page cache (`O_DIRECT` on Linux, `F_NOCACHE` on
 /// macOS), or is not opened: a file system that can't fails its openings (TASK-433.6). Its reads
-/// and writes go by the blocks around them, from memory aligned to them
-/// (`bucket_cell::direct`), so that no byte of a store's is held in
-/// the host's page cache, a memory no budget of the process's counts (TASK-433). Extents' files
-/// go through the process's page cache instead ([`crate::pages`]): a write lands there and
-/// returns, the disk taking it later, coalesced, as the host's page cache had it, a `WRITE`
-/// waiting for no disk, and what was written lately read back from memory, as framings and
-/// commits copying extents read it (TASK-91.17, TASK-221, TASK-401); and every opening of a file,
-/// by whatever name, shares its pages. A file removed drops its pages, its dirty ones unwritten.
-/// Until TASK-433, they were written through the host's page cache, read around it, and synced
-/// keeping the open segment's pages there (TASK-92.23). Syncing a file is `fdatasync` on Linux,
-/// and a directory's entries `fsync`, each of which flushes the drive's cache too. cladefs: on macOS
-/// each is an `F_BARRIERFSYNC`, which leaves the drive's cache to `barrier`, an `F_FULLFSYNC`, but
-/// orders what it synced before what is written after (TASK-92.48). They were std's `sync_data`
-/// and `sync_all`, each an `F_FULLFSYNC` there, which flushed the drive's cache at every sync. Run
-/// interleaved, twenty runs of each, by their medians and quartiles, cell-bench's `burst`, whose
-/// commit seals 640 extents in files of their own, flushed in 620 ms (572-664 ms), and 175 ms since
-/// (168-209 ms), the host's load average 4.7-6.4; `durable`'s commits of one in 9.8 ms (7.7-14.9
-/// ms), and 4.1 ms since (3.6-5.2 ms), the load 6.7-18: measured with `AT_ONCE`'s at those loads.
-/// The trade-off: a sync on macOS is durable as it returns against the store's process or the
-/// host's kernel crashing, as on Linux, but against the drive losing power only once a barrier
-/// follows; and each point at which the store says that what it wrote is durable ends in one: a
-/// flush, a closing between commits, a cell's record, an index's first checkpoint. A plain
-/// `fsync` would leave the order to the drive as well, so that a power loss could keep a commit's
-/// record, synced after its data, without the data. macOS is a development host: stores run on
-/// Linux.
+/// and writes go by the blocks around them, from memory aligned to them (`bucket_cell::direct`), so
+/// that no byte of a cell's is held in the host's page cache, a memory no budget of the process's
+/// counts (TASK-433). Extents' files go through the process's page cache instead
+/// ([`crate::pages`]): a write lands there and returns, the disk taking it later, coalesced, as the
+/// host's page cache had it, a `WRITE` waiting for no disk, and what was written lately read back
+/// from memory, as framings and commits copying extents read it (TASK-91.17, TASK-221, TASK-401);
+/// and every opening of a file, by whatever name, shares its pages. A file removed drops its pages,
+/// its dirty ones unwritten. Until TASK-433, they were written through the host's page cache, read
+/// around it, and synced keeping the open segment's pages there (TASK-92.23). Syncing a file is
+/// `fdatasync` on Linux, and a directory's entries `fsync`, each of which flushes the drive's cache
+/// too. cladefs: on macOS each is an `F_BARRIERFSYNC`, which leaves the drive's cache to `barrier`,
+/// an `F_FULLFSYNC`, but orders what it synced before what is written after (TASK-92.48). They were
+/// std's `sync_data` and `sync_all`, each an `F_FULLFSYNC` there, which flushed the drive's cache
+/// at every sync. Run interleaved, twenty runs of each, by their medians and quartiles,
+/// cell-bench's `burst`, whose commit seals 640 extents in files of their own, flushed in 620 ms
+/// (572-664 ms), and 175 ms since (168-209 ms), the host's load average 4.7-6.4; `durable`'s
+/// commits of one in 9.8 ms (7.7-14.9 ms), and 4.1 ms since (3.6-5.2 ms), the load 6.7-18: measured
+/// with `AT_ONCE`'s at those loads. The trade-off: a sync on macOS is durable as it returns against
+/// the cell's process or the host's kernel crashing, as on Linux, but against the drive losing
+/// power only once a barrier follows; and each point at which the cell says that what it wrote is
+/// durable ends in one: a flush, a closing between commits, a cell's record, an index's first
+/// checkpoint. A plain `fsync` would leave the order to the drive as well, so that a power loss
+/// could keep a commit's record, synced after its data, without the data. macOS is a development
+/// host: extent stores run on Linux.
 ///
-/// cladefs: its changes counted, as it makes them, in its store's footprint ([`crate::Metered`],
+/// cladefs: its changes counted, as it makes them, in its cell's footprint ([`crate::Metered`],
 /// TASK-539.4).
 pub type HostDir = crate::Metered<crate::CachedDir<DiskDir>>;
 
@@ -278,14 +276,14 @@ impl HostDir {
     /// ([`crate::pages::shared`]). Its files are opened bypassing the host's page cache, or not
     /// at all: a file system that refuses to fails their openings (`InvalidInput`), never falling
     /// back to the host's cache, a second memory (TASK-433, TASK-433.6).
-    /// cladefs: its changes counted in its store's footprint, the one this process counts it in
+    /// cladefs: its changes counted in its cell's footprint, the one this process counts it in
     /// already if it opened it before ([`crate::footprint`]): the first opening while no other
     /// is alive lists it.
     pub fn new(path: &Path) -> io::Result<Self> {
         Self::on(DiskDir::new(path)?, crate::pages::shared().clone())
     }
 
-    /// `dir`, its extents' files through `cache`, its changes counted in its store's footprint.
+    /// `dir`, its extents' files through `cache`, its changes counted in its cell's footprint.
     pub fn on(dir: DiskDir, cache: Arc<crate::pages::PageCache>) -> io::Result<Self> {
         let footprint = crate::footprint::of_host(&dir.path, &dir.disk)?;
         Self::over(crate::CachedDir::over(dir, cache), footprint)
@@ -430,9 +428,9 @@ impl Dir for DiskDir {
     /// Takes the directory with an exclusive `flock` of it, which a descriptor of the directory's
     /// of the process's holds until the process lets it go, or exits. cladefs: the process's
     /// takings of it share that, counted, each `HostDir` of it taking it once: what is taken in
-    /// this process another opening of it here shares, as a store's uploader stopping, which
-    /// holds it ([`LocalCell::hold_dir`](crate::LocalCell::hold_dir)), and its store's next opening do;
-    /// which store is open here, its claim says ([`Dir::claim`], TASK-165.7).
+    /// this process another opening of it here shares, as a cell's uploader stopping, which holds
+    /// it ([`LocalCell::hold_dir`](crate::LocalCell::hold_dir)), and its cell's next opening do;
+    /// which cell is open here, its claim says ([`Dir::claim`], TASK-165.7).
     fn take(&self) -> io::Result<()> {
         let id = self.id()?;
         let mut taken = TAKEN.get().lock().unwrap();
@@ -468,7 +466,7 @@ impl Dir for DiskDir {
         if claimed.contains_key(&id) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "this process has the store open",
+                "this process has the cell open",
             ));
         }
         claimed.insert(id, false);
@@ -512,30 +510,30 @@ impl Dir for DiskDir {
 }
 
 node_local::node_local! {
-    /// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and inodes:
-    /// how many takings of each, and the lock they hold, a process's, which its death lets go, a
-    /// simulated host's too (`host_fs::Flock`).
+    /// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and
+    /// inodes: how many takings of each, and the lock they hold, a process's, which its death lets
+    /// go, a simulated host's too (`host_fs::Flock`).
     static TAKEN: Mutex<BTreeMap<DirId, (usize, host_fs::Flock)>> = Mutex::new(BTreeMap::new());
 }
 
 node_local::node_local! {
-    /// cladefs: the directories whose stores this process has open ([`Dir::claim`]), and whether each
-    /// is closing ([`Dir::closing`]).
+    /// cladefs: the directories whose cells this process has open ([`Dir::claim`]), and whether
+    /// each is closing ([`Dir::closing`]).
     static CLAIMED: Mutex<BTreeMap<DirId, bool>> = Mutex::new(BTreeMap::new());
 }
 
 node_local::node_local! {
-    /// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a store closing.
+    /// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a cell closing.
     static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
 }
 
 node_local::node_local! {
-    /// cladefs: said as a claim goes ([`Dir::unclaim`]), for what waits for a store closing holding
+    /// cladefs: said as a claim goes ([`Dir::unclaim`]), for what waits for a cell closing holding
     /// no thread ([`closed`]).
     static UNCLAIMED_EVENT: event_listener::Event = event_listener::Event::new();
 }
 
-/// cladefs: `claimed`, [`CLAIMED`] locked, once no store of the directory `id` is closing in this
+/// cladefs: `claimed`, [`CLAIMED`] locked, once no cell of the directory `id` is closing in this
 /// process, which it waits for a while ([`CLOSING_WAIT`]): `WouldBlock` if one still is.
 fn closed_in(
     mut claimed: std::sync::MutexGuard<'static, BTreeMap<DirId, bool>>,
@@ -547,28 +545,28 @@ fn closed_in(
         if left.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "this process is still closing the store",
+                "this process is still closing the cell",
             ));
         }
         fail::fail_point!("dir::claim_waits");
-        // cladefs: never under madsim, where an opening of a store waits for its close first,
+        // cladefs: never under madsim, where an opening of a cell waits for its close first,
         // holding no thread ([`closed`]), then claims it, awaiting nothing between (doc-24,
         // TASK-685.3). The wait stays for what claims from a thread of its own, an outermost
         // entry's (board 2946): the sync openings, `LocalCell::recover` and what opens over it,
         // which tests and tools call as they are, have no `closed` to await first; and off madsim
-        // a store another thread begins closing between an opening's `closed` and its claim is
+        // a cell another thread begins closing between an opening's `closed` and its claim is
         // waited for here, rather than refused as one open.
-        crate::blocks!("an opening, waiting for a store of its directory closing in the process");
+        crate::blocks!("an opening, waiting for a cell of its directory closing in the process");
         claimed = UNCLAIMED.get().wait_timeout(claimed, left).unwrap().0;
     }
     Ok(claimed)
 }
 
-/// cladefs: returns once no store of the directory at `path` is closing in this process, waiting
+/// cladefs: returns once no cell of the directory at `path` is closing in this process, waiting
 /// for one that is a while, as an opening of it does ([`Dir::claim`]), holding no thread:
-/// `WouldBlock` if it still is. What reads in the bucket what a store's close uploads, a fork of a
-/// version its closing store made, say, waits for the close so (TASK-644); and an opening of the
-/// store, first, so that its claim finds none closing (doc-24). Nothing at `path`, nothing closes
+/// `WouldBlock` if it still is. What reads in the bucket what a cell's close uploads, a fork of a
+/// version its closing cell made, say, waits for the close so (TASK-644); and an opening of the
+/// cell, first, so that its claim finds none closing (doc-24). Nothing at `path`, nothing closes
 /// there.
 pub async fn closed(path: &Path) -> io::Result<()> {
     use host_fs::MetadataExt as _;
@@ -589,11 +587,11 @@ pub async fn closed(path: &Path) -> io::Result<()> {
         }
     };
     tokio::time::timeout(CLOSING_WAIT, closing).await.map_err(|_| {
-        io::Error::new(io::ErrorKind::WouldBlock, "this process is still closing the store")
+        io::Error::new(io::ErrorKind::WouldBlock, "this process is still closing the cell")
     })
 }
 
-/// cladefs: how long an opening waits for a store of its directory closing in this process
+/// cladefs: how long an opening waits for a cell of its directory closing in this process
 /// (TASK-648): a close makes its last commits durable, seconds on a busy disk.
 const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -639,16 +637,13 @@ pub struct DiskFile {
     tail: Mutex<bucket_cell::direct::Tail>,
 }
 
-impl AsRawFd for DiskFile {
-    fn as_raw_fd(&self) -> RawFd {
-        #[cfg(not(madsim))]
-        return self.file.as_raw_fd();
-        // cladefs: a simulated host's disk in memory has no descriptors; what wants one, FUSE's
-        // storage, is outside the simulation (doc-24, TASK-685.4).
-        #[cfg(madsim)]
-        panic!(
-            "a descriptor of a simulated host's file, which has none: FUSE is outside the simulation"
-        )
+impl HostFile {
+    /// cladefs: the host's file under the page cache and the counting, for I/O of a caller's own
+    /// beside them, as an image's device does, settled first (`settle`, `settle_for_write`): by its
+    /// descriptor on a real host, and in place on a simulated host's disk (host_fs, doc-24), which
+    /// has no descriptors (board 5687).
+    pub fn host_file(&self) -> &host_fs::File {
+        &self.under().under().file
     }
 }
 
@@ -684,8 +679,8 @@ impl File for DiskFile {
         self.sync()
     }
 
-    /// Held as no write is in flight, as [`DiskFile::size`] is: a write of part of a block writes it
-    /// whole.
+    /// Held as no write is in flight, as [`DiskFile::size`] is: a write of part of a block writes
+    /// it whole.
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
         let _writes = self.tail.lock().unwrap();
         host_fs::punch_hole(&self.file, offset, len)

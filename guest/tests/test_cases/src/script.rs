@@ -17,7 +17,7 @@
 //! argument, so that all of it is tested on any host.
 //!
 //! cladefs: the wide mix ([`WIDE`], TASK-44.15) adds what a VFS asks of a file beyond those: ranges
-//! cloned and copied, zeroed and allocated, msyncs and fdatasyncs, stores through mappings made for
+//! cloned and copied, zeroed and allocated, msyncs and fdatasyncs, writes through mappings made for
 //! them, private ones too, O_DIRECT, a file's page cache dropped, and a file closed, evicted and
 //! opened again. The model says each operation's outcome, its errno too, as the VFS's own checks
 //! decide it ([`Model::clone_range`], [`Model::copy_range`]), and a reference filesystem in the
@@ -29,8 +29,8 @@ use std::fmt;
 pub const SEED_VAR: &str = "CLADEFS_RANDOM_OPS_SEED";
 /// The operations to drop from a script, by their index in the whole of it: `12-40,100-110`.
 pub const DROP_VAR: &str = "CLADEFS_RANDOM_OPS_DROP";
-/// How many runs of a script a shrink may take: CLADEFS_SHRINK_TRIES's, or else this many, enough for
-/// a pair of operations among thousands.
+/// How many runs of a script a shrink may take: CLADEFS_SHRINK_TRIES's, or else this many, enough
+/// for a pair of operations among thousands.
 pub const TRIES: usize = 64;
 /// The longest value `DROP_VAR` may have: it goes on the kernel's command line, of 2048 bytes,
 /// beside the kernel's own arguments and the test's.
@@ -48,7 +48,8 @@ const NEAR: u64 = 16 << 10;
 pub const MOST: u64 = MAX + LONGEST;
 /// A whole-file check follows every so many operations, and the script's end.
 const CHECK_EVERY: usize = 256;
-/// Of the operations, one in this many has a clone after it, and a store in a child.
+/// Of the operations, one in this many has a clone after it, and a write through a mapping in a
+/// child.
 const CLONE_ONE_IN: u64 = 32;
 const FORK_ONE_IN: u64 = 16;
 /// cladefs: the most pages an O_DIRECT read or write takes.
@@ -75,8 +76,8 @@ pub mod kind {
     pub const DIFFERS: &str = "differs";
     /// A write wrote less than it was given, with room to write it all.
     pub const SHORT_WRITE: &str = "short write";
-    /// A store through a mapping, of a file's bytes, killed its process.
-    pub const STORE_KILLED: &str = "store killed";
+    /// A write through a mapping, of a file's bytes, killed its process.
+    pub const WRITE_KILLED: &str = "write killed";
     /// The run on a nearly full filesystem was never refused anything.
     pub const NOTHING_REFUSED: &str = "nothing refused";
     /// The host's Fxfs doesn't read what the guest's model says.
@@ -92,7 +93,8 @@ pub mod kind {
     /// cladefs: the reference filesystem doesn't do as the model says: the model's mistake, or the
     /// kernel's, not the filesystem's under test (`differential`).
     pub const REFERENCE_DIFFERS: &str = "reference differs";
-    /// cladefs: the filesystems' timestamps changed otherwise, in ways not allowed (`differential`).
+    /// cladefs: the filesystems' timestamps changed otherwise, in ways not allowed
+    /// (`differential`).
     pub const TIMES_DIFFER: &str = "times differ";
     /// cladefs: on a DAX mount, no file read in again was DAX: the run looked at the page cache.
     pub const NEVER_DAX: &str = "never DAX";
@@ -155,9 +157,9 @@ pub enum Op {
     Write { file: usize, place: Place, len: u64, data: u64 },
     /// An append.
     Append { file: usize, len: u64, data: u64 },
-    /// Stores through the mapping kept of the file, within its size, by the process that keeps it
+    /// Writes through the mapping kept of the file, within its size, by the process that keeps it
     /// or, `child`, by a child that inherited it.
-    Store { file: usize, place: Place, len: u64, data: u64, child: bool },
+    MappedWrite { file: usize, place: Place, len: u64, data: u64, child: bool },
     /// read(2), checked.
     Read { file: usize, place: Place, len: u64 },
     /// A truncation, shorter or longer.
@@ -170,9 +172,9 @@ pub enum Op {
     Clone { from: usize, to: usize },
     /// Every file read whole, through read(2) and its mapping, and checked.
     Check,
-    /// cladefs: FICLONERANGE of `len` bytes, or to the source's end if 0, at `from_place` of `from`,
-    /// onto `to_place` of `to`, which may be the same file: the offsets and length rounded down to
-    /// blocks if `aligned`, as most are, and the rest refused, as the VFS refuses them.
+    /// cladefs: FICLONERANGE of `len` bytes, or to the source's end if 0, at `from_place` of
+    /// `from`, onto `to_place` of `to`, which may be the same file: the offsets and length rounded
+    /// down to blocks if `aligned`, as most are, and the rest refused, as the VFS refuses them.
     CloneRange {
         from: usize,
         from_place: Place,
@@ -185,22 +187,24 @@ pub enum Op {
     Copy { from: usize, from_place: Place, to: usize, to_place: Place, len: u64 },
     /// cladefs: fallocate's FALLOC_FL_ZERO_RANGE, the size kept or grown to the range's end.
     Zero { file: usize, place: Place, len: u64, keep_size: bool },
-    /// cladefs: fallocate's allocation, which leaves the bytes as they were, the size kept or grown.
+    /// cladefs: fallocate's allocation, which leaves the bytes as they were, the size kept or
+    /// grown.
     Allocate { file: usize, place: Place, len: u64, keep_size: bool },
     /// cladefs: msync(MS_SYNC) of the kept mapping's pages around `len` bytes at `place`.
     Msync { file: usize, place: Place, len: u64 },
     /// cladefs: fdatasync.
     Fdatasync { file: usize },
-    /// cladefs: stores within the file's size through a mapping made for them and gone after:
-    /// shared, or `private`, whose stores the file never sees.
-    MapStore { file: usize, place: Place, len: u64, data: u64, private: bool },
+    /// cladefs: writes within the file's size through a mapping made for them and gone after:
+    /// shared, or `private`, whose writes the file never sees.
+    MapWrite { file: usize, place: Place, len: u64, data: u64, private: bool },
     /// cladefs: an O_DIRECT write, or read, of `pages` pages at the page `place` falls in.
     Direct { file: usize, place: Place, pages: u64, data: u64, write: bool },
-    /// cladefs: the file's page cache dropped (POSIX_FADV_DONTNEED), what the kept mapping maps too.
+    /// cladefs: the file's page cache dropped (POSIX_FADV_DONTNEED), what the kept mapping maps
+    /// too.
     Drop { file: usize },
     /// cladefs: the file closed, its kept mapping gone, its inode evicted, and the file opened and
     /// mapped again: on a DAX mount, a file read in again once its writes are sealed is DAX, its
-    /// stores copying on write, where one created and kept open stays in the page cache.
+    /// writes copying on write, where one created and kept open stays in the page cache.
     Reopen { file: usize },
     /// cladefs: a call with arguments no well-behaved caller passes (TASK-149.16), which the VFS
     /// refuses as it is, whatever the filesystem's largest file: an offset and a length past i64's
@@ -215,31 +219,32 @@ pub enum Op {
     /// (`EINVAL`) at no page's start, or of nothing; else read through, past the file's end too, to
     /// its last page's.
     MapOdd { file: usize, place: Place, len: u64, aligned: bool },
-    /// cladefs: a new shared mapping of the file's pages at `place`, MAP_FIXED over the same pages of
-    /// the kept mapping of `over`, which may be another file's, its stores through it within the
+    /// cladefs: a new shared mapping of the file's pages at `place`, MAP_FIXED over the same pages
+    /// of the kept mapping of `over`, which may be another file's, its writes through it within the
     /// file; `over`'s pages then mapped back.
     MapFixed { file: usize, over: usize, place: Place, len: u64, data: u64 },
-    /// cladefs: a new mapping of the file's pages at `place`, remapped (mremap) twice as large, moved
-    /// if it must, its stores through it within the file.
+    /// cladefs: a new mapping of the file's pages at `place`, remapped (mremap) twice as large,
+    /// moved if it must, its writes through it within the file.
     Mremap { file: usize, place: Place, len: u64, data: u64 },
     /// cladefs: madvise of the kept mapping's pages at `place`: DONTNEED, which leaves the file, or
     /// REMOVE, which punches them; at no page's start if `odd`, `EINVAL`.
     Madvise { file: usize, place: Place, len: u64, remove: bool, odd: bool },
-    /// cladefs: a truncation down to `size` and back, while a thread stores through the kept mapping
-    /// below it.
+    /// cladefs: a truncation down to `size` and back, while a thread writes through the kept
+    /// mapping below it.
     TruncateRacing { file: usize, size: u64, place: Place, len: u64, data: u64 },
     /// cladefs: a write(2) from a buffer whose bytes past its `good`th fault (TASK-149.16): it
     /// stops there, or short of it, at an offset of the file no page's start, as the copy got.
     FaultingWrite { file: usize, place: Place, len: u64, good: u64, data: u64 },
-    /// cladefs: a write(2) from the kept mapping of its own file, `by` bytes on from where it writes:
-    /// the same bytes, if 0, or bytes apart, in pages they may share. Not overlapping bytes, which
-    /// a write copies as memcpy does, its result undefined: the guest's x86 copy wrote bytes of a
-    /// line before it read them, which the source at 17 bytes on from them held (GCE r868).
+    /// cladefs: a write(2) from the kept mapping of its own file, `by` bytes on from where it
+    /// writes: the same bytes, if 0, or bytes apart, in pages they may share. Not overlapping
+    /// bytes, which a write copies as memcpy does, its result undefined: the guest's x86 copy wrote
+    /// bytes of a line before it read them, which the source at 17 bytes on from them held (GCE
+    /// r868).
     WriteFromMapping { file: usize, place: Place, len: u64, by: u64 },
-    /// cladefs: the kept mapping read through, whole, so that each page the file has is mapped, then
-    /// made read-only (mprotect) and writable again, all of it, whose PTEs the kernel changes in
-    /// batches, then stored to within the file (TASK-149.42): to a page only read, as it comes,
-    /// whose store must fault, which makes it private.
+    /// cladefs: the kept mapping read through, whole, so that each page the file has is mapped,
+    /// then made read-only (mprotect) and writable again, all of it, whose PTEs the kernel changes
+    /// in batches, then stored to within the file (TASK-149.42): to a page only read, as it comes,
+    /// whose write must fault, which makes it private.
     ProtectKept { file: usize, place: Place, len: u64, data: u64 },
     /// cladefs: as [`Op::ProtectKept`], the kept mapping moved (mremap), its PTEs with it.
     MoveKept { file: usize, place: Place, len: u64, data: u64 },
@@ -318,7 +323,7 @@ pub fn generate(seed: u64, mix: Mix) -> Vec<Op> {
         let data = rng.next(u64::MAX);
         script.push(match rng.next(if mix.wide { WIDE_KINDS } else { 17 }) {
             0..=4 => Op::Write { file, place, len, data },
-            5..=8 => Op::Store { file, place, len, data, child: false },
+            5..=8 => Op::MappedWrite { file, place, len, data, child: false },
             9..=11 => Op::Read { file, place, len },
             12 => Op::Truncate { file, size: rng.next(MAX) },
             13 => Op::Punch { file, place, len },
@@ -338,7 +343,7 @@ pub fn generate(seed: u64, mix: Mix) -> Vec<Op> {
             let file = rng.next(mix.files as u64) as usize;
             let place = self::place(&mut rng);
             let (len, data) = (1 + rng.next(LONGEST), rng.next(u64::MAX));
-            script.push(Op::Store { file, place, len, data, child: true });
+            script.push(Op::MappedWrite { file, place, len, data, child: true });
         }
         if op % CHECK_EVERY == CHECK_EVERY - 1 {
             script.push(Op::Check);
@@ -352,8 +357,8 @@ pub fn generate(seed: u64, mix: Mix) -> Vec<Op> {
 const WIDE_KINDS: u64 = 32;
 
 /// cladefs: the wide mix's operation of `kind`, one of [`generate`]'s draws past its own 17, on
-/// `file` at `place`, of `len` bytes of `data`'s, as [`generate`] drew them: ranges cloned and copied
-/// twice as often as the rest, between any two files, a file and itself too.
+/// `file` at `place`, of `len` bytes of `data`'s, as [`generate`] drew them: ranges cloned and
+/// copied twice as often as the rest, between any two files, a file and itself too.
 fn wide_op(
     rng: &mut Rng,
     mix: Mix,
@@ -383,7 +388,7 @@ fn wide_op(
         22 => Op::Allocate { file, place, len, keep_size: rng.next(2) == 0 },
         23 => Op::Msync { file, place, len },
         24 => Op::Fdatasync { file },
-        25 | 26 => Op::MapStore { file, place, len, data, private: kind == 26 },
+        25 | 26 => Op::MapWrite { file, place, len, data, private: kind == 26 },
         27 | 28 => {
             let pages = 1 + rng.next(DIRECT_PAGES);
             Op::Direct { file, place, pages, data, write: kind == 27 }
@@ -397,10 +402,10 @@ fn wide_op(
 /// cladefs: of the operations, one in this many has a hostile one after it, in the hostile mix.
 const HOSTILE_ONE_IN: u64 = 4;
 
-/// cladefs: where [`Op::Far`]'s offsets are drawn around: a file's offsets past a small DAX window's
-/// end (512 MiB, 1 GiB, as a file larger than its window maps them in turn), ext4's largest file
-/// (16 TiB less a block, 4 KiB blocks), a DAX mount's (i64's end less a chunk), i64's, and between
-/// those (1 PiB).
+/// cladefs: where [`Op::Far`]'s offsets are drawn around: a file's offsets past a small DAX
+/// window's end (512 MiB, 1 GiB, as a file larger than its window maps them in turn), ext4's
+/// largest file (16 TiB less a block, 4 KiB blocks), a DAX mount's (i64's end less a chunk), i64's,
+/// and between those (1 PiB).
 const FAR: [u64; 6] = [
     512 << 20,
     1 << 30,
@@ -410,8 +415,8 @@ const FAR: [u64; 6] = [
     1 << 50,
 ];
 
-/// cladefs: a hostile operation (TASK-149.16), of [`Op`]'s last eleven, its arguments drawn here, or
-/// a range of a file cloned or copied onto itself, overlapping.
+/// cladefs: a hostile operation (TASK-149.16), of [`Op`]'s last eleven, its arguments drawn here,
+/// or a range of a file cloned or copied onto itself, overlapping.
 fn hostile_op(rng: &mut Rng, mix: Mix) -> Op {
     let file = rng.next(mix.files as u64) as usize;
     let place = place(rng);
@@ -520,7 +525,7 @@ pub enum Step {
         at: u64,
         data: Vec<u8>,
     },
-    Store {
+    MappedWrite {
         file: usize,
         at: u64,
         data: Vec<u8>,
@@ -584,7 +589,7 @@ pub enum Step {
     Fdatasync {
         file: usize,
     },
-    MapStore {
+    MapWrite {
         file: usize,
         at: u64,
         data: Vec<u8>,
@@ -645,7 +650,7 @@ pub enum Step {
         remove: bool,
         odd: bool,
     },
-    /// Down to `size` and back, while a child stores `data` at `at`, below both.
+    /// Down to `size` and back, while a child writes `data` at `at`, below both.
     TruncateRacing {
         file: usize,
         size: u64,
@@ -667,7 +672,7 @@ pub enum Step {
         dst: u64,
         len: u64,
     },
-    /// Of the store after, at `at`, within the file.
+    /// Of the write after, at `at`, within the file.
     ProtectKept {
         file: usize,
         at: u64,
@@ -685,8 +690,8 @@ impl Step {
     pub fn kind(&self) -> &'static str {
         match self {
             Step::Write { .. } => "write",
-            Step::Store { child: false, .. } => "store",
-            Step::Store { child: true, .. } => "store by a child",
+            Step::MappedWrite { child: false, .. } => "mapped write",
+            Step::MappedWrite { child: true, .. } => "mapped write by a child",
             Step::Read { .. } => "read",
             Step::Truncate { .. } => "truncate",
             Step::Punch { .. } => "punch",
@@ -701,8 +706,8 @@ impl Step {
             Step::Allocate { keep_size: true, .. } => "allocate, size kept",
             Step::Msync { .. } => "msync",
             Step::Fdatasync { .. } => "fdatasync",
-            Step::MapStore { private: false, .. } => "store through a new mapping",
-            Step::MapStore { private: true, .. } => "store through a private mapping",
+            Step::MapWrite { private: false, .. } => "write through a new mapping",
+            Step::MapWrite { private: true, .. } => "write through a private mapping",
             Step::DirectWrite { .. } => "direct write",
             Step::DirectRead { .. } => "direct read",
             Step::Drop { .. } => "drop the page cache",
@@ -721,11 +726,11 @@ impl Step {
             Step::Far { truncate: false, .. } => "write far",
             Step::Far { truncate: true, .. } => "truncate far",
             Step::MapOdd { .. } => "map oddly",
-            Step::MapFixed { .. } => "store through a fixed mapping",
-            Step::Mremap { .. } => "store through a remapped mapping",
+            Step::MapFixed { .. } => "write through a fixed mapping",
+            Step::Mremap { .. } => "write through a remapped mapping",
             Step::Madvise { remove: false, .. } => "madvise DONTNEED",
             Step::Madvise { remove: true, .. } => "madvise REMOVE",
-            Step::TruncateRacing { .. } => "truncate racing a store",
+            Step::TruncateRacing { .. } => "truncate racing a mapped write",
             Step::FaultingWrite { .. } => "write from a faulting buffer",
             Step::WriteFromMapping { .. } => "write from its own mapping",
             Step::ProtectKept { .. } => "mprotect the kept mapping",
@@ -745,7 +750,7 @@ impl Step {
                 (false, false) => Role::Other,
             },
             Step::Write { file: its, .. }
-            | Step::Store { file: its, .. }
+            | Step::MappedWrite { file: its, .. }
             | Step::Read { file: its, .. }
             | Step::Truncate { file: its, .. }
             | Step::Punch { file: its, .. }
@@ -754,7 +759,7 @@ impl Step {
             | Step::Allocate { file: its, .. }
             | Step::Msync { file: its, .. }
             | Step::Fdatasync { file: its }
-            | Step::MapStore { file: its, .. }
+            | Step::MapWrite { file: its, .. }
             | Step::DirectWrite { file: its, .. }
             | Step::DirectRead { file: its, .. }
             | Step::Drop { file: its }
@@ -782,12 +787,12 @@ impl Step {
     pub fn changes(&self) -> Option<usize> {
         match *self {
             Step::Write { file, .. }
-            | Step::Store { file, .. }
+            | Step::MappedWrite { file, .. }
             | Step::Truncate { file, .. }
             | Step::Punch { file, .. }
             | Step::Zero { file, .. }
             | Step::Allocate { file, .. }
-            | Step::MapStore { file, private: false, .. }
+            | Step::MapWrite { file, private: false, .. }
             | Step::DirectWrite { file, .. }
             | Step::MapFixed { file, .. }
             | Step::Mremap { file, .. }
@@ -810,8 +815,8 @@ impl Step {
         let size = |file: usize| model.files[file].len() as u64;
         let (file, start, end, source) = match *self {
             Step::Write { file, at, ref data }
-            | Step::Store { file, at, ref data, .. }
-            | Step::MapStore { file, at, ref data, private: false }
+            | Step::MappedWrite { file, at, ref data, .. }
+            | Step::MapWrite { file, at, ref data, private: false }
             | Step::DirectWrite { file, at, ref data }
             | Step::MapFixed { file, at, ref data, .. }
             | Step::Mremap { file, at, ref data }
@@ -847,14 +852,14 @@ impl Step {
         Some(Reach { file, start, end, source })
     }
 
-    /// cladefs: whether its timestamps are its own to say: not a store's through a shared mapping,
+    /// cladefs: whether its timestamps are its own to say: not a write through a shared mapping,
     /// whose times change at a write fault, which comes as the filesystem's cache has the page,
     /// written back or not, which filesystems differ in.
     pub fn says_its_times(&self) -> bool {
         !matches!(
             self,
-            Step::Store { .. }
-                | Step::MapStore { private: false, .. }
+            Step::MappedWrite { .. }
+                | Step::MapWrite { private: false, .. }
                 | Step::MapFixed { .. }
                 | Step::Mremap { .. }
                 | Step::ProtectKept { .. }
@@ -876,9 +881,10 @@ impl fmt::Display for Step {
             Step::Write { file, at, data } => {
                 write!(f, "write {:#x} at {at:#x} of file {file}", data.len())
             }
-            Step::Store { file, at, data, child } => {
+            Step::MappedWrite { file, at, data, child } => {
                 let by = if *child { " by a child" } else { "" };
-                write!(f, "store {:#x} at {at:#x} of file {file}{by}", data.len())
+                let (len, mapping) = (data.len(), "through its mapping");
+                write!(f, "write {len:#x} at {at:#x} of file {file} {mapping}{by}")
             }
             Step::Read { file, at, len } => write!(f, "read {len:#x} at {at:#x} of file {file}"),
             Step::Truncate { file, size } => write!(f, "truncate file {file} to {size:#x}"),
@@ -902,9 +908,9 @@ impl fmt::Display for Step {
             }
             Step::Msync { file, at, len } => write!(f, "msync {len:#x} at {at:#x} of file {file}"),
             Step::Fdatasync { file } => write!(f, "fdatasync file {file}"),
-            Step::MapStore { file, at, data, private } => {
+            Step::MapWrite { file, at, data, private } => {
                 let how = if *private { "a private" } else { "a new" };
-                write!(f, "store {:#x} at {at:#x} of file {file} through {how} mapping", data.len())
+                write!(f, "write {:#x} at {at:#x} of file {file} through {how} mapping", data.len())
             }
             Step::DirectWrite { file, at, data } => {
                 write!(f, "direct write {:#x} at {at:#x} of file {file}", data.len())
@@ -924,12 +930,12 @@ impl fmt::Display for Step {
             Step::MapOdd { file, at, len } => write!(f, "map {len:#x} at {at:#x} of file {file}"),
             Step::MapFixed { file, over, at, data } => write!(
                 f,
-                "store {:#x} at {at:#x} of file {file} through a mapping fixed over file {over}'s",
+                "write {:#x} at {at:#x} of file {file} through a mapping fixed over file {over}'s",
                 data.len()
             ),
             Step::Mremap { file, at, data } => write!(
                 f,
-                "store {:#x} at {at:#x} of file {file} through a mapping remapped larger",
+                "write {:#x} at {at:#x} of file {file} through a mapping remapped larger",
                 data.len()
             ),
             Step::Madvise { file, at, len, remove, odd } => {
@@ -939,7 +945,7 @@ impl fmt::Display for Step {
             }
             Step::TruncateRacing { file, size, at, data } => write!(
                 f,
-                "truncate file {file} to {size:#x} and back, while a child stores {:#x} at {at:#x}",
+                "truncate file {file} to {size:#x} and back, while a child writes {:#x} at {at:#x}",
                 data.len()
             ),
             Step::FaultingWrite { file, at, data, good } => write!(
@@ -952,13 +958,13 @@ impl fmt::Display for Step {
             }
             Step::ProtectKept { file, at, data } => write!(
                 f,
-                "read file {file}'s kept mapping, make it read-only and writable again, and store \
+                "read file {file}'s kept mapping, make it read-only and writable again, and write \
                  {:#x} at {at:#x}",
                 data.len()
             ),
             Step::MoveKept { file, at, data } => write!(
                 f,
-                "read file {file}'s kept mapping, move it, and store {:#x} at {at:#x}",
+                "read file {file}'s kept mapping, move it, and write {:#x} at {at:#x}",
                 data.len()
             ),
         }
@@ -1023,9 +1029,9 @@ impl Model {
                 let at = self.size(file);
                 Step::Write { file, at, data: bytes(data, len.min(MOST - at)) }
             }
-            Op::Store { file, place, len, data, child } => {
+            Op::MappedWrite { file, place, len, data, child } => {
                 let (at, data) = self.within(file, place, len, data);
-                Step::Store { file, at, data, child }
+                Step::MappedWrite { file, at, data, child }
             }
             Op::Read { file, place, len } => {
                 Step::Read { file, at: place.resolve(self.size(file)), len }
@@ -1064,13 +1070,13 @@ impl Model {
                 Step::Msync { file, at: at / PAGE * PAGE, len: len + at % PAGE }
             }
             Op::Fdatasync { file } => Step::Fdatasync { file },
-            Op::MapStore { file, place, len, data, private } => {
-                let Step::Store { file, at, data, .. } =
-                    self.resolve(&Op::Store { file, place, len, data, child: false })
+            Op::MapWrite { file, place, len, data, private } => {
+                let Step::MappedWrite { file, at, data, .. } =
+                    self.resolve(&Op::MappedWrite { file, place, len, data, child: false })
                 else {
-                    unreachable!("a store resolves to a store")
+                    unreachable!("a mapped write resolves to a mapped write")
                 };
-                Step::MapStore { file, at, data, private }
+                Step::MapWrite { file, at, data, private }
             }
             Op::Direct { file, place, pages, data, write } => {
                 let at = place.resolve(self.size(file)) / PAGE * PAGE;
@@ -1147,7 +1153,7 @@ impl Model {
         }
     }
 
-    /// Where, and what, a store of `len` bytes of `data`'s at `place` of `file` stores: within the
+    /// Where, and what, a write of `len` bytes of `data`'s at `place` of `file` writes: within the
     /// file, wrapping round to its start, as much as it holds.
     fn within(&self, file: usize, place: Place, len: u64, data: u64) -> (u64, Vec<u8>) {
         let size = self.size(file);
@@ -1162,7 +1168,7 @@ impl Model {
             Step::Write { ref data, .. } | Step::DirectWrite { ref data, .. } => {
                 Ok(data.len() as u64)
             }
-            Step::Store { ref data, .. } | Step::MapStore { ref data, .. } => Ok(data.len() as u64),
+            Step::MappedWrite { ref data, .. } | Step::MapWrite { ref data, .. } => Ok(data.len() as u64),
             Step::Read { file, at, len } | Step::DirectRead { file, at, len } => {
                 Ok(read(file, at, len))
             }
@@ -1200,8 +1206,8 @@ impl Model {
     pub fn apply(&mut self, step: &Step) {
         match *step {
             Step::Write { file, at, ref data }
-            | Step::Store { file, at, ref data, .. }
-            | Step::MapStore { file, at, ref data, private: false }
+            | Step::MappedWrite { file, at, ref data, .. }
+            | Step::MapWrite { file, at, ref data, private: false }
             | Step::DirectWrite { file, at, ref data } => self.write(file, at, data),
             Step::Truncate { file, size } => self.truncate(file, size),
             Step::Punch { file, at, len } => self.punch(file, at, len),
@@ -1256,8 +1262,8 @@ impl Model {
         }
     }
 
-    /// cladefs: what FICLONERANGE of `len` bytes, or to the source's end if 0, at `src` of `from` onto
-    /// `dst` of `to` comes to, as the VFS checks it before a filesystem sees it, with no flags
+    /// cladefs: what FICLONERANGE of `len` bytes, or to the source's end if 0, at `src` of `from`
+    /// onto `dst` of `to` comes to, as the VFS checks it before a filesystem sees it, with no flags
     /// (fs/remap_range.c: generic_remap_file_range_prep, generic_remap_checks,
     /// generic_remap_check_len; and ioctl_file_clone): the bytes it clones, or EINVAL. FICLONE is
     /// one of the whole file, to 0. Blocks are pages, as Fxfs's, ext4's and XFS's are here.
@@ -1295,9 +1301,9 @@ impl Model {
         Ok(count)
     }
 
-    /// cladefs: what copy_file_range of `len` bytes at `src` of `from` to `dst` of `to` comes to, as
-    /// the VFS checks it (fs/read_write.c: generic_copy_file_checks), however many calls it takes:
-    /// what lies within the source, or EINVAL for ranges of one file that overlap.
+    /// cladefs: what copy_file_range of `len` bytes at `src` of `from` to `dst` of `to` comes to,
+    /// as the VFS checks it (fs/read_write.c: generic_copy_file_checks), however many calls it
+    /// takes: what lies within the source, or EINVAL for ranges of one file that overlap.
     pub fn copy_range(&self, from: usize, src: u64, to: usize, dst: u64, len: u64) -> Outcome {
         let count = len.min(self.size(from).saturating_sub(src));
         if from == to && dst + count > src && dst < src + count {
@@ -1389,8 +1395,8 @@ impl Model {
         }
     }
 
-    /// What a clone refused for lack of room left: a clone is many transactions, and what it got
-    /// to stands (cladefs_data_remap_file_range), its blocks in order, which `got`, `to` as it reads
+    /// What a clone refused for lack of room left: a clone is many transactions, and what it got to
+    /// stands (cladefs_data_remap_file_range), its blocks in order, which `got`, `to` as it reads
     /// now, says the extent of. Fails with the size if that's no size the clone could have reached.
     fn clone_stopped_short(&mut self, from: usize, to: usize, got: &[u8]) -> Result<(), String> {
         let (before, source) = (self.files[to].len(), self.files[from].clone());
@@ -1417,8 +1423,8 @@ impl Model {
 
 /// cladefs: the largest file a filesystem holds, its superblock's `s_maxbytes`: the VFS's own
 /// (MAX_LFS_FILESIZE), as XFS's and Fxfs's without a DAX window are; Fxfs's with one, a chunk short
-/// of the VFS's (cladefs_vfs_fill_super); and ext4's of blocks of `block` bytes, its extents' 32-bit
-/// block numbers' (ext4_max_size).
+/// of the VFS's (cladefs_vfs_fill_super); and ext4's of blocks of `block` bytes, its extents'
+/// 32-bit block numbers' (ext4_max_size).
 pub const LARGEST: u64 = i64::MAX as u64;
 pub const LARGEST_DAX: u64 = LARGEST / CHUNK * CHUNK;
 pub const fn largest_ext4(block: u64) -> u64 {
@@ -1450,12 +1456,12 @@ pub fn kill_index(seed: u64, len: usize) -> usize {
     1 + Rng::new(seed ^ 0x6b69_6c6c_6564).next(len.max(2) as u64 - 1) as usize
 }
 
-/// cladefs: what a file may hold after its VM is killed, as of the operations done (TASK-149.2): the
-/// sizes it had since its last fsync, and of each of its pages, the contents it had since then,
+/// cladefs: what a file may hold after its VM is killed, as of the operations done (TASK-149.2):
+/// the sizes it had since its last fsync, and of each of its pages, the contents it had since then,
 /// past its end reading zeros. Writeback writes pages as they are when it takes them, and a kill
-/// keeps what it wrote, so that each page, and the size, may be of a state of its own. Kept page
-/// by page, not state by state: a file that isn't synced for thousands of operations had thousands
-/// of states of megabytes.
+/// keeps what it wrote, so that each page, and the size, may be of a state of its own. Kept page by
+/// page, not state by state: a file that isn't synced for thousands of operations had thousands of
+/// states of megabytes.
 #[derive(Clone, Debug, Default)]
 pub struct Survivals {
     sizes: std::collections::BTreeSet<u64>,
@@ -1525,9 +1531,9 @@ impl Survivals {
 /// cladefs: what an operation a full volume refused came to, where it isn't what the model says of
 /// it done whole, which a killed run's guest says for the host to replay (TASK-149.2): the file it
 /// changes, as long as `len`, reading as the operation done whole has it over `ranges`, and as it
-/// was elsewhere, as a write or a child's store cut short, a clone that stopped, and a truncate or
-/// punch that got part way leave it ([`Model::stopped_short`]); or, of an fsync refused, nothing
-/// made durable.
+/// was elsewhere, as a write or a child's mapped write cut short, a clone that stopped, and a
+/// truncate or punch that got part way leave it ([`Model::stopped_short`]); or, of an fsync
+/// refused, nothing made durable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Partial {
     Reached { len: u64, ranges: Vec<(u64, u64)> },
@@ -1628,7 +1634,7 @@ pub fn survivals(
             Op::Read { .. } | Op::Check | Op::Fsync { .. } => Vec::new(),
             Op::Write { file, .. }
             | Op::Append { file, .. }
-            | Op::Store { file, .. }
+            | Op::MappedWrite { file, .. }
             | Op::Truncate { file, .. }
             | Op::Punch { file, .. } => vec![file],
             Op::Clone { to, .. } => vec![to],
@@ -1782,8 +1788,8 @@ pub fn shrink_failure(
 mod tests {
     use super::*;
 
-    /// cladefs: after a kill, a file holds a size it had since its last fsync, and each page as one of
-    /// its states since then had it, which may be of different states; not what it held before
+    /// cladefs: after a kill, a file holds a size it had since its last fsync, and each page as one
+    /// of its states since then had it, which may be of different states; not what it held before
     /// that fsync, nor bytes no state held, nor a size none had. A file the kill lost the creation
     /// of is empty (TASK-149.2).
     #[test]
@@ -1895,8 +1901,8 @@ mod tests {
             let kind = match op {
                 Op::Write { .. } => "write",
                 Op::Append { .. } => "append",
-                Op::Store { child: false, .. } => "store",
-                Op::Store { child: true, .. } => "fork",
+                Op::MappedWrite { child: false, .. } => "mapped write",
+                Op::MappedWrite { child: true, .. } => "fork",
                 Op::Read { .. } => "read",
                 Op::Truncate { .. } => "truncate",
                 Op::Punch { .. } => "punch",
@@ -1911,8 +1917,8 @@ mod tests {
                 Op::Allocate { .. } => "allocate",
                 Op::Msync { .. } => "msync",
                 Op::Fdatasync { .. } => "fdatasync",
-                Op::MapStore { private: false, .. } => "map store",
-                Op::MapStore { private: true, .. } => "private store",
+                Op::MapWrite { private: false, .. } => "map write",
+                Op::MapWrite { private: true, .. } => "private write",
                 Op::Direct { write: true, .. } => "direct write",
                 Op::Direct { write: false, .. } => "direct read",
                 Op::Drop { .. } => "drop",
@@ -1920,8 +1926,8 @@ mod tests {
                 Op::Limit { .. } => "limit",
                 Op::Far { .. } => "far",
                 Op::MapOdd { .. } => "map oddly",
-                Op::MapFixed { .. } => "fixed map store",
-                Op::Mremap { .. } => "remapped store",
+                Op::MapFixed { .. } => "fixed map write",
+                Op::Mremap { .. } => "remapped write",
                 Op::Madvise { remove: false, .. } => "dontneed",
                 Op::Madvise { remove: true, .. } => "remove",
                 Op::TruncateRacing { .. } => "truncate racing",
@@ -1963,9 +1969,9 @@ mod tests {
         );
     }
 
-    /// random_ops's mix, as test_random_ops drew it: of 3000, 5 in 17 writes (882), 4 stores (706),
-    /// 3 reads (529), 2 fsyncs (353) and one each (176) of truncations, punches and appends, and a
-    /// check every 256 operations.
+    /// random_ops's mix, as test_random_ops drew it: of 3000, 5 in 17 writes (882), 4 mapped
+    /// writes (706), 3 reads (529), 2 fsyncs (353) and one each (176) of truncations, punches and
+    /// appends, and a check every 256 operations.
     #[test]
     fn one_files_mix_is_random_opss() {
         let script = generate(1, ONE_FILE);
@@ -1975,7 +1981,7 @@ mod tests {
             ("fsync", 368),
             ("punch", 180),
             ("read", 525),
-            ("store", 696),
+            ("mapped write", 696),
             ("truncate", 174),
             ("write", 887),
         ]);
@@ -1994,7 +2000,7 @@ mod tests {
             ("fsync", 343),
             ("punch", 184),
             ("read", 545),
-            ("store", 670),
+            ("mapped write", 670),
             ("truncate", 153),
             ("write", 920),
         ]);
@@ -2038,7 +2044,7 @@ mod tests {
     }
 
     /// Any subset of a script resolves: the model never reaches past what a file may hold, and no
-    /// store past a file's end.
+    /// write past a file's end.
     #[test]
     fn any_subset_of_a_script_resolves() {
         for (mix, seed) in [(SEVERAL_FILES, 11), (WIDE, 11), (WIDE, 12), (HOSTILE, 11)] {
@@ -2048,8 +2054,8 @@ mod tests {
                 let mut model = Model::new(mix.files);
                 for op in script.iter().filter(|_| rng.next(keep_one_in) == 0) {
                     let step = model.resolve(op);
-                    if let Step::Store { file, at, data, .. }
-                    | Step::MapStore { file, at, data, .. }
+                    if let Step::MappedWrite { file, at, data, .. }
+                    | Step::MapWrite { file, at, data, .. }
                     | Step::MapFixed { file, at, data, .. }
                     | Step::Mremap { file, at, data }
                     | Step::ProtectKept { file, at, data }
@@ -2098,18 +2104,18 @@ mod tests {
     }
 
     #[test]
-    fn a_store_on_an_empty_file_stores_nothing() {
-        let op = Op::Store { file: 0, place: Place::At(100), len: 10, data: 1, child: true };
+    fn a_mapped_write_on_an_empty_file_writes_nothing() {
+        let op = Op::MappedWrite { file: 0, place: Place::At(100), len: 10, data: 1, child: true };
         let step = Model::new(1).resolve(&op);
-        assert_eq!(step, Step::Store { file: 0, at: 0, data: Vec::new(), child: true });
+        assert_eq!(step, Step::MappedWrite { file: 0, at: 0, data: Vec::new(), child: true });
     }
 
     #[test]
-    fn a_store_wraps_within_the_file() {
+    fn a_mapped_write_wraps_within_the_file() {
         let mut model = Model::new(1);
         model.truncate(0, 1000);
-        let op = Op::Store { file: 0, place: Place::At(1900), len: 500, data: 1, child: false };
-        let Step::Store { at, data, .. } = model.resolve(&op) else { panic!("a store") };
+        let op = Op::MappedWrite { file: 0, place: Place::At(1900), len: 500, data: 1, child: false };
+        let Step::MappedWrite { at, data, .. } = model.resolve(&op) else { panic!("a mapped write") };
         assert_eq!((at, data.len()), (900, 100));
     }
 
@@ -2253,8 +2259,9 @@ mod tests {
         assert_eq!(model.outcome(&Step::Truncate { file: 0, size: 1 }), Ok(0));
     }
 
-    /// The wide mix's places resolve as its operations need: direct I/O and msyncs at pages' starts,
-    /// aligned clones in whole blocks, a clone to the end landing where the file it makes fits.
+    /// The wide mix's places resolve as its operations need: direct I/O and msyncs at pages'
+    /// starts, aligned clones in whole blocks, a clone to the end landing where the file it makes
+    /// fits.
     #[test]
     fn wide_operations_resolve_to_what_they_need() {
         let mut model = Model { files: vec![vec![1; 3 * PAGE as usize + 7], vec![]] };
@@ -2284,16 +2291,16 @@ mod tests {
             panic!("a clone to the end")
         };
         assert_eq!(dst, PAGE);
-        let store =
-            Op::MapStore { file: 0, place: Place::At(MOST + 5), len: 10, data: 1, private: true };
-        let Step::MapStore { at, data, private: true, .. } = model.resolve(&store) else {
-            panic!("a private store")
+        let write =
+            Op::MapWrite { file: 0, place: Place::At(MOST + 5), len: 10, data: 1, private: true };
+        let Step::MapWrite { at, data, private: true, .. } = model.resolve(&write) else {
+            panic!("a private write")
         };
         assert_eq!((at, data.len()), (MAX - 1, 10));
     }
 
     /// The wide mix: of 3000, half again as many kinds as random_ops', in their proportions, the
-    /// clones and stores by a child as fxfs-guest-script's, and none of its own lost to another.
+    /// clones and writes by a child as fxfs-guest-script's, and none of its own lost to another.
     #[test]
     fn the_wide_mix_adds_to_several_files() {
         let script = generate(1, WIDE);
@@ -2312,13 +2319,13 @@ mod tests {
             ("fdatasync", 90),
             ("fork", 197),
             ("fsync", 179),
-            ("map store", 103),
+            ("map write", 103),
             ("msync", 95),
-            ("private store", 91),
+            ("private write", 91),
             ("punch", 78),
             ("read", 279),
             ("reopen", 103),
-            ("store", 359),
+            ("mapped write", 359),
             ("truncate", 198),
             ("write", 501),
             ("zero", 85),
@@ -2356,22 +2363,22 @@ mod tests {
             ("far", 46),
             ("faulting write", 108),
             ("fdatasync", 94),
-            ("fixed map store", 55),
+            ("fixed map write", 55),
             ("fork", 179),
             ("fsync", 190),
             ("limit", 110),
             ("map oddly", 62),
-            ("map store", 97),
+            ("map write", 97),
             ("move kept", 56),
             ("msync", 99),
-            ("private store", 80),
+            ("private write", 80),
             ("protect kept", 54),
             ("punch", 95),
             ("read", 277),
-            ("remapped store", 48),
+            ("remapped write", 48),
             ("remove", 24),
             ("reopen", 90),
-            ("store", 357),
+            ("mapped write", 357),
             ("truncate", 184),
             ("truncate racing", 52),
             ("write", 475),
@@ -2383,8 +2390,8 @@ mod tests {
     }
 
     /// Arguments no well-behaved caller passes, refused by the VFS before any filesystem sees them
-    /// (rw_verify_area, ksys_pwrite64, do_ftruncate, vfs_fallocate, remap_verify_area), or
-    /// nothing done: a read near i64's end past the largest file, a copy from past the source's end.
+    /// (rw_verify_area, ksys_pwrite64, do_ftruncate, vfs_fallocate, remap_verify_area), or nothing
+    /// done: a read near i64's end past the largest file, a copy from past the source's end.
     #[test]
     fn calls_past_i64_are_refused_as_the_vfs_refuses_them() {
         let model = Model { files: vec![vec![1; 100]] };
@@ -2488,10 +2495,10 @@ mod tests {
         );
     }
 
-    /// A truncation racing a store leaves the store, below the size it went down to, and zeros
+    /// A truncation racing a write leaves the write, below the size it went down to, and zeros
     /// between that and the size it came back to.
     #[test]
-    fn a_truncation_racing_a_store_leaves_the_store_and_zeros_past_its_size() {
+    fn a_truncation_racing_a_write_leaves_the_write_and_zeros_past_its_size() {
         let mut model = Model { files: vec![vec![1; 100]] };
         let op = Op::TruncateRacing { file: 0, size: 50, place: Place::At(140), len: 30, data: 2 };
         let step = model.resolve(&op);

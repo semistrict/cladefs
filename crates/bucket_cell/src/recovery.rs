@@ -8,9 +8,9 @@
 //!
 //! A cell's state is what its head names (doc-7, The head; TASK-407): its newest checkpoint, or,
 //! with none, its parent's state where it was forked, then the footers of the segments the head
-//! names after it, in order: read by their objects' tails, which hold them, many at once, every
-//! key known. Each key is written once, so that what a reader reads at it is the one object it
-//! names, ever. cladefs: a commit may span segments, each naming its runs of it, which a reader holds
+//! names after it, in order: read by their objects' tails, which hold them, many at once, every key
+//! known. Each key is written once, so that what a reader reads at it is the one object it names,
+//! ever. cladefs: a commit may span segments, each naming its runs of it, which a reader holds
 //! until the segment ending it ([`Begun`], TASK-92.41): a head names whole commits alone. A state
 //! recovered is recovered on by the segments the head names since ([`recover_on`]): a writer's,
 //! once it holds the head, from what it found before.
@@ -20,8 +20,8 @@
 //! head again: if it changed, a newer checkpoint may cover what went, and the reader starts again.
 //!
 //! cladefs: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
-//! checkpoints are checked against their MACs under the keys it holds, and one whose encrypt says the
-//! clear is corrupt (TASK-411.28). The collector's holds none, reading them as it did.
+//! checkpoints are checked against their MACs under the keys it holds, and one whose encrypt says
+//! the clear is corrupt (TASK-411.28). The collector's holds none, reading them as it did.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::keys::Ring;
@@ -35,10 +35,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use storage_device::ExtentId;
 
-/// What a cell holds as of a segment: where its extents are, `P`, and the rest of its state.
-/// One replay makes it, [`State::apply`], whoever reads the cell's history: its recovery, so its
-/// writers, its collector, its versions and its deletion; a writer acknowledging its segments; and a
-/// local store rebuilding it from the footers of its closed segments (TASK-165.3). Each places the
+/// What a cell holds as of a segment: where its extents are, `P`, and the rest of its state. One
+/// replay makes it, [`State::apply`], whoever reads the cell's history: its recovery, so its
+/// writers, its collector, its versions and its deletion; a writer acknowledging its segments; and
+/// a local cell rebuilding it from the footers of its closed segments (TASK-165.3). Each places the
 /// extents as it keeps them ([`Places`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State<P = Extents> {
@@ -56,8 +56,8 @@ pub struct State<P = Extents> {
     /// The most bytes its extents may hold, as its last commit to set it set it, if one did: its
     /// own, or, before its first, its parent's at the fork (TASK-165.3).
     pub capacity: Option<u64>,
-    /// cladefs: the runs of the commit the segments applied last went on with, which a later segment
-    /// ends, if they did ([`Begun`], TASK-92.41): none in a state a head names, nor in any
+    /// cladefs: the runs of the commit the segments applied last went on with, which a later
+    /// segment ends, if they did ([`Begun`], TASK-92.41): none in a state a head names, nor in any
     /// checkpoint, as writers acknowledge only segments ending their commits.
     pub begun: Option<Begun>,
 }
@@ -159,15 +159,15 @@ impl<P: Places> State<P> {
         self.apply_contents(footer.segment, footer.epoch, &footer.contents);
     }
 
-    /// Applies `contents`, those of the cell's segment `segment`, of the writer of epoch
-    /// `epoch`: what its commits sealed, where they sealed it, then what they freed; the root they
-    /// set, their last commit, the cell's next sequence number, the largest named, and the
-    /// capacity they set. Every free of the cell's own extents spends it, as
-    /// the store that freed it spent it: a footer frees only what a commit held, not what was
-    /// freed while open (TASK-160.15), and one sealed and freed within the segment is a free and no
-    /// seal (TASK-165.3). cladefs: first, the runs of a commit the segments before began ([`Begun`]),
-    /// if this one ends it, or holding them on if it goes on with it; then, after its own, holding
-    /// those of the commit it goes on with, if any (TASK-92.41).
+    /// Applies `contents`, those of the cell's segment `segment`, of the writer of epoch `epoch`:
+    /// what its commits sealed, where they sealed it, then what they freed; the root they set,
+    /// their last commit, the cell's next sequence number, the largest named, and the capacity they
+    /// set. Every free of the cell's own extents spends it, as the cell that freed it spent it: a
+    /// footer frees only what a commit held, not what was freed while open (TASK-160.15), and one
+    /// sealed and freed within the segment is a free and no seal (TASK-165.3). cladefs: first, the
+    /// runs of a commit the segments before began ([`Begun`]), if this one ends it, or holding them
+    /// on if it goes on with it; then, after its own, holding those of the commit it goes on with,
+    /// if any (TASK-92.41).
     pub fn apply_contents(&mut self, segment: u64, epoch: u64, contents: &Contents) {
         let key = layout::segment(self.cell, segment, epoch);
         match self.begun.take() {
@@ -177,7 +177,7 @@ impl<P: Places> State<P> {
                 }
             }
             Some(begun) if contents.continues(begun.commit) => self.begun = Some(begun),
-            // Never ended: a writer's, never acknowledged. A head names none such: a store's
+            // Never ended: a writer's, never acknowledged. A head names none such: a cell's
             // replay of its own segments, closed again, may (wal::recover).
             Some(_) | None => {}
         }
@@ -381,9 +381,9 @@ pub async fn recover_under(
 }
 
 /// cladefs: the state of `cell` as [`recover_under`] finds it, starting from `head`, what a read of
-/// its head found, rather than a read of its own (TASK-449): as an opening store reads its head at
-/// once with its record, and a store at a version knows it has none. The head read before is as good as
-/// one read now: it names what the cell held as of that read, the recovery is of that, and
+/// its head found, rather than a read of its own (TASK-449): as an opening cell reads its head at
+/// once with its record, and a cell at a version knows it has none. The head read before is as good
+/// as one read now: it names what the cell held as of that read, the recovery is of that, and
 /// whatever takes the cell after goes on from what is there then (`Writer::take`). Something it
 /// names gone, it starts again from a read of the head, as [`recover_under`] does.
 pub async fn recover_under_from(
@@ -606,14 +606,15 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
         }
     }
 
-    /// The state the checkpoint `listed` of `cell` holds, if it is there ([`Checkpoints::read_key`]).
+    /// The state the checkpoint `listed` of `cell` holds, if it is there
+    /// ([`Checkpoints::read_key`]).
     async fn read(&self, listed: &Meta, cell: CellId) -> Result<Option<Arc<State>>, Error> {
         self.read_key(&listed.key, cell).await
     }
 
-    /// The state the checkpoint at `key` of `cell` holds, if it is there: read now, or by the
-    /// read of it in flight or kept, or as the bucket decoded it before ([`Bucket::decoded`]), by
-    /// its key alone, written once (TASK-407). One gone, or that failed, is read anew the next time.
+    /// The state the checkpoint at `key` of `cell` holds, if it is there: read now, or by the read
+    /// of it in flight or kept, or as the bucket decoded it before ([`Bucket::decoded`]), by its
+    /// key alone, written once (TASK-407). One gone, or that failed, is read anew the next time.
     async fn read_key(&self, key: &str, cell: CellId) -> Result<Option<Arc<State>>, Error> {
         let flight = {
             let mut read = self.read.lock().unwrap();
@@ -665,12 +666,12 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
 /// state's extents are a persistent map, which a recovery starting from it takes for nothing; the
 /// last [`Decoded::KEEP`] decoded are kept: those the forks being opened start from (TASK-92.55).
 ///
-/// cladefs: and every state decoded that something still holds, as an open store holds the one it
+/// cladefs: and every state decoded that something still holds, as an open cell holds the one it
 /// started from ([`Recovered::layer`]), however many were decoded since (TASK-453): the forks of a
 /// base opened after it find it, and share it, while one is open. And a state decoded anew shares
 /// what it holds alike with the state held still that has the most of its extents' cells' in
 /// common with it, its map made of that one's, changed where it differs ([`rebased`]): the
-/// checkpoints a live store's writer writes for each of its forks hold the same extents, and a
+/// checkpoints a live cell's writer writes for each of its forks hold the same extents, and a
 /// fork's own checkpoint, as it opens again, its base's but its own, each decoded apart a copy of
 /// them all, 230 bytes an extent a fork (TASK-443.2). What they hold, each map once, and each made
 /// of another held still by what it changed ([`Changes`]), it says ([`Decoded::held`]), which the
@@ -742,7 +743,7 @@ pub const ENTRY_BYTES: u64 = 512;
 /// side by side share one path; scattered, each copies its own: measured 1.9-2.1 KB a change,
 /// every 32nd entry of 32,768 changed (`bench_fork_extent_memory`, TASK-453), and bounded at every
 /// spacing and size by `tests::changes_bound_what_maps_made_of_others_copy`. What
-/// [`Changes::bytes`], and local_cell's count of what its stores' writers change of the maps
+/// [`Changes::bytes`], and local_cell's count of what its cells' writers change of the maps
 /// they share, count each run as.
 pub const RUN_BYTES: u64 = 4096;
 
@@ -787,8 +788,9 @@ impl Decoded {
     }
 
     /// Keeps `state`, which the checkpoint at `key` holds, just decoded: its extents made of the
-    /// most alike of the states others hold still, if one is alike ([`rebased`]). Returns it, or the
-    /// one at `key` another decoded meanwhile, if one did. Made holding no lock: one walk of both.
+    /// most alike of the states others hold still, if one is alike ([`rebased`]). Returns it, or
+    /// the one at `key` another decoded meanwhile, if one did. Made holding no lock: one walk of
+    /// both.
     fn keep(&self, key: &str, mut state: State) -> Arc<State> {
         let cells = cells_of(&state.extents);
         let alike = {
@@ -1001,8 +1003,8 @@ async fn attempt<B: Bucket>(
 }
 
 /// `recovered`, the segments its head names from `from` on applied, read by their tails,
-/// [`AT_ONCE`] at most at once, holding `keys`. One gone, the head is read again: changed, a checkpoint newer may
-/// cover it, and the recovery starts again; else what it names is lost.
+/// [`AT_ONCE`] at most at once, holding `keys`. One gone, the head is read again: changed, a
+/// checkpoint newer may cover it, and the recovery starts again; else what it names is lost.
 async fn follow<B: Bucket>(
     (bucket, keys): (&B, &Ring),
     recovered: &mut Recovered<Layers>,
@@ -1652,8 +1654,8 @@ mod tests {
         assert_eq!(rounds, [checkpoint, vec![tail(3)]]);
     }
 
-    /// cladefs: a commit spanning segments (TASK-92.41): the runs each segment going on with it names
-    /// are sealed, where they are, once the segment ending it is applied, and not before; its
+    /// cladefs: a commit spanning segments (TASK-92.41): the runs each segment going on with it
+    /// names are sealed, where they are, once the segment ending it is applied, and not before; its
     /// writer acknowledges none of its segments until then, and no head names them. A writer taking
     /// the cell with a commit begun, its segments landed, finds none of it: the head names whole
     /// commits alone, the next writer's state and recovery's agreeing.
@@ -1727,9 +1729,9 @@ mod tests {
         });
     }
 
-    /// TASK-165.3: a cell's capacity is its state, set by its commits, recovered from its
-    /// segments and its checkpoints wherever it is taken; a fork's child has its parent's at the
-    /// fork, until it sets its own, and a version keeps it as it was, whatever the parent sets after.
+    /// TASK-165.3: a cell's capacity is its state, set by its commits, recovered from its segments
+    /// and its checkpoints wherever it is taken; a fork's child has its parent's at the fork, until
+    /// it sets its own, and a version keeps it as it was, whatever the parent sets after.
     #[test]
     fn capacities_are_set_by_commits() {
         futures::executor::block_on(async {

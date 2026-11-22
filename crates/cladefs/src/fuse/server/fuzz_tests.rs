@@ -8,11 +8,11 @@
 //!
 //! Valid requests are of every opcode the server serves, on names of a few, the root, nodes the
 //! kernel holds, nodes it forgot and nodes it never had, directory handles open, released and never
-//! given, with offsets, sizes, modes and times of every kind, forgets of more lookups than are held.
-//! Malformed ones are valid ones made wrong: their header's length short of a header or past the
-//! request, their body cut short of its message, a name without its NUL, bytes after the last name,
-//! a write's or an extended attribute's size not its data's; or bodies of random bytes, and opcodes
-//! the protocol hasn't.
+//! given, with offsets, sizes, modes and times of every kind, forgets of more lookups than are
+//! held. Malformed ones are valid ones made wrong: their header's length short of a header or past
+//! the request, their body cut short of its message, a name without its NUL, bytes after the last
+//! name, a write's or an extended attribute's size not its data's; or bodies of random bytes, and
+//! opcodes the protocol hasn't.
 //!
 //! Each request is checked:
 //!
@@ -28,7 +28,7 @@
 //!   replies gave it less those it forgot, each node the one its ID names; the directories open, by
 //!   handle.
 //!
-//! At the end, `DESTROY` unmounts the filesystem, and its store is checked (fsck).
+//! At the end, `DESTROY` unmounts the filesystem, and its cell is checked (fsck).
 //!
 //! Seeded and shrunk by proptest: `CLADEFS_FUSE_FUZZ_CASES` cases (256 by default), from
 //! `PROPTEST_RNG_SEED`'s seed if set.
@@ -906,7 +906,7 @@ fn check_tables(server: &Server, model: &Model) -> Result<(), String> {
 }
 
 /// Sends `sent` in turn to a new server, checking each reply and the tables after it; then
-/// DESTROY, and checks the store.
+/// DESTROY, and checks the cell.
 fn fuzz(sent: &[Sent]) -> Result<(), String> {
     block_on(async {
         let fs = Filesystem::format(crate::Storage::memory(STORAGE_SIZE)).await.unwrap();
@@ -971,7 +971,7 @@ fn fuzz(sent: &[Sent]) -> Result<(), String> {
             .close()
             .await
             .map_err(|error| format!("closing: {error:#}"))?;
-        storage.check().await.map_err(|error| format!("the store is not whole: {error:#}"))?;
+        storage.check().await.map_err(|error| format!("the cell is not whole: {error:#}"))?;
         Ok(())
     })
 }

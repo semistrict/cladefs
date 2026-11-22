@@ -5,15 +5,14 @@
 //! cladefs TASK-111.4: `cladefsctl stats --json` takes the stats of one moment, what the extent
 //! daemon, a live VM's process and its guest counted, each with the commit it was built of.
 //!
-//! The host boots the guest kernel with an extent-store device with a DAX window, on a new store,
+//! The host boots the guest kernel with an extent-store device with a DAX window, on a new cell,
 //! which the guest formats as it mounts it. The guest writes a file, durably, and reads it through
-//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/cladefs/extents), asks the host
-//! over vsock for the stats, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN) against
-//! the daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`), and checks
-//! it:
-//! the daemon's build and the VM process's, one commit; the VM's store, answered, its window's
-//! mappings and its host mappings within their budget; its guest's build, a commit, and its
-//! counters, each between what the guest read before asking and after, which the host's answer
+//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/cladefs/extents), asks the
+//! host over vsock for the stats, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN)
+//! against the daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`),
+//! and checks it: the daemon's build and the VM process's, one commit; the VM's cell, answered, its
+//! window's mappings and its host mappings within their budget; its guest's build, a commit, and
+//! its counters, each between what the guest read before asking and after, which the host's answer
 //! tells it. The second taking is later than the first, and counts the guest's writes since.
 
 use macros::{guest, host};
@@ -21,7 +20,7 @@ use macros::{guest, host};
 pub struct TestFxfsGuestStats;
 
 const MIB: u64 = 1 << 20;
-/// The store's capacity.
+/// The cell's capacity.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const CAPACITY: u64 = 256 * MIB;
 /// The DAX window, as large as the data ([`crate::common::dax_window`]).
@@ -75,16 +74,16 @@ mod host {
     }
 
     /// Checks the stats `json` hold the daemon's and the VM process's builds, one commit, and
-    /// the VM's store, at `store`, its process's and its guest's counters; and returns those of its
-    /// guest's `asked` names, and when it was taken.
-    fn check(json: &Value, store: &Path, asked: &[&str]) -> anyhow::Result<(Vec<u64>, u64)> {
+    /// the VM's cell, at `cell_dir`, its process's and its guest's counters; and returns those of
+    /// its guest's `asked` names, and when it was taken.
+    fn check(json: &Value, cell_dir: &Path, asked: &[&str]) -> anyhow::Result<(Vec<u64>, u64)> {
         let build = json["cladefsd"]["build"].as_str().context("the daemon's build")?;
         ensure!(is_commit(build), "the daemon's build: {build:?}");
         ensure!(json["cladefsd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
         let vms = json["vms"].as_array().context("vms")?;
         let vm = (vms.iter())
-            .find(|vm| vm["path"].as_str().map(PathBuf::from).as_deref() == Some(store))
-            .with_context(|| format!("no VM of {}", store.display()))?;
+            .find(|vm| vm["path"].as_str().map(PathBuf::from).as_deref() == Some(cell_dir))
+            .with_context(|| format!("no VM of {}", cell_dir.display()))?;
         ensure!(vm["follower"] == false, "a writer: {vm}");
         ensure!(vm["answered"] == true, "it answered: {vm}");
         ensure!(vm["vmm"]["build"].as_str() == Some(build), "the VM process's build: {vm}");
@@ -111,12 +110,12 @@ mod host {
     fn takings(
         listener: UnixListener,
         cladefsd: &Path,
-        store: &Path,
+        cell_dir: &Path,
         dir: &Path,
     ) -> anyhow::Result<()> {
         let (stream, _) = listener.accept()?;
         let mut answers = stream.try_clone()?;
-        let store = store.canonicalize()?;
+        let cell_dir = cell_dir.canonicalize()?;
         let mut taken_before = 0;
         for (round, line) in BufReader::new(stream).lines().enumerate() {
             let line = line?;
@@ -131,7 +130,7 @@ mod host {
                 std::fs::write(dir.join(format!("stats-{}.json", round + 1)), &text)?;
                 eprintln!("cladefsctl stats --json, taking {}:\n{text}", round + 1);
                 let names: Vec<&str> = read.iter().map(|(name, _)| *name).collect();
-                let (counters, taken) = check(&json, &store, &names)?;
+                let (counters, taken) = check(&json, &cell_dir, &names)?;
                 ensure!(taken > taken_before, "taken at {taken}, before {taken_before}");
                 taken_before = taken;
                 for ((name, before), counted) in read.iter().zip(&counters) {
@@ -168,13 +167,13 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let store = test_setup.tmp_dir.join("extents");
+            let cell_dir = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let cladefsd =
                 PathBuf::from(std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"));
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.cell("extents", &store, CAPACITY, crate::common::dax_window(WINDOW)?)?;
+            vm.cell("extents", &cell_dir, CAPACITY, crate::common::dax_window(WINDOW)?)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-stats-{}.vsock", std::process::id()));
@@ -183,7 +182,7 @@ mod host {
             let dir = test_setup.tmp_dir.clone();
             std::thread::spawn(move || {
                 // Created as the guest mounts it, before it asks.
-                if let Err(err) = takings(listener, &cladefsd, &store, &dir) {
+                if let Err(err) = takings(listener, &cladefsd, &cell_dir, &dir) {
                     eprintln!("stats: {err:#}");
                 }
             });

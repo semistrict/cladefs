@@ -4,7 +4,7 @@
 
 //! The simulation (backlog doc-8, testing 3): the writer makes random operations on an extent
 //! store's filesystem, syncing and compacting now and then; a follower, Fxfs mounted read-only on
-//! a view of the store, follows it (`FxFilesystem::follow`, TASK-42.4); readers read files through
+//! a view of the cell, follows it (`FxFilesystem::follow`, TASK-42.4); readers read files through
 //! the follower, and holders hold files open through it, reading them as the writer goes on. Every
 //! interleaving of their tasks is Shuttle's to choose. Then:
 //!
@@ -37,7 +37,7 @@ use fxfs::lsm_tree::Query;
 use fxfs::lsm_tree::types::{ItemRef, LayerIterator};
 use fxfs::object_store::directory::Directory;
 use fxfs::object_store::{ExtentValue, HandleOptions, ObjectDescriptor, ObjectStore, ObjectValue};
-use local_cell::{Description, LocalCell, MemDir, Options as StoreOptions, View};
+use local_cell::{Description, LocalCell, MemDir, Options as CellOptions, View};
 use shuttle::rand::{Rng, thread_rng};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -76,8 +76,8 @@ pub enum Mutation {
 }
 
 /// Mounts Fxfs read-only on `view`: the checker's own mount of a commit.
-async fn mount(store: &Arc<LocalCell<MemDir>>, view: View) -> Arc<OpenFxFilesystem> {
-    let device = DeviceHolder::new(ViewDevice::new(store.clone(), view));
+async fn mount(cell: &Arc<LocalCell<MemDir>>, view: View) -> Arc<OpenFxFilesystem> {
+    let device = DeviceHolder::new(ViewDevice::new(cell.clone(), view));
     let fs = FxFilesystemBuilder::new().read_only(true).open(device).await.expect("mount failed");
     Arc::new(fs)
 }
@@ -292,7 +292,7 @@ fn check_changes(
 /// commit, and its changes with what changed: but for the records of objects holders held, if
 /// `excluding_held`. Only this task applies batches, so its own reads of the follower need no
 /// validating.
-async fn follow(follower: &Follower, store: &Arc<LocalCell<MemDir>>, excluding_held: bool) {
+async fn follow(follower: &Follower, cell: &Arc<LocalCell<MemDir>>, excluding_held: bool) {
     let fs = &follower.fs;
     let before = tree(fs).await;
     let changes = follower.protocol.batch(follower).await.expect("following failed");
@@ -303,7 +303,7 @@ async fn follow(follower: &Follower, store: &Arc<LocalCell<MemDir>>, excluding_h
         let view = follower.view.lock();
         (view.commit(), view.duplicate().expect("duplicating the follower's view failed"))
     };
-    let oracle = mount(store, view).await;
+    let oracle = mount(cell, view).await;
     let after = compare(fs, &oracle, commit, &excluded).await;
     assert_eq!(
         fs.allocator().get_allocated_bytes(),
@@ -356,21 +356,21 @@ pub async fn simulate(profile: Profile) {
         _ => fxfs::follower::Rules::ALL,
     });
     let description = Description { block_size: 4096, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
-    let store = Arc::new(store);
-    let writer = Writer::new(store.clone()).await;
+    let cell = LocalCell::create(MemDir::new(), description, CellOptions::default()).unwrap();
+    let cell = Arc::new(cell);
+    let writer = Writer::new(cell.clone()).await;
     writer.apply(Op::Sync).await;
     let history = Arc::new(Mutex::new(History::new()));
-    history.lock().synced(store.last_commit().unwrap());
+    history.lock().synced(cell.last_commit().unwrap());
 
     // The follower, mounted on the commit the writer made first, and the checker's mount of it.
     let follower = {
-        let view = store.view();
+        let view = cell.view();
         let commit = view.commit();
-        let first = mount(&store, view.duplicate().unwrap()).await;
+        let first = mount(&cell, view.duplicate().unwrap()).await;
         let device = match profile.mutation {
-            Mutation::ReadsPastItsView => ViewDevice::reading_past_its_view(store.clone(), view),
-            _ => ViewDevice::new(store.clone(), view),
+            Mutation::ReadsPastItsView => ViewDevice::reading_past_its_view(cell.clone(), view),
+            _ => ViewDevice::new(cell.clone(), view),
         };
         let view = device.view();
         let device = DeviceHolder::new(device);
@@ -395,12 +395,12 @@ pub async fn simulate(profile: Profile) {
     let followed = Arc::new(AtomicBool::new(false));
 
     let following = {
-        let (store, follower, done) = (store.clone(), follower.clone(), done.clone());
+        let (cell, follower, done) = (cell.clone(), follower.clone(), done.clone());
         let followed = followed.clone();
         fasync::Task::spawn(async move {
             loop {
                 let last = done.load(Ordering::SeqCst);
-                follow(&follower, &store, true).await;
+                follow(&follower, &cell, true).await;
                 if last {
                     followed.store(true, Ordering::SeqCst);
                     return;
@@ -504,10 +504,10 @@ pub async fn simulate(profile: Profile) {
     let mut model = Model::new();
     for _ in 0..profile.operations {
         let op = Op::random(&model, &mut thread_rng());
-        let after = store.last_commit().unwrap();
+        let after = cell.last_commit().unwrap();
         let created = writer.apply(op).await;
         match op {
-            Op::Sync => history.lock().synced(store.last_commit().unwrap()),
+            Op::Sync => history.lock().synced(cell.last_commit().unwrap()),
             Op::Compact => {}
             _ => {
                 op.apply(&mut model, created);
@@ -516,7 +516,7 @@ pub async fn simulate(profile: Profile) {
         }
     }
     writer.apply(Op::Sync).await;
-    history.lock().synced(store.last_commit().unwrap());
+    history.lock().synced(cell.last_commit().unwrap());
     done.store(true, Ordering::SeqCst);
     following.await;
     for task in readers.into_iter().chain(holders) {
@@ -524,12 +524,12 @@ pub async fn simulate(profile: Profile) {
     }
 
     // With the holders done, the follower's next batch lets go of all it kept for them.
-    follow(&follower, &store, false).await;
+    follow(&follower, &cell, false).await;
     let pins = follower.view.lock().pinned();
     assert!(pins.is_empty(), "the follower pins {pins:?} with no file held");
 
     // A mount of the last commit holds what the writer's last operation left.
-    let last = mount(&store, store.view()).await;
+    let last = mount(&cell, cell.view()).await;
     for name in NAMES {
         let found = observe(&last, name).await;
         let expected = model.get(name).map(|file| file.contents);
@@ -574,9 +574,10 @@ mod tests {
     }
 
     /// Runs `profile`'s simulation under `scheduler`, once a run has warmed the process up: a
-    /// process's first run initializes what lives as long as the process (statics), taking Shuttle's locks then only, so that its schedules replay in no other
-    /// process, nor another's in it. After it, every run starts alike, and a failing run's
-    /// schedule replays exactly (`failing_schedules_replay`).
+    /// process's first run initializes what lives as long as the process (statics), taking
+    /// Shuttle's locks then only, so that its schedules replay in no other process, nor another's
+    /// in it. After it, every run starts alike, and a failing run's schedule replays exactly
+    /// (`failing_schedules_replay`).
     fn simulations(scheduler: impl Scheduler + 'static, config: Config, profile: Profile) {
         static WARM: std::sync::Once = std::sync::Once::new();
         WARM.call_once(|| {
@@ -587,10 +588,10 @@ mod tests {
         Runner::new(scheduler, config).run(run(profile));
     }
 
-    /// Reads of deleted files held open are rare under random schedules: 20 runs reached none in
-    /// CI on Linux (run 42178623463), though 40 of 40 batches reached one on macOS. Further batches of fresh random schedules
-    /// run until one does, up to `BATCHES`, so the check stays one of what the simulation
-    /// reaches rather than of one batch's luck.
+    /// Reads of deleted files held open are rare under random schedules: 20 runs reached none in CI
+    /// on Linux (run 42178623463), though 40 of 40 batches reached one on macOS. Further batches of
+    /// fresh random schedules run until one does, up to `BATCHES`, so the check stays one of what
+    /// the simulation reaches rather than of one batch's luck.
     #[test]
     fn followers_show_prefixes_randomly() {
         const BATCHES: usize = 5;
@@ -658,7 +659,7 @@ mod tests {
         });
     }
 
-    /// A failing schedule replays exactly (doc-8, testing 3): Fxfs, the store and the simulation
+    /// A failing schedule replays exactly (doc-8, testing 3): Fxfs, the cell and the simulation
     /// choose nothing but what Shuttle chooses, so a failure found once is found again, the same,
     /// from its schedule: each in a process of its own (`fails_alone`).
     #[test]

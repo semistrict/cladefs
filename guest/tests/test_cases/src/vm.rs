@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The VM an cladefs test boots: cladefs's Firecracker (vendor/firecracker, with its cladefs feature),
-//! as CLADEFS_FIRECRACKER names it, booting cladefs's guest kernel, which this process runs until it
-//! exits.
+//! The VM an cladefs test boots: cladefs's Firecracker (vendor/firecracker, with its cladefs
+//! feature), as CLADEFS_FIRECRACKER names it, booting cladefs's guest kernel, which this process
+//! runs until it exits.
 //!
 //! The root filesystem is an ext4 image of the root directory, on the first virtio-blk disk, and
 //! the guest agent is the guest's init (`guest_init`), which gets its environment and the test's
@@ -61,7 +61,8 @@ pub struct Vm {
     cpus: Vec<usize>,
     /// cladefs: the extent store whose Fxfs is the root filesystem, by its tag, if not an image.
     fxfs_root: Option<String>,
-    /// cladefs: a line of the guest agent's output at which the VM process is killed ([`Vm::kill_on`]).
+    /// cladefs: a line of the guest agent's output at which the VM process is killed
+    /// ([`Vm::kill_on`]).
     kill_on: Option<String>,
     /// cladefs: how the VM process is to exit ([`Vm::stops_with`]).
     stops_with: Option<i32>,
@@ -71,17 +72,17 @@ pub struct Vm {
     loops: Vec<LoopDevice>,
 }
 
-/// The guest kernel's command line, before the guest's environment and the test's name: the
-/// console on the serial port, saying what is a warning or worse (to the test's standard error:
+/// The guest kernel's command line, before the guest's environment and the test's name: the console
+/// on the serial port, saying what is a warning or worse (to the test's standard error:
 /// `split_console`); a reset on a panic, which ends the VM; and the guest agent as init. cladefs: a
-/// task blocked for 10 s says so, with its stack, on the console, before the runner's timeout
-/// kills a hung test (TASK-44.13); a soft lockup panics, printing every task's state first
-/// (panic_print's bit 0), runnable ones too: two vCPUs looping in the kernel starve the task they
-/// wait on, which no guest watchdog then runs to name, and the test waited for its timeout
-/// (TASK-113). It says what every CPU is doing before that, as the task holding what the stuck
-/// CPU waits for is on another, whose state the tasks' dump doesn't show (TASK-133). An oops
-/// panics too, as cladefs's kernel is configured to (cladefs.config), rather than leave the locks its
-/// task held held, and every CPU locked up on them (TASK-311).
+/// task blocked for 10 s says so, with its stack, on the console, before the runner's timeout kills
+/// a hung test (TASK-44.13); a soft lockup panics, printing every task's state first (panic_print's
+/// bit 0), runnable ones too: two vCPUs looping in the kernel starve the task they wait on, which
+/// no guest watchdog then runs to name, and the test waited for its timeout (TASK-113). It says
+/// what every CPU is doing before that, as the task holding what the stuck CPU waits for is on
+/// another, whose state the tasks' dump doesn't show (TASK-133). An oops panics too, as cladefs's
+/// kernel is configured to (cladefs.config), rather than leave the locks its task held held, and
+/// every CPU locked up on them (TASK-311).
 const CMDLINE: &str = "console=ttyS0 loglevel=5 reboot=k panic=-1 8250.nr_uarts=1 i8042.noaux i8042.nomux \
      i8042.dumbkbd sysctl.kernel.hung_task_timeout_secs=10 softlockup_panic=1 panic_print=0x1 \
      sysctl.kernel.softlockup_all_cpu_backtrace=1 init=/guest-agent";
@@ -131,9 +132,9 @@ impl Vm {
         Ok(())
     }
 
-    /// Adds an extent-store device tagged `tag`, on the store at `path`, which it makes, holding
+    /// Adds an extent-store device tagged `tag`, on the cell at `path`, which it makes, holding
     /// at most `capacity` bytes, if it doesn't exist; with a DAX window of `window` bytes if not
-    /// 0. The extent daemon at CLADEFSD serves the store.
+    /// 0. The extent daemon at CLADEFSD serves the cell.
     pub fn cell(
         &mut self,
         tag: &str,
@@ -146,9 +147,9 @@ impl Vm {
         Ok(())
     }
 
-    /// cladefs: adds an extent-store device tagged `tag` that follows the store at `path`, which
+    /// cladefs: adds an extent-store device tagged `tag` that follows the cell at `path`, which
     /// another VM writes, read-only (backlog doc-8), with a DAX window of `window` bytes if not 0.
-    /// The extent daemon at CLADEFSD serves the store.
+    /// The extent daemon at CLADEFSD serves the cell.
     pub fn cell_following(&mut self, tag: &str, path: &Path, window: u64) -> anyhow::Result<()> {
         let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
         self.cell_following_served(tag, path, window, Path::new(&cladefsd));
@@ -303,15 +304,15 @@ impl Vm {
         self.cpus = cpus.to_owned();
     }
 
-    /// cladefs: kills the VM process (SIGKILL) at once as `line` comes on its console, a line of the
-    /// guest agent's output, as a host's crash would end it, wherever its guest's writes and its
-    /// own requests were (TASK-119.6): [`Vm::enter`] returns as if it had exited of itself.
+    /// cladefs: kills the VM process (SIGKILL) at once as `line` comes on its console, a line of
+    /// the guest agent's output, as a host's crash would end it, wherever its guest's writes and
+    /// its own requests were (TASK-119.6): [`Vm::enter`] returns as if it had exited of itself.
     pub fn kill_on(&mut self, line: &str) {
         self.kill_on = Some(line.to_owned());
     }
 
-    /// cladefs: the VM stops itself, its VM process exiting with `code`, which [`Vm::enter`] takes as
-    /// an exit of its own, and any other as a failure.
+    /// cladefs: the VM stops itself, its VM process exiting with `code`, which [`Vm::enter`] takes
+    /// as an exit of its own, and any other as a failure.
     pub fn stops_with(&mut self, code: i32) {
         self.stops_with = Some(code);
     }
@@ -364,8 +365,8 @@ impl Vm {
         }
     }
 
-    /// A path for the API socket of the VM `name` of this process: in the temporary directory, as
-    /// a socket's path is short (SUN_LEN), and a test's directory, named after its case, may not be.
+    /// A path for the API socket of the VM `name` of this process: in the temporary directory, as a
+    /// socket's path is short (SUN_LEN), and a test's directory, named after its case, may not be.
     pub fn api_socket(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("cladefs-{}-{name}.api", std::process::id()))
     }
@@ -685,10 +686,10 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-/// cladefs: waits for the VM process `child` to exit, killing it (SIGKILL) at once if `line`, a line
-/// of the guest agent's output, comes on its console at `console` first ([`Vm::kill_on`]): or, with
-/// `daemon`, killing that, and waiting for the VM process to exit, as it does once its daemon goes
-/// ([`Vm::kill_daemon_on`]). Returns its exit status, if it exited of itself.
+/// cladefs: waits for the VM process `child` to exit, killing it (SIGKILL) at once if `line`, a
+/// line of the guest agent's output, comes on its console at `console` first ([`Vm::kill_on`]): or,
+/// with `daemon`, killing that, and waiting for the VM process to exit, as it does once its daemon
+/// goes ([`Vm::kill_daemon_on`]). Returns its exit status, if it exited of itself.
 fn kill_on_line(
     child: &mut std::process::Child,
     console: &Path,
@@ -738,7 +739,8 @@ fn spawn(
         Some(jail) => jail.command(&firecracker, console)?,
         None => std::process::Command::new(&firecracker),
     };
-    // A seccomp filter of its own, compiled (scripts/test-e2e.sh's CLADEFS_FIRECRACKER_SECCOMP=log).
+    // A seccomp filter of its own, compiled (scripts/test-e2e.sh's
+    // CLADEFS_FIRECRACKER_SECCOMP=log).
     if let Some(filter) = std::env::var_os("CLADEFS_FIRECRACKER_SECCOMP_FILTER") {
         command.arg("--seccomp-filter").arg(filter);
     }
@@ -909,8 +911,8 @@ fn disk_letter(index: usize) -> char {
 /// them to cross the console.
 const WATCHDOG_MARGIN: Duration = Duration::from_secs(15);
 
-/// cladefs: the seconds a guest booting at `now` has before it dumps its stacks, if the runner set a
-/// deadline, `deadline` ([`crate::TEST_DEADLINE`]): a guest hung in the kernel can't say where
+/// cladefs: the seconds a guest booting at `now` has before it dumps its stacks, if the runner set
+/// a deadline, `deadline` ([`crate::TEST_DEADLINE`]): a guest hung in the kernel can't say where
 /// otherwise. None too close to the deadline.
 fn watchdog_secs(deadline: Option<&OsStr>, now: SystemTime) -> anyhow::Result<Option<u64>> {
     let Some(var) = deadline else { return Ok(None) };
@@ -998,8 +1000,8 @@ impl Framing {
     }
 }
 
-/// cladefs: `output`, the guest agent's standard output, without the kernel's lines that came out in
-/// the midst of it: the console carries the kernel's lines as it says them, between the bytes of
+/// cladefs: `output`, the guest agent's standard output, without the kernel's lines that came out
+/// in the midst of it: the console carries the kernel's lines as it says them, between the bytes of
 /// output it is still passing on, so that one, a stop's, went into the middle of an output line
 /// (GCE r215, r221, r248). The kernel's begin with its timestamp, `[` seconds `.` microseconds `]`,
 /// and end with "\r\n", which the agent's output, passed on as written, never has.
@@ -1343,9 +1345,9 @@ mod tests {
 // cladefs: what a guest's kernel says of itself on its console (TASK-44.8).
 
 /// The change of a word in a race of cladefs's code that KCSAN reports, looked into: a task's
-/// flags, its PF_MEMALLOC_NOFS set or cleared, as fs/cladefs's NOFS scopes around its calls into its
-/// Rust do (memalloc_nofs_save and restore, inlined), which other tasks read for other bits of the
-/// word, read whole (the scheduler's kthread_is_per_cpu, for PF_KTHREAD; mem_cgroup_from_task).
+/// flags, its PF_MEMALLOC_NOFS set or cleared, as fs/cladefs's NOFS scopes around its calls into
+/// its Rust do (memalloc_nofs_save and restore, inlined), which other tasks read for other bits of
+/// the word, read whole (the scheduler's kthread_is_per_cpu, for PF_KTHREAD; mem_cgroup_from_task).
 const KCSAN_REVIEWED_CHANGE: u64 = 0x0004_0000;
 
 /// A folio's flag bits (include/linux/page-flags.h's enum pageflags): its lock, which a holder
@@ -1371,8 +1373,8 @@ const PG_WAITERS: u64 = 1 << 7;
 /// Writeback cleans a folio holding its lock (writeback_get_folio; folio_clear_dirty_for_io
 /// asserts it) and, the folio clean, counts it so: __lruvec_stat_mod_folio reads its node
 /// (folio_pgdat, r611), and zone_stat_mod_folio, inlined into folio_clear_dirty_for_io, its zone
-/// (folio_zone, TASK-286). A store's page_mkwrite (cladefs_vfs_page_mkwrite) meanwhile takes the lock,
-/// as filemap_page_mkwrite does, to dirty the folio under it (the exclusion
+/// (folio_zone, TASK-286). A write's page_mkwrite (cladefs_vfs_page_mkwrite) meanwhile takes the
+/// lock, as filemap_page_mkwrite does, to dirty the folio under it (the exclusion
 /// folio_clear_dirty_for_io's comment asks of a fault handler): its folio_trylock fails, marked,
 /// and it waits, setting PG_waiters. Only the lock's bits change: a dirtying, or any change of the
 /// folio's bits but its lock's, while writeback holds the lock, would be a race of cladefs's.
@@ -1392,19 +1394,18 @@ const KCSAN_REVIEWED_PEERS: [(&str, u64); 6] = [
 /// (whose mangled names name its crates, fxfs and cladefs_linux), or virtio_extent's.
 ///
 /// A debug kernel's KCSAN reports races in all of the kernel; a test fails on those of cladefs's
-/// code: a report naming a function of fs/cladefs's, virtio_extent's or their Rust's,
-/// whether both of its accesses are, or one is at unknown origin (one KCSAN doesn't
-/// see: uninstrumented, as the Rust and the scheduler are, or the host's, writing shared memory).
-/// But for its races whose change is KCSAN_REVIEWED_CHANGE's, looked into. The others are the
-/// kernel's, which the tests leave to it. Those seen, each looked into: two of
-/// the kernel's accesses, alloc_pid / copy_process (a PID namespace's flags), _find_next_bit /
-/// gen_pool_alloc_algo_owner (genalloc's lockless bitmap, of fs/cladefs's DAX window),
-/// folio_batch_move_lru / folios_put_refs (a folio's flags); at unknown origin,
-/// kthread_is_per_cpu, wq_worker_running and kick_pool (a task's flags, CPU time and wake CPU,
-/// which the scheduler writes), process_one_work (a work item of fs/cladefs's Rust runtime, rt.c, as
-/// the Rust writes it: looked into apart from the followers' torture test), virtqueue_enable_cb,
-/// virtqueue_get_buf_ctx_split and vring_interrupt (the used ring's index, which the device, the
-/// host, writes as virtio has it).
+/// code: a report naming a function of fs/cladefs's, virtio_extent's or their Rust's, whether both
+/// of its accesses are, or one is at unknown origin (one KCSAN doesn't see: uninstrumented, as the
+/// Rust and the scheduler are, or the host's, writing shared memory). But for its races whose
+/// change is KCSAN_REVIEWED_CHANGE's, looked into. The others are the kernel's, which the tests
+/// leave to it. Those seen, each looked into: two of the kernel's accesses, alloc_pid /
+/// copy_process (a PID namespace's flags), _find_next_bit / gen_pool_alloc_algo_owner (genalloc's
+/// lockless bitmap, of fs/cladefs's DAX window), folio_batch_move_lru / folios_put_refs (a folio's
+/// flags); at unknown origin, kthread_is_per_cpu, wq_worker_running and kick_pool (a task's flags,
+/// CPU time and wake CPU, which the scheduler writes), process_one_work (a work item of
+/// fs/cladefs's Rust runtime, rt.c, as the Rust writes it: looked into apart from the followers'
+/// torture test), virtqueue_enable_cb, virtqueue_get_buf_ctx_split and vring_interrupt (the used
+/// ring's index, which the device, the host, writes as virtio has it).
 fn ours(function: &str) -> bool {
     function.contains("cladefs")
         || function.contains("cladefs")
@@ -1476,9 +1477,9 @@ fn message(line: &str) -> &str {
     text
 }
 
-/// Fails with the lines of the console at `console` in which its kernel complains, but for
-/// KCSAN's reports of races that aren't cladefs's code's, or were reviewed (see [`ours`]). The
-/// runner checks every test's consoles so (TASK-44.8): a release kernel's WARN_ON in fs/cladefs, which
+/// Fails with the lines of the console at `console` in which its kernel complains, but for KCSAN's
+/// reports of races that aren't cladefs's code's, or were reviewed (see [`ours`]). The runner
+/// checks every test's consoles so (TASK-44.8): a release kernel's WARN_ON in fs/cladefs, which
 /// once hid a bug a stress test alone found (TASK-44.2), fails its test as a debug kernel's
 /// lockdep, KCSAN and atomic-sleep reports do.
 pub fn complaints(console: &Path) -> anyhow::Result<()> {

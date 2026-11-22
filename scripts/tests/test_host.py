@@ -150,7 +150,7 @@ class HostCommand(unittest.TestCase):
     def test_this_machines_own_setup_stays_here(self):
         here = {name: "/laptop/" + name for name in KEPT}
         here["CLADEFS_TEST_HOST"] = "laptop-host"
-        # Knobs for the host: where its stores keep their cells, and its daemons what they read
+        # Knobs for the host: where its cells keep their cells, and its daemons what they read
         # from them. And a path of this machine's build that the host scripts set themselves.
         host = {
             "CLADEFSD_BUCKET": "s3://bucket/prefix",
@@ -989,8 +989,8 @@ class Jobs(unittest.TestCase):
                          ("status 2\n", "", ["e2e", "host.txt", "remote.log", "run.txt",
                                               "source.txt"]))
 
-    def test_stores_buckets_and_images_a_killed_case_left_are_not_fetched(self):
-        """board 1868: a job killed mid-case never prunes its stores, bases and images, and the fetch
+    def test_cells_buckets_and_images_a_killed_case_left_are_not_fetched(self):
+        """board 1868: a job killed mid-case never prunes its cells, bases and images, and the fetch
         copied 7.1 GB of them. Those directories stay on the host; files of the same names, as
         perf's, are results."""
         fleet = Fleet()

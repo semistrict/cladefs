@@ -176,7 +176,7 @@ export function TraceLegend({ spec }: { spec: string }) {
         ["window", "what the host maps there, and its version"],
         ["Fxfs", "the file's committed block"],
         ["durable", "what a crash would show"],
-        ["stored", "the last version a store or punch completed"],
+        ["stored", "the last version a write or punch completed"],
       ].map(([k, v], i) => (
         <Fragment key={k}>
           {i > 0 && "; "}

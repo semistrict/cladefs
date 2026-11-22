@@ -4,14 +4,15 @@
 
 //! cladefs: what cladefsd asks of a disk it shares with many VMs, and with the bucket (TASK-310): a
 //! sandbox host's CI, whose daemon wrote some 2.3 times what its guests wrote, its framings stalled
-//! for seconds behind its own write-back. The case's daemon, its own, keeps its stores, its file
+//! for seconds behind its own write-back. The case's daemon, its own, keeps its cells, its file
 //! bucket and its part cache in the case's directory, one disk, as such a host's daemon keeps its
-//! stores, and its bucket server its objects, on one. VMs boot CLADEFS_SHARED_DISK_AT_ONCE at a time
-//! (8), CLADEFS_SHARED_DISK_VMS in all (16), each on a new store; each guest writes a large file,
+//! cells, and its bucket server its objects, on one. VMs boot CLADEFS_SHARED_DISK_AT_ONCE at a time
+//! (8), CLADEFS_SHARED_DISK_VMS in all (16), each on a new cell; each guest writes a large file,
 //! CLADEFS_SHARED_DISK_LARGE_MIB (768), of bytes that don't compress, and fsyncs it; then
 //! CLADEFS_SHARED_DISK_FILES files (3,000) of 8 KiB, synced at once (syncfs), or each fsynced with
-//! CLADEFS_SHARED_DISK_FSYNC=1, commits small enough for their records to hold their data; reads them back, its
-//! caches dropped, checking each; deletes them, and syncs again. With a DAX window or without.
+//! CLADEFS_SHARED_DISK_FSYNC=1, commits small enough for their records to hold their data; reads
+//! them back, its caches dropped, checking each; deletes them, and syncs again. With a DAX window
+//! or without.
 //!
 //! The host says, as `shared-disk:` lines on its standard error, the case's log: what the guests
 //! wrote; what the daemon wrote, as its kernel counts it (/proc/PID/io's `write_bytes`, and of
@@ -20,7 +21,7 @@
 //! longest and their sum, and so of its makings of the segments framed durable, together, apart
 //! from their framings (TASK-310); the time the host's tasks stalled on I/O (/proc/pressure/io's
 //! `some` and `full`); and the case's disk's writes and busy time (its block device's stat). A
-//! measurement: it fails only if a VM does, or its daemon's stores lose half their commits'
+//! measurement: it fails only if a VM does, or its daemon's cells lose half their commits'
 //! durability within 50 ms, doc-12's median.
 
 use macros::{guest, host};
@@ -30,12 +31,12 @@ pub struct TestFxfsGuestSharedDisk {
 }
 
 const MIB: u64 = 1 << 20;
-/// Each store's capacity: the large file and the small files, with room.
+/// Each cell's capacity: the large file and the small files, with room.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const CAPACITY: u64 = 4096 * MIB;
-/// The daemon's memory, with DAX windows: room for the private pages of the windows of the VMs at once, each half
-/// its window's by default, which past the daemon's default, 8 GiB, refused the eighth's window
-/// (ENOMEM).
+/// The daemon's memory, with DAX windows: room for the private pages of the windows of the VMs at
+/// once, each half its window's by default, which past the daemon's default, 8 GiB, refused the
+/// eighth's window (ENOMEM).
 #[cfg(feature = "host")]
 const DAX_DAEMON_MEMORY: u64 = 20 << 30;
 /// Without: its memory, and its VMs', what a host shared with other loads holds at once, eight
@@ -117,7 +118,7 @@ mod host {
         took.fold((0, 0.0, 0.0), |(count, max, sum), ms| (count + 1, max.max(ms), sum + ms))
     }
 
-    /// Boots VM `vm` on a new store of its own, served by the daemon at `socket`.
+    /// Boots VM `vm` on a new cell of its own, served by the daemon at `socket`.
     fn boot(
         test_setup: &TestSetup,
         root: &Path,
@@ -126,10 +127,10 @@ mod host {
         vm: u64,
     ) -> anyhow::Result<Firecracker> {
         let name = format!("vm-{vm}");
-        let store = test_setup.tmp_dir.join(format!("store-{vm}"));
+        let cell_dir = test_setup.tmp_dir.join(format!("store-{vm}"));
         let mut machine = Vm::new(2, VM_MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.cell_served("extents", &store, CAPACITY, window, socket);
+        machine.cell_served("extents", &cell_dir, CAPACITY, window, socket);
         for var in [
             "CLADEFS_SHARED_DISK_LARGE_MIB",
             "CLADEFS_SHARED_DISK_FILES",
@@ -180,13 +181,13 @@ mod host {
             // Short, as a Unix socket's path is.
             let sockets = tempdir::TempDir::new("cladefs-shared-disk")?;
             let socket = sockets.path().join("cladefsd.sock");
-            // Its bucket and part cache in the case's directory, on the stores' disk
+            // Its bucket and part cache in the case's directory, on the cells' disk
             // (crate::common::spawn_daemon's defaults), unless this process names others.
             // As much as the windows' private pages take, with a window; the default without.
             let memory = Some(if self.dax { DAX_DAEMON_MEMORY } else { DAEMON_MEMORY });
             let mut daemon =
                 crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &[], memory)?;
-            // A window the store's size, as its data is: eight at once of the host's memory each
+            // A window the cell's size, as its data is: eight at once of the host's memory each
             // were refused (ENOMEM).
             let window = if self.dax { CAPACITY } else { 0 };
             let (io, pressure, disk) = (process_io(daemon.id())?, io_pressure()?, disk_stat(dir));

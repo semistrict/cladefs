@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the store's page cache (TASK-433): what holds the bytes its data files are written with
+//! cladefs: the cell's page cache (TASK-433): what holds the bytes its data files are written with
 //! until they are on the host's disk, and for as long after as memory allows, in memory of the
 //! process's own, which the extent daemon governs with the rest (`cladefs::cladefsd::memory`). Its
-//! files bypass the host's page cache (`O_DIRECT`), so that no byte a store holds is held twice,
+//! files bypass the host's page cache (`O_DIRECT`), so that no byte a cell holds is held twice,
 //! in two memories each budgeted as if the other weren't there. It does what the host's did for
 //! them, as Linux's does (mm/filemap.c, mm/page-writeback.c, fs/fs-writeback.c):
 //!
@@ -13,35 +13,36 @@
 //!   the disk takes them later, coalesced. Reads see them at once ([`Cached::read_at`]); a read of
 //!   what the cache holds not goes to the file, and leaves nothing cached: what is read again, the
 //!   readers' own caches hold (the extent cache), so that nothing is held twice here either.
-//! - **Write-back** goes in the file's order, contiguous dirty pages one write of up to
-//!   [`CHUNK`], from memory aligned to blocks, as iomap's ioends coalesce. One write-back of a
-//!   file at a time (`I_SYNC`): a sync, the flusher and a writer writing back take turns, each
-//!   waiting for the last to end, which carries what it covers ([`Shared::writeback`]). A page
-//!   written while its write-back is in flight is dirty again, and written again after: writers
-//!   never wait on write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back
-//!   first what a writer asked it to begin ([`Cached::write_behind`], as `sync_file_range`'s
-//!   `SYNC_FILE_RANGE_WRITE` begins it), then what has been dirty longer than
-//!   [`Options::expire`], and the oldest first while more than [`Options::background`] is dirty. A cache with no flusher ([`PageCache::without_flusher`]),
-//!   as a directory whose I/O is all its callers' has ([`crate::Dir::concurrent`]), has the writer
-//!   that takes it past [`Options::background`] write back itself, as Linux's writers did before
-//!   per-device flushers: what it writes, and when, is then a function of the writes alone.
+//! - **Write-back** goes in the file's order, contiguous dirty pages one write of up to [`CHUNK`],
+//!   from memory aligned to blocks, as iomap's ioends coalesce. One write-back of a file at a time
+//!   (`I_SYNC`): a sync, the flusher and a writer writing back take turns, each waiting for the
+//!   last to end, which carries what it covers ([`Shared::writeback`]). A page written while its
+//!   write-back is in flight is dirty again, and written again after: writers never wait on
+//!   write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back first what a
+//!   writer asked it to begin ([`Cached::write_behind`], as `sync_file_range`'s
+//!   `SYNC_FILE_RANGE_WRITE` begins it), then what has been dirty longer than [`Options::expire`],
+//!   and the oldest first while more than [`Options::background`] is dirty. A cache with no flusher
+//!   ([`PageCache::without_flusher`]), as a directory whose I/O is all its callers' has
+//!   ([`crate::Dir::concurrent`]), has the writer that takes it past [`Options::background`] write
+//!   back itself, as Linux's writers did before per-device flushers: what it writes, and when, is
+//!   then a function of the writes alone.
 //! - **Writers are throttled**, not refused, past [`Options::hard`] dirty: they wait for
 //!   write-back, as `balance_dirty_pages` has them.
 //! - **A sync** ([`Cached::sync`]) writes back what was dirty as it began, waits for every write of
 //!   the file in flight, the flusher's too, then syncs the file: what it covers is a snapshot, so
 //!   that a writer going on never keeps it from ending (`PAGECACHE_TAG_TOWRITE`). cladefs: a
 //!   write-back that failed leaves its pages dirty, which the sync after it writes back again: the
-//!   sync fails only if that does (TASK-539.12). Linux's reports it once, errseq's, as it drops
-//!   the pages it failed to write; before TASK-539.12 this did too ([`Pages::failed`]), which failed
-//!   a store's flush, and the store, for a moment of a full disk long gone.
+//!   sync fails only if that does (TASK-539.12). Linux's reports it once, errseq's, as it drops the
+//!   pages it failed to write; before TASK-539.12 this did too ([`Pages::failed`]), which failed a
+//!   cell's flush, and the cell, for a moment of a full disk long gone.
 //! - **Eviction** takes clean pages alone, of the files used least recently first
 //!   ([`PageCache::evict_to`]), never writing any: what is dirty is the flusher's to write.
 //! - **Files are ordered by their keys as they were once** ([`PageCache::files_by`]): when they
 //!   were used, when they were dirtied, which other threads change as the cache goes through them,
 //!   so that no comparison sees another's file changed since (TASK-493).
-//! - **The flusher's work is the process's** ([`FLUSHER`]): every store's files wait on it, so a
-//!   panic on it, which no store's halt contains, aborts the extent daemon as one holding a lock
-//!   shared beyond one store does ([`crate::shared`], TASK-149.24). Elsewhere, as in tests, its
+//! - **The flusher's work is the process's** ([`FLUSHER`]): every cell's files wait on it, so a
+//!   panic on it, which no cell's halt contains, aborts the extent daemon as one holding a lock
+//!   shared beyond one cell does ([`crate::shared`], TASK-149.24). Elsewhere, as in tests, its
 //!   death is said ([`PageCache::flusher_died`]), and a writer it would have let go panics rather
 //!   than wait for good.
 //! - **A file removed** keeps its pages while it is open, as an unlinked inode does, and drops
@@ -49,10 +50,10 @@
 //!   `iput`): a segment's raw file, framed and gone, never reaches the disk but what its syncs
 //!   and the flusher took.
 //!
-//! Every directory a store opens holds its data files in one ([`crate::CachedDir`]): the host's
+//! Every directory a cell opens holds its data files in one ([`crate::CachedDir`]): the host's
 //! ([`crate::HostDir`]) in the process's ([`shared`]), and one in memory ([`crate::MemDir`]) in a
-//! small one of its own with no flusher, so that the store's tests, its crash rounds and its
-//! Shuttle schedules among them, run through it as the store does on a host.
+//! small one of its own with no flusher, so that the cell's tests, its crash rounds and its
+//! Shuttle schedules among them, run through it as the cell does on a host.
 
 use crate::dir::File;
 use crate::frames::{Frame, Frames};
@@ -66,14 +67,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-/// The cache's page: what it holds, writes back and evicts. A store's data files are written in
+/// The cache's page: what it holds, writes back and evicts. A cell's data files are written in
 /// whole sectors of this size (TASK-411.8), so a write fills its pages whole but at a file's end.
 pub const PAGE: u64 = 4096;
 
 /// The most a write-back writes at once: contiguous dirty pages, one write.
 pub const CHUNK: u64 = 1 << 20;
 
-/// What a [`PageCache`]'s flusher holds for its life, as a lock shared beyond one store
+/// What a [`PageCache`]'s flusher holds for its life, as a lock shared beyond one cell
 /// ([`Holding::work`]): what the extent daemon's log names as it aborts for a panic on it.
 pub const FLUSHER: &str = "page cache flusher";
 
@@ -159,7 +160,7 @@ pub struct PageCache {
     frames: Arc<Frames>,
 }
 
-/// The process's page cache, which every store's files share ([`crate::HostDir`]).
+/// The process's page cache, which every cell's files share ([`crate::HostDir`]).
 pub fn shared() -> &'static Arc<PageCache> {
     node_local::node_local! {
         /// The daemon's, each simulated node's its own (doc-24).
@@ -314,7 +315,7 @@ impl PageCache {
     }
 
     /// Writes back every dirty page of every file, waiting for every write-back in flight: what
-    /// a reader of the files behind the stores' backs needs first, as a test damaging one. A file
+    /// a reader of the files behind the cells' backs needs first, as a test damaging one. A file
     /// failing leaves the others written; the first failure is returned, and each file's next sync
     /// writes it back again.
     pub fn write_back_all(&self) -> io::Result<()> {
@@ -547,7 +548,7 @@ struct Pages {
     failed: Option<io::Error>,
 }
 
-/// A file, `F`, through the page cache: what [`File`] it is to its store.
+/// A file, `F`, through the page cache: what [`File`] it is to its cell.
 pub struct Cached<F: File> {
     shared: Arc<Shared<F>>,
 }
@@ -558,10 +559,10 @@ pub(crate) struct Shared<F: File> {
     file: F,
     cache: Arc<PageCache>,
     pages: Mutex<Pages>,
-    /// Held by its write-back, one at a time (`I_SYNC`): what a sync, or a dropping of pages,
-    /// waits on for the write-back in flight to end. A lock, not a condition variable, so that
-    /// whatever wakes a thread waiting on it, it waits on (Shuttle's scoped threads wake the scope's
-    /// thread as the last ends, whatever it waits on). Taken before its pages' lock.
+    /// Held by its write-back, one at a time (`I_SYNC`): what a sync, or a dropping of pages, waits
+    /// on for the write-back in flight to end. A lock, not a condition variable, so that whatever
+    /// wakes a thread waiting on it, it waits on (Shuttle's scoped threads wake the scope's thread
+    /// as the last ends, whatever it waits on). Taken before its pages' lock.
     writeback: Mutex<()>,
     used: AtomicU64,
     /// Whether the file is at no name any more ([`Cached::unlink`]): its last opening drops its
@@ -1032,8 +1033,8 @@ impl<F: File> File for Cached<F> {
         self.sync()
     }
 
-    /// cladefs: its pages in the range written back first, then let go, clean, so that none hides the
-    /// hole (TASK-698.2).
+    /// cladefs: its pages in the range written back first, then let go, clean, so that none hides
+    /// the hole (TASK-698.2).
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
         let shared = &*self.shared;
         let range = offset..offset + len;
@@ -1453,7 +1454,8 @@ mod tests {
         }
     }
 
-    /// A cache whose flusher was woken to a [`Panicking`] file, and the file, which the caller holds.
+    /// A cache whose flusher was woken to a [`Panicking`] file, and the file, which the caller
+    /// holds.
     fn flusher_panicking() -> (Arc<PageCache>, Arc<dyn Paged>) {
         let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
         let file: Arc<dyn Paged> = Arc::new(Panicking);
@@ -1471,9 +1473,9 @@ mod tests {
         cache.flusher_died()
     }
 
-    /// A flusher a panic unwinds says it died, where nothing aborts the process: the cache knows it,
-    /// and a writer held back at its bound panics, as nothing would write back for it, rather than
-    /// wait for good, as it did, the flusher dead and none knowing (TASK-493).
+    /// A flusher a panic unwinds says it died, where nothing aborts the process: the cache knows
+    /// it, and a writer held back at its bound panics, as nothing would write back for it, rather
+    /// than wait for good, as it did, the flusher dead and none knowing (TASK-493).
     #[test]
     fn a_dead_flusher_is_known_and_holds_no_writer_for_good() {
         let (cache, _file) = flusher_panicking();
@@ -1496,7 +1498,7 @@ mod tests {
     const CHILD: &str = "EXTENT_STORE_PAGES_CHILD";
 
     /// Run by [`a_panic_on_the_flusher_aborts_the_daemon`], in a process of its own: aborting on
-    /// panics holding what is shared beyond one store, as the extent daemon does, its cache's
+    /// panics holding what is shared beyond one cell, as the extent daemon does, its cache's
     /// flusher panicking; it says if the process lived on.
     #[test]
     #[ignore = "run by a_panic_on_the_flusher_aborts_the_daemon, in a process of its own"]
@@ -1511,8 +1513,8 @@ mod tests {
     }
 
     /// A panic on the flusher aborts the extent daemon, which a panic holding a lock shared beyond
-    /// one store does (TASK-149.24), its log naming the flusher: every store's files wait on it, and
-    /// no store's halt contains its death, which left the daemon going on with nothing writing back
+    /// one cell does (TASK-149.24), its log naming the flusher: every cell's files wait on it, and
+    /// no cell's halt contains its death, which left the daemon going on with nothing writing back
     /// what was dirty but writers held at the bound (TASK-493).
     #[test]
     fn a_panic_on_the_flusher_aborts_the_daemon() {

@@ -1,0 +1,27 @@
+# cladefs's own: a block device kept straight on an extent device, as blocks in write-once
+# extents, each flush one commit of the extent device: a SQLite cell's database (sqlite_cladefs)
+# and a memory cell's VM memory (TASK-456).
+[package]
+name = "block_device"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+log.workspace = true
+storage_device.workspace = true
+thiserror.workspace = true
+
+[features]
+# A window of memory of its own for tests, here and in sqlite_cladefs' (`testing`).
+testing = []
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+block_device = { path = ".", features = ["testing"] }
+rand.workspace = true

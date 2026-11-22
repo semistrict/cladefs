@@ -1,0 +1,13 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# Failures of the full-stack simulation (tests/madsim.rs) that open bugs explain, which
+# scripts/madsim-seeds.py lets be, said as known (board 2912): a line each, the bug's board task,
+# the test, and a regular expression (Python's) the start of the test's panic's message matches.
+# Any other failure fails the run: another test's, another message, a hang, a crash. The line goes
+# with the bug's fix, as its seeds join madsim-seeds.
+#
+# BOARD TEST                                            PANIC
+5948    replicated_commits_survive_disk_faults          host \d+'s control API never answered: .*ConnectionRefused
+5908    ephemeral_cells_survive_disk_faults             kept/\S+: made around its cell directory

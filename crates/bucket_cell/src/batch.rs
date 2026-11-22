@@ -3,13 +3,13 @@
 // found in the LICENSE file.
 
 //! A segment builder ([`SegmentBuilder`]): commits a writer makes into one segment of its own
-//! (doc-7, Layout), rather than take a segment a store closed. Closed on the writer's chain, it is
-//! the writer's next segment, framed as the store frames its own ([`Unframed::frame`]), which the
-//! writer takes as it takes a store's ([`Writer::add_segment`](crate::Writer::add_segment)).
+//! (doc-7, Layout), rather than take a segment a cell closed. Closed on the writer's chain, it is
+//! the writer's next segment, framed as the cell frames its own ([`Unframed::frame`]), which the
+//! writer takes as it takes a cell's ([`Writer::add_segment`](crate::Writer::add_segment)).
 //!
-//! What is too much to hold at once, what a store holds that its cell doesn't, goes in segments
-//! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
-//! as they upload ([`objects`]).
+//! What is too much to hold at once, what a local cell holds that the bucket's doesn't, goes in
+//! segments planned by the lengths of the extents they seal ([`Plan`]), whose objects read their
+//! data only as they upload ([`objects`]).
 
 use crate::layout::{self, CellId, Chain, Contents, Footer, NewVersion, Segment};
 use crate::writer::{Body, Objects};
@@ -43,8 +43,8 @@ impl Commit {
 
 /// What one segment's commits make, by the lengths of the extents they seal: the contents of its
 /// footer, once closed on its writer's chain ([`Plan::close`]); the extents in its data one after
-/// another, from where its data begins. cladefs: as a store's segment does, its footer seals what its
-/// commits sealed that the cell holds as of its last, and frees what they freed that a commit
+/// another, from where its data begins. cladefs: as a cell's segment does, its footer seals what
+/// its commits sealed that the cell holds as of its last, and frees what they freed that a commit
 /// held: one sealed by a commit and freed by a later is a free alone, which spends it; one a commit
 /// seals and frees itself no commit held, and is neither (TASK-160.15, TASK-165.3).
 #[derive(Default)]
@@ -171,8 +171,8 @@ impl Plan {
 pub type Read = Arc<dyn Fn(ExtentId, &mut [u8]) -> std::io::Result<()> + Send + Sync>;
 
 /// The objects of the segment `footer` stamps, a plan's ([`Plan::close`]), and of the extents it
-/// says are stored on their own, by their keys: each read, its extents' data by `read`, and
-/// framed, only as it uploads. cladefs: encrypted under `encrypting`, the writer's DEK and which it is
+/// says are stored on their own, by their keys: each read, its extents' data by `read`, and framed,
+/// only as it uploads. cladefs: encrypted under `encrypting`, the writer's DEK and which it is
 /// (TASK-411.3).
 pub fn objects(
     footer: Footer,
@@ -247,9 +247,9 @@ impl SegmentBuilder {
         self.close_ending(chain, Vec::new())
     }
 
-    /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its end:
-    /// a name for the cell's state there, which the acknowledgement naming the segment names in
-    /// the cell's head (doc-18, TASK-476).
+    /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its
+    /// end: a name for the cell's state there, which the acknowledgement naming the segment names
+    /// in the cell's head (doc-18, TASK-476).
     pub fn cut(self, cut: NewVersion, chain: &mut Chain) -> Unframed {
         self.close_ending(chain, vec![cut])
     }
@@ -387,11 +387,11 @@ mod tests {
         assert_eq!(chain.next_segment(), 1);
     }
 
-    /// TASK-165.3: as a store's segment's footer does, a batch's seals what its commits sealed that
-    /// none of them freed, and frees what a commit before the freeing one held: an extent sealed and
-    /// later freed in it, in its data or on its own, is a free alone; one a commit seals and frees
-    /// itself is neither; an inherited extent of the same sequence number as one sealed on its own
-    /// is freed as it is.
+    /// TASK-165.3: as a cell's segment's footer does, a batch's seals what its commits sealed that
+    /// none of them freed, and frees what a commit before the freeing one held: an extent sealed
+    /// and later freed in it, in its data or on its own, is a free alone; one a commit seals and
+    /// frees itself is neither; an inherited extent of the same sequence number as one sealed on
+    /// its own is freed as it is.
     #[test]
     fn batches_free_what_a_commit_before_held() {
         let mut chain = Chain::new(test_cell(1), 2, 0, 0);

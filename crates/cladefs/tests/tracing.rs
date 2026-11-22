@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 //! TASK-258: the daemon's binary exports its spans over OTLP, to the collector
-//! `OTEL_EXPORTER_OTLP_ENDPOINT` names, with `CLADEFSD_TRACES=otlp`; and sends nothing
-//! without, nor with `CLADEFSD_TRACES=off` (TASK-707), which makes no spans at all. The collector is one of the test's own, which takes OTLP over HTTP as a real one does
-//! (`docs/tracing.md` runs Jaeger's), and keeps what it is sent.
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` names, with `CLADEFSD_TRACES=otlp`; and sends nothing without, nor
+//! with `CLADEFSD_TRACES=off` (TASK-707), which makes no spans at all. The collector is one of the
+//! test's own, which takes OTLP over HTTP as a real one does (`docs/tracing.md` runs Jaeger's), and
+//! keeps what it is sent.
 
 #![cfg(target_os = "linux")]
 
@@ -72,7 +73,7 @@ fn collector() -> (String, mpsc::Receiver<(String, Vec<u8>)>) {
     (endpoint, exports)
 }
 
-/// A daemon serving at `socket`, its stores' cells in a bucket in its memory, as `traces` says
+/// A daemon serving at `socket`, its cells in a bucket in its memory, as `traces` says
 /// of its spans, OpenTelemetry's variables naming `endpoint` the collector, every trace kept.
 fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str) -> KillOnDrop {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
@@ -96,17 +97,17 @@ fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str) -> KillOnDrop {
     daemon
 }
 
-/// Has `daemon` write, commit and close a store in `dir`, then drains it with SIGTERM, which
+/// Has `daemon` write, commit and close a cell in `dir`, then drains it with SIGTERM, which
 /// exports the spans it has not yet: what it was sent, in order, once it exited.
 fn serve_and_drain(dir: &Path, traces: Option<&str>) -> Vec<(String, Vec<u8>)> {
     let (endpoint, exports) = collector();
     let socket = dir.join("cladefsd.sock");
     let mut daemon = daemon(&socket, traces, &endpoint);
-    let store = CellClient::connect(&socket, dir.join("store"), 1 << 28).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
-    store.commit(Some(b"traced")).unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, dir.join("store"), 1 << 28).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    client.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
+    client.commit(Some(b"traced")).unwrap();
+    drop(client);
     // SAFETY: Signals the daemon this test started.
     assert_eq!(unsafe { libc::kill(daemon.0.id() as i32, libc::SIGTERM) }, 0);
     let status = daemon.0.wait().unwrap();

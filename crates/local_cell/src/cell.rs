@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The store. See the crate's docs.
+//! The cell. See the crate's docs.
 
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Due, Durability, FileSyncs, Syncs};
@@ -56,18 +56,18 @@ use storage_device::{ExtentId, OtherCell, SealedExtent};
 mod ephemeral;
 pub use ephemeral::{EphemeralOpening, LocalCheckpoint, Parent};
 
-/// The error of a write the store has no room for.
+/// The error of a write the cell has no room for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the extent store is full")]
 pub struct NoSpace;
 
-/// cladefs: the error of a version cut of a store that is not quiescent: extents written since its
+/// cladefs: the error of a version cut of a cell that is not quiescent: extents written since its
 /// last commit, which a version holds not, as its guest committed them not (TASK-476).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a version of a store holding extents written since its last commit")]
+#[error("a version of a cell holding extents written since its last commit")]
 pub struct NotQuiescent;
 
-/// The error of a capacity smaller than what the store holds: its extents' bytes, and those that
+/// The error of a capacity smaller than what the cell holds: its extents' bytes, and those that
 /// writes in progress may add.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the extent store holds {held} bytes, more than {capacity}")]
@@ -76,14 +76,14 @@ pub struct TooSmall {
     pub held: u64,
 }
 
-/// cladefs: the error of a write, or an opening, of an extent of the store's cell that the cell
+/// cladefs: the error of a write, or an opening, of an extent of the cell that the cell
 /// sealed and freed (TASK-79.6): an extent's ID is its cell's to write once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0:?} was written before: an extent's ID is written once")]
 pub struct SpentExtent(pub ExtentId);
 
-/// cladefs: the error of a read of an extent the store holds whose data is in the bucket, at
-/// `location` ([`LocalCell::adopt`]): what the store's user reads it from.
+/// cladefs: the error of a read of an extent the cell holds whose data is in the bucket, at
+/// `location` ([`LocalCell::adopt`]): what the cell's user reads it from.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{extent:?}'s data is in the bucket, at {location:?}")]
 pub struct BucketData {
@@ -108,7 +108,13 @@ pub struct TooLong {
     pub len: u64,
 }
 
-/// How a store lays its extents out.
+/// cladefs: the error of a write of an extent of the last sequence, past which no cell's next
+/// sequence is, nor a spent run's end (board 2762): refused, as no cell mints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0:?}: the last sequence, which no extent is of")]
+pub struct LastSequence(pub ExtentId);
+
+/// How a cell lays its extents out.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// The most bytes an extent holds, doc-4's `max_extent`: no write or read ends past it. A
@@ -116,18 +122,18 @@ pub struct Options {
     /// memory, whatever its writer asks (TASK-79.2).
     pub max_extent: u64,
     /// The size past which a segment takes no more extents: the next commit closes it, and starts
-    /// another. cladefs: between commits it takes writes up to `max_extent` past it, then they go to
-    /// another, so that no segment holds more than both together (TASK-79.2).
+    /// another. cladefs: between commits it takes writes up to `max_extent` past it, then they go
+    /// to another, so that no segment holds more than both together (TASK-79.2).
     pub segment_size: u64,
     /// The age past which a segment holding extents' data takes no more: the next commit closes it.
     pub segment_age: Duration,
     /// The size from which an extent is stored in a file of its own: one sealed at that length or
     /// more.
     pub large_extent: u64,
-    /// How many segments' files the store keeps open between reads.
+    /// How many segments' files the cell keeps open between reads.
     pub open_files: usize,
-    /// cladefs: how long a view ([`LocalCell::view`]) may lag behind the commits after its own before
-    /// it is cut off, if it may not lag for ever.
+    /// cladefs: how long a view ([`LocalCell::view`]) may lag behind the commits after its own
+    /// before it is cut off, if it may not lag for ever.
     pub view_lag: Option<Duration>,
     /// cladefs: how many bytes of frees views may keep, past which the oldest is cut off, if any
     /// limit.
@@ -163,16 +169,16 @@ impl Default for Options {
     }
 }
 
-/// What a store holds, as doc-4's `INFO` reports it.
+/// What a cell holds, as doc-4's `INFO` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Info {
-    /// The most bytes the store's extents may hold.
+    /// The most bytes the cell's extents may hold.
     pub capacity: u64,
     /// The bytes its extents hold: each as long as its furthest write.
     pub used: u64,
     /// The bytes it can still take.
     pub available: u64,
-    /// One more than the highest sequence number of the store's cell's extents, freed or not
+    /// One more than the highest sequence number of the cell's extents, freed or not
     /// since it opened; and, as it opened, of those it held. cladefs: those freed before, the
     /// writer's floor is past, each opening's writer minting past its own (doc-7, The head).
     pub next_sequence: u64,
@@ -188,7 +194,7 @@ pub struct Info {
     pub inherited_extents: u64,
 }
 
-/// The space a store's files take.
+/// The space a cell's files take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Usage {
     /// The segments, and how many there are.
@@ -207,7 +213,7 @@ pub struct Usage {
     pub kept_for_views: u64,
 }
 
-/// cladefs: a store's directory, taken and claimed for its opening, until it closes.
+/// cladefs: a cell directory, taken and claimed for its opening, until it closes.
 type Opened<D> = Option<(Claim<D>, Arc<TakenDir<D>>)>;
 
 /// An extent store, open. See the crate's docs.
@@ -245,15 +251,15 @@ pub struct LocalCell<D: Dir> {
     /// cladefs: the start of its write-ahead log, written as segments are acknowledged, before
     /// their files leave (TASK-165.9).
     start: SharedLock<Mutex<StartFile>>,
-    /// cladefs: the host's cache of the bucket's objects, if it has one: what the bucket acknowledged
-    /// of the store's goes into it (TASK-165.8).
+    /// cladefs: the host's cache of the bucket's objects, if it has one: what the bucket
+    /// acknowledged of the cell's goes into it (TASK-165.8).
     cache: Option<Arc<Cache>>,
     /// cladefs: what holds the parts of its segments packed as they fill, until their framings: the
-    /// process's stores', or its own ([`Opening::held`], TASK-400).
+    /// process's cells', or its own ([`Opening::held`], TASK-400).
     held: Arc<HeldParts>,
     /// Notified when the open segment has no write in progress, and when it closed: what
-    /// [`LocalCell::close_now`] and the writes it holds up wait for; cladefs: and as each framing of a
-    /// segment ends, which flushes, the uploader, forks and the cell's closing wait for.
+    /// [`LocalCell::close_now`] and the writes it holds up wait for; cladefs: and as each framing
+    /// of a segment ends, which flushes, the uploader, forks and the cell's closing wait for.
     idle: Arc<Event>,
     /// cladefs: its views, which followers read it through ([`LocalCell::view`]).
     views: Arc<Views>,
@@ -263,16 +269,16 @@ pub struct LocalCell<D: Dir> {
     /// cladefs: of a replicated cell's writer, what sends each flush's commits to the members of
     /// its configuration (doc-21, TASK-537.3.3), once it started.
     replicator: std::sync::Mutex<Option<Arc<Replicator>>>,
-    /// cladefs: of an ephemeral cell, its local checkpoint as it stands, and what its next checkpoint covers
-    /// (doc-25, TASK-698.2): held by a checkpoint, one at a time.
+    /// cladefs: of an ephemeral cell, its local checkpoint as it stands, and what its next
+    /// checkpoint covers (doc-25, TASK-698.2): held by a checkpoint, one at a time.
     ephemeral: Option<std::sync::Mutex<ephemeral::Ephemeral>>,
 }
 
-/// cladefs: the directory of the stores' replicators' spools ([`LocalCell::spool`]).
+/// cladefs: the directory of the cells' replicators' spools ([`LocalCell::spool`]).
 const SPOOL: &str = "replica-spool";
 
-/// cladefs: a replicator's spool in its store's directory, at `at`, a file a log, held open
-/// (TASK-537.3.3): written bypassing the host's page cache as every store file is, never synced.
+/// cladefs: a replicator's spool in its cell directory, at `at`, a file a log, held open
+/// (TASK-537.3.3): written bypassing the host's page cache as every cell file is, never synced.
 struct DirSpool<D: Dir> {
     dir: Arc<D>,
     at: String,
@@ -332,7 +338,7 @@ impl<D: Dir> crate::replicate::Spool for DirSpool<D> {
     }
 }
 
-/// A store's directory, taken for this process ([`Dir::take`]): let go of once dropped.
+/// A cell directory, taken for this process ([`Dir::take`]): let go of once dropped.
 struct TakenDir<D: Dir>(Arc<D>);
 
 impl<D: Dir> Drop for TakenDir<D> {
@@ -341,7 +347,7 @@ impl<D: Dir> Drop for TakenDir<D> {
     }
 }
 
-/// cladefs: a store's directory, claimed for its opening in this process ([`Dir::claim`]): let go of
+/// cladefs: a cell directory, claimed for its opening in this process ([`Dir::claim`]): let go of
 /// once dropped.
 struct Claim<D: Dir>(Arc<D>);
 
@@ -351,7 +357,7 @@ impl<D: Dir> Drop for Claim<D> {
     }
 }
 
-/// cladefs: a hold of a store's directory, taken for this process until it is dropped
+/// cladefs: a hold of a cell directory, taken for this process until it is dropped
 /// ([`LocalCell::hold_dir`]).
 pub struct DirHold<D: Dir> {
     _taken: Arc<TakenDir<D>>,
@@ -392,17 +398,17 @@ struct Logs<F> {
     /// started.
     replica: BTreeMap<SegmentId, (ReplicaLog, u64)>,
     /// cladefs: the segments whose logs held records as the replicator started, which no member
-    /// holds from their headers: commits recorded in them after are never told replicated before the
-    /// bucket holds them ([`Replicator::raise_base`]).
+    /// holds from their headers: commits recorded in them after are never told replicated before
+    /// the bucket holds them ([`Replicator::raise_base`]).
     unreplicated: BTreeSet<SegmentId>,
 }
 
 /// A write in progress (see [`LocalCell::begin_write`]): its data goes to its file, by
 /// [`Write::write`], or by a caller's own I/O of what [`Write::stored`] gives. Dropping it before
-/// it is finished abandons it. cladefs: no caller writes its file otherwise: an encrypted store's
+/// it is finished abandons it. cladefs: no caller writes its file otherwise: an encrypted cell's
 /// raw files are encrypted, a sector at a time, as they write them (TASK-411.5).
 pub struct Write<'a, D: Dir> {
-    store: &'a LocalCell<D>,
+    cell: &'a LocalCell<D>,
     extent: ExtentId,
     /// The extent's opening it writes to ([`Uncommitted::open`]): one its free ends drops it.
     opening: u64,
@@ -412,16 +418,16 @@ pub struct Write<'a, D: Dir> {
     offset: u64,
     /// The segment written to, if it isn't the extent's own file.
     segment: Option<SegmentId>,
-    /// The bytes it reserved, which it may add to the store.
+    /// The bytes it reserved, which it may add to the cell.
     grows: u64,
     finished: bool,
-    /// cladefs: what it holds of its store's disk, admitted, until it lands (doc-22).
+    /// cladefs: what it holds of its cell's disk, admitted, until it lands (doc-22).
     _pledge: Option<crate::footprint::Pledge>,
 }
 
 impl<D: Dir> Write<'_, D> {
-    /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the store is,
-    /// whole sectors then, as what the store takes is (TASK-411.8). cladefs: refused past
+    /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the cell is,
+    /// whole sectors then, as what the cell takes is (TASK-411.8). cladefs: refused past
     /// the write's end.
     pub fn write(&self, data: &[u8], at: u64) -> Result<(), Error> {
         let len = data.len() as u64;
@@ -430,7 +436,7 @@ impl<D: Dir> Write<'_, D> {
     }
 
     /// cladefs: `data`, the whole write's bytes, as its file is to store them, for a caller writing
-    /// them by an I/O of its own, as an image's device does: encrypted in place if the store
+    /// them by an I/O of its own, as an image's device does: encrypted in place if the cell
     /// is (TASK-411.5). They go to the file it names, at the offset it names; written in whole
     /// sectors if a write of them stops short, from the last whole sector written, they are what
     /// they are whatever writes them again.
@@ -449,8 +455,7 @@ impl<D: Dir> Write<'_, D> {
         // cladefs: what was written to the open segment, its writing back begun once a MiB or more
         // waits, and waited for once more than WRITTEN_BEHIND_MOST is begun: holding no lock
         // (TASK-221). Failing, it is the flush's sync that fails.
-        let Some(Behind { raw, begin: (offset, len), wait }) = self.store.finish_write(&self)
-        else {
+        let Some(Behind { raw, begin: (offset, len), wait }) = self.cell.finish_write(&self) else {
             return;
         };
         if let Err(err) = raw.write_behind(offset, len) {
@@ -465,7 +470,7 @@ impl<D: Dir> Write<'_, D> {
 }
 
 /// cladefs: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
-/// in `file`, encrypted if the store is.
+/// in `file`, encrypted if the cell is.
 pub struct Stored<'a, F> {
     pub file: &'a Arc<F>,
     pub offset: u64,
@@ -475,7 +480,7 @@ pub struct Stored<'a, F> {
 impl<D: Dir> Drop for Write<'_, D> {
     fn drop(&mut self) {
         if !self.finished {
-            self.store.abandon_write(self);
+            self.cell.abandon_write(self);
         }
     }
 }
@@ -500,10 +505,11 @@ fn place_of(entry: Entry<'_>) -> Place {
     }
 }
 
-/// cladefs: ends the framing of segment `number`, `framed` saying how ([`LocalCell::frame_behind`]), in
-/// `state`: the segment is read from its framed file from now on, durable, its raw file going once
-/// the commits its footer names are durable; or its framing failed, writing the framed file or
-/// making it durable, and the store with it, as it is ahead of its files.
+/// cladefs: ends the framing of segment `number`, `framed` saying how
+/// ([`LocalCell::frame_behind`]), in `state`: the segment is read from its framed file from now on,
+/// durable, its raw file going once the commits its footer names are durable; or its framing
+/// failed, writing the framed file or making it durable, and the cell with it, as it is ahead of
+/// its files.
 fn framing_ended<F: File>(
     state: &mut State<F>,
     number: SegmentId,
@@ -520,7 +526,7 @@ fn framing_ended<F: File>(
     }
 }
 
-/// cladefs: a store's writes held back ([`Gate`]) by a waiting commit, or closing between commits,
+/// cladefs: a cell's writes held back ([`Gate`]) by a waiting commit, or closing between commits,
 /// released as its waiting is dropped, should it be, as a cancelled future's is (board 2944).
 struct HeldWrites<'a, D: Dir>(Option<&'a LocalCell<D>>);
 
@@ -533,14 +539,14 @@ impl<D: Dir> HeldWrites<'_, D> {
 
 impl<D: Dir> Drop for HeldWrites<'_, D> {
     fn drop(&mut self) {
-        if let Some(store) = self.0 {
-            store.lock().gate.release();
-            store.idle.notify(usize::MAX);
+        if let Some(cell) = self.0 {
+            cell.lock().gate.release();
+            cell.idle.notify(usize::MAX);
         }
     }
 }
 
-/// cladefs: what a store's segments are framed with, behind what closed them
+/// cladefs: what a cell's segments are framed with, behind what closed them
 /// ([`LocalCell::frame_behind`]): its directory, its state, which each framing ends itself in, and
 /// what is notified as one does. A framer frames the segments closed, one after another, in the
 /// order they closed, each written as it goes (`Unframed::frame`), and hands it to be made durable;
@@ -580,7 +586,7 @@ impl<D: Dir> Framer<D> {
                 }
                 Job::Frame(unframed) => unframed,
             };
-            // cladefs: none once the store failed, a segment before it among what failed, saying so
+            // cladefs: none once the cell failed, a segment before it among what failed, saying so
             // (TASK-165.9).
             let whole = state.standing.whole();
             let number = unframed.number();
@@ -609,7 +615,7 @@ impl<D: Dir> Framer<D> {
         let Some((raw, look)) = Self::to_see(&state, number) else { return state };
         state.framing.looking = true;
         drop(state);
-        fail::fail_point!("store::looking_ahead");
+        fail::fail_point!("cell::looking_ahead");
         let seen = self.look(&*raw, part, look);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
@@ -621,7 +627,7 @@ impl<D: Dir> Framer<D> {
     /// cladefs: looks ahead at part `part` of segment `number`, written whole, holding `state`: for
     /// its framing, which reads it no more if it frames the segment in place, nor if it holds it
     /// packed, which this has it do if the segment looks as if it will be framed in a copy; unless
-    /// its framing took its parts' looks already, or the store failed, or closed (TASK-400).
+    /// its framing took its parts' looks already, or the cell failed, or closed (TASK-400).
     fn see_here(&self, state: &mut State<D::File>, number: SegmentId, part: u64) {
         if let Some((raw, look)) = Self::to_see(state, number) {
             let seen = self.look(&*raw, part, look);
@@ -640,8 +646,8 @@ impl<D: Dir> Framer<D> {
     /// before it look as `look` says ([`framing::look_ahead`]): what it saw, and the part held, if
     /// it is to be packed: by the threads packing ahead, at the host's lowest priority, held
     /// pending until then ([`framing::pack_ahead`]); here and now, on a directory whose I/O is its
-    /// callers' alone, as the store's tests' are, and in the Shuttle tests, whose schedule no
-    /// thread of the store's runs outside of. cladefs: of an encrypted raw file too, its part seen as
+    /// callers' alone, as the cell's tests' are, and in the Shuttle tests, whose schedule no thread
+    /// of the cell's runs outside of. cladefs: of an encrypted raw file too, its part seen as
     /// stored and packed, and held, in the clear, in memory, until its framing encrypts it
     /// (TASK-411.23, TASK-421).
     fn look(
@@ -663,9 +669,9 @@ impl<D: Dir> Framer<D> {
         Ok((seen, held))
     }
 
-    /// cladefs: a look ahead at part `part` of segment `number` saw `seen`, holding the part, or to,
-    /// if it is to be packed, or failed: its framing reads the part itself then, which fails as it
-    /// may.
+    /// cladefs: a look ahead at part `part` of segment `number` saw `seen`, holding the part, or
+    /// to, if it is to be packed, or failed: its framing reads the part itself then, which fails as
+    /// it may.
     fn saw(
         state: &mut State<D::File>,
         (number, part): (SegmentId, u64),
@@ -818,33 +824,33 @@ fn remove_spare<D: Dir>(dir: &D, spare: Option<SegmentId>) {
     }
 }
 
-/// cladefs: the file a store's directory holds until its maker made it whole, which opening it
-/// refuses ([`Unmade`]): written before its description, removed once whole ([`LocalCell::made`]), as
-/// an import fills it, so that a maker dying part way leaves no store that opens (TASK-196).
+/// cladefs: the file a cell directory holds until its maker made it whole, which opening it refuses
+/// ([`Unmade`]): written before its description, removed once whole ([`LocalCell::made`]), as an
+/// import fills it, so that a maker dying part way leaves no cell that opens (TASK-196).
 pub(crate) const UNMADE: &str = "unmade";
 
-/// cladefs: the error of opening a store whose maker never made it whole ([`UNMADE`], TASK-196).
+/// cladefs: the error of opening a cell whose maker never made it whole ([`UNMADE`], TASK-196).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the store was never made whole: its maker stopped part way")]
+#[error("the cell was never made whole: its maker stopped part way")]
 pub struct Unmade;
 
-/// cladefs: what the bucket holds of the cell a store opens (doc-14, Opening a store;
-/// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
-/// found taking it ([`bucket_cell::TakenCell`]), the head, which the store's write-ahead log is put after,
-/// and its writer's chain there, which stamps the store's footers from then on; or, for a version,
-/// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
-/// one, which what the bucket acknowledged of the store's goes into. cladefs: and the store's keys,
-/// its cell's and its ancestors' DEKs, which its segments and extents stored on their own are
-/// encrypted and read under (`bucket_cell::keys`, TASK-411.3): a writer's, which encrypts, but a
-/// version's. And what holds
-/// the parts of its segments packed as they fill, which the process's stores share, so that what
-/// governs the process's memory lets them go as it runs short (`crate::held`, TASK-400); without,
-/// one of the store's own, which nothing makes let go. An encrypted store holds none (TASK-411.5).
+/// cladefs: what the bucket holds of the cell it opens (doc-14, Opening a cell; TASK-165.9): its
+/// state, as recovery found it once its writer took its head, what the writer found taking it
+/// ([`bucket_cell::TakenCell`]), the head, which the cell's write-ahead log is put after, and its
+/// writer's chain there, which stamps the cell's footers from then on; or, for a version, its state
+/// alone, which nothing writes. And the host's cache of the bucket's objects, if it has one, which
+/// what the bucket acknowledged of the cell's goes into. cladefs: and the cell's keys, its cell's
+/// and its ancestors' DEKs, which its segments and extents stored on their own are encrypted and
+/// read under (`bucket_cell::keys`, TASK-411.3): a writer's, which encrypts, but a version's. And
+/// what holds the parts of its segments packed as they fill, which the process's cells share, so
+/// that what governs the process's memory lets them go as it runs short (`crate::held`, TASK-400);
+/// without, one of the cell's own, which nothing makes let go. An encrypted cell holds none
+/// (TASK-411.5).
 pub struct Opening {
     pub state: bucket_cell::State,
     /// cladefs: the decoded state `state` started from, if it did, whose map of the extents it
-    /// shares ([`bucket_cell::Recovered::layer`]): held by the store while it is open, so that
-    /// the stores of its lineage opened after it find it decoded and share it too (TASK-453).
+    /// shares ([`bucket_cell::Recovered::layer`]): held by the cell while it is open, so that
+    /// the cells of its lineage opened after it find it decoded and share it too (TASK-453).
     pub layer: Option<Arc<bucket_cell::State>>,
     pub taken: Option<bucket_cell::TakenCell>,
     pub cache: Option<Arc<Cache>>,
@@ -852,19 +858,19 @@ pub struct Opening {
     pub held: Option<Arc<HeldParts>>,
 }
 
-/// cladefs: the DEK stores kept in no bucket are encrypted under ([`Opening::new`], TASK-411.28): the
-/// tests' (`bucket_cell::testing::dek`, of which a test's reader holds the ring), known to all,
-/// so that tests, benches and simulations make and reopen them in any process. A host's stores are
+/// cladefs: the DEK cells kept in no bucket are encrypted under ([`Opening::new`], TASK-411.28):
+/// the tests' (`bucket_cell::testing::dek`, of which a test's reader holds the ring), known to all,
+/// so that tests, benches and simulations make and reopen them in any process. A host's cells are
 /// all kept in a bucket, under DEKs their records keep; none is so.
 #[cfg(any(test, feature = "unkept"))]
 pub const UNKEPT_DEK: [u8; 32] = [0x7e; 32];
 
 impl Opening {
     /// The opening of `cell`, which the bucket holds nothing of: no commit of it there, and a
-    /// writer's chain from its first segment, of epoch 0. Its store's write-ahead log
+    /// writer's chain from its first segment, of epoch 0. Its cell's write-ahead log
     /// follows only if it never had anything acknowledged ([`bucket_cell::Error::Diverged`]):
-    /// a store of the store's own tests, of a bucket it never reaches. cladefs: encrypted under
-    /// [`UNKEPT_DEK`]: every store is encrypted (TASK-411.28), and one kept nowhere has no record to
+    /// a cell of the tests' own, of a bucket it never reaches. cladefs: encrypted under
+    /// [`UNKEPT_DEK`]: every cell is encrypted (TASK-411.28), and one kept nowhere has no record to
     /// keep a DEK of its own; tests', benches' and simulations'.
     #[cfg(any(test, feature = "unkept"))]
     pub fn new(cell: CellId) -> Self {
@@ -876,9 +882,9 @@ impl Opening {
     }
 }
 
-/// cladefs: a store's directory, taken for this process and claimed for its opening, its write-ahead
-/// log recovered from it ([`LocalCell::recover`]), to be opened as what the bucket holds of its cell
-/// says ([`Recovering::open`]): its cell's writer takes the head meanwhile, and recovers it.
+/// cladefs: a cell directory, taken for this process and claimed for its opening, its write-ahead
+/// log recovered from it ([`LocalCell::recover`]), to be opened as what the bucket holds of its
+/// cell says ([`Recovering::open`]): its cell's writer takes the head meanwhile, and recovers it.
 pub struct Recovering<D: Dir> {
     dir: Arc<D>,
     taken: Arc<TakenDir<D>>,
@@ -905,12 +911,12 @@ impl<D: Dir> Recovering<D> {
         !self.wal.segments.is_empty() || !self.wal.closing.is_empty()
     }
 
-    /// cladefs: the store recovered again once what members of its replicated cell's
+    /// cladefs: the cell recovered again once what members of its replicated cell's
     /// configuration hold, `logs`, is written as its write-ahead log after `last`, the last commit
-    /// its cell's head names ([`crate::replicate::restore`], doc-21, TASK-537.3.4): of a store
+    /// its cell's head names ([`crate::replicate::restore`], doc-21, TASK-537.3.4): of a cell
     /// holding none.
     pub fn restored(self, logs: &[(u64, Vec<u8>)], last: Option<u64>) -> Result<Self, Error> {
-        ensure!(!self.has_wal(), "restoring members' logs into a store holding a write-ahead log");
+        ensure!(!self.has_wal(), "restoring members' logs into a cell holding a write-ahead log");
         crate::replicate::restore(&*self.dir, self.file.cell, logs, last)?;
         let Recovering { dir, taken, claim, file, .. } = self;
         let wal = crate::wal::recover(&*dir, file.cell)?;
@@ -928,7 +934,7 @@ impl<D: Dir> Recovering<D> {
     }
 
     /// cladefs: whether its placement's takings of its cell are forced (`PlaceCell`'s `force`,
-    /// TASK-681): its placement was placed forced, and is the store's placement still.
+    /// TASK-681): its placement was placed forced, and is the cell's placement still.
     pub fn forced(&self) -> bool {
         self.file.forced.is_some() && self.file.forced == self.file.token
     }
@@ -943,7 +949,7 @@ impl<D: Dir> Recovering<D> {
     /// cladefs: notes, durably, in its description, that its taking, of the placement `placement`,
     /// forced, fenced fewer members than a take needs, the bucket holding its commits through epoch
     /// `kept` (TASK-681): what its status says from now on, until another placement holds it. The
-    /// placement noted too, as a store made by a forced take is placed after (`CreateCell`).
+    /// placement noted too, as a cell made by a forced take is placed after (`CreateCell`).
     pub fn note_forced_after(&mut self, placement: u64, kept: u64) -> Result<(), Error> {
         self.file.token = Some(placement);
         self.file.forced = Some(placement);
@@ -959,7 +965,7 @@ impl<D: Dir> Recovering<D> {
     /// synced and the bucket doesn't, all of it, or, empty, nothing the bucket doesn't, the
     /// writer's end counting toward Replicated only once synced (doc-21). Not from its log's
     /// holding records alone: a log dropped and then restored only in part, or a later writer's,
-    /// holds records too. A store made anew names none.
+    /// holds records too. A cell made anew names none.
     pub fn holds_own_copy(&self, epoch: u64) -> bool {
         self.file.writer_copies.contains(&epoch)
     }
@@ -1038,17 +1044,17 @@ impl<D: Dir> Recovering<D> {
     }
 
     /// Whether its write-ahead log follows the cell whose end a writer found as `taken` says:
-    /// unless the cell moved on from it ([`bucket_cell::Error::Diverged`]). What a store asks
-    /// of the cell as recovery found it before taking its head, so that a store plainly stale
+    /// unless the cell moved on from it ([`bucket_cell::Error::Diverged`]). What a cell asks
+    /// of the cell as recovery found it before taking its head, so that a cell plainly stale
     /// fences no writer.
     pub fn follows(&self, taken: &bucket_cell::TakenCell) -> bool {
         self.wal().rebase(taken).is_ok()
     }
 
     /// Drops its write-ahead log, the commits it holds never acknowledged lost: what `cladefsctl
-    /// take` does of a store whose log diverged (doc-14, Opening a store). Its start goes with it:
-    /// an empty log follows any cell. Durably, before the store opens past it: a crash after
-    /// brings none of it back, whose commits the cell moved on from, to upload after the store's
+    /// take` does of a cell whose log diverged (doc-14, Opening a cell). Its start goes with it:
+    /// an empty log follows any cell. Durably, before the cell opens past it: a crash after
+    /// brings none of it back, whose commits the cell moved on from, to upload after the cell's
     /// own since (TASK-295).
     pub fn drop_wal(&mut self) -> Result<(), Error> {
         // cladefs: its writer's copies, which it holds no more, said so first, durably: a crash
@@ -1088,15 +1094,15 @@ impl<D: Dir> Recovering<D> {
         }
     }
 
-    /// Opens the store as `opening` says the bucket holds its cell (doc-14, Opening a store):
+    /// Opens the cell as `opening` says the bucket holds its cell (doc-14, Opening a cell):
     /// its write-ahead log put after the cell's end, by its commits, those of its segments that
     /// landed acknowledged, their files into the host's cache, and the rest stamped anew on the
     /// writer's chain ([`Wal::rebase`]), its start written first; or refused, if the cell moved
     /// on from it ([`bucket_cell::Error::Diverged`]). The cell's state is the bucket's, its
     /// extents there, with the log's segments' footers applied over it, their extents here; and
-    /// another segment opens, past them. A version's store holds its state alone, and no log.
+    /// another segment opens, past them. A version's cell holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<LocalCell<D>, Error> {
-        ensure!(!self.file.ephemeral, "an ephemeral cell's store opens as one (open_ephemeral)");
+        ensure!(!self.file.ephemeral, "an ephemeral cell opens as one (open_ephemeral)");
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let CellFile { block_size, cell, bucket, capacity, kind, version, .. } = file;
         let Opening { state, layer, taken: found, cache, keys, held } = opening;
@@ -1105,12 +1111,12 @@ impl<D: Dir> Recovering<D> {
         // before them is (TASK-411.9).
         recovered.close(&*dir, cell, &keys)?;
         // cladefs: what the bucket acknowledged goes into the host's cache by a rename, which can't
-        // cross filesystems: a store elsewhere than the cache is refused, not left to read every
+        // cross filesystems: a cell elsewhere than the cache is refused, not left to read every
         // segment back from the bucket (TASK-359).
         if let (Some(cache), Some(here)) = (&cache, dir.disk().and_then(|disk| disk.dev())) {
             ensure!(
                 cache.disk().dev() == Some(here),
-                "the store is on another filesystem than the host's cache at {}: the store's \
+                "the cell is on another filesystem than the host's cache at {}: the cell's \
                  segments go into the cache by renaming them",
                 cache.dir().display()
             );
@@ -1132,7 +1138,7 @@ impl<D: Dir> Recovering<D> {
                 (rebased, chain)
             }
             None => {
-                ensure!(wal.is_empty(), "the store of version {cell} holds commits of its own");
+                ensure!(wal.is_empty(), "the cell at version {cell} holds commits of its own");
                 (Rebased { landed: Vec::new() }, Chain::new(cell, 0, 0, 0))
             }
         };
@@ -1171,7 +1177,11 @@ impl<D: Dir> Recovering<D> {
         // it (`Allocator::open`). Not the footers' next sequence, which their writers stamped
         // past their own floors (`Chain::close`), the next floor being the uploader's to say.
         let own = extents.lens().filter(|(extent, _)| extent.cell == cell.id);
-        let next_sequence = own.map(|(extent, _)| extent.sequence + 1).max().unwrap_or(0);
+        // cladefs: the bucket's state is authenticated, and its extents a cell's, of no last
+        // sequence ([`LastSequence`]): saturating all the same, as no arithmetic on what was read
+        // wraps (board 2762).
+        let next_sequence =
+            own.map(|(extent, _)| extent.sequence.saturating_add(1)).max().unwrap_or(0);
         let root = root.unwrap_or_default();
         remove_unheld(&*dir, cell.id, &extents, &named_own)?;
 
@@ -1253,14 +1263,14 @@ impl<D: Dir> Recovering<D> {
     }
 }
 
-/// cladefs: what an opening found of a store, from which it is put together
+/// cladefs: what an opening found of a cell, from which it is put together
 /// ([`LocalCell::assemble`]): a cell kept in the bucket's ([`Recovering::open`]), or an ephemeral
 /// cell's (`Recovering::open_ephemeral`, TASK-698.2).
 struct Assembled<D: Dir> {
     options: Options,
     extents: Extents,
     capacity: u64,
-    /// Whether the cell said no capacity, its store's then, which its next commit sets in it.
+    /// Whether the cell said no capacity, its cell's then, which its next commit sets in it.
     restate: bool,
     holding: Holding,
     epoch: u64,
@@ -1280,7 +1290,7 @@ struct Assembled<D: Dir> {
 }
 
 impl<D: Dir> LocalCell<D> {
-    /// cladefs: the store `assembled` says an opening found, in `dir`, taken and claimed, of `cell`
+    /// cladefs: the cell `assembled` says an opening found, in `dir`, taken and claimed, of `cell`
     /// described so (TASK-698.2's refactor of [`Recovering::open`]).
     fn assemble(
         (dir, taken, claim): (Arc<D>, Arc<TakenDir<D>>, Claim<D>),
@@ -1315,7 +1325,7 @@ impl<D: Dir> LocalCell<D> {
             ephemeral,
         } = assembled;
         let mut uncommitted = Uncommitted::default();
-        // cladefs: a cell saying no capacity has the store's, which its next commit sets in it
+        // cladefs: a cell saying no capacity has the cell's, which its next commit sets in it
         // (TASK-165.3).
         if restate {
             uncommitted.resize(capacity);
@@ -1428,7 +1438,7 @@ fn own_footer(extent: ExtentId) -> Vec<u8> {
     bucket_cell::layout::encode(&extent)
 }
 
-/// cladefs: the files at the paths of `leaving` leave a store's directory `dir`, the objects in the
+/// cladefs: the files at the paths of `leaving` leave a cell directory `dir`, the objects in the
 /// bucket at their keys, if given: into the host's cache, `cache`, if it takes them, the file
 /// renamed; or removed (TASK-165.8). What fails to leave is logged, and removed, the bucket
 /// holding it.
@@ -1453,12 +1463,12 @@ fn leave<D: Dir>(dir: &D, cache: Option<&Cache>, leaving: Vec<(String, Option<St
 }
 
 impl<D: Dir> LocalCell<D> {
-    /// cladefs: makes a new store's directory in `dir`, which holds no store, as `description`
-    /// describes, its description naming `bucket`, the URL of the bucket its cell is kept in,
-    /// if given ([`LocalCell::bucket`]), and `kind`, its cell's kind, if given ([`LocalCell::kind`],
-    /// TASK-364); unmade until its maker says it is whole ([`LocalCell::made`]).
-    /// The description is made last: until it is durable, the directory is no store either. Its
-    /// cell is the bucket's, which opening it takes ([`LocalCell::recover`]).
+    /// cladefs: makes a new cell directory in `dir`, which holds no cell, as `description`
+    /// describes, its description naming `bucket`, the URL of the bucket its cell is kept in, if
+    /// given ([`LocalCell::bucket`]), and `kind`, its cell's kind, if given ([`LocalCell::kind`],
+    /// TASK-364); unmade until its maker says it is whole ([`LocalCell::made`]). The description is
+    /// made last: until it is durable, the directory is no cell either. Its cell is the bucket's,
+    /// which opening it takes ([`LocalCell::recover`]).
     pub fn make(
         dir: &D,
         description: Description,
@@ -1468,9 +1478,9 @@ impl<D: Dir> LocalCell<D> {
         Self::make_copy(dir, description, bucket, kind, None)
     }
 
-    /// cladefs: makes a new store's directory in `dir`, as [`LocalCell::make`] does, a copy of the
+    /// cladefs: makes a new cell's directory in `dir`, as [`LocalCell::make`] does, a copy of the
     /// version `version` of its cell, if given: its cell's state at the version, which nothing
-    /// writes, as a store at a version holds the version's (doc-18, TASK-476).
+    /// writes, as a cell at a version holds the version's (doc-18, TASK-476).
     pub fn make_copy(
         dir: &D,
         description: Description,
@@ -1481,7 +1491,7 @@ impl<D: Dir> LocalCell<D> {
         Self::make_described(dir, description, bucket, kind, (version, false), |_| Ok(()))
     }
 
-    /// cladefs: makes a new store's directory in `dir`, as [`LocalCell::make_copy`] does, its
+    /// cladefs: makes a new cell's directory in `dir`, as [`LocalCell::make_copy`] does, its
     /// description saying `version` and whether its cell is ephemeral, as `described` says;
     /// `extra` writes what else it holds first, before its description (TASK-698.2).
     fn make_described(
@@ -1497,11 +1507,11 @@ impl<D: Dir> LocalCell<D> {
             block_size.is_power_of_two() && block_size as usize <= crate::framed::ALIGNMENT,
             "bad block size {block_size}"
         );
-        ensure!(capacity >= block_size as u64, "the store is smaller than a block");
-        // cladefs: what a store made takes, within its disk's allowance and its tenant's limits
+        ensure!(capacity >= block_size as u64, "the cell is smaller than a block");
+        // cladefs: what a cell made takes, within its disk's allowance and its tenant's limits
         // (doc-22, TASK-539.8).
         let _pledge = dir.footprint().map(|footprint| footprint.admit_made()).transpose()?;
-        dir.take().context("taking the store's directory")?;
+        dir.take().context("taking the cell directory")?;
         let made = || -> Result<(), Error> {
             for path in KINDS {
                 dir.create_dir(path).with_context(|| format!("creating {path}"))?;
@@ -1536,7 +1546,7 @@ impl<D: Dir> LocalCell<D> {
         made
     }
 
-    /// cladefs: the store is whole, as its maker made it: the file saying it is not goes, durably
+    /// cladefs: the cell is whole, as its maker made it: the file saying it is not goes, durably
     /// ([`UNMADE`], TASK-196). Its next openings open it.
     pub fn made(&self) -> Result<(), Error> {
         match self.dir.remove(UNMADE) {
@@ -1547,19 +1557,19 @@ impl<D: Dir> LocalCell<D> {
         Ok(self.dir.barrier()?)
     }
 
-    /// cladefs: makes a new store in `dir` as [`LocalCell::make`] does, whole, kept nowhere, and opens
-    /// it: one whose cell the bucket holds nothing of ([`Opening::new`]), as the store's own
+    /// cladefs: makes a new cell in `dir` as [`LocalCell::make`] does, whole, kept nowhere, and
+    /// opens it: one whose cell the bucket holds nothing of ([`Opening::new`]), as the cell's own
     /// tests' are.
     #[cfg(any(test, feature = "unkept"))]
     pub fn create(dir: D, description: Description, options: Options) -> Result<Self, Error> {
         Self::make(&dir, description, None, None)?;
-        let store = Self::recover_unmade(dir)?.open(options, Opening::new(description.cell))?;
-        store.made()?;
-        Ok(store)
+        let cell = Self::recover_unmade(dir)?.open(options, Opening::new(description.cell))?;
+        cell.made()?;
+        Ok(cell)
     }
 
-    /// cladefs: opens the store in `dir`, whose cell the bucket holds nothing of
-    /// ([`Opening::new`]), as the store's own tests' is: refused if its write-ahead log had
+    /// cladefs: opens the cell in `dir`, whose cell the bucket holds nothing of
+    /// ([`Opening::new`]), as the cell's own tests' is: refused if its write-ahead log had
     /// anything acknowledged.
     #[cfg(any(test, feature = "unkept"))]
     pub fn open(dir: D, options: Options) -> Result<Self, Error> {
@@ -1568,7 +1578,7 @@ impl<D: Dir> LocalCell<D> {
         recovering.open(options, Opening::new(cell))
     }
 
-    /// Takes the store in `dir` for this process ([`Dir::take`]), and claims it for an opening
+    /// Takes the cell in `dir` for this process ([`Dir::take`]), and claims it for an opening
     /// ([`Dir::claim`]), and recovers its write-ahead log ([`crate::wal`]), to be opened as the
     /// bucket holds its cell ([`Recovering::open`]). Fails while another process has it open, or
     /// this one; and with [`Unmade`] if its maker never made it whole (TASK-196).
@@ -1581,17 +1591,17 @@ impl<D: Dir> LocalCell<D> {
         Self::recover_unmade(dir)
     }
 
-    /// Recovers the store in `dir` as [`LocalCell::recover`] does, unmade or not: its maker's
+    /// Recovers the cell in `dir` as [`LocalCell::recover`] does, unmade or not: its maker's
     /// opening.
     pub fn recover_unmade(dir: D) -> Result<Recovering<D>, Error> {
-        dir.take().context("taking the store's directory")?;
+        dir.take().context("taking the cell directory")?;
         let dir = Arc::new(dir);
         // Dropped, as an opening that fails drops them, they let the directory go.
         let taken = Arc::new(TakenDir(dir.clone()));
-        dir.claim().context("taking the store's directory")?;
+        dir.claim().context("taking the cell directory")?;
         let claim = Claim(dir.clone());
         let file = {
-            let file = dir.open(DESCRIPTION, false).context("opening the store's description")?;
+            let file = dir.open(DESCRIPTION, false).context("opening the cell's description")?;
             let text = String::from_utf8(read_file(&file)?).context("reading the description")?;
             CellFile::parse(&text)?
         };
@@ -1627,7 +1637,7 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: the URL of the bucket its cell is kept in, as its description names it: every
-    /// store in a host's directory names one ([`crate::create_host`]); none, one of memory's
+    /// cell in a host's directory names one ([`crate::create_host`]); none, one of memory's
     /// (TASK-165.6).
     pub fn bucket(&self) -> Option<&str> {
         self.bucket.as_deref()
@@ -1639,13 +1649,13 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: its keys, its cell's and its ancestors' DEKs, which it encrypts and reads under
-    /// (TASK-411.3): every store's encrypted (TASK-411.28).
+    /// (TASK-411.3): every cell's encrypted (TASK-411.28).
     pub fn keys(&self) -> &Arc<Ring> {
         &self.keys
     }
 
-    /// cladefs: holds the store's directory taken for this process until what it returns is dropped,
-    /// as the store open does: for what outlives the store's closing and still writes in the
+    /// cladefs: holds the cell directory taken for this process until what it returns is dropped,
+    /// as the cell open does: for what outlives the cell's closing and still writes in the
     /// directory, as its uploader does as it stops (TASK-129). Fails once it is closed.
     pub fn hold_dir(&self) -> Result<DirHold<D>, Error> {
         let opened = self.opened.with(Mutex::lock);
@@ -1653,14 +1663,14 @@ impl<D: Dir> LocalCell<D> {
         Ok(DirHold { _taken: taken.clone() })
     }
 
-    /// cladefs: commits, durably, a commit whose segment's footer names the version `cut` cut at its
-    /// end, a name for the cell's state as of the commit, which the acknowledgement naming the
-    /// segment names in the cell's head (doc-18, TASK-476). Its segment closes at the commit.
-    /// If `quiescent`, the store must be, no extent written since its last commit
-    /// ([`LocalCell::has_open`]), so that the version holds all its guest wrote, as a VM
-    /// snapshot's must: refused otherwise ([`NotQuiescent`]). A fork's need not: it holds what the
-    /// guest committed. Returns the commit's number: the version is local until the bucket
-    /// acknowledges it ([`LocalCell::local_versions`]).
+    /// cladefs: commits, durably, a commit whose segment's footer names the version `cut` cut at
+    /// its end, a name for the cell's state as of the commit, which the acknowledgement naming the
+    /// segment names in the cell's head (doc-18, TASK-476). Its segment closes at the commit. If
+    /// `quiescent`, the cell must be, no extent written since its last commit
+    /// ([`LocalCell::has_open`]), so that the version holds all its guest wrote, as a VM snapshot's
+    /// must: refused otherwise ([`NotQuiescent`]). A fork's need not: it holds what the guest
+    /// committed. Returns the commit's number: the version is local until the bucket acknowledges
+    /// it ([`LocalCell::local_versions`]).
     pub async fn commit_version(&self, cut: NewVersion, quiescent: bool) -> Result<u64, Error> {
         let committing = self.committing.lock().await;
         if quiescent && self.has_open()? {
@@ -1695,7 +1705,7 @@ impl<D: Dir> LocalCell<D> {
         self.version
     }
 
-    /// The store's directory.
+    /// The cell directory.
     pub fn dir(&self) -> &D {
         &self.dir
     }
@@ -1706,7 +1716,7 @@ impl<D: Dir> LocalCell<D> {
         &self.held
     }
 
-    /// The store, as its user sees it.
+    /// The cell, as its user sees it.
     pub fn description(&self) -> Description {
         Description {
             block_size: self.block_size,
@@ -1721,12 +1731,12 @@ impl<D: Dir> LocalCell<D> {
         Locked::new(self.state.with(Mutex::lock))
     }
 
-    /// The state, to read: unless the store failed ([`Readable`], TASK-160.19).
+    /// The state, to read: unless the cell failed ([`Readable`], TASK-160.19).
     fn state(&self) -> Result<Readable<'_, D::File>, Error> {
         Readable::check(self.lock(), self.cell)
     }
 
-    /// The state, to change: unless the store failed, or the cell is closed, or a version
+    /// The state, to change: unless the cell failed, or the cell is closed, or a version
     /// ([`Writable`]), checked again by its waits, which let it go meanwhile (TASK-83).
     fn writable(&self) -> Result<Writable<'_, D::File>, Error> {
         Writable::check(self.lock(), self.cell)
@@ -1776,13 +1786,13 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// Closes the cell, once the commits only ordered are durable, those a flush in flight is
-    /// making durable among them: another store may open it, and this one reads what it holds, as
+    /// making durable among them: another opening may follow, and this one reads what it holds, as
     /// caches of its extents may still, and changes nothing.
     pub async fn close(&self) -> Result<(), Error> {
         self.closing();
-        fail::fail_point!("store::closing");
+        fail::fail_point!("cell::closing");
         // After a flush in flight: its commits are durable, and the files they made unreferenced
-        // gone, before another store may open the cell.
+        // gone, before the cell may be opened again.
         let mut flushing = match rules().close_waits_for_flushes {
             true => Some(self.flushing.lock().await),
             false => None,
@@ -1797,8 +1807,8 @@ impl<D: Dir> LocalCell<D> {
             None => self.flush().await,
         };
         drop(flushing);
-        // cladefs: an ephemeral cell's closed segments covered, all of them, its local checkpoint what its next
-        // opening starts from (TASK-698.2).
+        // cladefs: an ephemeral cell's closed segments covered, all of them, its local checkpoint
+        // what its next opening starts from (TASK-698.2).
         let flushed = match flushed {
             Ok(()) if self.ephemeral.is_some() && !self.lock().standing.is_closed() => {
                 self.checkpoint(true).await.map(drop)
@@ -1807,7 +1817,7 @@ impl<D: Dir> LocalCell<D> {
         };
         if !self.lock().standing.is_closed() {
             // cladefs: once no segment is being framed, whatever closed it, a commit no flush took
-            // or one that failed among them, which another store, opening the cell, would frame
+            // or one that failed among them, which another opening of the cell would frame
             // again meanwhile from its raw file (TASK-41.1, TASK-79.99): each framing ends itself,
             // and the segments say which are running (TASK-153.8). The opening keeps their framed
             // files, if whole, or frames their raw files anew.
@@ -1815,14 +1825,14 @@ impl<D: Dir> LocalCell<D> {
                 drop(self.lock_when(|state| state.segments.framings().is_empty()).await);
             }
             // cladefs: and for the next segment's log being prepared, which writes a spare's header
-            // and room: a store opening the cell again meanwhile, taking the spare as a log, would
+            // and room: the cell opened again meanwhile, taking the spare as a log, would
             // have its header written over, another segment's, its records then none of its own
             // (TASK-333, the Shuttle rounds closing after a failed framing).
             self.lock_when(|state| !state.segments.preparing()).await.standing.close();
             // cladefs: and for a look ahead reading its part, holding no lock (TASK-400), which
-            // read on after close returned, maybe once the raw files below were gone, while a store
-            // opened on the directory meanwhile counted its I/O as that store's own (TASK-426).
-            // Closed, the store begins none of those queued ([`Framer::to_see`]). Their raw files,
+            // read on after close returned, maybe once the raw files below were gone, while a cell
+            // opened on the directory meanwhile counted its I/O as that cell's own (TASK-426).
+            // Closed, the cell begins none of those queued ([`Framer::to_see`]). Their raw files,
             // of commits durable, go as a flush's would.
             let raw = {
                 let mut state = self.lock_when(|state| !state.framing.looking).await;
@@ -1877,7 +1887,7 @@ impl<D: Dir> LocalCell<D> {
         self.lock().gate.is_held()
     }
 
-    /// Begins writing `len` bytes at `offset` in `extent`, which must be the store's cell's and
+    /// Begins writing `len` bytes at `offset` in `extent`, which must be the cell's and
     /// open: not yet written, or written since the last commit. The caller writes the data to the
     /// returned write's file, and finishes it.
     pub async fn begin_write(
@@ -1909,6 +1919,9 @@ impl<D: Dir> LocalCell<D> {
         if extent.cell != self.cell.id {
             bail!(OtherCell(extent));
         }
+        if extent.sequence == u64::MAX {
+            bail!(LastSequence(extent));
+        }
         let state = self.writable()?;
         if state.gate.is_held() {
             return Ok(None);
@@ -1935,8 +1948,8 @@ impl<D: Dir> LocalCell<D> {
         }
     }
 
-    /// Begins a write, as [`LocalCell::begin_write`] says, with `state`, writable, held, and no commit
-    /// holding writes back.
+    /// Begins a write, as [`LocalCell::begin_write`] says, with `state`, writable, held, and no
+    /// commit holding writes back.
     fn begin_write_locked(
         &self,
         mut state: Writable<'_, D::File>,
@@ -1963,12 +1976,12 @@ impl<D: Dir> LocalCell<D> {
             (grows, to_segment, overwrites)
         };
         // cladefs: whole sectors, which the open segment takes, and its seal, copying it whole from
-        // its start, appends there (TASK-411.8): refused before the extent opens. cladefs: and which
-        // large extents' raw files take, encrypted a sector at a time (TASK-411.5).
+        // its start, appends there (TASK-411.8): refused before the extent opens. cladefs: and
+        // which large extents' raw files take, encrypted a sector at a time (TASK-411.5).
         Unsectored::check(offset, len)?;
         state.check_room(grows, overwrites)?;
         // cladefs: within its disk's allowance and its tenant's limits, with room left for what the
-        // store's own work adds for it, which nothing refuses (doc-22, TASK-539.8).
+        // cell's own work adds for it, which nothing refuses (doc-22, TASK-539.8).
         let pledge =
             self.dir.footprint().map(|footprint| footprint.admit(len, grows)).transpose()?;
         if to_segment {
@@ -1997,7 +2010,7 @@ impl<D: Dir> LocalCell<D> {
         state.space.reserve(grows);
         state.gate.pass();
         Ok(Write {
-            store: self,
+            cell: self,
             extent,
             opening,
             extent_offset: offset,
@@ -2011,12 +2024,12 @@ impl<D: Dir> LocalCell<D> {
         })
     }
 
-    /// The raw file of `extent`, not open, made for its writes until it is sealed. cladefs: one left
-    /// at its path holds nothing the extent does, as no open extent's writes go to it: a free's, of
-    /// the extent while it was open, which the next commit's flush removes. It makes way, so that
-    /// the extent may be written anew before that flush (TASK-79.5).
-    /// cladefs: encrypted under its cell's newest DEK, from a salt of its own kept in memory alone,
-    /// as the file never outlives the process: an opening removes those left (TASK-411.5).
+    /// The raw file of `extent`, not open, made for its writes until it is sealed. cladefs: one
+    /// left at its path holds nothing the extent does, as no open extent's writes go to it: a
+    /// free's, of the extent while it was open, which the next commit's flush removes. It makes
+    /// way, so that the extent may be written anew before that flush (TASK-79.5). cladefs:
+    /// encrypted under its cell's newest DEK, from a salt of its own kept in memory alone, as the
+    /// file never outlives the process: an opening removes those left (TASK-411.5).
     fn create_raw(&self, extent: ExtentId) -> Result<RawFile<D::File>, Error> {
         let (dir, path) = (&*self.dir, open_extent_path(extent));
         let created = match dir.create(&path, true) {
@@ -2046,7 +2059,7 @@ impl<D: Dir> LocalCell<D> {
         Ok(())
     }
 
-    /// cladefs: what frames the store's segments, and prepares its next segment's log, off its
+    /// cladefs: what frames the cell's segments, and prepares its next segment's log, off its
     /// commits ([`Framer`]).
     fn framer(&self) -> Framer<D> {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
@@ -2056,7 +2069,7 @@ impl<D: Dir> LocalCell<D> {
     /// cladefs: prepares the log of the segment after the open one, off the state lock, on a thread
     /// of its own, unless it is or is being (`Segments::to_prepare`, TASK-333): the segment's
     /// opening takes it, syncing nothing, where it wrote and synced its header holding the state
-    /// lock, every write and read of the store, and its flushes, waiting 0.1-1.4 s behind the
+    /// lock, every write and read of the cell, and its flushes, waiting 0.1-1.4 s behind the
     /// host's journal on a disk VMs share. cladefs: placed there under its name, beside the
     /// segment's raw file, holding the state, then their entries made durable, holding nothing
     /// (`Segments::prepared`, TASK-384): the commits made in the segment, opened, then wait for no
@@ -2118,8 +2131,8 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: the number of the next segment, if its raw file and log are there, under their
-    /// names, ahead of it, its preparation's ([`LocalCell::prepare_next`], TASK-384): what reads the
-    /// directory beside the store, as a test does, finds them holding nothing, as an opening
+    /// names, ahead of it, its preparation's ([`LocalCell::prepare_next`], TASK-384): what reads
+    /// the directory beside the cell, as a test does, finds them holding nothing, as an opening
     /// would, which removes them.
     pub fn placed(&self) -> Option<u64> {
         self.lock().segments.placed().map(|segment| segment.number)
@@ -2127,7 +2140,7 @@ impl<D: Dir> LocalCell<D> {
 
     /// cladefs: waits for the preparation of the next segment's log to end, if one runs
     /// ([`LocalCell::prepare_next`]): its raw file and log there, under their names, their entries
-    /// durable, until the segment opens, as what counts the store's files counts them (TASK-333,
+    /// durable, until the segment opens, as what counts the cell's files counts them (TASK-333,
     /// TASK-384).
     pub async fn prepared(&self) -> Result<(), Error> {
         drop(self.lock_when(|state| !(state.segments.preparing())).await);
@@ -2190,7 +2203,8 @@ impl<D: Dir> LocalCell<D> {
             }
             _ => unreachable!("an extent's data is in segments or its own file"),
         }
-        state.next_sequence = state.next_sequence.max(extent.sequence + 1);
+        // Not the last sequence, which writes refuse ([`LastSequence`]).
+        state.next_sequence = state.next_sequence.max(extent.sequence.saturating_add(1));
         self.count_open(state);
         self.written(state);
         self.see_ahead(state);
@@ -2334,7 +2348,7 @@ impl<D: Dir> LocalCell<D> {
         part.unpack(stored, crate::framed::unpacked())
     }
 
-    /// Frees `extent`, which may be open, if the store holds it.
+    /// Frees `extent`, which may be open, if the cell holds it.
     pub fn free(&self, extent: ExtentId) -> Result<(), Error> {
         let mut state = self.writable()?;
         let state = &mut *state;
@@ -2384,24 +2398,24 @@ impl<D: Dir> LocalCell<D> {
         Ok(())
     }
 
-    /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for views,
-    /// or for the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
+    /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for
+    /// views, or for the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
     pub fn read_kept(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
         self.read_into_entry(extent, offset, buf, Reader::Kept)
     }
 
     /// Commits what was written and freed since the last commit, and `root`, if given, as the
-    /// store's root, durably: a barrier, after which the store recovers at least this. It seals
+    /// cell's root, durably: a barrier, after which the cell recovers at least this. It seals
     /// the extents written before it.
     pub async fn commit(&self, root: Option<&[u8]>) -> Result<(), Error> {
         self.commit_ordered(root).await?;
         self.flush().await
     }
 
-    /// cladefs: commits as [`LocalCell::commit`] does, but without waiting for durability: a barrier,
-    /// which orders what came before it before what comes after, and seals the extents written
-    /// before it. A crash keeps a prefix of the commits, which [`LocalCell::flush`] makes durable in
-    /// order: doc-4's `COMMIT` without `COMMIT_UPLOADED`.
+    /// cladefs: commits as [`LocalCell::commit`] does, but without waiting for durability: a
+    /// barrier, which orders what came before it before what comes after, and seals the extents
+    /// written before it. A crash keeps a prefix of the commits, which [`LocalCell::flush`] makes
+    /// durable in order: doc-4's `COMMIT` without `COMMIT_UPLOADED`.
     pub async fn commit_ordered(&self, root: Option<&[u8]>) -> Result<(), Error> {
         let committing = self.committing.lock().await;
         self.commit_locked(&committing, root).await
@@ -2435,7 +2449,7 @@ impl<D: Dir> LocalCell<D> {
             false => self.writable()?,
         };
         // From its first seal on, the state runs ahead of the files: a commit failing part way
-        // fails the store.
+        // fails the cell.
         let committed = state.failing(|state| self.commit_in(state, root));
         committed.context("committing the extent store")
     }
@@ -2477,10 +2491,10 @@ impl<D: Dir> LocalCell<D> {
         self.committed(state, epoch, records)
     }
 
-    /// cladefs: what follows commit `epoch`, whose contents are `records`, by the segments it spans,
-    /// in the state: the segments filled since the last commit closed and framed, which it sealed
-    /// in, the open segment closed if it is due, the segments it let go of, and what its flush
-    /// makes durable, queued.
+    /// cladefs: what follows commit `epoch`, whose contents are `records`, by the segments it
+    /// spans, in the state: the segments filled since the last commit closed and framed, which it
+    /// sealed in, the open segment closed if it is due, the segments it let go of, and what its
+    /// flush makes durable, queued.
     fn committed(
         &self,
         state: &mut State<D::File>,
@@ -2622,8 +2636,8 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// Seals `extent`, which a commit seals, in one run in the open segment, or in a file of its
-    /// own, framed, if it is large, copying its data there unless it is. cladefs: or where it is, if
-    /// one run of a segment filled since the last commit, which the commit goes on with
+    /// own, framed, if it is large, copying its data there unless it is. cladefs: or where it is,
+    /// if one run of a segment filled since the last commit, which the commit goes on with
     /// (`Segments::fill`, TASK-92.41); a copy past the open segment's room filling it, and going in
     /// the next. Returns the bytes it copied, if it copied them.
     fn seal(&self, state: &mut State<D::File>, extent: ExtentId) -> Result<u64, Error> {
@@ -2631,7 +2645,7 @@ impl<D: Dir> LocalCell<D> {
             // cladefs: opened by a write abandoned, none since: its raw file, if it has one, holds
             // nothing, and goes now, as the commit waited for the writes in progress; not with the
             // commit's flush, which the extent's next write, making another, may come before
-            // (TASK-79.5). Opening the store removes it, failing here.
+            // (TASK-79.5). Opening the cell removes it, failing here.
             if let Some(Packing::Own(_)) = state.uncommitted.packing(extent) {
                 let path = open_extent_path(extent);
                 if let Err(err) = self.dir.remove(&path) {
@@ -2697,22 +2711,23 @@ impl<D: Dir> LocalCell<D> {
             Data::Pieces(pieces)
         };
         state.segments.place(extent, &data_now);
-        state.extents.own_mut(&extent).expect("an extent open is its store's own").data = data_now;
+        state.extents.own_mut(&extent).expect("an extent open is its cell's own").data = data_now;
         Ok(entry.len)
     }
 
-    /// cladefs: seals `extent`, open in `raw`, a raw file of its own, of its `len` bytes, in its own
-    /// file, framed: in place, if none of its parts compresses, as an object of such parts holds
-    /// them as they are, where they are (`extent_frame::Packer::in_place`), its raw file that file
-    /// then, its tail appended, renamed; or else in a file of its own, as [`LocalCell::write_own`]
-    /// frames one, the parts before the first that compresses copied there. A large extent's data
-    /// was written twice, in its raw file, which the host's disk wrote back as its guest wrote it,
-    /// and in the framed file: as much again as its guest wrote, its framings and the disk's other
-    /// writers waiting behind it (TASK-310). In place, its bytes don't change, which a read of the
-    /// raw file in progress reads. Returns the bytes it copied: none in place. cladefs: an encrypted
-    /// store's in place too, its raw file's XTS sectors the object's parts, each tagged as it is
-    /// read, stored, then decrypted to be packed (TASK-411.23); its parts before the first that
-    /// compresses are not its copy's, encrypted with AES-GCM: framed anew, whole, in a copy then.
+    /// cladefs: seals `extent`, open in `raw`, a raw file of its own, of its `len` bytes, in its
+    /// own file, framed: in place, if none of its parts compresses, as an object of such parts
+    /// holds them as they are, where they are (`extent_frame::Packer::in_place`), its raw file that
+    /// file then, its tail appended, renamed; or else in a file of its own, as
+    /// [`LocalCell::write_own`] frames one, the parts before the first that compresses copied
+    /// there. A large extent's data was written twice, in its raw file, which the host's disk wrote
+    /// back as its guest wrote it, and in the framed file: as much again as its guest wrote, its
+    /// framings and the disk's other writers waiting behind it (TASK-310). In place, its bytes
+    /// don't change, which a read of the raw file in progress reads. Returns the bytes it copied:
+    /// none in place. cladefs: an encrypted cell's in place too, its raw file's XTS sectors the
+    /// object's parts, each tagged as it is read, stored, then decrypted to be packed
+    /// (TASK-411.23); its parts before the first that compresses are not its copy's, encrypted with
+    /// AES-GCM: framed anew, whole, in a copy then.
     fn seal_own(
         &self,
         state: &mut State<D::File>,
@@ -2749,8 +2764,8 @@ impl<D: Dir> LocalCell<D> {
             }
             let file = match &mut framed {
                 Some(file) => file,
-                // Its raw parts before are no parts of a store at a version's, encrypted with AES-GCM: framed anew,
-                // whole.
+                // Its raw parts before are no parts of a cell at a version's, encrypted with
+                // AES-GCM: framed anew, whole.
                 None if end > 0 => {
                     self.write_own(state, extent, len, |at, buf| raw.read_cached(buf, at))?;
                     state.unreferenced.doomed.push(raw_path);
@@ -2857,20 +2872,20 @@ impl<D: Dir> LocalCell<D> {
     /// if commits made since it opened, or forks: for its uploader to upload what the commits made
     /// so far without waiting for the next. Writes wait for the closing alone: it is framed, and
     /// made durable, by a framing that ends itself, as a commit's closing is
-    /// ([`LocalCell::frame_behind`]), waited for holding no lock, so that the store serves its writes,
-    /// reads and commits meanwhile, which read the segment from its raw file (TASK-41.1). Its
-    /// framed file is durable when this returns; its raw file goes once the commits its footer
-    /// names are durable, as a commit's closing's does: so that opening the cell reads no
-    /// segment whose raw file is gone (TASK-92.16). Returns whether it closed.
+    /// ([`LocalCell::frame_behind`]), waited for holding no lock, so that the cell serves its
+    /// writes, reads and commits meanwhile, which read the segment from its raw file (TASK-41.1).
+    /// Its framed file is durable when this returns; its raw file goes once the commits its footer
+    /// names are durable, as a commit's closing's does: so that opening the cell reads no segment
+    /// whose raw file is gone (TASK-92.16). Returns whether it closed.
     pub async fn close_now(&self) -> Result<bool, Error> {
         self.close_now_unless(false).await
     }
 
-    /// cladefs: closes as [`LocalCell::close_now`] does, unless the guest is filling the segment it would
-    /// close (`Segments::filling`): its next commit seals in place what is one run in it, where
-    /// closed now that commit copies all it wrote since out of it (TASK-92.41). What an uploader's
-    /// interval does; a commit waiting for its upload closes it whatever it holds. Returns whether
-    /// it closed.
+    /// cladefs: closes as [`LocalCell::close_now`] does, unless the guest is filling the segment it
+    /// would close (`Segments::filling`): its next commit seals in place what is one run in it,
+    /// where closed now that commit copies all it wrote since out of it (TASK-92.41). What an
+    /// uploader's interval does; a commit waiting for its upload closes it whatever it holds.
+    /// Returns whether it closed.
     pub async fn close_now_unless_filling(&self) -> Result<bool, Error> {
         self.close_now_unless(true).await
     }
@@ -2899,8 +2914,8 @@ impl<D: Dir> LocalCell<D> {
         }
     }
 
-    /// cladefs: closes the open segment, between commits, as [`LocalCell::close_now`] does, framing it
-    /// behind, and returns it: none if no commit came since it opened, nor fork, or the cell is
+    /// cladefs: closes the open segment, between commits, as [`LocalCell::close_now`] does, framing
+    /// it behind, and returns it: none if no commit came since it opened, nor fork, or the cell is
     /// closed. cladefs: or the first segment filled since the last commit, holding commits, which
     /// would wait for the next otherwise (`Segments::fill`, TASK-92.41).
     async fn close_between_commits(
@@ -2957,16 +2972,16 @@ impl<D: Dir> LocalCell<D> {
     /// framing writes it ([`Unframed::frame`]) and makes it durable, with the segments framed
     /// meanwhile (`segments::make_durable`, TASK-310), then ends itself, holding the state: the
     /// segment read from its framed file from now on, its raw file going once the commits its
-    /// footer names are durable ([`Segments::framed`]); or the store failed. Whatever comes next,
+    /// footer names are durable ([`Segments::framed`]); or the cell failed. Whatever comes next,
     /// or never does, only waits for that, as the flush of the commit that closed it, a fork, the
     /// cell's closing and [`LocalCell::close_now`] do (TASK-153.8): it ends whether or not a commit
     /// comes after (TASK-150.2), and a closing waits for every one, being counted
     /// ([`Segments::framings`], TASK-79.99). On a thread of its own, which would otherwise hold up
     /// every write and commit behind it for as long as reading, compressing, writing and syncing a
-    /// segment takes (TASK-41: 67 ms under pgbench, the store's commits' time); on the caller's,
+    /// segment takes (TASK-41: 67 ms under pgbench, the cell's commits' time); on the caller's,
     /// holding them up as before TASK-41, if the directory's I/O is its callers' alone
     /// ([`Dir::concurrent`], TASK-79.79), or if the host refuses a thread, rather than panic
-    /// through the store's locks, which the caller holds (TASK-79.80).
+    /// through the cell's locks, which the caller holds (TASK-79.80).
     fn frame_behind(
         &self,
         state: &mut State<D::File>,
@@ -2988,10 +3003,10 @@ impl<D: Dir> LocalCell<D> {
 
     /// cladefs: has the framer look ahead at the parts of segments written whole since it last did,
     /// as they fill, behind the framings queued before them, as it frames them
-    /// ([`LocalCell::frame_behind`]): its framings in place read them no more (TASK-400). A segment's
-    /// framing read all of its data back as it closed, seconds after its guest wrote it, from the
-    /// host's disk once the host had let its pages go, its 16 GiB at its limit in the long mode,
-    /// 0.7-5.7 s with eight VMs and their bucket keeping the disk busy.
+    /// ([`LocalCell::frame_behind`]): its framings in place read them no more (TASK-400). A
+    /// segment's framing read all of its data back as it closed, seconds after its guest wrote it,
+    /// from the host's disk once the host had let its pages go, its 16 GiB at its limit in the long
+    /// mode, 0.7-5.7 s with eight VMs and their bucket keeping the disk busy.
     fn see_ahead(&self, state: &mut State<D::File>) {
         let seeing = state.segments.take_seeing();
         if seeing.is_empty() {
@@ -3018,7 +3033,7 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: removes the files at `paths`, as nothing refers to them: logging what it can't,
-    /// which opening the store removes.
+    /// which opening the cell removes.
     fn remove(&self, paths: impl IntoIterator<Item = String>) {
         for path in paths {
             if let Err(err) = self.dir.remove(&path)
@@ -3030,9 +3045,9 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: the numbers of the cell's segments being framed behind what closed them
-    /// ([`LocalCell::frame_behind`]): their framed files, in the store's directory already, are whole
+    /// ([`LocalCell::frame_behind`]): their framed files, in the cell directory already, are whole
     /// only once their framings end, their raw files holding their data meanwhile. What reads the
-    /// directory beside the store, as a test does, reads no other framed file (TASK-189).
+    /// directory beside the cell, as a test does, reads no other framed file (TASK-189).
     pub fn framing(&self) -> Vec<u64> {
         let state = self.lock();
         let framing = state.segments.framings().iter();
@@ -3040,9 +3055,9 @@ impl<D: Dir> LocalCell<D> {
         ours.map(|segment| segment.number).collect()
     }
 
-    /// cladefs: the last commit whose segments the uploader may take: the last durable. A segment of
-    /// commits a crash may lose here, acknowledged in the bucket, would leave the cell past the
-    /// write-ahead log the store opens with, which its opening reads as diverged (`ESTALE`), the
+    /// cladefs: the last commit whose segments the uploader may take: the last durable. A segment
+    /// of commits a crash may lose here, acknowledged in the bucket, would leave the cell past the
+    /// write-ahead log the cell opens with, which its opening reads as diverged (`ESTALE`), the
     /// commits its own (TASK-165.9). The uploader flushes before it takes them, but for commits
     /// made between.
     fn uploadable(&self) -> u64 {
@@ -3064,7 +3079,7 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: waits, holding no lock, for every framing running to end, its framed file durable,
-    /// or failed, which it fails then: what reads the directory beside the store, as a test does,
+    /// or failed, which it fails then: what reads the directory beside the cell, as a test does,
     /// finds the segments framed then named their own, their raw files and logs going with the next
     /// flush, if their commits are durable. The uploader waits for no more than their framed files
     /// written (`LocalCell::closed`, TASK-384).
@@ -3084,23 +3099,23 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: waits, holding no lock, until no look ahead at a part written whole is queued or
-    /// reading it ([`LocalCell::see_ahead`]): the framer reads each, as its segment fills, beside what
-    /// wrote it and after, whatever comes next (TASK-400). What measures the directory's I/O across
-    /// an operation, as a test does, counts the operation's alone then, for none is queued but by
-    /// writes (TASK-423). Packing a part looked at ahead, on the threads packing ahead, reads no
-    /// file, and may run on.
+    /// reading it ([`LocalCell::see_ahead`]): the framer reads each, as its segment fills, beside
+    /// what wrote it and after, whatever comes next (TASK-400). What measures the directory's I/O
+    /// across an operation, as a test does, counts the operation's alone then, for none is queued
+    /// but by writes (TASK-423). Packing a part looked at ahead, on the threads packing ahead,
+    /// reads no file, and may run on.
     pub async fn wait_looked_ahead(&self) {
         drop(self.lock_when(|state| !(state.framing.looks_ahead())).await);
     }
 
-    /// cladefs: waits, holding no lock, until the store does nothing to its directory off its
+    /// cladefs: waits, holding no lock, until the cell does nothing to its directory off its
     /// callers' threads: no segment is being framed, nor made durable, its framed file renamed its
-    /// own (`segments::make_durable`); no log of the next segment's is being
-    /// prepared, its spare renamed the segment's ([`LocalCell::prepare_next`]); and no look ahead is
-    /// queued or reading ([`LocalCell::wait_looked_ahead`]). What reads the directory beside the store,
-    /// as a test does, finds then every file it lists still there under the name listed, as after
-    /// [`LocalCell::close`], until its callers, or its uploader, do something more (TASK-463). Fails if
-    /// the store failed.
+    /// own (`segments::make_durable`); no log of the next segment's is being prepared, its spare
+    /// renamed the segment's ([`LocalCell::prepare_next`]); and no look ahead is queued or reading
+    /// ([`LocalCell::wait_looked_ahead`]). What reads the directory beside the cell, as a test
+    /// does, finds then every file it lists still there under the name listed, as after
+    /// [`LocalCell::close`], until its callers, or its uploader, do something more (TASK-463).
+    /// Fails if the cell failed.
     pub async fn wait_idle(&self) -> Result<(), Error> {
         let idle = |state: &State<D::File>| {
             state.segments.framings().is_empty()
@@ -3114,12 +3129,12 @@ impl<D: Dir> LocalCell<D> {
 
     /// cladefs: the segments of the write-ahead log not yet taken, oldest first, `limit` of them at
     /// most, for the uploader, which has them until it says they are acknowledged
-    /// ([`LocalCell::acknowledged`]): the rest it takes later, their files not opened meanwhile. Only
-    /// those whose commits are durable ([`LocalCell::uploadable`]). Those being framed it waits for,
-    /// holding no lock: each framing ends itself, whatever comes next, which may be nothing, as
-    /// after a write that closed one for want of room (TASK-150.2, TASK-153.8). cladefs: until it
-    /// wrote their framed files, not until it made them durable, which their raw files and logs
-    /// stand for meanwhile, until the commits their footers name are (TASK-384).
+    /// ([`LocalCell::acknowledged`]): the rest it takes later, their files not opened meanwhile.
+    /// Only those whose commits are durable ([`LocalCell::uploadable`]). Those being framed it
+    /// waits for, holding no lock: each framing ends itself, whatever comes next, which may be
+    /// nothing, as after a write that closed one for want of room (TASK-150.2, TASK-153.8).
+    /// cladefs: until it wrote their framed files, not until it made them durable, which their raw
+    /// files and logs stand for meanwhile, until the commits their footers name are (TASK-384).
     pub async fn closed(&self, limit: usize) -> Result<Vec<Closed<D::File>>, Error> {
         let framing = self.state()?.segments.framings().clone();
         self.wait_for_writings(framing).await?;
@@ -3147,24 +3162,25 @@ impl<D: Dir> LocalCell<D> {
         Ok(closed)
     }
 
-    /// cladefs: the extents `moved` says the collector moved, from where to where, as the uploader's
-    /// writer names them where they went before its checkpoint lands (`Writer::following`): those
-    /// the store reads in the bucket, held or kept, are named there too, if it names them on their
-    /// way there, so that it names none further back than the writer's newest checkpoint, from
-    /// which the collector keeps the moves (TASK-195). Before, it named each where it was sealed,
-    /// whose object the collector deleted, and the moves after, once compacted again.
+    /// cladefs: the extents `moved` says the collector moved, from where to where, as the
+    /// uploader's writer names them where they went before its checkpoint lands
+    /// (`Writer::following`): those the cell reads in the bucket, held or kept, are named there
+    /// too, if it names them on their way there, so that it names none further back than the
+    /// writer's newest checkpoint, from which the collector keeps the moves (TASK-195). Before, it
+    /// named each where it was sealed, whose object the collector deleted, and the moves after,
+    /// once compacted again.
     pub fn moved(&self, moved: &[(ExtentId, Location, Location)]) -> Result<(), Error> {
         self.state()?.moved(moved);
         Ok(())
     }
 
-    /// cladefs: segment `number`, which [`LocalCell::closed`] gave, the first of the write-ahead log, is
-    /// acknowledged in the bucket: the extents sealed in it, and those stored on their own its
-    /// footer names, are read there from now on ([`BucketData`]), and their files leave the store
-    /// for the host's cache, or go: the extents' own files, and the segment's, once no extent's
-    /// data is in it here (TASK-165.8). The frees of its commits are the bucket's to keep. The
-    /// log's start, its last commit from now on, is durable first, so that the store opened again
-    /// puts what is left of the log after the cell (TASK-165.9).
+    /// cladefs: segment `number`, which [`LocalCell::closed`] gave, the first of the write-ahead
+    /// log, is acknowledged in the bucket: the extents sealed in it, and those stored on their own
+    /// its footer names, are read there from now on ([`BucketData`]), and their files leave the
+    /// cell for the host's cache, or go: the extents' own files, and the segment's, once no
+    /// extent's data is in it here (TASK-165.8). The frees of its commits are the bucket's to keep.
+    /// The log's start, its last commit from now on, is durable first, so that the cell opened
+    /// again puts what is left of the log after the cell (TASK-165.9).
     ///
     /// cladefs: once its framing ended, its framed file durable, which its upload waited for no
     /// more, but for its framed file written (TASK-384): its upload and the syncs making it
@@ -3187,8 +3203,8 @@ impl<D: Dir> LocalCell<D> {
                 _ => bail!("segment {} is not the first of the write-ahead log", Short(number)),
             }
         };
-        // cladefs: failing, it leaves the record before it whole, which the store goes on with: the
-        // uploader tries again (TASK-539.12). Before, a full disk failed the store here.
+        // cladefs: failing, it leaves the record before it whole, which the cell goes on with: the
+        // uploader tries again (TASK-539.12). Before, a full disk failed the cell here.
         start.write(&*self.dir, after).context("recording an acknowledgement")?;
         let (leaving, raw) = {
             let mut state = self.state()?;
@@ -3258,10 +3274,10 @@ impl<D: Dir> LocalCell<D> {
         .await
     }
 
-    /// [`LocalCell::flush`], holding `flushing`, and so `logs`, those of the open segment and of the
-    /// segments closed since that the last flush left; timing it in `timed`.
+    /// [`LocalCell::flush`], holding `flushing`, and so `logs`, those of the open segment and of
+    /// the segments closed since that the last flush left; timing it in `timed`.
     fn flush_locked(&self, logs: &mut Logs<D::File>, timed: &mut Flush) -> Result<(), Error> {
-        // A store that failed makes nothing more durable.
+        // A cell that failed makes nothing more durable.
         drop(self.state()?);
         let batch = self.durability.with(Mutex::lock).take();
         let appended = batch.is_some();
@@ -3303,7 +3319,7 @@ impl<D: Dir> LocalCell<D> {
         self.remove_raw(raw);
         timed.phases.took(flush::RAW, started);
         // cladefs: and the next segment's log prepared, ahead of its opening (TASK-333): by a flush
-        // that made commits durable, a store that writes, not as a store opens. A store never
+        // that made commits durable, a cell that writes, not as a cell opens. A cell never
         // written to, as a fork's that only reads, takes none: every fork a daemon served took
         // the next segment's log, and a file held open (serves_hundreds_of_forks_of_a_base).
         if appended {
@@ -3316,7 +3332,7 @@ impl<D: Dir> LocalCell<D> {
     /// `last`, `records` the records it appended, to the members of its configuration (doc-21,
     /// TASK-537.3.3): each segment's records held whole, in its replica log
     /// ([`ReplicaLog`]), started with its local log's header, and the extents they stored on their
-    /// own, in its own log ([`own_frame`]). Nothing, of a store not replicating.
+    /// own, in its own log ([`own_frame`]). Nothing, of a cell not replicating.
     fn replicate(
         &self,
         logs: &mut Logs<D::File>,
@@ -3400,7 +3416,7 @@ impl<D: Dir> LocalCell<D> {
     /// a replicated cell's configuration ([`LocalCell::replicate`]): their round trips overlap its
     /// own sync (doc-21), and no waiter is told a commit replicated before its own copy is local,
     /// as every waiter flushes first. A failure to read what it sends breaks the replicator, whose
-    /// commits then wait for the bucket, and fails nothing else: the flush is the store's own
+    /// commits then wait for the bucket, and fails nothing else: the flush is the cell's own
     /// (Codex's review of TASK-537.3.3).
     fn send(
         &self,
@@ -3417,9 +3433,9 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: has `replicator` send the commits of every flush from now on to the members of the
-    /// store's configuration (doc-21, TASK-537.3.3): as the store opens after its writer's taking,
+    /// cell's configuration (doc-21, TASK-537.3.3): as the cell opens after its writer's taking,
     /// every segment before closed, so that what it sends of each segment starts at its log's
-    /// header. The epoch of the store's last commit, local, is what none of them holds
+    /// header. The epoch of the cell's last commit, local, is what none of them holds
     /// ([`Replicator::base`]).
     pub async fn replicate_to(&self, replicator: Arc<Replicator>) {
         let mut logs = self.flushing.lock().await;
@@ -3504,17 +3520,17 @@ impl<D: Dir> LocalCell<D> {
         }
     }
 
-    /// Makes `commits`, a flush's, durable, in order: their data, and their records in the logs
-    /// of the segments they were made in, open, or closed since; but for the files they made
-    /// unreferenced. cladefs: it waits for no framing, those of segments the uploader closes between
-    /// commits among them, which held up the turns a daemon makes its guests' commits durable in
-    /// (TASK-165.9): an opening closes a segment whose framed file isn't whole again from its log.
-    /// cladefs: in one sync's time, not two (TASK-301, [`LogRecord`]): commits that sealed little
-    /// (`Options::held_most`) hold their runs in their records, and only the logs are synced, as a
-    /// database's write-ahead log is; others' records check their runs, synced at once with them.
-    /// Data first, then records, if the commits stored extents on their own, which no record
-    /// checks. At once, the records go first in a directory that does one thing at a time, as crash
-    /// tests' do: a crash between keeps records whose data it lost.
+    /// Makes `commits`, a flush's, durable, in order: their data, and their records in the logs of
+    /// the segments they were made in, open, or closed since; but for the files they made
+    /// unreferenced. cladefs: it waits for no framing, those of segments the uploader closes
+    /// between commits among them, which held up the turns a daemon makes its guests' commits
+    /// durable in (TASK-165.9): an opening closes a segment whose framed file isn't whole again
+    /// from its log. cladefs: in one sync's time, not two (TASK-301, [`LogRecord`]): commits that
+    /// sealed little (`Options::held_most`) hold their runs in their records, and only the logs are
+    /// synced, as a database's write-ahead log is; others' records check their runs, synced at once
+    /// with them. Data first, then records, if the commits stored extents on their own, which no
+    /// record checks. At once, the records go first in a directory that does one thing at a time,
+    /// as crash tests' do: a crash between keeps records whose data it lost.
     fn make_durable(
         &self,
         logs: &mut Logs<D::File>,
@@ -3581,9 +3597,9 @@ impl<D: Dir> LocalCell<D> {
         Ok(records)
     }
 
-    /// cladefs: runs `first`, and `then`, at once, `then` on a thread of the pool's, if one is free,
-    /// as one of the helpers every flush of the process shares (`durability::HELPERS`); or in turn,
-    /// on this thread, if none is, or the directory does one thing at a time.
+    /// cladefs: runs `first`, and `then`, at once, `then` on a thread of the pool's, if one is
+    /// free, as one of the helpers every flush of the process shares (`durability::HELPERS`); or in
+    /// turn, on this thread, if none is, or the directory does one thing at a time.
     fn at_once<T: Send + 'static>(
         &self,
         first: impl FnOnce() -> Result<(), Error>,
@@ -3654,8 +3670,8 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: waits, holding no lock, for the framings of `segments` to write their framed files,
-    /// or end, each of which ends itself ([`LocalCell::frame_behind`]): fails if one failed. Not for
-    /// them to make the framed files durable, which the uploader waits for no more (TASK-384).
+    /// or end, each of which ends itself ([`LocalCell::frame_behind`]): fails if one failed. Not
+    /// for them to make the framed files durable, which the uploader waits for no more (TASK-384).
     async fn wait_for_writings(
         &self,
         segments: impl IntoIterator<Item = SegmentId>,
@@ -3670,10 +3686,10 @@ impl<D: Dir> LocalCell<D> {
         }
     }
 
-    /// cladefs: whether commits ordered are not durable yet, which [`LocalCell::flush`] makes durable:
-    /// waiting for a flush to take them, or taken by one in flight, which a flush waits for. Those
-    /// taken counted not, a daemon's turn finding none took commits for durable that weren't,
-    /// a flush of the uploader's in flight (TASK-165.9).
+    /// cladefs: whether commits ordered are not durable yet, which [`LocalCell::flush`] makes
+    /// durable: waiting for a flush to take them, or taken by one in flight, which a flush waits
+    /// for. Those taken counted not, a daemon's turn finding none took commits for durable that
+    /// weren't, a flush of the uploader's in flight (TASK-165.9).
     pub fn flush_pending(&self) -> bool {
         self.durability.with(Mutex::lock).pending()
     }
@@ -3705,11 +3721,11 @@ impl<D: Dir> LocalCell<D> {
         self.write_with(extent, offset, data.len() as u64, data.len(), fill).await
     }
 
-    /// cladefs: writes `len` bytes at `offset` in `extent`, as [`LocalCell::write`] does, one write, but
-    /// `piece` bytes at a time at most, each of which `fill(at, buf)` fills with the bytes at `at`
-    /// of them: so that what a write holds of memory is a piece, whatever its length, which a VM
-    /// process names (TASK-149.17). Its pieces are whole sectors, one at least, as what reaches
-    /// the open segment is ([`SECTOR`], TASK-411.8).
+    /// cladefs: writes `len` bytes at `offset` in `extent`, as [`LocalCell::write`] does, one
+    /// write, but `piece` bytes at a time at most, each of which `fill(at, buf)` fills with the
+    /// bytes at `at` of them: so that what a write holds of memory is a piece, whatever its length,
+    /// which a VM process names (TASK-149.17). Its pieces are whole sectors, one at least, as what
+    /// reaches the open segment is ([`SECTOR`], TASK-411.8).
     pub async fn write_with(
         &self,
         extent: ExtentId,
@@ -3792,9 +3808,9 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: the bytes of frees views keep, which count as used ([`Usage::kept_for_views`]):
-    /// found as [`LocalCell::info`] finds what it says, at once, without [`LocalCell::usage`]'s walk of
-    /// every extent the cell holds, its local checkpoint's with them, which holds the state meanwhile
-    /// (TASK-92.17).
+    /// found as [`LocalCell::info`] finds what it says, at once, without [`LocalCell::usage`]'s
+    /// walk of every extent the cell holds, its local checkpoint's with them, which holds the state
+    /// meanwhile (TASK-92.17).
     pub fn kept_for_views(&self) -> Result<u64, Error> {
         Ok(self.state()?.kept.for_views())
     }
@@ -3865,7 +3881,7 @@ impl<D: Dir> LocalCell<D> {
         Reader::View { epoch: view.commit(), since: view.since(), pinned: view.pins(extent) }
     }
 
-    /// `extent`'s length, and whether it is open (written since the last commit), if the store
+    /// `extent`'s length, and whether it is open (written since the last commit), if the cell
     /// holds it.
     pub fn extent(&self, extent: ExtentId) -> Result<Option<(u64, bool)>, Error> {
         let state = self.state()?;
@@ -3886,7 +3902,7 @@ impl<D: Dir> LocalCell<D> {
         Ok(self.state()?.extents.shares_bucket_with(&other.state()?.extents))
     }
 
-    /// The extents the store holds, with their lengths, in order.
+    /// The extents the cell holds, with their lengths, in order.
     pub fn extents(&self) -> Result<Vec<(ExtentId, u64)>, Error> {
         let state = self.state()?;
         let mut extents: Vec<_> = state.extents.lens().collect();
@@ -3930,19 +3946,19 @@ fn remove_unheld<D: Dir>(
     Ok(())
 }
 
-// cladefs: commits only ordered are made durable before the store goes, which would otherwise
+// cladefs: commits only ordered are made durable before the cell goes, which would otherwise
 // lose them though nothing crashed.
 impl<D: Dir> Drop for LocalCell<D> {
     fn drop(&mut self) {
         // cladefs: dropped unclosed, closed here: at once, as a close that waits for nothing goes,
-        // as one does where the store's work runs on its caller's thread (madsim's); or waiting on
+        // as one does where the cell's work runs on its caller's thread (madsim's); or waiting on
         // the dropping thread for what it waits on, an outermost entry's (board 2944).
         let mut closing = std::pin::pin!(self.close());
         let waker = std::task::Waker::noop();
         let closed = match closing.as_mut().poll(&mut std::task::Context::from_waker(waker)) {
             std::task::Poll::Ready(closed) => closed,
             std::task::Poll::Pending => {
-                crate::blocks!("a store dropped unclosed, its close waiting");
+                crate::blocks!("a cell dropped unclosed, its close waiting");
                 crate::sync::block_on(closing)
             }
         };
@@ -4018,7 +4034,7 @@ fn paint(pieces: &[Piece], start: u64, end: u64) -> Vec<Span> {
 mod tests {
     use super::*;
 
-    /// The store's own tests under Shuttle (the `shuttle` feature), which only they can run:
+    /// The cell's own tests under Shuttle (the `shuttle` feature), which only they can run:
     /// `cargo nextest run -p local_cell --features shuttle --lib shuttle_tests::`.
     #[cfg(feature = "shuttle")]
     mod shuttle_tests {
@@ -4038,12 +4054,11 @@ mod tests {
                     capacity: 1 << 20,
                     cell: bucket_cell::layout::test_cell(1),
                 };
-                let store =
-                    LocalCell::create(crate::MemDir::new(), description, Options::default())
-                        .unwrap();
-                let _committing = shuttle::future::block_on(store.committing.lock());
-                let _state = store.state.with(Mutex::lock);
-                let mut view = store.view();
+                let cell = LocalCell::create(crate::MemDir::new(), description, Options::default())
+                    .unwrap();
+                let _committing = shuttle::future::block_on(cell.committing.lock());
+                let _state = cell.state.with(Mutex::lock);
+                let mut view = cell.view();
                 view.advance().unwrap();
                 view.pin(ExtentId::new(1, 1)).unwrap();
                 view.unpin(ExtentId::new(1, 1));
@@ -4054,7 +4069,7 @@ mod tests {
         /// cladefs: a segment a commit closes while the host refuses threads is framed on the
         /// committing thread, rather than panic, as `thread::spawn` does, through the locks the
         /// commit holds, which every later call would find poisoned: the commit goes on, and its
-        /// flush, which syncs on its own thread too, and the store's next commits; and the cell,
+        /// flush, which syncs on its own thread too, and the cell's next commits; and the cell,
         /// opened again, holds what they committed (TASK-79.80). Under Shuttle, the only build in
         /// which a test can have the host refuse threads (`refuse_threads`), on random schedules:
         /// Shuttle's PCT scheduler fails a test that exercises no concurrency, as this one, its
@@ -4071,66 +4086,65 @@ mod tests {
                     capacity: 1 << 20,
                     cell: bucket_cell::layout::test_cell(1),
                 };
-                let store =
-                    LocalCell::create(dir.clone(), description, Options::default()).unwrap();
+                let cell = LocalCell::create(dir.clone(), description, Options::default()).unwrap();
                 let extent = |sequence| ExtentId::new(1, sequence);
-                shuttle::future::block_on(store.write(extent(0), 0, &[1; 4096])).unwrap();
-                store.close_segment().unwrap();
+                shuttle::future::block_on(cell.write(extent(0), 0, &[1; 4096])).unwrap();
+                cell.close_segment().unwrap();
                 crate::sync::refuse_threads(true);
-                let committed = shuttle::future::block_on(store.commit(None));
+                let committed = shuttle::future::block_on(cell.commit(None));
                 crate::sync::refuse_threads(false);
                 committed.unwrap();
                 let framed = dir.list(&cell_dir(crate::layout::SEGMENTS, 1)).unwrap();
                 assert_eq!(framed, ["0000000000000"]);
-                shuttle::future::block_on(store.write(extent(1), 0, &[2; 4096])).unwrap();
-                shuttle::future::block_on(store.commit(None)).unwrap();
-                drop(store);
+                shuttle::future::block_on(cell.write(extent(1), 0, &[2; 4096])).unwrap();
+                shuttle::future::block_on(cell.commit(None)).unwrap();
+                drop(cell);
 
-                let store = LocalCell::open(dir, Options::default()).unwrap();
+                let cell = LocalCell::open(dir, Options::default()).unwrap();
                 let mut data = [0; 4096];
                 for (sequence, byte) in [(0, 1), (1, 2)] {
-                    store.read(extent(sequence), 0, &mut data).unwrap();
+                    cell.read(extent(sequence), 0, &mut data).unwrap();
                     assert_eq!(data, [byte; 4096], "extent {sequence}");
                 }
             });
         }
     }
 
-    /// cladefs: the store's futures are `Send`, as the daemon's tasks awaiting them are, which tokio
-    /// moves between its threads (board 2944): a guard of the store's lock held across an await
+    /// cladefs: the cell's futures are `Send`, as the daemon's tasks awaiting them are, which tokio
+    /// moves between its threads (board 2944): a guard of the cell's lock held across an await
     /// makes one not, as `close`'s and `wait_framed`'s were. Made, never polled.
     #[test]
-    fn the_stores_futures_are_send() {
+    fn the_cells_futures_are_send() {
         fn send<T: Send>(_: T) {}
         let description = Description {
             block_size: 4096,
             capacity: 1 << 20,
             cell: bucket_cell::layout::test_cell(1),
         };
-        let store =
+        let cell =
             LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
         let extent = ExtentId::new(1, 1);
-        send(store.begin_write(extent, 0, 4096));
-        send(store.write(extent, 0, &[1; 4096]));
-        send(store.write_with(extent, 0, 4096, 4096, |_, _| {}));
-        send(store.wait_until_writes_resume());
-        send(store.commit(None));
-        send(store.commit_ordered(None));
-        send(store.commit_version(NewVersion { id: 1, keep_last: None }, true));
-        send(store.set_capacity(2 << 20));
-        send(store.flush());
-        send(store.prepared());
-        send(store.close_now());
-        send(store.close_now_unless_filling());
-        send(store.close_for_upload(true));
-        send(store.wait_framed());
-        send(store.wait_looked_ahead());
-        send(store.wait_idle());
-        send(store.closed(1));
-        send(store.acknowledged(0));
-        send(store.unreplicate());
-        send(store.checkpoint(true));
-        send(store.close());
+        send(cell.begin_write(extent, 0, 4096));
+        send(cell.write(extent, 0, &[1; 4096]));
+        send(cell.write_with(extent, 0, 4096, 4096, |_, _| {}));
+        send(cell.wait_until_writes_resume());
+        send(cell.commit(None));
+        send(cell.commit_ordered(None));
+        send(cell.commit_version(NewVersion { id: 1, keep_last: None }, true));
+        send(cell.set_capacity(2 << 20));
+        send(cell.flush());
+        send(cell.prepared());
+        send(cell.close_now());
+        send(cell.close_now_unless_filling());
+        send(cell.close_for_upload(true));
+        send(cell.wait_framed());
+        send(cell.wait_looked_ahead());
+        send(cell.wait_idle());
+        send(cell.closed(1));
+        send(cell.acknowledged(0));
+        send(cell.unreplicate());
+        send(cell.checkpoint(true));
+        send(cell.close());
     }
 
     /// cladefs: what commits sealed is recorded for the views older than them alone: commits no
@@ -4142,20 +4156,20 @@ mod tests {
             capacity: 1 << 20,
             cell: bucket_cell::layout::test_cell(1),
         };
-        let store =
+        let cell =
             LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
         // Whether extent `sequence` is recorded as sealed after commit `epoch`.
         let sealed_after = |sequence, epoch| {
-            store.state.with(Mutex::lock).sealed.after(ExtentId::new(1, sequence), epoch)
+            cell.state.with(Mutex::lock).sealed.after(ExtentId::new(1, sequence), epoch)
         };
         let commit = async |sequence| {
-            store.write(ExtentId::new(1, sequence), 0, &[1; 4096]).await.unwrap();
-            store.commit(None).await.unwrap();
+            cell.write(ExtentId::new(1, sequence), 0, &[1; 4096]).await.unwrap();
+            cell.commit(None).await.unwrap();
         };
         commit(1).await;
         commit(2).await;
         assert!(!sealed_after(2, 1));
-        let view = store.view();
+        let view = cell.view();
         commit(3).await;
         assert!(sealed_after(3, view.commit()));
         drop(view);
@@ -4174,11 +4188,11 @@ mod tests {
             capacity: 1 << 20,
             cell: bucket_cell::layout::test_cell(1),
         };
-        let store =
+        let cell =
             LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
-        store.write(ExtentId::new(1, 1), 0, &[1; 4096]).await.unwrap();
-        store.state.with(Mutex::lock).space.grew(4096, true);
-        store.last_commit().unwrap();
+        cell.write(ExtentId::new(1, 1), 0, &[1; 4096]).await.unwrap();
+        cell.state.with(Mutex::lock).space.grew(4096, true);
+        cell.last_commit().unwrap();
     }
 
     /// cladefs: and here how many extents it holds: one counted that no map holds (TASK-454).
@@ -4190,11 +4204,11 @@ mod tests {
             capacity: 1 << 20,
             cell: bucket_cell::layout::test_cell(1),
         };
-        let store =
+        let cell =
             LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
-        store.write(ExtentId::new(1, 1), 0, &[1; 4096]).await.unwrap();
-        store.state.with(Mutex::lock).space.entered(true);
-        store.last_commit().unwrap();
+        cell.write(ExtentId::new(1, 1), 0, &[1; 4096]).await.unwrap();
+        cell.state.with(Mutex::lock).space.entered(true);
+        cell.last_commit().unwrap();
     }
 
     #[test]

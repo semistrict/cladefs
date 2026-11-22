@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! FUSE: a [`Filesystem`](crate::Filesystem) mounted on the host, such as a store's, an image's
-//! or a stopped VM's, as any filesystem is (TASK-222). `cladefs-mount` mounts a store so.
+//! FUSE: a [`Filesystem`](crate::Filesystem) mounted on the host, such as a cell's, an image's
+//! or a stopped VM's, as any filesystem is (TASK-222). `cladefs-mount` mounts a cell so.
 //!
 //! - [`Server`] serves the FUSE protocol, a request's bytes in, its reply's out, whatever carries
 //!   them, on every host, as its tests drive it.
 //! - [`MountOptions::mount`] mounts a filesystem on Linux, through `/dev/fuse`, and serves the
 //!   kernel's requests until it is unmounted. macOS has no FUSE of its own, nor an open-source one.
-//! - [`MountOptions::mount_stores`] mounts a directory of stores instead (TASK-302): one mount,
-//!   into which stores are attached by name, and detached, by [`Server::attach`] and
+//! - [`MountOptions::mount_cells`] mounts a directory of cells instead (TASK-302): one mount,
+//!   into which cells are attached by name, and detached, by [`Server::attach`] and
 //!   [`Server::detach`], or through [`control`], a gRPC API, which cladefsd serves (TASK-475.2).
 //!
-//! The mount is its store's only writer, as a store's directory is its process's alone, so the
+//! The mount is its cell's only writer, as a cell directory is its process's alone, so the
 //! kernel may cache all it reads: names, their absence, attributes, pages, directories' entries,
 //! for as long as it likes. The kernel checks permissions (`default_permissions`), and keeps
 //! files' locks itself, which no other mount shares.
@@ -42,5 +42,5 @@ mod mount;
 mod server;
 
 #[cfg(target_os = "linux")]
-pub use mount::{Mount, MountOptions, StoresMount, Unmounter};
+pub use mount::{CellsMount, Mount, MountOptions, Unmounter};
 pub use server::{Attached, Notifier, Server};

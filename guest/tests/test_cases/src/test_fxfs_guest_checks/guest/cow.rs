@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: the checks of copying on write (doc-13): private pages, their writeback, and rebinds
-//! under loads and stores.
+//! under loads and writes.
 
 use super::*;
 
@@ -80,12 +80,12 @@ fn cow_rebind_now() {
 /// to through a shared mapping and written with write(2): the bytes reach its new extents by
 /// writeback (msync, fsync), committed after them, and are there after a remount, which maps
 /// the file again from Fxfs. Fails if writeback wrote the extents' old pages (no copy from the
-/// window, or the copy before the stores), if write(2)'s pages never joined the dirty set (no
+/// window, or the copy before the writes), if write(2)'s pages never joined the dirty set (no
 /// writepages comes for them: fsync writes them back), or if a rebind mapped a page back to its
 /// old extent before its new one was sealed.
-pub(super) fn test_cow_store_persists() {
+pub(super) fn test_cow_write_persists() {
     const PAGE: usize = 4096;
-    let name = path("cow-store");
+    let name = path("cow-write");
     let mut expected = cow_base_file(&name, 16 * PAGE, 0x11);
     let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
     let map = CowMapping::new(&file, 16 * PAGE);
@@ -97,7 +97,7 @@ pub(super) fn test_cow_store_persists() {
     expected[3 * PAGE + 100] = 0xee;
     std::os::unix::fs::FileExt::write_all_at(&file, &[0x5a; 2 * PAGE], 7 * PAGE as u64).unwrap();
     expected[7 * PAGE..9 * PAGE].fill(0x5a);
-    // What the window shows, the stores' and the write's, before any writeback.
+    // What the window shows, the writes' and the write's, before any writeback.
     assert!(map.bytes()[..] == expected[..], "the mapping before fsync");
     file.sync_all().unwrap();
     // Rebound to the new extents, the window shows the same bytes.
@@ -114,7 +114,7 @@ pub(super) fn test_cow_store_persists() {
 }
 
 /// cladefs: a file of two chunks read in sealed, DAX, mapped shared, each chunk read through the
-/// mapping 2 MiB at once, so that its window's pages are one large folio, then a store to the
+/// mapping 2 MiB at once, so that its window's pages are one large folio, then a write to the
 /// second page, which splits the first chunk's PMD, and the file read again, page by page: each
 /// page's PTE read-only but the one stored to, all of one folio (TASK-149.16, TASK-149.42).
 struct SplitChunk {
@@ -122,14 +122,14 @@ struct SplitChunk {
     file: fs::File,
     map: CowMapping,
     data: Vec<u8>,
-    /// The private pages after the store.
+    /// The private pages after the write.
     private: u64,
 }
 
 impl SplitChunk {
     const PAGE: usize = 4096;
     const SIZE: usize = 4 << 20;
-    /// A page the store left read-only, as r861's child stored to.
+    /// A page the write left read-only, as r861's child stored to.
     const READ_ONLY: usize = 435 * Self::PAGE + 0x9bf;
 
     fn new(name: &str) -> Self {
@@ -145,7 +145,7 @@ impl SplitChunk {
         let before = Self::private();
         map.bytes()[Self::PAGE + 100] = 0xee;
         data[Self::PAGE + 100] = 0xee;
-        assert_eq!(Self::private(), before + 1, "private pages after a store to a PMD's page");
+        assert_eq!(Self::private(), before + 1, "private pages after a write to a PMD's page");
         // Page by page now, the PMD split: each page's PTE read-only, but the one stored to.
         assert!(map.bytes()[..] == data[..], "the file read again, page by page");
         Self { name, file, map, data, private: before + 1 }
@@ -155,18 +155,18 @@ impl SplitChunk {
         stats()["dax_private_pages"]
     }
 
-    /// Stores to the page left read-only through the mapping, as it is now, from this process:
-    /// the store must fault, which makes the page private.
-    fn store_to_read_only(&mut self, how: &str) {
+    /// Writes to the page left read-only through the mapping, as it is now, from this process:
+    /// the write must fault, which makes the page private.
+    fn write_to_read_only(&mut self, how: &str) {
         self.map.bytes()[Self::READ_ONLY] = 0xcd;
         self.data[Self::READ_ONLY] = 0xcd;
-        assert_eq!(Self::private(), self.private + 1, "private pages after the store {how}");
+        assert_eq!(Self::private(), self.private + 1, "private pages after the write {how}");
     }
 
     /// The mapping holds what was stored, and so does the file, evicted.
     fn finish(self) {
         let Self { name, file, map, data, .. } = self;
-        assert!(map.bytes()[..] == data[..], "the mapping after the stores");
+        assert!(map.bytes()[..] == data[..], "the mapping after the writes");
         drop(map);
         drop(file);
         evict(&name);
@@ -175,11 +175,11 @@ impl SplitChunk {
     }
 }
 
-/// cladefs: copying on write (doc-13), a fork after a chunk mapped whole and split (SplitChunk): the
-/// child's store to a page it only read faults, which makes the page private, as the parent's
+/// cladefs: copying on write (doc-13), a fork after a chunk mapped whole and split (SplitChunk):
+/// the child's write to a page it only read faults, which makes the page private, as the parent's
 /// would (TASK-149.16). Fork copies a large folio's PTEs as one, all writable if any is (6.18's
-/// copy_present_ptes, FPB_MERGE_WRITE), of a mapping it copies at all: a VM_MIXEDMAP one, as
-/// Fxfs's were. The child stored, unfaulted, to a page no PRIVATE had made the VM's, which the host
+/// copy_present_ptes, FPB_MERGE_WRITE), of a mapping it copies at all: a VM_MIXEDMAP one, as Fxfs's
+/// were. The child stored, unfaulted, to a page no PRIVATE had made the VM's, which the host
 /// refused, again and again, till the VM went down (GCE r861, fxfs-guest-fsx-faults-dax; r866).
 pub(super) fn test_cow_fork_after_a_split_pmd() {
     let mut chunk = SplitChunk::new("cow-fork-after-split");
@@ -194,12 +194,12 @@ pub(super) fn test_cow_fork_after_a_split_pmd() {
     let status = wait_for_child(child, std::time::Duration::from_secs(10));
     assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child: {status:#x}");
     chunk.data[SplitChunk::READ_ONLY] = 0xcd;
-    assert_eq!(SplitChunk::private(), chunk.private + 1, "private pages after the child's store");
+    assert_eq!(SplitChunk::private(), chunk.private + 1, "private pages after the child's write");
     chunk.finish();
 }
 
 /// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
-/// made read-only (mprotect) and writable again: a store to a page only read faults, which makes
+/// made read-only (mprotect) and writable again: a write to a page only read faults, which makes
 /// the page private (TASK-149.42). mprotect batches a large folio's PTEs, their write bits alike,
 /// their dirty bits not (6.18's change_pte_range, FPB_RESPECT_WRITE, soft-dirty unset as the
 /// guest builds no MEM_SOFT_DIRTY), clears them collecting the dirty bits into the first's
@@ -209,19 +209,19 @@ pub(super) fn test_cow_mprotect_after_a_split_pmd() {
     let mut chunk = SplitChunk::new("cow-mprotect-after-split");
     chunk.map.protect(libc::PROT_READ);
     chunk.map.protect(libc::PROT_READ | libc::PROT_WRITE);
-    chunk.store_to_read_only("after mprotect");
+    chunk.write_to_read_only("after mprotect");
     chunk.finish();
 }
 
 /// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
-/// moved (mremap), its PTEs with it: a store to a page only read faults, which makes the page
+/// moved (mremap), its PTEs with it: a write to a page only read faults, which makes the page
 /// private (TASK-149.42). mremap moves a large folio's PTEs in batches whose write bits are alike
 /// (6.18's move_ptes, mremap_folio_pte_batch's FPB_RESPECT_WRITE), each batch set as its first
 /// with the batch's dirty and young bits (get_and_clear_ptes, set_ptes): none made writable.
 pub(super) fn test_cow_mremap_after_a_split_pmd() {
     let mut chunk = SplitChunk::new("cow-mremap-after-split");
     chunk.map.moved();
-    chunk.store_to_read_only("after mremap");
+    chunk.write_to_read_only("after mremap");
     chunk.finish();
 }
 
@@ -229,8 +229,8 @@ pub(super) fn test_cow_mremap_after_a_split_pmd() {
 /// read in from sealed extents, mapped shared, three pages stored to cost three private pages,
 /// and the rest stay mapped from the extents, shared, costing none, read as they were; written
 /// back, sealed and rebound, the three are private no more, and read as stored. Fails if the
-/// file left DAX as it was written, if a store or a read made other pages private (a range's
-/// pages mapped writable, or a write iomap wider than its page), or if rebinding lost a store.
+/// file left DAX as it was written, if a write or a read made other pages private (a range's
+/// pages mapped writable, or a write iomap wider than its page), or if rebinding lost a write.
 pub(super) fn test_cow_unwritten_stay_shared() {
     const PAGE: usize = 4096;
     const LEN: usize = 8 << 20;
@@ -239,18 +239,18 @@ pub(super) fn test_cow_unwritten_stay_shared() {
     let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
     // Every private page so far written back and rebound: none left.
     cow_rebind_now();
-    assert_eq!(stats()["dax_private_pages"], 0, "private pages before the stores");
+    assert_eq!(stats()["dax_private_pages"], 0, "private pages before the writes");
     let map = CowMapping::new(&file, LEN);
     // Read whole, through the mapping: nothing private.
-    assert!(map.bytes()[..] == expected[..], "the mapping before the stores");
+    assert!(map.bytes()[..] == expected[..], "the mapping before the writes");
     assert_eq!(stats()["dax_private_pages"], 0, "private pages after reading");
     for page in [5, 700, 1900] {
         map.bytes()[page * PAGE + 1] = 0xab;
         expected[page * PAGE + 1] = 0xab;
     }
-    assert_eq!(stats()["dax_private_pages"], 3, "private pages after three stores");
+    assert_eq!(stats()["dax_private_pages"], 3, "private pages after three writes");
     assert!(is_dax(&name), "{name} left DAX as it was stored to");
-    assert!(map.bytes()[..] == expected[..], "the mapping after the stores");
+    assert!(map.bytes()[..] == expected[..], "the mapping after the writes");
     assert_eq!(stats()["dax_private_pages"], 3, "private pages after reading again");
     map.msync();
     cow_rebind_now();
@@ -266,7 +266,7 @@ pub(super) fn test_cow_unwritten_stay_shared() {
 /// cladefs: copying on write, a punch, a clone and a truncate of a file with dirty private pages,
 /// stored through a mapping and written with write(2), none written back: the punched page
 /// reads as zeros and the others as stored; the clone, into a file created here (a page-cache
-/// inode beside the DAX one, TASK-164.3), has the stores; the truncate drops the dirty pages
+/// inode beside the DAX one, TASK-164.3), has the writes; the truncate drops the dirty pages
 /// past the end, which read as zeros once it grows again; all of it as written after a
 /// remount. Fails if an UNMAP of a range dropped its dirty pages unwritten (the punch's or
 /// clone's drop of the chunk not writing back first), if the clone shared the extents' old
@@ -411,19 +411,19 @@ pub(super) fn test_cow_created_in_page_cache() {
 
 /// cladefs: copying on write (doc-13), a rebind paused before its MAP over a private page,
 /// holding the file's semaphore for writing (Pauses::REBIND): a load through another process's
-/// PTE of the page reads what was stored there, and a store to it by a process with no PTE of
+/// PTE of the page reads what was stored there, and a write to it by a process with no PTE of
 /// it waits for the rebind, then lands, the page private again. The rebind rebinds that page
-/// alone, and the file, through the mapping and evicted, holds both stores. Fails if a store
+/// alone, and the file, through the mapping and evicted, holds both writes. Fails if a write
 /// went in during the rebind (one taking the semaphore shared), if the rebind's MAP lost it,
-/// or came before the writeback's bytes were in the extent (the stores gone), or if a load had
+/// or came before the writeback's bytes were in the extent (the writes gone), or if a load had
 /// to wait for it. Copying on write, nothing moves: this replaced writable DAX's races of moves
-/// against loads and stores (moved_across_seal, load_during_move, TASK-121, 149.14).
-pub(super) fn test_rebind_against_loads_and_stores() {
+/// against loads and writes (moved_across_seal, load_during_move, TASK-121, 149.14).
+pub(super) fn test_rebind_against_loads_and_writes() {
     const PAGE: usize = 4096;
     const LEN: usize = 16 * PAGE;
     const STORED: usize = 3 * PAGE + 10;
     const AGAIN: usize = 3 * PAGE + 100;
-    let name = path("rebind-against-loads-and-stores");
+    let name = path("rebind-against-loads-and-writes");
     let mut expected = cow_base_file(&name, LEN, 0x88);
     // Every other file's private pages rebound first: the rebind pauses at this file's.
     cow_rebind_now();
@@ -477,30 +477,31 @@ pub(super) fn test_rebind_against_loads_and_stores() {
     let go = 0u8;
     assert_eq!(unsafe { libc::write(to_loader, (&raw const go).cast(), 1) }, 1, "go");
     assert_eq!(heard(from_loader, 1000), Some(b's'), "a load during the rebind");
-    // The storer, in a process of its own: its store's fault, waiting, holds its process's
+    // The mapped_writer, in a process of its own: its write's fault, waiting, holds its process's
     // mmap_lock, which this one's threads would otherwise wait for.
-    let [from_storer, storer_says] = pipe();
-    let storer = unsafe { libc::fork() };
-    assert!(storer >= 0, "fork: {}", std::io::Error::last_os_error());
-    if storer == 0 {
+    let [from_mapped_writer, mapped_writer_says] = pipe();
+    let mapped_writer = unsafe { libc::fork() };
+    assert!(mapped_writer >= 0, "fork: {}", std::io::Error::last_os_error());
+    if mapped_writer == 0 {
         unsafe {
             ((mapped + AGAIN) as *mut u8).write_volatile(0xee);
             let done = 1u8;
-            let wrote = libc::write(storer_says, (&raw const done).cast(), 1);
+            let wrote = libc::write(mapped_writer_says, (&raw const done).cast(), 1);
             libc::_exit(if wrote == 1 { 0 } else { 1 });
         }
     }
-    assert_eq!(heard(from_storer, 200), None, "a store went in during the rebind");
+    assert_eq!(heard(from_mapped_writer, 200), None, "a write went in during the rebind");
     drop(pauses);
     drop(only);
     rebinder.join().unwrap();
-    assert_eq!(heard(from_storer, 10_000), Some(1), "the store after the rebind");
-    for (child, who) in [(loader, "the loader"), (storer, "the storer")] {
+    assert_eq!(heard(from_mapped_writer, 10_000), Some(1), "the write after the rebind");
+    for (child, who) in [(loader, "the loader"), (mapped_writer, "the mapped writer")] {
         let status = wait_for_child(child, std::time::Duration::from_secs(10));
         let exited = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
         assert!(exited, "{who}: {status:#x}");
     }
-    for fd in [from_loader, loader_says, loader_hears, to_loader, from_storer, storer_says] {
+    let fds = [from_loader, loader_says, loader_hears, to_loader, from_mapped_writer, mapped_writer_says];
+    for fd in fds {
         unsafe { libc::close(fd) };
     }
     expected[AGAIN] = 0xee;
@@ -513,28 +514,28 @@ pub(super) fn test_rebind_against_loads_and_stores() {
     fs::remove_file(&name).unwrap();
 }
 
-/// cladefs: copying on write (doc-13), stores through a mapping and write(2)s to a file's pages,
+/// cladefs: copying on write (doc-13), writes through a mapping and write(2)s to a file's pages,
 /// one after another for two seconds, while the budget's worker writes back, seals and rebinds
 /// every private page it can every 10 ms (cladefs.dax_rebind_every, doc-13's stage 2): each reads
 /// back as stored, then and at the end, and the file evicted holds them all. Fails if a rebind
-/// lost a store (a page mapped back to its extent before the writeback of a store to it was
-/// sealed, or with a store to it under way), or if a writeback lost one made after its
-/// write-protect (a store into its swapped-out set, its page left clean).
+/// lost a write (a page mapped back to its extent before the writeback of a write to it was
+/// sealed, or with a write to it under way), or if a writeback lost one made after its
+/// write-protect (a write into its swapped-out set, its page left clean).
 ///
-/// The stores go to a set of `HOT` pages that moves on by a page every `STEP`, so that each
+/// The writes go to a set of `HOT` pages that moves on by a page every `STEP`, so that each
 /// page, left behind, goes unstored for many of the worker's rounds, which rebind it, while
-/// stores race the rebinds of the pages beside it, and, as the set comes back to it, its own.
+/// writes race the rebinds of the pages beside it, and, as the set comes back to it, its own.
 /// Stored to all in turn, a page went unstored between its writeback and its rebind only if
 /// the loop stalled: the faster the loop, the fewer rebound, 31 and 45 at two million rounds,
 /// none at last (GCE r582, r583; TASK-171).
-pub(super) fn test_stores_under_rebinds() {
+pub(super) fn test_writes_under_rebinds() {
     use std::os::unix::fs::FileExt;
     const PAGE: usize = 4096;
     const PAGES: usize = 64;
     const HOT: usize = 8;
     const STEP: Duration = Duration::from_millis(2);
     const LEN: usize = PAGES * PAGE;
-    let name = path("stores-under-rebinds");
+    let name = path("writes-under-rebinds");
     let mut expected = cow_base_file(&name, LEN, 0x99);
     let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
     let map = CowMapping::new(&file, LEN);
@@ -564,7 +565,7 @@ pub(super) fn test_stores_under_rebinds() {
     }
     drop(every);
     let rebinds = stats()["dax_rebound_pages"] - rebound;
-    eprintln!("stores_under_rebinds: {round} rounds, {rebinds} pages rebound");
+    eprintln!("writes_under_rebinds: {round} rounds, {rebinds} pages rebound");
     assert!(map.bytes()[..] == expected[..], "the mapping after {round} rounds");
     assert_ne!(rebinds, 0, "no page rebound in {round} rounds");
     drop(map);

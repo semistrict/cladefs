@@ -8,19 +8,19 @@
 //! the fork, what [`World::settle`] checks: no data lost, no other cell harmed, nothing leaked
 //! for good, and a later fork succeeding, or the same one failing cleanly.
 //!
-//! A fork is the bucket's alone (TASK-165.7): its child's store is made only once the bucket has
-//! the child's record, so that nothing here names a child the bucket may not have. What a fork
+//! A fork is the bucket's alone (TASK-165.7): its child's open cell is made only once the bucket
+//! has the child's record, so that nothing here names a child the bucket may not have. What a fork
 //! whose host died, or whose cleanup failed, leaves in the bucket stands, as the bucket's protocol
-//! has it (doc-14): an orphan, a live cell no store holds, which an operator finds among the live
-//! cells and deletes ([`World::settle`], `cladefs-gc --cells`).
+//! has it (doc-14): an orphan, a live cell no open cell holds, which an operator finds among the
+//! live cells and deletes ([`World::settle`], `cladefs-gc --cells`).
 //!
 //! A host dying is its disk, copied there and then, restarted, and its bucket cut off, so that what
-//! it had going runs to its end unseen ([`Gated::sever`]): every write of a dead host's kept, synced
-//! or not, as its file system may keep them.
+//! it had going runs to its end unseen ([`Gated::sever`]): every write of a dead host's kept,
+//! synced or not, as its file system may keep them.
 //!
-//! The extents are a guest's: minted from its store's next sequence number or its writer's floor,
-//! which jumps at each writer, on from 1 << 40, its cells random; never counted from nothing, as
-//! the extents of `bucket`'s other tests are, which no store's are.
+//! The extents are a guest's: minted from its open cell's next sequence number or its writer's
+//! floor, which jumps at each writer, on from 1 << 40, its cells random; never counted from
+//! nothing, as the extents of `bucket`'s other tests are, which no open cell's are.
 
 use super::tests::{Gated, Mishap, idle, kept_in, naming, pattern, reopened, restart, uploaded};
 use crate::faults::{CLEANUP_STEPS, FORK_STEPS, plan};
@@ -73,8 +73,9 @@ pub(super) const MISHAPS: [Mishap; 5] = [
     Mishap::DiesLandingLate,
 ];
 
-/// The stores of a host, and another's, in a bucket: a parent, in `host`, reaching the bucket
-/// through `gated`, holding extents two writers minted, one stored on its own; and another tenant's.
+/// The open cells of a host, and another's, in a bucket: a parent, in `host`, reaching the bucket
+/// through `gated`, holding extents two writers minted, one stored on its own; and another
+/// tenant's.
 struct World {
     temp: tempfile::TempDir,
     /// Where the parent's host's disk is: once it died, its copy, restarted.
@@ -95,51 +96,52 @@ struct World {
     taken: Arc<AtomicBool>,
 }
 
-/// `store`'s next extents' IDs, `count` of them, as its guest mints them: never below its writer's
-/// floor, whatever it minted before.
-fn mint(store: &OpenCell, count: u64) -> Vec<ExtentId> {
-    let info = store.info().unwrap();
+/// `open_cell`'s next extents' IDs, `count` of them, as its guest mints them: never below its
+/// writer's floor, whatever it minted before.
+fn mint(open_cell: &OpenCell, count: u64) -> Vec<ExtentId> {
+    let info = open_cell.info().unwrap();
     let first = info.next_sequence.max(info.sequence_floor);
     assert!(first >= 1 << EPOCH_SHIFT, "a guest mints from its writer's floor: {info:?}");
-    (first..first + count).map(|sequence| ExtentId { cell: store.cell().id, sequence }).collect()
+    let cell = open_cell.cell().id;
+    (first..first + count).map(|sequence| ExtentId { cell, sequence }).collect()
 }
 
-async fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
-    store.write(extent, 0, &[VolatileSlice::from(data)]).await.unwrap();
+async fn write(open_cell: &OpenCell, extent: ExtentId, data: &[u8]) {
+    open_cell.write(extent, 0, &[VolatileSlice::from(data)]).await.unwrap();
 }
 
-pub(super) async fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
+pub(super) async fn read(open_cell: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
+    open_cell.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
     data
 }
 
-/// Options of a store of this host's or another's.
+/// Options of an open cell of this host's or another's.
 pub(super) fn options() -> local_cell::upload::Options {
     local_cell::upload::Options { token: TOKEN, ..idle() }
 }
 
-/// Mints `extents` of `store`'s, of those lengths, with data from `seed`, and commits them, the
+/// Mints `extents` of `open_cell`'s, of those lengths, with data from `seed`, and commits them, the
 /// root `root`: returns them.
 pub(super) async fn commit(
-    store: &OpenCell,
+    open_cell: &OpenCell,
     seed: u8,
     lens: &[usize],
     root: &[u8],
 ) -> Vec<(ExtentId, Vec<u8>)> {
-    let minted = mint(store, lens.len() as u64);
+    let minted = mint(open_cell, lens.len() as u64);
     let extents: Vec<_> = (minted.into_iter().zip(lens))
         .enumerate()
         .map(|(at, (extent, &len))| (extent, pattern(seed + at as u8, len)))
         .collect();
     for (extent, data) in &extents {
-        write(store, *extent, data).await;
+        write(open_cell, *extent, data).await;
     }
-    store.commit(Some(root)).await.unwrap();
+    open_cell.commit(Some(root)).await.unwrap();
     extents
 }
 
-/// Makes this process a host: deleting a store takes its placement's token.
+/// Makes this process a host: deleting an open cell takes its placement's token.
 pub(super) fn host() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
@@ -237,7 +239,7 @@ impl World {
         Some(guard.unwrap())
     }
 
-    /// Forks the parent to `child`, its store at `child` in the host's disk, with `faults`
+    /// Forks the parent to `child`, its cell directory at `child` in the host's disk, with `faults`
     /// happening; and lets go of the parent, whatever its uploader has left to do.
     async fn fork(&mut self, faults: &[Fault]) -> Result<(), crate::Error> {
         let guards: Vec<_> = faults.iter().filter_map(|fault| self.arm(*fault)).collect();
@@ -260,25 +262,25 @@ impl World {
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
-    /// Opens the store at `path`, and takes its cell.
+    /// Opens the cell directory at `path`, and takes its cell.
     async fn open(&self, path: &Path) -> Result<OpenCell, String> {
         naming(path, &self.bucket);
         reopened(path, options()).await.map_err(|err| err.to_string())
     }
 
-    /// Whether `store`, a fork of the parent, reads what the parent held at the fork, whose root
-    /// was `root`, and goes on committing, its writer's floor its own.
-    async fn check_fork(&self, store: &OpenCell, root: &[u8], case: &str) {
-        assert_eq!(store.root(), Ok(root.to_vec()), "{case}");
+    /// Whether `open_cell`, a fork of the parent, reads what the parent held at the fork, whose
+    /// root was `root`, and goes on committing, its writer's floor its own.
+    async fn check_fork(&self, open_cell: &OpenCell, root: &[u8], case: &str) {
+        assert_eq!(open_cell.root(), Ok(root.to_vec()), "{case}");
         for (extent, data) in &self.held {
             assert!(
-                read(store, *extent, data.len()).await == *data,
+                read(open_cell, *extent, data.len()).await == *data,
                 "{case}: {extent:?} of a fork"
             );
         }
-        let own = commit(store, 5, &[BLOCK], b"child").await;
-        assert_eq!(store.wait_uploaded().await, Ok(()), "{case}");
-        assert!(read(store, own[0].0, BLOCK).await == own[0].1, "{case}");
+        let own = commit(open_cell, 5, &[BLOCK], b"child").await;
+        assert_eq!(open_cell.wait_uploaded().await, Ok(()), "{case}");
+        assert!(read(open_cell, own[0].0, BLOCK).await == own[0].1, "{case}");
     }
 
     /// Deletes the fork at `path`, as the control API does.
@@ -304,7 +306,7 @@ impl World {
         block_on(bucket_cell::testing::live(&*self.bucket)).unwrap().into_keys().collect()
     }
 
-    /// The cells live in the bucket that no store holds, of those `named`: what a fork whose
+    /// The cells live in the bucket that no open cell holds, of those `named`: what a fork whose
     /// host died, or whose cleanup failed, leaves standing, which an operator finds so, and
     /// deletes, whichever placement took it last, as `cladefs-gc --cells` and `--delete-cell`
     /// do. Only the fork's child may be one, and only if the fork failed.
@@ -331,20 +333,23 @@ impl World {
         self.collect(case);
 
         // What the host left at the fork's path goes, or is the fork, as its caller was told, or
-        // finds: a store of the child's, or a directory its making left unmade.
+        // finds: an open cell of the child's, or a directory its making left unmade.
         let (dead, made) = (self.dead.load(Ordering::SeqCst), forked.is_ok());
         let made = made && !dead;
         // A fork that failed on a host alive left nothing here (TASK-609).
-        assert!(made || dead || !path.exists(), "{case}: a failed fork left its child's store");
+        assert!(
+            made || dead || !path.exists(),
+            "{case}: a failed fork left its child's cell directory"
+        );
         if path.exists() {
             if made {
                 children.push(path.clone());
                 unchecked.push((path.clone(), b"root"));
             } else if leftover == Leftover::Opened {
                 match self.open(&path).await {
-                    Ok(store) => {
+                    Ok(open_cell) => {
                         assert!(!self.taken.load(Ordering::SeqCst), "{case}: it took another's");
-                        self.check_fork(&store, b"root", case).await;
+                        self.check_fork(&open_cell, b"root", case).await;
                         children.push(path.clone());
                     }
                     Err(_) => self.delete(&path, case).await,
@@ -353,7 +358,7 @@ impl World {
                 self.delete(&path, case).await;
             }
         } else {
-            assert!(!made, "{case}: a fork made left no store");
+            assert!(!made, "{case}: a fork made left no cell directory");
         }
         self.collect(case);
 
@@ -381,7 +386,7 @@ impl World {
         assert_eq!(root, Some(b"later".to_vec()), "{case}");
         self.collect(case);
 
-        // What the fork left standing in the bucket, no store holding it, an operator deletes.
+        // What the fork left standing in the bucket, no open cell holding it, an operator deletes.
         let taken = self.taken.load(Ordering::SeqCst);
         let mut named = vec![self.cell, self.other.cell()];
         named.extend(children.iter().map(|_| self.child));
@@ -422,7 +427,7 @@ impl World {
             self.check_fork(&opened, root, case).await;
         }
 
-        // No cell lives that no store holds, none another's was harmed, and it goes on.
+        // No cell lives that no open cell holds, none another's was harmed, and it goes on.
         let mut live = self.live();
         live.sort();
         let mut named = vec![self.cell, self.other.cell()];
@@ -433,7 +438,7 @@ impl World {
             named.push(self.child);
         }
         named.sort();
-        assert_eq!(live, named, "{case}: cells no store holds, or lost");
+        assert_eq!(live, named, "{case}: cells no open cell holds, or lost");
         for (extent, data) in &self.other_held {
             assert!(
                 read(&self.other, *extent, data.len()).await == *data,
@@ -465,8 +470,9 @@ impl World {
                 // cladefs: no reference stays: the cell that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
-                // cladefs: nor a mirror's pin, hold or marker, in a test of one bucket (TASK-633.8);
-                // nor an ephemeral cell's reference or index entry, none forked here (doc-25).
+                // cladefs: nor a mirror's pin, hold or marker, in a test of one bucket
+                // (TASK-633.8); nor an ephemeral cell's reference or index entry, none forked here
+                // (doc-25).
                 Kind::Pin { .. } | Kind::Hold { .. } | Kind::Mirror { .. } => true,
                 Kind::Ephemeral { .. } | Kind::EphemeralIndex { .. } => true,
                 // cladefs: nor read evidence, which goes with its version (TASK-702.2).
@@ -494,8 +500,8 @@ impl World {
             })
             .collect();
         assert_eq!(leaked, Vec::<String>::new(), "{case}: left in the bucket");
-        // But the file buckets beside the stores their descriptions name, which outlive them, and
-        // which they keep nothing in here, attached to the world's bucket instead.
+        // But the file buckets beside the open cells their descriptions name, which outlive them,
+        // and which they keep nothing in here, attached to the world's bucket instead.
         let left = std::fs::read_dir(&self.host).unwrap();
         let left = left.map(|entry| entry.unwrap().file_name().into_string().unwrap());
         let left: Vec<_> = left.filter(|name| !name.ends_with(".bucket")).collect();
@@ -649,7 +655,7 @@ async fn each_write_of_a_fork_meeting_the_collector() {
 
 /// Where a fork may fail for what its cleanup finds: nothing of it in object storage, its version
 /// named and no child's record yet, its child's record being made, and made; and its child's
-/// store made.
+/// open cell made.
 const FAILING_FOR_CLEANUPS: [&str; 5] =
     ["version::committed", "fork::uploaded", "version::referred", "fork::recorded", "fork::made"];
 

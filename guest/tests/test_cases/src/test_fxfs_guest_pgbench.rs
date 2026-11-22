@@ -2,31 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The sandbox team's load (cladefs's TASK-57, TASK-62): PostgreSQL's pgbench makes its database, at
-//! scale 50, on a fork of a base store, through a DAX window, its cells in a bucket 25 ms away,
+//! The sandbox team's load (cladefs's TASK-57, TASK-62): PostgreSQL's pgbench makes its database,
+//! at scale 50, on a fork of a base cell, through a DAX window, its cells in a bucket 25 ms away,
 //! as theirs was. It broke Fxfs twice: a kernel panic in a truncate (TASK-58), then the primary
 //! key's parallel build reading back other data than its workers wrote (TASK-59). A base VM makes
 //! the base's filesystem; the host forks it through a daemon of its own; a VM as theirs boots on
 //! the fork, makes the database, and checks it: every account there once. Then pgbench runs on it,
 //! as theirs did, where Fxfs's journal shut down on a write to a sealed extent (TASK-91.1). After
-//! each run, the database is checked whole (its balances, amcheck, its pages' checksums), and
-//! again once it has recovered from a stop as if it crashed (TASK-119.4). With
-//! a DAX window (fxfs-guest-pgbench-dax) or without (fxfs-guest-pgbench); and without, its first
-//! run probed (TASK-91.14): profiled, the guest's time by symbol and the callers of its hot
-//! spinlock on the console (fxfs-guest-pgbench-profile; with DAX, fxfs-guest-pgbench-dax-profile,
-//! TASK-91.16); or, as the sandbox team's CPU-bound run,
-//! with synchronous_commit off, its locks' contention, on a kernel that counts it
-//! (fxfs-guest-pgbench-locks, scripts/build-guest-kernel.sh's CLADEFS_GUEST_KERNEL_LOCK_STAT). Or,
-//! without DAX, with PostgreSQL's fsync off (fxfs-guest-pgbench-nofsync): the load as fast as it
-//! goes when nothing waits for the store's commits, which the load with fsync on is measured
-//! against on the same host (TASK-91.17). And on ext4 with DAX on writable virtio-pmem
-//! (pgbench-ext4-dax-pmem), a copy of a base image of its own: a static DAX device, storage as
-//! memory, which the sandbox team measure the DAX window against (TASK-131.5).
+//! each run, the database is checked whole (its balances, amcheck, its pages' checksums), and again
+//! once it has recovered from a stop as if it crashed (TASK-119.4). With a DAX window
+//! (fxfs-guest-pgbench-dax) or without (fxfs-guest-pgbench); and without, its first run probed
+//! (TASK-91.14): profiled, the guest's time by symbol and the callers of its hot spinlock on the
+//! console (fxfs-guest-pgbench-profile; with DAX, fxfs-guest-pgbench-dax-profile, TASK-91.16); or,
+//! as the sandbox team's CPU-bound run, with synchronous_commit off, its locks' contention, on a
+//! kernel that counts it (fxfs-guest-pgbench-locks, scripts/build-guest-kernel.sh's
+//! CLADEFS_GUEST_KERNEL_LOCK_STAT). Or, without DAX, with PostgreSQL's fsync off
+//! (fxfs-guest-pgbench-nofsync): the load as fast as it goes when nothing waits for the cell's
+//! commits, which the load with fsync on is measured against on the same host (TASK-91.17). And on
+//! ext4 with DAX on writable virtio-pmem (pgbench-ext4-dax-pmem), a copy of a base image of its
+//! own: a static DAX device, storage as memory, which the sandbox team measure the DAX window
+//! against (TASK-131.5).
 //!
-//! cladefs: and for copy-on-write DAX (doc-13, TASK-164.5), on a database the base's VM makes, which
-//! each VM runs pgbench on a fork of, its files read in, not created, which DAX maps, every first
-//! store to a page a copy on the host (fxfs-guest-pgbench-forked, -dax-forked); and so, each VM
-//! kept running once its runs are done, the host's memory measured as each is added
+//! cladefs: and for copy-on-write DAX (doc-13, TASK-164.5), on a database the base's VM makes,
+//! which each VM runs pgbench on a fork of, its files read in, not created, which DAX maps, every
+//! first cell to a page a copy on the host (fxfs-guest-pgbench-forked, -dax-forked); and so, each
+//! VM kept running once its runs are done, the host's memory measured as each is added
 //! (`crate::measure`): what a VM more costs the host (fxfs-guest-pgbench-density, -dax-density).
 //! CLADEFS_PGBENCH_RUNS and CLADEFS_PGBENCH_RUN_SECS set the runs, CLADEFS_PGBENCH_SCALE its scale,
 //! CLADEFS_PGBENCH_DENSITY_MEMORY_MIB the density cases' VMs' memory (1024), and
@@ -75,7 +75,7 @@ impl TestFxfsGuestPgbench {
 /// What the database is stored on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Storage {
-    /// The guest's Fxfs, on a fork of a base store a daemon of the case's own serves.
+    /// The guest's Fxfs, on a fork of a base cell a daemon of the case's own serves.
     Fxfs,
     /// The same, through a DAX window.
     FxfsDax,
@@ -159,7 +159,7 @@ mod host {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    /// The stores' capacity, as the sandbox team's.
+    /// The cells' capacity, as the sandbox team's.
     const CAPACITY: u64 = 16 << 30;
     /// The ext4 images' size: the database's, its WAL's and the runs' history's, with room.
     const PMEM_SIZE: u64 = 8 << 30;
@@ -233,9 +233,9 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
 
     /// Where a VM's filesystem is.
     enum Device<'a> {
-        /// The store at `store`, which the daemon at `cladefsd` serves, with a DAX window of
+        /// The cell at `cell_dir`, which the daemon at `cladefsd` serves, with a DAX window of
         /// `window` bytes if not 0.
-        Store { store: &'a Path, cladefsd: &'a Path, window: u64 },
+        Cell { cell_dir: &'a Path, cladefsd: &'a Path, window: u64 },
         /// The image at `image`, on writable virtio-pmem, which the guest mounts ext4 on, with DAX.
         Pmem(&'a Path),
         /// cladefs: the image at `image`, on a writable virtio-blk disk whose flushes go as `cache`
@@ -274,8 +274,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         let mut vm = Vm::new(vcpus()?, memory)?;
         vm.guest_kernel()?;
         match device {
-            Device::Store { store, cladefsd, window } => {
-                vm.cell_served("extents", store, CAPACITY, window, cladefsd);
+            Device::Cell { cell_dir, cladefsd, window } => {
+                vm.cell_served("extents", cell_dir, CAPACITY, window, cladefsd);
             }
             Device::Pmem(image) => {
                 let device = vm.pmem("pgbench", image)?;
@@ -319,14 +319,14 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     }
 
     /// Samples, every 2 s until `stop`, what the daemon at `socket` did and has left to upload of
-    /// the store at `store`: its stats file, `stats`, and the store's upload lag, appended to
+    /// the cell at `cell_dir`: its stats file, `stats`, and the cell's upload lag, appended to
     /// `samples` with the seconds since it started: to see where a run's time goes (TASK-91.2).
     /// And the CPU time of each thread of the VM's process, `vmm`, so far: what the window's
     /// changes cost the VMM, its 'cladefsd client' thread's system time; and KVM's counts of the
     /// VM's exits, faults and flushes, what they cost the guest (TASK-91.16).
     fn sample(
         socket: PathBuf,
-        store: PathBuf,
+        cell_dir: PathBuf,
         stats: PathBuf,
         samples: PathBuf,
         vmm: u32,
@@ -339,7 +339,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let started = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_secs(2));
-                let stat = control.stat_cell(&store)?;
+                let stat = control.stat_cell(&cell_dir)?;
                 writeln!(
                     out,
                     "t={} pending_upload_bytes={} oldest_pending_ms={}",
@@ -508,7 +508,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         }
     }
 
-    /// The base's store, and the daemon serving it and its forks.
+    /// The base's cell, and the daemon serving it and its forks.
     struct Served<'a> {
         test_setup: &'a TestSetup,
         root: &'a Path,
@@ -546,7 +546,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let root = setup_rootfs(test_setup)?;
             match self.storage {
-                Storage::Fxfs | Storage::FxfsDax => self.run_stores(test_setup, &root),
+                Storage::Fxfs | Storage::FxfsDax => self.run_cells(test_setup, &root),
                 Storage::Ext4DaxPmem => Self::run_images(test_setup, &root, Image::Pmem),
                 Storage::Ext4BlkUnsafe => {
                     Self::run_images(test_setup, &root, Image::Blk(DiskCache::Unsafe))
@@ -586,10 +586,10 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             Ok(())
         }
 
-        /// The base's VM makes the guest's Fxfs on a store, and the database too if the VMs run on
+        /// The base's VM makes the guest's Fxfs on a cell, and the database too if the VMs run on
         /// its; then each VM runs pgbench on a fork of it, making its database first if not, a
         /// daemon of the case's own serving them all.
-        fn run_stores(&self, test_setup: &TestSetup, root: &Path) -> anyhow::Result<()> {
+        fn run_cells(&self, test_setup: &TestSetup, root: &Path) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             // A daemon of its own, whose bucket answers 25 ms late, as the sandbox team's RustFS
             // did, or as CLADEFS_BUCKET_LATENCY_MS says; its socket's path short, as Unix sockets'
@@ -620,7 +620,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let forked = self.database != Database::Made;
             // cladefs: the base's VM, making the database, as much memory as a VM loading it needs.
             let memory = if forked { load_memory()? } else { 512 };
-            let device = Device::Store { store: &base, cladefsd: &socket, window: 0 };
+            let device = Device::Cell { cell_dir: &base, cladefsd: &socket, window: 0 };
             let mut machine = machine("base", device, memory)?;
             if forked {
                 machine.env(c"CLADEFS_PGBENCH_BASE_DATABASE=1");
@@ -715,7 +715,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let fork = dir.join(nth("fork", vm));
             crate::common::control(&served.socket)?.fork_cell(&served.base, &fork)?;
             let device =
-                Device::Store { store: &fork, cladefsd: &served.socket, window: served.window };
+                Device::Cell { cell_dir: &fork, cladefsd: &served.socket, window: served.window };
             let mut machine = machine(role, device, memory)?;
             if let Some(requests) = requests {
                 machine.vsock(requests.uds());
@@ -835,7 +835,7 @@ mod guest {
 
     const MNT: &str = "/mnt/fxfs";
 
-    /// Mounts the database's filesystem at MNT: the guest's Fxfs on the store tagged `extents`,
+    /// Mounts the database's filesystem at MNT: the guest's Fxfs on the cell tagged `extents`,
     /// made as it mounts; or, on the virtio-pmem device CLADEFS_PGBENCH_PMEM names, ext4 with DAX,
     /// which must map its files' data in place (TASK-131.5); or on the virtio-blk disk
     /// CLADEFS_PGBENCH_BLK names, ext4 (TASK-91.8). The base (`role`) makes the ext4.
@@ -924,8 +924,8 @@ mod guest {
     }
 
     /// cladefs: the database is whole (TASK-119.4), after a run that began with each table's
-    /// balances summing to `before`: each of pgbench's transactions adds a delta to an account,
-    /// its teller and its branch, and logs it in the history, which pgbench empties as a run begins:
+    /// balances summing to `before`: each of pgbench's transactions adds a delta to an account, its
+    /// teller and its branch, and logs it in the history, which pgbench empties as a run begins:
     /// each table's balances sum to `before` and the history's deltas. And, with amcheck, every
     /// tuple of the tables is sound, and their indexes hold them all; a page whose checksum fails
     /// fails the query reading it. Returns the balances' sum.
@@ -1065,8 +1065,8 @@ mod guest {
 
         /// Runs pgbench on the database, its server running, as the sandbox team's runs, each of
         /// which must end well, checking it after each; then has it recover from a crash, and
-        /// checks it again. cladefs: with CLADEFS_PGBENCH_MEASURE, asks the host to measure it once its
-        /// runs are done, and waits for the host's word (`crate::measure`, TASK-164.5).
+        /// checks it again. cladefs: with CLADEFS_PGBENCH_MEASURE, asks the host to measure it once
+        /// its runs are done, and waits for the host's word (`crate::measure`, TASK-164.5).
         fn run(&self) {
             // pgbench says each run's tps, on the console, to compare, and PostgreSQL what it wrote
             // so far, its WAL and its relations' pages, to set beside what the device was written
@@ -1146,7 +1146,7 @@ mod guest {
                     unmount();
                     println!("OK base");
                 }
-                // Makes the database, then runs pgbench on it: on a fork of the base, or on a store
+                // Makes the database, then runs pgbench on it: on a fork of the base, or on a cell
                 // of its own, which has no directory for it yet (fxfs-guest-sandboxes').
                 "load" => {
                     fs::create_dir_all(DATA).unwrap();

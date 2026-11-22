@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's directory with its data files through a page cache of the process's
-//! ([`crate::pages`], TASK-433): what every directory a store opens is, the host's
-//! ([`crate::HostDir`]) and one in memory ([`crate::MemDir`]) alike, so that no store, a test's
+//! cladefs: a cell directory with its data files through a page cache of the process's
+//! ([`crate::pages`], TASK-433): what every directory a cell opens is, the host's
+//! ([`crate::HostDir`]) and one in memory ([`crate::MemDir`]) alike, so that no cell, a test's
 //! no more than a host's, runs around it.
 //!
 //! Its extents' files (`data`) are held in the cache, one set of pages a file however many times
@@ -20,7 +20,6 @@ use crate::sync::Mutex;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -65,7 +64,7 @@ impl<D: Dir> CachedDir<D> {
         self.shared.files.lock().unwrap().get(path).and_then(WeakCached::upgrade)
     }
 
-    /// `file`, opened at `path`, as the store's: through the cache if it is an extents' file, or
+    /// `file`, opened at `path`, as the cell's: through the cache if it is an extents' file, or
     /// if an opening of it is.
     fn file(&self, path: &str, file: D::File, data: bool) -> io::Result<CachedFile<D::File>> {
         let mut files = self.shared.files.lock().unwrap();
@@ -241,8 +240,8 @@ impl<F: File> CachedFile<F> {
     }
 
     /// Writes back the pages the cache holds dirty in `range`, if the file is cached: what an I/O
-    /// of a caller's own on the file under it ([`AsRawFd`]) is to be preceded by, as an image's
-    /// device's is, so that it reads what was written.
+    /// of a caller's own on the file under it ([`HostFile::host_file`](crate::HostFile)) is to be
+    /// preceded by, as an image's device's is, so that it reads what was written.
     pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
         match self {
             Self::Raw(_) => Ok(()),
@@ -258,12 +257,6 @@ impl<F: File> CachedFile<F> {
             Self::Raw(_) => Ok(()),
             Self::Cached(cached) => cached.settle_for_write(range),
         }
-    }
-}
-
-impl<F: File + AsRawFd> AsRawFd for CachedFile<F> {
-    fn as_raw_fd(&self) -> RawFd {
-        self.under().as_raw_fd()
     }
 }
 

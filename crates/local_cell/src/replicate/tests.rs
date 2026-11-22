@@ -292,7 +292,7 @@ fn own_extents_go_before_their_records() {
     assert_eq!(*ordered.0.lock().unwrap(), [own_of(3), log_of(3)]);
 }
 
-/// TASK-537.3.4's review: a store's own log is recovered unless its members' go past it: a later
+/// TASK-537.3.4's review: a cell's own log is recovered unless its members' go past it: a later
 /// writer's commits, or the same writer's beyond its own log (sent before its own sync).
 #[test]
 fn members_go_past_own_logs_by_writer_then_commit() {
@@ -530,4 +530,35 @@ fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
     let mut own = honest.to_vec();
     own.push(replica_log(3, &[&[2]]));
     assert!(kept(&own, 2).unwrap_err().contains("not one writer's"));
+}
+
+/// Board 5408: an own log's bytes, a member's, untrusted: frames read until one is cut short, or
+/// says a length past what is left, the frames before it kept, whatever the length (u64::MAX
+/// among them), which overflowed `16 + len` before its bounds check.
+#[test]
+fn own_frames_end_at_one_cut_short_or_past_the_end() {
+    let frame = |sequence: u64, file: &[u8]| {
+        let mut bytes = sequence.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&(file.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(file);
+        bytes
+    };
+    let whole = [frame(1, b"one"), frame(2, b"")].concat();
+    assert_eq!(own_frames(&whole), [(1, b"one".to_vec()), (2, Vec::new())]);
+    for len in [4, u64::MAX, u64::MAX - 15, 1 << 63] {
+        let mut bytes = whole.clone();
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(b"abc");
+        assert_eq!(own_frames(&bytes).len(), 2, "a frame of {len} bytes");
+    }
+    // Cut short anywhere: the first frame whole from its 19th byte, the second at the 35th.
+    for cut in 0..=whole.len() {
+        let expected = match cut {
+            0..19 => 0,
+            19..35 => 1,
+            _ => 2,
+        };
+        assert_eq!(own_frames(&whole[..cut]).len(), expected, "cut at {cut}");
+    }
 }

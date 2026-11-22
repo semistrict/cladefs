@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 //! TASK-43.3: the extent daemon's control API, gRPC over a Unix socket, as the host's VM manager
-//! calls it, from a client in Rust: every call, and the errors a store a VM has open gives.
+//! calls it, from a client in Rust: every call, and the errors a cell a VM has open gives.
 //!
 //! The daemon serves on threads of this process: its control socket, and a VM socket, whose
-//! connections, VM processes here, have stores open.
+//! connections, VM processes here, have cells open.
 
 #![cfg(target_os = "linux")]
 
@@ -19,10 +19,10 @@ use common::pattern;
 use std::path::Path;
 use tonic::Code;
 
-/// A store made, written by a VM, grown, forked, made a public base, synced to object storage and
-/// taken from there to a new store, placed, and deleted, through the API.
+/// A cell made, written by a VM, grown, forked, made a public base, synced to object storage and
+/// taken from there to a new cell directory, placed, and deleted, through the API.
 #[test]
-fn stores_through_the_control_api() {
+fn cells_through_the_control_api() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
@@ -56,7 +56,7 @@ fn stores_through_the_control_api() {
             own_extents: 1,
             inherited_extents: 0,
             committed: 1,
-            // Closed, the stat opens it, as the daemon opens any store, taking its cell's head
+            // Closed, the stat opens it, as the daemon opens any cell, taking its cell's head
             // after its making's and its VM's (TASK-165.9): what it committed, uploaded.
             uploading: true,
             taken_token: 1,
@@ -111,10 +111,10 @@ fn stores_through_the_control_api() {
     assert!(object_storage.uploaded_bytes.values().sum::<u64>() >= 64 << 10, "{object_storage:?}");
 }
 
-/// TASK-50.5: the stores VM processes have open are listed, with their writers' takings of their
+/// TASK-50.5: the cells VM processes have open are listed, with their writers' takings of their
 /// cells' heads, as this host's placement took them, and their uploads: synced, nothing waits.
 #[test]
-fn open_stores_are_listed_with_their_takings_and_uploads() {
+fn open_cells_are_listed_with_their_takings_and_uploads() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (first, second) = (dir.path().join("first"), dir.path().join("second"));
@@ -146,7 +146,7 @@ fn open_stores_are_listed_with_their_takings_and_uploads() {
     drop((one, two));
 }
 
-/// TASK-454: StatCell and ListCells say how many extents a store holds, its own and those it
+/// TASK-454: StatCell and ListCells say how many extents a cell holds, its own and those it
 /// inherited, as its VM writes and frees them, open and closed, and of its fork.
 #[test]
 fn extents_are_counted_through_the_control_api() {
@@ -185,27 +185,27 @@ fn extents_are_counted_through_the_control_api() {
     assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
 }
 
-/// A store a VM process has open is its: the API refuses what would change it under its guest,
+/// A cell a VM process has open is its: the API refuses what would change it under its guest,
 /// grows it, forks it live, and syncs it; and calls fail with the errnos the .proto says.
 #[test]
-fn open_stores_are_their_vms() {
+fn open_cells_are_their_vms() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
-    let (store, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let vm = daemon.open(&store, CAPACITY);
+    let (cell_dir, fork) = (dir.path().join("store"), dir.path().join("fork"));
+    let vm = daemon.open(&cell_dir, CAPACITY);
     write(&vm, &pattern(2), b"open");
 
-    assert!(daemon.stat(&store).unwrap().open);
+    assert!(daemon.stat(&cell_dir).unwrap().open);
     let busy = (Code::FailedPrecondition, Errno::EBUSY);
-    assert_eq!(failure(daemon.delete(&store)), busy);
-    assert_eq!(failure(daemon.make_public(&store)), busy);
-    assert_eq!(failure(daemon.place(&store, 1)), busy);
-    assert_eq!(failure(daemon.create(&store, NEW, None)), busy);
+    assert_eq!(failure(daemon.delete(&cell_dir)), busy);
+    assert_eq!(failure(daemon.make_public(&cell_dir)), busy);
+    assert_eq!(failure(daemon.place(&cell_dir, 1)), busy);
+    assert_eq!(failure(daemon.create(&cell_dir, NEW, None)), busy);
     // Grown at once, as its VM process sees.
-    daemon.resize(&store, 2 * CAPACITY).unwrap();
+    daemon.resize(&cell_dir, 2 * CAPACITY).unwrap();
     assert_eq!(vm.info().unwrap().capacity, 2 * CAPACITY);
     // Forked live: nothing is open on it.
-    let cell = daemon.fork(&store, &fork).unwrap();
+    let cell = daemon.fork(&cell_dir, &fork).unwrap();
     assert_eq!(daemon.cell(&fork).unwrap(), cell);
 
     assert_eq!(failure(daemon.create(&fork, NEW, None)), (Code::AlreadyExists, Errno::EEXIST));
@@ -216,15 +216,15 @@ fn open_stores_are_their_vms() {
         (Code::InvalidArgument, Errno::EINVAL)
     );
     // Synced as its VM process goes on.
-    daemon.sync(&store).unwrap();
+    daemon.sync(&cell_dir).unwrap();
 
     // Gone with its VM process, it is the API's.
     drop(vm);
-    assert!(!daemon.stat(&store).unwrap().open);
-    daemon.delete(&store).unwrap();
+    assert!(!daemon.stat(&cell_dir).unwrap().open);
+    daemon.delete(&cell_dir).unwrap();
 }
 
-/// A container image imported is a store holding its files.
+/// A container image imported is a cell holding its files.
 #[test]
 fn imports_images() {
     use cladefs::import::testing::{Entry, Kind, layer};
@@ -233,14 +233,16 @@ fn imports_images() {
     let image = dir.path().join("layer.tar");
     let hello = b"hello from the image\n";
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(hello))]).unwrap()).unwrap();
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
 
-    let cell = daemon.import(&store, &image).unwrap();
-    assert_eq!(daemon.cell(&store).unwrap(), cell);
-    assert_eq!(failure(daemon.import(&store, &image)), (Code::AlreadyExists, Errno::EEXIST));
+    let cell = daemon.import(&cell_dir, &image).unwrap();
+    assert_eq!(daemon.cell(&cell_dir).unwrap(), cell);
+    assert_eq!(failure(daemon.import(&cell_dir, &image)), (Code::AlreadyExists, Errno::EEXIST));
 
     let size = futures::executor::block_on(async {
-        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&store).unwrap()).await.unwrap();
+        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&cell_dir).await.unwrap())
+            .await
+            .unwrap();
         let (_, attr) = fs.root().lookup(b"hello").await.unwrap();
         fs.close().await.unwrap();
         attr.size
@@ -248,11 +250,11 @@ fn imports_images() {
     assert_eq!(size, hello.len() as u64);
 }
 
-/// An image that cannot be made into a store leaves none behind, so that its path takes another:
-/// one whose entry's time is out of range panicked the import, which left the store half made,
+/// An image that cannot be made into a cell leaves none behind, so that its path takes another:
+/// one whose entry's time is out of range panicked the import, which left the cell half made,
 /// and every import to the path after failed with `EEXIST`.
 #[test]
-fn imports_that_fail_leave_no_store() {
+fn imports_that_fail_leave_no_cell() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
@@ -263,20 +265,20 @@ fn imports_that_fail_leave_no_store() {
     };
     let out_of_range = image("out-of-range.tar", Entry::new("f", Kind::File(b"f")).mtime(u64::MAX));
     let whole = image("whole.tar", Entry::new("f", Kind::File(b"f")));
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
 
     assert_eq!(
-        failure(daemon.import(&store, &out_of_range)),
+        failure(daemon.import(&cell_dir, &out_of_range)),
         (Code::InvalidArgument, Errno::EINVAL)
     );
-    assert!(!store.exists(), "the store is left half made");
-    let cell = daemon.import(&store, &whole).unwrap();
-    assert_eq!(daemon.cell(&store).unwrap(), cell);
+    assert!(!cell_dir.exists(), "the cell_dir is left half made");
+    let cell = daemon.import(&cell_dir, &whole).unwrap();
+    assert_eq!(daemon.cell(&cell_dir).unwrap(), cell);
 }
 
 /// An import its caller gave up on runs to its end, its path held until then (board 5599, board
 /// 5384): stopped at the await its caller left it in, it let go of its path while its blocking
-/// work went on, and a CreateCell of the path made a store there beside the import's.
+/// work went on, and a CreateCell of the path made a cell there beside the import's.
 #[test]
 fn imports_given_up_on_hold_their_paths_to_their_end() {
     use cladefs::import::testing::{Entry, Kind, layer};
@@ -286,7 +288,7 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
     let image = dir.path().join("layer.tar");
     let hello = b"hello from the image\n";
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(hello))]).unwrap()).unwrap();
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
 
     // The import held under way, its path held, saying so, until let go.
     let (under_way, seen) = mpsc::channel();
@@ -299,7 +301,7 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
     .unwrap();
     // Its caller gives up once it is under way: the call dropped, its stream reset.
     let request = ImportImageRequest {
-        path: name(&store),
+        path: name(&cell_dir),
         capacity: CAPACITY,
         image: name(&image),
         reference: String::new(),
@@ -313,14 +315,17 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
         assert!(call.await.unwrap_err().is_cancelled());
     });
     // The path is the import's still: a CreateCell of it waits its turn, and gives up.
-    assert_eq!(failure(daemon.create(&store, NEW, None)), (Code::FailedPrecondition, Errno::EBUSY));
+    let busy = failure(daemon.create(&cell_dir, NEW, None));
+    assert_eq!(busy, (Code::FailedPrecondition, Errno::EBUSY));
 
-    // Let go, the import ends, the store the image's.
+    // Let go, the import ends, the cell the image's.
     fail::remove("cladefsd::import");
     go.send(()).unwrap();
-    assert_eq!(failure(daemon.import(&store, &image)), (Code::AlreadyExists, Errno::EEXIST));
+    assert_eq!(failure(daemon.import(&cell_dir, &image)), (Code::AlreadyExists, Errno::EEXIST));
     let size = futures::executor::block_on(async {
-        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&store).unwrap()).await.unwrap();
+        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&cell_dir).await.unwrap())
+            .await
+            .unwrap();
         let (_, attr) = fs.root().lookup(b"hello").await.unwrap();
         fs.close().await.unwrap();
         attr.size
@@ -328,12 +333,12 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
     assert_eq!(size, hello.len() as u64);
 }
 
-/// A fork of a cell this host never had: the cell's store taken from object storage
+/// A fork of a cell this host never had: the cell taken from object storage
 /// (CreateCell of its cell, placed after the host that wrote it), then forked (ForkCell), whose
 /// VM reads what the cell held, its data fetched as read.
 #[test]
 fn forks_of_cells_never_had_here() {
-    // SAFETY: as in stores_through_the_control_api.
+    // SAFETY: as in cells_through_the_control_api.
     unsafe {
         std::env::set_var("CLADEFSD_BUCKET", "memory:///elsewhere");
         std::env::set_var("CLADEFSD_TOKEN", "1");
@@ -378,15 +383,15 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
     let (vms, paths): (Vec<_>, Vec<_>) = (0..count)
         .map(|vm| {
             let path = dir.path().join(format!("vm-{vm}"));
-            let store = daemon.open(&path, CAPACITY);
+            let client = daemon.open(&path, CAPACITY);
             // A guest that never answers.
             let asked = asked.clone();
-            store.on_capacity(move |_, ask| {
+            client.on_capacity(move |_, ask| {
                 if ask {
                     asked.fetch_add(1, Ordering::Relaxed);
                 }
             });
-            (store, path)
+            (client, path)
         })
         .collect();
 
@@ -462,15 +467,15 @@ fn health_follows_whether_the_daemon_serves() {
     });
 }
 
-/// TASK-411.7, and TASK-411's AC #3 (cladefsd serving a VM's store of an encrypted cell through its
-/// socket): stores of two cells of a tenant whose KEK the daemon's KMS (`CLADEFS_KMS`) keeps, each
+/// TASK-411.7, and TASK-411's AC #3 (cladefsd serving a VM's encrypted cell through its
+/// socket): two cells of a tenant whose KEK the daemon's KMS (`CLADEFS_KMS`) keeps, each
 /// written by its VM, read back, no file of their directories holding what they wrote in the
-/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and halts its store,
+/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and halts it,
 /// its VM's reads failing with EACCES, the other's reading on; called again, it finds the cell
 /// shredded and halts nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
-/// KMS, halts the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
+/// KMS, halts the other. Closed, neither cell opens again (PERMISSION_DENIED, EACCES).
 #[test]
-fn encrypted_stores_served_and_shredded_through_the_control_api() {
+fn encrypted_cells_served_and_shredded_through_the_control_api() {
     let keys = tempfile::tempdir().unwrap();
     let kms_dir = keys.path().join("kms");
     let kms = extent_keys::kms::LocalKms::open(&kms_dir).unwrap();
@@ -498,7 +503,7 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
     assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
     daemon.sync(&ours).unwrap();
     daemon.sync(&sibling).unwrap();
-    // Beside the daemon's stores, which work on behind its API (TASK-463).
+    // Beside the daemon's cells, which work on behind its API (TASK-463).
     for (seed, path) in (1..).zip([&ours, &sibling]) {
         let held = cladefs::testing::files_holding_beside(path, &[&pattern(seed)[..64]]);
         assert_eq!(held, Vec::<String>::new(), "files holding what their VM wrote");
@@ -526,12 +531,12 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
     assert_eq!(failure(daemon.stat(&sibling)), denied);
 }
 
-/// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts its
-/// tenants' stores under the bucket KMS, each tenant's KEK made in its bucket on first use; what
-/// VMs wrote is in no file of the stores' directories in the clear. `ShredTenant` replaces the
-/// first tenant's KEK object by a tombstone and halts its store, its VM's reads failing with
-/// EACCES, the other tenant's reading on; called again, it finds the tenant shredded and halts
-/// nothing more. Closed, the store opens no more (PERMISSION_DENIED, EACCES).
+/// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts
+/// its tenants' cells under the bucket KMS, each tenant's KEK made in its bucket on first use; what
+/// VMs wrote is in no file of the cells' directories in the clear. `ShredTenant` replaces the first
+/// tenant's KEK object by a tombstone and halts its cell, its VM's reads failing with EACCES, the
+/// other tenant's reading on; called again, it finds the tenant shredded and halts nothing more.
+/// Closed, the cell opens no more (PERMISSION_DENIED, EACCES).
 #[test]
 fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api() {
     let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
@@ -588,12 +593,12 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
 }
 
 /// TASK-537.3.1 (doc-21): CreateCell gives a cell its replication, its f and what its fsync waits
-/// for, in its head, which StatCell reports of the store open; a taking that asks for nothing, on
+/// for, in its head, which StatCell reports of the open cell; a taking that asks for nothing, on
 /// any host, keeps them, and one that asks for another changes them. Asks no f can satisfy are
 /// refused, and an f of 1 or more by a daemon with no peers (TASK-537.3.3).
 #[test]
 fn cells_are_made_replicated_through_the_control_api() {
-    // SAFETY: as in stores_through_the_control_api.
+    // SAFETY: as in cells_through_the_control_api.
     unsafe {
         std::env::set_var("CLADEFSD_BUCKET", "memory:///replicated");
         std::env::set_var("CLADEFSD_TOKEN", "1");
@@ -613,9 +618,9 @@ fn cells_are_made_replicated_through_the_control_api() {
         daemon.runtime.block_on(daemon.client.create_cell(request)).map(|made| made.into_inner())
     };
     let replicated = |daemon: &mut Daemon, path: &Path| {
-        let store = daemon.open(path, CAPACITY);
+        let client = daemon.open(path, CAPACITY);
         let stat = daemon.stat(path).unwrap();
-        drop(store);
+        drop(client);
         (stat.replicas, stat.fsync(), stat.configuration)
     };
 
@@ -629,7 +634,7 @@ fn cells_are_made_replicated_through_the_control_api() {
     assert_eq!(replicated(&mut daemon, &first), (0, FsyncLevel::Local, 0));
     daemon.sync(&first).unwrap();
 
-    // Taken into another store, asking for nothing: kept. Then asking for another: changed.
+    // Taken into another directory, asking for nothing: kept. Then asking for another: changed.
     let second = dir.path().join("second");
     create(&mut daemon, request(&second, made.cell, None, FsyncLevel::Ordered)).unwrap();
     assert_eq!(replicated(&mut daemon, &second), (0, FsyncLevel::Local, 0));

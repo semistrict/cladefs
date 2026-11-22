@@ -3,17 +3,17 @@
 // found in the LICENSE file.
 
 //! cladefs: reads and writes of the host's files bypassing its page cache (TASK-433): `O_DIRECT` on
-//! Linux, `F_NOCACHE` on macOS, where the file system allows. cladefs keeps what it caches in memory
-//! of its own, budgeted (its extent cache, the fetchers' parts, held parts); the host's page cache
-//! is a second memory, unbudgeted, holding the same bytes again, which the files it writes and
-//! reads keep out of.
+//! Linux, `F_NOCACHE` on macOS, where the file system allows. cladefs keeps what it caches in
+//! memory of its own, budgeted (its extent cache, the fetchers' parts, held parts); the host's page
+//! cache is a second memory, unbudgeted, holding the same bytes again, which the files it writes
+//! and reads keep out of.
 //!
 //! Direct I/O on Linux moves whole blocks, from memory aligned to them: what is read here is read
 //! by the blocks around it, into a buffer aligned so, and what is written that doesn't start or
 //! end at a block's edge is merged into the blocks it touches, read first, unless the caller holds
 //! the block that ends what it wrote before ([`Tail`]), as a log appended to does. A file that
 //! can't bypass the cache (a file system without `O_DIRECT`, such as eCryptfs) is not read or
-//! written at all: [`bypass`] fails, and so does the opening of what it is for, a store's file or
+//! written at all: [`bypass`] fails, and so does the opening of what it is for, a cell's file or
 //! the part cache, rather than run in the host's page cache, a second memory no budget counts
 //! (TASK-433.6). Its setup is to be fixed: a file system that bypasses it.
 
@@ -113,11 +113,11 @@ thread_local! {
     static SPARE: std::cell::Cell<Option<Aligned>> = const { std::cell::Cell::new(None) };
 }
 
-/// cladefs: `len` bytes aligned to [`DIRECT_BLOCK`], what direct I/O reads into and writes from as they
-/// are: the thread's spare memory if it is large enough, which held what the last held, or memory
-/// allocated zeroed. Each write-back, read and write here used to allocate a zeroed buffer of its
-/// own: on Linux a MiB of fresh pages each, faulted in, zeroed and freed again, a quarter of the
-/// time of a store's writes (TASK-433.8).
+/// cladefs: `len` bytes aligned to [`DIRECT_BLOCK`], what direct I/O reads into and writes from as
+/// they are: the thread's spare memory if it is large enough, which held what the last held, or
+/// memory allocated zeroed. Each write-back, read and write here used to allocate a zeroed buffer
+/// of its own: on Linux a MiB of fresh pages each, faulted in, zeroed and freed again, a quarter of
+/// the time of a cell's writes (TASK-433.8).
 pub struct Buffer {
     aligned: Option<Aligned>,
     len: usize,

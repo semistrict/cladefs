@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a sweep of the collector over every cell of a bucket, as `cladefs-gc` runs it (TASK-395.5):
-//! a pass over each cell, so many at once, beside the sweeps of any number of other processes.
+//! cladefs: a sweep of the collector over every cell of a bucket, as `cladefs-gc` runs it
+//! (TASK-395.5): a pass over each cell, so many at once, beside the sweeps of any number of other
+//! processes.
 //!
 //! The cells come from delimiter listings a page at a time ([`crate::cell::listed`]), each page
 //! listed as the passes before it end: a sweep holds no more than a page of tenants, a page of
@@ -53,8 +54,8 @@ pub struct Sweep {
     pub mode: Mode,
     /// How many passes it runs at once, each over a cell of its own: at least 1.
     pub at_once: usize,
-    /// How long each pass holds its cell, in milliseconds by the store's clock, from its taking of
-    /// the cell's lease or its last renewal of it ([`Holding::lease`]): how long a process gone
+    /// How long each pass holds its cell, in milliseconds by the backend's clock, from its taking
+    /// of the cell's lease or its last renewal of it ([`Holding::lease`]): how long a process gone
     /// holds its cells.
     pub lease: u64,
     /// How many of the slowest passes it says ([`Swept::slowest`]).
@@ -197,7 +198,7 @@ impl Sweep {
         self.run_with_own(bucket, None::<&Arc<B>>, observe).await
     }
 
-    /// cladefs: as [`Sweep::run`], `bucket` routed, `own` its own store, unrouted, if given
+    /// cladefs: as [`Sweep::run`], `bucket` routed, `own` its own bucket, unrouted, if given
     /// (TASK-633.8): a cell listed here of another bucket, by its ID, is a copy of that cell's
     /// mirrored versions, which a pass over the copy decides ([`Collector::collect_copy`]), not a
     /// pass over the cell, which is its own bucket's. None: every cell listed is passed over as
@@ -422,7 +423,7 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.delete(key)
     }
 
-    /// One request, as a store with batch deletes makes it, whatever the bucket under it does.
+    /// One request, as a backend with batch deletes makes it, whatever the bucket under it does.
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::DeleteBatch);
         self.bucket.delete_batch(keys)
@@ -549,7 +550,7 @@ mod tests {
     }
 
     /// Runs `future` over `bucket`, completing a request waiting at random at each step, as
-    /// `seed` picks it, the store's clock a tick on for each: what it gives.
+    /// `seed` picks it, the backend's clock a tick on for each: what it gives.
     fn served_at_random<T>(bucket: &SimBucket, future: impl Future<Output = T>, seed: u64) -> T {
         let mut random = rand::rngs::StdRng::seed_from_u64(seed);
         let mut future = std::pin::pin!(future);
@@ -792,10 +793,10 @@ mod tests {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(4).build().unwrap();
         let swept = |spawned: bool| {
-            let store =
+            let memory =
                 Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
-            let bucket = Arc::new(Tasks { bucket: store.clone(), tasks: Default::default() });
-            runtime.block_on(fill(&store, &cells, false));
+            let bucket = Arc::new(Tasks { bucket: memory.clone(), tasks: Default::default() });
+            runtime.block_on(fill(&memory, &cells, false));
             let sweep = Sweep { spawned, ..sweep(4) };
             let swept = {
                 let bucket = bucket.clone();
@@ -854,7 +855,7 @@ mod tests {
 
     /// A sweep reports what its passes did as the bucket counts it: the objects gone and their
     /// bytes, the moves written and the bytes of what they are of, and every request of each kind
-    /// the store made, its passes' and its listings' of the cells; each pass's adding up to the
+    /// the bucket made, its passes' and its listings' of the cells; each pass's adding up to the
     /// whole; and its slowest passes, slowest first.
     #[test]
     fn sweeps_report_what_the_bucket_counts() {

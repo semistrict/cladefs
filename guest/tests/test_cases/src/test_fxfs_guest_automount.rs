@@ -4,7 +4,7 @@
 
 //! Shared volumes attached on a path's lookup (cladefs's TASK-136.6, backlog doc-10, Automount). A
 //! publisher VM publishes a volume, as fxfs-guest-shared-volumes's does. A consumer VM, on a
-//! store of its own, runs the automounter (`fxfs-automount`) on `/repos`, whose asks the host
+//! cell of its own, runs the automounter (`fxfs-automount`) on `/repos`, whose asks the host
 //! answers as the sandbox manager would: `repo` and `other` are the generation, imported as
 //! volumes of those names; any other name is refused. In the consumer:
 //!

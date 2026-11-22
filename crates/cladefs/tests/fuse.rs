@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Tests of the FUSE server (`cladefs::fuse::Server`), driven as the kernel drives it: with requests
-//! encoded as Linux's FUSE client encodes them, and their replies decoded.
+//! Tests of the FUSE server (`cladefs::fuse::Server`), driven as the kernel drives it: with
+//! requests encoded as Linux's FUSE client encodes them, and their replies decoded.
 //!
 //! The client here encodes and decodes messages by hand, from Linux's `include/uapi/linux/fuse.h`,
 //! independently of the server's definitions.
@@ -950,13 +950,13 @@ fn noise(len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// TASK-411.7 (TASK-411's AC #3, FUSE mounts): the server a FUSE mount runs, serving a store of a
+/// TASK-411.7 (TASK-411's AC #3, FUSE mounts): the server a FUSE mount runs, serving an
 /// encrypted cell, its tenant's KEK in the host's KMS (the default tenant's, whose cells `Storage`
-/// makes): a file written through it reads back, before and after the store is closed and served
-/// again; no file of the store's directory, nor of its bucket's, holds the file's data in the
+/// makes): a file written through it reads back, before and after the cell is closed and served
+/// again; no file of the cell directory, nor of its bucket's, holds the file's data in the
 /// clear. Its kernel mount is `fuse_mount.rs`'s, Linux's.
 #[test]
-fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
+fn an_encrypted_cell_served_reads_back_and_holds_nothing_in_the_clear() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(0).unwrap();
@@ -967,7 +967,8 @@ fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
     let data = noise(3 * pages::page_size() as usize + 5);
     let served = Client::of;
     block_on(async {
-        let fs = Filesystem::format(Storage::create(&path, 256 << 20).unwrap()).await.unwrap();
+        let fs =
+            Filesystem::format(Storage::create(&path, 256 << 20).await.unwrap()).await.unwrap();
         let mut client = served(fs);
         client.init().await;
         let (file, _) = client.create(ROOT, b"file", 0o644).await;
@@ -976,7 +977,7 @@ fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
         assert!(client.read(file, 0, data.len() as u32).await == data, "read back otherwise");
         drop(client.server.into_filesystem().close().await.unwrap());
 
-        let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.unwrap();
+        let fs = Filesystem::mount(Storage::open(&path).await.unwrap()).await.unwrap();
         let mut client = served(fs);
         client.init().await;
         let (file, attr) = entry(&client.lookup(ROOT, b"file").await.ok());

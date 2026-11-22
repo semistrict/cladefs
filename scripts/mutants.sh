@@ -7,7 +7,7 @@
 # their code a mutant at a time and runs their tests with cargo nextest; a mutant
 # no test fails, missed, is a gap in the tests, or a change that changes nothing.
 # Then, for the crates with Shuttle tests (the `shuttle` feature: the concurrency
-# rules the store and the daemon rely on), the mutants missed run again with that
+# rules the cell and the daemon rely on), the mutants missed run again with that
 # feature, its tests alone: cargo-mutants runs one feature set at a time.
 #
 #   scripts/mutants.sh [CRATE...]   (default: extent_frame local_cell bucket_cell cladefs)

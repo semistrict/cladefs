@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Volumes of one filesystem mounted side by side (cladefs's TASK-136.2): the host makes a store with
-//! several volumes, as it does a repo's base, and the guest mounts them on directories of the
+//! Volumes of one filesystem mounted side by side (cladefs's TASK-136.2): the host makes a cell
+//! with several volumes, as it does a repo's base, and the guest mounts them on directories of the
 //! default volume, each with a superblock of its own, on one device. It checks that they have their
 //! own `st_dev` and `EXDEV`, and that a file of each, made alike, has the same inode number and
 //! its own data; that one unmounting leaves the others working, and the last closes the filesystem;
@@ -41,7 +41,7 @@ mod host {
     const WINDOW: crate::common::Window = crate::common::Window::Large;
     const VOLUMES: [&str; 4] = ["default", "a", "b", "c"];
 
-    /// Makes the store at `path`, with `VOLUMES`, empty.
+    /// Makes the cell at `path`, with `VOLUMES`, empty.
     fn format(path: &Path) -> anyhow::Result<()> {
         block_on(async {
             let image = Image::format(Storage::create(path, CAPACITY)?).await?;
@@ -53,7 +53,7 @@ mod host {
         })
     }
 
-    /// What `volume`'s file holds in the store at `path`.
+    /// What `volume`'s file holds in the cell at `path`.
     fn read(path: &Path, volume: &str) -> anyhow::Result<Vec<u8>> {
         block_on(async {
             let image = Image::mount(Storage::open(path)?).await?;

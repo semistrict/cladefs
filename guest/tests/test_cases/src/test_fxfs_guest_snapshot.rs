@@ -5,29 +5,29 @@
 //! Snapshots of a VM with an extent-store device (cladefs's TASK-39.1): the guest's Fxfs, written
 //! to and frozen, is snapshotted, the VM goes, and the snapshot is restored (`Mode`):
 //!
-//! - **Zygote:** twice, as a zygote's children are, each into a store of its own, forked from the
-//!   snapshot's version; the host then checks each store holds what its guest wrote, and not the
+//! - **Zygote:** twice, as a zygote's children are, each into a cell of its own, forked from the
+//!   snapshot's version; the host then checks each cell holds what its guest wrote, and not the
 //!   other's.
-//! - **Suspend:** once, into the store the VM had, which nothing changed meanwhile but its size:
-//!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
-//! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
-//!   restore names a version and a store it doesn't have here, so it takes the version's cell from
-//!   the bucket, and forks the store from it. The bucket is CLADEFSD_BUCKET's, if set, or one
-//!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
-//!   scripts/migrate-host.sh): `source` snapshots the VM, its store's cell in the bucket, and
+//! - **Suspend:** once, into the cell the VM had, which nothing changed meanwhile but its size:
+//!   the guest, told of it by nothing, finds the cell grew as it thaws (TASK-79.52).
+//! - **Migrate:** once, as on another host: its extent daemon keeps cells in a bucket, and the
+//!   restore names a version and a cell directory it doesn't have here, so it takes the version's
+//!   cell from the bucket, and forks one there from it. The bucket is CLADEFSD_BUCKET's, if set, or
+//! one in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
+//!   scripts/migrate-host.sh): `source` snapshots the VM, its cell in the bucket, and
 //!   leaves the snapshot, its memory and the VM's root filesystem in CLADEFS_MIGRATE_BUNDLE; then
-//!   `target`, on another host, which has nothing of the store, restores it from there, at the
+//!   `target`, on another host, which has nothing of the cell, restores it from there, at the
 //!   same paths, the root filesystem's too, which the restored VM goes on reading.
 //! - **TenantMigrate:** as Migrate, for a tenant's VM (TASK-154): the tenant's VM process names no
 //!   cell, so that the host's VM manager makes the version in the tenant's directory first, of the
 //!   cell the daemon says it is, and Firecracker restores through the tenant's socket. Several
-//!   times at once (TASK-158), each from a copy of the version of its own, as on hosts of their own,
-//!   for tenants of their own, and once from the snapshot's own copy, all at the same moment: each
-//!   copy a read-only ancestor, which no restore takes from the others.
+//!   times at once (TASK-158), each from a copy of the version of its own, as on hosts of their
+//!   own, for tenants of their own, and once from the snapshot's own copy, all at the same moment:
+//!   each copy a read-only ancestor, which no restore takes from the others.
 //!
 //! Each restored guest thaws, reads what was written before the snapshot (with a DAX window,
 //! through a mapping made before it, which the restored window maps again), writes its own file,
-//! which mints extents of its store's cell, and remounts.
+//! which mints extents of its cell, and remounts.
 //!
 //! cladefs TASK-92.14: before the snapshot, the guest maps a file of `PIECES` pages, each an extent
 //! of its own, read in from a mount before, so that the window maps each page apart (with a DAX
@@ -68,7 +68,7 @@ pub struct TestFxfsGuestSnapshot {
     #[cfg_attr(feature = "guest", allow(dead_code))]
     pub dax: bool,
     pub mode: Mode,
-    /// How many volumes the guest mounts besides the default: on a store the host makes, if any.
+    /// How many volumes the guest mounts besides the default: on a cell the host makes, if any.
     pub volumes: usize,
     /// What of the guest's is read-only as it freezes.
     pub read_only: ReadOnly,
@@ -89,7 +89,7 @@ pub enum Memory {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ReadOnly {
     Nothing,
-    /// A volume of its own, `RO_VOLUME`, mounted read-only beside the default, on a store the host
+    /// A volume of its own, `RO_VOLUME`, mounted read-only beside the default, on a cell the host
     /// makes with it, which the guest writes to first, mounted writable.
     Volume,
     /// The default volume, remounted read-only before it freezes, and writable once it thaws. The
@@ -115,7 +115,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// The restored VMs' names, which each writes to its store.
+    /// The restored VMs' names, which each writes to its cell.
     #[cfg_attr(feature = "guest", allow(dead_code))]
     fn restores(self) -> &'static [&'static str] {
         match self {
@@ -148,7 +148,7 @@ impl Phase {
     }
 }
 
-/// The store's capacity, and what the host grows it to meanwhile, resuming.
+/// The cell's capacity, and what the host grows it to meanwhile, resuming.
 const CAPACITY: u64 = 128 << 20;
 const GROWN: u64 = CAPACITY * 2;
 
@@ -184,14 +184,14 @@ fn pieces() -> Vec<u8> {
     (0..PIECES).flat_map(piece).collect()
 }
 
-/// Whether the guest stores to page `page` of the file of `PIECES` pages, through its mapping,
+/// Whether the guest writes to page `page` of the file of `PIECES` pages, through its mapping,
 /// before the freeze: every eighth (TASK-191).
 #[cfg_attr(feature = "host", allow(dead_code))]
 fn piece_stored(page: usize) -> bool {
     page % 8 == 3
 }
 
-/// What the guest stores at the start of page `page` of the file of `PIECES` pages.
+/// What the guest writes at the start of page `page` of the file of `PIECES` pages.
 #[cfg_attr(feature = "host", allow(dead_code))]
 fn stored(page: usize) -> [u8; 8] {
     (page as u64 | 0x5a5a_0000_0000_0000).to_le_bytes()
@@ -234,12 +234,12 @@ mod host {
         UnixListener::bind(&path).with_context(|| format!("binding {path}"))
     }
 
-    /// The store the test's restore `name` opens.
-    fn store(dir: &Path, name: &str) -> PathBuf {
+    /// The cell directory the test's restore `name` opens.
+    fn cell_dir(dir: &Path, name: &str) -> PathBuf {
         dir.join(format!("store-{name}"))
     }
 
-    /// Makes the store at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
+    /// Makes the cell at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
     fn format(path: &Path, volumes: usize) -> anyhow::Result<()> {
         block_on(async {
             let image = Image::format(Storage::create(path, CAPACITY)?).await?;
@@ -255,12 +255,13 @@ mod host {
     }
 
     /// What a VM manager does for a tenant's VM to restore the snapshot at `snapshot` where its
-    /// version isn't (TASK-154): the tenant granted `dir`, and the version's cell, as the daemon says
-    /// it, not as the snapshot does, made a store at `version` in it. Returns the tenant's socket,
-    /// given to the jail's user, if Firecracker runs in one. The tenant is its ID in the bucket
-    /// (TASK-364); the version stays the snapshot's tenant's, and the restores are the tenant's.
-    /// Grants `tenant` a socket in `dir`, and shares the snapshot's version of the VM's store at
-    /// `source` with it, as its VM manager does for another tenant's restores (TASK-395.7).
+    /// version isn't (TASK-154): the tenant granted `dir`, and the version's cell, as the daemon
+    /// says it, not as the snapshot does, made a cell directory at `version` in it. Returns the
+    /// tenant's socket, given to the jail's user, if Firecracker runs in one. The tenant is its ID
+    /// in the bucket (TASK-364); the version stays the snapshot's tenant's, and the restores are
+    /// the tenant's. Grants `tenant` a socket in `dir`, and shares the snapshot's version of the
+    /// VM's cell at `source` with it, as its VM manager does for another tenant's restores
+    /// (TASK-395.7).
     fn share_with_tenant(
         cladefsd: &Path,
         source: &Path,
@@ -309,7 +310,7 @@ mod host {
             let phase = Phase::of_env().filter(|_| self.mode == Mode::Migrate);
             let root = setup_rootfs(test_setup)?;
             std::fs::create_dir_all(root.join("mnt/fxfs"))?;
-            // Migrating, a daemon of the test's own, which keeps stores in a bucket, as the hosts
+            // Migrating, a daemon of the test's own, which keeps cells in a bucket, as the hosts
             // a VM moves between do: the environment's, or one in its memory.
             let cladefsd = match self.mode {
                 Mode::Migrate | Mode::TenantMigrate => {
@@ -344,7 +345,7 @@ mod host {
                 }
             } else {
                 if self.volumes > 0 || self.read_only == ReadOnly::Volume {
-                    format(&store(dir, "source"), self.volumes)?;
+                    format(&cell_dir(dir, "source"), self.volumes)?;
                 }
                 let mut vm = Vm::new(2, 512)?;
                 vm.guest_kernel()?;
@@ -353,7 +354,7 @@ mod host {
                 } else {
                     0
                 };
-                vm.cell_served("extents", &store(dir, "source"), CAPACITY, window, &cladefsd);
+                vm.cell_served("extents", &cell_dir(dir, "source"), CAPACITY, window, &cladefsd);
                 vm.read_only_root();
                 let source_uds = uds("source");
                 vm.vsock(&source_uds);
@@ -403,10 +404,10 @@ mod host {
             }
 
             if self.mode == Mode::Suspend {
-                resize_once_let_go(&cladefsd, &store(dir, "source"))?;
+                resize_once_let_go(&cladefsd, &cell_dir(dir, "source"))?;
             }
 
-            // Restored, told its name: each into its own store, but resuming.
+            // Restored, told its name: each into its own cell, but resuming.
             let mut restored = Vec::new();
             let mut loads = Vec::new();
             // Each restore's tenant, of an ID of its own (TASK-364), where it has one.
@@ -414,28 +415,28 @@ mod host {
                 let elsewhere = dir.join(format!("elsewhere-{name}"));
                 let overrides = match self.mode {
                     Mode::Zygote => serde_json::json!([
-                        { "id": "extents", "path_on_host": store(dir, name) },
+                        { "id": "extents", "path_on_host": cell_dir(dir, name) },
                     ]),
                     Mode::Suspend => serde_json::json!([]),
                     Mode::Migrate => {
                         std::fs::create_dir_all(&elsewhere)?;
                         serde_json::json!([{
                             "id": "extents",
-                            "path_on_host": store(&elsewhere, name),
+                            "path_on_host": cell_dir(&elsewhere, name),
                             "cladefsd_socket": cladefsd,
                         }])
                     }
-                    // The snapshot's own tenant's: only the store to name.
+                    // The snapshot's own tenant's: only the cell to name.
                     Mode::TenantMigrate if name == "here" => serde_json::json!([
-                        { "id": "extents", "path_on_host": store(dir, name) },
+                        { "id": "extents", "path_on_host": cell_dir(dir, name) },
                     ]),
                     Mode::TenantMigrate => {
                         std::fs::create_dir_all(&elsewhere)?;
-                        let source = store(dir, "source");
+                        let source = cell_dir(dir, "source");
                         let socket = share_with_tenant(&cladefsd, &source, &elsewhere, id)?;
                         serde_json::json!([{
                             "id": "extents",
-                            "path_on_host": store(&elsewhere, name),
+                            "path_on_host": cell_dir(&elsewhere, name),
                             "cladefsd_socket": socket,
                         }])
                     }
@@ -515,7 +516,7 @@ mod host {
                         "{name}: its windows mapped {pages} pages at most, {private} private"
                     );
                     // The first restore's window shares more than half of what it maps: its
-                    // private pages are its guest's stores, a third or so of its pages, the
+                    // private pages are its guest's writes, a third or so of its pages, the
                     // case's files read into its page cache among them. Its loads, of pages its
                     // window installs ahead, take none: with no pages installed ahead, x86 KVM's
                     // asynchronous page fault worker made nine in ten private (TASK-456.3,
@@ -539,8 +540,8 @@ mod host {
                 );
                 return Ok(());
             }
-            // All at once: no restore of one version waits for another's. cladefs: each timed, as it
-            // maps the window's mappings again before the VM resumes (TASK-92.14).
+            // All at once: no restore of one version waits for another's. cladefs: each timed, as
+            // it maps the window's mappings again before the VM resumes (TASK-92.14).
             std::thread::scope(|scope| {
                 let loading: Vec<_> = (restored.iter().zip(&loads).zip(self.restores(phase)))
                     .map(|((firecracker, load), name)| {
@@ -566,8 +567,8 @@ mod host {
         }
     }
 
-    /// Grows the store at `path` to `GROWN`, once the daemon lets go of the VM killed just now: it
-    /// refuses a resize (`EBUSY`) while a connection whose VM process is gone holds the store.
+    /// Grows the cell at `path` to `GROWN`, once the daemon lets go of the VM killed just now: it
+    /// refuses a resize (`EBUSY`) while a connection whose VM process is gone holds the cell.
     fn resize_once_let_go(cladefsd: &Path, path: &Path) -> anyhow::Result<()> {
         let control = crate::common::control(cladefsd)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -608,34 +609,34 @@ mod host {
             if output != expected {
                 return TestOutcome::Fail(format!("expected {expected:?}, got {output:?}"));
             }
-            // Each store holds what its guest wrote, checked, and not another's: but a migrated
+            // Each cell holds what its guest wrote, checked, and not another's: but a migrated
             // one, whose data the daemon that served it took from its bucket, gone with it.
-            let stores: Vec<(&str, PathBuf)> = match self.mode {
+            let cell_dirs: Vec<(&str, PathBuf)> = match self.mode {
                 Mode::Zygote => {
-                    restores.iter().map(|name| (*name, store(&test_setup.tmp_dir, name))).collect()
+                    restores.iter().map(|name| (*name, cell_dir(&test_setup.tmp_dir, name))).collect()
                 }
-                Mode::Suspend => vec![(restores[0], store(&test_setup.tmp_dir, "source"))],
+                Mode::Suspend => vec![(restores[0], cell_dir(&test_setup.tmp_dir, "source"))],
                 Mode::Migrate | Mode::TenantMigrate => vec![],
             };
-            // The daemon keeps the snapshot's version open for the restores after these (TASK-92.5),
-            // and with it the directory of the stores forked from it, which this process may not
-            // open meanwhile: a look at the version through the daemon's control API, which works
-            // on the version alone, closes it first.
-            if !stores.is_empty() {
+            // The daemon keeps the snapshot's version open for the restores after these
+            // (TASK-92.5), and with it the directory of the cells forked from it, which this
+            // process may not open meanwhile: a look at the version through the daemon's control
+            // API, which works on the version alone, closes it first.
+            if !cell_dirs.is_empty() {
                 let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD");
                 let mut version = test_setup.tmp_dir.join("snapshot").into_os_string();
                 version.push(".extent-extents");
                 let control = crate::common::control(Path::new(&cladefsd)).expect("control API");
                 control.stat_cell(Path::new(&version)).expect("the snapshot's version");
             }
-            for (name, path) in stores {
-                let storage = Storage::open(path).expect("open store");
+            for (name, path) in cell_dirs {
+                let storage = Storage::open(path).expect("open cell");
                 let fs = block_on(async { Filesystem::mount(storage.check().await?).await })
-                    .expect("mount store");
-                assert_eq!(read_file(&fs, "before"), BEFORE, "store {name}: before");
-                assert_eq!(read_file(&fs, "who"), name.as_bytes(), "store {name}: who");
-                assert_eq!(read_file(&fs, "after").len(), 4 << 20, "store {name}: after");
-                assert!(read_file(&fs, "pieces") == pieces_stored(), "store {name}: pieces");
+                    .expect("mount cell");
+                assert_eq!(read_file(&fs, "before"), BEFORE, "cell {name}: before");
+                assert_eq!(read_file(&fs, "who"), name.as_bytes(), "cell {name}: who");
+                assert_eq!(read_file(&fs, "after").len(), 4 << 20, "cell {name}: after");
+                assert!(read_file(&fs, "pieces") == pieces_stored(), "cell {name}: pieces");
             }
             TestOutcome::Pass
         }
@@ -684,7 +685,7 @@ mod guest {
         assert_eq!(ret, 0, "ioctl {request:#x}: {}", std::io::Error::last_os_error());
     }
 
-    /// The filesystem takes the size its store grew to while the VM was away: it says so, and
+    /// The filesystem takes the size its cell grew to while the VM was away: it says so, and
     /// holds more than the size it had, which its allocator, which `fallocate` doesn't ask, would
     /// refuse otherwise (ENOSPC).
     fn grown() {
@@ -815,7 +816,7 @@ mod guest {
 
     /// Maps the file of `PIECES` pages at `path`, shared and writable, which stays mapped; reads
     /// it, so that the window maps each of its pages (TASK-92.14), KVM's worker writing for the
-    /// loads; and stores to every eighth page through it (TASK-191).
+    /// loads; and writes to every eighth page through it (TASK-191).
     fn map_pieces(path: &str) -> &'static [u8] {
         let len = PIECES * 4096;
         let file = fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
@@ -862,7 +863,7 @@ mod guest {
             let volumes = self.volumes;
             mount();
             if volumes > 0 {
-                // With nothing in the journal, each volume opened would read its store's record.
+                // With nothing in the journal, each volume opened would read its cell's record.
                 let reads = device_reads();
                 eprintln!("{reads} reads, with {volumes} volumes closed");
                 assert!(reads < volumes as u64, "{reads} reads with {volumes} volumes");
@@ -964,7 +965,7 @@ mod guest {
             assert_eq!(unsafe { libc::munmap(mapped_pieces.as_ptr() as *mut _, len) }, 0);
             fs::write(format!("{MNT}/who"), &name).unwrap();
             eprintln!("{name}: wrote");
-            // New extents, of the restored store's cell.
+            // New extents, of the restored cell's cell.
             let after: Vec<u8> = (0..4 << 20).map(|i: usize| (i % 241) as u8).collect();
             let mut file = fs::File::create(format!("{MNT}/after")).unwrap();
             file.write_all(&after).unwrap();

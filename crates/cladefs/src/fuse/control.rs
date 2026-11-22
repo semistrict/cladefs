@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The control API of a FUSE mount of many stores (TASK-302): gRPC, whose calls and errors are
+//! The control API of a FUSE mount of many cells (TASK-302): gRPC, whose calls and errors are
 //! `proto/cladefs/mount/v1/mount.proto`'s, served on cladefsd's control socket (TASK-475.2). It
 //! attaches tenants' cells of the mount's bucket (TASK-364), each of one kind (doc-20), an Fxfs
-//! one taken into a store in the mount's directory of stores, at `TENANT/CELL`, and shown at that
+//! one taken into a cell in the mount's directory of cells, at `TENANT/CELL`, and shown at that
 //! path in the mount; and detaches them.
 //!
 //! An attach or detach runs in a task of its own, which a caller giving up on it doesn't stop:
@@ -18,7 +18,6 @@ use crate::{CellId, CellOf, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use bucket_cell::cell::Kind;
 use proto::mount_client::MountClient;
-use proto::mount_server::MountServer;
 use proto::*;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -31,28 +30,33 @@ pub mod proto {
     tonic::include_proto!("cladefs.mount.v1");
 }
 
-/// Where a mount of many stores takes the cells it attaches from, and keeps their stores.
+/// Where a mount of many cells takes the cells it attaches from, and keeps their cells.
 #[derive(Clone, Debug)]
-pub struct Stores {
-    /// The directory the stores are in, each at the path it is attached at.
+pub struct CellSource {
+    /// The directory the cells are in, each at the path it is attached at.
     pub dir: PathBuf,
     /// The URL of the bucket the cells are in.
     pub bucket: String,
 }
 
-/// The Mount service of `server`, a server of many stores, which attaches cells as `stores` says:
+/// The Mount service of `server`, a server of many cells, which attaches cells as `cells` says:
 /// what the daemon serves on its control socket, beside its other services, if it mounts cells
 /// (`crate::cladefsd::mount`, TASK-475.2).
 #[cfg(not(madsim))]
 pub(crate) fn service(
     server: &Arc<Server>,
-    stores: Stores,
-) -> MountServer<impl proto::mount_server::Mount + use<>> {
-    let (server, stores) = (Arc::downgrade(server), Arc::new(stores));
-    MountServer::new(Control { server, stores, cells: Arc::default(), holds: Arc::default() })
+    source: CellSource,
+) -> mount_server::MountServer<impl mount_server::Mount + use<>> {
+    let (server, source) = (Arc::downgrade(server), Arc::new(source));
+    mount_server::MountServer::new(Control {
+        server,
+        source,
+        cells: Arc::default(),
+        holds: Arc::default(),
+    })
 }
 
-/// The path `cell`'s filesystem has in the mount, and in its directory of stores: `TENANT/CELL`,
+/// The path `cell`'s filesystem has in the mount, and in its directory of cells: `TENANT/CELL`,
 /// the tenant and the cell in base 32, padded, as the bucket's keys have them
 /// (`base32_id::Padded`).
 pub fn cell_path(cell: CellId) -> String {
@@ -73,42 +77,38 @@ enum Attaching {
     Detaching,
 }
 
-/// The API's calls, served by a server of many stores: the mount's, which the daemon's drain lets
-/// go of as it closes the mount, and its stores with it, which a call holding the server's last
+/// The API's calls, served by a server of many cells: the mount's, which the daemon's drain lets
+/// go of as it closes the mount, and its cells with it, which a call holding the server's last
 /// reference would keep open, their uploaders running, past the drain (TASK-475.2). Gone, calls
 /// fail with `UNAVAILABLE`.
 struct Control {
     server: Weak<Server>,
-    stores: Arc<Stores>,
+    source: Arc<CellSource>,
     cells: Cells,
     holds: Holds,
 }
 
-/// cladefs: the daemon's holds of the stores attached, by their paths in the directory of stores
-/// (TASK-475.3): while the mount has a store, a VM process opening it, or the daemon's control API
-/// working on it, fails with `EBUSY` at once. Taken before a store opens, let go once it is
+/// cladefs: the daemon's holds of the cells attached, by their paths in the directory of cells
+/// (TASK-475.3): while the mount has a cell, a VM process opening it, or the daemon's control API
+/// working on it, fails with `EBUSY` at once. Taken before a cell opens, let go once it is
 /// detached, written back and closed, or failed to attach.
 type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::cells::MountHold>>>;
 
-/// Opens the store at `path` as [`mount_cell`] does, held for the mount first ([`Holds`]), the hold
-/// awaited, holding no thread (board 2946): `open` opens it, on a blocking thread, and the hold is
-/// kept in `holds` if it opens.
+/// Opens the cell directory at `path` as `open`, [`mount_cell`]'s, does, held for the mount first
+/// ([`Holds`]), the hold awaited, holding no thread (board 2946), and kept in `holds` if it opens.
 async fn held_open(
     holds: Holds,
     path: PathBuf,
-    open: impl FnOnce(&Path) -> Result<Filesystem, Error> + Send + 'static,
+    open: impl Future<Output = Result<Filesystem, Error>>,
 ) -> Result<Filesystem, Error> {
     let hold = crate::cladefsd::cells::hold_mounted(&path).await.map_err(|errno| {
         Error::new(
             anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
         )
     })?;
-    let opened = tokio::task::spawn_blocking(move || {
-        let fs = open(&path)?;
-        holds.lock().unwrap().insert(path, hold);
-        Ok(fs)
-    });
-    opened.await.map_err(Error::new)?
+    let fs = open.await?;
+    holds.lock().unwrap().insert(path, hold);
+    Ok(fs)
 }
 
 /// The cell `cell` of `cells` as `reserving` finds it: marked `marked` if it says so, else left be.
@@ -123,10 +123,13 @@ fn reserve(
     Ok(())
 }
 
-/// Takes a cell's filesystem, the cell `of` says, into a store at `path` in the bucket at `url`,
-/// of `capacity` bytes until its cell says its own, placed at `token` if given, and mounts it:
-/// made empty if new, its root the mounting user's, as the mount is.
-fn mount_cell(
+/// Takes a cell's filesystem, the cell `of` says, into a cell directory at `path` in the bucket at
+/// `url`, of `capacity` bytes until its cell says its own, placed at `token` if given, and mounts
+/// it: made empty if new, its root the mounting user's, as the mount is. cladefs: awaited, as the
+/// daemon's control API serves it, holding no thread: its disk work
+/// [`local_cell::upload::blocking`]'s, its bucket's on the bucket runtime ([`Storage::take`]),
+/// Fxfs's device I/O the I/O engine's.
+async fn mount_cell(
     path: &Path,
     url: &str,
     (of, capacity): (CellOf, u64),
@@ -135,10 +138,10 @@ fn mount_cell(
     let new = matches!(of, CellOf::New(_) | CellOf::Named(_));
     // Its tenant's directory, made once for all its cells.
     if let Some(tenant) = path.parent() {
-        std::fs::create_dir_all(tenant)
+        local_cell::upload::blocking(|| std::fs::create_dir_all(tenant))
             .map_err(|err| Error::new(err).context(format!("making {}", tenant.display())))?;
     }
-    let storage = Storage::take(path, (of, capacity), url, token)?;
+    let storage = Storage::take(path, (of, capacity), url, token).await?;
     let mounting = async {
         if !new {
             return Filesystem::mount(storage).await;
@@ -150,11 +153,10 @@ fn mount_cell(
         fs.root().setattr(&owner).await?;
         Ok(fs)
     };
-    futures::executor::block_on(mounting)
-        .map_err(|err| err.context(format!("mounting {}", path.display())))
+    mounting.await.map_err(|err| err.context(format!("mounting {}", path.display())))
 }
 
-/// The capacity a store taking a cell's filesystem is made with, until its cell says its own,
+/// The capacity a cell taking a cell's filesystem is made with, until its cell says its own,
 /// which every filesystem made here does as it is made: a block.
 const TAKEN_CAPACITY: u64 = Storage::BLOCK_SIZE as u64;
 
@@ -183,11 +185,11 @@ impl Control {
             (false, _) => return Ok(false),
         };
         let shown = cell_path(cell);
-        let path = self.stores.dir.join(&shown);
-        let (url, holds, held) = (self.stores.bucket.clone(), self.holds.clone(), path.clone());
-        let open = held_open(holds, path, move |path| mount_cell(path, &url, of, token));
+        let path = self.source.dir.join(&shown);
+        let mounting = mount_cell(&path, &self.source.bucket, of, token);
+        let open = held_open(self.holds.clone(), path.clone(), mounting);
         if let Err(err) = server.attach(&shown, open).await {
-            self.holds.lock().unwrap().remove(&held);
+            self.holds.lock().unwrap().remove(&path);
             return Err(err);
         }
         Ok(true)
@@ -210,7 +212,7 @@ impl proto::mount_server::Mount for Control {
         // A new cell's ID is the bucket's to give, its cell's too (TASK-364).
         let cell = match cell {
             0 => {
-                let made = crate::host_cell::new_cell_at(&self.stores.bucket, tenant).await;
+                let made = crate::host_cell::new_cell_at(&self.source.bucket, tenant).await;
                 made.map_err(Error::new).map_err(failed)?
             }
             id => CellId { tenant, id },
@@ -223,31 +225,18 @@ impl proto::mount_server::Mount for Control {
         .map_err(|errno| failed(errno.into()))?;
         let control = Control {
             server: self.server.clone(),
-            stores: self.stores.clone(),
+            source: self.source.clone(),
             cells: self.cells.clone(),
             holds: self.holds.clone(),
         };
         let attached = whole(async move {
             let attached = async {
-                let url = control.stores.bucket.clone();
-                // A cell of the bucket's, its head read for its kind: its store's opening takes it,
+                // A cell of the bucket's, its head read for its kind: its cell's opening takes it,
                 // as a new one's makes it, encrypted (TASK-411.28, TASK-515).
-                let read = tokio::task::spawn_blocking(move || {
-                    if make {
-                        return Ok(None);
-                    }
-                    let bucket = crate::host_cell::bucket(&url).map_err(Error::new)?;
-                    let found =
-                        local_cell::upload::block_on(bucket_cell::head::get(&*bucket, cell))
-                            .map_err(Error::new)?;
-                    let head = found.and_then(|found| found.ok_or(bucket_cell::Error::NoCell));
-                    let head = head.map_err(|err| {
-                        let errno = cell_errno(&err);
-                        Error::new(anyhow::Error::new(err).context(errno))
-                    })?;
-                    Ok::<_, Error>(head.kind)
-                });
-                let kind = read.await.map_err(Error::new)??;
+                let kind = match make {
+                    true => None,
+                    false => cell_kind(&control.source.bucket, cell).await?,
+                };
                 control.attach_cell(cell, kind, (make, capacity), token).await
             }
             .await;
@@ -275,7 +264,7 @@ impl proto::mount_server::Mount for Control {
         })
         .map_err(|errno| failed(errno.into()))?;
         let (server, cells, holds) = (self.server()?, self.cells.clone(), self.holds.clone());
-        let dir = self.stores.dir.clone();
+        let dir = self.source.dir.clone();
         let path = cell_path(cell);
         let detached = whole(async move {
             let shown: Vec<String> = (server.attached().into_iter())
@@ -284,15 +273,15 @@ impl proto::mount_server::Mount for Control {
                 .collect();
             let detaching = shown.iter().map(|name| server.detach(name, force));
             let detached = futures::future::join_all(detaching).await;
-            // Their stores closed, or gone from the mount all the same: the daemon's again.
+            // Their cells closed, or gone from the mount all the same: the daemon's again.
             let mut held = holds.lock().unwrap();
             for name in &shown {
                 held.remove(&dir.join(name));
             }
             drop(held);
-            // A store that failed to unmount is gone from the mount all the same
+            // A cell that failed to unmount is gone from the mount all the same
             // (`Server::detach`): the cell is no longer attached, and attaching it again opens its
-            // store anew.
+            // cell anew.
             cells.lock().unwrap().remove(&cell);
             match detached.into_iter().find_map(Result::err) {
                 Some(err) => Err(err),
@@ -326,6 +315,18 @@ impl proto::mount_server::Mount for Control {
     }
 }
 
+/// The kind of `cell`, a cell of the bucket at `url`, if its head says one: `ENOENT` if it has no
+/// head.
+async fn cell_kind(url: &str, cell: CellId) -> Result<Option<Kind>, Error> {
+    let bucket = crate::host_cell::bucket(url).map_err(Error::new)?;
+    let found = bucket_cell::head::get(&*bucket, cell).await;
+    let head = found.and_then(|found| found.ok_or(bucket_cell::Error::NoCell)).map_err(|err| {
+        let errno = cell_errno(&err);
+        Error::new(anyhow::Error::new(err).context(errno))
+    })?;
+    Ok(head.kind)
+}
+
 /// The errno a failure to hold a cell says, as the extent daemon's API has it: `ENOENT` for a cell
 /// the bucket has none of, `ESTALE` for one a later placement holds.
 fn cell_errno(err: &bucket_cell::Error) -> Errno {
@@ -350,9 +351,9 @@ fn failed(err: Error) -> Status {
     saying(errno, format!("{err:#}"))
 }
 
-/// A client of the control API of a FUSE mount of many stores that blocks, for callers without a
-/// runtime of their own: `cladefsctl mount`'s commands, and tests. Its errors carry the errno a call
-/// failed with, if it did ([`crate::Error::errno`]).
+/// A client of the control API of a FUSE mount of many cells that blocks, for callers without a
+/// runtime of their own: `cladefsctl mount`'s commands, and tests. Its errors carry the errno a
+/// call failed with, if it did ([`crate::Error::errno`]).
 pub struct Client {
     runtime: tokio::runtime::Runtime,
     client: MountClient<tonic::transport::Channel>,

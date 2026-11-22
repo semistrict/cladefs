@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The filesystem the guest kernel's fs/cladefs calls (guest/linux/fs/cladefs/cladefs.h): Fxfs, on the
-//! extent-store device a mount names (`device`), serving the volumes mounted (`fs`).
+//! The filesystem the guest kernel's fs/cladefs calls (guest/linux/fs/cladefs/cladefs.h): Fxfs, on
+//! the extent-store device a mount names (`device`), serving the volumes mounted (`fs`).
 //!
 //! Each call blocks the calling thread until Fxfs is done with it, while Fxfs's own tasks run on
 //! the kernel's workers.
@@ -316,8 +316,8 @@ pub unsafe extern "C" fn cladefs_unmount(fs: *mut Fxfs) {
     block_on(fs.unmount());
 }
 
-/// cladefs: fault injection (TASK-164.2): the next `count` of `cladefs_write_many`'s transactions fail
-/// once their blocks are written, before they commit
+/// cladefs: fault injection (TASK-164.2): the next `count` of `cladefs_write_many`'s transactions
+/// fail once their blocks are written, before they commit
 /// (`fxfs::object_store::data_object_handle::FAIL_COMMITS`).
 #[unsafe(no_mangle)]
 pub extern "C" fn cladefs_set_fail_commits(count: u64) {
@@ -600,7 +600,8 @@ pub unsafe extern "C" fn cladefs_manifest(fs: *const Fxfs, buf: *mut u8, size: u
     }
 }
 
-/// cladefs: makes a volume over a base (`Filesystem::import`), named with the `len` bytes of `name`.
+/// cladefs: makes a volume over a base (`Filesystem::import`), named with the `len` bytes of
+/// `name`.
 ///
 /// # Safety
 ///
@@ -641,7 +642,7 @@ pub unsafe extern "C" fn cladefs_seal(filesystem: *const Filesystem) -> c_int {
     }
 }
 
-/// cladefs: takes the size the host resized the store to (`Filesystem::resize`).
+/// cladefs: takes the size the host resized the cell to (`Filesystem::resize`).
 ///
 /// # Safety
 ///
@@ -692,7 +693,8 @@ pub unsafe extern "C" fn cladefs_getattr(fs: *const Fxfs, ino: u64, attr: *mut A
     unsafe { write_attr(block_on(fs.reading(|| fs.attr_by_handle(ino))), attr) }
 }
 
-/// cladefs: the attributes of the object `ino`, as `cladefs_getattr`'s, but of one no name links too.
+/// cladefs: the attributes of the object `ino`, as `cladefs_getattr`'s, but of one no name links
+/// too.
 ///
 /// # Safety
 ///

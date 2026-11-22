@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's host tool for VMs' disks, the extent stores cladefsd serves: makes them, of cells kept
+//! cladefs's host tool for VMs' disks, the cells cladefsd serves: makes them, of cells kept
 //! in object storage (backlog doc-7) or of container images, places, forks, deletes and resizes
 //! them, makes them public bases, and waits for their uploads:
 //!
@@ -41,71 +41,69 @@
 //! ```
 //!
 //! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), every
-//! command goes through its control API (`cladefs::cladefsd::control`), and acts on stores as the
-//! daemon serves them: on a store a VM has open, live, or not at all (`EBUSY`). Without, cladefsctl
-//! acts on stores itself, on stores nothing has open, as their lock says, which an extent daemon
+//! command goes through its control API (`cladefs::cladefsd::control`), and acts on cells as the
+//! daemon serves them: on a cell a VM has open, live, or not at all (`EBUSY`). Without, cladefsctl
+//! acts on cells itself, on cells nothing has open, as their lock says, which an extent daemon
 //! serving them holds (it waits a while for it, then refuses). `create`, `take` and `import`, which
-//! make new stores, work so anywhere, as when building base images where no daemon runs. The others change
-//! existing stores' cells, which are in the bucket each store's description names: they need
+//! make new cells, work so anywhere, as when building base images where no daemon runs. The others
+//! change existing cells, which are in the bucket each cell's description names: they need
 //! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
-//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
-//! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell.
-//! `take` makes an empty store at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL`, each in base 32,
-//! its cell's, TASK-364), which its bucket has (`ENOENT` otherwise), its taking of a replicated
-//! cell forced with `--force`, as `place --force` places a store (TASK-681): once
-//! cladefsd opens it,
-//! with `CLADEFSD_BUCKET` naming the cell's bucket, it takes what the cell holds there,
-//! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
-//! version, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
-//! `place` places the store at DIR at the placement whose fencing token,
-//! its boot ID, is TOKEN (TASK-39.7): its writer takes its cell in object storage with that token
-//! from then on, which a later placement's exceeds, so that a placement cut off takes no cell
-//! back from the one after it (`ESTALE`), and its commits fail once a later one takes it.
-//! `--force`d, that placement's takings of a replicated cell go on with the members of the
-//! configuration its head names that answer, fewer than a take needs, as when f+1 of them are
-//! gone for good (doc-21, TASK-681): commits told replicated that only the others held are lost,
-//! and the store's status says past which commit (`forced_after`). `sync`
-//! returns once every commit of the store at DIR is durable and in object storage, as before a
-//! clean stop: through the daemon, a store a VM has open as of then. `import` makes a store at DIR, of CAPACITY bytes,
-//! holding an Fxfs filesystem of the container image IMAGE (TASK-39.5), a base for VMs to boot
-//! forks of: IMAGE is an OCI image layout, as `skopeo copy` makes, or `docker save` (whose tarball
-//! is one, once extracted), holding the image REF names, or its only image; or a tar archive of one
-//! layer, gzipped or not, as `docker export` makes. Files keep their owners, permissions, times
-//! and extended attributes; see `cladefs::import`. `fork` copies the store at SRC to a new store at
-//! DST, of a new cell, which it prints: through the daemon, live, if a VM has SRC open, once
-//! nothing is open on it, as with the guest's filesystem frozen (fsfreeze), and refused otherwise
-//! (TASK-39.3). The new cell is a fork of SRC's in its bucket, made once SRC's commits are
-//! uploaded, holding its extents without uploading them again; DST is a store of its own, which
-//! reads them there (TASK-165.7). `version` makes a version of the cell of the store at DIR, once
-//! nothing is open on it: one commit here, uploaded behind, which it prints the ID of, in
-//! hexadecimal. `fork-version` forks the version VERSION of CELL (TENANT/CELL) to DST, on any
-//! host, as many hosts at once as wanted, the version uploaded first. `versions` lists the cell's versions,
-//! `drop-versions` drops some, what forks of them inherited staying until they go. `share` shares
-//! a version (TASK-395.7): it forks into cells of other tenants' than its own, as a base image
-//! many tenants fork, which a version not shared refuses (`EACCES`); `unshare` stops such forks,
-//! those made living on. The cell's head says it, for every
-//! host. `delete` deletes a store, a fork or not: its cell in its bucket, its forks' living on,
-//! and its directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this
-//! host's copy of it, its cell staying in the bucket (TASK-154): what `take` made, once this host
-//! is done with it. `resize` sets the store's capacity, the size of the disk
-//! its guest sees, to CAPACITY bytes: through the daemon, a store its VM has open grows at once,
-//! the guest seeing the new size while mounted, and shrinks if the guest's filesystem agrees, no
-//! lower than what it holds; otherwise, it grows, and does not shrink. `public` makes the store at
-//! DIR a public base, whose pages every tenant's forks of it share (TASK-43). `stat` prints what the
-//! store at DIR is and holds, one `name value` a line: its cell (base 32), capacity, used and
-//! available bytes, and of those used, its own (its cell wrote them) and inherited (from the
-//! cells it was forked from), what billing it alone charges it and what it shares (TASK-49);
-//! how many extents it holds, own and inherited (`own_extents`, `inherited_extents`), which what an
-//! open store takes of the daemon's memory grows with (TASK-443.2, TASK-454); whether it is public,
-//! and, through the daemon, open. A store no VM has open, it opens, locally or through the daemon,
-//! as a VM's would, to say: time, and memory till it is done, as its extents. `--version` prints the commit it was built
-//! of (`cladefs::BUILD_COMMIT`, TASK-111.7).
+//! `create` makes an empty cell at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
+//! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell. `take`
+//! makes an empty cell at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL`, each in base 32, its
+//! cell's, TASK-364), which its bucket has (`ENOENT` otherwise), its taking of a replicated cell
+//! forced with `--force`, as `place --force` places a cell (TASK-681): once cladefsd opens it, with
+//! `CLADEFSD_BUCKET` naming the cell's bucket, it takes what the cell holds there, whose data it
+//! fetches as it is read; placed at TOKEN, if given, as `place` places it. A version, a VM
+//! snapshot's or another, it reads, taking no head, as any number of hosts do at once. `place`
+//! places the cell at DIR at the placement whose fencing token, its boot ID, is TOKEN (TASK-39.7):
+//! its writer takes its cell in object storage with that token from then on, which a later
+//! placement's exceeds, so that a placement cut off takes no cell back from the one after it
+//! (`ESTALE`), and its commits fail once a later one takes it. `--force`d, that placement's takings
+//! of a replicated cell go on with the members of the configuration its head names that answer,
+//! fewer than a take needs, as when f+1 of them are gone for good (doc-21, TASK-681): commits told
+//! replicated that only the others held are lost, and the cell's status says past which commit
+//! (`forced_after`). `sync` returns once every commit of the cell at DIR is durable and in object
+//! storage, as before a clean stop: through the daemon, a cell a VM has open as of then. `import`
+//! makes a cell at DIR, of CAPACITY bytes, holding an Fxfs filesystem of the container image IMAGE
+//! (TASK-39.5), a base for VMs to boot forks of: IMAGE is an OCI image layout, as `skopeo copy`
+//! makes, or `docker save` (whose tarball is one, once extracted), holding the image REF names, or
+//! its only image; or a tar archive of one layer, gzipped or not, as `docker export` makes. Files
+//! keep their owners, permissions, times and extended attributes; see `cladefs::import`. `fork`
+//! copies the cell at SRC to a new cell at DST, of a new cell, which it prints: through the daemon,
+//! live, if a VM has SRC open, once nothing is open on it, as with the guest's filesystem frozen
+//! (fsfreeze), and refused otherwise (TASK-39.3). The new cell is a fork of SRC's in its bucket,
+//! made once SRC's commits are uploaded, holding its extents without uploading them again; DST is a
+//! cell of its own, which reads them there (TASK-165.7). `version` makes a version of the cell of
+//! the cell at DIR, once nothing is open on it: one commit here, uploaded behind, which it prints
+//! the ID of, in hexadecimal. `fork-version` forks the version VERSION of CELL (TENANT/CELL) to
+//! DST, on any host, as many hosts at once as wanted, the version uploaded first. `versions` lists
+//! the cell's versions, `drop-versions` drops some, what forks of them inherited staying until they
+//! go. `share` shares a version (TASK-395.7): it forks into cells of other tenants' than its own,
+//! as a base image many tenants fork, which a version not shared refuses (`EACCES`); `unshare`
+//! stops such forks, those made living on. The cell's head says it, for every host. `delete`
+//! deletes a cell, a fork or not: its cell in its bucket, its forks' living on, and its directory
+//! (TASK-39.4). `drop` deletes the cell at DIR as `delete` does, this host's copy of it, its cell
+//! staying in the bucket (TASK-154): what `take` made, once this host is done with it. `resize`
+//! sets the cell's capacity, the size of the disk its guest sees, to CAPACITY bytes: through the
+//! daemon, a cell its VM has open grows at once, the guest seeing the new size while mounted, and
+//! shrinks if the guest's filesystem agrees, no lower than what it holds; otherwise, it grows, and
+//! does not shrink. `public` makes the cell at DIR a public base, whose pages every tenant's forks
+//! of it share (TASK-43). `stat` prints what the cell at DIR is and holds, one `name value` a line:
+//! its cell (base 32), capacity, used and available bytes, and of those used, its own (its cell
+//! wrote them) and inherited (from the cells it was forked from), what billing it alone charges it
+//! and what it shares (TASK-49); how many extents it holds, own and inherited (`own_extents`,
+//! `inherited_extents`), which what an open cell takes of the daemon's memory grows with
+//! (TASK-443.2, TASK-454); whether it is public, and, through the daemon, open. A cell no VM has
+//! open, it opens, locally or through the daemon, as a VM's would, to say: time, and memory till it
+//! is done, as its extents. `--version` prints the commit it was built of (`cladefs::BUILD_COMMIT`,
+//! TASK-111.7).
 //!
-//! cladefs: on Linux, it logs on standard error what is as grave as a warning: as a read of an object
-//! the collector's newest mark-only pass marked, a bug in the collector (`bucket_cell::marks`,
-//! TASK-264).
+//! cladefs: on Linux, it logs on standard error what is as grave as a warning: as a read of an
+//! object the collector's newest mark-only pass marked, a bug in the collector
+//! (`bucket_cell::marks`, TASK-264).
 //!
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
@@ -118,47 +116,47 @@
 //!
 //! `grant` and `revoke`, through the daemon alone, are the control API's `Grant` and `Revoke`
 //! (TASK-43.4), for tests and operators (TASK-71): `grant` gives the tenant TENANT, its ID in the
-//! bucket, in base 32 and not 0, the default tenant's (TASK-364), whose stores are in the
-//! directory DIR, a VM socket of its own, `TENANT.sock`, its VM processes naming stores in DIR
+//! bucket, in base 32 and not 0, the default tenant's (TASK-364), whose cells are in the
+//! directory DIR, a VM socket of its own, `TENANT.sock`, its VM processes naming cells in DIR
 //! alone, of its own cells, the socket given to the user UID and the group GID if named, the
 //! daemon's own otherwise, and prints its path; granting a tenant again, of the same directory,
 //! prints it again. `revoke` takes the tenant TENANT's socket away (base 32): its VM processes
-//! connected keep their stores, and no more connect.
+//! connected keep their cells, and no more connect.
 //!
 //! `shred-cell` and `forget-tenant-keys`, through the daemon alone, are the control API's
 //! `ShredCell` and `ForgetTenantKeys` (TASK-411.7, backlog doc-16, Shredding). `shred-cell` shreds
 //! the cell TENANT/CELL (each in base 32): takes its wrapped KEKs out of its object in the daemon's
-//! bucket, so that its keys unwrap no more, and has the daemon forget what it holds of
-//! them, halting its stores open there (`EACCES`); run it against every host's daemon, the first
+//! bucket, so that its keys unwrap no more, and has the daemon forget what it holds of them,
+//! halting its cells open there (`EACCES`); run it against every host's daemon, the first
 //! shredding, each forgetting. A bucket that keeps object versions keeps the KEKs in the cell
 //! object's older versions until a lifecycle rule expires them. `forget-tenant-keys` has the daemon
-//! forget the keys of the tenant TENANT (base 32), once its KEK is destroyed, or revoked, in the KMS:
-//! its stores there are halted, their pages leave the cache, its fetchers' and KMS's keys of it
+//! forget the keys of the tenant TENANT (base 32), once its KEK is destroyed, or revoked, in the
+//! KMS: its cells there are halted, their pages leave the cache, its fetchers' and KMS's keys of it
 //! go. `shred-tenant`, through the daemon alone too, is the control API's `ShredTenant`
 //! (TASK-411.27, doc-16 The bucket KMS): under the bucket KMS (a master key, no `CLADEFS_KMS`), it
-//! replaces the tenant TENANT's (base 32) KEK object in the daemon's bucket by a tombstone, so that no
-//! key its KEK wrapped unwraps anywhere and none is made it again, and has the daemon forget its
+//! replaces the tenant TENANT's (base 32) KEK object in the daemon's bucket by a tombstone, so that
+//! no key its KEK wrapped unwraps anywhere and none is made it again, and has the daemon forget its
 //! keys; run it against every host's daemon, the first shredding, each forgetting, and printing
-//! `shredded_now 1` or `0`. A bucket that keeps object versions keeps the KEK in the object's
-//! older versions until a lifecycle rule expires them. A daemon of another KMS refuses it: destroy
-//! the tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
+//! `shredded_now 1` or `0`. A bucket that keeps object versions keeps the KEK in the object's older
+//! versions until a lifecycle rule expires them. A daemon of another KMS refuses it: destroy the
+//! tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
 //! value` a line.
 //!
-//! `format-bucket`, `add-bucket` and `buckets` act on buckets themselves, with or without the daemon
-//! (TASK-633.9, backlog doc-23). A bucket's number is in the high bits of every cell ID it gives,
-//! so that no two buckets give one ID. `format-bucket` makes the bucket at URL, unless it was
-//! formatted or added, the root of buckets of its own, number 1, and prints its number; a bucket
-//! never formatted is made a root so by the first host that makes a cell in it. `add-bucket` adds
-//! the bucket at URL, never formatted, to the buckets of the root bucket at ROOT: the next number,
-//! which it prints, given by a conditional write of the root's record of every bucket, which then
-//! goes to the root of every bucket. Refused if URL is a bucket already (`EEXIST`), or ROOT is not
-//! the root (`EINVAL`). DETAILS, recorded of the bucket, are any of `--region REGION`, `--endpoint
-//! URL`, `--kms URI` (its `CLADEFS_KMS`) and `--master-key-id ID` (under the bucket KMS): never a
-//! key or a credential. Its provider and URL are recorded too. DETAILS may set the bucket's
-//! settings too, fixed for good (TASK-691): `--head-slots N`, how many objects each cell's head is
-//! kept in, 1 to 64, 10 by default at `format-bucket`, the root's at `add-bucket`. `buckets`
-//! prints the record in the root of the bucket at URL: its version, then each bucket, a line
-//! each, its number, its details and its settings, `name=value`.
+//! `format-bucket`, `add-bucket` and `buckets` act on buckets themselves, with or without the
+//! daemon (TASK-633.9, backlog doc-23). A bucket's number is in the high bits of every cell ID it
+//! gives, so that no two buckets give one ID. `format-bucket` makes the bucket at URL, unless it
+//! was formatted or added, the root of buckets of its own, number 1, and prints its number; a
+//! bucket never formatted is made a root so by the first host that makes a cell in it. `add-bucket`
+//! adds the bucket at URL, never formatted, to the buckets of the root bucket at ROOT: the next
+//! number, which it prints, given by a conditional write of the root's record of every bucket,
+//! which then goes to the root of every bucket. Refused if URL is a bucket already (`EEXIST`), or
+//! ROOT is not the root (`EINVAL`). DETAILS, recorded of the bucket, are any of `--region REGION`,
+//! `--endpoint URL`, `--kms URI` (its `CLADEFS_KMS`) and `--master-key-id ID` (under the bucket
+//! KMS): never a key or a credential. Its provider and URL are recorded too. DETAILS may set the
+//! bucket's settings too, fixed for good (TASK-691): `--head-slots N`, how many objects each cell's
+//! head is kept in, 1 to 64, 10 by default at `format-bucket`, the root's at `add-bucket`.
+//! `buckets` prints the record in the root of the bucket at URL: its version, then each bucket, a
+//! line each, its number, its details and its settings, `name=value`.
 //!
 //! `mount`, through the daemon alone, calls the Mount service of its FUSE mount of tenants' cells
 //! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in base 32
@@ -167,14 +165,14 @@
 //! given, the daemon's otherwise, and shows it, if an Fxfs cell, at `MOUNT/TENANT/CELL`; it
 //! prints the cell. `create` makes a new Fxfs cell of TENANT's, its filesystem empty, of CAPACITY
 //! bytes, attached so, and prints the same.
-//! `detach` takes the cell away, and returns once its store is unmounted and written
+//! `detach` takes the cell away, and returns once its cell is unmounted and written
 //! back: once nothing has a file of it open, or a directory of it as its current one; with
 //! `--force`, at once, what is open of it failing from then on. `list` prints the cells attached,
 //! a line each, `TENANT CELL`, and `detaching` after one being detached.
 
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
-// cladefs: its commands' futures, which hold the stores' (TASK-685.3), nest deeper than the default.
+// cladefs: its commands' futures, which hold the cells' (TASK-685.3), nest deeper than the default.
 #![recursion_limit = "256"]
 
 use anyhow::{Context as _, bail};
@@ -222,7 +220,8 @@ fn usage() -> anyhow::Error {
     )
 }
 
-/// cladefs: what a daemon forgot of a tenant's or a cell's keys, one `name value` a line (TASK-411.7).
+/// cladefs: what a daemon forgot of a tenant's or a cell's keys, one `name value` a line
+/// (TASK-411.7).
 #[cfg(target_os = "linux")]
 fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> String {
     let cladefs::cladefsd::control::proto::Forgotten { stores, rings, kept, extents, bytes } =
@@ -235,7 +234,7 @@ fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> 
 
 /// What cladefsctl was asked to do.
 enum Command {
-    /// cladefs: a new store of a new cell, its ID its bucket's to give (TASK-364).
+    /// cladefs: a new cell of a new cell, its ID its bucket's to give (TASK-364).
     Create {
         dir: PathBuf,
         capacity: u64,
@@ -317,7 +316,7 @@ enum Command {
         json: bool,
     },
     /// cladefs: a tenant, of the ID `tenant` in the bucket (TASK-364), granted a VM socket of its
-    /// own, for its stores in `dir`, given to `uid` and `gid` if named (TASK-71). Read by
+    /// own, for its cells in `dir`, given to `uid` and `gid` if named (TASK-71). Read by
     /// `through`, which is Linux's alone.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Grant {
@@ -661,7 +660,7 @@ impl Command {
         Ok(())
     }
 
-    /// Does it here, on stores nothing has open: new ones anywhere; existing ones with the bucket
+    /// Does it here, on cells nothing has open: new ones anywhere; existing ones with the bucket
     /// and a placement token.
     fn locally(self) -> anyhow::Result<()> {
         if self.is_on_buckets() {
@@ -679,7 +678,7 @@ impl Command {
         if let Some(what) = daemons {
             bail!("{what} the extent daemon's: name its control socket (CLADEFSD_GRPC)");
         }
-        // cladefs: every store it opens here, or deletes the cell of, is encrypted under the host's
+        // cladefs: every cell it opens here, or deletes the cell of, is encrypted under the host's
         // KMS: none chosen, it refuses before it touches any (TASK-411.28).
         cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
         // What stat reads needs no cell changed, nor does a copy dropped, its cell left be.
@@ -694,15 +693,15 @@ impl Command {
         if let Some(Err(why)) = existing.then(cladefs::bucket::Host::from_env) {
             bail!(
                 "without the extent daemon (CLADEFSD_GRPC), cladefsctl changes no existing \
-                 store's cell here: {why}"
+                 cell here: {why}"
             );
         }
-        // cladefs: outside the daemon, cladefsctl blocks on what the stores do, at its one entry
-        // here; each store it opens it closes, its uploads done (TASK-685.3).
-        // An import's walk of its image makes its store through FUSE storage, which blocks on the
+        // cladefs: outside the daemon, cladefsctl blocks on what the cells do, at its one entry
+        // here; each cell it opens it closes, its uploads done (TASK-685.3).
+        // An import's walk of its image makes its cell through FUSE storage, which blocks on the
         // bucket runtime itself: on no runtime's thread, as it always did.
         if let Self::Import { dir, capacity, image, reference } = self {
-            let made = cladefs::import::store(&dir, capacity, &image, reference.as_deref());
+            let made = cladefs::import::make_base(&dir, capacity, &image, reference.as_deref());
             return futures::executor::block_on(made)
                 .with_context(|| format!("importing {}", image.display()));
         }
@@ -713,9 +712,9 @@ impl Command {
     async fn locally_async(self) -> anyhow::Result<()> {
         match self {
             Self::Create { dir, capacity } => {
-                let store = OpenCell::create(&dir, capacity).await?;
-                println!("{}", store.cell());
-                store.close().await;
+                let cell = OpenCell::create(&dir, capacity).await?;
+                println!("{}", cell.cell());
+                cell.close().await;
             }
             Self::Take { dir, capacity, cell, token, force } => {
                 let mut opening = cladefs::Opening::here()?;
@@ -725,41 +724,41 @@ impl Command {
             Self::Place { dir, token, force: false } => OpenCell::place(&dir, token)?,
             Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,
             Self::Sync { dir } => {
-                let store = OpenCell::open(&dir).await?;
-                let synced = store.wait_uploaded().await;
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                let synced = cell.wait_uploaded().await;
+                cell.close().await;
                 synced?;
             }
             Self::Import { .. } => unreachable!("imported above, on no runtime's thread"),
             Self::Fork { src, dst } => {
-                let store = OpenCell::open(&src).await?;
-                // A new cell of the store's tenant's (TASK-364).
-                let tenant = store.cell().tenant;
-                let forked = store.fork(&dst, tenant).await;
-                store.close().await;
+                let cell = OpenCell::open(&src).await?;
+                // A new cell of the cell's tenant's (TASK-364).
+                let tenant = cell.cell().tenant;
+                let forked = cell.fork(&dst, tenant).await;
+                cell.close().await;
                 println!("{}", forked?);
             }
             Self::Version { dir } => {
-                let store = OpenCell::open(&dir).await?;
-                let made = store.make_version(None).await;
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                let made = cell.make_version(None).await;
+                cell.close().await;
                 println!("{:x}", made?);
             }
             Self::Versions { dir } => {
-                let store = OpenCell::open(&dir).await?;
-                print_versions(&store.versions().await);
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                print_versions(&cell.versions().await);
+                cell.close().await;
             }
             Self::DropVersions { dir, versions } => {
-                let store = OpenCell::open(&dir).await?;
-                let dropped = store.drop_versions(&versions.into_iter().collect()).await;
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                let dropped = cell.drop_versions(&versions.into_iter().collect()).await;
+                cell.close().await;
                 dropped?;
             }
             Self::Share { dir, version, shared } => {
-                let store = OpenCell::open(&dir).await?;
-                let shared = store.share_version(version, shared).await;
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                let shared = cell.share_version(version, shared).await;
+                cell.close().await;
                 shared?;
             }
             Self::ForkVersion { from, dst } => bail!(
@@ -774,42 +773,42 @@ impl Command {
             }
             Self::Drop { dir } => OpenCell::delete(&dir, None).await?,
             Self::Resize { dir, capacity } => {
-                let store = OpenCell::open(&dir).await?;
+                let cell = OpenCell::open(&dir).await?;
                 // Opened, it says whether it is a version, whose capacity changes nowhere
                 // (TASK-160.10).
-                let resized = match store.info() {
+                let resized = match cell.info() {
                     Ok(info) if capacity < info.capacity => Err(anyhow::anyhow!(
                         "shrinking a store needs its guest to agree: resize it through the \
                          extent daemon serving its VM (CLADEFSD_GRPC)"
                     )),
-                    Ok(_) => store.set_capacity(capacity).await.map_err(anyhow::Error::from),
+                    Ok(_) => cell.set_capacity(capacity).await.map_err(anyhow::Error::from),
                     Err(err) => Err(err.into()),
                 };
-                store.close().await;
+                cell.close().await;
                 resized?;
             }
             Self::Public { dir } => {
-                let store = OpenCell::open(&dir).await?;
-                let made = store.make_public();
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                let made = cell.make_public();
+                cell.close().await;
                 made?;
             }
             Self::PublicAttachOnly { dir } => {
-                let store = OpenCell::open(&dir).await?;
-                let made = store.make_public_attach_only();
-                store.close().await;
+                let cell = OpenCell::open(&dir).await?;
+                let made = cell.make_public_attach_only();
+                cell.close().await;
                 made?;
             }
             Self::Attach { dir, base } => {
                 let based = OpenCell::open(&base).await?;
                 let ancestry = based.ancestry();
                 based.close().await;
-                let store = OpenCell::open(&dir).await?;
+                let cell = OpenCell::open(&dir).await?;
                 let attached = match base.canonicalize() {
-                    Ok(base) => store.attach_base(&base, &ancestry).map_err(anyhow::Error::from),
+                    Ok(base) => cell.attach_base(&base, &ancestry).map_err(anyhow::Error::from),
                     Err(err) => Err(err.into()),
                 };
-                store.close().await;
+                cell.close().await;
                 attached?;
             }
             Self::Stats { .. }
@@ -823,21 +822,21 @@ impl Command {
             | Self::AddBucket { .. }
             | Self::Buckets { .. } => unreachable!("refused above"),
             Self::Stat { dir } => {
-                let store = OpenCell::open(&dir).await?;
+                let cell = OpenCell::open(&dir).await?;
                 let stat = || -> anyhow::Result<Stat> {
-                    let info = store.info()?;
+                    let info = cell.info()?;
                     Ok(Stat {
-                        cell: store.cell(),
+                        cell: cell.cell(),
                         capacity: info.capacity,
                         used: info.used,
                         available: info.available,
-                        holding: store.holding()?,
-                        public: store.is_public(),
+                        holding: cell.holding()?,
+                        public: cell.is_public(),
                         open: None,
                     })
                 };
                 let stat = stat();
-                store.close().await;
+                cell.close().await;
                 print!("{}", stat?);
             }
         }
@@ -899,7 +898,7 @@ fn buckets_lines(registry: &bucket_cell::identity::Registry) -> String {
     lines
 }
 
-/// What `stat` says of a store, which it prints one `name value` a line.
+/// What `stat` says of a cell, which it prints one `name value` a line.
 struct Stat {
     cell: cladefs::CellId,
     capacity: u64,
@@ -907,7 +906,7 @@ struct Stat {
     available: u64,
     holding: cladefs::CellHolding,
     public: bool,
-    /// Whether the store is open, if known.
+    /// Whether the cell is open, if known.
     open: Option<bool>,
 }
 
@@ -973,8 +972,8 @@ fn stats_json(stats: &cladefs::cladefsd::control::proto::GetStatsResponse) -> se
     })
 }
 
-/// cladefs: `value`, as lines of a path through it, its keys and indices joined by dots, and a value
-/// there that holds no other: what `stats` prints without `--json`.
+/// cladefs: `value`, as lines of a path through it, its keys and indices joined by dots, and a
+/// value there that holds no other: what `stats` prints without `--json`.
 #[cfg(target_os = "linux")]
 fn flattened(value: &serde_json::Value) -> String {
     use serde_json::Value;

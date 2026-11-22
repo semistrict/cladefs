@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/dax-refusals.py, which finds the refused guest stores that fail a run."""
+"""Tests of scripts/dax-refusals.py, which finds the refused guest writes that fail a run."""
 
 import unittest
 
@@ -36,9 +36,9 @@ JAILED_VCPU = REFUSED.format(what="a store to a page the window maps read-only",
 
 
 class DaxRefusals(unittest.TestCase):
-    def test_the_daemon_alone_cannot_say_whose_so_every_store_refused_fails(self):
-        """Seals explained stores refused while writable DAX made sealed pages read-only; under
-        copy on write, a store refused is the guest's or a kernel worker's, which the daemon's
+    def test_the_daemon_alone_cannot_say_whose_so_every_write_refused_fails(self):
+        """Seals explained writes refused while writable DAX made sealed pages read-only; under
+        copy on write, a write refused is the guest's or a kernel worker's, which the daemon's
         log doesn't say (dead-ends/writable-dax.md)."""
         self.assertEqual(dax_refusals.refused([SEALED, HISTORY, FREED, NOTHING]),
                          [SEALED, FREED, NOTHING])
@@ -46,13 +46,13 @@ class DaxRefusals(unittest.TestCase):
     def test_what_a_refusal_met_later_is_no_refusal(self):
         self.assertEqual(dax_refusals.refused([MET]), [])
 
-    def test_stores_of_kernel_workers_are_no_guests(self):
+    def test_writes_of_kernel_workers_are_no_guests(self):
         self.assertEqual(dax_refusals.by_guests([WORKER]), [])
 
-    def test_stores_of_vcpus_are_guests(self):
+    def test_writes_of_vcpus_are_guests(self):
         self.assertEqual(dax_refusals.by_guests([WORKER, VCPU, LOAD]), [VCPU])
 
-    def test_the_vmm_says_whose_a_store_was(self):
+    def test_the_vmm_says_whose_a_write_was(self):
         """TASK-167: a jailed VMM's thread is gone to /proc, its registry saying whose it was."""
         self.assertEqual(dax_refusals.by_guests([JAILED_WORKER, JAILED_VCPU]), [JAILED_VCPU])
 

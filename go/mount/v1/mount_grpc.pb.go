@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
+// The control API of a host FUSE mount of many cells (TASK-302), of tenants' cells (TASK-364):
 // cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
-// mount, however many stores: one OS mount, not one per store (TASK-475.2). A cell has one kind
-// (doc-20). Attach takes a cell of the daemon's bucket, as its holder, into a store at
+// mount, however many cells: one OS mount, not one per cell (TASK-475.2). A cell has one kind
+// (doc-20). Attach takes a cell of the daemon's bucket, as its holder, into a cell directory at
 // DIR/TENANT/CELL, its lease with it, and shows an Fxfs cell's filesystem at
 // MOUNTPOINT/TENANT/CELL, TENANT and CELL in base 32, 13 digits (Crockford's, lower case,
 // zero-padded), as the bucket's keys have them; Detach writes it back, so that another host may
 // take the cell. A cell of another kind is attached but not shown: a SQLite cell's database opens
-// through sqlite_extents' VFS alone, and a VM's cells are its VM process's, in the same daemon.
+// through sqlite_cladefs' VFS alone, and a VM's cells are its VM process's, in the same daemon.
 //
 // It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
 // (cladefs/cladefsd/v1/cladefsd.proto), the daemon's user's alone, mode 0600 whatever its umask, as
@@ -24,8 +24,8 @@
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
 //
-// Calls block for as long as their work takes: an attach while its stores recover, a detach until
-// the kernel lets the stores go. A caller bounds them with deadlines; one that gives up does not
+// Calls block for as long as their work takes: an attach while its cells recover, a detach until
+// the kernel lets the cells go. A caller bounds them with deadlines; one that gives up does not
 // stop the work, which completes, or fails, on its own.
 //
 // Compatibility: cells changed v1 outright (TASK-364: formats break, no caller is kept), and again
@@ -61,9 +61,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// The control API of a FUSE mount of many stores.
+// The control API of a FUSE mount of many cells.
 type MountClient interface {
-	// Attaches a cell of the mount's bucket: takes it, as its holder, into a store at
+	// Attaches a cell of the mount's bucket: takes it, as its holder, into a cell directory at
 	// DIR/TENANT/CELL, opened again where one is, its lease with it, an Fxfs cell's filesystem shown
 	// at MOUNTPOINT/TENANT/CELL. A cell of 0 is a new Fxfs one, its filesystem made empty, of
 	// `capacity` bytes, its root directory the mounting user's (INVALID_ARGUMENT without
@@ -71,7 +71,7 @@ type MountClient interface {
 	// NOT_FOUND if the bucket has no such cell; ESTALE if a later placement holds it. A cell attached
 	// part way is detached at once, and the call fails.
 	Attach(ctx context.Context, in *AttachRequest, opts ...grpc.CallOption) (*AttachResponse, error)
-	// Detaches a cell: it goes from the mount at once; its store is unmounted, what is
+	// Detaches a cell: it goes from the mount at once; its cell is unmounted, what is
 	// dirty written back, once the kernel has let go of every file and directory of it, as once
 	// whatever has one open, or as its current directory, lets it go: the call returns then.
 	// NOT_FOUND if the cell is not attached; EBUSY if it is being attached or detached. DIR stays,
@@ -123,9 +123,9 @@ func (c *mountClient) List(ctx context.Context, in *ListRequest, opts ...grpc.Ca
 // All implementations must embed UnimplementedMountServer
 // for forward compatibility.
 //
-// The control API of a FUSE mount of many stores.
+// The control API of a FUSE mount of many cells.
 type MountServer interface {
-	// Attaches a cell of the mount's bucket: takes it, as its holder, into a store at
+	// Attaches a cell of the mount's bucket: takes it, as its holder, into a cell directory at
 	// DIR/TENANT/CELL, opened again where one is, its lease with it, an Fxfs cell's filesystem shown
 	// at MOUNTPOINT/TENANT/CELL. A cell of 0 is a new Fxfs one, its filesystem made empty, of
 	// `capacity` bytes, its root directory the mounting user's (INVALID_ARGUMENT without
@@ -133,7 +133,7 @@ type MountServer interface {
 	// NOT_FOUND if the bucket has no such cell; ESTALE if a later placement holds it. A cell attached
 	// part way is detached at once, and the call fails.
 	Attach(context.Context, *AttachRequest) (*AttachResponse, error)
-	// Detaches a cell: it goes from the mount at once; its store is unmounted, what is
+	// Detaches a cell: it goes from the mount at once; its cell is unmounted, what is
 	// dirty written back, once the kernel has let go of every file and directory of it, as once
 	// whatever has one open, or as its current directory, lets it go: the call returns then.
 	// NOT_FOUND if the cell is not attached; EBUSY if it is being attached or detached. DIR stays,

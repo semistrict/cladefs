@@ -6,7 +6,7 @@
  * slices of the extent's region, which one MAP maps: the device maps zeros past an extent's end, so
  * a region needn't know where it ends. Red with a slice refused for an extent of no size, each file
  * a range of its own, a MAP each: a sandbox's cold read of the Linux tree asked 91,072 MAPs, 19.6 s
- * of its 27 s, against a fresh VM's 1,005 on the publisher's store, 5.7 s (GCE r940, TASK-229).
+ * of its 27 s, against a fresh VM's 1,005 on the publisher's write, 5.7 s (GCE r940, TASK-229).
  */
 
 #include <sim/sim.h>

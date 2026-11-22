@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! Hosts sharing a bucket in this process, each reaching the others by a link that calls their
-//! serving fetchers directly: what asking peers saves, and what it does when they fail. The daemon's
-//! gRPC links are `cladefsd::peers`'.
+//! serving fetchers directly: what asking peers saves, and what it does when they fail. The
+//! daemon's gRPC links are `cladefsd::peers`'.
 
 use super::*;
 use bucket_cell::bucket::{Bucket as _, PutMode};
@@ -47,8 +47,8 @@ pub(crate) fn holding(data: &[u8]) -> (Arc<ObjectBucket>, Location) {
     (bucket, Location { key, offset: 0, len: data.len() as u64 })
 }
 
-/// A host of this process: the fetcher its stores read by, asking its peers, and the one it serves
-/// them by, asking none, which share its memory, budget and cache, as a daemon's do.
+/// A host of this process: the fetcher its open cells read by, asking its peers, and the one it
+/// serves them by, asking none, which share its memory, budget and cache, as a daemon's do.
 struct Host {
     reads: Fetcher<ObjectBucket>,
     peers: Arc<Peers>,

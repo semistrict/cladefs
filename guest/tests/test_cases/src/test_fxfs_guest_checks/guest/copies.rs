@@ -106,7 +106,7 @@ pub(super) fn test_write_from_same_page() {
 /// 1 is a hole between pages 0 and 2, written first, and a load maps the zero page for it. On
 /// writable DAX, a write of pages 0 and 1 then took two iomaps, as page 0 stayed where it was
 /// and page 1 went after page 2 in the staging extent; only the first said its pages were new,
-/// so that page 1's mapping could stay on the zero page, and a store from it write zeros for
+/// so that page 1's mapping could stay on the zero page, and a write from it write zeros for
 /// good (found by guest/sim, TASK-149.14).
 pub(super) fn test_write_over_mapped_hole() {
     const PAGE: usize = 4096;
@@ -151,7 +151,7 @@ pub(super) fn test_write_over_mapped_hole() {
 }
 
 /// cladefs: a read into a mapping of the file it reads, whose pages the window maps read-only:
-/// the read's copy faults, the fault can't store to a slice, and dropping the slice waited for
+/// the read's copy faults, the fault can't write to a slice, and dropping the slice waited for
 /// the slice's users, the read among them, for ever.
 pub(super) fn test_read_into_own_mapping() {
     use std::os::unix::fs::FileExt;
@@ -253,13 +253,13 @@ pub(super) fn test_direct_read_past_end() {
     fs::remove_file(&name).unwrap();
 }
 
-/// A store through a mapping past a file's end, then the file grown over it: it reads zeros
+/// A write through a mapping past a file's end, then the file grown over it: it reads zeros
 /// there. Writeback wrote no more than the file held, and the folio's tail, never zeroed,
 /// became the file's data (TASK-79.53).
-pub(super) fn test_store_past_end() {
+pub(super) fn test_mapped_write_past_end() {
     use std::os::unix::fs::FileExt;
     const PAGE: usize = 4096;
-    let name = path("store-past-end");
+    let name = path("mapped-write-past-end");
     fs::write(&name, vec![b'D'; 100]).unwrap();
     let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
     let map = unsafe {
@@ -286,12 +286,12 @@ pub(super) fn test_store_past_end() {
     fs::remove_file(&name).unwrap();
 }
 
-/// As `test_store_past_end`, the file grown by a write past its end, which leaves what is
+/// As `test_mapped_write_past_end`, the file grown by a write past its end, which leaves what is
 /// between the old end and the write for reads to find: it reads zeros there too.
-pub(super) fn test_store_past_end_then_written() {
+pub(super) fn test_mapped_write_past_end_then_written() {
     use std::os::unix::fs::FileExt;
     const PAGE: usize = 4096;
-    let name = path("store-past-end-written");
+    let name = path("mapped-write-past-end-written");
     fs::write(&name, vec![b'D'; 100]).unwrap();
     let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
     let map = unsafe {
@@ -319,13 +319,14 @@ pub(super) fn test_store_past_end_then_written() {
     fs::remove_file(&name).unwrap();
 }
 
-/// As `test_store_past_end`, the file grown by a clone past its end, which grew the inode
+/// As `test_mapped_write_past_end`, the file grown by a clone past its end, which grew the inode
 /// without zeroing what the cached page held past the old end, and Fxfs's file without zeroing
 /// what its last block held there (TASK-153.4).
-pub(super) fn test_store_past_end_then_cloned() {
+pub(super) fn test_mapped_write_past_end_then_cloned() {
     use std::os::unix::fs::FileExt;
     const PAGE: usize = 4096;
-    let (name, source_name) = (path("store-past-end-cloned"), path("store-past-end-source"));
+    let name = path("mapped-write-past-end-cloned");
+    let source_name = path("mapped-write-past-end-source");
     fs::write(&source_name, vec![b'E'; PAGE]).unwrap();
     fs::write(&name, vec![b'D'; 100]).unwrap();
     let source = fs::File::open(&source_name).unwrap();

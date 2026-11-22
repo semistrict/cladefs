@@ -4,46 +4,46 @@
 
 //! cladefs: fxfs-guest-soak (TASK-67): hours of mixed load on forks of one base, through crashes of
 //! every kind doc-12 names, each repeat checked against it. Each repeat (CLADEFS_E2E_REPEATS) goes
-//! on from where the last left it: a bucket, a host's stores and cache, and a ledger of what the
+//! on from where the last left it: a bucket, a host's cells and cache, and a ledger of what the
 //! guests were told, kept outside the results (`Paths`), which the first repeat makes.
 //!
 //! A repeat, as the run's seed and its number say (`crate::soak::Plan`): a daemon of the soak's
 //! own, its bucket answering late or an upload failing; a collector (cladefs-gc) collecting the
 //! bucket throughout; five VMs at once, each on a fork of the base, which holds files and a pgbench
-//! database, a VM's store forked anew now and then; each VM a writer, fsyncing file after file and
+//! database, a VM's cell forked anew now and then; each VM a writer, fsyncing file after file and
 //! syncing the filesystem every so often, saying what returned; or fsx-style scripts against their
 //! model; or pgbench. VMs are killed mid-write and booted again; the daemon is killed, started
-//! again, and its VMs booted again; the host is lost, its stores and cache taken away, and every
+//! again, and its VMs booted again; the host is lost, its cells and cache taken away, and every
 //! cell taken again from the bucket by a daemon of a later placement; the cache is lost.
 //!
-//! Then a daemon with no faults, and a VM on every store, which checks it: every file a writer was
+//! Then a daemon with no faults, and a VM on every cell, which checks it: every file a writer was
 //! told of is there whole (a prefix of each writer's fsyncs where the daemon died or the host was
 //! lost, with every file a syncfs was told of: `crate::soak::kept`), every fork reads its base,
 //! fsx's files are their model's, the database is consistent; the collector lists every live
-//! cell. The repeat's stores, cache and bucket are measured, and each daemon's peak memory, said
+//! cell. The repeat's cells, cache and bucket are measured, and each daemon's peak memory, said
 //! on a line of the log (`soak-repeat {...}`), and a measure grown past twice the warm repeats'
 //! most fails the repeat (`crate::soak::Bound`).
 //!
 //! CLADEFS_SEED replays a run, repeat by repeat: its first repeat's seed, which the run's outcomes
-//! say;
-//! CLADEFS_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
+//! say; CLADEFS_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
 //! CLADEFS_SOAK_LOAD_SECS fixes the loads' time; CLADEFS_SOAK_STATE is where runs keep their state,
-//! /var/tmp/cladefs-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
-//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFSD_BUCKET's, under
-//! a prefix of the run's, or a file bucket in the state. The daemons fail uploads only if built
-//! with failpoints (scripts/test-e2e.sh's CLADEFSD_FAILPOINTS).
+//! /var/tmp/cladefs-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04
+//! hosts, where the soak's cells and cache took the host's RAM, and their measures said nothing of
+//! disk). The bucket is CLADEFSD_BUCKET's, under a prefix of the run's, or a file bucket in the
+//! state. The daemons fail uploads only if built with failpoints (scripts/test-e2e.sh's
+//! CLADEFSD_FAILPOINTS).
 
 use macros::{guest, host};
 
 pub struct TestFxfsGuestSoak;
 
-/// The stores' tag, and where guests mount them.
+/// The cells' tag, and where guests mount them.
 #[cfg_attr(feature = "host", allow(dead_code))]
 const TAG: &str = "extents";
 #[cfg_attr(feature = "host", allow(dead_code))]
 const MNT: &str = "/mnt/fxfs";
 
-/// What a VM does: makes the base (`base`), runs its load (`load`), or checks its store (`check`).
+/// What a VM does: makes the base (`base`), runs its load (`load`), or checks its cell (`check`).
 const ROLE: &str = "CLADEFS_SOAK_ROLE";
 const SLOT: &str = "CLADEFS_SOAK_SLOT";
 const LOAD: &str = "CLADEFS_SOAK_LOAD";
@@ -75,7 +75,7 @@ mod host {
     use std::process::Child;
     use std::time::{Duration, Instant};
 
-    /// Each store's capacity, and its VM's DAX window, memory and vCPUs.
+    /// Each cell's capacity, and its VM's DAX window, memory and vCPUs.
     const CAPACITY: u64 = 4 << 30;
     const WINDOW: crate::common::Window = crate::common::Window::Large;
     const MEMORY_MIB: u32 = 1024;
@@ -94,8 +94,8 @@ mod host {
     /// The shortest load a VM is booted again for.
     const REBOOT_LEFT: u64 = 30;
     /// The repeats whose measures later repeats' are held to, and how much more than twice they may
-    /// grow: past those, the stores, the bucket or a daemon's memory grow with the soak's age.
-    const STORES: Bound = Bound { warm: (3, 6), slack: 1 << 30 };
+    /// grow: past those, the cells, the bucket or a daemon's memory grow with the soak's age.
+    const CELLS: Bound = Bound { warm: (3, 6), slack: 1 << 30 };
     const BUCKET: Bound = Bound { warm: (3, 6), slack: 2 << 30 };
     const MEMORY: Bound = Bound { warm: (3, 6), slack: 512 << 20 };
     /// The least free space the state's filesystem may be left with: the cache leaves 4 GiB.
@@ -115,7 +115,7 @@ mod host {
         measures: Vec<Measure>,
     }
 
-    /// A VM's store, as the ledger has it.
+    /// A VM's cell, as the ledger has it.
     #[derive(Clone, Default, Serialize, Deserialize)]
     struct SlotState {
         /// How many times it was forked again.
@@ -139,8 +139,8 @@ mod host {
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Measure {
         repeat: u64,
-        /// Bytes the host's stores' directories take, and its cache's.
-        stores: u64,
+        /// Bytes the host's cells' directories take, and its cache's.
+        cell_dirs: u64,
         cache: u64,
         /// Bytes of the bucket's objects.
         bucket: u64,
@@ -157,7 +157,7 @@ mod host {
     /// Where the soak keeps its state, and what it runs.
     struct Paths {
         ledger: PathBuf,
-        stores: PathBuf,
+        cell_dirs: PathBuf,
         cache: PathBuf,
         bucket: String,
         bucket_dir: Option<PathBuf>,
@@ -191,7 +191,7 @@ mod host {
                 .context("CLADEFS_GC_BIN names no cladefs-gc (scripts/test-e2e.sh's)")?;
             Ok(Self {
                 ledger: state.join("ledger.json"),
-                stores: host.join("stores"),
+                cell_dirs: host.join("stores"),
                 cache: host.join("cache"),
                 state,
                 bucket,
@@ -202,11 +202,11 @@ mod host {
         }
 
         fn base(&self) -> PathBuf {
-            self.stores.join("base")
+            self.cell_dirs.join("base")
         }
 
         fn slot(&self, slot: usize) -> PathBuf {
-            self.stores.join(format!("slot-{slot}"))
+            self.cell_dirs.join(format!("slot-{slot}"))
         }
     }
 
@@ -252,7 +252,7 @@ mod host {
         }
     }
 
-    /// A VM of the repeat's load, booted on its slot's store.
+    /// A VM of the repeat's load, booted on its slot's cell.
     struct Boot {
         slot: usize,
         name: String,
@@ -294,7 +294,7 @@ mod host {
         }
     }
 
-    /// What a VM checking a store found.
+    /// What a VM checking a cell found.
     #[derive(Default)]
     struct Checked {
         /// Each run's writers' files, by run and writer.
@@ -347,7 +347,7 @@ mod host {
     impl<'a> Soak<'a> {
         fn new(setup: &'a TestSetup, sockets: &Path) -> anyhow::Result<Self> {
             let paths = Paths::new(sockets)?;
-            std::fs::create_dir_all(&paths.stores)?;
+            std::fs::create_dir_all(&paths.cell_dirs)?;
             if let Some(dir) = &paths.bucket_dir {
                 std::fs::create_dir_all(dir)?;
             }
@@ -378,7 +378,7 @@ mod host {
                 plan.upload_fails_after = None;
             }
             // Latency is added to every bucket the plan names: a file bucket's reads take it since
-            // TASK-208, and a real bucket's crashed VM's store, draining its uploads, refuses the VM
+            // TASK-208, and a real bucket's crashed VM's cell, draining its uploads, refuses the VM
             // booted again no more since TASK-216.
             Ok(Self {
                 root: setup_rootfs(setup)?,
@@ -451,13 +451,13 @@ mod host {
                 .collect()
         }
 
-        /// Boots a VM named `name` on the store at `store`, its guest told `env`.
-        fn boot(&self, name: &str, store: &Path, env: &[String]) -> anyhow::Result<Firecracker> {
+        /// Boots a VM named `name` on the cell at `cell_dir`, its guest told `env`.
+        fn boot(&self, name: &str, cell_dir: &Path, env: &[String]) -> anyhow::Result<Firecracker> {
             let mut vm = Vm::new(VCPUS, MEMORY_MIB)?;
             vm.guest_kernel()?;
             vm.cell_served(
                 TAG,
-                store,
+                cell_dir,
                 CAPACITY,
                 crate::common::dax_window(WINDOW)?,
                 &self.paths.socket,
@@ -505,10 +505,10 @@ mod host {
                 daemon.stop().context("the loaded daemon")?;
             }
             if happened.host_lost {
-                self.say("the host's stores and cache are lost");
-                remove_dir(&self.paths.stores)?;
+                self.say("the host's cells and cache are lost");
+                remove_dir(&self.paths.cell_dirs)?;
                 remove_dir(&self.paths.cache)?;
-                std::fs::create_dir_all(&self.paths.stores)?;
+                std::fs::create_dir_all(&self.paths.cell_dirs)?;
                 self.ledger.token += 1;
             } else if self.plan.cache_lost {
                 self.say("the cache is lost");
@@ -517,8 +517,8 @@ mod host {
             self.check(&boots, &happened)
         }
 
-        /// Makes the base: its filesystem, its files and pgbench's database, on a store of its
-        /// own, which every slot's store is forked from.
+        /// Makes the base: its filesystem, its files and pgbench's database, on a cell of its
+        /// own, which every slot's cell is forked from.
         fn make_base(&mut self) -> anyhow::Result<()> {
             let base = self.paths.base();
             let env = [format!("{ROLE}=base"), format!("{BASE_SEED}={}", self.ledger.seed)];
@@ -542,7 +542,7 @@ mod host {
             Ok(())
         }
 
-        /// Forks each slot's store from the base where it has none, or the plan forks it again,
+        /// Forks each slot's cell from the base where it has none, or the plan forks it again,
         /// deleting its old one, cell and all.
         fn fork_slots(&mut self) -> anyhow::Result<()> {
             let control = control(&self.paths.socket)?;
@@ -712,7 +712,7 @@ mod host {
             Ok(())
         }
 
-        /// Checks every store, as a daemon with no faults serves it, against what the repeat's VMs
+        /// Checks every cell, as a daemon with no faults serves it, against what the repeat's VMs
         /// were told, and measures the repeat.
         fn check(&mut self, boots: &[Boot], happened: &Happened) -> anyhow::Result<()> {
             let checker = self.daemon(false)?;
@@ -723,7 +723,7 @@ mod host {
                 let base = self.ledger.base.context("no base")?;
                 control.create_cell(&self.paths.base(), CAPACITY, base, (token, false))?;
                 for slot in 0..SLOTS {
-                    let cell = self.ledger.slots[slot].cell.context("a slot with no store")?;
+                    let cell = self.ledger.slots[slot].cell.context("a slot with no cell")?;
                     control.create_cell(&self.paths.slot(slot), CAPACITY, cell, (token, false))?;
                 }
                 self.say("every cell taken again from the bucket");
@@ -815,12 +815,12 @@ mod host {
             for cell in cells {
                 if !live.contains(&cell) {
                     failures
-                        .add(format!("the collector finds cell {cell} dead, which a store holds"));
+                        .add(format!("the collector finds cell {cell} dead, which a cell holds"));
                 }
             }
             let measure = Measure {
                 repeat: self.plan.repeat,
-                stores: du(&self.paths.stores)?,
+                cell_dirs: du(&self.paths.cell_dirs)?,
                 cache: du(&self.paths.cache)?,
                 bucket: self.bucket_bytes()?,
                 cladefsd_peak: happened.peak,
@@ -834,7 +834,7 @@ mod host {
                 self.ledger.measures.iter().map(of).collect()
             };
             let grown = [
-                STORES.grown("the stores' bytes", &series(|m| m.stores)),
+                CELLS.grown("the cells' bytes", &series(|m| m.cell_dirs)),
                 BUCKET.grown("the bucket's bytes", &series(|m| m.bucket)),
                 MEMORY.grown("the loaded daemons' peak memory", &series(|m| m.cladefsd_peak)),
                 MEMORY
@@ -862,7 +862,7 @@ mod host {
             Ok(())
         }
 
-        /// The cells whose uploads the repeat's daemons failed, as their logs say: those stores'
+        /// The cells whose uploads the repeat's daemons failed, as their logs say: those cells'
         /// uploaders stopped, and their commits fail until they are attached again
         /// (`local_cell::upload`).
         fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
@@ -890,7 +890,7 @@ mod host {
         }
     }
 
-    /// What's wrong with slot `slot`'s store, as `checked` found it, against what its ledger
+    /// What's wrong with slot `slot`'s cell, as `checked` found it, against what its ledger
     /// `state` holds it to, and the repeat's runs' acknowledgements, `told`, which it takes in.
     fn judge(
         state: &mut SlotState,
@@ -964,7 +964,7 @@ mod host {
     }
 
     /// What's wrong with how a load's VM ended, `ended`, saying `said`: `lossy` if it lost its
-    /// daemon or host, `stopped` if its store's uploads were failed, whose commits fail from then
+    /// daemon or host, `stopped` if its cell's uploads were failed, whose commits fail from then
     /// on, which its guest's calls see as EIO.
     fn load_problems(ended: Option<Ended>, said: &str, lossy: bool, stopped: bool) -> Vec<String> {
         let mut problems = Vec::new();
@@ -1160,7 +1160,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
             assert_eq!(finished_lines("cut"), "");
         }
 
-        /// Only a store whose uploads were failed may see EIO, and its guest give up.
+        /// Only a cell whose uploads were failed may see EIO, and its guest give up.
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
             let log = "ERROR local_cell::upload: cladefs: uploading cell \
@@ -1193,10 +1193,10 @@ RUN apk add --no-cache postgresql postgresql-contrib
 
         const WHOLE: &str = "base ok\nfsx none\npgbench consistent\nchecked\n";
 
-        /// A store holds its kept runs whole, and its new runs as their acknowledgements say;
+        /// A cell holds its kept runs whole, and its new runs as their acknowledgements say;
         /// its base, its database and fsx's models as they were.
         #[test]
-        fn stores_are_judged_against_the_ledger() {
+        fn cells_are_judged_against_the_ledger() {
             let mut state = SlotState::default();
             state.runs.insert("old".into(), RunState { kept: [Some(3), None], dropping: false });
             state.runs.insert("new".into(), RunState::default());
@@ -1353,7 +1353,7 @@ mod guest {
 
     /// Runs `command` as PostgreSQL's user: its output, if it succeeded; or what it said, its
     /// standard error's last lines too. Not on the console as it runs: PostgreSQL's clients say
-    /// `WARNING:` as their server crashes, as it does where the store's commits fail, which the
+    /// `WARNING:` as their server crashes, as it does where the cell's commits fail, which the
     /// console's check takes for the kernel's complaint (`vm::complaints`, GCE r756).
     fn postgres(command: &str) -> Result<Output, String> {
         let output = Command::new("su")
@@ -1699,7 +1699,7 @@ mod guest {
         println!("fsx same");
     }
 
-    /// The checking VM: says what its store holds, its database checked, then unmounts it, said
+    /// The checking VM: says what its cell holds, its database checked, then unmounts it, said
     /// `checked`.
     fn check() {
         let slot = number(SLOT) as usize;

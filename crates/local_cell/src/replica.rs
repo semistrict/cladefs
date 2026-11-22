@@ -27,7 +27,7 @@
 use crate::dir::{Dir, File};
 use anyhow::{Context as _, anyhow};
 use extent_frame::segment::CellId;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -90,8 +90,11 @@ pub struct Replicas<D: Dir> {
 /// so that a fence answered leaves no append of an older epoch in flight.
 #[derive(Default)]
 struct Held {
-    /// Its promise, as on the disk.
+    /// Its promise, as on the disk: the greatest of `promises`.
     promise: u64,
+    /// The epochs of its promises' files on the disk: the promise's, and those before it that a
+    /// crash, or a removal failing, left, which the next fence removes (board 5420).
+    promises: BTreeSet<u64>,
     /// Its logs, by configuration and log.
     logs: BTreeMap<(Key, u64), Log>,
 }
@@ -323,19 +326,27 @@ impl<D: Dir> Replicas<D> {
             return Err(Refused::Fenced { promise: held.promise }.into());
         }
         if epoch > held.promise {
-            // A file of each promise, made and synced before the one before goes: a crash
+            // A file of each promise, made and synced before the ones before go: a crash
             // between leaves both, the greatest read. Nothing renamed over another (TASK-537.3.4's
-            // review: `Dir::rename` renames to no file there).
+            // review: `Dir::rename` renames to no file there). A fence at this epoch that failed
+            // partway left its file, made again here (board 5420).
             let path = promise_path(cell, epoch);
-            let file = self.dir.create(&path, false).with_context(|| format!("making {path}"))?;
+            let made = match self.dir.create(&path, false) {
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    self.dir.open(&path, false)
+                }
+                made => made,
+            };
+            let file = made.with_context(|| format!("making {path}"))?;
+            held.promises.insert(epoch);
             file.sync().with_context(|| format!("syncing {path}"))?;
             self.dir.sync_dir("").context("syncing the replica directory")?;
-            if held.promise > 0 {
-                let before = promise_path(cell, held.promise);
-                self.dir.remove(&before).with_context(|| format!("removing {before}"))?;
-                self.dir.sync_dir("").context("syncing the replica directory")?;
-            }
+            // Made: the promise, from here on, whatever of the rest fails. The files before it
+            // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
             held.promise = epoch;
+            if let Err(err) = self.remove_promises_before(cell, &mut held, epoch) {
+                log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
+            }
         }
         Ok((held.logs.range((key, 0)..=(key, u64::MAX)))
             .map(|(&(_, log), state)| (log, state.end))
@@ -422,10 +433,33 @@ impl<D: Dir> Replicas<D> {
         };
         self.remove(cell, &mut held, &gone)?;
         if swept == Swept::Gone && held.promise > 0 {
-            self.dir.remove(&promise_path(cell, held.promise)).context("removing a promise")?;
-            self.dir.sync_dir("").context("syncing the replica directory")?;
+            self.remove_promises_before(cell, &mut held, u64::MAX)?;
             held.promise = 0;
         }
+        Ok(())
+    }
+
+    /// Removes the files of `held`'s promises before `epoch`, durably: those a removal failed
+    /// before (board 5420) too, each gone from `promises` once it went, and found gone as gone.
+    fn remove_promises_before(
+        &self,
+        cell: CellId,
+        held: &mut Held,
+        epoch: u64,
+    ) -> Result<(), Error> {
+        let before: Vec<u64> = held.promises.range(..epoch).copied().collect();
+        if before.is_empty() {
+            return Ok(());
+        }
+        for promised in before {
+            let path = promise_path(cell, promised);
+            match self.dir.remove(&path) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                removed => removed.with_context(|| format!("removing {path}"))?,
+            }
+            held.promises.remove(&promised);
+        }
+        self.dir.sync_dir("").context("syncing the replica directory")?;
         Ok(())
     }
 
@@ -462,6 +496,7 @@ impl<D: Dir> Replicas<D> {
                     let epoch = epoch.ok_or_else(|| anyhow!("bad promise {name:?}"))?;
                     // A crash between a promise and the removal of the one before leaves both.
                     held.promise = held.promise.max(epoch);
+                    held.promises.insert(epoch);
                 }
                 Some((of, Some(key))) if of == cell => {
                     let log = name.rsplit('.').next().and_then(|log| log.parse().ok());

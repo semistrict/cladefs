@@ -1050,7 +1050,8 @@ mod tests {
         block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("image");
-            let fs = Filesystem::format(Storage::create(&path, 64 << 20).unwrap()).await.unwrap();
+            let fs =
+                Filesystem::format(Storage::create(&path, 64 << 20).await.unwrap()).await.unwrap();
             let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
             assert_eq!(file.write(0, b"written").await, Ok(7));
             drop(file);
@@ -1061,7 +1062,7 @@ mod tests {
             drop(fs);
             assert!(unmounted.wait().now_or_never().is_some(), "the image closed mid-unmount");
 
-            let fs = Filesystem::mount(Storage::open(&path).unwrap().check().await.unwrap())
+            let fs = Filesystem::mount(Storage::open(&path).await.unwrap().check().await.unwrap())
                 .await
                 .unwrap();
             let (file, attr) = fs.root().lookup(b"file").await.unwrap();

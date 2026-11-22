@@ -204,7 +204,7 @@ pub(super) fn test_reads_stay_mapped() {
 
 /// cladefs: write(2)s of pages scattered over a file read in from sealed extents take no MAP
 /// each: a write makes its page private where the window maps it, a page more each, by one
-/// PRIVATE each, its iomap's, before its store (doc-13, TASK-164.9). A MAP of its own took
+/// PRIVATE each, its iomap's, before its write (doc-13, TASK-164.9). A MAP of its own took
 /// 200 us of a write's 230 on writable DAX: rand-write fell from 18,151 to 3,534 IOPS. Fails if
 /// a write's iomap made more than its page private, or mapped its chunk again.
 pub(super) fn test_writes_private() {
@@ -270,7 +270,7 @@ pub(super) fn test_stale_entry_flushed() {
     };
     assert_ne!(map, libc::MAP_FAILED);
     let map = map as *mut u8;
-    // The store makes the page private, its entry dirty.
+    // The write makes the page private, its entry dirty.
     unsafe { std::ptr::write_volatile(map, 2) };
     // Another file's fsync seals, of its creation alone.
     let other_file =
@@ -521,10 +521,10 @@ pub(super) fn test_pmd_over_stale_index() {
 /// cladefs: a file larger than a chunk, written whole by one write(2) and fsynced, then read
 /// through a mapping: each byte as written. The first load of such a file died of SIGBUS, its
 /// fault failing with no error (TASK-121's pause check). The read maps the first chunk with a
-/// PMD, which the store after breaks up (TASK-123). The file is read in again from sealed
-/// extents (created here, it is a page-cache inode until then, doc-13, TASK-164.3): the store
+/// PMD, which the write after breaks up (TASK-123). The file is read in again from sealed
+/// extents (created here, it is a page-cache inode until then, doc-13, TASK-164.3): the write
 /// splits the PMD, making its page alone private, which the fsync after writes back. Fails if
-/// the store made the PMD's 2 MiB private, or none, or if the fsync lost the store.
+/// the write made the PMD's 2 MiB private, or none, or if the fsync lost the write.
 pub(super) fn test_mapped_after_write() {
     const SIZE: usize = 4 << 20;
     let name = path("mapped-after-write");
@@ -547,7 +547,7 @@ pub(super) fn test_mapped_after_write() {
     let bytes = unsafe { std::slice::from_raw_parts(map as *const u8, SIZE) };
     assert!(bytes == &data[..], "the file as mapped differs from what was written");
     assert!(stats()["dax_huge_maps"] > before, "no fault mapped a PMD's 2 MiB: {:?}", stats());
-    // A store to the second page, which the first chunk's mapping, read in 2 MiB at once,
+    // A write to the second page, which the first chunk's mapping, read in 2 MiB at once,
     // mapped in a row with the rest, makes it private; then the chunk is read again, page by
     // page.
     let mut data = data;
@@ -555,10 +555,10 @@ pub(super) fn test_mapped_after_write() {
     let before = private();
     unsafe { (map as *mut u8).add(4096 + 100).write_volatile(0xee) };
     data[4096 + 100] = 0xee;
-    assert_eq!(private(), before + 1, "private pages after a store to a PMD's page");
+    assert_eq!(private(), before + 1, "private pages after a write to a PMD's page");
     file.sync_all().unwrap();
     let bytes = unsafe { std::slice::from_raw_parts(map as *const u8, SIZE) };
-    assert!(bytes == &data[..], "the file as mapped differs after a store to a page");
+    assert!(bytes == &data[..], "the file as mapped differs after a write to a page");
     // And again: each page's fault replaced the kernel's entry of the 2 MiB, which held
     // them all, with its own (TASK-123).
     let bytes = unsafe { std::slice::from_raw_parts(map as *const u8, SIZE) };
@@ -568,14 +568,14 @@ pub(super) fn test_mapped_after_write() {
     fs::remove_file(&name).unwrap();
 }
 
-/// cladefs: stores through a mapping of a file, write(2)s to its pages, holes or not, and other
+/// cladefs: writes through a mapping of a file, write(2)s to its pages, holes or not, and other
 /// files made, written and removed meanwhile, which make the journal compact, for a few
 /// seconds: on writable DAX, a write in the gate waited for a fault's DAX entry, the fault for
 /// Fxfs, Fxfs for compaction, and compaction's seal for the write, and the filesystem hung
-/// (TASK-79.12). Each finishes. The write(2)s write pages' first halves, the stores their
+/// (TASK-79.12). Each finishes. The write(2)s write pages' first halves, the writes their
 /// second: each finds its bytes as it left them, now and then as it goes, and the file holds
 /// what both left (TASK-119.1). The file, all holes, is read in again, DAX (doc-13,
-/// TASK-164.3): its holes map zeros, which stores and write(2)s copy on write.
+/// TASK-164.3): its holes map zeros, which writes and write(2)s copy on write.
 pub(super) fn test_faults_writes_compaction() {
     use std::os::unix::fs::FileExt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -599,8 +599,8 @@ pub(super) fn test_faults_writes_compaction() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
     let read = |at: usize, buf: &mut [u8]| file.read_exact_at(buf, at as u64).unwrap();
     let (stored, written) = std::thread::scope(|scope| {
-        // Stores through a mapping, a page at a time, holes and pages mapped already.
-        let storer = scope.spawn(|| {
+        // Writes through a mapping, a page at a time, holes and pages mapped already.
+        let mapped_writer = scope.spawn(|| {
             let mut stored = vec![0u8; SIZE];
             let map = unsafe {
                 libc::mmap(
@@ -621,7 +621,7 @@ pub(super) fn test_faults_writes_compaction() {
                 stored[at] = n as u8;
                 if n % 64 == 0 {
                     read(at, &mut byte);
-                    assert_eq!(byte[0], n as u8, "the store at {at:#x} reads back other");
+                    assert_eq!(byte[0], n as u8, "the write at {at:#x} reads back other");
                 }
                 n += 1;
             }
@@ -660,7 +660,7 @@ pub(super) fn test_faults_writes_compaction() {
             }
             stop.store(true, Ordering::Relaxed);
         });
-        (storer.join().unwrap(), writer.join().unwrap())
+        (mapped_writer.join().unwrap(), writer.join().unwrap())
     });
     file.sync_all().unwrap();
     let mut page = vec![0; PAGE];

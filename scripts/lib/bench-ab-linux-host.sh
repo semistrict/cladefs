@@ -151,7 +151,7 @@ ab_prune() {
 }
 
 # ab_tidy records in RESULTS/rounds-size.txt the bytes the rounds' results hold, with the guests'
-# root filesystems and the stores failed cases leave in them, for the room a later run asks for
+# root filesystems and the cells failed cases leave in them, for the room a later run asks for
 # (scripts/nightly.py's room, TASK-489); then removes those, which are not results.
 ab_tidy() {
     local kib

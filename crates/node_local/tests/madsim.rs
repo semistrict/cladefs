@@ -99,3 +99,59 @@ fn nodes_read_the_environments_they_are_given() {
         assert_eq!(node_local::env::var_os("NODE_LOCAL_HOST"), None);
     });
 }
+
+/// Whether a value of [`MADE_SLOWLY`]'s is being made, and whether another simulation's thread let
+/// its node's values go meanwhile.
+static SLOWLY: (Mutex<(bool, bool)>, std::sync::Condvar) =
+    (Mutex::new((false, false)), std::sync::Condvar::new());
+
+node_local! {
+    /// Made only once another simulation's thread has started a node, letting that node's values
+    /// go, this static's among them.
+    static MADE_SLOWLY: AtomicU64 = {
+        let (state, changed) = &SLOWLY;
+        state.lock().unwrap().0 = true;
+        changed.notify_all();
+        drop(changed.wait_while(state.lock().unwrap(), |state| !state.1).unwrap());
+        AtomicU64::new(0)
+    };
+}
+
+/// Board 5473: simulations sharing a process, as a test binary's run on threads of its own, are
+/// independent. A node's start on one, letting its values go, waits for no value another is
+/// making, which may itself wait on that start: made holding its static's lock, as the start
+/// waited for, a value whose making used a static not yet registered waited for the registry, which
+/// the start held, every simulation in the process stopping with them.
+#[test]
+fn a_value_being_made_holds_up_no_other_simulations_start() {
+    let (done, finished) = std::sync::mpsc::channel();
+    let making = std::thread::spawn({
+        let done = done.clone();
+        move || {
+            let runtime = madsim::runtime::Runtime::new();
+            runtime.add_simulator::<node_local::Plugin>();
+            runtime.block_on(async { MADE_SLOWLY.get().fetch_add(1, Ordering::Relaxed) });
+            done.send("making").unwrap();
+        }
+    });
+    let (state, changed) = &SLOWLY;
+    drop(changed.wait_while(state.lock().unwrap(), |state| !state.0).unwrap());
+    let starting = std::thread::spawn(move || {
+        let runtime = madsim::runtime::Runtime::new();
+        runtime.add_simulator::<node_local::Plugin>();
+        runtime.block_on(async { node_local::starting() });
+        state.lock().unwrap().1 = true;
+        changed.notify_all();
+        done.send("starting").unwrap();
+    });
+    // Waited for here, outside any simulation, whose clock runs meanwhile, unlike the simulations':
+    // a start waiting for the value fails the test rather than hang it. Far longer than it takes.
+    let mut ended: Vec<_> = (0..2)
+        .map(|_| finished.recv_timeout(Duration::from_secs(10)))
+        .collect::<Result<_, _>>()
+        .expect("a node's start, on another simulation's thread, waited for a value being made");
+    ended.sort();
+    assert_eq!(ended, ["making", "starting"]);
+    making.join().unwrap();
+    starting.join().unwrap();
+}

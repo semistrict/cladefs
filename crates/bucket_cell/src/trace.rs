@@ -18,8 +18,8 @@
 //! cladefs: and where a read's data came from (TASK-672.2): the nearest of the host's memory, its
 //! part cache, a peer and the bucket that a read went as far as ([`Source`]), each noted where the
 //! fetcher goes there ([`note`]) and gathered by what waits for the read ([`sourced`]); and, of a
-//! read that went to the bucket, the frames of the thread that waited for it ([`record_backtrace`]),
-//! as addresses, resolved only when shown.
+//! read that went to the bucket, the frames of the thread that waited for it
+//! ([`record_backtrace`]), as addresses, resolved only when shown.
 
 use crate::layout::CellId;
 use futures::future::Either;
@@ -49,7 +49,7 @@ pub const LEVEL: &str = "cladefs.level";
 pub const CHILD: &str = "cladefs.child";
 /// The attribute of whether a fork makes a version (`doc-7`, Versions).
 pub const POINT: &str = "cladefs.version";
-/// The attribute of a store's path.
+/// The attribute of a cell's path.
 pub const STORE: &str = "cladefs.store";
 /// The attribute of the arena of physical memory an operation is of.
 pub const ARENA: &str = "cladefs.arena";
@@ -62,7 +62,7 @@ pub const PREFIXES: &str = "cladefs.prefixes";
 /// The attribute of a segment's sequence number in its cell.
 pub const SEGMENT: &str = "cladefs.segment";
 /// cladefs: the attribute of where a read's data came from: a [`Source`]'s name, or `local`, for a
-/// read of the host's stores, which went to no fetcher (TASK-672.2).
+/// read of the host's cells, which went to no fetcher (TASK-672.2).
 pub const SOURCE: &str = "cladefs.source";
 /// cladefs: the attribute of the frames of the thread that waited for a read from the bucket: their
 /// addresses in this process, in hexadecimal, innermost first, separated by spaces
@@ -160,7 +160,7 @@ impl Span {
         self.set(key, i64::try_from(value).unwrap_or(i64::MAX));
     }
 
-    /// Sets its attribute [`CELL`] to `cell`, in base 32, as store paths name cells.
+    /// Sets its attribute [`CELL`] to `cell`, in base 32, as cell paths name cells.
     pub fn set_cell(&self, cell: CellId) {
         self.set_with(CELL, || format!("{cell}"));
     }
@@ -308,7 +308,7 @@ pub fn note(source: Option<Source>) {
 }
 
 /// cladefs: `future`'s output, and the farthest a read of it went ([`note`]), none if no read noted
-/// anything: as a page-in, whose reads of the host's stores go to no fetcher, gathers where its
+/// anything: as a page-in, whose reads of the host's cells go to no fetcher, gathers where its
 /// fetcher's reads went; or a flight of the fetcher's, whose readers each note where it went, the
 /// first to ask and those that joined it alike. None while spans are off.
 pub async fn sourced<F: Future>(future: F) -> (F::Output, Option<Source>) {

@@ -33,7 +33,7 @@ pub fn setup_rootfs(test_setup: &TestSetup) -> anyhow::Result<PathBuf> {
 
 /// Whether a test of cladefs's guest kernel's Fxfs runs: CLADEFS_FIRECRACKER names the VMM, and
 /// CLADEFS_GUEST_KERNEL the kernel, and CLADEFSD the socket of the extent daemon that serves
-/// the device's store (as cladefs's scripts/test-e2e.sh has them).
+/// the device's cell (as cladefs's scripts/test-e2e.sh has them).
 pub fn cladefs_guest_should_run() -> ShouldRun {
     if !crate::vm::has_vmm() {
         return ShouldRun::No("CLADEFS_FIRECRACKER does not name cladefs's Firecracker");
@@ -73,7 +73,7 @@ pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
         Ok(kept) => kept.lines().for_each(|line| eprintln!("{name} stats: {line}")),
         Err(err) => eprintln!("{name} stats: reading {}: {err}", path.display()),
     }
-    // And its stores' warnings, of flushes and framings past cladefsd's turn among them, in its
+    // And its cells' warnings, of flushes and framings past cladefsd's turn among them, in its
     // log, as the stats file, gone with a repeat's directory that passed.
     let log = test_setup.tmp_dir.join(format!("{name}.log"));
     let warned = fs::read_to_string(&log).unwrap_or_default();
@@ -263,7 +263,7 @@ impl Measured {
     }
 }
 
-/// cladefs: fails unless the daemon named `name` the test spawned made half its stores' commits
+/// cladefs: fails unless the daemon named `name` the test spawned made half its cells' commits
 /// durable within cladefsd's turn, 50 ms, at least, as its stats file says: doc-12's median
 /// (`local_lag_within_50ms`, TASK-221).
 pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Result<()> {
@@ -283,13 +283,13 @@ pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Resul
     Ok(())
 }
 
-/// cladefs: the most bytes a DAX window has, the extent daemon's (`cladefsd::wire::MAX_WINDOW`): what
-/// it keeps for a window grows with the pages it maps, which it bounds so (TASK-150.3).
+/// cladefs: the most bytes a DAX window has, the extent daemon's (`cladefsd::wire::MAX_WINDOW`):
+/// what it keeps for a window grows with the pages it maps, which it bounds so (TASK-150.3).
 pub const MAX_DAX_WINDOW: u64 = 64 << 30;
 
-/// cladefs: a case's DAX window: as large as the data, the host's memory, or `CLADEFS_DAX_WINDOW_MIB`'s
-/// if set ([`Window::Large`]); or a small window's, whose cases check it fills
-/// ([`Window::Small`]), as fxfs-guest-checks-dax-small's, which a large one fails (TASK-227).
+/// cladefs: a case's DAX window: as large as the data, the host's memory, or
+/// `CLADEFS_DAX_WINDOW_MIB`'s if set ([`Window::Large`]); or a small window's, whose cases check it
+/// fills ([`Window::Small`]), as fxfs-guest-checks-dax-small's, which a large one fails (TASK-227).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Window {
     Large,
@@ -330,7 +330,7 @@ fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::R
 /// beside it ([`control`]), once this returns, with `env` in its environment, and `memory` bytes of
 /// memory if given; otherwise, as production's, its memory a page cache of what of the host's is
 /// free (TASK-358). It logs to `<name>.log` in the test's directory.
-/// cladefs: it keeps what its stores read from their bucket in a part cache of its own,
+/// cladefs: it keeps what its cells read from their bucket in a part cache of its own,
 /// `<name>-cache` in the test's directory, as production's daemon keeps it on the host's disk
 /// (`CLADEFSD_PART_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
 /// daemon at a time has a cache's directory (TASK-164.12). And it keeps what it did in
@@ -348,9 +348,9 @@ pub fn spawn_daemon(
 
     let bin = std::env::var_os("CLADEFSD_BIN").context("CLADEFSD_BIN")?;
     let log = fs::File::create(test_setup.tmp_dir.join(format!("{name}.log")))?;
-    // A host keeps stores in a bucket, `env`'s or this process's, or a file bucket of its own in
+    // A host keeps cells in a bucket, `env`'s or this process's, or a file bucket of its own in
     // the test's directory, as of placement 1, unless one is named. Not one in its memory: the
-    // cases open the stores it made in processes of their own, after it, which keep a store's
+    // cases open the cells it made in processes of their own, after it, which keep a cell's
     // cell in the bucket its description names, and opening one whose cell the bucket lacks,
     // its commits acknowledged, is refused (TASK-165.9), as scripts/test-e2e.sh's daemon's.
     let named = |var: &str| {
@@ -396,8 +396,8 @@ pub fn spawn_daemon(
 
 /// cladefs: the part cache a test's daemon `name` is given, in `dir`, the test's directory, as
 /// production's daemon keeps one on the host's disk (`CLADEFSD_PART_CACHE`, doc-7), unless
-/// `CLADEFSD_PART_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
-/// as it is, empty for none. Without one, a fork paged in what it inherited from the bucket a ranged
+/// `CLADEFSD_PART_CACHE` is said, `given` the daemon or `ours` this process, which it then takes as
+/// it is, empty for none. Without one, a fork paged in what it inherited from the bucket a ranged
 /// GET at a time: forked-dax 0.304 in the perf gate, 0.849 with it (TASK-164.12, GCE r790, r792).
 fn part_cache(
     given: Option<&std::ffi::OsStr>,
@@ -408,10 +408,11 @@ fn part_cache(
     (given.is_none() && ours.is_none()).then(|| dir.join(format!("{name}-cache")))
 }
 
-/// cladefs: the stats file a test's daemon `name` keeps what it did in, `<name>-stats.txt` in `dir`,
-/// the test's directory, beside its log, unless `env` names one (`given`): what the run's summary
-/// reads of each daemon, its downloads against its reads (scripts/guest_results.py, TASK-165.12).
-/// Not this process's, which scripts/test-e2e.sh's own daemon alone has, its file the run's.
+/// cladefs: the stats file a test's daemon `name` keeps what it did in, `<name>-stats.txt` in
+/// `dir`, the test's directory, beside its log, unless `env` names one (`given`): what the run's
+/// summary reads of each daemon, its downloads against its reads (scripts/guest_results.py,
+/// TASK-165.12). Not this process's, which scripts/test-e2e.sh's own daemon alone has, its file the
+/// run's.
 fn stats_file(given: bool, dir: &Path, name: &str) -> Option<PathBuf> {
     (!given).then(|| dir.join(format!("{name}-stats.txt")))
 }
@@ -438,11 +439,11 @@ pub fn control(socket: &Path) -> Result<cladefs::cladefsd::control::Client, clad
     cladefs::cladefsd::control::Client::connect(socket.with_extension("control"))
 }
 
-/// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open: its
-/// directory taken, as a process opening it takes it, which the extent daemon serving it holds
+/// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open:
+/// its directory taken, as a process opening it takes it, which the extent daemon serving it holds
 /// until its last user, an upload too, lets it go. Copied while the daemon held it, an upload's
 /// marker's `.new` file was renamed away between listing it and copying it (TASK-129).
-pub fn copy_store(from: &Path, to: &Path) -> anyhow::Result<()> {
+pub fn copy_cell_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
     use local_cell::Dir;
     let dir =
         local_cell::HostDir::new(from).with_context(|| format!("opening {}", from.display()))?;

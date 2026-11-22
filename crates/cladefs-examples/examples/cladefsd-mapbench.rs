@@ -10,10 +10,10 @@
 //! commit, and the extent freed (FREE): what a request costs the daemon and its round trip, and a
 //! byte of one, which the guest's REQUESTS lines, less this, leave to the device's queues and the
 //! VMM. Then a database's fsyncs, as the guest's Fxfs makes them on a file it read in (TASK-41,
-//! backlog doc-13): pages of a sealed extent mapped, stored to, each store copying its page into a
+//! backlog doc-13): pages of a sealed extent mapped, written to, each write copying its page into a
 //! private one, and a journal block written with an ordered commit (`WRITE_COMMIT`); each commit's
-//! phases timed (`Stats::commits`). For profiling, with perf on Linux (`perf record --call-graph fp`;
-//! every build here keeps frame pointers, .cargo/config.toml):
+//! phases timed (`Stats::commits`). For profiling, with perf on Linux (`perf record --call-graph
+//! fp`; every build here keeps frame pointers, .cargo/config.toml):
 //!
 //! ```sh
 //! cargo run --release -p cladefs-examples --example cladefsd-mapbench [MAPS [PAGES [MAPS_PER_COMMIT [maps|fsyncs|faults|all [CONNECTIONS]]]]]
@@ -21,8 +21,8 @@
 //!
 //! PAGES is the pages each map maps (default 32), MAPS_PER_COMMIT how many maps a commit
 //! follows (default 8); `maps` times the maps alone, `fsyncs` the fsyncs alone, PAGES then the
-//! pages each stores to, and `faults` the faults alone, to profile them, and `all` everything.
-//! CONNECTIONS is how many other VM processes' connections, each of a store of its own, the daemon
+//! pages each writes to, and `faults` the faults alone, to profile them, and `all` everything.
+//! CONNECTIONS is how many other VM processes' connections, each of a cell of its own, the daemon
 //! serves meanwhile, idle, as a host's hundreds of VMs (default 0). And, last, or alone with
 //! `faults`, the loads of extents mapped whose pages were evicted, each extent's first a fault
 //! the daemon resolves (`FAULT`), paging it in.
@@ -56,7 +56,7 @@ mod bench {
     /// Times each request of a kind, and of a MAP, the daemon's own time mapping
     /// (`Stats::map_ns`), and the window's changes it sent this process, as it made them
     /// (`Stats::stage_ns`): what is left is the round trip. Of a commit, its phases: committing the
-    /// store, and waiting for object storage.
+    /// extent store, and waiting for object storage.
     #[derive(Default)]
     struct Timer {
         count: u32,
@@ -135,10 +135,10 @@ mod bench {
                 unsafe { std::env::set_var(var, default) };
             }
         }
-        // cladefs: its stores encrypted, under the tests' KMS unless its environment names a KMS or
+        // cladefs: its cells encrypted, under the tests' KMS unless its environment names a KMS or
         // gives a master key: a real host's KMS adds its calls (TASK-411.28).
         cladefs::bucket::testing::encrypted();
-        // This thread's stores to the window are the guest's own, as a vCPU's are: they copy
+        // This thread's writes to the window are the guest's own, as a vCPU's are: they copy
         // pages, which KVM's worker's writes mustn't.
         cladefs::guest_thread_started();
 
@@ -146,7 +146,7 @@ mod bench {
         let socket = dir.path().join("cladefsd.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || cladefsd::serve(listener));
-        let store = CellClient::connect(&socket, dir.path().join("store"), 64 << 30).unwrap();
+        let client = CellClient::connect(&socket, dir.path().join("store"), 64 << 30).unwrap();
         // The other VM processes' connections, idle.
         cladefsd::raise_open_files_limit().unwrap();
         let _others: Vec<_> = (0..connections)
@@ -169,17 +169,18 @@ mod bench {
         };
         assert_ne!(memory, libc::MAP_FAILED);
         let memory = NonNull::new(memory.cast::<u8>()).unwrap();
-        // SAFETY: The memory is this process's, which nothing else uses, and it outlives the store.
-        unsafe { store.create_dax_window_in_host_memory(memory, WINDOW, None, PRIVATE_MAX) }
+        // SAFETY: The memory is this process's, which nothing else uses, and it outlives the
+        // client.
+        unsafe { client.create_dax_window_in_host_memory(memory, WINDOW, None, PRIVATE_MAX) }
             .unwrap();
 
         let page_size = 4096u64;
         if only == Some("fsyncs") {
-            fsyncs(&store, memory, maps, pages, 1);
+            fsyncs(&client, memory, maps, pages, 1);
             return;
         }
         if only == Some("faults") {
-            faults(&store, memory, maps, pages, 1);
+            faults(&client, memory, maps, pages, 1);
             return;
         }
         let len = pages * page_size;
@@ -189,17 +190,17 @@ mod bench {
         let mut sealed = Vec::new();
         let data = vec![7u8; len as usize];
         for i in 0..maps {
-            let extent = ExtentId { cell: store.cell(), sequence: i + 1 };
+            let extent = ExtentId { cell: client.cell(), sequence: i + 1 };
             // The guest's Fxfs writes a small file's data into each, as it writes back.
-            write.time(|| store.write(extent, 0, &[VolatileSlice::from(&data[..])])).unwrap();
+            write.time(|| client.write(extent, 0, &[VolatileSlice::from(&data[..])])).unwrap();
             sealed.push(extent);
             if (i + 1) % maps_per_commit == 0 {
-                commit.time(|| store.commit(None)).unwrap();
+                commit.time(|| client.commit(None)).unwrap();
                 // And maps the extents it sealed, as it reads the files in.
                 for extent in sealed.drain(..) {
                     let at = (extent.sequence % slots) * len;
-                    map.time(|| store.map(extent, 0, len, at)).unwrap();
-                    unmap.time(|| store.unmap(at, len)).unwrap();
+                    map.time(|| client.map(extent, 0, len, at)).unwrap();
+                    unmap.time(|| client.unmap(at, len)).unwrap();
                 }
             }
         }
@@ -221,13 +222,13 @@ mod bench {
             let mut back = vec![0u8; data.len()];
             for _ in 0..maps {
                 sequence += 1;
-                let extent = ExtentId { cell: store.cell(), sequence };
-                write.time(|| store.write(extent, 0, &[VolatileSlice::from(&data[..])])).unwrap();
-                read.time(|| store.read(extent, 0, &mut [VolatileSliceMut::from(&mut back[..])]))
+                let extent = ExtentId { cell: client.cell(), sequence };
+                write.time(|| client.write(extent, 0, &[VolatileSlice::from(&data[..])])).unwrap();
+                read.time(|| client.read(extent, 0, &mut [VolatileSliceMut::from(&mut back[..])]))
                     .unwrap();
                 assert_eq!(back, data);
-                ordered.time(|| store.commit_ordered(None)).unwrap();
-                free.time(|| store.free(extent)).unwrap();
+                ordered.time(|| client.commit_ordered(None)).unwrap();
+                free.time(|| client.free(extent)).unwrap();
             }
             let kib = blocks * page_size / 1024;
             write.print(&format!("write {kib} KiB"));
@@ -235,30 +236,30 @@ mod bench {
             ordered.print("commit ordered");
             free.print("free");
         }
-        fsyncs(&store, memory, maps, 1, sequence + 1);
-        faults(&store, memory, maps, pages, sequence + maps + 2);
+        fsyncs(&client, memory, maps, 1, sequence + 1);
+        faults(&client, memory, maps, pages, sequence + maps + 2);
     }
 
     /// Makes `count` extents of `pages` pages each, from `sequence` on, mapped, as the guest's
     /// Fxfs maps the extents of files it reads, and has their pages evicted, as a host whose
     /// memory runs low evicts them (`ShrinkMemory`): the loads of each extent's pages after that,
-    /// timed, take FAULTs, which the daemon resolves, paging the extent in from the store
+    /// timed, take FAULTs, which the daemon resolves, paging the extent in from the cell
     /// (TASK-92.20).
-    fn faults(store: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
+    fn faults(client: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
         let page_size = 4096u64;
         let len = pages * page_size;
         let slots = WINDOW / len;
         let data = vec![7u8; len as usize];
         let extents: Vec<_> = (0..count)
             .map(|i| {
-                let extent = ExtentId { cell: store.cell(), sequence: sequence + i };
-                store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+                let extent = ExtentId { cell: client.cell(), sequence: sequence + i };
+                client.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
                 (extent, (i % slots) * len)
             })
             .collect();
-        store.commit(None).unwrap();
+        client.commit(None).unwrap();
         for (extent, at) in &extents {
-            store.map(*extent, 0, len, *at).unwrap();
+            client.map(*extent, 0, len, *at).unwrap();
         }
         futures::executor::block_on(cladefsd::memory::shrink(None, 0)).unwrap();
         let mut loads = Timer::default();
@@ -276,30 +277,30 @@ mod bench {
     }
 
     /// Makes `count` fsyncs of a database's, as the guest's Fxfs makes them on a file it read in,
-    /// of extents from `sequence` on: `pages` pages of a sealed extent mapped, each stored to,
+    /// of extents from `sequence` on: `pages` pages of a sealed extent mapped, each written to,
     /// which copies it into a private page, and a journal block written with an ordered commit;
     /// then the range unmapped, its private pages with it, as writeback and rebinding end them.
-    fn fsyncs(store: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
+    fn fsyncs(client: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
         let page_size = 4096u64;
         let len = pages * page_size;
-        let file = ExtentId { cell: store.cell(), sequence };
-        store.write(file, 0, &[VolatileSlice::from(&vec![1u8; len as usize][..])]).unwrap();
-        store.commit(None).unwrap();
+        let file = ExtentId { cell: client.cell(), sequence };
+        client.write(file, 0, &[VolatileSlice::from(&vec![1u8; len as usize][..])]).unwrap();
+        client.commit(None).unwrap();
         let (mut copy, mut commit) = (Timer::default(), Timer::default());
         let journal = vec![7u8; page_size as usize];
         let ordered = WriteBarriers { after: Some(Commit::Ordered), ..Default::default() };
         for i in 0..count {
-            let block = ExtentId { cell: store.cell(), sequence: sequence + 1 + i };
-            store.map(file, 0, len, 0).unwrap();
+            let block = ExtentId { cell: client.cell(), sequence: sequence + 1 + i };
+            client.map(file, 0, len, 0).unwrap();
             copy.time(|| {
                 for page in 0..pages {
-                    // SAFETY: The window's memory, which a store copies on write.
+                    // SAFETY: The window's memory, which a guest write copies.
                     unsafe { memory.as_ptr().add((page * page_size) as usize).write(i as u8) };
                 }
             });
             let data = [VolatileSlice::from(&journal[..])];
-            commit.time(|| store.write_with_barriers(block, 0, &data, ordered)).unwrap();
-            store.unmap(0, len).unwrap();
+            commit.time(|| client.write_with_barriers(block, 0, &data, ordered)).unwrap();
+            client.unmap(0, len).unwrap();
         }
         copy.print(&format!("fsync: copy {pages}"));
         commit.print(&format!("fsync: commit {pages}"));

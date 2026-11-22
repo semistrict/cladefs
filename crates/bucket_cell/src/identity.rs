@@ -53,7 +53,7 @@ pub const DEFAULT_HEAD_SLOTS: u64 = 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Per bucket. How many objects each cell's head is kept in, its slots ([`crate::head`]), each
-    /// written in turn, so that the head is swapped as many times a second as the store takes
+    /// written in turn, so that the head is swapped as many times a second as the backend takes
     /// writes of one object (GCS, about one a second). Each cell's maker creates them all, and
     /// each read of a head reads them all. 1 to [`layout::MAX_HEAD_SLOTS`]; [`DEFAULT_HEAD_SLOTS`]
     /// by default.
@@ -256,10 +256,10 @@ pub async fn format(
     Ok(identity)
 }
 
-/// Adds `new`, at `details.url`, to the buckets of the root bucket `root`, whose own details missing
-/// from its registry `root_details` gives: the next number, given by a conditional write of the
-/// root's registry, then its identity, of that number. Its identity, and the root's registry, which
-/// the caller copies to every bucket ([`spread`]). An addition that stopped short of `new`'s
+/// Adds `new`, at `details.url`, to the buckets of the root bucket `root`, whose own details
+/// missing from its registry `root_details` gives: the next number, given by a conditional write of
+/// the root's registry, then its identity, of that number. Its identity, and the root's registry,
+/// which the caller copies to every bucket ([`spread`]). An addition that stopped short of `new`'s
 /// identity is finished by another of the same URL. `root` unformatted is formatted, the root;
 /// refused if it is another bucket ([`Error::NotRoot`]), as is `new` if it is a bucket already
 /// ([`Error::Formatted`]), or if no number is left ([`Error::NoNumbers`]). cladefs: its settings
@@ -326,8 +326,8 @@ pub async fn add(
 }
 
 /// `found`, the identity of the bucket the registry records as `entry`, if it is that bucket: of
-/// its number and its identity's random ID (TASK-633.3). Otherwise another bucket's, or no bucket's,
-/// which a host refuses to use as it.
+/// its number and its identity's random ID (TASK-633.3). Otherwise another bucket's, or no
+/// bucket's, which a host refuses to use as it.
 pub fn verified(entry: &Entry, found: Option<Identity>) -> Result<Identity, Error> {
     match found {
         Some(found) if (found.number, found.id) == (entry.number, entry.id) => Ok(found),

@@ -1,16 +1,16 @@
-# A tenant's VM processes name stores anywhere, not in its directory alone (TASK-43.4): they make
-# stores in another tenant's directory. (Another tenant's store it closed, which opened for them
+# A tenant's VM processes name cells anywhere, not in its directory alone (TASK-43.4): they make
+# cells in another tenant's directory. (Another tenant's cell it closed, which opened for them
 # before TASK-364, is refused as another tenant's cell.)
 # Kind: another tenant's
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
 @@ -375,7 +375,7 @@
-     /// `EACCES` unless it is where they name stores ([`Stores`]).
+     /// `EACCES` unless it is where they name cells ([`CellDirs`]).
      fn holds(&self, path: &Path) -> Result<(), Errno> {
-         let held = match &self.policy.stores {
--            Stores::Dir(dir) => in_dir(path, dir),
-+            Stores::Dir(_) => true,
-             Stores::Roots(Some(roots)) => {
-                 let key = store_key(path);
+         let held = match &self.policy.cell_dirs {
+-            CellDirs::Dir(dir) => in_dir(path, dir),
++            CellDirs::Dir(_) => true,
+             CellDirs::Roots(Some(roots)) => {
+                 let key = cell_dir_key(path);
                  roots.iter().any(|root| key_in_dir(&key, root))

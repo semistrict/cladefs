@@ -8,47 +8,46 @@
 // host filesystem, and with DAX on writable virtio-pmem, where file data and metadata are stored
 // in place in memory. Every case boots cladefs's Firecracker.
 //
-// Each case boots an Alpine guest, with fio, a compiler and e2fsprogs, onto one filesystem
-// mounted at /mnt/bench, and runs the same workloads on it several times: sequential and
-// random reads and writes, cold and warm, fsync-heavy writes, I/O through mmap (and SQLite's
-// reads through it), metadata operations on many small files, and a build. The guest prints a measurement per workload
+// Each case boots an Alpine guest, with fio, a compiler and e2fsprogs, onto one filesystem mounted
+// at /mnt/bench, and runs the same workloads on it several times: sequential and random reads and
+// writes, cold and warm, fsync-heavy writes, I/O through mmap (and SQLite's reads through it),
+// metadata operations on many small files, and a build. The guest prints a measurement per workload
 // and iteration, and the host reports their medians and spread. The workloads are sized for an
 // iteration of each case to take well under a minute.
 //
 // The cases only run when CLADEFS_BENCH_ITERATIONS is set. CLADEFS_BENCH_GROUPS limits them to some
 // of the groups of workloads: io, metadata and build, separated by commas, or parts of metadata:
 // files, fsync, tree, large-dir and concurrent; pgbench, PostgreSQL's benchmark, runs only when it
-// names it. The sqlite group adds rollback-journal and WAL commits, batches, checkpoints,
-// process recovery and reader isolation; it also runs the mmap scan independently of io.
-// The scaling group, which also runs only when named, runs random reads cold and warm, random
-// writes (to pages read before, and to pages the guest never read, rand-write-unread), fsynced
-// appends and metadata operations at each of CLADEFS_BENCH_JOBS's jobs at once (1, 2, 4 and 8),
-// with their latencies' percentiles and how the device's queues took their requests;
-// CLADEFS_BENCH_VCPUS sets the VMs' vCPUs (2), to measure how the filesystems scale (TASK-276).
-// CLADEFS_BENCH_SQLITE_TXNS sizes each transaction workload (200 commits). The sqlite-transactions
-// group skips scans; CLADEFS_BENCH_SQLITE_WORKLOAD selects one transaction workload by its result
-// name (such as sqlite-wal-normal-batch100), keeping the recovery and snapshot checks.
-// cladefs: the working-set group, run only when named, reads 4 KiB at random from files of half,
-// one, two and four times the extent daemon's memory (CLADEFSD_MEMORY, as test-e2e.sh gives
-// it), IOPS and latencies once the caches settle (TASK-350.2); the sync group, also only when
-// named, writes 4 KiB and then syncs, syncfs's or freezes and thaws the filesystem,
-// CLADEFS_BENCH_SYNCS times each (50) (TASK-350.5).
+// names it. The sqlite group adds rollback-journal and WAL commits, batches, checkpoints, process
+// recovery and reader isolation; it also runs the mmap scan independently of io. The scaling group,
+// which also runs only when named, runs random reads cold and warm, random writes (to pages read
+// before, and to pages the guest never read, rand-write-unread), fsynced appends and metadata
+// operations at each of CLADEFS_BENCH_JOBS's jobs at once (1, 2, 4 and 8), with their latencies'
+// percentiles and how the device's queues took their requests; CLADEFS_BENCH_VCPUS sets the VMs'
+// vCPUs (2), to measure how the filesystems scale (TASK-276). CLADEFS_BENCH_SQLITE_TXNS sizes each
+// transaction workload (200 commits). The sqlite-transactions group skips scans;
+// CLADEFS_BENCH_SQLITE_WORKLOAD selects one transaction workload by its result name (such as
+// sqlite-wal-normal-batch100), keeping the recovery and snapshot checks. cladefs: the working-set
+// group, run only when named, reads 4 KiB at random from files of half, one, two and four times the
+// extent daemon's memory (CLADEFSD_MEMORY, as test-e2e.sh gives it), IOPS and latencies once the
+// caches settle (TASK-350.2); the sync group, also only when named, writes 4 KiB and then syncs,
+// syncfs's or freezes and thaws the filesystem, CLADEFS_BENCH_SYNCS times each (50) (TASK-350.5).
 // CLADEFS_BENCH_FILES sets how many files the metadata workloads make (2000), and
-// CLADEFS_BENCH_PGBENCH_SECS how long pgbench's transactions run (20), and CLADEFS_BENCH_PGBENCH_SCALE
-// the scale of its database (10, about 160 MiB). With
+// CLADEFS_BENCH_PGBENCH_SECS how long pgbench's transactions run (20), and
+// CLADEFS_BENCH_PGBENCH_SCALE the scale of its database (10, about 160 MiB). With
 // CLADEFS_BENCH_RESULTS set to a directory, the host also writes each case's measurements there as
 // JSON, which scripts/bench-report.py turns into tables comparing the filesystems. With
 // CLADEFS_BENCH_PERF set to `record`, perf profiles each case's VMM into perf.data in its directory
-// (`record-all`, the whole host, cladefs's extent daemon too),
-// or with `record:EVENTS` records the events, such as the scheduler's tracepoints, with stacks;
-// set to `stat:EVENTS`, perf counts the events, such as KVM's tracepoints, each 100 ms of the run,
-// into the case's log, where they line up with the guest's results. With CLADEFS_BENCH_GUEST_PERF
-// set, perf in the guest samples its kernel through each metadata workload, and the case's log
-// says where each one's time went; set to `record:EVENTS`, it samples the events instead.
+// (`record-all`, the whole host, cladefs's extent daemon too), or with `record:EVENTS` records the
+// events, such as the scheduler's tracepoints, with stacks; set to `stat:EVENTS`, perf counts the
+// events, such as KVM's tracepoints, each 100 ms of the run, into the case's log, where they line
+// up with the guest's results. With CLADEFS_BENCH_GUEST_PERF set, perf in the guest samples its
+// kernel through each metadata workload, and the case's log says where each one's time went; set to
+// `record:EVENTS`, it samples the events instead.
 //
 // cladefs: the fork cases measure what a VM booted on a fork of a base image pays to start and run,
 // on the base's data, and what the extent daemon having that data in memory already saves it. A
-// base VM, on a store of its own, copies the guest's /usr there and makes a PostgreSQL database
+// base VM, on a cell of its own, copies the guest's /usr there and makes a PostgreSQL database
 // (pgbench -i), once. Then each iteration forks the base through the daemon (its FORK request)
 // and boots a VM on the fork, which mounts it, reads the tree whole, and starts PostgreSQL on the
 // database and runs pgbench's read-only transactions. The fork is served by the daemon that served
@@ -68,7 +67,8 @@ use macros::{guest, host};
 /// The filesystem a case benchmarks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// ext4 on a virtio-blk disk, with cladefs's guest kernel, which the guest's Fxfs compares with.
+    /// ext4 on a virtio-blk disk, with cladefs's guest kernel, which the guest's Fxfs compares
+    /// with.
     Ext4GuestKernel,
     /// cladefs: ext4 on a virtio-blk disk on a loop device over a raw image file, as a VM host's
     /// local disk images are, each flush a host fsync (cache_type Writeback): the baseline cladefs
@@ -85,8 +85,8 @@ pub enum Backend {
     FxfsGuest,
     /// The guest kernel's Fxfs on an extent-store device, mapping files from its DAX window.
     FxfsGuestDax,
-    /// cladefs: as `FxfsGuestDax`, its device answering the guest's asks for durability once ordered
-    /// (`cache_type` Unsafe, TASK-363), as production's image drives drop their flushes.
+    /// cladefs: as `FxfsGuestDax`, its device answering the guest's asks for durability once
+    /// ordered (`cache_type` Unsafe, TASK-363), as production's image drives drop their flushes.
     FxfsGuestDaxUnsafe,
     /// cladefs: as `FxfsGuestDax`, booted on a fork of a base image whose data the extent daemon
     /// serving it has in memory already: the daemon that served the base.
@@ -100,17 +100,17 @@ pub enum Backend {
     /// cladefs: as `FxfsGuestDaxForkWarm`, without a DAX window: the fork's files read through the
     /// guest's page cache, which each VM fills with a copy of its own (TASK-112.2).
     FxfsGuestForkWarm,
-    /// cladefs: the fork cases' base on ext4 with DAX on virtio-pmem, each VM booted on a copy of the
-    /// base's image, which the host's page cache holds: a static DAX device, as a base layer's
+    /// cladefs: the fork cases' base on ext4 with DAX on virtio-pmem, each VM booted on a copy of
+    /// the base's image, which the host's page cache holds: a static DAX device, as a base layer's
     /// (TASK-112.2).
     Ext4DaxPmemFork,
     /// cladefs: as `Ext4DaxPmemFork`, without DAX, the files in the guest's page cache.
     Ext4PmemFork,
-    /// cladefs: as `FxfsGuestDax`, with two follower VMs following its store, reading what it writes
+    /// cladefs: as `FxfsGuestDax`, with two follower VMs following its cell, reading what it writes
     /// as it does (TASK-42.7): what followers cost their writer.
     FxfsGuestDaxFollowed,
-    /// cladefs: as `FxfsGuestDaxFollowed`, but its followers read nothing: they follow, applying its
-    /// commits, and no more: what following costs a writer, without its followers' reading.
+    /// cladefs: as `FxfsGuestDaxFollowed`, but its followers read nothing: they follow, applying
+    /// its commits, and no more: what following costs a writer, without its followers' reading.
     FxfsGuestDaxFollowedIdle,
 }
 
@@ -118,11 +118,11 @@ pub enum Backend {
 impl Backend {
     /// Whether the case boots VMs on forks of a base image.
     fn forks(self) -> bool {
-        self.forks_store() || self.forks_image()
+        self.forks_cell() || self.forks_image()
     }
 
-    /// Whether the case's forks are forks of a store, which an extent daemon serves.
-    fn forks_store(self) -> bool {
+    /// Whether the case's forks are forks of a cell, which an extent daemon serves.
+    fn forks_cell(self) -> bool {
         matches!(
             self,
             Backend::FxfsGuestDaxForkWarm
@@ -137,7 +137,7 @@ impl Backend {
         matches!(self, Backend::Ext4DaxPmemFork | Backend::Ext4PmemFork)
     }
 
-    /// Whether the case boots a writer VM and followers of its store.
+    /// Whether the case boots a writer VM and followers of its cell.
     fn followed(self) -> bool {
         matches!(self, Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle)
     }
@@ -151,9 +151,9 @@ const ROLE: &str = "CLADEFS_FORK_BENCH_ROLE";
 /// cladefs: the vsock port the followed case's writer says it is ready on, its filesystem mounted.
 const FOLLOW_READY_PORT: u32 = 5055;
 
-/// cladefs: the store of a fork case's VM, the base's or a fork's.
+/// cladefs: the cell of a fork case's VM, the base's or a fork's.
 #[cfg_attr(feature = "guest", allow(dead_code))]
-const STORE: &str = "CLADEFS_FORK_BENCH_STORE";
+const CELL_DIR: &str = "CLADEFS_FORK_BENCH_STORE";
 
 pub struct TestFsBench {
     pub backend: Backend,
@@ -337,9 +337,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             }
             let cladefsd = PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
             // Under `extents`, which what keeps a run's results leaves out (bench-linux-host.sh).
-            let stores = test_setup.tmp_dir.join("extents");
-            std::fs::create_dir_all(&stores)?;
-            let base = stores.join("base");
+            let cells_dir = test_setup.tmp_dir.join("extents");
+            std::fs::create_dir_all(&cells_dir)?;
+            let base = cells_dir.join("base");
             role(test_setup, "base", &base, &cladefsd, None)?;
             let iterations = iterations().unwrap_or(1);
             // The version the forks are of, if they are of one (predicted).
@@ -365,19 +365,19 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if backend == Backend::FxfsGuestDaxForkPredicted {
                 // A fork, before the iterations, whose boot is the version's evidence: its output
                 // is not the case's.
-                let fork = stores.join("fork-recorded");
+                let fork = cells_dir.join("fork-recorded");
                 fork_to(&fork)?;
                 let sockets = tempdir::TempDir::new("cladefs-fork")?;
                 let (socket, mut daemon) = daemon(test_setup, sockets.path(), iterations)?;
                 let output = std::fs::File::create(test_setup.tmp_dir.join("recorded-fork.txt"))?;
                 role(test_setup, "fork", &fork, &socket, Some(output))?;
-                // Written as the daemon closes the fork's store, once it has seen its VM go.
+                // Written as the daemon closes the fork's cell, once it has seen its VM go.
                 drop(opened(&socket, &fork)?);
                 daemon.kill()?;
                 daemon.wait()?;
             }
             for i in 0..iterations {
-                let fork = stores.join(format!("fork-{i}"));
+                let fork = cells_dir.join(format!("fork-{i}"));
                 fork_to(&fork)?;
                 // A socket's path is short: the daemon's directory is a temporary one of its own.
                 let sockets = tempdir::TempDir::new("cladefs-fork")?;
@@ -425,12 +425,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             Ok(())
         }
 
-        /// Runs this program again, as `role`'s VM, on the store at `store`, which the daemon at
+        /// Runs this program again, as `role`'s VM, on the cell at `cell_dir`, which the daemon at
         /// `cladefsd` serves, and waits for it: its output is this one's, or goes to `output`.
         fn role(
             test_setup: &TestSetup,
             role: &str,
-            store: &Path,
+            cell_dir: &Path,
             cladefsd: &Path,
             output: Option<std::fs::File>,
         ) -> anyhow::Result<()> {
@@ -438,7 +438,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             command
                 .args(std::env::args_os().skip(1))
                 .env(ROLE, role)
-                .env(STORE, store)
+                .env(CELL_DIR, cell_dir)
                 .env("CLADEFSD", cladefsd);
             if let Some(output) = output {
                 command.stdout(output);
@@ -456,13 +456,13 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             Ok(())
         }
 
-        /// The store at `store`, which the daemon at `cladefsd` serves: once the daemon has seen the
-        /// VM that had it open go.
-        fn opened(cladefsd: &Path, store: &Path) -> anyhow::Result<cladefs::CellClient> {
+        /// The cell at `cell_dir`, which the daemon at `cladefsd` serves: once the daemon has seen
+        /// the VM that had it open go.
+        fn opened(cladefsd: &Path, cell_dir: &Path) -> anyhow::Result<cladefs::CellClient> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::CellClient::connect(cladefsd, store, IMAGE_SIZE) {
-                    Ok(store) => return Ok(store),
+                match cladefs::CellClient::connect(cladefsd, cell_dir, IMAGE_SIZE) {
+                    Ok(client) => return Ok(client),
                     Err(err)
                         if Instant::now() < deadline
                             && err.errno() == Some(cladefs::Errno::EBUSY) =>
@@ -554,12 +554,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             let theirs = cores.pop().expect("two or more");
             let writers = cores.concat();
             let root = setup_rootfs(test_setup)?;
-            let store = test_setup.tmp_dir.join("extents");
+            let cell_dir = test_setup.tmp_dir.join("extents");
             let uds =
                 std::env::temp_dir().join(format!("cladefs-followed-{}.vsock", std::process::id()));
             let ready = format!("{}_{FOLLOW_READY_PORT}", uds.display());
             let listener = UnixListener::bind(&ready)?;
-            let mut writer = spawn(test_setup, &root, "writer", &store, Some(&uds), &writers)?;
+            let mut writer = spawn(test_setup, &root, "writer", &cell_dir, Some(&uds), &writers)?;
             // Until the writer says its filesystem is mounted, unless it is gone first.
             let mut stream = writer.accept(&listener)?;
             let mut said = String::new();
@@ -567,10 +567,10 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             anyhow::ensure!(said == "ready\n", "the writer said {said:?}");
             let followers = FOLLOWERS
                 .iter()
-                .map(|role| spawn(test_setup, &root, role, &store, None, &theirs))
+                .map(|role| spawn(test_setup, &root, role, &cell_dir, None, &theirs))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             // The writer's workloads wait for its followers' root images, which spawning them
-            // makes and syncs, onto the host's filesystem its store is on too (TASK-92.38).
+            // makes and syncs, onto the host's filesystem its cell is on too (TASK-92.38).
             stream.write_all(b"go\n")?;
             let (status, console) = writer.wait()?;
             // The writer's output is the case's.
@@ -587,13 +587,13 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             Ok(())
         }
 
-        /// Boots `role`'s VM on the store at `store`, on the host's CPUs `cpus`: the writer's,
+        /// Boots `role`'s VM on the cell at `cell_dir`, on the host's CPUs `cpus`: the writer's,
         /// which says it is ready over the vsock at `uds`, or a follower's.
         fn spawn(
             test_setup: &TestSetup,
             root: &Path,
             role: &str,
-            store: &Path,
+            cell_dir: &Path,
             uds: Option<&Path>,
             cpus: &[usize],
         ) -> anyhow::Result<Firecracker> {
@@ -606,14 +606,14 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if writer {
                 vm.cell(
                     "bench",
-                    store,
+                    cell_dir,
                     IMAGE_SIZE,
                     crate::common::dax_window(crate::common::Window::Large)?,
                 )?;
             } else {
                 vm.cell_following(
                     "bench",
-                    store,
+                    cell_dir,
                     crate::common::dax_window(crate::common::Window::Large)?,
                 )?;
             }
@@ -750,9 +750,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if self.backend.forks() && std::env::var_os(ROLE).is_none() {
                 return forks::run(self.backend, &test_setup);
             }
-            // With CLADEFS_BENCH_PERF set, this process, which becomes the VMM, or drives a followed
-            // case's VMs, runs again under perf, which samples all its threads, its vCPUs', its
-            // devices' and cladefs's, or counts events.
+            // With CLADEFS_BENCH_PERF set, this process, which becomes the VMM, or drives a
+            // followed case's VMs, runs again under perf, which samples all its threads, its
+            // vCPUs', its devices' and cladefs's, or counts events.
             let perf = std::env::var("CLADEFS_BENCH_PERF").unwrap_or_default();
             if !perf.is_empty() && std::env::var_os("CLADEFS_BENCH_PERF_RUNNING").is_none() {
                 use std::os::unix::process::CommandExt;
@@ -794,37 +794,37 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             // The filesystem's device in the guest, for those on one.
             let device = match self.backend {
                 Backend::FxfsGuest | Backend::FxfsGuestDax | Backend::FxfsGuestDaxUnsafe => {
-                    // A new store, which the guest's Fxfs formats as it mounts it.
-                    let store = test_setup.tmp_dir.join("extents");
+                    // A new cell, which the guest's Fxfs formats as it mounts it.
+                    let cell_dir = test_setup.tmp_dir.join("extents");
                     let window = if self.backend == Backend::FxfsGuest {
                         0
                     } else {
                         crate::common::dax_window(crate::common::Window::Large)?
                     };
-                    vm.cell("bench", &store, IMAGE_SIZE, window)?;
+                    vm.cell("bench", &cell_dir, IMAGE_SIZE, window)?;
                     if self.backend == Backend::FxfsGuestDaxUnsafe {
                         vm.cell_unsafe();
                     }
                     None
                 }
-                // The base's store, new, or a fork of it.
+                // The base's cell, new, or a fork of it.
                 Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold
                 | Backend::FxfsGuestDaxForkPredicted
                 | Backend::FxfsGuestForkWarm => {
-                    let store = std::env::var_os(STORE).context("no store for a fork case")?;
+                    let cell_dir = std::env::var_os(CELL_DIR).context("no cell for a fork case")?;
                     let window = if self.backend == Backend::FxfsGuestForkWarm {
                         0
                     } else {
                         crate::common::dax_window(crate::common::Window::Large)?
                     };
-                    vm.cell("bench", std::path::Path::new(&store), IMAGE_SIZE, window)?;
+                    vm.cell("bench", std::path::Path::new(&cell_dir), IMAGE_SIZE, window)?;
                     vm.env(&CString::new(format!("{ROLE}={}", std::env::var(ROLE)?))?);
                     None
                 }
                 // cladefs: the base's image, or a copy of it (TASK-112.2).
                 Backend::Ext4DaxPmemFork | Backend::Ext4PmemFork => {
-                    let image = std::env::var_os(STORE).context("no image for a fork case")?;
+                    let image = std::env::var_os(CELL_DIR).context("no image for a fork case")?;
                     vm.env(&CString::new(format!("{ROLE}={}", std::env::var(ROLE)?))?);
                     Some(vm.pmem("bench", std::path::Path::new(&image))?)
                 }
@@ -919,8 +919,8 @@ mod guest {
     const APPENDED_SIZE: u64 = 8 << 20;
     const RUNTIME: &str = "--runtime=2";
     const MIB: f64 = (1 << 20) as f64;
-    /// The number of files the metadata workloads create, stat, list and remove: CLADEFS_BENCH_FILES,
-    /// or 2000, whose workloads take milliseconds.
+    /// The number of files the metadata workloads create, stat, list and remove:
+    /// CLADEFS_BENCH_FILES, or 2000, whose workloads take milliseconds.
     fn files() -> usize {
         std::env::var("CLADEFS_BENCH_FILES").ok().and_then(|n| n.parse().ok()).unwrap_or(2_000)
     }
@@ -1187,8 +1187,8 @@ mod guest {
         result("seq-read-warm", "MiB/s", true, job.read.bytes_per_sec / MIB);
         let job = fio(&["--rw=randread", "--bs=4k", "--time_based", RUNTIME]);
         result("rand-read-warm", "IOPS", true, job.read.iops);
-        // cladefs: the file read once through a new mapping, which faults each part in (TASK-26.18.8):
-        // before the random writes, which would leave it in small extents.
+        // cladefs: the file read once through a new mapping, which faults each part in
+        // (TASK-26.18.8): before the random writes, which would leave it in small extents.
         let faults = page_faults();
         let job = fio(&["--ioengine=mmap", "--rw=read", "--bs=1M"]);
         result("mmap-seq-read", "MiB/s", true, job.read.bytes_per_sec / MIB);
@@ -1224,11 +1224,11 @@ mod guest {
     const WORKING_SET_RUNTIME: &str = "--runtime=10";
     const WORKING_SET_RAMP: &str = "--ramp_time=10";
 
-    /// cladefs: random 4 KiB reads over working sets sized by the extent daemon's memory, which is a
-    /// DAX guest's only cache of its files, and whose misses read and decompress a whole part each
-    /// (TASK-350.2). Each set is a file written whole and synced, the guest's caches then dropped;
-    /// its reads, uniform over the file, run until the caches settle, then are measured: IOPS and
-    /// their latencies' median and 99th percentile.
+    /// cladefs: random 4 KiB reads over working sets sized by the extent daemon's memory, which is
+    /// a DAX guest's only cache of its files, and whose misses read and decompress a whole part
+    /// each (TASK-350.2). Each set is a file written whole and synced, the guest's caches then
+    /// dropped; its reads, uniform over the file, run until the caches settle, then are measured:
+    /// IOPS and their latencies' median and 99th percentile.
     fn working_set_workloads() {
         let memory: u64 = std::env::var("CLADEFS_BENCH_DAEMON_MEMORY")
             .expect("CLADEFS_BENCH_DAEMON_MEMORY: the host sets it")
@@ -1293,7 +1293,8 @@ mod guest {
                 }),
                 ("freeze", &|| {
                     let fd = mount.as_raw_fd();
-                    // SAFETY: ioctls without arguments on the mount's root this function holds open.
+                    // SAFETY: ioctls without arguments on the mount's root this function holds
+                    // open.
                     let frozen = unsafe { libc::ioctl(fd, FIFREEZE as _, 0) };
                     assert_eq!(frozen, 0, "FIFREEZE: {}", std::io::Error::last_os_error());
                     let thawed = unsafe { libc::ioctl(fd, FITHAW as _, 0) };
@@ -1326,7 +1327,8 @@ mod guest {
         line.expect("/proc/vmstat has pgfault").parse().unwrap()
     }
 
-    /// cladefs: reports `faults`, taken over `bytes`, per MiB of them, as an observation of `workload`.
+    /// cladefs: reports `faults`, taken over `bytes`, per MiB of them, as an observation of
+    /// `workload`.
     fn faults_per_mib(workload: &str, faults: u64, bytes: u64) {
         println!("OBSERVED {workload}-faults-per-mib {:.1}", faults as f64 / (bytes as f64 / MIB));
     }
@@ -1893,17 +1895,17 @@ mod guest {
         fs::remove_dir(&shared).unwrap();
     }
 
-    /// cladefs: where the scaling workloads' files are, a file of [`SCALE_FILE_SIZE`] bytes per job,
-    /// fio's `scale.<job>.0` (TASK-276).
+    /// cladefs: where the scaling workloads' files are, a file of [`SCALE_FILE_SIZE`] bytes per
+    /// job, fio's `scale.<job>.0` (TASK-276).
     const SCALE_DIR: &str = "/mnt/bench/scale";
     const SCALE_FILE_SIZE: u64 = 64 << 20;
-    /// cladefs: the files of the random writes to pages never read (`rand-write-unread`), one per job
-    /// of each job count, `unread<jobs>.<job>.0`, whose writes reach a quarter of their pages
+    /// cladefs: the files of the random writes to pages never read (`rand-write-unread`), one per
+    /// job of each job count, `unread<jobs>.<job>.0`, whose writes reach a quarter of their pages
     /// (TASK-276.6).
     const UNREAD_FILE_SIZE: u64 = 16 << 20;
 
-    /// cladefs: the jobs the scaling workloads run at, each in turn: CLADEFS_BENCH_JOBS, separated by
-    /// commas, or 1, 2, 4 and 8.
+    /// cladefs: the jobs the scaling workloads run at, each in turn: CLADEFS_BENCH_JOBS, separated
+    /// by commas, or 1, 2, 4 and 8.
     fn scale_jobs() -> Vec<usize> {
         let jobs = std::env::var("CLADEFS_BENCH_JOBS").unwrap_or_default();
         if jobs.is_empty() {
@@ -1989,10 +1991,10 @@ mod guest {
         fs::read_to_string(device).ok()
     }
 
-    /// cladefs: runs `f`, `workload`, as [`observed`] does, and says how its requests spread over the
-    /// device's queues and where they completed (TASK-276): the requests each queue took, and the
-    /// queues' interrupts by CPU, to the log; how many queues took requests, and the share of the
-    /// requests completed on a CPU other than the one that queued them, as observations.
+    /// cladefs: runs `f`, `workload`, as [`observed`] does, and says how its requests spread over
+    /// the device's queues and where they completed (TASK-276): the requests each queue took, and
+    /// the queues' interrupts by CPU, to the log; how many queues took requests, and the share of
+    /// the requests completed on a CPU other than the one that queued them, as observations.
     fn scaled<T>(workload: &str, f: impl FnOnce() -> T) -> T {
         let counts = |text: Option<String>| -> Vec<u64> {
             let text = text.unwrap_or_default();
@@ -2456,8 +2458,8 @@ mod guest {
                 Backend::FxfsGuest | Backend::FxfsGuestDax | Backend::FxfsGuestDaxUnsafe => {
                     mount("bench", "cladefs", "")
                 }
-                // cladefs: the writer runs the workloads once its followers have started; they read,
-                // or only follow.
+                // cladefs: the writer runs the workloads once its followers have started; they
+                // read, or only follow.
                 Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle => {
                     mount("bench", "cladefs", "");
                     if std::env::var(ROLE).unwrap() != "writer" {

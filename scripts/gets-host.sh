@@ -14,7 +14,7 @@
 #   scripts/gets-host.sh [RESULTS]
 #   scripts/gets-host.sh resume RUN RESULTS | cancel RUN
 #
-# CLADEFS_GETS_URL names the bucket and prefix the run puts its object under, as an object store's
+# CLADEFS_GETS_URL names the bucket and prefix the run puts its object under, as a bucket's
 # URL the test host reaches (s3://bucket/prefix, with CLADEFS_S3_* for an S3 server's address and
 # keys; or file:///path/, a directory there, which measures that disk); CLADEFS_GETS_MIB is the
 # object's size (default 512) and CLADEFS_GETS_SECS the seconds each measurement takes (default 10).

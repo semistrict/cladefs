@@ -8,7 +8,7 @@
 # The first runs HEAD's DAX suites, repeats of each: the checks with delays injected
 # (fxfs-guest-checks-dax-delay) and on a small window (-small), and the crash test and its variant
 # killing its process (-killed). The second runs pgbench-dax-forked, on a base's database, whose
-# files are DAX and whose stores copy on write, whose data is checked and whose write path's
+# files are DAX and whose writes copy on write, whose data is checked and whose write path's
 # latencies stay under their ceilings (scripts/pgbench-probes.py): a database made in the run is
 # files created in the mount, which the page cache writes (doc-13); then every hand mutant
 # (guest/mutants) that needs a real kernel (scripts/guest-mutants-host.py), each killed by the

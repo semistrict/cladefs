@@ -5,12 +5,12 @@
 //! cladefs: the sequence numbers of a cell's own extents freed once sealed, which it writes no
 //! more ([`Spent`], TASK-79.6). An extent's ID is its cell's to write once: what holds a sealed
 //! extent by its ID takes the same ID for the same data, as the lineage's forks and views do, the
-//! cache of extents a process's stores share, and object storage. A guest that freed one of its
+//! cache of extents a process's cells share, and object storage. A guest that freed one of its
 //! own and wrote the ID again would have them take its new data for the old, in another cell's.
 //! A sealed extent the cell holds is refused as sealed; one it freed, by this record, which its
 //! index keeps: a delta's frees, and a checkpoint's rows. Those minted and never written, as
 //! Fxfs's journal mints its tail's blocks ahead of its writes, across mounts, it may write. Object
-//! storage keeps it too, in a cell's state, so that a store taking the cell on another host
+//! storage keeps it too, in a cell's state, so that another host taking the cell
 //! has it (TASK-150.6).
 
 use serde::{Deserialize, Serialize};
@@ -30,9 +30,12 @@ impl Spent {
         self.runs.range(..=sequence).next_back().is_some_and(|(_, &end)| sequence < end)
     }
 
-    /// Spends `sequence`.
+    /// Spends `sequence`, which is not the last: a run's end, past its last, is past it, and no
+    /// cell writes an extent of it (`local_cell::LastSequence`, board 2762), which a wrapped end
+    /// omitted silently.
     pub fn insert(&mut self, sequence: u64) {
-        self.insert_run(sequence, sequence + 1);
+        let end = sequence.checked_add(1).expect("no extent is of the last sequence (board 2762)");
+        self.insert_run(sequence, end);
     }
 
     /// Spends the run `start..end`, joining the runs it meets.

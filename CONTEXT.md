@@ -62,14 +62,14 @@ _Avoid_: seal for encryption (say **encrypted**), close, freeze
 A request ordering every request completed before it ahead of every one submitted after; `COMMIT` is the usual one.
 
 **Commit**:
-A barrier that also records the cell's new root; the unit the store recovers to.
+A barrier that also records the cell's new root; the unit an open cell recovers to.
 _Avoid_: flush, sync (a sync waits for a commit's level)
 
 **Root**:
 The one mutable record of a cell: where its metadata starts.
 
 **Free**:
-The guest's telling the store an extent is no longer referenced.
+The guest's telling the extent store an extent is no longer referenced.
 _Avoid_: delete, trim, discard
 
 **Orphan**:
@@ -92,11 +92,11 @@ Having KVM map installed pages ahead of the guest's accesses.
 _Avoid_: map ahead, pre-fault, pre-faulting
 
 **Private page**:
-A window page the VM owns, copied on the guest's store or by `PRIVATE`, at the same address, named by no extent.
+A window page the VM owns, copied on the guest's write or by `PRIVATE`, at the same address, named by no extent.
 _Avoid_: dirty page (dirty is the guest's view), COW page
 
 **private_max**:
-The most private pages a window holds at once; a store past it stops the VM.
+The most private pages a window holds at once; a write past it stops the VM.
 
 **Rebind**:
 Mapping a private page back to the sealed extent its writeback wrote, sharing it again.
@@ -131,12 +131,12 @@ A file created in this mount, served from the guest's page cache until it is nex
 ### The extent daemon
 
 **Extent daemon**:
-The one process on a host that owns the physical memory, the extent cache and the stores, and serves them to VM processes.
+The one process on a host that owns the physical memory, the extent cache and the open cells, and serves them to VM processes.
 _Avoid_: server, remote; `cladefsd`, its name on the command line, in its module, protocol and files
 
 **Daemon client**:
-A VM process's connection to the extent daemon, through which its extent device has a store.
-_Avoid_: remote, remote store
+A VM process's connection to the extent daemon, through which its extent device has an open cell.
+_Avoid_: remote, remote store, store
 
 **Tenant**:
 An owner of cells, who is granted a VM socket, an arena, memory and disk limits, and keys of its own.
@@ -171,29 +171,29 @@ Where a freed page waits until no VM process may still map it.
 
 **Governor**:
 What bounds the daemon's one memory budget, which every cache of its holds under; and, the disk
-governor, what bounds each host disk's: the stores first, the part cache what they leave.
+governor, what bounds each host disk's: the open cells first, the part cache what they leave.
 
 **Host disk**:
-A filesystem the daemon keeps stores or the part cache on, one however many of its directories are
-opened: what its stores and part cache hold, counted, and what the disk governor allows them.
+A filesystem the daemon keeps cell directories or the part cache on, one however many of its directories are
+opened: what its cell directories and part cache hold, counted, and what the disk governor allows them.
 _Avoid_: volume, device (but for its `MAJOR:MINOR` label)
 
 **Footprint**:
-What a store's files take of its host disk, counted as the store writes them: each file's length in
+What a cell directory's files take of its host disk, counted as the open cell writes them: each file's length in
 4 KiB granules, once however many names it has.
 
 **Allotment**:
 A granted tenant directory's footprints summed, with the tenant's disk limit, weight and share.
 
 **Reserve**:
-What a store's own work may still add for what was written, never refused: its commits copying it,
+What an open cell's own work may still add for what was written, never refused: its commits copying it,
 its logs holding it, its framings copying it. Admission weighs a write with it.
 
 **Headroom**:
 What a governor leaves free of the memory, or of a host disk: room for others between its looks.
 
 **Spare**:
-What a host disk's stores leave of its allowance, taken, reserved and admitted: what the part cache
+What a host disk's cell directories leave of its allowance, taken, reserved and admitted: what the part cache
 keeps of it, and what new writes are admitted into.
 _Avoid_: room (a segment's free space alone)
 
@@ -205,11 +205,11 @@ _Avoid_: cache alone, page cache
 A host's disk copies of the bucket's objects' parts, no tenant's.
 _Avoid_: cache alone, NVMe cache, object cache
 
-**Store page cache**:
-The pages of a store's data files cladefs holds itself, in place of the host's page cache.
+**Cell page cache**:
+The pages of a cell directory's data files cladefs holds itself, in place of the host's page cache.
 _Avoid_: page cache alone (that is the kernel's)
 
-### Cells, stores and the bucket
+### Cells, cell directories and the bucket
 
 **Bucket**:
 The object storage holding every cell's durable copy.
@@ -237,16 +237,24 @@ What a bucket is formatted or added with, fixed for good in its identity: each p
 _Avoid_: config, options (a process's), parameters
 
 **Cell**:
-A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique across buckets, given by its bucket and carrying its bucket number; no caller names a new one. On a host, a cell is kept in a directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
-_Avoid_: volume, disk
+A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique across buckets, given by its bucket and carrying its bucket number; no caller names a new one. On a host, a cell is kept in its cell directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
+_Avoid_: volume, disk, store
+
+**Cell directory**:
+The directory on a host's disk a cell is kept in, named by its path: its description, its local checkpoint, its segments and their logs, its write-ahead log. Control calls name a cell on a host by it (`path`). An ephemeral cell's is its only copy.
+_Avoid_: store, store directory
+
+**Open cell**:
+A cell opened from its cell directory in the extent daemon (`OpenCell`), which VMs' daemon clients read and write through; where the difference from the cell or its directory doesn't matter, just the cell.
+_Avoid_: store
 
 **Volume**:
 One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`, as upstream Fxfs says.
 _Avoid_: volume for a cell
 
-**File set**:
-Named files kept straight on an extent device, with no filesystem between, each committed alone: what a SQLite or memory cell holds (`extent_files`).
-_Avoid_: volume
+**Block device**:
+A cell's contents as one array of blocks, read and written at offsets, discarded, resized and flushed, each flush one commit, kept straight on its extent store with no filesystem between: what a SQLite cell (its one database) and a memory cell (a VM's memory) hold (`block_device::BlockDevice`). No names or files: a cell needing those is an Fxfs cell. Not the extent store device, which is none.
+_Avoid_: file set (retired 2026-11-21, board 5790), volume
 
 **Version**:
 A read-only state of a cell in its past, kept inside the cell. Only the cell's writer makes or drops one. Making one is local: one commit in the cell's local log that closes its segment, nothing touching the bucket; uploading it and naming it in the head come later, in the background.
@@ -265,7 +273,7 @@ The cell a fork came from, and the cell it made. Dropping a version that has chi
 
 **Ephemeral cell**:
 A child kept on one host's disk alone, never uploaded, with no versions of its own: its parent's version its lower layer, its own extents raw in its directory (doc-25). It survives what keeps the host's disk, and moves to another host only by hand-over. Its reference in the parent's bucket names its host's incarnation.
-_Avoid_: local cell (`local_cell` is the store's crate, Local a level), scratch, overlay, upper
+_Avoid_: local cell (`local_cell` is the extent store's crate, Local a level), scratch, overlay, upper
 
 **Hand over**:
 Moving an ephemeral cell's writing from one host to another in a live migration: the source gives the cell up, then names its last commit, from which alone the target opens it.
@@ -282,14 +290,14 @@ Where a child was forked from: its parent and the segment its version closed. Th
 A VM's saved state: a version of each of the VM's cells (its disk and its memory) plus the record naming them. Host-local: it pauses the VM, makes a version in each cell, and writes the record last; no bucket round trip, no cross-host coordination.
 
 **Base**:
-A store VMs boot forks of, such as an imported container image.
+A cell VMs boot forks of, such as an imported container image.
 _Avoid_: template, golden image
 
 **Public base**:
 A base whose pages every tenant's forks share, in the default arena.
 
 **Attached base**:
-A fork of another store attached to a cell, for an Fxfs volume over a read-only base.
+A fork of another cell attached to a cell, for an Fxfs volume over a read-only base.
 
 **Read evidence**:
 What forks of a version read of it as they opened, each tenant's apart: a **recording** is one fork's, every MiB of the version's extents its guest read in its first 10 s and when it first did, an object written once beside the version (TASK-702.2). The collector deletes it with the version, and past its tenant's newest 8.
@@ -302,7 +310,7 @@ What a version's next fork will read, as its tenant's newest recordings say: eve
 A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, kept in its head slots. Taking it is taking the cell.
 
 **Head slot**:
-One of the objects a head is kept in, its bucket's setting of them, 10 by default: version k in slot k mod N, each swap conditional on its slot, so that the head is swapped as often as the store takes writes of N objects.
+One of the objects a head is kept in, its bucket's setting of them, 10 by default: version k in slot k mod N, each swap conditional on its slot, so that the head is swapped as often as the bucket takes writes of N objects.
 _Avoid_: shard, replica, copy
 
 **Mark** (of a head):
@@ -322,7 +330,7 @@ The number of a taking: a writer's of a cell, a placement's, a pass's of its col
 _Avoid_: epoch for a commit's number, generation
 
 **Commit number**:
-Which commit of a cell, as a follower's view or a store's stats name it.
+Which commit of a cell, as a follower's view or an open cell's stats name it.
 _Avoid_: epoch
 
 **Placement**:
@@ -330,7 +338,7 @@ A host's holding of a cell, under a fencing token.
 _Avoid_: copy (a version's), holder; placement for where an open extent goes or which arena pages are in
 
 **Halted**:
-Of a store: stopped for good after a panic went through it (`EIO`) or its tenant or cell was shredded (`EACCES`).
+Of an open cell: stopped for good after a panic went through it (`EIO`) or its tenant or cell was shredded (`EACCES`).
 _Avoid_: fenced
 
 **Fencing token**:
@@ -340,10 +348,10 @@ The number a placement holds, greater than every earlier placement's, so a host 
 Sealed extents packed in commit order, with a footer saying what each commit did; an object in the bucket.
 
 **Open segment**:
-The segment a store is writing, raw, with its log of commits.
+The segment an open cell is writing, raw, with its log of commits.
 
 **Write-ahead log**:
-A store's closed segments not yet acknowledged by the bucket, each byte for byte the object it will be.
+A cell's closed segments not yet acknowledged by the bucket, each byte for byte the object it will be.
 _Avoid_: log (the log is an open segment's)
 
 **Own extent**:
@@ -361,11 +369,11 @@ A 1 MiB unit of an object, compressed, encrypted and fetched on its own.
 Putting a write-ahead log's segment into the bucket.
 
 **Acknowledged**:
-Of a segment: named by the head's swap, so the bucket has it and it may leave the store.
+Of a segment: named by the head's swap, so the bucket has it and it may leave the cell directory.
 _Avoid_: acknowledged for a VM process's taking in window changes (say **confirmed**)
 
 **Lag bound**:
-How far a store's uploads may fall behind its commits before commits stall.
+How far a cell's uploads may fall behind its commits before commits stall.
 
 **Checkpoint**:
 A cell's state as of a segment, so recovery reads from it rather than from the beginning. An
@@ -436,7 +444,7 @@ _Avoid_: down, failed (the cell serves)
 How much of what was ordered a crash may lose: at most a second's worth.
 
 **Drain**:
-What a daemon does on SIGTERM: every store closed and its commits uploaded before it exits.
+What a daemon does on SIGTERM: every open cell closed and its commits uploaded before it exits.
 
 **Format**:
 The version an on-disk, bucket or wire format names; a reader refuses every other, and nothing migrates.
@@ -444,7 +452,7 @@ The version an on-disk, bucket or wire format names; a reader refuses every othe
 ### Followers
 
 **Follower**:
-A read-only mount of a store another VM on the host writes, applying that writer's commits as they come.
+A read-only mount of a cell another VM on the host writes, applying that writer's commits as they come.
 _Avoid_: replica, secondary, reader
 
 **Writer** (of a mount):
@@ -454,7 +462,7 @@ The one read-write mount whose commits followers apply.
 A task in a follower's guest reading its files.
 
 **View**:
-A store as of one commit, which keeps what later commits free until let go.
+An open cell as of one commit, which keeps what later commits free until let go.
 
 **Advance**:
 Moving a follower's view to the writer's latest commit.
@@ -493,14 +501,14 @@ A cell's key, wrapped by its tenant's KEK, wrapping its DEK.
 A cell's data key, under whose subkeys its objects are encrypted.
 
 **Encrypted**:
-Of a cell, store or object: held under its tenant's keys.
+Of a cell or object: held under its tenant's keys.
 _Avoid_: sealed (sealing is extents'); its opposite is **unencrypted**, or in the clear
 
 **Shred**:
 Making data unreadable by destroying the key that wraps it: a tenant's KEK, or a cell's wrapped KEKs.
 
 **Forget**:
-A host's dropping the keys of a shredded tenant or cell, fencing its stores.
+A host's dropping the keys of a shredded tenant or cell, fencing its open cells.
 
 ### Testing and measurement
 
@@ -590,22 +598,22 @@ code does not have yet are said so.
 
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
 - **remote**: retired, in code too; say **bucket** or **daemon client** (`CLADEFSD_BUCKET`).
-- **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
-- **volume**: Fxfs's alone. Named files on an extent device, with no filesystem, are a
-  **file set** (`extent_files::FileSet`).
+- **store**: retired for a cell on a host, in code too (2026-11-21, board 5622): its directory is the **cell directory** (`cell_dir`), the cell opened from it an **open cell** (`OpenCell`), and else just the **cell**. Left to the **extent store**, the component (`local_cell`, the daemon's storage), and to Fxfs's **object stores**. A CPU's is a **write** (a **store instruction** where a syscall's write could be meant); the object-storage backend's calls are `object_*`, its `ObjectStore` implementations `...Backend`. The cell directory's files (`store`, `store.deleted`), metric names, proto fields and CLI flags keep the word until their own rename.
+- **volume**: Fxfs's alone. A cell's array of blocks on an extent device, with no filesystem, is
+  its **block device** (`block_device::BlockDevice`).
 - **snapshot**: VMs' (Firecracker's) and Fxfs's alone. A cell's named state is a **version**; the daemon's counters are **stats** (no `GetSnapshot`).
 - **version**: a cell's past state alone; a format's is its **format**, a tool's a **pinned version**.
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
-  StatCell's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
-- **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
+  StatCell's `committed`, `LocalCell::last_commit_held`, `View::commit` and the trace's `cladefs.commit`.
+- **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). An open cell stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; writers have none since TASK-407.
 - **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,
   `COMMIT_UPLOADED`, the `local_lag` stats, the trace's `cladefs.level`).
-- **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it,
+- **cache**: the extent cache, the part cache, the cell page cache, the host's page cache. Name it,
   env vars too (`CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`).
 - **region**: the guest's; virtio's is a **shared memory region**.
 - **format**: a format's version alone (**Format**); making a bucket a root is **formatting** it, and making a filesystem is Fxfs's mkfs.
-- **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
+- **base**: a cell VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
 - **Fxfs** / **cladefs** in the guest: Fxfs is Fuchsia's filesystem, its crates and its format; the guest
   kernel's module that runs it is `cladefs` (`fs/cladefs`, `mount -t cladefs`, `cladefs.*` parameters,

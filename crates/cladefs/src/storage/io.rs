@@ -6,7 +6,11 @@
 //!
 //! Fxfs's device I/O is awaited on its executor's threads, which must not block in `pread` and
 //! `pwrite`. On Linux, the engine submits operations to an io_uring, whose completions a thread
-//! of its own collects. Elsewhere, a small pool of threads runs them.
+//! of its own collects. Elsewhere, a small pool of threads runs them. cladefs: under madsim, each
+//! runs as it is submitted, in place on its simulated host's disk (host_fs, doc-24), as a
+//! simulated host's cells read and write their files: neither the ring nor the threads, which the
+//! simulation doesn't model, nor the real host's disk, whose files a simulated host's crash would
+//! leave as they were (board 5687).
 //!
 //! An operation owns what the host touches, its buffer and its file, until the host is done with
 //! them, and gives the buffer back as it completes. A future dropped, or leaked, while its
@@ -19,7 +23,6 @@ use futures::task::AtomicWaker;
 use local_cell::Aligned;
 use std::future::Future;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -33,7 +36,26 @@ pub(super) enum Op {
 }
 
 /// A file an operation runs on, which it keeps open until the host is done with it.
-pub(super) type IoFile = Arc<dyn AsRawFd + Send + Sync>;
+pub(super) type IoFile = Arc<dyn OnHost>;
+
+/// A file of the host's, or what holds one: an image's cell's files, through its page cache.
+pub(super) trait OnHost: Send + Sync {
+    /// The host's file operations run on.
+    fn host_file(&self) -> &host_fs::File;
+}
+
+impl OnHost for local_cell::HostFile {
+    fn host_file(&self) -> &host_fs::File {
+        local_cell::HostFile::host_file(self)
+    }
+}
+
+#[cfg(test)]
+impl OnHost for host_fs::File {
+    fn host_file(&self) -> &host_fs::File {
+        self
+    }
+}
 
 /// An operation as an engine runs it: on memory at `addr`, which the operation's completion owns.
 #[derive(Clone, Copy, Debug)]
@@ -55,7 +77,7 @@ pub(super) struct Done {
 pub(super) struct Io {
     engine: Arc<Engine>,
     /// A test's hold of the next operation: submitted once the test lets it go.
-    #[cfg(test)]
+    #[cfg(all(test, not(madsim)))]
     hold: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
@@ -63,7 +85,7 @@ impl Io {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             engine: Arc::new(Engine::new()?),
-            #[cfg(test)]
+            #[cfg(all(test, not(madsim)))]
             hold: Mutex::new(None),
         })
     }
@@ -77,21 +99,26 @@ impl Io {
         let bytes = buffer.as_mut_slice();
         // The buffer's bytes are on the heap, where moving it into the completion leaves them.
         let raw = Raw { write, addr: bytes.as_mut_ptr() as usize, len: bytes.len(), offset };
-        let fd = file.as_raw_fd();
+        // What the engine runs it on: its file's descriptor; under madsim, the simulated host's
+        // file itself, which has none. The operation holds the file open until it completes.
+        #[cfg(not(madsim))]
+        let on = std::os::fd::AsRawFd::as_raw_fd(file.host_file());
+        #[cfg(madsim)]
+        let on = file.host_file();
         let completion = Arc::new(Completion {
-            state: Mutex::new(State::InFlight { buffer, _file: file }),
+            state: Mutex::new(State::InFlight { buffer, file: file.clone() }),
             waker: AtomicWaker::new(),
         });
-        #[cfg(test)]
+        #[cfg(all(test, not(madsim)))]
         if let Some(hold) = self.hold.lock().unwrap().take() {
             let (engine, submitted) = (self.engine.clone(), completion.clone());
             std::thread::spawn(move || {
                 let _ = hold.recv();
-                engine.submit(fd, raw, submitted);
+                engine.submit(on, raw, submitted);
             });
             return InFlight { completion };
         }
-        self.engine.submit(fd, raw, completion.clone());
+        self.engine.submit(on, raw, completion.clone());
         InFlight { completion }
     }
 }
@@ -99,7 +126,7 @@ impl Io {
 /// An operation's state: in flight, owning its buffer and its file, or done, with its result, a
 /// negated errno on failure, and its buffer, until the future takes them.
 enum State {
-    InFlight { buffer: Aligned, _file: IoFile },
+    InFlight { buffer: Aligned, file: IoFile },
     Done { result: i64, buffer: Aligned },
     Taken,
 }
@@ -111,17 +138,29 @@ pub(super) struct Completion {
 }
 
 impl Completion {
+    /// cladefs: what `run` does with the buffer of the operation, in flight, in place, rather than
+    /// at the address the operation was submitted with: an engine's under madsim (`sim`), which
+    /// runs it as it is submitted.
+    #[cfg(madsim)]
+    fn in_place<T>(&self, run: impl FnOnce(&mut [u8]) -> T) -> T {
+        let mut state = self.state.lock().unwrap();
+        let State::InFlight { buffer, .. } = &mut *state else {
+            unreachable!("an operation run once it completed");
+        };
+        run(buffer.as_mut_slice())
+    }
+
     /// The host is done with the operation's memory and file: the file is let go of, and the
     /// buffer kept for the future, or freed with the completion if the future is gone.
     fn complete(&self, result: i64) {
         let file = {
             let mut state = self.state.lock().unwrap();
-            let State::InFlight { buffer, _file } = std::mem::replace(&mut *state, State::Taken)
+            let State::InFlight { buffer, file } = std::mem::replace(&mut *state, State::Taken)
             else {
                 unreachable!("an operation completed twice");
             };
             *state = State::Done { result, buffer };
-            _file
+            file
         };
         drop(file);
         self.waker.wake();
@@ -155,14 +194,17 @@ impl Future for InFlight {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 use uring::Engine;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(madsim)))]
 use pool::Engine;
 
+#[cfg(madsim)]
+use sim::Engine;
+
 /// The io_uring engine.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 mod uring {
     use super::{Completion, Raw};
     use io_uring::{IoUring, opcode, squeue, types};
@@ -295,7 +337,7 @@ mod uring {
 }
 
 /// The thread pool engine.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(madsim)))]
 mod pool {
     use super::{Completion, Raw};
     use std::io;
@@ -368,6 +410,41 @@ mod pool {
             -(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) as i64)
         } else {
             result
+        }
+    }
+}
+
+/// cladefs: the simulation's engine (doc-24, board 5687), which runs each operation as it is
+/// submitted, on the thread submitting it, in place on its file, a simulated host's (host_fs): in
+/// memory, where it takes no time, as the simulated host's cells' own reads and writes of their
+/// files do, and kept as that disk keeps what is written to it, durable once synced.
+#[cfg(madsim)]
+mod sim {
+    use super::{Completion, Raw};
+    use host_fs::FileExt as _;
+    use std::io;
+    use std::sync::Arc;
+
+    pub(in super::super) struct Engine;
+
+    impl Engine {
+        pub fn new() -> io::Result<Self> {
+            Ok(Self)
+        }
+
+        pub fn submit(&self, file: &host_fs::File, raw: Raw, completion: Arc<Completion>) {
+            let result = completion.in_place(|bytes| {
+                let submitted = (bytes.as_mut_ptr() as usize, bytes.len());
+                assert_eq!(submitted, (raw.addr, raw.len), "an operation's buffer, in place");
+                match raw.write {
+                    false => file.read_at(bytes, raw.offset),
+                    true => file.write_at(bytes, raw.offset),
+                }
+            });
+            completion.complete(match result {
+                Ok(transferred) => transferred as i64,
+                Err(err) => -(err.raw_os_error().unwrap_or(libc::EIO) as i64),
+            });
         }
     }
 }

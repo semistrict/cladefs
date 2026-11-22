@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a store keeps in its directory. See the crate's docs.
+//! What a cell keeps in its directory. See the crate's docs.
 
 use crate::dir::Dir;
 use anyhow::{Context as _, Error, anyhow, ensure};
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use storage_device::ExtentId;
 
-/// The first line of a store's description: its format. cladefs: 6 names the bucket a host's store
+/// The first line of a cell's description: its format. cladefs: 6 names the bucket a host's cell
 /// keeps its cells in (TASK-165.6); 7 places an extent whose data is in the bucket by its
 /// location there (TASK-165.8), and holds one cell, no cell records (TASK-165.7); 8 has no
 /// index: its cell is the bucket's, its write-ahead log and its segments' logs of their
@@ -29,20 +29,20 @@ use storage_device::ExtentId;
 /// cut at their ends, and its description may name a version of its cell it is a copy of
 /// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
 /// were in hexadecimal (`base32_id`, TASK-504); 15's description names its cell's kind alone, as a
-/// cell has one kind, of no cell's name (doc-20, TASK-508.1). A store of another format is
+/// cell has one kind, of no cell's name (doc-20, TASK-508.1). A cell of another format is
 /// refused ([`Format`]): nothing reads, converts or upgrades it.
 pub(crate) const FORMAT: &str = "cladefs extent store 15";
 
-/// cladefs: the error of a store whose description is of another format than [`FORMAT`], an older
+/// cladefs: the error of a cell whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a store of format {found:?}, not {FORMAT:?}: refused")]
+#[error("a cell of format {found:?}, not {FORMAT:?}: refused")]
 pub struct Format {
     /// The description's first line.
     pub found: String,
 }
 
-/// A store, as its user sees it: the size of the blocks extents are read and written in, the most
+/// A cell, as its user sees it: the size of the blocks extents are read and written in, the most
 /// bytes its extents may hold, and its cell, whose extents its user mints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Description {
@@ -51,9 +51,9 @@ pub struct Description {
     pub cell: CellId,
 }
 
-/// The store's description, its `store` file: its format, block size, and cell; and cladefs: the
-/// URL of the bucket its cell is kept in, which every store in a host's directory names
-/// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its cell has
+/// The cell's description, its `store` file: its format, block size, and cell; and cladefs: the
+/// URL of the bucket its cell is kept in, which every cell in a host's directory names
+/// (`create_host`, TASK-165.6), and a cell of memory's need not; the capacity its cell has
 /// until a commit sets one, as a cell made for it, or taken into it, says none; and the fencing
 /// token of its placement, if it was placed (TASK-39.7), which takes the cell,
 /// and so its head (TASK-165.9, TASK-364); and whether that placement's takings are forced.
@@ -71,7 +71,7 @@ pub(crate) struct CellFile {
     pub forced: Option<u64>,
     /// cladefs: of a forced placement whose taking fenced fewer members than a take needs, the
     /// epoch of the last commit the bucket held then, past which commits told replicated may be
-    /// lost (TASK-681): what the store's status says while that placement holds it.
+    /// lost (TASK-681): what the cell's status says while that placement holds it.
     pub forced_after: Option<u64>,
     /// cladefs: the epochs of the replicated cell's configurations it is its writer's copy of
     /// (TASK-683): of each, its write-ahead log holds what the writer synced and the bucket
@@ -81,10 +81,11 @@ pub(crate) struct CellFile {
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
     /// cladefs: the version of its cell it is at, if it is one: its cell's state at the
-    /// version, which nothing writes, as a store at a version (doc-18, TASK-476).
+    /// version, which nothing writes, as a cell at a version (doc-18, TASK-476).
     pub version: Option<u64>,
     /// cladefs: whether its cell is ephemeral (doc-25, TASK-698.2): kept on this host's disk alone,
-    /// never uploaded, its closed segments raw, recovered from its local checkpoint ([`crate::ephemeral`]).
+    /// never uploaded, its closed segments raw, recovered from its local checkpoint
+    /// ([`crate::ephemeral`]).
     pub ephemeral: bool,
 }
 
@@ -202,8 +203,8 @@ pub(crate) const EXTENTS: &str = "extents";
 /// holds, appended and synced by the flushes that make them durable (TASK-165.9).
 pub(crate) const LOGS: &str = "logs";
 /// cladefs: the directory of an ephemeral cell's kept segments, raw, a directory for each cell's:
-/// segments its local checkpoint covers, read in place, the runs of the extents freed in them given back
-/// (doc-25, TASK-698.2).
+/// segments its local checkpoint covers, read in place, the runs of the extents freed in them given
+/// back (doc-25, TASK-698.2).
 pub(crate) const KEPT: &str = "kept";
 
 /// cladefs: an ephemeral cell's local checkpoint: its state as of the last segment it covers
@@ -301,7 +302,7 @@ pub(crate) fn list_numbers<D: Dir>(dir: &D, path: &str) -> Result<Vec<u64>, Erro
     Ok(numbers)
 }
 
-/// The directories of a store's files, each a directory for each cell's.
+/// The directories of a cell's files, each a directory for each cell's.
 pub(crate) const KINDS: [&str; 5] = [SEGMENTS, EXTENTS, LOGS, OPEN_SEGMENTS, OPEN_EXTENTS];
 
 /// Creates `cell`'s directories of segments, extents, logs and open files, where it has none.
@@ -339,11 +340,11 @@ impl Piece {
     }
 }
 
-/// Adds `piece`, written last, to `pieces`, an extent's, joined to the last while they are one
-/// run: they hold none of each other's bytes, so that which is painted over which does not matter.
-/// cladefs: an extent written in runs one after another in a segment, as the guest's device splits a
-/// write larger than its most I/O, is so one piece, which its commit seals where it is, rather than
-/// reading it back and writing it again (TASK-92.1).
+/// Adds `piece`, written last, to `pieces`, an extent's, joined to the last while they are one run:
+/// they hold none of each other's bytes, so that which is painted over which does not matter.
+/// cladefs: an extent written in runs one after another in a segment, as the guest's device splits
+/// a write larger than its most I/O, is so one piece, which its commit seals where it is, rather
+/// than reading it back and writing it again (TASK-92.1).
 pub(crate) fn add_piece(pieces: &mut Vec<Piece>, mut piece: Piece) {
     while let Some(joined) = pieces.last().and_then(|last| last.joined(&piece)) {
         pieces.pop();
@@ -354,7 +355,7 @@ pub(crate) fn add_piece(pieces: &mut Vec<Piece>, mut piece: Piece) {
 
 /// Where an extent's data is: pieces in segments, the later of overlapping pieces holding the data
 /// written last, or a file of its own; or, cladefs, in the bucket, at its location there, which the
-/// store's user reads it from (TASK-165.8).
+/// cell's user reads it from (TASK-165.8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Data {
     Pieces(Vec<Piece>),
@@ -363,8 +364,8 @@ pub(crate) enum Data {
 }
 
 impl Data {
-    /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on its
-    /// way there (`bucket_cell::layout::further`, TASK-195).
+    /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on
+    /// its way there (`bucket_cell::layout::further`, TASK-195).
     pub fn follow(&mut self, to: &Location) {
         if let Data::Bucket(at) = self
             && bucket_cell::layout::further(&at.key, &to.key)
@@ -436,7 +437,7 @@ pub(crate) enum Change {
 
 /// cladefs: of `changes`, an epoch's, the extents it freed that a commit held: but those written in
 /// it, open, which their frees let go of before any commit held them (TASK-79.1). Those of them
-/// that are the cell's own it spends, as the store spends them as it frees them (TASK-79.6);
+/// that are the cell's own it spends, as the cell spends them as it frees them (TASK-79.6);
 /// and a footer frees them alone, so that what its readers spend of it, all its frees, is that
 /// too (TASK-160.15).
 pub(crate) fn held_frees(changes: &[Change]) -> HashSet<ExtentId> {
@@ -455,7 +456,7 @@ pub(crate) fn held_frees(changes: &[Change]) -> HashSet<ExtentId> {
     freed
 }
 
-/// Where an extent's data is, as a store's user sees it.
+/// Where an extent's data is, as a cell's user sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
     /// One run in a segment of a cell's, at an offset: the extent is sealed.
@@ -620,7 +621,7 @@ mod tests {
             ephemeral: false,
         };
         assert_eq!(CellFile::parse(&file.text()).unwrap(), file);
-        // cladefs: a host's store names its bucket (TASK-165.6), and a placed one its placement's
+        // cladefs: a host's cell names its bucket (TASK-165.6), and a placed one its placement's
         // token (TASK-165.9).
         let bucket = Some("file:///images/a/bucket".to_owned());
         let kept = CellFile { bucket, token: Some(7), ..file.clone() };
@@ -656,15 +657,15 @@ mod tests {
         let bare = format!("{FORMAT}\nblock_size 4096\ncell 1\n{capacity}");
         let refused = CellFile::parse(&bare).unwrap_err().to_string();
         assert_eq!(refused, "bad cell: no cell, TENANT/CELL in base 32: 1");
-        // cladefs: a store kept in a bucket names its cell's kind (doc-20).
+        // cladefs: a cell kept in a bucket names its cell's kind (doc-20).
         let named = CellFile { kind: Some(Kind::Sqlite), ..kept.clone() };
         assert!(named.text().ends_with("\nkind sqlite\n"));
         assert_eq!(CellFile::parse(&named.text()).unwrap(), named);
-        // cladefs: a store at a version names the version (TASK-476).
+        // cladefs: a cell at a version names the version (TASK-476).
         let copy = CellFile { version: Some(190), ..kept.clone() };
         assert!(copy.text().ends_with("version 000000000005y\n"));
         assert_eq!(CellFile::parse(&copy.text()).unwrap(), copy);
-        // cladefs: an ephemeral cell's store says so (doc-25, TASK-698.2).
+        // cladefs: an ephemeral cell says so (doc-25, TASK-698.2).
         let ephemeral = CellFile { ephemeral: true, ..named.clone() };
         assert!(ephemeral.text().ends_with("\nkind sqlite\nephemeral yes\n"));
         assert_eq!(CellFile::parse(&ephemeral.text()).unwrap(), ephemeral);

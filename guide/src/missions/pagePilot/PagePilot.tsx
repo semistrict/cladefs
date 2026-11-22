@@ -6,7 +6,7 @@ import type { ComponentType } from "react";
 import { setHere } from "../../data/place.ts";
 import { MissionContext } from "../../ui/mdx.tsx";
 import Shared from "./steps/1-shared.mdx";
-import Store from "./steps/2-store.mdx";
+import Write from "./steps/2-write.mdx";
 import Fsync from "./steps/3-fsync.mdx";
 import Catch from "./steps/4-catch.mdx";
 import Road from "./steps/5-road.mdx";
@@ -20,7 +20,7 @@ interface Step {
 
 export const steps: Step[] = [
   { title: "One page, two forks", kicker: "Read", Body: Shared },
-  { title: "A store in fork A", kicker: "Copy on write", Body: Store },
+  { title: "A write in fork A", kicker: "Copy on write", Body: Write },
   { title: "fsync", kicker: "Writeback, seal, rebind", Body: Fsync },
   { title: "Pull a safety catch", kicker: "TLA+ counterexamples", Body: Catch },
   { title: "The road not taken", kicker: "Writable DAX", Body: Road },
@@ -37,7 +37,7 @@ export function PagePilot({ step }: { step: number }) {
         <span className="eyebrow">Mission · about 10 minutes</span>
         <h1>Page Pilot</h1>
         <p>
-          Follow one page of one file through copy-on-write DAX: shared by two forks, made private by a store, written
+          Follow one page of one file through copy-on-write DAX: shared by two forks, made private by a write, written
           back, sealed and shared again. Predict before each reveal. The diagrams are illustrations of doc-13; the
           traces are TLC’s.
         </p>

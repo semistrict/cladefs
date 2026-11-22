@@ -27,12 +27,12 @@
 //!
 //! A batch that fails leaves the trees as of no commit, part of it applied, and the follower can
 //! never apply the rest: it follows no more, and no reader reads the trees from then on
-//! ([`Failed`]), until the follower is remounted, on a new view of its store. (TASK-79.23)
+//! ([`Failed`]), until the follower is remounted, on a new view of its cell. (TASK-79.23)
 //!
 //! The protocol is generic over [`Kernel`], the kernel's operations: thin C shims in the guest
-//! (guest/linux/fs/cladefs), Shuttle's primitives in tests, so that Shuttle runs the protocol itself
-//! (tests/shuttle.rs). It has no lock-free code of its own, whose relaxed orderings Shuttle, which
-//! makes every atomic SeqCst, couldn't check.
+//! (guest/linux/fs/cladefs), Shuttle's primitives in tests, so that Shuttle runs the protocol
+//! itself (tests/shuttle.rs). It has no lock-free code of its own, whose relaxed orderings Shuttle,
+//! which makes every atomic SeqCst, couldn't check.
 //!
 //! Each of its rules ([`Rules`]) is shown to be needed by a test that fails with it turned off.
 

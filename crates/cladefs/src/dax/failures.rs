@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a vCPU's accesses that fail, as `KVM_RUN` does with `EFAULT` where a DAX window's memory
-//! is inaccessible, and when the VMM gives up on them (TASK-187).
+//! cladefs: a vCPU's accesses that fail, as `KVM_RUN` does with `EFAULT` where a DAX window's
+//! memory is inaccessible, and when the VMM gives up on them (TASK-187).
 //!
 //! The second stage makes memory inaccessible for a moment as it changes it, so that a fault
 //! between its system calls fails rather than resolving wrongly (`dax::uffd`): the VMM retries the
 //! access, which goes through once the change is done. It makes it so for good where the guest
-//! strays, its access to a page the window maps nothing at withheld, or a store past its private
+//! strays, its access to a page the window maps nothing at withheld, or a write past its private
 //! pages refused: the access never goes through, and the VMM stops the VM, the guest's doing
 //! (Firecracker's exit status 159).
 //!
@@ -62,7 +62,7 @@ impl AccessFailures {
 
     /// The vCPU's access failed at `now`: whether to retry it or give up on it. On Linux, a retry
     /// has the second stages lift what they restricted for workers' writes first
-    /// ([`guest_access_failed`](crate::guest_access_failed)), so that a store they kept from
+    /// ([`guest_access_failed`](crate::guest_access_failed)), so that a write they kept from
     /// faulting faults as one.
     pub fn failed(&mut self, now: Instant) -> Failure {
         let ended = self.run.take_if(|run| now - run.last >= Self::IN_A_ROW);

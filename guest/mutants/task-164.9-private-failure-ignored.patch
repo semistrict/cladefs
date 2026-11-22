@@ -5,9 +5,9 @@
 # Killer: scenarios cow_private_failed
 #
 # TASK-164.9, doc-13: the iomap whose PRIVATE fails goes on, its pages dirty, as a write(2)'s
-# PRIVATE ahead of its copy did before: dirty without private, the store left to the host's copy,
+# PRIVATE ahead of its copy did before: dirty without private, the write left to the host's copy,
 # after a writeback may have moved the page's block. cow_private_failed: the write succeeds, and the
-# store reaches a page no PRIVATE made the VM's.
+# write reaches a page no PRIVATE made the VM's.
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c

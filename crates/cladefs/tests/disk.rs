@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! TASK-94: the host's disk a tenant takes, what its stores' files take, counted as they write
+//! TASK-94: the host's disk a tenant takes, what its cells' files take, counted as they write
 //! (TASK-539.5), and limited at runtime through the control API, a tenant's and every tenant's
 //! together. Past a limit the
-//! tenant's writes fail with ENOSPC, and the stores its VMs make; the daemon goes on, and other
+//! tenant's writes fail with ENOSPC, and the cells its VMs make; the daemon goes on, and other
 //! tenants' writes do; what leaves the disk lets the tenant write again. Its metrics show each
 //! tenant's disk by its ID.
 
@@ -25,7 +25,7 @@ use tonic::Code;
 /// The extents VMs write, of a MiB each.
 const EXTENT: u64 = 1 << 20;
 
-/// What a write of one, a new extent's, is admitted as until its commit: it, and what its store's
+/// What a write of one, a new extent's, is admitted as until its commit: it, and what its cell's
 /// own work may add for it as raw data and as an extent open (doc-22); once committed, the open
 /// extent's share goes.
 const ADMITTED: u64 = (1 + 2 * bucket_cell::host_disk::RESERVE_FACTOR) * EXTENT;
@@ -36,10 +36,10 @@ fn contents(seed: u64) -> Vec<u8> {
     (0..EXTENT / (64 << 10)).flat_map(|part| pattern(seed << 8 | part)).collect()
 }
 
-/// Writes extent `sequence` of `store`, `seed`'s bytes.
-fn write(store: &CellClient, sequence: u64, seed: u64) -> Result<(), Errno> {
-    let extent = ExtentId { cell: store.cell(), sequence };
-    store.write(extent, 0, &[VolatileSlice::from(&contents(seed)[..])])
+/// Writes extent `sequence` of `client`, `seed`'s bytes.
+fn write(client: &CellClient, sequence: u64, seed: u64) -> Result<(), Errno> {
+    let extent = ExtentId { cell: client.cell(), sequence };
+    client.write(extent, 0, &[VolatileSlice::from(&contents(seed)[..])])
 }
 
 /// The value of the metric `series`, as the daemon renders its metrics.
@@ -53,7 +53,7 @@ fn metric(series: &str) -> u64 {
 /// The bytes of a segment's log's header, a block (`local_cell::wal::LOG_RECORDS`).
 const LOG_HEADER: u64 = 4096;
 
-/// What a store's files under `dir` take, as its footprint counts them (`local_cell::footprint`):
+/// What a cell's files under `dir` take, as its footprint counts them (`local_cell::footprint`):
 /// each file's length rounded up to a granule, once however many names it has, and each
 /// directory under `dir` a granule.
 fn counted(dir: &Path) -> u64 {
@@ -76,11 +76,11 @@ fn counted(dir: &Path) -> u64 {
     bytes
 }
 
-/// What the stores in a tenant's directory, `dir`, take, as their footprints count them: each
-/// directory in it a store.
-fn stores(dir: &Path) -> u64 {
-    let stores = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path());
-    stores.filter(|store| store.is_dir()).map(|store| counted(&store)).sum()
+/// What the cells in a tenant's directory, `dir`, take, as their footprints count them: each
+/// directory in it a cell.
+fn cells(dir: &Path) -> u64 {
+    let cells = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path());
+    cells.filter(|cell| cell.is_dir()).map(|cell| counted(&cell)).sum()
 }
 
 /// Waits until `done` says so, polling, a minute at most: what it waits for, as an upload's
@@ -95,9 +95,9 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 
 /// A tenant whose VMs, forks of a base of its, write past its limit is refused with ENOSPC, while
 /// another tenant writes on, past what the first's limit would allow, and the daemon's own VMs do;
-/// and the first's VMs still commit. What it takes is what its stores' files do, as their
-/// footprints count them: a fork of a base takes little of its own. Once what it wrote leaves the disk, freed and uploaded,
-/// it writes again. Every tenant's limit refuses any tenant past it.
+/// and the first's VMs still commit. What it takes is what its cells' files do, as their footprints
+/// count them: a fork of a base takes little of its own. Once what it wrote leaves the disk, freed
+/// and uploaded, it writes again. Every tenant's limit refuses any tenant past it.
 #[test]
 fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let dir = tempfile::tempdir().unwrap();
@@ -108,7 +108,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let acme_socket = daemon.grant(1, &acme, None).unwrap();
     let globex_socket = daemon.grant(2, &globex, None).unwrap();
 
-    // Acme's base, which its VMs' stores are forks of, uploaded, as its VM manager makes them.
+    // Acme's base, which its VMs' cells are forks of, uploaded, as its VM manager makes them.
     let base = acme.join("base");
     let vm = CellClient::connect(&acme_socket, &base, CAPACITY).unwrap();
     for sequence in 1..=8 {
@@ -121,17 +121,17 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     for fork in &forks {
         daemon.fork(&base, fork).unwrap();
     }
-    // What it takes is what its stores' files do.
+    // What it takes is what its cells' files do.
     let (taken, limit) = daemon.tenant_disk(Some(1)).unwrap();
-    assert_eq!((taken, limit), (stores(&acme), None));
-    // Each fork takes little of its own, the base's data in the bucket: no more than a store made
+    assert_eq!((taken, limit), (cells(&acme), None));
+    // Each fork takes little of its own, the base's data in the bucket: no more than a cell made
     // is admitted as.
     for fork in &forks {
         assert!(counted(fork) <= STORE_MADE, "{} takes {} bytes", fork.display(), counted(fork));
     }
 
     // 16 MiB more, its VMs writing its forks, uncommitted, which none uploads: room for them as
-    // admitted, past what its stores, open, take and reserve.
+    // admitted, past what its cells, open, take and reserve.
     let vms: Vec<_> = (forks.iter())
         .map(|fork| CellClient::connect(&acme_socket, fork, CAPACITY).unwrap())
         .collect();
@@ -149,17 +149,17 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     };
     assert_eq!((refused, written), (Errno::ENOSPC, 16));
     // What it takes, counted again, is what it wrote, and the base of each fork's write-ahead
-    // log, which its store makes as it opens to write (backlog doc-14, `wal`), and the header of
+    // log, which its cell makes as it opens to write (backlog doc-14, `wal`), and the header of
     // its open segment's log (TASK-301): its metrics name it by its ID, with its limit.
     let (full, _) = daemon.tenant_disk(Some(1)).unwrap();
     let wal = |fork: &Path| std::fs::metadata(fork.join("wal")).unwrap().len();
     let wals: u64 = forks.iter().map(|fork| bucket_cell::host_disk::counted(wal(fork))).sum();
     let opened = wals + forks.len() as u64 * LOG_HEADER;
-    assert_eq!((full, stores(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
+    assert_eq!((full, cells(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
     let tenant = "{tenant=\"1\"}";
     assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
     assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);
-    // A store its VM makes is refused too.
+    // A cell its VM makes is refused too.
     let made = CellClient::connect(&acme_socket, acme.join("more"), CAPACITY);
     assert_eq!(made.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOSPC)));
     assert!(!acme.join("more").exists());
@@ -211,7 +211,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
 
     // Lifted, it writes on; every tenant's limit, reached, refuses any: room for two writes past
     // what every tenant takes and reserves, and for what their uploads let go of meanwhile, which
-    // frames and leaves their stores, a few more at most.
+    // frames and leaves their cells, a few more at most.
     daemon.set_disk_limit(Some(1), None).unwrap();
     let (every, none) = daemon.tenant_disk(None).unwrap();
     assert_eq!(none, None);

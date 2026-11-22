@@ -5,12 +5,12 @@
 # Killer: cladefsd::tests::hostile::what_requests_hold_is_within_the_credit
 --- a/crates/cladefs/src/open_cell.rs
 +++ b/crates/cladefs/src/open_cell.rs
-@@ -544,7 +544,7 @@
+@@ -640,7 +640,7 @@
      /// (TASK-149.17): which a VM process names, so that a connection of the extent daemon's held
      /// a copy of each of its requests' whole lengths, as many as it serves at once, past what the
      /// protocol bounds of it.
 -    pub const PIECE: usize = 1 << 20;
 +    pub const PIECE: usize = usize::MAX;
  
-     /// A new store at `path`, which must not exist, holding at most `capacity` bytes, with a cell
-     /// of its own. cladefs: kept in this host's bucket, or, where this is no host of cladefs's system, a
+     /// A new cell directory at `path`, which must not exist, holding at most `capacity` bytes, with
+     /// a cell of its own. cladefs: kept in this host's bucket, or, where this is no host of

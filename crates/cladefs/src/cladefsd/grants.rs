@@ -36,11 +36,11 @@ impl Grants {
     }
 
     /// Grants the tenant of the ID `id` in the bucket (TASK-364), not the default tenant's
-    /// (`EINVAL`), whose stores are in `dir`, its socket, given to `uid` and `gid` (the daemon's
+    /// (`EINVAL`), whose cells are in `dir`, its socket, given to `uid` and `gid` (the daemon's
     /// own, where not given), and returns its path: a new tenant's, which a thread of its own
     /// serves; or, granted already, its socket, given again (`EEXIST` with another directory). A
     /// tenant revoked whose VM processes live on is the one granted again, its socket new: those it
-    /// connects then share its arena with them, and the stores they have open (TASK-79.36), which,
+    /// connects then share its arena with them, and the cells they have open (TASK-79.36), which,
     /// another tenant's, they could not.
     pub fn grant(
         &self,
@@ -83,20 +83,20 @@ impl Grants {
         Ok(socket)
     }
 
-    /// The ID in the bucket of the granted tenant whose directory the store at `path` is in, if
+    /// The ID in the bucket of the granted tenant whose directory the cell at `path` is in, if
     /// any (TASK-364).
     pub fn tenant_at(&self, path: &Path) -> Option<u64> {
-        let key = super::cells::store_key(path);
+        let key = super::cells::cell_dir_key(path);
         let granted = self.granted.lock().unwrap();
         let mut grants = granted.values().map(|grant| &grant.tenant);
         grants.find(|tenant| tenant.dir().is_some_and(|dir| key_in_dir(&key, dir))).map(|t| t.id())
     }
 
-    /// Whether the stores at `one` and `other` are of one tenant, or of none: their paths in one
+    /// Whether the cells at `one` and `other` are of one tenant, or of none: their paths in one
     /// tenant's directory, as VM processes name them.
     pub fn same_tenant(&self, one: &Path, other: &Path) -> bool {
-        let one = super::cells::store_key(one);
-        let other = super::cells::store_key(other);
+        let one = super::cells::cell_dir_key(one);
+        let other = super::cells::cell_dir_key(other);
         let granted = self.granted.lock().unwrap();
         let tenant_of = |path: &Path| {
             granted

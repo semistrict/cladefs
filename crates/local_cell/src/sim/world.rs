@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The simulated world: hosts whose stores keep cells for their guests, each a [`LocalCell`] over a
+//! The simulated world: hosts keeping cells for their guests, each a [`LocalCell`] over a
 //! directory of the host's disk in memory, which does its I/O in the order its calls make
 //! ([`MemDir::serial`]), and its uploader, `upload`'s, uploading its write-ahead log to the bucket;
 //! forks, takeovers, deletions and collectors; driven by a seeded scheduler that also decides when,
 //! in what order and how each request to the bucket completes, and when each uploader's interval
 //! runs out. After every step it checks every live cell against what its guests did and were
-//! told (TASK-88: the segments, their footers and the logs are the store's, as a host's are).
+//! told (TASK-88: the segments, their footers and the logs are the cell's, as a host's are).
 //!
 //! cladefs: replicated cells (doc-21, TASK-680): each host keeps a replica directory, and the
 //! network between hosts delays, duplicates, drops and partitions, one way or both, the writers'
@@ -52,15 +52,15 @@ pub struct Weights {
     /// A guest writes an extent, which its next commit seals.
     pub write: u32,
     pub commit: u32,
-    /// A store's uploader is asked for its commits, as a commit waiting for its upload asks, or
-    /// its interval runs out: either closes the store's open segment.
+    /// A cell's uploader is asked for its commits, as a commit waiting for its upload asks, or
+    /// its interval runs out: either closes the cell's open segment.
     pub close: u32,
     pub checkpoint: u32,
     /// A writer takes a cell that has none.
     pub open: u32,
     /// A writer takes a cell from the one it has.
     pub takeover: u32,
-    /// A host crashes, its disk keeping what was durable, or lost, its stores with it.
+    /// A host crashes, its disk keeping what was durable, or lost, its cells with it.
     pub crash: u32,
     pub delete: u32,
     /// A cell a fork of which lives is deleted: a base whose forks live on (TASK-39.4).
@@ -81,14 +81,14 @@ pub struct Weights {
     /// A writer whose session stopped, a later one taking its cell or its host cut off, which
     /// runs on unaware, checkpoints: late, past where the next writer recovered from (TASK-175).
     pub stale_checkpoint: u32,
-    /// cladefs: a cell's writer cuts a version, its store quiescent (doc-18, TASK-476).
+    /// cladefs: a cell's writer cuts a version, its cell quiescent (doc-18, TASK-476).
     pub version: u32,
     /// cladefs: a cell's writer drops one of its versions, uploaded or local.
     pub drop_version: u32,
     /// cladefs: a host restores a version a cell's head names, which may be dropped by now: a fork
     /// of it, its child's record alone, as many hosts do at once.
     pub restore_version: u32,
-    /// The store's clock advances.
+    /// The cell's clock advances.
     pub tick: u32,
     /// cladefs: a replicated cell's writer sends a member of its configuration what it lacks
     /// next, a turn of the member's (TASK-680).
@@ -110,7 +110,7 @@ pub struct Profile {
     /// from, each until an object at its key is deleted ([`SimBucket::hold`], TASK-79.18).
     pub hold: f64,
     /// Whether a host that crashes, its disk kept, starts again at once, taking back the cells
-    /// it had, as cladefsd opens its stores at boot: while the creates its writers had in flight
+    /// it had, as cladefsd opens its cells at boot: while the creates its writers had in flight
     /// land.
     pub restarts: bool,
     /// cladefs: the chance that a collector's pass is over one cell alone, not a sweep over
@@ -132,7 +132,7 @@ pub struct Profile {
     /// of reach, landing or not, or lands later, again or for the first time.
     pub net_faults: f64,
     /// cladefs: whether a crash corrupts what a disk kept of the writes its files never synced
-    /// ([`MemDir::crash_corrupting`]), its stores' and replica directories', at random.
+    /// ([`MemDir::crash_corrupting`]), its cells' and replica directories', at random.
     pub corrupting: bool,
     /// cladefs: whether its end deletes every cell, once checked, and sweeps until the collectors
     /// do nothing more, checking then that nothing is left ([`World::tear_down`]): the copies of
@@ -234,21 +234,21 @@ impl Default for Profile {
     }
 }
 
-/// cladefs: the simulation's cell `id`: a cell of its own, as a store made
+/// cladefs: the simulation's cell `id`: a cell of its own, as one made
 /// alone, or a fork, is (TASK-364).
 fn sim_cell(id: u64) -> bucket_cell::layout::CellId {
     bucket_cell::layout::CellId { tenant: 1, id }
 }
 
-/// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
+/// The block size of the hosts' cells: small, so that a few blocks make an extent, and segments
 /// of a few extents close, full, between commits. cladefs: a sector of an open segment, the least
 /// it takes (`segments::SECTOR`, TASK-411.8); 512 bytes before.
 const BLOCK: u64 = crate::segments::SECTOR;
 
-/// How the hosts' stores keep their cells: in segments of a few extents, those of three blocks
-/// or more in objects of their own. No segment closes for its age, which the store's clock, not
+/// How the hosts keep their cells: in segments of a few extents, those of three blocks
+/// or more in objects of their own. No segment closes for its age, which the cell's clock, not
 /// the world's, would decide.
-fn store_options() -> crate::Options {
+fn cell_options() -> crate::Options {
     crate::Options {
         max_extent: 4 * BLOCK,
         segment_size: 6 * BLOCK,
@@ -262,7 +262,7 @@ fn store_options() -> crate::Options {
     }
 }
 
-/// The capacity of the hosts' stores: what a commit gives a cell that has none yet.
+/// The capacity of the hosts' cells: what a commit gives a cell that has none yet.
 const CAPACITY: u64 = 1 << 40;
 
 /// The uploaders' interval, which only the world's [`Intervals`] run out.
@@ -293,7 +293,8 @@ struct Intervals {
 }
 
 impl Intervals {
-    /// The uploader's clock: each interval it waits out runs out at the next [`Intervals::run_out`].
+    /// The uploader's clock: each interval it waits out runs out at the next
+    /// [`Intervals::run_out`].
     fn clock(self: &Arc<Self>) -> Clock {
         let intervals = self.clone();
         Arc::new(move |_| {
@@ -698,30 +699,30 @@ struct Truth {
     capacity: Option<u64>,
 }
 
-/// A cell's store's directory on a host's disk: its write-ahead log, open segment and index, as
+/// A cell's directory on a host's disk: its write-ahead log, open segment and index, as
 /// a crash leaves them.
 struct Disk {
     dir: MemDir,
-    /// Whether its store was made whole ([`LocalCell::made`]).
+    /// Whether its cell was made whole ([`LocalCell::made`]).
     made: bool,
-    /// The history of commits its store holds ([`World::lineages`]): a new one once its log is
+    /// The history of commits its cell holds ([`World::lineages`]): a new one once its log is
     /// dropped.
     lineage: u64,
 }
 
 struct Host {
-    /// Each cell's store's directory (doc-14), by cell.
+    /// Each cell's directory (doc-14), by cell.
     disks: HashMap<u64, Disk>,
     sessions: BTreeMap<u64, Session>,
     /// The PUTs its writers upload objects with, as a host's share one budget
     /// (`local_cell::upload`): a few at once, so that uploads wait for each other's to be done,
     /// and are woken as they are (TASK-149.32).
     uploads: Arc<Budget>,
-    /// What holds the parts its stores pack as their segments fill, which they share, as a
+    /// What holds the parts its cells pack as their segments fill, which they share, as a
     /// daemon's do (`crate::held`, TASK-400).
     held: Arc<crate::HeldParts>,
-    /// cladefs: its keys, its KMS the tests' and its fetchers' keys its own, which its stores share,
-    /// as a daemon's do: every store encrypted (TASK-411.28).
+    /// cladefs: its keys, its KMS the tests' and its fetchers' keys its own, which its cells share,
+    /// as a daemon's do: every cell encrypted (TASK-411.28).
     keys: bucket_cell::keys::Host,
     /// cladefs: its mirrors under way, by ID ([`World::spawn_mirror`]), which its crash stops.
     mirrors: BTreeMap<u64, AbortHandle>,
@@ -742,19 +743,19 @@ impl Default for Host {
     }
 }
 
-/// A cell's store on a host, its uploader, and its guest.
+/// A cell on a host, its uploader, and its guest.
 struct Session {
     id: u64,
     /// The fencing token of the placement it is.
     token: u64,
-    /// The history of commits its store holds ([`Disk::lineage`]).
+    /// The history of commits its cell holds ([`Disk::lineage`]).
     lineage: u64,
     uploader: Arc<Uploader>,
     intervals: Arc<Intervals>,
-    /// What opening the store gave, once it did.
+    /// What opening the cell gave, once it did.
     started: futures::channel::oneshot::Receiver<Result<Arc<LocalCell<MemDir>>, Failure>>,
-    /// The store, once open.
-    store: Option<Arc<LocalCell<MemDir>>>,
+    /// The cell, once open.
+    cell: Option<Arc<LocalCell<MemDir>>>,
     /// The uploader's task.
     running: AbortHandle,
     guest: Guest,
@@ -762,7 +763,7 @@ struct Session {
     /// spawns them; and once it did, each one's.
     kept: Arc<Mutex<Vec<BoxFuture<'static, ()>>>>,
     keepers: Vec<AbortHandle>,
-    /// cladefs: whether its take restored its members' logs into its store's directory, which
+    /// cladefs: whether its take restored its members' logs into its cell directory, which
     /// the world followed ([`World::follow_restore`]).
     restored: bool,
 }
@@ -871,11 +872,11 @@ pub struct World {
     commits: HashMap<u64, Truth>,
     /// The commit, or write, that minted each extent.
     minted: HashMap<ExtentId, u64>,
-    /// Each history of commits a store held, by the store's epoch of each: what the tags of the
+    /// Each history of commits a cell held, by the cell's epoch of each: what the tags of the
     /// commits its writers upload name ([`World::truth_of`]).
     lineages: HashMap<u64, BTreeMap<u64, u64>>,
     /// The history the commits each writer uploads are of, by its cell and epoch: a writer
-    /// uploads one store's.
+    /// uploads one cell's.
     stamps: HashMap<(u64, u64), u64>,
     collectors: BTreeMap<u64, AbortHandle>,
     /// The writers of the sessions stopped, the latest few, which may run on unaware
@@ -897,7 +898,7 @@ pub struct World {
     quiescing: bool,
     /// The tasks spawned and not done, aborted or dropped, by number, each with where it was
     /// spawned: one still here once every request is done waits for a wake nothing will give
-    /// (TASK-149.32). The uploaders, which wait for commits for as long as their stores are open,
+    /// (TASK-149.32). The uploaders, which wait for commits for as long as their cells are open,
     /// are not among them: that each uploads what it is asked to is checked of it
     /// ([`World::check_uploaded`]).
     tasks: Rc<RefCell<BTreeMap<u64, &'static std::panic::Location<'static>>>>,
@@ -924,7 +925,7 @@ impl Drop for Running {
 }
 
 /// A sweep of the collector over every cell of `bucket`, as `id`. cladefs: of a region's bucket, by
-/// a collector of its region, its own store's copies of other buckets' cells passed over as such
+/// a collector of its region, its own cell's copies of other buckets' cells passed over as such
 /// (TASK-633.8).
 async fn sweep(bucket: &SimBucket, id: u64, options: &Options) -> Result<collector::Report, Error> {
     match bucket.home() {
@@ -1049,7 +1050,7 @@ impl World {
     }
 
     /// Runs the profile's steps, then lets everything finish and checks that no garbage is left.
-    /// The test's outermost entry: its steps await the stores, which [`crate::wait_here`] runs them
+    /// The test's outermost entry: its steps await the cells, which [`crate::wait_here`] runs them
     /// for, its pool's tasks run between their awaits ([`World::settle_tasks`]), which
     /// `futures::executor::block_on` would refuse to.
     pub fn run(&mut self) {
@@ -1159,7 +1160,7 @@ impl World {
 
     // Tasks.
 
-    /// Spawns an uploader's `task`, which waits for its store's commits for as long as it is
+    /// Spawns an uploader's `task`, which waits for its cell's commits for as long as it is
     /// open: counted among no [`World::tasks`].
     fn spawn_uploader(&mut self, task: impl Future<Output = ()> + 'static) -> AbortHandle {
         let (task, handle) = abortable(task);
@@ -1315,9 +1316,9 @@ impl World {
         }
     }
 
-    // The stores and their uploaders.
+    // The cells and their uploaders.
 
-    /// Takes in what each session's uploader did since: its store opened, or refused to; its
+    /// Takes in what each session's uploader did since: its cell opened, or refused to; its
     /// uploader stopped; the epoch of its writer, which the tags of the commits it uploads
     /// name; and the commits it uploaded, which their guests are told are durable. Returns
     /// whether a session opened, ended or started anew, which the next run of the tasks may go on
@@ -1337,9 +1338,9 @@ impl World {
                 }
                 let session = &self.hosts[host].sessions[&cell];
                 let id = session.id;
-                // cladefs: a take that restored its members' logs into the store's directory, as
+                // cladefs: a take that restored its members' logs into the cell directory, as
                 // its write-ahead log, opened or not yet (TASK-680).
-                if session.store.is_none()
+                if session.cell.is_none()
                     && !session.restored
                     && let Some(from) = session.uploader.recovered_from()
                 {
@@ -1347,13 +1348,13 @@ impl World {
                     changed = true;
                 }
                 let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
-                if session.store.is_none() {
+                if session.cell.is_none() {
                     match session.started.try_recv() {
-                        Ok(Some(Ok(store))) => self.opened(host, cell, store),
+                        Ok(Some(Ok(open_cell))) => self.opened(host, cell, open_cell),
                         Ok(Some(Err(failure))) => self.refused(host, cell, failure),
                         Ok(None) => continue,
                         Err(futures::channel::oneshot::Canceled) => {
-                            unreachable!("an uploader stopped without saying how its store opened")
+                            unreachable!("an uploader stopped without saying how its cell opened")
                         }
                     }
                     changed = true;
@@ -1386,7 +1387,7 @@ impl World {
                     .filter(|tag| commits[tag].cell == cell)
                     .collect();
                 // cladefs: and of what was replicated, by its replicator's word (TASK-680).
-                let replicator = session.store.as_ref().and_then(|store| store.replicator());
+                let replicator = session.cell.as_ref().and_then(|open_cell| open_cell.replicator());
                 let told: Vec<u64> = match replicator {
                     Some(replicator) => (self.lineages[&lineage]
                         .range(..=replicator.told(uploaded)))
@@ -1405,13 +1406,13 @@ impl World {
     }
 
     /// cladefs: the take of `cell`'s session on `host` restored the logs of the members of `from`
-    /// into its store's directory, as its write-ahead log (TASK-680): the store's history is, from
-    /// now on, what `from`'s writer's store held.
+    /// into its cell directory, as its write-ahead log (TASK-680): the cell's history is, from
+    /// now on, what `from`'s writer's cell held.
     fn follow_restore(&mut self, host: usize, cell: u64, from: &layout::Configuration) {
         self.hosts[host].sessions.get_mut(&cell).unwrap().restored = true;
         let Some(&source) = self.stamps.get(&(cell, from.epoch)) else {
             return self.violation(format!(
-                "cell {cell}'s store recovered from configuration {} of a writer of epoch {}, \
+                "cell {cell} recovered from configuration {} of a writer of epoch {}, \
                  which no session's was",
                 from.number,
                 from.epoch,
@@ -1424,7 +1425,7 @@ impl World {
         self.hosts[host].disks.get_mut(&cell).unwrap().lineage = lineage;
         self.hosts[host].sessions.get_mut(&cell).unwrap().lineage = lineage;
         trace!(
-            "host {host}: {cell}'s store restored from configuration {} of writer {}: history \
+            "host {host}: {cell} restored from configuration {} of writer {}: history \
              {lineage}, of {source}'s",
             from.number,
             from.epoch,
@@ -1433,7 +1434,7 @@ impl World {
     }
 
     /// cladefs: a forced take of `cell` opened, the bucket holding its commits through epoch
-    /// `epoch`, its store's last commit `head` (TASK-681): what was told replicated past that epoch,
+    /// `epoch`, its cell's last commit `head` (TASK-681): what was told replicated past that epoch,
     /// which the members that did not answer alone may have held, is let go of; what was told
     /// through it must be its history, as the bucket holds it.
     fn forced(&mut self, cell: u64, epoch: u64, head: Option<u64>) {
@@ -1464,7 +1465,7 @@ impl World {
         found.told.retain(|tag| !lost.contains(tag));
     }
 
-    /// The directory of `cell`'s store on `host`, made if its disk has none.
+    /// The cell directory of `cell` on `host`, made if its disk has none.
     fn disk(&mut self, host: usize, cell: u64) -> &mut Disk {
         if !self.hosts[host].disks.contains_key(&cell) {
             let dir = MemDir::serial();
@@ -1478,7 +1479,7 @@ impl World {
         self.hosts[host].disks.get_mut(&cell).unwrap()
     }
 
-    /// Starts a session of `cell` on `host`: its store opened, its writer taking the cell, of
+    /// Starts a session of `cell` on `host`: its cell opened, its writer taking the cell, of
     /// the placement whose fencing token is `token`, or, with none, of a new one, the latest.
     fn start_session(&mut self, host: usize, cell: u64, token: Option<u64>) {
         let disk = self.disk(host, cell);
@@ -1489,12 +1490,13 @@ impl World {
         };
         match recovering {
             Ok(recovering) => self.run_session(host, cell, token, recovering),
-            Err(err) => self
-                .violation(format!("recovering cell {cell}'s store: {err:#}", cell = Short(cell))),
+            Err(err) => {
+                self.violation(format!("recovering cell {cell}: {err:#}", cell = Short(cell)))
+            }
         }
     }
 
-    /// Starts a session of `cell` on `host` that opens the store `recovering` recovered, as
+    /// Starts a session of `cell` on `host` that opens the cell `recovering` recovered, as
     /// [`World::start_session`] does.
     fn run_session(
         &mut self,
@@ -1504,7 +1506,7 @@ impl World {
         recovering: Recovering<MemDir>,
     ) {
         let (id, holder) = (self.id(), self.id());
-        // cladefs: its placement's, which its store's description names once it was placed, as a
+        // cladefs: its placement's, which its cell's description names once it was placed, as a
         // forced one is (TASK-681): what its writer takes the cell with, whatever it is asked.
         let token = recovering.token().or(token).unwrap_or(holder);
         let intervals = Arc::<Intervals>::default();
@@ -1542,7 +1544,7 @@ impl World {
         let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {
             let recovering = (recovering, None);
-            running.run(recovering, store_options(), bucket, holder, started).await;
+            running.run(recovering, cell_options(), bucket, holder, started).await;
         });
         let lineage = self.hosts[host].disks[&cell].lineage;
         trace!(
@@ -1556,7 +1558,7 @@ impl World {
             uploader,
             intervals,
             started: start,
-            store: None,
+            cell: None,
             running,
             guest: Guest::default(),
             kept,
@@ -1566,29 +1568,28 @@ impl World {
         self.hosts[host].sessions.insert(cell, session);
     }
 
-    /// `cell`'s store on `host` opened, its writer having taken the cell: its log put after
+    /// `cell`'s cell on `host` opened, its writer having taken the cell: its log put after
     /// the cell's end, what it holds that landed acknowledged, the rest stamped anew. Its guest
-    /// starts from its last commit, which the store's history holds, or the bucket's.
-    fn opened(&mut self, host: usize, cell: u64, store: Arc<LocalCell<MemDir>>) {
+    /// starts from its last commit, which the cell's history holds, or the bucket's.
+    fn opened(&mut self, host: usize, cell: u64, open_cell: Arc<LocalCell<MemDir>>) {
         let disk = self.hosts[host].disks.get_mut(&cell).unwrap();
         if !disk.made {
-            if let Err(err) = store.made() {
-                return self
-                    .violation(format!("making cell {cell}'s store: {err:#}", cell = Short(cell)));
+            if let Err(err) = open_cell.made() {
+                return self.violation(format!("making cell {cell}: {err:#}", cell = Short(cell)));
             }
             disk.made = true;
         }
         let session = &self.hosts[host].sessions[&cell];
         let (token, lineage, uploader) = (session.token, session.lineage, session.uploader.clone());
         let writer = uploader.writer().expect("a writer took the cell");
-        let epoch = match store.last_commit() {
+        let epoch = match open_cell.last_commit() {
             Ok(epoch) => epoch,
             Err(err) => {
-                return self.violation(format!("cell {cell}'s store: {err:#}", cell = Short(cell)));
+                return self.violation(format!("cell {cell}: {err:#}", cell = Short(cell)));
             }
         };
         // Its last commit: its log's, past the cell's end, or the cell's, its log holding
-        // nothing more: the store's history then, if it holds that commit, or the bucket's, the
+        // nothing more: the cell's history then, if it holds that commit, or the bucket's, the
         // commits its history holds past it lost, a crash taking them before they were durable.
         let last = writer.state().last_commit;
         let history = &self.lineages[&lineage];
@@ -1640,20 +1641,20 @@ impl World {
         );
         session.lineage = lineage;
         session.guest = Guest { head, held, written: BTreeMap::new(), next_sequence };
-        session.store = Some(store);
+        session.cell = Some(open_cell);
         // cladefs: its host begins the mirror of the version it was forked from, if any, as
         // `upload::open` does, the host that forked it perhaps dead before it did (TASK-633.8).
         self.spawn_mirror(host, cell, None);
     }
 
-    /// `cell`'s store on `host` did not open, for `failure`: its log diverged, another writer's
+    /// `cell`'s cell on `host` did not open, for `failure`: its log diverged, another writer's
     /// commits past it, which `cladefsctl take` drops, and it opens again with none; else its guest
     /// goes. cladefs: a log diverged must have: the cell's last commit is neither one of its
     /// commits nor its base. Before, every divergence was taken as one, which hid a log whose
     /// segment ending one commit and going on with the next landed alone, its next commit, durable,
     /// dropped (TASK-345).
     fn refused(&mut self, host: usize, cell: u64, failure: Failure) {
-        trace!("host {host}: {cell}'s store refused: {failure}", cell = Short(cell));
+        trace!("host {host}: {cell} refused: {failure}", cell = Short(cell));
         let session = self.hosts[host].sessions.remove(&cell).unwrap();
         let token = session.token;
         self.stop(host, cell, session);
@@ -1668,8 +1669,7 @@ impl World {
             let mut recovering = match recovering {
                 Ok(recovering) => recovering,
                 Err(err) => {
-                    return self
-                        .violation(format!("cell {cell}'s store: {err:#}", cell = Short(cell)));
+                    return self.violation(format!("cell {cell}: {err:#}", cell = Short(cell)));
                 }
             };
             let origin = self.cells[&cell].origin;
@@ -1711,7 +1711,7 @@ impl World {
     /// cladefs: whether too many members of the configuration `cell`'s head names lost their disks,
     /// their replica directories of another incarnation now, for a take on `host` to fence
     /// enough of them: f+1 others than its writer, or f, if `host` is its writer, in the
-    /// incarnation it names, and its store holds a write-ahead log, as `upload`'s fence counts
+    /// incarnation it names, and its cell holds a write-ahead log, as `upload`'s fence counts
     /// (TASK-681).
     fn members_gone(&self, host: usize, cell: u64) -> Result<bool, String> {
         let Some(net) = &self.net else { return Ok(false) };
@@ -1741,7 +1741,7 @@ impl World {
         Ok(answering < needed)
     }
 
-    /// cladefs: takes `cell` on `host` by force (TASK-681): its store placed forced, at a new
+    /// cladefs: takes `cell` on `host` by force (TASK-681): its cell placed forced, at a new
     /// placement; what its guests were told replicated past what it recovered may be lost, and is
     /// let go of once it opened ([`World::forced`]).
     fn force(&mut self, host: usize, cell: u64) {
@@ -1757,7 +1757,7 @@ impl World {
 
     /// The commit the guests made that `tag`, a commit's in a footer or a state of `cell`'s,
     /// names: the tag names the epoch of the writer that uploaded it, which says which
-    /// store's history it is of, and the store's epoch of it there. A fork's child names its
+    /// cell's history it is of, and the cell's epoch of it there. A fork's child names its
     /// parent's commits until it has its own.
     fn truth_of(&self, cell: u64, tag: Option<u64>) -> Result<Option<u64>, String> {
         let Some(tag) = tag else { return Ok(None) };
@@ -1783,7 +1783,7 @@ impl World {
     }
 
     /// Stops `session`, of `cell` on `host`, taken out of the host's sessions: its uploader, as
-    /// its host dying stops it, and its store, which closes as it goes, making its last commits
+    /// its host dying stops it, and its cell, which closes as it goes, making its last commits
     /// durable, before anything opens its directory again; a crash took what its disk keeps
     /// before ([`World::crash`]).
     fn stop(&mut self, host: usize, cell: u64, session: Session) {
@@ -1798,16 +1798,16 @@ impl World {
                 self.stale.remove(0);
             }
         }
-        let Session { uploader, store, kept, .. } = session;
+        let Session { uploader, cell: open_cell, kept, .. } = session;
         drop(kept);
-        let closing = store.as_ref().map(Arc::downgrade);
+        let closing = open_cell.as_ref().map(Arc::downgrade);
         let going = Arc::downgrade(&uploader);
-        drop((uploader, store));
-        // The uploader's task, aborted, lets go of the store as it is next polled.
+        drop((uploader, open_cell));
+        // The uploader's task, aborted, lets go of the cell as it is next polled.
         self.pool.run_until_stalled();
         assert!(
-            closing.as_ref().is_none_or(|store| store.strong_count() == 0),
-            "cell {cell}'s store on host {host} is open still, its session stopped: {} \
+            closing.as_ref().is_none_or(|open_cell| open_cell.strong_count() == 0),
+            "cell {cell} on host {host} is open still, its session stopped: {} \
              holds of it, {} of its uploader",
             closing.as_ref().map_or(0, std::sync::Weak::strong_count),
             going.strong_count(),
@@ -1815,37 +1815,34 @@ impl World {
         );
     }
 
-    /// `cell`'s store on `host` failed doing what its guest asked, for `err`: which it may only
-    /// once its uploader stopped. `store` is the caller's hold of it, let go first, as the
-    /// session's end closes the store ([`World::stop`]).
-    fn store_failed(
+    /// `cell`'s cell on `host` failed doing what its guest asked, for `err`: which it may only
+    /// once its uploader stopped. `open_cell` is the caller's hold of it, let go first, as the
+    /// session's end closes the cell ([`World::stop`]).
+    fn cell_failed(
         &mut self,
         host: usize,
         cell: u64,
-        store: Arc<LocalCell<MemDir>>,
+        open_cell: Arc<LocalCell<MemDir>>,
         err: anyhow::Error,
     ) {
-        drop(store);
+        drop(open_cell);
         let session = &self.hosts[host].sessions[&cell];
         let (id, stopped) = (session.id, session.uploader.failed().is_some());
         if !stopped {
-            self.violation(format!(
-                "cell {cell}'s store on host {host}: {err:#}",
-                cell = Short(cell)
-            ));
+            self.violation(format!("cell {cell} on host {host}: {err:#}", cell = Short(cell)));
         }
         self.end(host, cell, id);
     }
 
-    /// Checks that every session's uploader uploads what its store committed, asked to, as
+    /// Checks that every session's uploader uploads what its cell committed, asked to, as
     /// everything settles (TASK-149.32): one that doesn't waits for a wake nothing will give.
     fn check_uploaded(&mut self) {
         trace!("checking uploads");
         let mut asked = Vec::new();
         for host in &self.hosts {
             for (&cell, session) in &host.sessions {
-                let Some(store) = &session.store else { continue };
-                let epoch = store.last_commit().unwrap();
+                let Some(open_cell) = &session.cell else { continue };
+                let epoch = open_cell.last_commit().unwrap();
                 let _ = session.uploader.ask(epoch, Awaited::Uploaded);
                 asked.push((cell, Arc::downgrade(&session.uploader), epoch));
             }
@@ -1867,7 +1864,7 @@ impl World {
 
     // Actions.
 
-    /// A random session whose store is open, and its writer.
+    /// A random session whose cell is open, and its writer.
     fn ready(&mut self) -> Option<(usize, u64)> {
         let ready: Vec<(usize, u64)> = self
             .hosts
@@ -1878,7 +1875,7 @@ impl World {
                     .sessions
                     .iter()
                     .filter(|(_, session)| {
-                        session.store.is_some()
+                        session.cell.is_some()
                             && session.uploader.failed().is_none()
                             && session.uploader.writer().is_some_and(|w| w.stopped().is_none())
                     })
@@ -1894,7 +1891,7 @@ impl World {
         self.write_extent(host, cell, seed).await;
     }
 
-    /// The guest of `cell`'s store on `host` writes an extent of its own, its bytes of `seed`:
+    /// The guest of `cell`'s cell on `host` writes an extent of its own, its bytes of `seed`:
     /// whether it could.
     async fn write_extent(&mut self, host: usize, cell: u64, seed: u64) -> bool {
         let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
@@ -1902,9 +1899,9 @@ impl World {
         session.guest.next_sequence += 1;
         let len = self.rng.random_range(1..=4) * BLOCK as usize;
         let bytes = Self::content(seed, extent, len);
-        let store = session.store.clone().unwrap();
-        if let Err(err) = store.write(extent, 0, &bytes).await {
-            self.store_failed(host, cell, store, err);
+        let open_cell = session.cell.clone().unwrap();
+        if let Err(err) = open_cell.write(extent, 0, &bytes).await {
+            self.cell_failed(host, cell, open_cell, err);
             return false;
         }
         session.guest.written.insert(extent, bytes);
@@ -1914,9 +1911,9 @@ impl World {
         true
     }
 
-    /// The store's epoch of the commit `store` just made, which follows `before`'s.
-    fn committed(&mut self, cell: u64, store: &LocalCell<MemDir>, before: u64) -> Option<u64> {
-        let epoch = store.last_commit().ok()?;
+    /// The cell's epoch of the commit `open_cell` just made, which follows `before`'s.
+    fn committed(&mut self, cell: u64, open_cell: &LocalCell<MemDir>, before: u64) -> Option<u64> {
+        let epoch = open_cell.last_commit().ok()?;
         if epoch <= before {
             self.violation(format!(
                 "cell {cell}'s commit after {before} made epoch {epoch}",
@@ -1927,15 +1924,15 @@ impl World {
         Some(epoch)
     }
 
-    /// The guest of `cell`'s store on `host` made the commit `tag`, sealing what it wrote,
-    /// freeing `frees`, the store's epoch of it `epoch`.
+    /// The guest of `cell`'s cell on `host` made the commit `tag`, sealing what it wrote,
+    /// freeing `frees`, the cell's epoch of it `epoch`.
     fn made(&mut self, host: usize, cell: u64, tag: u64, epoch: u64, mut made: Truth) {
         trace!(
             "host {host}: {cell} commits {tag} at epoch {epoch}, after {:?}",
             made.parent,
             cell = Short(cell)
         );
-        // A cell with no capacity yet takes its store's.
+        // A cell with no capacity yet takes its cell's.
         if made.capacity.is_none() && self.capacity(made.parent).is_none() {
             made.capacity = Some(CAPACITY);
         }
@@ -1977,24 +1974,24 @@ impl World {
         let session = &self.hosts[host].sessions[&cell];
         // Durable at once, or later, with a later commit's, or a closing's.
         let durable = self.rng.random_bool(0.5);
-        let store = session.store.clone().unwrap();
+        let open_cell = session.cell.clone().unwrap();
         let parent = session.guest.head;
         let committing = async || -> anyhow::Result<u64> {
-            let before = store.last_commit()?;
+            let before = open_cell.last_commit()?;
             for extent in &frees {
-                store.free(*extent)?;
+                open_cell.free(*extent)?;
             }
-            store.commit_ordered(root.as_deref()).await?;
+            open_cell.commit_ordered(root.as_deref()).await?;
             if durable {
-                store.flush().await?;
+                open_cell.flush().await?;
             }
             Ok(before)
         };
         let before = match committing().await {
             Ok(before) => before,
-            Err(err) => return self.store_failed(host, cell, store, err),
+            Err(err) => return self.cell_failed(host, cell, open_cell, err),
         };
-        let Some(epoch) = self.committed(cell, &store, before) else { return };
+        let Some(epoch) = self.committed(cell, &open_cell, before) else { return };
         let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
         let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
         let frees = frees.into_iter().collect();
@@ -2002,25 +1999,25 @@ impl World {
         self.made(host, cell, tag, epoch, made);
     }
 
-    /// The guest of `cell`'s store on `host` sets its capacity to `capacity`: a commit of its
+    /// The guest of `cell`'s cell on `host` sets its capacity to `capacity`: a commit of its
     /// own, which seals none of what it wrote. Whether it could.
     async fn resize(&mut self, host: usize, cell: u64, capacity: u64) -> bool {
         let tag = self.id();
         let session = &self.hosts[host].sessions[&cell];
-        let (store, parent) = (session.store.clone().unwrap(), session.guest.head);
+        let (open_cell, parent) = (session.cell.clone().unwrap(), session.guest.head);
         let resizing = async || -> anyhow::Result<u64> {
-            let before = store.last_commit()?;
-            store.set_capacity(capacity).await?;
+            let before = open_cell.last_commit()?;
+            open_cell.set_capacity(capacity).await?;
             Ok(before)
         };
         let before = match resizing().await {
             Ok(before) => before,
             Err(err) => {
-                self.store_failed(host, cell, store, err);
+                self.cell_failed(host, cell, open_cell, err);
                 return false;
             }
         };
-        let Some(epoch) = self.committed(cell, &store, before) else { return false };
+        let Some(epoch) = self.committed(cell, &open_cell, before) else { return false };
         let capacity = Some(capacity);
         let made =
             Truth { cell, parent, extents: Vec::new(), frees: Vec::new(), root: None, capacity };
@@ -2028,7 +2025,7 @@ impl World {
         true
     }
 
-    /// A store's uploader is asked for its commits, as a commit waiting for its upload asks, or its
+    /// A cell's uploader is asked for its commits, as a commit waiting for its upload asks, or its
     /// interval runs out: its open segment closes, and it uploads.
     fn close(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
@@ -2037,14 +2034,14 @@ impl World {
             session.intervals.run_out();
             return;
         }
-        let (store, uploader) = (session.store.clone().unwrap(), session.uploader.clone());
-        let asked = store
+        let (open_cell, uploader) = (session.cell.clone().unwrap(), session.uploader.clone());
+        let asked = open_cell
             .last_commit()
             .map_err(Failure::from)
             .and_then(|epoch| uploader.ask(epoch, Awaited::Uploaded));
         if let Err(failure) = asked {
             drop(uploader);
-            self.store_failed(host, cell, store, anyhow::Error::new(failure));
+            self.cell_failed(host, cell, open_cell, anyhow::Error::new(failure));
         }
     }
 
@@ -2073,7 +2070,7 @@ impl World {
     }
 
     /// A writer takes a cell on a host: one with no writer, or, `takeover`, one with. Only a
-    /// cell with a record: as a host opens the stores of the cells it was told of.
+    /// cell with a record: as a host opens the cells it was told of.
     fn open(&mut self, takeover: bool) {
         let direct = Direct(self.bucket.clone());
         let candidates: Vec<u64> = self
@@ -2099,7 +2096,7 @@ impl World {
         if elsewhere.is_empty() {
             return;
         }
-        // Mostly where its store is.
+        // Mostly where its cell is.
         let with_disk: Vec<usize> = elsewhere
             .iter()
             .copied()
@@ -2120,7 +2117,7 @@ impl World {
     }
 
     /// A host crashes: its uploaders stop where they are, what they had in flight landing or not;
-    /// its disk keeps what its stores made durable, and some of what they did since, or is lost.
+    /// its disk keeps what its cells made durable, and some of what they did since, or is lost.
     fn crash(&mut self) {
         let host = self.rng.random_range(0..self.hosts.len());
         trace!("host {host} crashes");
@@ -2166,7 +2163,7 @@ impl World {
             }
         }
         let cells: Vec<u64> = sessions.keys().copied().collect();
-        // Their stores close on what the crash left behind.
+        // Their cells close on what the crash left behind.
         for (cell, session) in sessions {
             self.stop(host, cell, session);
         }
@@ -2272,8 +2269,8 @@ impl World {
         );
     }
 
-    /// `child`, a fork of a version that failed, or a crash left, goes as its host's cleanup deletes
-    /// it, or an operator does what no host held: which nothing relies on.
+    /// `child`, a fork of a version that failed, or a crash left, goes as its host's cleanup
+    /// deletes it, or an operator does what no host held: which nothing relies on.
     fn fail_restore(&mut self, child: u64, restore: Restore) {
         let mut found = CellId::forked(Some(restore.origin), restore.base);
         found.deleting = true;
@@ -2299,10 +2296,10 @@ impl World {
         self.restores.get_mut(&child).unwrap().running = Some(running);
     }
 
-    /// cladefs: host `host`'s mirror into its bucket of the version `child` was forked from: `origin`,
-    /// or as `child`'s head names it (`bucket_cell::mirror::wanted`, TASK-633.8), as the child's
-    /// fork on the host, or its store's opening there, begins it; stopped by the host's crash.
-    /// Nothing without regions.
+    /// cladefs: host `host`'s mirror into its bucket of the version `child` was forked from:
+    /// `origin`, or as `child`'s head names it (`bucket_cell::mirror::wanted`, TASK-633.8), as the
+    /// child's fork on the host, or its cell's opening there, begins it; stopped by the host's
+    /// crash. Nothing without regions.
     fn spawn_mirror(&mut self, host: usize, child: u64, origin: Option<Origin>) {
         if self.profile.regions == 0 {
             return;
@@ -2339,8 +2336,8 @@ impl World {
         self.hosts[host].mirrors.insert(id, running);
     }
 
-    /// cladefs: a cell's writer cuts a version (doc-18, TASK-476), its store quiescent, its guest
-    /// having written nothing since its last commit: a commit of its store's whose segment's
+    /// cladefs: a cell's writer cuts a version (doc-18, TASK-476), its cell quiescent, its guest
+    /// having written nothing since its last commit: a commit of its cell's whose segment's
     /// footer names it, which its uploader is asked for, as a snapshot's caller may wait for it.
     async fn cut_version(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
@@ -2348,18 +2345,18 @@ impl World {
         if !session.guest.written.is_empty() {
             return;
         }
-        let (store, uploader, parent) =
-            (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
+        let (open_cell, uploader, parent) =
+            (session.cell.clone().unwrap(), session.uploader.clone(), session.guest.head);
         let (id, tag) = (self.id(), self.id());
-        let before = match store.last_commit() {
+        let before = match open_cell.last_commit() {
             Ok(before) => before,
-            Err(err) => return self.store_failed(host, cell, store, err),
+            Err(err) => return self.cell_failed(host, cell, open_cell, err),
         };
         let cut = layout::NewVersion { id, keep_last: None };
-        if let Err(err) = store.commit_version(cut, true).await {
-            return self.store_failed(host, cell, store, err);
+        if let Err(err) = open_cell.commit_version(cut, true).await {
+            return self.cell_failed(host, cell, open_cell, err);
         }
-        let Some(epoch) = self.committed(cell, &store, before) else { return };
+        let Some(epoch) = self.committed(cell, &open_cell, before) else { return };
         let made = Truth {
             cell,
             parent,
@@ -2379,7 +2376,7 @@ impl World {
         let _ = uploader.ask(epoch, Awaited::Uploaded);
     }
 
-    /// cladefs: a cell's writer drops one of its versions, uploaded or local, which its store
+    /// cladefs: a cell's writer drops one of its versions, uploaded or local, which its cell
     /// forgets: told dropped once its swap of the head is done.
     fn drop_version(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
@@ -2404,7 +2401,7 @@ impl World {
             epoch = writer.epoch()
         );
         let ids = BTreeSet::from([id]);
-        session.store.as_ref().unwrap().forget_versions(&ids);
+        session.cell.as_ref().unwrap().forget_versions(&ids);
         self.spawn(async move {
             let result = writer.drop_versions(&ids).await;
             let event = Event::VersionDropped { id, result, host, session: session_id };
@@ -2759,7 +2756,7 @@ impl World {
             }
         }
         for host in &self.hosts {
-            for session in host.sessions.values().filter(|session| session.store.is_none()) {
+            for session in host.sessions.values().filter(|session| session.cell.is_none()) {
                 moved |= session.intervals.run_out();
             }
         }
@@ -2795,9 +2792,9 @@ impl World {
 
     /// Checks that a sweep of the collector that ran alone, the bucket holding `before` as it
     /// started, the objects' sizes by their keys, reports what it did (TASK-44.1): the objects it
-    /// deleted, and the moves it wrote. cladefs: and no more references gone than it retired, whether
-    /// or not they were there (TASK-395.4), and deleted marked (TASK-395.13); and the bytes of what
-    /// it deleted, and of what it compacted, as they were (TASK-395.5).
+    /// deleted, and the moves it wrote. cladefs: and no more references gone than it retired,
+    /// whether or not they were there (TASK-395.4), and deleted marked (TASK-395.13); and the bytes
+    /// of what it deleted, and of what it compacted, as they were (TASK-395.5).
     fn check_report(
         &mut self,
         before: &BTreeMap<String, u64>,
@@ -2930,7 +2927,7 @@ impl World {
         let mut lineages: Vec<_> = self.lineages.iter().collect();
         lineages.sort();
         for (lineage, commits) in lineages {
-            text += &format!("history {lineage}: commits by the store's epochs {commits:?}\n");
+            text += &format!("history {lineage}: commits by the cell's epochs {commits:?}\n");
         }
         for (tag, truth) in &self.commits {
             let short = |extents: &mut dyn Iterator<Item = ExtentId>| {
@@ -3099,7 +3096,7 @@ impl World {
 
     /// Checks that every live cell holds what its commits made, up to one of its own, past
     /// everything its guests were told was durable, and that the current writers, and their
-    /// stores, read what their guests hold.
+    /// cells, read what their guests hold.
     pub fn check(&mut self) {
         let direct = Arc::new(Direct(self.bucket.clone()));
         let mut violations = Vec::new();
@@ -3192,7 +3189,7 @@ impl World {
             }
             // Its segments since its newest checkpoint apply each commit after the one before, of
             // its history: each once, in order, none another writer's history put after it. A
-            // store's segment names the last of the commits it holds.
+            // cell's segment names the last of the commits it holds.
             let mut before = recovered.checkpoint().is_none().then_some(cell.base);
             let applied = match self.applied(&direct, &recovered) {
                 Ok(applied) => applied,
@@ -3228,7 +3225,7 @@ impl World {
             if !cell.told.is_empty() {
                 let serving =
                     self.hosts.iter().filter_map(|host| host.sessions.get(&id)).find(|session| {
-                        session.store.is_some()
+                        session.cell.is_some()
                             && session.uploader.failed().is_none()
                             && session.uploader.writer().is_some_and(|writer| {
                                 writer.stopped().is_none() && writer.epoch() == record.epoch
@@ -3388,10 +3385,10 @@ impl World {
                 }
             }
         }
-        // The writers no later one fenced read what their guests hold, and their stores.
+        // The writers no later one fenced read what their guests hold, and their cells.
         for host in &self.hosts {
             for (&id, session) in &host.sessions {
-                let (Some(writer), Some(store)) = (session.uploader.writer(), &session.store)
+                let (Some(writer), Some(open_cell)) = (session.uploader.writer(), &session.cell)
                 else {
                     continue;
                 };
@@ -3419,29 +3416,26 @@ impl World {
                         }
                     }
                 }
-                // And its store, where it names them in the bucket (TASK-195).
+                // And its cell, where it names them in the bucket (TASK-195).
                 for (extent, bytes) in &session.guest.held {
-                    let location = match store.place(*extent) {
+                    let location = match open_cell.place(*extent) {
                         Ok(Some(Place::Bucket(location))) => location,
                         Ok(Some(_)) => continue,
                         Ok(None) => {
-                            violations
-                                .push(format!("cell {id}'s store lost {extent:?}", id = Short(id)));
+                            violations.push(format!("cell {id} lost {extent:?}", id = Short(id)));
                             continue;
                         }
                         Err(err) => {
-                            violations.push(format!("cell {id}'s store: {err:#}", id = Short(id)));
+                            violations.push(format!("cell {id}: {err:#}", id = Short(id)));
                             continue;
                         }
                     };
                     match block_on(bucket_cell::testing::read(&direct, *extent, &location)) {
                         Ok(read) if read == *bytes => {}
-                        Ok(_) => violations.push(format!(
-                            "cell {id}'s store: {extent:?} reads wrong",
-                            id = Short(id)
-                        )),
+                        Ok(_) => violations
+                            .push(format!("cell {id}: {extent:?} reads wrong", id = Short(id))),
                         Err(error) => {
-                            violations.push(format!("cell {id}'s store: {error}", id = Short(id)))
+                            violations.push(format!("cell {id}: {error}", id = Short(id)))
                         }
                     }
                 }
@@ -3563,18 +3557,18 @@ impl World {
                 .collect();
             for &(host, cell) in &sessions {
                 let Some(session) = self.hosts[host].sessions.get(&cell) else { continue };
-                let Some(store) = session.store.clone() else { continue };
+                let Some(open_cell) = session.cell.clone() else { continue };
                 let parent = session.guest.head;
                 let tag = self.id();
-                let before = store.last_commit().unwrap();
-                if let Err(err) = store.commit(None).await {
+                let before = open_cell.last_commit().unwrap();
+                if let Err(err) = open_cell.commit(None).await {
                     self.violation(format!(
-                        "cell {cell}'s last store: {err:#}",
+                        "cell {cell}'s last commit: {err:#}",
                         cell = Short(cell)
                     ));
                     return;
                 }
-                let Some(epoch) = self.committed(cell, &store, before) else { return };
+                let Some(epoch) = self.committed(cell, &open_cell, before) else { return };
                 let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
                 let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
                 let made =

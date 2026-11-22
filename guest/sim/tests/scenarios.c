@@ -4,7 +4,7 @@
  * Paths no seed of tests/interleave takes, each played out exactly: memory that ends part way
  * through a write, a write from the pages it writes, a writer killed, allocations and device
  * requests that fail. And copy-on-write DAX's own (doc-13): rebinding and writeback against
- * stores, truncating and punching dirty pages, and a crash between writeback's bytes and its
+ * writes, truncating and punching dirty pages, and a crash between writeback's bytes and its
  * commit.
  *
  *   scenarios [NAME]
@@ -28,7 +28,7 @@
 #define CHUNK_LEN (2UL << 20)
 /*
  * The device's private pages, few, so that the budget, past seven eighths of them, has the worker
- * write back and rebind while tasks store.
+ * write back and rebind while tasks write.
  */
 #define COW_PRIVATE_MAX 64
 
@@ -183,7 +183,7 @@ static void append_stopped_short_in_a_page(void)
 }
 
 /* That bytes stored past the file's end read as zeros once a write past it grows the file. */
-static void store_past_end_then_written(void)
+static void mapped_write_past_end_then_written(void)
 {
 	static char bytes[100], expected[2 * PAGE_SIZE + 8], got[2 * PAGE_SIZE + 8];
 	struct file *file;
@@ -193,7 +193,7 @@ static void store_past_end_then_written(void)
 	memset(bytes, 'D', sizeof(bytes));
 	file = new_file(bytes, sizeof(bytes));
 	addr = sim_mmap(file, 0, PAGE_SIZE);
-	check(!sim_user_store(addr + 1000, "X", 1), "a store past the end");
+	check(!sim_user_write(addr + 1000, "X", 1), "a write past the end");
 	memcpy(expected, bytes, sizeof(bytes));
 	memset(expected + 2 * PAGE_SIZE, 'E', 8);
 	done = sim_write(file, 2 * PAGE_SIZE, expected + 2 * PAGE_SIZE, 8);
@@ -520,7 +520,7 @@ static void wait_for(struct task_struct *task)
 
 /*
  * Copy-on-write DAX (doc-13): what a file's pages hold, each a round in its first 8 bytes, which
- * the task storing to it alone changes, and the rest of the page as it was written first.
+ * the task writing to it alone changes, and the rest of the page as it was written first.
  */
 #define COW_PAGES 128
 static struct file *cow_target;
@@ -545,14 +545,14 @@ static struct file *cow_file(size_t pages)
 	return file;
 }
 
-/* Stores `round` to `page` of cow_target: through its mapping, or by write(2). */
+/* Writes `round` to `page` of cow_target: through its mapping, or by write(2). */
 static void cow_put(u64 page, u64 round, bool mapped)
 {
 	loff_t at = page * PAGE_SIZE;
 
 	if (mapped)
-		check(!sim_user_store(cow_addr + at, &round, sizeof(round)),
-		      "a store to page %llu", page);
+		check(!sim_user_write(cow_addr + at, &round, sizeof(round)),
+		      "a write to page %llu", page);
 	else
 		check(sim_write(cow_target, at, &round, sizeof(round)) == sizeof(round),
 		      "a write to page %llu", page);
@@ -571,7 +571,7 @@ static void cow_check(u64 page, bool mapped, const char *what)
 	else
 		check(sim_read(cow_target, at, &got, sizeof(got)) == sizeof(got),
 		      "a read of page %llu", page);
-	check(got == cow_round[page], "%s: page %llu reads round %llu, its last store round %llu: a store was lost",
+	check(got == cow_round[page], "%s: page %llu reads round %llu, its last write round %llu: a write was lost",
 	      what, page, got, cow_round[page]);
 }
 
@@ -594,14 +594,14 @@ static void cow_check_file(const char *what, size_t len)
 	      sim_device_open_maps_refused());
 }
 
-/* Stores to the first pages, each checked to hold its last first, till cow_stop. */
-static void cow_storer(void *arg)
+/* Writes to the first pages, each checked to hold its last first, till cow_stop. */
+static void cow_writer(void *arg)
 {
 	u64 pages = (uintptr_t)arg, page, round;
 
 	for (round = 1; !READ_ONCE(cow_stop); round++) {
 		for (page = 0; page < pages; page++) {
-			cow_check(page, round % 2, "before the next store");
+			cow_check(page, round % 2, "before the next write");
 			cow_put(page, round, (round + page) % 3);
 		}
 		msleep(1);
@@ -628,24 +628,24 @@ static void cow_syncer(void *arg)
 }
 
 /*
- * That a rebind loses no store: stores go on to some pages, through a mapping and by write(2),
+ * That a rebind loses no write: writes go on to some pages, through a mapping and by write(2),
  * while writes to the rest, twice private_max, have the worker write back and rebind clean pages,
  * a syncer cleaning the stored pages between rounds. A rebind under the file's semaphore shared,
- * or of a page in either set, MAPs an extent's page over a private page holding a store, which
+ * or of a page in either set, MAPs an extent's page over a private page holding a write, which
  * reads its round before.
  */
-static void cow_rebind_against_stores(void)
+static void cow_rebind_against_mapped_writes(void)
 {
-	struct task_struct *storer, *pusher, *syncer;
+	struct task_struct *writer, *pusher, *syncer;
 
 	cow_target = cow_file(COW_PAGES);
 	cow_addr = sim_mmap(cow_target, 0, COW_PAGES * PAGE_SIZE);
-	storer = sim_spawn("storer", cow_storer, (void *)16UL);
+	writer = sim_spawn("writer", cow_writer, (void *)16UL);
 	syncer = sim_spawn("syncer", cow_syncer, NULL);
 	pusher = sim_spawn("pusher", cow_pusher, (void *)16UL);
 	wait_for(pusher);
 	WRITE_ONCE(cow_stop, true);
-	wait_for(storer);
+	wait_for(writer);
 	wait_for(syncer);
 	check(sim_device_private_freed(), "no private page was rebound");
 	check(sim_device_private_most() <= COW_PRIVATE_MAX, "%llu private pages",
@@ -654,21 +654,21 @@ static void cow_rebind_against_stores(void)
 }
 
 /*
- * That an fsync keeps every store that completed before it began: stores go on, through a
+ * That an fsync keeps every write that completed before it began: writes go on, through a
  * mapping and by write(2), while each fsync, once it returns, finds in Fxfs at least the round
  * each page had before it began. A swap of the dirty set after the write-protect, or under the
- * semaphore shared, leaves a store in neither set: the fsync after it writes nothing of it.
+ * semaphore shared, leaves a write in neither set: the fsync after it writes nothing of it.
  */
-static void cow_writeback_against_stores(void)
+static void cow_writeback_against_mapped_writes(void)
 {
 	const u64 pages = 32;
-	struct task_struct *storer;
+	struct task_struct *writer;
 	u64 floor[32], got, page;
 	int fsyncs;
 
 	cow_target = cow_file(pages);
 	cow_addr = sim_mmap(cow_target, 0, pages * PAGE_SIZE);
-	storer = sim_spawn("storer", cow_storer, (void *)(uintptr_t)pages);
+	writer = sim_spawn("writer", cow_writer, (void *)(uintptr_t)pages);
 	for (fsyncs = 0; fsyncs < 40; fsyncs++) {
 		for (page = 0; page < pages; page++)
 			floor[page] = READ_ONCE(cow_round[page]);
@@ -677,17 +677,17 @@ static void cow_writeback_against_stores(void)
 			cladefs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino,
 				      page * PAGE_SIZE, &got, sizeof(got));
 			check(got >= floor[page] && got <= READ_ONCE(cow_round[page]) + 1,
-			      "fsync %d returned, and Fxfs's page %llu holds round %llu: the store of round %llu completed before it began",
+			      "fsync %d returned, and Fxfs's page %llu holds round %llu: the write of round %llu completed before it began",
 			      fsyncs, page, got, floor[page]);
 		}
 		msleep(sim_random() % 3);
 	}
 	WRITE_ONCE(cow_stop, true);
-	wait_for(storer);
+	wait_for(writer);
 	cow_check_file("after the fsyncs", pages * PAGE_SIZE);
 }
 
-/* Stores `round` to each page from `first` to `last`, through the mapping and by write(2). */
+/* Writes `round` to each page from `first` to `last`, through the mapping and by write(2). */
 static void cow_put_pages(u64 first, u64 last, u64 round)
 {
 	u64 page;
@@ -748,27 +748,27 @@ static void cow_puncher(void *arg)
 }
 
 /*
- * That a punch of dirty pages, with writeback under way and stores beside it, leaves a hole: no
+ * That a punch of dirty pages, with writeback under way and writes beside it, leaves a hole: no
  * writeback that copied the pages before it commits them after it.
  */
 static void cow_punch_dirty(void)
 {
 	const u64 pages = 16;
-	struct task_struct *storer, *syncer, *puncher;
+	struct task_struct *writer, *syncer, *puncher;
 
 	cow_target = cow_file(pages);
 	cow_addr = sim_mmap(cow_target, 0, pages * PAGE_SIZE);
-	storer = sim_spawn("storer", cow_storer, (void *)8UL);
+	writer = sim_spawn("writer", cow_writer, (void *)8UL);
 	syncer = sim_spawn("syncer", cow_syncer, NULL);
 	puncher = sim_spawn("puncher", cow_puncher, (void *)8UL);
 	wait_for(puncher);
 	WRITE_ONCE(cow_stop, true);
-	wait_for(storer);
+	wait_for(writer);
 	wait_for(syncer);
 	cow_check_file("after the punches", pages * PAGE_SIZE);
 }
 
-static void cow_store_during_commit(void *arg)
+static void cow_write_during_commit(void *arg)
 {
 	cow_put(3, 2, true);
 }
@@ -781,14 +781,14 @@ static void cow_fsync(void *arg)
 /*
  * That a crash between writeback's bytes and its commit shows the file as it was, whole pages, and
  * the commit as writeback copied them: a commit before its bytes would show what its extent held
- * unwritten. A store meanwhile, which takes no lock a writeback holds, goes to the private page,
+ * unwritten. A write meanwhile, which takes no lock a writeback holds, goes to the private page,
  * dirty again, which the fsync's writeback of its dirty pages (cladefs_dax_write_back) writes after.
  */
 static void cow_crash_between_bytes_and_commit(void)
 {
 	const u64 pages = 8;
 	static char old[8 * PAGE_SIZE], got[8 * PAGE_SIZE];
-	struct task_struct *syncer, *storer;
+	struct task_struct *syncer, *writer;
 	u64 ino;
 
 	cow_target = cow_file(pages);
@@ -804,14 +804,14 @@ static void cow_crash_between_bytes_and_commit(void)
 	cladefs_sim_read_pending(mount->info->fs, ino, 0, got, sizeof(got));
 	check(!memcmp(got, cow_expected, sizeof(got)),
 	      "a crash after the commit wouldn't show what writeback copied");
-	storer = sim_spawn("storer", cow_store_during_commit, NULL);
+	writer = sim_spawn("writer", cow_write_during_commit, NULL);
 	msleep(50);
 	cladefs_sim_hold_commits(false);
 	wait_for(syncer);
-	wait_for(storer);
+	wait_for(writer);
 	cladefs_sim_read(mount->info->fs, ino, 0, got, sizeof(got));
 	check(!memcmp(got, cow_expected, sizeof(got)),
-	      "after the held fsync, Fxfs doesn't hold the store made during it: page 3 holds round %llu",
+	      "after the held fsync, Fxfs doesn't hold the write made during it: page 3 holds round %llu",
 	      *(u64 *)(got + 3 * PAGE_SIZE));
 	cow_check(3, false, "after the held fsync");
 	cow_check_file("after the next fsync", pages * PAGE_SIZE);
@@ -911,7 +911,7 @@ static void cow_rebind_during_writeback(void)
  * That a rebind takes no dirty page, nor one a fault left writable: the worker's own writeback
  * held after its copy, a write(2) dirties page 1 again, which the rebind after must leave, while
  * it rebinds the rest, whose PTEs, made writable by faults, the writeback write-protected
- * (cladefs_dax_protect): through one left writable, a store makes the page
+ * (cladefs_dax_protect): through one left writable, a write makes the page
  * private again on the host, which the guest never learns of, and no fsync writes.
  */
 static void cow_rebind_skips_dirty(void)
@@ -931,12 +931,12 @@ static void cow_rebind_skips_dirty(void)
 	check(sim_device_private_freed() > freed, "the worker rebound nothing");
 	cow_check(1, false, "the page dirtied as the worker wrote back");
 	cow_check(3, true, "a page a fault had made writable");
-	/* Write-protected, it faults, and is dirty: a writable PTE left would store unseen. */
+	/* Write-protected, it faults, and is dirty: a writable PTE left would write unseen. */
 	cow_put(3, 3, true);
 	cow_check_file("after the rebind", 8 * PAGE_SIZE);
 }
 
-static void cow_store_page3(void *arg)
+static void cow_mapped_write_page3(void *arg)
 {
 	cow_put(3, (uintptr_t)arg, true);
 }
@@ -949,15 +949,15 @@ static void cow_load_page3_checked(void *arg)
 /*
  * That a rebind holds the file's semaphore exclusively from its look at the dirty sets to its MAP:
  * the MAP held on its way to the host, a write(2) to a page it found clean waits, and so does a
- * fault, a store's or a load's, which blocks on the semaphore holding its DAX entry. Under the
- * semaphore shared, the write or the store dirtied and stored to the private page, which the MAP
+ * fault, a write's or a load's, which blocks on the semaphore holding its DAX entry. Under the
+ * semaphore shared, the write or the write dirtied and stored to the private page, which the MAP
  * then replaced with the extent's. Every other file's private pages are rebound first, so that the
  * MAP held is this file's.
  */
 static void cow_rebind_against_write(void)
 {
 	static void (*const ways[])(void *) = {
-		cow_write_page3, cow_store_page3, cow_load_page3_checked,
+		cow_write_page3, cow_mapped_write_page3, cow_load_page3_checked,
 	};
 	struct task_struct *rebinder, *other;
 	size_t way;
@@ -1044,25 +1044,25 @@ static void cow_reclaim_during_writeback(void)
 }
 
 /*
- * That a writeback leaves no PTE writable of a page it took. A store's fault paused past its
+ * That a writeback leaves no PTE writable of a page it took. A write's fault paused past its
  * iomap_end (dax_pause), its PTE writable, the file's semaphore let go and its page's DAX entry
  * held, the worker writes the page back, seals and rebinds it. dax_writeback_mapping_range, finding
  * the entry locked, gives up on it: with the write-protect its alone, the PTE stayed writable, and
- * the rebind's read-only MAP under it was refused, as the host would refuse the store; or, with no
- * rebind, a store through it after the writeback's copy went in no writeback (interleave's seed 22,
+ * the rebind's read-only MAP under it was refused, as the host would refuse the write; or, with no
+ * rebind, a write through it after the writeback's copy went in no writeback (interleave's seed 22,
  * 15 of CI's 3,000).
  */
 static void cow_writeback_during_fault(void)
 {
-	struct task_struct *storer, *rebinder;
+	struct task_struct *writer, *rebinder;
 
 	cow_mapped_file(8);
-	storer = cow_pause(PAUSE_FAULTED, cow_store_page3, (void *)1UL);
+	writer = cow_pause(PAUSE_FAULTED, cow_mapped_write_page3, (void *)1UL);
 	rebinder = sim_spawn("rebinder", cow_rebind_now, NULL);
 	wait_for(rebinder);
 	sim_param_set("dax_pause", "0");
-	wait_for(storer);
-	cow_check(3, true, "the store whose fault a writeback met");
+	wait_for(writer);
+	cow_check(3, true, "the write whose fault a writeback met");
 	cow_put(3, 2, true);
 	cow_check_file("after a writeback met a fault", 8 * PAGE_SIZE);
 }
@@ -1089,7 +1089,7 @@ static void cow_sync_kept(void *arg)
 /*
  * That an fsync, and a sync, wait for a writeback under way. One paused after its swap
  * (dax_pause), before it reads its pages from the window, the file has nothing dirty: an fsync
- * returned at once, and a sync's settle passed the file by, the stores before them neither written
+ * returned at once, and a sync's settle passed the file by, the writes before them neither written
  * nor sealed (interleave's seed 962, the budget's worker's writeback there).
  */
 static void cow_fsync_during_writeback(void)
@@ -1119,7 +1119,7 @@ static void cow_load_page3(void *arg)
 }
 
 /*
- * That reclaim takes a range whose pages a writeback cleaned. A store through one mapping tags page
+ * That reclaim takes a range whose pages a writeback cleaned. A write through one mapping tags page
  * 3's DAX entry dirty; a load through a second faults, paused past its iomap (dax_pause), holding
  * the entry, as an fsync writes the page back: dax_writeback_mapping_range gives up on the entry,
  * locked, which stays tagged, and with no page dirty no writeback comes for it again. Its
@@ -1152,16 +1152,16 @@ static void cow_reclaim_after_writeback_met_a_fault(void)
 
 /*
  * That a page a writeback takes is the VM's own before its old block dies. The file's pages rebound
- * (dax_rebind_now), the window maps its sealed extent; a store's fault to page 3 paused past its
- * iomap_end (dax_pause): the page dirty, its store not come, the window mapping its block still. An
+ * (dax_rebind_now), the window maps its sealed extent; a write's fault to page 3 paused past its
+ * iomap_end (dax_pause): the page dirty, its write not come, the window mapping its block still. An
  * fsync writes the file back, every block moving, and the seals after have Fxfs free the old extent
- * (FreeAfter::Flush), where the window reads zeros: the store, let go, copied them as the host made
+ * (FreeAfter::Flush), where the window reads zeros: the write, let go, copied them as the host made
  * its page private, and the next writeback wrote them over the rest of page 3 (interleave's seed
  * 2802 at 1,000 operations).
  */
-static void cow_writeback_before_store(void)
+static void cow_writeback_before_write(void)
 {
-	struct task_struct *storer;
+	struct task_struct *writer;
 	u64 page, freed;
 	int seals;
 
@@ -1173,12 +1173,12 @@ static void cow_writeback_before_store(void)
 		if (page != 3)
 			cow_put(page, 1, page % 2);
 	}
-	storer = cow_pause(PAUSE_FAULTED, cow_store_page3, (void *)1UL);
+	writer = cow_pause(PAUSE_FAULTED, cow_mapped_write_page3, (void *)1UL);
 	for (seals = 0; seals < 8; seals++)
-		check(!sim_fsync(cow_target), "fsync %d, a store's fault paused", seals);
+		check(!sim_fsync(cow_target), "fsync %d, a write's fault paused", seals);
 	sim_param_set("dax_pause", "0");
-	wait_for(storer);
-	cow_check_file("after a writeback took a page before its store", 8 * PAGE_SIZE);
+	wait_for(writer);
+	cow_check_file("after a writeback took a page before its write", 8 * PAGE_SIZE);
 }
 
 static void cow_read_page0(void *arg)
@@ -1196,7 +1196,7 @@ static void cow_load_page0(void *arg)
 	cow_check(0, true, "a load's fault as a seal was under way");
 }
 
-static void cow_store_page1(void *arg)
+static void cow_mapped_write_page1(void *arg)
 {
 	cow_put(1, 2, true);
 }
@@ -1206,14 +1206,14 @@ static void cow_store_page1(void *arg)
  * file to a new extent, and its seal is held once it has begun (cladefs_sim_hold_seals): Fxfs takes the
  * extent for sealed already, as the guest's does (OpenExtents::seal), the device not. The file's
  * ranges dropped, a read maps the chunk again, as a slice of the extent's region, and then a write,
- * as a range of its own; and a load's fault, and a store's, which block on the seal holding their
+ * as a range of its own; and a load's fault, and a write's, which block on the seal holding their
  * DAX entry: each from the extent, at once, which the host refused (-EPERM); doc-13's invariant 1,
  * the cow_ scenarios' tripwire, which mutants' schedules of cow_punch_dirty met.
  */
 static void cow_map_during_seal(void)
 {
 	static void (*const ways[])(void *) = {
-		cow_read_page0, cow_write_page1, cow_load_page0, cow_store_page1,
+		cow_read_page0, cow_write_page1, cow_load_page0, cow_mapped_write_page1,
 	};
 	struct task_struct *syncer, *mapper;
 	size_t way;
@@ -1274,7 +1274,7 @@ static void cow_second_file(void *arg)
  * That the budget counts a private page until the host has freed it. A truncate's MAP of zeros over
  * 48 dirty private pages held on its way (sim_device_hold), a second file's write takes the
  * room among the 64 private_max allows: counted free as the MAP began, as an UNMAP's were, the 48
- * and the write's were on the host at once, which refused a store past private_max (interleave's
+ * and the write's were on the host at once, which refused a write past private_max (interleave's
  * seed 90, a range's UNMAP). Counted till it ends, the write waits for the budget.
  */
 static void cow_truncate_held(void)
@@ -1305,17 +1305,17 @@ static void cow_truncate_held(void)
 /*
  * That the iomap that dirties a page has the host make it private first, and fails the write if
  * the host doesn't (TASK-164.9): the file's pages rebound, mapping its sealed extent, a write(2) to
- * page 2 and a store to page 5, each with the device failing its PRIVATE, fail (-EIO, the fault's
+ * page 2 and a write to page 5, each with the device failing its PRIVATE, fail (-EIO, the fault's
  * SIGBUS), dirtying nothing, reserving nothing; tried again, they succeed; and a write to page 3
  * whose PRIVATE the guest found no memory for fails ENOMEM, one the host had no room for EIO. A page dirtied without
  * its PRIVATE is the window's mapping of an old block, which a writeback may move and Fxfs free
- * before its store comes (cow_writeback_before_store): the host, which this one makes refuse a
- * store to a page no PRIVATE made private, as the oracle of the rule, would have copied zeros.
+ * before its write comes (cow_writeback_before_write): the host, which this one makes refuse a
+ * write to a page no PRIVATE made private, as the oracle of the rule, would have copied zeros.
  */
 static void cow_private_failed(void)
 {
 	/*
-	 * The store's page before the write's: the write, tried again where it failed, follows on
+	 * The mapped write's page before the write(2)'s: the write, tried again where it failed, follows on
 	 * from itself, and makes the pages after it private ahead (TASK-164.10).
 	 */
 	static const u64 pages[] = { 5, 2 };
@@ -1333,14 +1333,14 @@ static void cow_private_failed(void)
 
 		reserved = cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino);
 		sim_device_fail(VIRTIO_EXTENT_T_PRIVATE, 0, 1);
-		err = mapped ? sim_user_store(cow_addr + at, &round, sizeof(round)) :
+		err = mapped ? sim_user_write(cow_addr + at, &round, sizeof(round)) :
 			       (int)sim_write(cow_target, at, &round, sizeof(round));
 		check(err == (mapped ? -EFAULT : -EIO), "a %s whose PRIVATE failed: %d",
-		      mapped ? "store" : "write", err);
+		      mapped ? "mapped write" : "write", err);
 		check(sim_device_failed() == i + 1, "no PRIVATE failed");
 		check(cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino) == reserved,
 		      "a %s whose PRIVATE failed left %llu bytes of room reserved, of %llu before",
-		      mapped ? "store" : "write",
+		      mapped ? "mapped write" : "write",
 		      cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino), reserved);
 		cow_check(pages[i], mapped, "after its PRIVATE failed");
 		cow_put(pages[i], round, mapped);
@@ -1374,7 +1374,7 @@ static void cow_private_failed(void)
  * cladefs: that a writeback Fxfs finds no memory for (TASK-207) fails its fsync ENOMEM, Fxfs holding
  * the file as it was, and keeps its pages dirty, their room reserved again: a rebind, which maps
  * the file's sealed extents over its clean private pages, leaves them as written, as does a clone,
- * which takes the store's blocks, and the next fsync writes them. Clean, as an I/O error's, the
+ * which takes the write's blocks, and the next fsync writes them. Clean, as an I/O error's, the
  * clone carried the blocks they replaced, and the rebind brought those back
  * (fxfs-guest-fsx-faults-dax, GCE r699).
  */
@@ -1397,7 +1397,7 @@ static void cow_writeback_found_no_memory(void)
 	check(cladefs_sim_reserved(fs, file_inode(cow_target)->i_ino) == 8 * PAGE_SIZE,
 	      "a writeback that found no memory left %llu bytes of room reserved for its 8 pages",
 	      cladefs_sim_reserved(fs, file_inode(cow_target)->i_ino));
-	/* A clone takes the store's blocks, once the VFS has written the source back. */
+	/* A clone takes the write's blocks, once the VFS has written the source back. */
 	copy = new_file(old, sizeof(old));
 	check(!sim_clone(cow_target, 0, copy, 0, sizeof(got)), "the clone");
 	check_file("the clone of a file whose writeback found no memory", copy, cow_expected,
@@ -1412,24 +1412,24 @@ static void cow_writeback_found_no_memory(void)
 
 static bool cow_pinned_stored;
 
-static void cow_store_page0(void *arg)
+static void cow_mapped_write_page0(void *arg)
 {
 	cow_put(0, 1, true);
 	WRITE_ONCE(cow_pinned_stored, true);
 }
 
 /*
- * That a store to a page of a slice a pin holds waits for the pin to go (TASK-79.49, TASK-149.31):
+ * That a write to a page of a slice a pin holds waits for the pin to go (TASK-79.49, TASK-149.31):
  * the file's ranges dropped, a load maps its chunk again as a slice of its extent's region, and a
- * pin of page 0, as vmsplice takes one (sim_pin_user_page), holds the page. A store to it can't use
+ * pin of page 0, as vmsplice takes one (sim_pin_user_page), holds the page. A write to it can't use
  * the slice (-EXDEV), whose drop waits for the page to be unused, as a truncate does: a fault from
  * user mode holds no pins. One that failed rather than wait, as a fault from the kernel does, which
  * may hold the pin itself (get_user_pages), was a SIGBUS (-EFAULT here) where the pin goes soon.
  * The guest check slice_held's steps, which went with writable DAX.
  */
-static void cow_store_to_pinned_slice(void)
+static void cow_write_to_pinned_slice(void)
 {
-	struct task_struct *storer;
+	struct task_struct *writer;
 	struct page *pin;
 
 	cow_mapped_file(8);
@@ -1437,27 +1437,27 @@ static void cow_store_to_pinned_slice(void)
 	cow_check(0, true, "the slice's load");
 	pin = sim_pin_user_page(cow_addr);
 	check(pin, "pinning page 0");
-	storer = sim_spawn("storer", cow_store_page0, NULL);
+	writer = sim_spawn("writer", cow_mapped_write_page0, NULL);
 	msleep(50);
 	check(!READ_ONCE(cow_pinned_stored),
-	      "the store to page 0 didn't wait for its pin: page 0 wasn't a slice's");
+	      "the write to page 0 didn't wait for its pin: page 0 wasn't a slice's");
 	if (pin)
 		sim_unpin_page(pin);
-	wait_for(storer);
+	wait_for(writer);
 	cow_check(0, true, "after the pin went");
-	cow_check_file("after a store to a pinned slice's page", 8 * PAGE_SIZE);
+	cow_check_file("after a write to a pinned slice's page", 8 * PAGE_SIZE);
 }
 
 static struct file *counted_file;
 
 static void counted_fsync(void *arg)
 {
-	check(!sim_fsync(counted_file), "the fsync a store met");
+	check(!sim_fsync(counted_file), "the fsync a write met");
 }
 
 /*
  * That a writeback counts its file's dirty ranges again once it holds the semaphore for writing.
- * Paused between its count and its swap (dax_pause), a store to the file's first chunk dirties a
+ * Paused between its count and its swap (dax_pause), a write to the file's first chunk dirties a
  * range it didn't count: with a batch as large as the count, the swap took that range, first in the
  * file, and passed the second's by, written before the fsync began, which returned 0 without it
  * (the file model's, failures seed 62).
@@ -1481,7 +1481,7 @@ static void cow_writeback_counts_again(void)
 	sim_param_set("dax_pause", value);
 	syncer = sim_spawn("syncer", counted_fsync, NULL);
 	sim_await(sim_param_read("dax_paused") & PAUSE_COUNTED, "no writeback waits, counted");
-	check(!sim_user_store(addr + 3 * PAGE_SIZE, "first", 5), "the first chunk's store");
+	check(!sim_user_write(addr + 3 * PAGE_SIZE, "first", 5), "the first chunk's write");
 	sim_param_set("dax_pause", "0");
 	wait_for(syncer);
 	cladefs_sim_read(mount->info->fs, file_inode(counted_file)->i_ino, second, got, sizeof(got));
@@ -1510,8 +1510,8 @@ static void cow_write_whole(u64 page, u64 round)
  */
 /*
  * That a write(2) from a file's own mapping, copying on write, its source a page on from its
- * target, apart from it in a page they share, then stores through the mapping over both, leave
- * the file as written and stored, each store to a page made private (TASK-149.16's hostile
+ * target, apart from it in a page they share, then writes through the mapping over both, leave
+ * the file as written and stored, each write to a page made private (TASK-149.16's hostile
  * scripts' writes from a file's mapping, as same_page has them without copying on write).
  */
 static void cow_write_from_its_own_mapping(void)
@@ -1526,19 +1526,19 @@ static void cow_write_from_its_own_mapping(void)
 	check(done == len, "a write from its own mapping: %zd", done);
 	memmove(cow_expected, cow_expected + src, len);
 	fill(bytes, sizeof(bytes), 9);
-	check(!sim_user_store(cow_addr + at, bytes, sizeof(bytes)), "the stores after");
+	check(!sim_user_write(cow_addr + at, bytes, sizeof(bytes)), "the writes after");
 	memcpy(cow_expected + at, bytes, sizeof(bytes));
-	cow_check_file("after the stores", 8 * PAGE_SIZE);
+	cow_check_file("after the writes", 8 * PAGE_SIZE);
 }
 
 /*
  * As cow_write_from_its_own_mapping, of a file of holes read in again, after a write from memory
- * that stops short of its end, and with stores far on between (TASK-149.16, GCE r861's script but
+ * that stops short of its end, and with writes far on between (TASK-149.16, GCE r861's script but
  * for its fork, which fxfs-guest-checks' cow_fork_after_a_split_pmd has).
  */
 static void cow_write_from_its_own_mapping_of_holes(void)
 {
-	static char source[PAGE_SIZE], stores[13604], far[10236];
+	static char source[PAGE_SIZE], writes[13604], far[10236];
 	const size_t size = 256 * PAGE_SIZE - 37;
 	struct file *file = sim_file_new(mount);
 	char *expected = kzalloc(size, GFP_KERNEL);
@@ -1557,13 +1557,13 @@ static void cow_write_from_its_own_mapping_of_holes(void)
 	check(done == 5136, "a write from its own mapping: %zd", done);
 	memmove(expected, expected + 5674, 5136);
 	fill(far, sizeof(far), 7);
-	check(!sim_user_store(cow_addr + 676639, far, sizeof(far)), "the stores far on");
+	check(!sim_user_write(cow_addr + 676639, far, sizeof(far)), "the writes far on");
 	memcpy(expected + 676639, far, sizeof(far));
-	check_file("after the stores far on", cow_target, expected, size);
-	fill(stores, sizeof(stores), 9);
-	check(!sim_user_store(cow_addr + 6684, stores, sizeof(stores)), "the stores over both");
-	memcpy(expected + 6684, stores, sizeof(stores));
-	check_file("after the stores over both", cow_target, expected, size);
+	check_file("after the writes far on", cow_target, expected, size);
+	fill(writes, sizeof(writes), 9);
+	check(!sim_user_write(cow_addr + 6684, writes, sizeof(writes)), "the writes over both");
+	memcpy(expected + 6684, writes, sizeof(writes));
+	check_file("after the writes over both", cow_target, expected, size);
 	kfree(expected);
 }
 
@@ -1794,7 +1794,7 @@ static const struct {
 	SCENARIO(short_copy_pages),
 	SCENARIO(same_page),
 	SCENARIO(append_stopped_short_in_a_page),
-	SCENARIO(store_past_end_then_written),
+	SCENARIO(mapped_write_past_end_then_written),
 	SCENARIO(write_past_end_copies_nothing),
 	SCENARIO(cladefs_growths_zero_past_a_cut),
 	SCENARIO(write_killed),
@@ -1802,8 +1802,8 @@ static const struct {
 	SCENARIO(unmaps_failed_take_the_window),
 	SCENARIO(unmaps_failed_leave_room_unaligned),
 	SCENARIO(allocations_failed),
-	COW_SCENARIO(cow_rebind_against_stores),
-	COW_SCENARIO(cow_writeback_against_stores),
+	COW_SCENARIO(cow_rebind_against_mapped_writes),
+	COW_SCENARIO(cow_writeback_against_mapped_writes),
 	COW_SCENARIO(cow_truncate_dirty),
 	COW_SCENARIO(cow_punch_dirty),
 	COW_SCENARIO(cow_crash_between_bytes_and_commit),
@@ -1818,11 +1818,11 @@ static const struct {
 	COW_SCENARIO(cow_fsync_during_writeback),
 	COW_SCENARIO(cow_truncate_held),
 	COW_SCENARIO(cow_reclaim_after_writeback_met_a_fault),
-	COW_SCENARIO(cow_writeback_before_store),
+	COW_SCENARIO(cow_writeback_before_write),
 	COW_SCENARIO(cow_map_during_seal),
 	COW_SCENARIO(cow_rebind_seals_open_extents),
 	COW_SCENARIO(cow_private_failed),
-	COW_SCENARIO(cow_store_to_pinned_slice),
+	COW_SCENARIO(cow_write_to_pinned_slice),
 	COW_SCENARIO(cow_writeback_counts_again),
 	SCENARIO(cow_writes_ahead),
 	SCENARIO(cow_write_from_its_own_mapping),

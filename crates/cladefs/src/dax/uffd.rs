@@ -23,7 +23,7 @@
 //! maps it (backlog doc-13: a `MAP` names pages, their first touch installs them): until then it
 //! is left out, as a page past the budget is (below), which a fault installs as the window names
 //! it then, under the lock the window's changes take. So a change of a page never touched takes
-//! nothing away, and flushes nothing; a page the guest stores to first, made private, has its
+//! nothing away, and flushes nothing; a page the guest writes to first, made private, has its
 //! private copy put in place of nothing (TASK-276.6). Only what the guest asks for to read next
 //! (doc-4's `MAP_PREFAULT`, [`UffdSecondStage::prefault`]) is installed ahead of its accesses.
 //!
@@ -38,17 +38,17 @@
 //! a page a window that doesn't copy on write maps, read-only, is resolved as a read, and the page
 //! made read-only here, so that the worker's write fails and the vCPU's own access decides.
 //!
-//! cladefs: a window that copies on write (backlog doc-13, `CopyOnWrite`) makes a page private for a
-//! store, which a load mustn't: the worker's write, of a page not here, is a load's as much as a
-//! store's. So a fault for writing is the guest's store if it write-protected the page here, as a
-//! load of a page here takes no fault, and if the faulting thread is one of the guest's own (its
-//! vCPUs', [`guest_thread_started`]); a worker's write is resolved as a load, the page made
+//! cladefs: a window that copies on write (backlog doc-13, `CopyOnWrite`) makes a page private for
+//! a store instruction, which a load mustn't: the worker's write, of a page not here, is a load's
+//! as much as a store's. So a fault for writing is the guest's if it write-protected the page here,
+//! as a load of a page here takes no fault, and if the faulting thread is one of the guest's own
+//! (its vCPUs', [`guest_thread_started`]); a worker's write is resolved as a load, the page made
 //! read-only here so that the worker's write fails: of a page not here, and of one write-protected
 //! here, as the page a vCPU's load found not here may be installed before the worker runs, by
-//! another fault, a probe or a map (TASK-191). A guest makes a page private before it stores to it
-//! (doc-13), so no store of its comes through a worker. The vCPU's own access decides: a
-//! load is made; a store fails, `KVM_RUN` with `EFAULT`, and the VMM, which retries it, says so
-//! ([`guest_access_failed`]), which lifts the restrictions such writes made: the store, retried,
+//! another fault, a probe or a map (TASK-191). A guest makes a page private before it writes to it
+//! (doc-13), so no write of its comes through a worker. The vCPU's own access decides: a load is
+//! made; a write fails, `KVM_RUN` with `EFAULT`, and the VMM, which retries it, says so
+//! ([`guest_access_failed`]), which lifts the restrictions such writes made: the write, retried,
 //! write-protected here now, faults as one.
 //!
 //! Nor is a fault always for a page the guest still maps. While the worker faults the page in, the
@@ -61,18 +61,18 @@
 //! when it maps it anew (`SecondStage::window_mapped`): the kernel maps a page here only once a
 //! fault brings it in, which a page withheld would never take.
 //!
-//! A page restricted by a fault, made read-only for a store the window refuses or withheld, is
+//! A page restricted by a fault, made read-only for a write the window refuses or withheld, is
 //! restricted by the fault thread beside the window's own changes to the memory: only between
 //! them, and only as the page was when it faulted. Restricted midway through a change, it would
 //! leave memory accessible that is not yet registered; restricted once the page has changed, it
-//! would refuse the new page's stores, or withhold a page mapped.
+//! would refuse the new page's writes, or withhold a page mapped.
 //!
-//! Changing a page's mapping here replaces its memory, which takes several system calls, and a fault
-//! between them finds memory not yet registered. Until it is registered, new memory is inaccessible,
-//! or read-only where a store would go untracked, so that such a fault fails with `EFAULT` rather
-//! than resolving wrongly: a page of zeros faulted in, or a store not dirtying its page. A VMM must
-//! then let the guest retry its access, as cladefs's Firecracker retries a vCPU's `KVM_RUN` that
-//! fails with `EFAULT` for a moment, giving up on one that keeps failing
+//! Changing a page's mapping here replaces its memory, which takes several system calls, and a
+//! fault between them finds memory not yet registered. Until it is registered, new memory is
+//! inaccessible, or read-only where a write would go untracked, so that such a fault fails with
+//! `EFAULT` rather than resolving wrongly: a page of zeros faulted in, or a write not dirtying its
+//! page. A VMM must then let the guest retry its access, as cladefs's Firecracker retries a vCPU's
+//! `KVM_RUN` that fails with `EFAULT` for a moment, giving up on one that keeps failing
 //! ([`AccessFailures`](crate::AccessFailures)).
 //!
 //! Each run of pages mapped here, consecutive pages of one arena's memory, is a mapping of the
@@ -93,10 +93,10 @@
 //! installed; a trim never leaves it out, as it leaves out runs alone. A private page that goes is
 //! emptied once nothing maps it any more: its memory, written as the object's and never through a
 //! mapping, has no page table entry but where the window maps it, which the change takes away with
-//! the rest, so that emptying it flushes no TLB (TASK-276.6). Each held its own mapping of an arena's page once,
-//! and a VM writing more pages than the budget had them left out and installed again by the
-//! thousand, the fault thread trimming in place of serving faults (r544: 110,857 private pages
-//! against a budget of some 30,000 runs).
+//! the rest, so that emptying it flushes no TLB (TASK-276.6). Each held its own mapping of an
+//! arena's page once, and a VM writing more pages than the budget had them left out and installed
+//! again by the thousand, the fault thread trimming in place of serving faults (r544: 110,857
+//! private pages against a budget of some 30,000 runs).
 //!
 //! The userfaultfd must handle faults taken in the kernel, such as KVM's. It is made through
 //! `/dev/userfaultfd` alone, which the process needs read and write access to: never by the system
@@ -199,7 +199,7 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     /// The hypervisor, told of the pages mapped here, if it maps them ahead of the guest.
     prefault: Option<Arc<dyn Prefault>>,
     /// What the window has done to each page here, held while it makes a change: a page a fault
-    /// restricts, as a store the window refuses makes it read-only, waits for a change being made,
+    /// restricts, as a write the window refuses makes it read-only, waits for a change being made,
     /// and is restricted only if it hasn't changed since the fault.
     pages: Mutex<Pages>,
     /// The runs of pages it keeps installed at most (see the module docs).
@@ -209,9 +209,9 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     /// cladefs: its window's private memory, if the window copies on write (backlog doc-13): a
     /// worker's write of a page not here is resolved as a load then (see the module docs).
     private: OnceLock<PrivateMemory>,
-    /// cladefs: whether every write is a store, a VM's memory's window's
-    /// ([`Self::writes_are_stores`]).
-    process_stores: std::sync::atomic::AtomicBool,
+    /// cladefs: whether every write is the guest's, a VM's memory's window's
+    /// ([`Self::writes_are_guests`]).
+    process_writes: std::sync::atomic::AtomicBool,
     /// cladefs: when it was made, which its pages' last changes are told from
     /// ([`describe_windows`]).
     start: std::time::Instant,
@@ -291,14 +291,14 @@ impl Drop for Busied<'_> {
     }
 }
 
-/// cladefs: the threads whose faults are the guest's own accesses, its vCPUs' ([`guest_thread_started`]),
-/// by their IDs, as userfaultfd reports them.
+/// cladefs: the threads whose faults are the guest's own accesses, its vCPUs'
+/// ([`guest_thread_started`]), by their IDs, as userfaultfd reports them.
 static GUEST_THREADS: std::sync::RwLock<Vec<u32>> = std::sync::RwLock::new(Vec::new());
 
 /// cladefs: the calling thread's accesses to guest memory are the guest's own, as a vCPU's are: a
-/// fault of it for writing, on a window that copies on write, is a store (backlog doc-13). A VMM
-/// calls it on each vCPU's thread as it starts. Any other thread's, as x86 KVM's asynchronous page
-/// fault's worker's, may be for a load.
+/// fault of it for writing, on a window that copies on write, is the guest's (backlog doc-13). A
+/// VMM calls it on each vCPU's thread as it starts. Any other thread's, as x86 KVM's asynchronous
+/// page fault's worker's, may be for a load.
 pub fn guest_thread_started() {
     // SAFETY: Plain system call.
     let thread = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
@@ -324,8 +324,8 @@ static LIFTS: std::sync::Mutex<Vec<Arc<Lift>>> = std::sync::Mutex::new(Vec::new(
 /// that a fault thread slow to lift leaves the VMM retrying the access, one run of failures.
 const LIFT_PATIENCE: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// cladefs: a fault thread's lifts of what its stage restricted for workers' writes, which a guest's
-/// access failing asks for, and waits for ([`guest_access_failed`]).
+/// cladefs: a fault thread's lifts of what its stage restricted for workers' writes, which a
+/// guest's access failing asks for, and waits for ([`guest_access_failed`]).
 struct Lift {
     /// What the fault thread polls, signalled at each ask.
     fd: File,
@@ -378,12 +378,12 @@ impl Lift {
 
 /// cladefs: a guest's access failed, as `KVM_RUN` does with `EFAULT`, which the VMM retries: each
 /// stage lifts the restrictions it made for workers' writes, on windows that copy on write, so that
-/// the access, a store, retried, faults to the window (see the module docs). Called on a vCPU's
+/// the access, a write, retried, faults to the window (see the module docs). Called on a vCPU's
 /// thread: it signals the fault threads, which lift them, and waits until they have, for
 /// [`LIFT_PATIENCE`] at most. It waited for nothing once, and the vCPU, retrying at once, failed
-/// again and again until the fault thread had lifted: 140 times a store after a worker's write,
+/// again and again until the fault thread had lifted: 140 times a write after a worker's write,
 /// 357 while a lift walked every page of the window (TASK-187,
-/// `a_store_after_a_workers_write_waits_for_one_lift`).
+/// `a_write_after_a_workers_write_waits_for_one_lift`).
 pub fn guest_access_failed() {
     let lifts: Vec<Arc<Lift>> =
         LIFTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
@@ -442,9 +442,9 @@ fn refused(what: &str, offset: u64, thread: u32) {
     }
 }
 
-/// cladefs: the name of thread `thread`, as the kernel has it: whether a fault the window refused was
-/// a vCPU's, the guest's own access, a device's, the VMM's on its behalf, or a kernel thread's, as
-/// KVM's asynchronous page faults are, a vCPU's access faulted in for it as its guest goes on
+/// cladefs: the name of thread `thread`, as the kernel has it: whether a fault the window refused
+/// was a vCPU's, the guest's own access, a device's, the VMM's on its behalf, or a kernel thread's,
+/// as KVM's asynchronous page faults are, a vCPU's access faulted in for it as its guest goes on
 /// (TASK-44.12): this process's threads, then any. cladefs: "gone" only if /proc is there to say
 /// so: a jailed VMM has none, where every thread would read as gone (TASK-172).
 fn thread_name(thread: u32) -> String {
@@ -457,10 +457,10 @@ fn thread_name(thread: u32) -> String {
         .map_or_else(|| "gone".to_owned(), |name| name.trim_end().to_owned())
 }
 
-/// cladefs: logs a restriction of a page at window offset `offset` to reads, or its lifting, `what`,
-/// as its changes stood (`made`, and what the fault saw, `seen`), each of the first thousand and
-/// every power of two after: which side was wrong, the window or the guest, when a store stays
-/// refused (TASK-102).
+/// cladefs: logs a restriction of a page at window offset `offset` to reads, or its lifting,
+/// `what`, as its changes stood (`made`, and what the fault saw, `seen`), each of the first
+/// thousand and every power of two after: which side was wrong, the window or the guest, when a
+/// write stays refused (TASK-102).
 fn changed_protection(what: &str, offset: u64, made: u32, seen: Option<u32>) {
     static CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -478,7 +478,7 @@ struct PageChanges {
     /// Whether a fault that found nothing mapped there withheld the page, which the window's
     /// mapping it anew gives back.
     withheld: bool,
-    /// cladefs: whether a fault whose store the window refused made the page read-only here, which
+    /// cladefs: whether a fault whose write the window refused made the page read-only here, which
     /// its memory replaced does away with (TASK-102).
     restricted: bool,
     /// cladefs: whether it was restricted for a worker's write, on a window that copies on write,
@@ -652,10 +652,11 @@ impl Pages {
         runs
     }
 
-    /// cladefs: what a change of `range` takes away from its memory ([`UffdSecondStage::take_away`]):
-    /// its pages installed, its private pages, which it ends, private no more, and those it made
-    /// inaccessible or read-only and installed nothing at, which it gives back. Recorded before the
-    /// change counts itself on the pages, which gives back what was withheld.
+    /// cladefs: what a change of `range` takes away from its memory
+    /// ([`UffdSecondStage::take_away`]): its pages installed, its private pages, which it ends,
+    /// private no more, and those it made inaccessible or read-only and installed nothing at, which
+    /// it gives back. Recorded before the change counts itself on the pages, which gives back what
+    /// was withheld.
     fn take_away(&mut self, range: std::ops::Range<usize>) -> Taking {
         let installed = self.any_installed(range.clone()) && rules().changes_take_away_installed;
         let protected = (range.clone())
@@ -731,13 +732,13 @@ pub(crate) trait HostMemory: Send + Sync {
     /// (`memfd_create`).
     fn private_memory(&self, len: usize) -> std::io::Result<OwnedFd>;
 
-    /// cladefs: fills the pages of memory object `fd` at `offset`, none filled yet, with `bytes`, as
-    /// the object's (`pwrite`): where they are mapped, accesses find them filled, and nothing maps
-    /// them that didn't.
+    /// cladefs: fills the pages of memory object `fd` at `offset`, none filled yet, with `bytes`,
+    /// as the object's (`pwrite`): where they are mapped, accesses find them filled, and nothing
+    /// maps them that didn't.
     fn fill(&self, fd: RawFd, offset: u64, bytes: &[u8]);
 
-    /// cladefs: empties the `len` bytes of memory object `fd` at `offset`: faults on them, where they
-    /// are mapped, find them unfilled again (`fallocate`'s `FALLOC_FL_PUNCH_HOLE`).
+    /// cladefs: empties the `len` bytes of memory object `fd` at `offset`: faults on them, where
+    /// they are mapped, find them unfilled again (`fallocate`'s `FALLOC_FL_PUNCH_HOLE`).
     fn punch(&self, fd: RawFd, offset: u64, len: usize);
 }
 
@@ -852,32 +853,32 @@ impl Syscalls {
 /// tests show to be needed by turning it off (TASK-44.3).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rules {
-    /// A page mapped here is read-only until its stores are tracked.
+    /// A page mapped here is read-only until its writes are tracked.
     pub map_with_window_protection: bool,
     /// A page mapped here is write-protected before it is made writable.
     pub write_protect_before_writable: bool,
     /// Memory unmapped here is inaccessible until it is registered for missing faults.
     pub register_before_accessible: bool,
-    /// A store the window refuses makes its page read-only here.
-    pub refused_store_read_only: bool,
-    /// A refused store's page is made read-only, and a page withheld inaccessible, between the
+    /// A write the window refuses makes its page read-only here.
+    pub refused_write_read_only: bool,
+    /// A refused write's page is made read-only, and a page withheld inaccessible, between the
     /// window's changes to the memory, and only if the page hasn't changed since the fault; a page
     /// withheld is recorded so, to be given back.
     pub restrict_between_changes: bool,
     /// A page withheld is given back when the window maps it anew.
     pub mapping_gives_back_withheld: bool,
-    /// cladefs: a worker's write of a page not here, on a window that copies on write, resolved as a
-    /// load, makes the page read-only here, so that the worker's write, retried, fails rather than
-    /// copying it for a load (backlog doc-13).
+    /// cladefs: a worker's write of a page not here, on a window that copies on write, resolved as
+    /// a load, makes the page read-only here, so that the worker's write, retried, fails rather
+    /// than copying it for a load (backlog doc-13).
     pub worker_writes_restricted: bool,
-    /// cladefs: a guest's access failing lifts what workers' writes restricted, so that a store,
+    /// cladefs: a guest's access failing lifts what workers' writes restricted, so that a write,
     /// retried, faults to the window.
     pub failures_lift_worker_restrictions: bool,
     /// cladefs: a private page is filled before its memory is mapped in place of what was there, so
     /// that the memory is never accessible unfilled before it is registered (backlog doc-13).
     pub private_filled_before_mapped: bool,
-    /// cladefs: a private page that goes is emptied, so that the memory around it, mapped there anew,
-    /// faults again rather than holding the private page for good.
+    /// cladefs: a private page that goes is emptied, so that the memory around it, mapped there
+    /// anew, faults again rather than holding the private page for good.
     pub private_emptied_as_it_goes: bool,
     /// cladefs: a change of pages installed takes their memory away, left out, for their next touch
     /// to install as the window names them then (backlog doc-13: a `MAP` names pages, their first
@@ -893,7 +894,7 @@ impl Rules {
         map_with_window_protection: true,
         write_protect_before_writable: true,
         register_before_accessible: true,
-        refused_store_read_only: true,
+        refused_write_read_only: true,
         restrict_between_changes: true,
         mapping_gives_back_withheld: true,
         worker_writes_restricted: true,
@@ -1089,8 +1090,8 @@ impl UffdSecondStage {
 
     /// Passes the memory's faults to `window` until `stop` is signalled. Faults are resolved
     /// concurrently: each is a future, which this thread polls once `wake`, its waker, signals that
-    /// it can make progress, as when Fxfs's pager supplies the page it waits for. cladefs: and lifts
-    /// what workers' writes restricted as `lift` is signalled ([`guest_access_failed`]).
+    /// it can make progress, as when Fxfs's pager supplies the page it waits for. cladefs: and
+    /// lifts what workers' writes restricted as `lift` is signalled ([`guest_access_failed`]).
     fn serve_faults(&self, window: &dyn Faults, stop: &File, wake: Arc<EventFdWaker>, lift: &Lift) {
         let waker = Waker::from(wake.clone());
         let mut cx = Context::from_waker(&waker);
@@ -1183,7 +1184,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             budget,
             taken,
             private: OnceLock::new(),
-            process_stores: std::sync::atomic::AtomicBool::new(false),
+            process_writes: std::sync::atomic::AtomicBool::new(false),
             start: std::time::Instant::now(),
             busy: Busy::default(),
         });
@@ -1216,25 +1217,25 @@ impl<H: HostMemory> UffdSecondStage<H> {
         Ok(())
     }
 
-    /// cladefs: makes every write a store, whoever's: a VM's memory's window (TASK-456.3), which the
-    /// VMM's threads write too, restoring devices and emulating them, and whose pages its memory
-    /// cell installs ahead of the guest's touches, a tree node of them as its first page faults
-    /// (`memory_cell`): a load of a page installed takes no fault here, KVM finding it present,
-    /// so a write that faults is a store but on that first page, which KVM may hand to x86's
-    /// asynchronous page fault worker, whose fault is a write whatever the vCPU's access, a load's
-    /// too (docs/research/kvm-async-pf-and-shared-guest-memory.md). That page is made private, at
-    /// most one of each node's, rather than restricted for the worker until the vCPU's own access
-    /// says what it was: lifted at any vCPU's failure, restrictions raced the worker's retry,
-    /// which made nearly every page a guest touched private, and left a store refused until its
-    /// VMM gave up (exit 159).
-    pub(crate) fn writes_are_stores(&self) {
-        self.process_stores.store(true, Ordering::Relaxed);
+    /// cladefs: makes every write the guest's, whoever's: a VM's memory's window (TASK-456.3),
+    /// which the VMM's threads write too, restoring devices and emulating them, and whose pages its
+    /// memory cell installs ahead of the guest's touches, a tree node of them as its first page
+    /// faults (`memory_cell`): a load of a page installed takes no fault here, KVM finding it
+    /// present, so a write that faults is the guest's but on that first page, which KVM may hand to
+    /// x86's asynchronous page fault worker, whose fault is a write whatever the vCPU's access, a
+    /// load's too (docs/research/kvm-async-pf-and-shared-guest-memory.md). That page is made
+    /// private, at most one of each node's, rather than restricted for the worker until the vCPU's
+    /// own access says what it was: lifted at any vCPU's failure, restrictions raced the worker's
+    /// retry, which made nearly every page a guest touched private, and left a write refused until
+    /// its VMM gave up (exit 159).
+    pub(crate) fn writes_are_guests(&self) {
+        self.process_writes.store(true, Ordering::Relaxed);
     }
 
-    /// cladefs: whether thread `thread`'s write is a store: the guest's own, or any write of a VM's
-    /// memory's window's ([`Self::writes_are_stores`]).
-    fn stores(&self, thread: u32) -> bool {
-        is_guests(thread) || self.process_stores.load(Ordering::Relaxed)
+    /// cladefs: whether thread `thread`'s write is the guest's: its own, or any write of a VM's
+    /// memory's window's ([`Self::writes_are_guests`]).
+    fn guest_writes(&self, thread: u32) -> bool {
+        is_guests(thread) || self.process_writes.load(Ordering::Relaxed)
     }
 
     /// cladefs: whether its window copies on write (backlog doc-13).
@@ -1399,8 +1400,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
         changed_protection(what, offset, made, seen);
     }
 
-    /// cladefs: restricts the page at `addr` to reads for a worker's write, resolved as a load, on a
-    /// window that copies on write (see the module docs), if the window maps it here, read-only,
+    /// cladefs: restricts the page at `addr` to reads for a worker's write, resolved as a load, on
+    /// a window that copies on write (see the module docs), if the window maps it here, read-only,
     /// so that the worker's write fails; until a guest's access fails ([`guest_access_failed`]). A
     /// private page takes the write.
     fn restrict_for_worker(&self, addr: usize) {
@@ -1432,7 +1433,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
 
     /// cladefs: lifts the restrictions made for workers' writes ([`Self::restrict_for_worker`]), as
     /// a guest's access failed ([`guest_access_failed`]): the page is writable here again, and
-    /// write-protected still, so that a store to it faults to the window.
+    /// write-protected still, so that a write to it faults to the window.
     pub(crate) fn lift_worker_restrictions(&self) {
         if !rules().failures_lift_worker_restrictions {
             return;
@@ -1493,61 +1494,64 @@ impl<H: HostMemory> UffdSecondStage<H> {
         } else {
             Access::Read
         };
-        // A store to a page mapped here read-only is the guest's: KVM faults loads of pages mapped
+        // A write to a page mapped here read-only is the guest's: KVM faults loads of pages mapped
         // here without userfaultfd. A fault on a page not mapped here may be for writing whatever
         // the guest's access (see the module docs), and resolves that page alone.
-        let store = flags & UFFD_PAGEFAULT_FLAG_WP != 0;
-        // cladefs: a worker's write, on a window that copies on write, which a load may have made, is
-        // resolved as a load, and the page restricted to reads here once it is (see the module
+        let guest_write = flags & UFFD_PAGEFAULT_FLAG_WP != 0;
+        // cladefs: a worker's write, on a window that copies on write, which a load may have made,
+        // is resolved as a load, and the page restricted to reads here once it is (see the module
         // docs): of a page not here, and of one here, write-protected, which the vCPU's load found
-        // not here, and another fault, a probe or a map installed before the worker ran. That
-        // one, taken as a store, made a private page the guest never counted, and its frozen
-        // VM's snapshot was refused (TASK-191, GCE r685, r686, r688).
-        let for_worker = access == Access::Write && self.copying() && !self.stores(thread);
-        // cladefs: a store of the guest's own to a page not here, on a window that copies on write,
-        // goes to the window as a store, which makes the page private in place of nothing, rather
-        // than installed first, to be stored to and replaced by its private copy, a TLB flush
-        // (backlog doc-13: a store's first touch, TASK-276.6). One private already has nothing to
-        // wait for: it was filled after the fault found it unfilled.
-        let first_store = !store && access == Access::Write && self.copying() && !for_worker;
+        // not here, and another fault, a probe or a map installed before the worker ran. That one,
+        // taken as the guest's, made a private page the guest never counted, and its frozen VM's
+        // snapshot was refused (TASK-191, GCE r685, r686, r688).
+        let for_worker = access == Access::Write && self.copying() && !self.guest_writes(thread);
+        // cladefs: a write of the guest's own to a page not here, on a window that copies on write,
+        // goes to the window as the guest's, which makes the page private in place of nothing,
+        // rather than installed first, to be stored to and replaced by its private copy, a TLB
+        // flush (backlog doc-13: a write's first touch, TASK-276.6). One private already has
+        // nothing to wait for: it was filled after the fault found it unfilled.
+        let first_guest_write =
+            !guest_write && access == Access::Write && self.copying() && !for_worker;
         // A page the window maps, left out past the budget, or named and never touched, is
         // installed, as the window names it, without the window; any other fault is the window's
         // to resolve.
-        let reinstalled = match first_store {
+        let reinstalled = match first_guest_write {
             true => self.is_private(addr),
-            false => !store && self.reinstall(addr),
+            false => !guest_write && self.reinstall(addr),
         };
         if !reinstalled {
-            self.resolve_through(window, addr, access, store, for_worker, thread).await;
-            // cladefs: what the window named for the fault installed now, which the access, retried,
-            // finds, rather than faulting again to install it (TASK-276.6).
-            if !store && !first_store {
+            self.resolve_through(window, addr, access, guest_write, for_worker, thread).await;
+            // cladefs: what the window named for the fault installed now, which the access,
+            // retried, finds, rather than faulting again to install it (TASK-276.6).
+            if !guest_write && !first_guest_write {
                 self.reinstall(addr);
             }
         }
         // Before the worker retries its write, however its page came to be here. cladefs: one
         // installed again, as it was, write-protected, and left writable, took the retried write
-        // as a store, which copied the page for a load, uncounted by the guest, past its private
-        // pages: a jailed VM process, its budget the default's for want of /proc, left out pages by
-        // the thousand, 21,396 copied so, and the guest's writes were refused (GCE r582, TASK-170).
+        // as the guest's, which copied the page for a load, uncounted by the guest, past its
+        // private pages: a jailed VM process, its budget the default's for want of /proc, left out
+        // pages by the thousand, 21,396 copied so, and the guest's writes were refused (GCE r582,
+        // TASK-170).
         if for_worker {
             self.restrict_for_worker(addr);
         }
         self.host.wake(addr, page_size);
-        // A write to a page not mapped here may start a run a sequential writer stores to: the pages
-        // after it are mapped read-only, the next read in if need be, so that stores to them fault
-        // as stores, which dirty runs of pages, and loads do not fault at all. Past the file, or
-        // the window, there is nothing to map. cladefs: a probe, whose page the guest may not map,
-        // which the window refuses then without telling of it as of the guest's access. cladefs: on
-        // a window that copies on write, a worker's write alone, which a run of loads makes: a
-        // guest's store there takes a private page whether its page is here or not, a fault
-        // either way, and the probe, made once the faulting thread is woken, installed the pages
-        // after it read-only for a moment (`install`) as that thread stored on to them, which a
-        // vCPU's VMM retries and a thread of the host's dies of: SIGSEGV in
+        // A write to a page not mapped here may start a run a sequential writer writes to: the
+        // pages after it are mapped read-only, the next read in if need be, so that writes to them
+        // fault as writes, which dirty runs of pages, and loads do not fault at all. Past the file,
+        // or the window, there is nothing to map. cladefs: a probe, whose page the guest may not
+        // map, which the window refuses then without telling of it as of the guest's access.
+        // cladefs: on a window that copies on write, a worker's write alone, which a run of loads
+        // makes: a guest's write there takes a private page whether its page is here or not, a
+        // fault either way, and the probe, made once the faulting thread is woken, installed the
+        // pages after it read-only for a moment (`install`) as that thread stored on to them, which
+        // a vCPU's VMM retries and a thread of the host's dies of: SIGSEGV in
         // snapshots_after_private_pages_are_rebound_restore_their_bytes, 3 runs in 500.
         let next = offset + page_size as u64;
         let probes = !self.copying() || for_worker;
-        if probes && !reinstalled && !store && access == Access::Write && next < window.size() {
+        if probes && !reinstalled && !guest_write && access == Access::Write && next < window.size()
+        {
             match window.probe(next).await {
                 // cladefs: installed, as the window names it now (TASK-276.6).
                 Ok(()) => {
@@ -1559,16 +1563,17 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
     }
 
-    /// Resolves the fault at `addr`, an `access`, a `store` to a page here if so, of `thread`'s,
-    /// through `window`, as [`resolve`](Self::resolve) does all but a page left out: a worker's
-    /// write as a load, `for_worker`. A fault the window refuses restricts the page as the access
-    /// found it; one it can't resolve aborts the process, as its faulting thread can't go on.
+    /// Resolves the fault at `addr`, an `access`, a `guest_write` to a page here if so, of
+    /// `thread`'s, through `window`, as [`resolve`](Self::resolve) does all but a page left out: a
+    /// worker's write as a load, `for_worker`. A fault the window refuses restricts the page as the
+    /// access found it; one it can't resolve aborts the process, as its faulting thread can't go
+    /// on.
     async fn resolve_through(
         &self,
         window: &dyn Faults,
         addr: usize,
         access: Access,
-        store: bool,
+        guest_write: bool,
         for_worker: bool,
         thread: u32,
     ) {
@@ -1577,7 +1582,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let seen = self.seen(addr);
         let resolved = if for_worker {
             window.fault_page(offset, Access::Read).await
-        } else if store {
+        } else if guest_write {
             window.fault(offset, access).await
         } else {
             window.fault_page(offset, access).await
@@ -1585,10 +1590,10 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let resolved = match resolved {
             // Where the window refuses a write, the page is mapped read-only: make it read-only
             // here too, so that the write fails in the kernel rather than faulting here again. A
-            // store from the guest then fails as KVM's would.
+            // write from the guest then fails as KVM's would.
             Err(Errno::EACCES) if access == Access::Write => {
-                refused("a store to a page the window maps read-only", offset, thread);
-                if rules().refused_store_read_only {
+                refused("a write to a page the window maps read-only", offset, thread);
+                if rules().refused_write_read_only {
                     self.restrict(addr, seen, libc::PROT_READ);
                 }
                 Ok(())
@@ -1760,8 +1765,8 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         self.change(addr, len, forget, |taking| self.take_away(addr, len, taking));
     }
 
-    /// cladefs: the window's change of a range it mapped, made at once (TASK-91.16): each map of the
-    /// very pages installed where it maps them, as a `MAP` of what a range maps already, leaves
+    /// cladefs: the window's change of a range it mapped, made at once (TASK-91.16): each map of
+    /// the very pages installed where it maps them, as a `MAP` of what a range maps already, leaves
     /// them in place, the memory staying; every other page of the range is taken away
     /// ([`Self::take_away`]), the pages a map covers named, installed as they are first touched
     /// ([`SecondStage::map`]), the rest mapping nothing. Made in steps, each page would be left
@@ -1864,8 +1869,8 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         }
     }
 
-    /// cladefs: the pages from `offset` on are private from now on (backlog doc-13), one for each of
-    /// `from`: their private memory filled with the bytes of each one's page at `from`, its
+    /// cladefs: the pages from `offset` on are private from now on (backlog doc-13), one for each
+    /// of `from`: their private memory filled with the bytes of each one's page at `from`, its
     /// source's, or zeros, then mapped in place of what was there, as the memory around them is,
     /// with which it merges (see the module docs): accessible as soon as they are mapped, as
     /// nothing about them faults any more.
@@ -1966,8 +1971,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let (fd, read_only) =
             self.memories.fd(phys.arena).expect("a window's page is of its arenas");
         // Memory this process holds read-only, the default arena's, public bases' pages, is mapped
-        // private: userfaultfd tracks stores to a mapping that may be made writable alone, and a
-        // store to a private one could only copy the page into this process, which the window
+        // private: userfaultfd tracks writes to a mapping that may be made writable alone, and a
+        // write to a private one could only copy the page into this process, which the window
         // never lets it make, as it write-protects every page it maps. Its loads read the very
         // pages.
         Memory::File { fd, offset: phys.offset, shared: !read_only }
@@ -1978,9 +1983,9 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let writable = libc::PROT_READ | libc::PROT_WRITE;
         let prot = if rules().map_with_window_protection { libc::PROT_READ } else { writable };
         self.host.map(addr, len, prot, memory);
-        // Stores are tracked by write-protecting the page, rather than by its protection, whose
+        // Writes are tracked by write-protecting the page, rather than by its protection, whose
         // faults userfaultfd does not report. The new mapping is read-only until it is
-        // write-protected, so that a store meanwhile fails rather than going untracked.
+        // write-protected, so that a write meanwhile fails rather than going untracked.
         self.host.register(addr, len, UFFDIO_REGISTER_MODE_WP);
         // Mapped writable already, it needs no protection changed (TASK-26.18.3).
         let make_writable = prot != writable;
@@ -2217,8 +2222,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
     }
 }
 
-/// cladefs: the second stages serving faults ([`UffdSecondStage::serve`]), which a vCPU whose access
-/// keeps failing tells of ([`describe_windows`]).
+/// cladefs: the second stages serving faults ([`UffdSecondStage::serve`]), which a vCPU whose
+/// access keeps failing tells of ([`describe_windows`]).
 static SERVING: std::sync::Mutex<Vec<Weak<UffdSecondStage>>> = std::sync::Mutex::new(Vec::new());
 
 /// cladefs: what the DAX windows' second stages serving faults hold and are doing, for a vCPU whose
@@ -2581,10 +2586,10 @@ mod tests {
         assert_eq!(unsafe { libc::munmap(memory, 2 * ps) }, 0);
     }
 
-    /// cladefs TASK-112.1: the pages the guest asks for ahead of its reads, of what the window maps,
-    /// are installed, and are those the hypervisor is told of, the runs of them installed; not
-    /// those it maps nothing at, nor past the window. TASK-276.6: the window's maps install none,
-    /// nor tell the hypervisor of any: a `MAP` names pages, their first touch installs them.
+    /// cladefs TASK-112.1: the pages the guest asks for ahead of its reads, of what the window
+    /// maps, are installed, and are those the hypervisor is told of, the runs of them installed;
+    /// not those it maps nothing at, nor past the window. TASK-276.6: the window's maps install
+    /// none, nor tell the hypervisor of any: a `MAP` names pages, their first touch installs them.
     #[test]
     fn pages_asked_for_ahead_are_installed_and_prefaulted() {
         struct Told(Mutex<Vec<(u64, u64)>>);
@@ -2888,13 +2893,13 @@ mod tests {
 
     /// cladefs TASK-164.1 (backlog doc-13): on a window that copies on write, a write the kernel
     /// makes to a page not here for a thread that isn't the guest's, as KVM's asynchronous page
-    /// fault's worker makes for a vCPU's load and store alike, copies nothing: resolved as a load,
+    /// fault's worker makes for a vCPU's load and write alike, copies nothing: resolved as a load,
     /// the page restricted to reads here, the write fails (`EFAULT`). The guest's own thread's
     /// write fails too then, until a guest's access failing lifts the restriction
-    /// (`guest_access_failed`): it faults as a store, and is made, in a private copy, the
+    /// (`guest_access_failed`): it faults as a write, and is made, in a private copy, the
     /// extent's page as it was. The kernel's writes are a pipe's reads into the window.
     #[test]
-    fn worker_writes_copy_nothing_and_the_guests_stores_copy() {
+    fn worker_writes_copy_nothing_and_the_guests_writes_copy() {
         use crate::dax::Source as _;
         let ps = page_size() as usize;
         // SAFETY: Maps anonymous memory, which this test owns.
@@ -2960,17 +2965,18 @@ mod tests {
         }
     }
 
-    /// cladefs: on a window that copies on write, a write to a page installed here, write-protected,
-    /// is a store only if a guest's thread makes it (TASK-191): any other's, as KVM's worker's,
-    /// which writes for loads too and may find the page a vCPU's load missed installed by the time
-    /// it runs, is resolved as a load, the page restricted to reads, and fails, nothing copied; a
-    /// vCPU's write fails while the restriction stands, and once a failure lifts it, as the VMM
-    /// asks, is a store, made in a private copy. Red with any thread's write taken as a store: the
-    /// worker's made a private page no guest counted. A test of a worker's write needn't keep its
-    /// page from here any more, as `a_store_after_a_workers_write_waits_for_one_lift` did by mapping
-    /// zeros, which a host's `vm.max_map_count` past OrbStack's kept installed (GCE r691, TASK-190).
+    /// cladefs: on a window that copies on write, a write to a page installed here,
+    /// write-protected, is a write only if a guest's thread makes it (TASK-191): any other's, as
+    /// KVM's worker's, which writes for loads too and may find the page a vCPU's load missed
+    /// installed by the time it runs, is resolved as a load, the page restricted to reads, and
+    /// fails, nothing copied; a vCPU's write fails while the restriction stands, and once a failure
+    /// lifts it, as the VMM asks, is a write, made in a private copy. Red with any thread's write
+    /// taken as the guest's: the worker's made a private page no guest counted. A test of a
+    /// worker's write needn't keep its page from here any more, as
+    /// `a_write_after_a_workers_write_waits_for_one_lift` did by mapping zeros, which a host's
+    /// `vm.max_map_count` past OrbStack's kept installed (GCE r691, TASK-190).
     #[test]
-    fn writes_to_pages_here_are_stores_of_the_guests_alone() {
+    fn writes_to_pages_here_are_writes_of_the_guests_alone() {
         use crate::dax::Source as _;
         let ps = page_size() as usize;
         // SAFETY: Maps anonymous memory, which this test owns.
@@ -3023,7 +3029,7 @@ mod tests {
         assert_eq!(worker, Err(libc::EFAULT), "a worker's write was made");
         assert_eq!(window.private_pages(), 0, "a worker's write copied the page");
         assert_eq!(extent_byte(), 9, "the worker's write reached the extent's page");
-        // A vCPU's, which fails while the worker's restriction stands, and is a store once lifted.
+        // A vCPU's, which fails while the worker's restriction stands, and is a write once lifted.
         let vcpu = std::thread::spawn(move || {
             crate::guest_thread_started();
             let restricted = read_into(base);
@@ -3047,13 +3053,13 @@ mod tests {
         }
     }
     /// cladefs TASK-276.6 (backlog doc-13: a `MAP` names pages, their first touch installs them):
-    /// pages the window maps are installed only as they are first touched. A guest's store, its
+    /// pages the window maps are installed only as they are first touched. A guest's write, its
     /// first touch of a page, makes the page private in place of nothing, and so does a `PRIVATE`
     /// of a page never touched: neither takes a page installed away, which the stage counts, each
     /// a TLB flush, and the window's memory stays one mapping, its private memory's. A load's
     /// first touch installs its page; a `PRIVATE` of it then takes it away, counted.
     #[test]
-    fn first_touches_of_pages_named_install_nothing_to_store() {
+    fn first_touches_of_pages_named_install_nothing_to_write() {
         let ps = page_size() as usize;
         let base = window_memory(3);
         // SAFETY: Only the test uses the memory, which outlives the window.
@@ -3066,9 +3072,9 @@ mod tests {
         let mut pipe = [0; 2];
         // SAFETY: Creates a pipe, which the test closes.
         assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
-        // A vCPU's store of a byte to the page at `addr`: the pipe's read into it, as the kernel
+        // A vCPU's write of a byte to the page at `addr`: the pipe's read into it, as the kernel
         // writes for the guest, on a guest's thread.
-        let store = move |addr: usize| {
+        let write_byte = move |addr: usize| {
             std::thread::spawn(move || {
                 crate::guest_thread_started();
                 // SAFETY: Writes a byte to the pipe, and reads it into the window's memory.
@@ -3080,7 +3086,7 @@ mod tests {
             .join()
             .unwrap()
         };
-        assert_eq!(store(base), 1, "the store's first touch failed");
+        assert_eq!(write_byte(base), 1, "the write's first touch failed");
         futures::executor::block_on(window.make_private(ps as u64, ps as u64)).unwrap();
         assert_eq!(window.private_pages(), 2);
         assert_eq!(stage.taken(), [0, 0], "a first touch took a page installed away");
@@ -3168,9 +3174,9 @@ mod tests {
         assert_eq!(unsafe { libc::munmap(memory, SIZE) }, 0);
     }
 
-    /// cladefs TASK-227: zero bytes are a page that nothing changed nor maps, which a window's pages
-    /// are as their memory is made ([`WindowPages`]): `Option<Mapped>`'s `None` is `used`'s 0,
-    /// `installed` a byte with no spare values for it.
+    /// cladefs TASK-227: zero bytes are a page that nothing changed nor maps, which a window's
+    /// pages are as their memory is made ([`WindowPages`]): `Option<Mapped>`'s `None` is `used`'s
+    /// 0, `installed` a byte with no spare values for it.
     #[test]
     fn zero_bytes_are_a_page_nothing_changed() {
         // SAFETY: Zero bytes, valid for each field: none is a reference, and `Option<Mapped>`'s
@@ -3244,7 +3250,7 @@ mod tests {
     /// them, but never its private pages: each stays in place, its private memory's, which the
     /// kernel reaches without a fault (a pipe's write from it), holding what was copied and stored
     /// there. Red with each private page a run, which a trim left out (r544: the private pages
-    /// thrice the budget, the fault thread trimming, its lifts of the stores it refused waiting).
+    /// thrice the budget, the fault thread trimming, its lifts of the writes it refused waiting).
     #[test]
     fn trims_leave_private_pages_in_place() {
         const PAGES: usize = 32;

@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what a host keeps its stores' cells in object storage with (backlog doc-7;
-//! TASK-28.5): its configuration ([`Host`], [`host_token`]), the runtime its stores' uploaders and
-//! fetches run on and their budgets ([`runtime`], [`HostFetcher`]), and the errno of each failure
-//! ([`errno`]). The uploader is local_cell's (`local_cell::upload`, TASK-165.9).
+//! cladefs's own: what a host keeps its cells in object storage with (backlog doc-7;
+//! TASK-28.5): its configuration ([`Host`], [`host_token`]), the runtime its open cells' uploaders
+//! and fetches run on and their budgets ([`runtime`], [`HostFetcher`]), and the errno of each
+//! failure ([`errno`]). The uploader is local_cell's (`local_cell::upload`, TASK-165.9).
 //!
-//! cladefs: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening stores
+//! cladefs: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening open cells
 //! chooses alike, the extent daemon, the cladefs CLI's mounts and `cladefsctl`
 //! (`bucket_cell::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
 //! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
@@ -28,8 +28,8 @@ use std::sync::Arc;
 use storage_device::ExtentId;
 
 /// The fencing token of this host's placement, `CLADEFSD_TOKEN`, which the system's control
-/// plane gives it, and which the copies of stores here that were never placed ([`place`]) take
-/// their cells with, as stores restored or taken here are. Not 0, which would fence nothing:
+/// plane gives it, and which the copies of open cells here that were never placed ([`place`]) take
+/// their cells with, as open cells restored or taken here are. Not 0, which would fence nothing:
 /// a host without one keeps no cell (TASK-45).
 pub fn host_token() -> Result<u64, Failure> {
     let missing = || {
@@ -49,7 +49,7 @@ pub fn host_token() -> Result<u64, Failure> {
 }
 
 /// This host, as one of cladefs's multi-node system, the only kind there is (TASK-45): the bucket
-/// its stores' cells are kept in, and its placement's fencing token, as the environment names
+/// its cells are kept in, and its placement's fencing token, as the environment names
 /// them. Tests and development use an in-memory bucket (`memory:///NAME`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
@@ -64,7 +64,7 @@ impl Host {
     pub fn from_env() -> Result<Self, String> {
         let bucket = crate::host_cell::host_bucket_url().ok_or_else(|| {
             "CLADEFSD_BUCKET names no bucket: a host of cladefs's multi-node system keeps its \
-             stores' cells in one (tests and development: memory:///NAME)"
+             cells in one (tests and development: memory:///NAME)"
                 .to_owned()
         })?;
         let token = host_token().map_err(|err| err.to_string())?;
@@ -145,16 +145,16 @@ pub async fn bucket_numbered(number: u16) -> Result<Arc<ObjectBucket>, crate::Er
 }
 
 /// The errno of `failure`, as doc-4 and doc-7 have them: a cell this writer lost, to another
-/// writer or deleted, or one nothing writes, is one the store takes no more commits for (`EROFS`);
-/// one a later placement holds, which a placement cut off takes back no more, or one another
-/// writer moved on from this host's write-ahead log, which the store opens no more until
-/// `cladefsctl take` drops it, `ESTALE`; a cell, or a version, gone, `ENOENT`; a fork's child's ID
-/// taken, `EEXIST`; a cell of a newer format, `ENOTSUP`. cladefs: a cell
+/// writer or deleted, or one nothing writes, is one the open cell takes no more commits for
+/// (`EROFS`); one a later placement holds, which a placement cut off takes back no more, or one
+/// another writer moved on from this host's write-ahead log, which the open cell opens no more
+/// until `cladefsctl take` drops it, `ESTALE`; a cell, or a version, gone, `ENOENT`; a fork's
+/// child's ID taken, `EEXIST`; a cell of a newer format, `ENOTSUP`. cladefs: a cell
 /// gone, `ENOENT`; a cell's name taken, `EEXIST`, or no cell's, `EINVAL` (TASK-364); a fork of
 /// another tenant's version not shared, `EACCES`, and sharing what is no version, `EINVAL`
 /// (TASK-395.7). None for
-/// what the store failed to read or write, here or in object storage, which is the caller's `EIO`,
-/// logged.
+/// what the open cell failed to read or write, here or in object storage, which is the caller's
+/// `EIO`, logged.
 pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
     use bucket_cell::Error;
@@ -167,7 +167,7 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
-        // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
+        // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its open cells
         // open no more until it is given back (TASK-411.3).
         Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
         // cladefs: an encrypted cell inherited by one whose record holds not its keys (TASK-411.4).
@@ -209,15 +209,15 @@ impl From<crate::faults::Failpoint> for Failure {
     }
 }
 
-/// The runtime the host's stores' uploaders run on, and the budget of their uploads; cladefs: and the
-/// host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime can't be
-/// made, a later call making it anew ([`bucket_runtime`]).
+/// The runtime the host's open cells' uploaders run on, and the budget of their uploads; cladefs:
+/// and the host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime
+/// can't be made, a later call making it anew ([`bucket_runtime`]).
 pub fn runtime() -> Result<Runtime, Failure> {
     let keys = keys::Host::new(kms()?, MEMORY.get().keys().clone());
     Ok(Runtime { handle: bucket_runtime()?, uploads: UPLOADS.get().clone(), keys })
 }
 
-/// The runtime every store's uploader, and its fetches, run on, and the calls from no runtime's
+/// The runtime every open cell's uploader, and its fetches, run on, and the calls from no runtime's
 /// task (`local_cell::upload::bucket_runtime`, TASK-34, TASK-449's review): one for the process, so
 /// that one runtime serves the connections to the host's buckets, whichever opened them. Fails if
 /// it can't be made, a later call making it anew.
@@ -230,8 +230,8 @@ pub(crate) fn bucket_runtime() -> Result<tokio::runtime::Handle, Failure> {
 /// bucket given a master key, TASK-411.27), or [`set_kms`] set it before (TASK-411.3), its pools of
 /// new cell KEKs refilled on the bucket runtime. None chosen, or one that can't be had (a bad
 /// `CLADEFS_KMS`, a master key unreadable, or given with no host's bucket to keep tenants' KEKs
-/// in), it is a KMS refusing every call, naming why: the host then opens no store and makes no
-/// cell. Every process that opens stores refuses to start so first ([`require_kms`],
+/// in), it is a KMS refusing every call, naming why: the host then opens no open cell and makes no
+/// cell. Every process that opens open cells refuses to start so first ([`require_kms`],
 /// TASK-411.28). Fails, keeping nothing, if the runtime its pools refill on can't be made
 /// ([`bucket_runtime`], TASK-449's review).
 pub fn kms() -> Result<Arc<keys::CachingKms>, Failure> {
@@ -253,7 +253,7 @@ node_local::node_local! {
 
 /// cladefs: whether the host has a KMS ([`kms`]): the refusal, naming `CLADEFS_KMS` and
 /// `CLADEFS_MASTER_KEY`, if its environment chooses none, or why the one it chooses can't be had.
-/// What every process that opens stores asks as it starts, refusing to start with none
+/// What every process that opens open cells asks as it starts, refusing to start with none
 /// (TASK-411.28): cladefsd, cladefsctl, the cladefs CLI's mounts.
 pub fn require_kms() -> Result<(), String> {
     host_keys().as_ref().map(drop).map_err(|why| format!("the host's KMS: {why}"))
@@ -327,7 +327,8 @@ fn host_kms(kmses: Arc<dyn keys::Kmses>, runtime: tokio::runtime::Handle) -> Arc
     keys::CachingKms::over(kmses, Some(keys::Pooling::on(runtime)))
 }
 
-/// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
+/// cladefs: has the host use `kms` as its KMS, before any open cell opens: tests' (TASK-411.3).
+/// Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
     KMS.get()
         .set(Ok(HostKeys { kmses: one(kms), bucket: None, by_bucket: None }))
@@ -340,30 +341,30 @@ node_local::node_local! {
 }
 
 /// cladefs: the KMS tests' and benches' processes encrypt under, their environment naming none
-/// (TASK-411.28): every store is encrypted, and a process given no KMS opens none.
+/// (TASK-411.28): every open cell is encrypted, and a process given no KMS opens none.
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::HostKeys;
     use std::sync::Arc;
 
-    /// Has this process's stores encrypt under the tests' KMS, every tenant's KEK one known key
+    /// Has this process's open cells encrypt under the tests' KMS, every tenant's KEK one known key
     /// (`extent_keys::testing::KnownKms`), unless its environment names a KMS (`CLADEFS_KMS`) or
     /// gives a master key (`CLADEFS_MASTER_KEY`, `CLADEFS_MASTER_KEY_FILE`): a bench's first step,
     /// which measures a host's work, a real host's KMS adding its calls. cladefs's tests have it
-    /// whatever they do, and the processes they start (the `tests-kms` feature). Before any store
-    /// opens.
+    /// whatever they do, and the processes they start (the `tests-kms` feature). Before any open
+    /// cell opens.
     pub fn encrypted() {
         let named = ["CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE"]
             .into_iter()
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
         if !named {
             let set = super::KMS.get().set(Ok(host_keys()));
-            assert!(set.is_ok(), "the tests' KMS, set before any store opens");
+            assert!(set.is_ok(), "the tests' KMS, set before any cell opens");
         }
     }
 
     /// The host's keys under the tests' KMS, which every process has alike: a test's, and those it
-    /// starts, whatever bucket each keeps its stores in.
+    /// starts, whatever bucket each keeps its open cells in.
     pub(super) fn host_keys() -> HostKeys {
         let kmses = super::one(Arc::new(extent_keys::testing::KnownKms));
         HostKeys { kmses, bucket: None, by_bucket: None }
@@ -373,9 +374,9 @@ pub mod testing {
 /// cladefs: what a host forgot of a tenant's or a cell's keys, told to ([`forget`], TASK-411.7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Forgotten {
-    /// The stores open of the scope's cells it halted, which serve nothing more (`EACCES`).
+    /// The open cells open of the scope's cells it halted, which serve nothing more (`EACCES`).
     pub stores: usize,
-    /// The rings of the scope's stores its fetchers held.
+    /// The rings of the scope's open cells its fetchers held.
     pub rings: usize,
     /// The objects' tails and parts of the scope's cells its fetchers kept in memory.
     pub kept: usize,
@@ -389,19 +390,19 @@ pub struct Forgotten {
 /// it is told the tenant's KEK is revoked or destroyed in the KMS, or the cell shredded, `why`
 /// saying which: what the control API's `ForgetTenantKeys` and `ShredCell` do.
 ///
-/// Every store open of the scope's cells is halted, each request failing with `EACCES`, as its
-/// opening would fail; the extent cache lets go of them, and of every extent no other open store
+/// Every open cell of the scope's cells is halted, each request failing with `EACCES`, as its
+/// opening would fail; the extent cache lets go of them, and of every extent no other open cell
 /// holds, its pages evicted, unmapped from the windows that map them; its fetchers forget the
-/// stores' rings and drop what they kept of the scope's objects; its KMS forgets the scope's cell
-/// KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays in
-/// memory: a halted store's own ring, and its open segment's key, until whoever holds it closes it
-/// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
-/// the pages of extents other stores hold too (a shared version's fork, a public base). On disk,
-/// everything of the scope's is as its keys encrypted it: open segments, write-ahead logs, the part
-/// cache.
+/// open cells' rings and drop what they kept of the scope's objects; its KMS forgets the scope's
+/// cell KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays
+/// in memory: a halted open cell's own ring, and its open segment's key, until whoever holds it
+/// closes it (a VM process whose guest met `EACCES`); the DEKs other open cells hold, which they
+/// inherited; and the pages of extents other open cells hold too (a shared version's fork, a public
+/// base). On disk, everything of the scope's is as its keys encrypted it: open segments,
+/// write-ahead logs, the part cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
-    let stores = crate::halt::halt_stores(|cell| scope.covers(cell), Errno::EACCES, &halted);
+    let stores = crate::halt::halt_cells(|cell| scope.covers(cell), Errno::EACCES, &halted);
     let (bytes, extents) = crate::cache::forget(|cell| scope.covers(cell));
     let kept = MEMORY.get().forget_kept(scope);
     // Its KMS, if it made it: one not made yet unwrapped nothing.
@@ -509,35 +510,37 @@ impl Unreached {
     }
 }
 
-/// cladefs: how many stores' uploaders run in this process, as it changes: what an extent daemon's
-/// drain waits to see none of (TASK-141.4): Linux's alone, as the daemon is.
-#[cfg(target_os = "linux")]
+/// cladefs: how many open cells' uploaders run in this process, as it changes: what an extent
+/// daemon's drain waits to see none of (TASK-141.4): the daemon's, Linux's and the simulation's.
+#[cfg(any(target_os = "linux", madsim))]
 pub(crate) fn uploaders() -> tokio::sync::watch::Receiver<usize> {
     local_cell::upload::uploaders()
 }
 
 node_local::node_local! {
-    /// The GETs of extents' data a host has in flight: one connection to object storage gives roughly
-    /// 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB. cladefs: so many
-    /// for each bucket its stores read (TASK-633.4), so that one slow or failing, another cloud
-    /// region's, holds up none of another's.
+    /// The GETs of extents' data a host has in flight: one connection to object storage gives
+    /// roughly 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB.
+    /// cladefs: so many for each bucket its open cells read (TASK-633.4), so that one slow or
+    /// failing, another cloud region's, holds up none of another's.
     static BUDGET: fetch::Budgets = {
         fetch::Budgets::per_bucket(Limits { requests: 64, bytes: 64 << 20 })
         };
 }
 
 node_local::node_local! {
-    /// What a host's stores' reads keep in memory, objects' tails and the parts fetched last: once for
-    /// the host, however many of its stores read them, as the forks of one base read its parts, within
-    /// bounds that hold for the host, not for each store (TASK-92.21, TASK-92.22).
+    /// What a host's open cells' reads keep in memory, objects' tails and the parts fetched last:
+    /// once for the host, however many of its open cells read them, as the forks of one base read
+    /// its parts, within bounds that hold for the host, not for each open cell (TASK-92.21,
+    /// TASK-92.22).
     static MEMORY: Arc<fetch::Memory> = fetch::Memory::new();
 }
 
 node_local::node_local! {
-    /// The PUTs of objects a host's stores upload, each holding its object's bytes while it goes:
-    /// bounded in bytes, so that a host whose stores are far behind, object storage out of reach for a
-    /// while, holds no more than these at once, whatever their number (TASK-79.19); and in number, as
-    /// its GETs are. cladefs: in bytes, its upload memory ([`set_upload_memory`], TASK-317).
+    /// The PUTs of objects a host's open cells upload, each holding its object's bytes while it
+    /// goes: bounded in bytes, so that a host whose open cells are far behind, object storage out
+    /// of reach for a while, holds no more than these at once, whatever their number (TASK-79.19);
+    /// and in number, as its GETs are. cladefs: in bytes, its upload memory ([`set_upload_memory`],
+    /// TASK-317).
     static UPLOADS: Arc<Budget> = {
         let bytes = *UPLOAD_MEMORY.get().get_or_init(|| UPLOAD_BYTES);
         Budget::new(Limits { requests: 64, bytes })
@@ -551,10 +554,10 @@ node_local::node_local! {
 }
 
 /// cladefs: has the host's uploads hold at most `bytes` of the objects they upload at once
-/// (TASK-317): cladefsd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its stores
+/// (TASK-317): cladefsd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its open cells
 /// fall, what waits for it is on the host's disk, their write-ahead logs, and what of it is in
-/// memory is what this lets upload at once. Before any store opens; no less than the largest
-/// object a store uploads, an extent's of 64 MiB, which goes alone.
+/// memory is what this lets upload at once. Before any open cell opens; no less than the largest
+/// object an open cell uploads, an extent's of 64 MiB, which goes alone.
 pub fn set_upload_memory(bytes: u64) -> Result<(), String> {
     if bytes < crate::OpenCell::MAX_EXTENT {
         return Err(format!(
@@ -565,7 +568,7 @@ pub fn set_upload_memory(bytes: u64) -> Result<(), String> {
     match UPLOAD_MEMORY.get().set(bytes) {
         Ok(()) => Ok(()),
         Err(_) if UPLOAD_MEMORY.get().get() == Some(&bytes) => Ok(()),
-        Err(_) => Err("the upload memory is set already, as stores opened".to_owned()),
+        Err(_) => Err("the upload memory is set already, as cells opened".to_owned()),
     }
 }
 
@@ -586,10 +589,11 @@ pub fn upload_memory() -> UploadMemory {
     UploadMemory { held, max_held, budget: UPLOADS.get().limits().bytes }
 }
 
-/// Reads the extents a store holds whose data is in object storage (`local_cell::LocalCell::adopt`),
-/// at their locations there, as the store names them: a fetcher (`bucket_cell::fetch::Fetcher`)
-/// that is the host's, its reads on the bucket runtime, which their uploads use too, under the
-/// host's budget of GETs and memory, asking the host's peers first if it has any.
+/// Reads the extents an open cell holds whose data is in object storage
+/// (`local_cell::LocalCell::adopt`), at their locations there, as the open cell names them: a
+/// fetcher (`bucket_cell::fetch::Fetcher`) that is the host's, its reads on the bucket runtime,
+/// which their uploads use too, under the host's budget of GETs and memory, asking the host's peers
+/// first if it has any.
 pub struct HostFetcher {
     runtime: tokio::runtime::Handle,
     parts: Arc<fetch::Fetcher<ObjectBucket>>,
@@ -617,8 +621,8 @@ impl HostFetcher {
         Ok(Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) }))
     }
 
-    /// cladefs: the runtime its reads run on, which what fetches ahead for a store, and writes its
-    /// guest's boot behind it, runs on too (doc-24, step 5; `crate::evidence`).
+    /// cladefs: the runtime its reads run on, which what fetches ahead for an open cell, and writes
+    /// its guest's boot behind it, runs on too (doc-24, step 5; `crate::evidence`).
     pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
         &self.runtime
     }
@@ -660,14 +664,14 @@ impl HostFetcher {
 }
 
 node_local::node_local! {
-    /// cladefs: the hosts sharing the host's bucket, the one they share, which its stores' fetchers of it
-    /// ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
+    /// cladefs: the hosts sharing the host's bucket, the one they share, which its open cells'
+    /// fetchers of it ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
     static PEERS: std::sync::OnceLock<(Arc<ObjectBucket>, Arc<peers::Peers>)> =
         std::sync::OnceLock::new();
 }
 
-/// cladefs: has the fetchers of `bucket`, the host's, made from now on ask `peers`, the hosts sharing
-/// it, for the parts they own before it (TASK-406.2): before any store opens. Once.
+/// cladefs: has the fetchers of `bucket`, the host's, made from now on ask `peers`, the hosts
+/// sharing it, for the parts they own before it (TASK-406.2): before any open cell opens. Once.
 pub fn ask_peers(bucket: Arc<ObjectBucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
     PEERS.get().set((bucket, peers)).map_err(|_| "the host's peers are set already".to_owned())
 }
@@ -683,7 +687,7 @@ node_local::node_local! {
 }
 
 /// cladefs: has the host's replicated cells' configurations be made of `members`, its peers, from
-/// now on (doc-21, TASK-537.3.3): before any store opens. Once.
+/// now on (doc-21, TASK-537.3.3): before any open cell opens. Once.
 pub fn replicate_with(members: Arc<dyn local_cell::upload::Members>) -> Result<(), String> {
     MEMBERS.get().set(members).map_err(|_| "the host's members are set already".to_owned())
 }
@@ -694,9 +698,9 @@ pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
     MEMBERS.get().get().cloned()
 }
 
-/// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as stored
-/// (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its stores'
-/// fetchers do, with them, under the host's budget, and asking no peer.
+/// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as
+/// stored (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its
+/// open cells' fetchers do, with them, under the host's budget, and asking no peer.
 pub fn serving_peers(bucket: Arc<ObjectBucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
     Ok(Serving {
         runtime: bucket_runtime()?,
@@ -759,15 +763,15 @@ mod tests {
     const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
     /// The URL `bucket` is this process's by, made so if it is none's yet: a memory bucket of its
-    /// own, by its address, which the stores the tests make in it name (TASK-165.9).
+    /// own, by its address, which the open cells the tests make in it name (TASK-165.9).
     pub(super) fn url_of(bucket: &Arc<ObjectBucket>) -> String {
         let url = format!("memory:///bucket-tests-{:p}", Arc::as_ptr(bucket));
         crate::host_cell::use_bucket(&url, bucket.clone());
         url
     }
 
-    /// A new store at `path`, of `capacity` bytes, of `cell`, a new one if none, its cell kept
-    /// in `bucket`, its uploader uploading as `keeping` says.
+    /// A new cell directory at `path`, of `capacity` bytes, of `cell`, a new one if none, its cell
+    /// kept in `bucket`, its uploader uploading as `keeping` says.
     pub(super) async fn kept_in(
         path: impl AsRef<std::path::Path>,
         (capacity, cell): (u64, Option<crate::CellId>),
@@ -778,9 +782,9 @@ mod tests {
         OpenCell::create_kept_with(path, capacity, cell, &url_of(bucket), keeping).await
     }
 
-    /// Has the store at `path` name `bucket` as the bucket its cell is kept in: a host restarted
-    /// whose stores reach the bucket otherwise than before, as the fault tests' do (TASK-165.9).
-    /// A store whose host died before it described it names nothing.
+    /// Has the cell directory at `path` name `bucket` as the bucket its cell is kept in: a host
+    /// restarted whose open cells reach the bucket otherwise than before, as the fault tests' do
+    /// (TASK-165.9). An open cell whose host died before it described it names nothing.
     pub(super) fn naming(path: &std::path::Path, bucket: &Arc<ObjectBucket>) {
         let description = path.join("store");
         let text = match std::fs::read_to_string(&description) {
@@ -796,7 +800,7 @@ mod tests {
         std::fs::write(&description, named).unwrap();
     }
 
-    /// The store at `path`, opened, its uploader uploading as `keeping` says.
+    /// The cell directory at `path`, opened, its uploader uploading as `keeping` says.
     pub(super) async fn reopened(
         path: impl AsRef<std::path::Path>,
         keeping: local_cell::upload::Options,
@@ -809,7 +813,7 @@ mod tests {
     }
 
     /// Uploads only when a commit waits.
-    /// How this process's stores keep their cells ([`crate::host_cell::keeping`]), but
+    /// How this process's open cells keep their cells ([`crate::host_cell::keeping`]), but
     /// uploading nothing until a commit waits for it, or the hour is up.
     pub(super) fn idle() -> local_cell::upload::Options {
         let keeping = crate::host_cell::keeping().unwrap();
@@ -820,9 +824,9 @@ mod tests {
         (0..len).map(|i| seed ^ (i % 251) as u8).collect()
     }
 
-    async fn write(store: &OpenCell, sequence: u64, data: &[u8]) -> ExtentId {
-        let extent = ExtentId { cell: store.cell().id, sequence };
-        store.write(extent, 0, &[VolatileSlice::from(data)]).await.unwrap();
+    async fn write(open_cell: &OpenCell, sequence: u64, data: &[u8]) -> ExtentId {
+        let extent = ExtentId { cell: open_cell.cell().id, sequence };
+        open_cell.write(extent, 0, &[VolatileSlice::from(data)]).await.unwrap();
         extent
     }
 
@@ -841,18 +845,18 @@ mod tests {
         })
     }
 
-    /// A store's extents, its root, and its commits made durable are uploaded; extents written and
-    /// freed between two uploads never are.
+    /// An open cell's extents, its root, and its commits made durable are uploaded; extents written
+    /// and freed between two uploads never are.
     #[tokio::test(flavor = "multi_thread")]
-    async fn uploads_what_the_store_makes_durable() {
+    async fn uploads_what_the_open_cell_makes_durable() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cells"));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        let cell = store.cell();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(Some(b"first")).await.unwrap();
+        let cell = open_cell.cell();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(Some(b"first")).await.unwrap();
         // What it held before is uploaded on attaching.
         assert_eq!(
             uploaded(&bucket, cell),
@@ -860,13 +864,13 @@ mod tests {
         );
 
         let large = pattern(3, 4 << 20);
-        write(&store, 2, &pattern(2, 2 * BLOCK)).await;
-        write(&store, 3, &large).await;
-        write(&store, 4, &pattern(4, BLOCK)).await;
-        store.commit_ordered(None).await.unwrap();
-        store.free(ExtentId { cell: cell.id, sequence: 1 }).unwrap();
-        store.free(ExtentId { cell: cell.id, sequence: 4 }).unwrap();
-        store.commit(Some(b"second")).await.unwrap();
+        write(&open_cell, 2, &pattern(2, 2 * BLOCK)).await;
+        write(&open_cell, 3, &large).await;
+        write(&open_cell, 4, &pattern(4, BLOCK)).await;
+        open_cell.commit_ordered(None).await.unwrap();
+        open_cell.free(ExtentId { cell: cell.id, sequence: 1 }).unwrap();
+        open_cell.free(ExtentId { cell: cell.id, sequence: 4 }).unwrap();
+        open_cell.commit(Some(b"second")).await.unwrap();
         assert_eq!(
             uploaded(&bucket, cell),
             (vec![(2, pattern(2, 2 * BLOCK)), (3, large.clone())], Some(b"second".to_vec()))
@@ -892,16 +896,17 @@ mod tests {
             })
             .count();
 
-        // Opened again, the store's uploader finds the cell as it left it.
-        drop(store);
-        let store = reopened(dir.path().join("store"), idle()).await.unwrap();
+        // Opened again, the open cell's uploader finds the cell as it left it.
+        drop(open_cell);
+        let open_cell = reopened(dir.path().join("store"), idle()).await.unwrap();
         // Its guest mints from the second writer's range.
-        let info = store.info().unwrap();
+        let info = open_cell.info().unwrap();
         assert_eq!(info.sequence_floor, 2 << bucket_cell::EPOCH_SHIFT);
-        // What the store holds ends far below: the guest looks for what a crash left there only.
+        // What the open cell holds ends far below: the guest looks for what a crash left there
+        // only.
         assert!(info.next_sequence < 1 << bucket_cell::EPOCH_SHIFT, "{info:?}");
         let keys = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, "")).unwrap();
-        // No segment more: the store takes the cell by its head alone.
+        // No segment more: the open cell takes the cell by its head alone.
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
@@ -911,18 +916,18 @@ mod tests {
                 .count(),
             segments
         );
-        write(&store, 5, &pattern(5, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        write(&open_cell, 5, &pattern(5, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         let (extents, root) = uploaded(&bucket, cell);
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [2, 3, 5]);
         assert_eq!(root, Some(b"second".to_vec()));
     }
 
-    /// doc-7, The head: a store taking a cell over from a writer still uploading, two segments
+    /// doc-7, The head: an open cell taking a cell over from a writer still uploading, two segments
     /// of it in flight, commits on. The writer's segments land at keys naming its epoch, which the
-    /// store's never are, and its head swap fails (`Fenced`): what it wrote, no head names, and the
-    /// store keeps its head. Before (TASK-407), its late segment landed where the store's first
-    /// went, and the store took the cell again.
+    /// open cell's never are, and its head swap fails (`Fenced`): what it wrote, no head names, and
+    /// the open cell keeps its head. Before (TASK-407), its late segment landed where the open
+    /// cell's first went, and the open cell took the cell again.
     #[tokio::test(flavor = "multi_thread")]
     async fn takeovers_of_writers_still_uploading_keep_their_guests() {
         use bucket_cell::{Commit, SegmentBuilder, Writer};
@@ -942,47 +947,47 @@ mod tests {
                 .frame(before.keys().encrypting());
             segments.push(before.add_segment(objects).unwrap());
         }
-        // A store takes the cell over, opening, its fence after the writer's.
+        // An open cell takes the cell over, opening, its fence after the writer's.
         let path = dir.path().join("store");
         made_for(&path, cell, &bucket);
-        let store = reopened(&path, idle()).await.unwrap();
+        let open_cell = reopened(&path, idle()).await.unwrap();
         // Both land, the second first, at keys of the writer's epoch; its head swap fails.
         futures::executor::block_on(async {
             before.upload(segments[1]).await.unwrap();
             before.upload(segments[0]).await.unwrap();
             assert_eq!(before.acknowledge().await, Err(bucket_cell::Error::Fenced));
         });
-        // The store's commit is the cell's, its head as it was.
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        let epoch = store.uploader().unwrap().status().unwrap().taking.unwrap().epoch;
-        let committed = store.commit(Some(b"after")).await;
-        let uploader = store.uploader().unwrap();
+        // The open cell's commit is the cell's, its head as it was.
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        let epoch = open_cell.uploader().unwrap().status().unwrap().taking.unwrap().epoch;
+        let committed = open_cell.commit(Some(b"after")).await;
+        let uploader = open_cell.uploader().unwrap();
         assert_eq!((committed, uploader.failed()), (Ok(()), None));
         assert_eq!(uploader.status().unwrap().taking.unwrap().epoch, epoch);
         let after = (vec![(1, pattern(1, BLOCK))], Some(b"after".to_vec()));
         assert_eq!(uploaded(&bucket, cell), after);
     }
 
-    /// TASK-195: a store reads what it holds after the collector compacted it twice, its writer
-    /// checkpointing between, with the host's cache and without. It names an extent where the
-    /// writer's checkpoints move it, as the writer does (`Writer::following`), from where the
+    /// TASK-195: an open cell reads what it holds after the collector compacted it twice, its
+    /// writer checkpointing between, with the host's cache and without. It names an extent where
+    /// the writer's checkpoints move it, as the writer does (`Writer::following`), from where the
     /// collector keeps the moves: compacted from its segment into moves, and from those into moves
-    /// of moves, the segment goes, and the first moves. Before, the store named it in the segment
-    /// as long as it held it: gone, and its moves gone, the guest's read failed (`EIO`) on a live
-    /// cell, which a recovery read through the moves of moves.
+    /// of moves, the segment goes, and the first moves. Before, the open cell named it in the
+    /// segment as long as it held it: gone, and its moves gone, the guest's read failed (`EIO`) on
+    /// a live cell, which a recovery read through the moves of moves.
     #[tokio::test(flavor = "multi_thread")]
-    async fn extents_compacted_twice_read_where_the_store_names_them() {
+    async fn extents_compacted_twice_read_where_the_cell_names_them() {
         compacted_twice(false).await;
         compacted_twice(true).await;
     }
 
-    /// TASK-217: a store whose host died, its disk as the death left it and the host's cache lost
-    /// with it, opens and reads what it holds after the collector compacted its segment and took
-    /// it, the writer's checkpoint having followed the moves: opening names its extents as the
+    /// TASK-217: an open cell whose host died, its disk as the death left it and the host's cache
+    /// lost with it, opens and reads what it holds after the collector compacted its segment and
+    /// took it, the writer's checkpoint having followed the moves: opening names its extents as the
     /// cell's newest checkpoint does, in the moves. Before (GCE r757, round 40, a soak's daemon
-    /// killed and its cache lost), the store opened from its own index, which named the extent in
-    /// the segment the collector had taken, and the checking VM's reads failed EIO (`lost: ... in
-    /// segments/<cell>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
+    /// killed and its cache lost), the open cell opened from its own index, which named the extent
+    /// in the segment the collector had taken, and the checking VM's reads failed EIO (`lost: ...
+    /// in segments/<cell>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
     /// cell.
     #[tokio::test(flavor = "multi_thread")]
     async fn extents_compacted_read_once_their_host_died_and_its_cache_went() {
@@ -1002,20 +1007,21 @@ mod tests {
         let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
-        let store = kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).await.unwrap();
-        let cell = store.cell();
+        let open_cell =
+            kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).await.unwrap();
+        let cell = open_cell.cell();
         for sequence in 1..=16 {
-            write(&store, sequence, &noise(sequence, EXTENT)).await;
+            write(&open_cell, sequence, &noise(sequence, EXTENT)).await;
         }
-        store.commit(None).await.unwrap();
+        open_cell.commit(None).await.unwrap();
         for sequence in 4..=16 {
-            store.free(ExtentId { cell: cell.id, sequence }).unwrap();
+            open_cell.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
-        checkpointed(&store, &bucket).await;
+        checkpointed(&open_cell, &bucket).await;
         // The segment compacted, 1 to 3 into its moves; the writer's checkpoint follows them; the
         // segment goes.
         assert_eq!(collect(1).compacted, 1);
-        checkpointed(&store, &bucket).await;
+        checkpointed(&open_cell, &bucket).await;
         collect(2);
         let keys: Vec<String> =
             futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
@@ -1027,7 +1033,7 @@ mod tests {
         let first = bucket_cell::layout::segment(cell, 0, 1);
         assert!(keys.iter().any(|key| key.starts_with(&moves)), "{keys:?}");
         assert!(!keys.contains(&first), "{keys:?}");
-        // The host dies: its disk copied as it is, its cache not, its store cut off.
+        // The host dies: its disk copied as it is, its cache not, its open cell cut off.
         let restarted = dir.path().join("restarted");
         restart(&path, &restarted);
         gated.sever();
@@ -1042,17 +1048,17 @@ mod tests {
             )
             .await;
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
-        drop(store);
+        drop(open_cell);
     }
 
-    /// TASK-195: so does a fork's store read what it inherited, its parent deleted: it names the
-    /// extents where its own writer's checkpoints move them, from the parent's segment, compacted
-    /// into moves, the segment gone. TASK-395.4: the fork in a cell of its own, as every fork a host
-    /// makes, its parent's cell keeps the parent's state at the origin whole for as long as the
-    /// fork lives, by its reference, what the fork frees of it since no matter: the moves, which
-    /// hold that state's extents, are compacted no further, as they were when the collector went
-    /// by the fork's state (`extents_compacted_twice_read_where_the_store_names_them` shows a
-    /// cell's own compacted twice).
+    /// TASK-195: so does a fork's open cell read what it inherited, its parent deleted: it names
+    /// the extents where its own writer's checkpoints move them, from the parent's segment,
+    /// compacted into moves, the segment gone. TASK-395.4: the fork in a cell of its own, as every
+    /// fork a host makes, its parent's cell keeps the parent's state at the origin whole for as
+    /// long as the fork lives, by its reference, what the fork frees of it since no matter: the
+    /// moves, which hold that state's extents, are compacted no further, as they were when the
+    /// collector went by the fork's state (`extents_compacted_twice_read_where_the_cell_names_them`
+    /// shows a cell's own compacted twice).
     #[tokio::test(flavor = "multi_thread")]
     async fn forks_read_what_they_inherited_compacted_twice() {
         inherited_compacted_twice().await;
@@ -1099,7 +1105,7 @@ mod tests {
         parent.fork_to(&child, forked).await.unwrap();
         drop(parent);
         crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token).await.unwrap();
-        // The fork's store, open all along: the segment compacted, 1 to 3 in its moves.
+        // The fork's open cell, open all along: the segment compacted, 1 to 3 in its moves.
         let child = reopened(&child, idle()).await.unwrap();
         assert_eq!(collect(1).compacted, 1);
         // It frees 2 and 3, and its writer checkpoints, naming 1 in the moves.
@@ -1139,7 +1145,7 @@ mod tests {
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
     }
 
-    /// [`extents_compacted_twice_read_where_the_store_names_them`], with the host's cache if
+    /// [`extents_compacted_twice_read_where_the_cell_names_them`], with the host's cache if
     /// `cached`.
     async fn compacted_twice(cached: bool) {
         const EXTENT: usize = 64 * BLOCK;
@@ -1155,27 +1161,27 @@ mod tests {
             cached.then(|| Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
-        let store = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).await.unwrap();
-        let store = Arc::new(store);
-        let cell = store.cell();
+        let open_cell = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).await.unwrap();
+        let open_cell = Arc::new(open_cell);
+        let cell = open_cell.cell();
         for sequence in 1..=16 {
-            write(&store, sequence, &noise(sequence, EXTENT)).await;
+            write(&open_cell, sequence, &noise(sequence, EXTENT)).await;
         }
-        store.commit(None).await.unwrap();
+        open_cell.commit(None).await.unwrap();
         for sequence in 4..=16 {
-            store.free(ExtentId { cell: cell.id, sequence }).unwrap();
+            open_cell.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
         // Its writer checkpoints, as every so many segments, each commit here one.
-        checkpointed(&store, &bucket).await;
+        checkpointed(&open_cell, &bucket).await;
         // The segment compacted: 1 to 3 in its moves.
         assert_eq!(collect(1).compacted, 1);
-        // The store frees 2 and 3, and its writer checkpoints, as every so many segments, naming 1
-        // in the moves, which hold a third of what they did.
-        store.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
-        store.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
-        checkpointed(&store, &bucket).await;
-        // A follower of the store, which reads what the store names.
-        let follower = store.follow();
+        // The open cell frees 2 and 3, and its writer checkpoints, as every so many segments,
+        // naming 1 in the moves, which hold a third of what they did.
+        open_cell.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
+        open_cell.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
+        checkpointed(&open_cell, &bucket).await;
+        // A follower of the open cell, which reads what the open cell names.
+        let follower = open_cell.follow();
         // The segment goes, no state naming it there; the moves are compacted, then go too.
         collect(3);
         collect(4);
@@ -1196,16 +1202,17 @@ mod tests {
         let twice = bucket_cell::layout::moves_under(&once).unwrap();
         assert!(keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
-        // The store, open all along, reads it there, and so does its follower.
+        // The open cell, open all along, reads it there, and so does its follower.
         let extent = ExtentId { cell: cell.id, sequence: 1 };
-        let reads = async |store: &OpenCell| {
+        let reads = async |open_cell: &OpenCell| {
             let mut data = vec![0; EXTENT];
-            let read =
-                store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await;
+            let read = open_cell
+                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])])
+                .await;
             read.map(|()| data == noise(1, EXTENT))
         };
         assert_eq!(
-            [reads(&store).await, reads(&follower).await],
+            [reads(&open_cell).await, reads(&follower).await],
             [Ok(true), Ok(true)],
             "cached: {cached}"
         );
@@ -1225,40 +1232,42 @@ mod tests {
         })
     }
 
-    /// TASK-165.9: a store whose bucket was out of reach holds its commits in its write-ahead log,
-    /// segments the commits closed, which upload once it is in reach again, in order, each the
-    /// object its file is; what the commits made, and the root, the cell has then. (Before, a store attaching uploaded what its cell lacked in batches.)
+    /// TASK-165.9: an open cell whose bucket was out of reach holds its commits in its write-ahead
+    /// log, segments the commits closed, which upload once it is in reach again, in order, each the
+    /// object its file is; what the commits made, and the root, the cell has then. (Before, an open
+    /// cell attaching uploaded what its cell lacked in batches.)
     #[tokio::test(flavor = "multi_thread")]
     async fn logs_caught_up_upload_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let store =
+        let open_cell =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket, idle()).await.unwrap();
-        let cell = store.cell();
+        let cell = open_cell.cell();
         gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut written = Vec::new();
         for sequence in 1..=3 {
             let data = pattern(sequence as u8, 2 * BLOCK);
-            write(&store, sequence, &data).await;
+            write(&open_cell, sequence, &data).await;
             written.push((sequence, data));
-            store.commit_ordered(Some(format!("root {sequence}").as_bytes())).await.unwrap();
+            open_cell.commit_ordered(Some(format!("root {sequence}").as_bytes())).await.unwrap();
         }
-        store.flush().await.unwrap();
-        // Out of reach: the store holds what it committed, the bucket nothing of it.
-        let behind = Arc::new(ObjectBucket::new(gated.store.clone(), ""));
+        open_cell.flush().await.unwrap();
+        // Out of reach: the open cell holds what it committed, the bucket nothing of it.
+        let behind = Arc::new(ObjectBucket::new(gated.backend.clone(), ""));
         assert_eq!(uploaded(&behind, cell), (vec![], None));
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        store.wait_uploaded().await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
         let footers = footers(&bucket, cell);
         let commits: Vec<_> = footers.iter().map(|footer| footer.contents.commits.len()).collect();
         assert_eq!(commits, [1], "the segment of the commits");
         assert_eq!(uploaded(&bucket, cell), (written, Some(b"root 3".to_vec())));
     }
 
-    /// A store whose commit, of more bytes than `options` let wait, is in a segment closed for want
-    /// of room, as a closing that beats the uploader leaves it: with no commit to come, as one in
-    /// the lag's wait holds its guest's seal, and holds back every other. And the commit's epoch.
+    /// An open cell whose commit, of more bytes than `options` let wait, is in a segment closed for
+    /// want of room, as a closing that beats the uploader leaves it: with no commit to come, as one
+    /// in the lag's wait holds its guest's seal, and holds back every other. And the commit's
+    /// epoch.
     async fn closed_for_room(
         options: local_cell::upload::Options,
     ) -> (tempfile::TempDir, crate::host_cell::Opened, u64) {
@@ -1276,14 +1285,14 @@ mod tests {
         )
         .await;
         let opened = opened.unwrap();
-        let store = &opened.store;
-        store.write(super::ExtentId::new(7, 1), 0, &pattern(1, EXTENT)).await.unwrap();
-        store.commit_ordered(None).await.unwrap();
-        let epoch = store.last_commit().unwrap();
+        let local = &opened.local;
+        local.write(super::ExtentId::new(7, 1), 0, &pattern(1, EXTENT)).await.unwrap();
+        local.commit_ordered(None).await.unwrap();
+        let epoch = local.last_commit().unwrap();
         // The most a segment holds, its last extent past it, and no commit with them.
         for sequence in 2..98 {
             let extent = super::ExtentId::new(7, sequence);
-            store.write(extent, 0, &pattern(sequence as u8, EXTENT)).await.unwrap();
+            local.write(extent, 0, &pattern(sequence as u8, EXTENT)).await.unwrap();
         }
         (dir, opened, epoch)
     }
@@ -1294,16 +1303,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn commits_stalled_on_the_lag_end_with_their_segment_closed_for_room() {
         let lag = local_cell::upload::Options { max_lag_bytes: BLOCK as u64, ..idle() };
-        let (_dir, crate::host_cell::Opened { store, uploader, .. }, epoch) =
+        let (_dir, crate::host_cell::Opened { local, uploader, .. }, epoch) =
             closed_for_room(lag).await;
         let stalled = std::sync::Arc::new(uploader);
         let waiting = stalled.clone();
         let lagged = tokio::time::timeout(Duration::from_secs(30), waiting.lag(epoch)).await;
         assert_eq!(lagged.map_err(drop), Ok(Ok(())));
-        assert_eq!(store.wal_bytes().unwrap(), 0);
+        assert_eq!(local.wal_bytes().unwrap(), 0);
     }
 
-    /// TASK-150.2: so does a sync of the store's commits, or anything else waiting for their upload.
+    /// TASK-150.2: so does a sync of the open cell's commits, or anything else waiting for their
+    /// upload.
     #[tokio::test(flavor = "multi_thread")]
     async fn uploads_waited_for_end_with_their_segment_closed_for_room() {
         let (_dir, crate::host_cell::Opened { uploader, .. }, epoch) =
@@ -1313,13 +1323,13 @@ mod tests {
         assert_eq!(uploaded.map_err(drop), Ok(Ok(())));
     }
 
-    /// A store's uploader holds its directory taken until it stops, after the store closed: the
-    /// store's closing let it go, and its uploader, which uploads the store's last commits as it
-    /// stops, wrote the cell's marker in the directory after, while another process, a crash
-    /// test's copy, had taken it, and the store at the version found the marker's new file gone (TASK-129, GCE, the
-    /// DAX gate's second run).
+    /// An open cell's uploader holds its directory taken until it stops, after the open cell
+    /// closed: the open cell's closing let it go, and its uploader, which uploads the open cell's
+    /// last commits as it stops, wrote the cell's marker in the directory after, while another
+    /// process, a crash test's copy, had taken it, and the open cell at the version found the
+    /// marker's new file gone (TASK-129, GCE, the DAX gate's second run).
     #[tokio::test(flavor = "multi_thread")]
-    async fn uploaders_hold_their_stores_directory_until_they_stop() {
+    async fn uploaders_hold_their_cell_directory_until_they_stop() {
         use std::os::fd::AsRawFd;
         // Whether another process could take the directory at `path` now, as `Dir::take` does.
         let free = |path: &std::path::Path| {
@@ -1339,19 +1349,19 @@ mod tests {
         )
         .await
         .unwrap();
-        let crate::host_cell::Opened { store, uploader, .. } = opened;
-        assert!(!free(&path), "taken while the store is open");
-        store.close().await.unwrap();
+        let crate::host_cell::Opened { local, uploader, .. } = opened;
+        assert!(!free(&path), "taken while the cell is open");
+        local.close().await.unwrap();
         assert!(!free(&path), "taken while its uploader runs");
         drop(uploader);
         assert!(free(&path), "free once the uploader stopped");
     }
 
-    /// TASK-79.19: a benchmark of a store's uploads keeping up with sustained writes, to a bucket
-    /// whose PUTs take 350 ms each, as S3's of a segment of 32 MiB may: 4 GiB written, a MiB an
-    /// extent, an ordered commit after each 32 MiB, as a guest's writeback makes them, each waiting
-    /// while the lag is past its bound, as the store's do; how long until it is all uploaded, at how
-    /// many MB/s, and how long the commits waited for the lag, in all.
+    /// TASK-79.19: a benchmark of an open cell's uploads keeping up with sustained writes, to a
+    /// bucket whose PUTs take 350 ms each, as S3's of a segment of 32 MiB may: 4 GiB written, a MiB
+    /// an extent, an ordered commit after each 32 MiB, as a guest's writeback makes them, each
+    /// waiting while the lag is past its bound, as the open cell's do; how long until it is all
+    /// uploaded, at how many MB/s, and how long the commits waited for the lag, in all.
     /// `cargo nextest run -p cladefs --run-ignored only bench_sustained_uploads --no-capture`.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "a benchmark: --run-ignored only, alone"]
@@ -1364,7 +1374,7 @@ mod tests {
         let objects = Arc::new(ThrottledStore::new(InMemory::new(), config));
         let bucket = Arc::new(ObjectBucket::new(objects, ""));
         let dir = tempfile::tempdir().unwrap();
-        let store = kept_in(
+        let open_cell = kept_in(
             dir.path().join("store"),
             (2 * WRITTEN, None),
             &bucket,
@@ -1375,17 +1385,17 @@ mod tests {
         let data = noise(1, EXTENT);
         let (started, mut waited) = (std::time::Instant::now(), Duration::ZERO);
         for sequence in 1..=WRITTEN / EXTENT as u64 {
-            write(&store, sequence, &data).await;
+            write(&open_cell, sequence, &data).await;
             if sequence % 32 == 0 {
                 let committing = std::time::Instant::now();
-                store.commit_ordered(None).await.unwrap();
+                open_cell.commit_ordered(None).await.unwrap();
                 waited += committing.elapsed();
             }
         }
         let written = started.elapsed();
-        store.wait_uploaded().await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
         let took = started.elapsed();
-        let stalls = store.uploader().unwrap().stalls();
+        let stalls = open_cell.uploader().unwrap().stalls();
         let rate = WRITTEN as f64 / took.as_secs_f64() / 1e6;
         println!(
             "{} MiB written in {written:.2?}, uploaded in {took:.2?}: {rate:.0} MB/s; commits took \
@@ -1399,13 +1409,13 @@ mod tests {
     /// as it is allocated (`crate::heap::held`), not read from the process's resident memory. A
     /// base of each of `CLADEFS_BENCH_EXTENTS` extents (64, 1,024, 32,768 and 300,000 unless set, a
     /// list by commas) of a block each, in a memory bucket, forked `CLADEFS_BENCH_FORKS` times (100
-    /// unless set; its first count alone), once from the store itself, live, whose writer writes a
-    /// checkpoint for each fork, as `cladefsd::tests::serves_hundreds_of_forks_of_a_base` makes its
-    /// forks, and once from a version of it, whose forks all start from the version's one state
-    /// (`CLADEFS_BENCH_PARENTS`, `live,version` unless set). A line for each count of forks open,
-    /// then one of what holds it ([`fork_extent_memory`]).
+    /// unless set; its first count alone), once from the open cell itself, live, whose writer
+    /// writes a checkpoint for each fork, as `cladefsd::tests::serves_hundreds_of_forks_of_a_base`
+    /// makes its forks, and once from a version of it, whose forks all start from the version's one
+    /// state (`CLADEFS_BENCH_PARENTS`, `live,version` unless set). A line for each count of forks
+    /// open, then one of what holds it ([`fork_extent_memory`]).
     /// TASK-453: and it fails unless each fork past the first holds [`IDLE_FORK_BYTES`] at most,
-    /// whatever its base holds, and the daemon's count of the stores' maps
+    /// whatever its base holds, and the daemon's count of the open cells' maps
     /// (`cladefsd::process::AnonBudget::extents`) covers what they hold.
     /// In the sim profile, optimized as a release build is, which this crate's tests, with their
     /// failpoints, refuse to be (TASK-320): the bytes are any build's, the times this one's.
@@ -1434,37 +1444,37 @@ mod tests {
     }
 
     /// TASK-453: the most bytes of the heap an open, idle fork holds past the first of its base's,
-    /// whatever its base holds: what it inherited it shares with the others, its store's and its
-    /// writer's maps the decoded state they started from, and holds of its own what it wrote, here
-    /// nothing. Measured 31-34 KB a fork (`bench_fork_extent_memory`), 221-468 bytes for each of
-    /// the base's extents more before (TASK-443.2).
+    /// whatever its base holds: what it inherited it shares with the others, its open cell's and
+    /// its writer's maps the decoded state they started from, and holds of its own what it wrote,
+    /// here nothing. Measured 31-34 KB a fork (`bench_fork_extent_memory`), 221-468 bytes for each
+    /// of the base's extents more before (TASK-443.2).
     const IDLE_FORK_BYTES: u64 = 64 << 10;
 
-    /// What the stores' maps of their extents hold now, as the extent daemon counts it
-    /// (`cladefsd::process::extents_held`, Linux's): what the stores hold of their own, and the
+    /// What the open cells' maps of their extents hold now, as the extent daemon counts it
+    /// (`cladefsd::process::extents_held`, Linux's): what the open cells hold of their own, and the
     /// decoded states they share, each once.
     fn extents_counted() -> (local_cell::Own, bucket_cell::recovery::Held) {
         (local_cell::own_held(), crate::host_cell::decoded_held())
     }
 
-    /// Opens `forks` forks of a base of `extents` extents, forked from a version of it if `version`,
-    /// from the store itself otherwise, and prints what the heap holds more than before them with
-    /// 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since the count before
-    /// (marginal), and that for each extent of the base; and how long each of those took to open.
-    /// TASK-453: each past the first holds [`IDLE_FORK_BYTES`] at most, the decoded state they
-    /// share one, of the base's extents, counted at [`bucket_cell::recovery::ENTRY_BYTES`] an
-    /// entry, which covers what the first held more than the others, and a map of them built
-    /// sharing nothing, as the writer's of a base written live is. Then what closing them all
-    /// leaves held over the heap before them; opened and closed again, the heap is to the byte
-    /// what the first closing left (TASK-471: not always, by 80 to 2,048 bytes), checked last.
-    /// Then one fork more writes, commits and uploads a block for every extent of the base, up to
-    /// 4,096: what it holds more, what closing it lets go of more than closing an idle one does,
-    /// what it holds of its own, counted ([`local_cell::Own::bytes`]), covers. And one more frees
-    /// every 32nd extent it inherited, each its writer's map's change apart, a path of its nodes
-    /// copied ([`bucket_cell::recovery::RUN_BYTES`]), and checkpoints: what closing it lets go of
-    /// more than an idle one does, counted too; and opened again, from its checkpoint, its map made
-    /// of the base's, what the heap holds more than an idle fork the bucket's decoded states count
-    /// more.
+    /// Opens `forks` forks of a base of `extents` extents, forked from a version of it if
+    /// `version`, from the open cell itself otherwise, and prints what the heap holds more than
+    /// before them with 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since
+    /// the count before (marginal), and that for each extent of the base; and how long each of
+    /// those took to open. TASK-453: each past the first holds [`IDLE_FORK_BYTES`] at most, the
+    /// decoded state they share one, of the base's extents, counted at
+    /// [`bucket_cell::recovery::ENTRY_BYTES`] an entry, which covers what the first held more than
+    /// the others, and a map of them built sharing nothing, as the writer's of a base written live
+    /// is. Then what closing them all leaves held over the heap before them; opened and closed
+    /// again, the heap is to the byte what the first closing left (TASK-471: not always, by 80 to
+    /// 2,048 bytes), checked last. Then one fork more writes, commits and uploads a block for every
+    /// extent of the base, up to 4,096: what it holds more, what closing it lets go of more than
+    /// closing an idle one does, what it holds of its own, counted ([`local_cell::Own::bytes`]),
+    /// covers. And one more frees every 32nd extent it inherited, each its writer's map's change
+    /// apart, a path of its nodes copied ([`bucket_cell::recovery::RUN_BYTES`]), and checkpoints:
+    /// what closing it lets go of more than an idle one does, counted too; and opened again, from
+    /// its checkpoint, its map made of the base's, what the heap holds more than an idle fork the
+    /// bucket's decoded states count more.
     async fn fork_extent_memory(extents: u64, forks: usize, version: bool) {
         use crate::host_cell::fork_child;
         let held = || crate::heap::held() as u64;
@@ -1518,14 +1528,14 @@ mod tests {
             held()
         };
 
-        let mut stores = Vec::with_capacity(forks);
+        let mut open_cells = Vec::with_capacity(forks);
         let mut samples = Vec::with_capacity(5);
         every_task_shard_locked();
         let (own_before, decoded_before) = extents_counted();
         let before = held();
         let started = std::time::Instant::now();
         for (n, path) in paths.iter().enumerate() {
-            stores.push(open(path).await);
+            open_cells.push(open(path).await);
             if [1, 10, 20, 50, 100].contains(&(n + 1)) {
                 samples.push((n as u64 + 1, held() - before, started.elapsed()));
             }
@@ -1565,9 +1575,9 @@ mod tests {
         let counted = shared.bytes();
         assert!(layer <= counted, "the decoded state shared: {layer} bytes, counted {counted}");
 
-        // A map of them sharing nothing, as the writer's of a base written live is, which a store
-        // over it counts as its own.
-        let cell = stores[0].cell();
+        // A map of them sharing nothing, as the writer's of a base written live is, which an open
+        // cell over it counts as its own.
+        let cell = open_cells[0].cell();
         let record = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
         let state = recover(&*bucket, cell, record.origin()).await.unwrap().state;
         let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
@@ -1582,12 +1592,12 @@ mod tests {
         assert!(unshared <= bound, "a map of the extents unshared: {unshared} bytes, of {bound}");
 
         // Closed, opened and closed again.
-        stores.clear();
+        open_cells.clear();
         let closed = settled();
         for path in &paths {
-            stores.push(open(path).await);
+            open_cells.push(open(path).await);
         }
-        stores.clear();
+        open_cells.clear();
         let again = settled();
         println!(
             "fork memory: extents={extents} parent={name} left-after-close={}",
@@ -1614,9 +1624,9 @@ mod tests {
         // What its writes hold, once its uploader is done with them: what closing it lets go of,
         // more than closing an idle fork does. Not what the heap holds more meanwhile, which
         // its uploader's work in flight swings by megabytes.
-        let closing = |store: OpenCell| {
+        let closing = |open_cell: OpenCell| {
             let open = settled();
-            drop(store);
+            drop(open_cell);
             open - settled()
         };
         let idle = closing(idle);
@@ -1678,8 +1688,8 @@ mod tests {
         assert_eq!(again, closed, "the heap after the forks were opened and closed again");
     }
 
-    /// TASK-453: the forks of a base open at once hold what they inherited once: their stores' maps
-    /// of it one, the decoded state they started from, which their bucket counts once, whether
+    /// TASK-453: the forks of a base open at once hold what they inherited once: their open cells'
+    /// maps of it one, the decoded state they started from, which their bucket counts once, whether
     /// forked from the base live, each from a checkpoint of its own the base's writer wrote, or
     /// from a version of it. Each reads the base's data; what one writes and frees, an inherited
     /// extent among them, is its own: the others, and a fork opened after, read the base's, and
@@ -1721,24 +1731,28 @@ mod tests {
             for path in &paths[..FORKS] {
                 forks.push(reopened(path, idle()).await.unwrap());
             }
-            let name = if version { "of a version" } else { "of the live store" };
+            let name = if version { "of a version" } else { "of the live cell" };
             for other in &forks[1..] {
                 assert!(forks[0].shares_extents_with(other), "forks {name}: their maps");
             }
             let one = bucket_cell::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
             let decoded = || bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
             assert_eq!(decoded(), one, "forks {name}: the states they share, decoded");
-            let read = async |store: &OpenCell, extent: ExtentId| {
+            let read = async |open_cell: &OpenCell, extent: ExtentId| {
                 let mut data = vec![0; BLOCK];
-                let read = store
+                let read = open_cell
                     .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])])
                     .await;
                 read.map(|()| data).map_err(|err| err.to_string())
             };
-            for store in &forks {
+            for open_cell in &forks {
                 for sequence in 1..=EXTENTS {
                     let data = pattern(sequence as u8, BLOCK);
-                    assert_eq!(read(store, inherited(sequence)).await, Ok(data), "forks {name}");
+                    assert_eq!(
+                        read(open_cell, inherited(sequence)).await,
+                        Ok(data),
+                        "forks {name}"
+                    );
                 }
             }
 
@@ -1750,31 +1764,31 @@ mod tests {
             forks[0].free(freed).unwrap();
             let mine = write(&forks[0], own, &pattern(200, BLOCK)).await;
             forks[0].commit(None).await.unwrap();
-            // What a read of an extent a store holds not answers (`NoExtent`, as errno).
+            // What a read of an extent an open cell holds not answers (`NoExtent`, as errno).
             let none = || Err("ENOENT (errno 2)".to_owned());
             assert_eq!(read(&forks[0], freed).await, none());
             assert_eq!(read(&forks[0], mine).await, Ok(pattern(200, BLOCK)));
             let opened = reopened(&paths[FORKS], idle()).await.unwrap();
-            for store in forks[1..].iter().chain([&opened]) {
+            for open_cell in forks[1..].iter().chain([&opened]) {
                 assert_eq!(
-                    read(store, freed).await,
+                    read(open_cell, freed).await,
                     Ok(pattern(7, BLOCK)),
                     "forks {name}: the freed"
                 );
-                assert_eq!(read(store, mine).await, none(), "forks {name}: the first's own");
-                assert!(forks[0].shares_extents_with(store), "forks {name}: their maps, after");
+                assert_eq!(read(open_cell, mine).await, none(), "forks {name}: the first's own");
+                assert!(forks[0].shares_extents_with(open_cell), "forks {name}: their maps, after");
             }
             assert_eq!(decoded(), one, "forks {name}: the states they share, after");
         }
     }
 
-    /// TASK-453: what a read asks of a fork's store of an extent it inherited, its length and
+    /// TASK-453: what a read asks of a fork's open cell of an extent it inherited, its length and
     /// whether it is open, and a read of it from the extent cache, there once read, allocate
-    /// nothing: the store's map lends its bucket's layer's entry, where it made one of its own of
-    /// it, its key copied, for every read, under the store's lock. A base of more extents than
-    /// the extent store's audit recounts (`AUDITED_EXTENTS`, 4,096), which the builds of its own
-    /// tests run at every lock of a store's state, as they build it for this crate's tests too
-    /// when run with them: no build but a test's audits.
+    /// nothing: the open cell's map lends its bucket's layer's entry, where it made one of its own
+    /// of it, its key copied, for every read, under the open cell's lock. A base of more extents
+    /// than the extent store's audit recounts (`AUDITED_EXTENTS`, 4,096), which the builds of its
+    /// own tests run at every lock of an open cell's state, as they build it for this crate's tests
+    /// too when run with them: no build but a test's audits.
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_of_inherited_extents_allocate_nothing() {
         use crate::heap::allocations_while;
@@ -1810,7 +1824,7 @@ mod tests {
                 assert_eq!(fork.stored_extent(inherited(sequence)), held);
             }
         });
-        assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the store");
+        assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the cell");
         let (read, ()) = allocations_while(|| {
             futures::executor::block_on(async {
                 for sequence in 1..=EXTENTS {
@@ -1890,8 +1904,8 @@ mod tests {
     /// tokio's: four for each worker, rounded up to a power of two
     /// (`OwnedTasks::gen_shared_list_size`, tokio 1.53). Opening and closing forks spawns
     /// uploaders, so a heap counted to the byte grew by 64 bytes now and then as they reached
-    /// shards none had (32 at most on this runtime): nothing of the stores'. The other such holder,
-    /// each of its threads' list of the shared locks it holds, it makes as each starts
+    /// shards none had (32 at most on this runtime): nothing of the open cells'. The other such
+    /// holder, each of its threads' list of the shared locks it holds, it makes as each starts
     /// (`local_cell::shared::prepare_thread`).
     fn every_task_shard_locked() {
         let runtime = local_cell::upload::bucket_runtime().unwrap();
@@ -1905,29 +1919,31 @@ mod tests {
         }
     }
 
-    /// A store's closed segments are the objects of its cell in the bucket, byte for byte, as
+    /// An open cell's closed segments are the objects of its cell in the bucket, byte for byte, as
     /// are its extents stored on their own (doc-7, decision 1): the uploader puts its files; and
-    /// once the bucket has acknowledged them, they leave the store whole, into the host's cache,
-    /// as those objects, which the store's reads read there with the bucket's gone (TASK-165.8).
+    /// once the bucket has acknowledged them, they leave the open cell whole, into the host's
+    /// cache, as those objects, which the open cell's reads read there with the bucket's gone
+    /// (TASK-165.8).
     #[tokio::test(flavor = "multi_thread")]
-    async fn uploaded_segments_are_the_stores_files() {
+    async fn uploaded_segments_are_the_cells_files() {
         use bucket_cell::layout::{self, Footer};
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
-            .await
-            .unwrap();
-        let cell = store.cell();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        write(&store, 2, &pattern(2, 4 << 20)).await;
-        store.commit(Some(b"one")).await.unwrap();
-        write(&store, 3, &pattern(3, 2 * BLOCK)).await;
-        store.commit(Some(b"two")).await.unwrap();
+        let open_cell =
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
+                .await
+                .unwrap();
+        let cell = open_cell.cell();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        write(&open_cell, 2, &pattern(2, 4 << 20)).await;
+        open_cell.commit(Some(b"one")).await.unwrap();
+        write(&open_cell, 3, &pattern(3, 2 * BLOCK)).await;
+        open_cell.commit(Some(b"two")).await.unwrap();
 
-        // The store's files of `kind`, by their contents.
+        // The open cell's files of `kind`, by their contents.
         let files = |kind: &str| -> Vec<Vec<u8>> {
             let path =
                 dir.path().join("store").join(kind).join(base32_id::Padded(cell.id).to_string());
@@ -1983,7 +1999,7 @@ mod tests {
         for (sequence, data) in written {
             let extent = ExtentId { cell: cell.id, sequence };
             let mut read = vec![0; data.len()];
-            store
+            open_cell
                 .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
                 .await
                 .unwrap();
@@ -1999,14 +2015,14 @@ mod tests {
         use bucket_cell::layout;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        let cell = store.cell();
+        let cell = open_cell.cell();
         // Stored on its own, raw, as it doesn't compress.
-        let extent = write(&store, 1, &noise(1, 4 << 20)).await;
-        store.commit_ordered(None).await.unwrap();
-        // On the disk, as the store's page cache holds it written (TASK-433).
+        let extent = write(&open_cell, 1, &noise(1, 4 << 20)).await;
+        open_cell.commit_ordered(None).await.unwrap();
+        // On the disk, as the open cell's page cache holds it written (TASK-433).
         local_cell::pages::shared().write_back_all().unwrap();
         let path = dir.path().join(format!(
             "store/extents/{}/{}",
@@ -2018,10 +2034,10 @@ mod tests {
         assert_eq!(stored.encoding, extent_frame::Encoding::Raw);
         bytes[stored.offset as usize + 7] ^= 0x10;
         std::fs::write(&path, bytes).unwrap();
-        // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
-        // so that its reads read the disk (TASK-433).
+        // Damaged behind the open cell's back: what the open cell's page cache holds of it, clean,
+        // goes, so that its reads read the disk (TASK-433).
         local_cell::pages::shared().evict_to(0);
-        assert_eq!(store.commit(None).await, Err(crate::error::Errno::EIO));
+        assert_eq!(open_cell.commit(None).await, Err(crate::error::Errno::EIO));
         let listed = |prefix: String| -> Vec<String> {
             let listed = bucket_cell::Bucket::list(&*bucket, &prefix);
             futures::executor::block_on(listed).unwrap().into_iter().map(|meta| meta.key).collect()
@@ -2035,25 +2051,25 @@ mod tests {
     async fn durable_commits_fail_once_another_takes_the_cell() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         let other = bucket_cell::Writer::open(
             bucket.clone(),
-            store.cell(),
+            open_cell.cell(),
             2,
             crate::host_cell::token().unwrap(),
         );
         futures::executor::block_on(other).unwrap();
-        write(&store, 2, &pattern(2, BLOCK)).await;
-        assert_eq!(store.commit(None).await, Err(crate::Errno::EROFS));
+        write(&open_cell, 2, &pattern(2, BLOCK)).await;
+        assert_eq!(open_cell.commit(None).await, Err(crate::Errno::EROFS));
     }
 
-    /// TASK-39.7: a store's copy takes its cell with its placement's fencing token: a later
+    /// TASK-39.7: an open cell's copy takes its cell with its placement's fencing token: a later
     /// placement's, higher, fences it, its commits failing, and it takes the cell back no more,
-    /// though its store is as current as the cell; a placement later still takes it.
+    /// though its open cell is as current as the cell; a placement later still takes it.
     #[tokio::test(flavor = "multi_thread")]
     async fn later_placements_fence_earlier_ones() {
         let dir = tempfile::tempdir().unwrap();
@@ -2086,12 +2102,12 @@ mod tests {
         assert_eq!(later.root(), Ok(b"first".to_vec()));
     }
 
-    /// TASK-550, TASK-612, doc-4: a store whose uploader failed for good, as a later placement
+    /// TASK-550, TASK-612, doc-4: an open cell whose uploader failed for good, as a later placement
     /// took its cell, changes nothing more: neither an ordered commit (a guest's fsync) nor a local
     /// one, nor a write, a free, a version or a resize, each `EROFS` as its durable commits are,
     /// rather than taken for what its cell will hold.
     #[tokio::test(flavor = "multi_thread")]
-    async fn fenced_stores_change_nothing() {
+    async fn fenced_open_cells_change_nothing() {
         changes_nothing_once_lost(async |bucket, dir, cell| {
             let second = dir.join("second");
             drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).await.unwrap());
@@ -2101,10 +2117,10 @@ mod tests {
         .await;
     }
 
-    /// TASK-550: as [`fenced_stores_change_nothing`], a store whose cell a later placement
+    /// TASK-550: as [`fenced_open_cells_change_nothing`], an open cell whose cell a later placement
     /// deleted.
     #[tokio::test(flavor = "multi_thread")]
-    async fn stores_of_deleted_cells_change_nothing() {
+    async fn open_cells_of_deleted_cells_change_nothing() {
         changes_nothing_once_lost(async |bucket, dir, cell| {
             let second = dir.join("second");
             drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).await.unwrap());
@@ -2114,7 +2130,7 @@ mod tests {
         .await;
     }
 
-    /// A store, placed, its cell then lost to it as `lose` loses it, in `dir`, changes nothing
+    /// An open cell, placed, its cell then lost to it as `lose` loses it, in `dir`, changes nothing
     /// more once its uploader finds it lost.
     async fn changes_nothing_once_lost(
         lose: impl AsyncFnOnce(&Arc<ObjectBucket>, &std::path::Path, crate::CellId),
@@ -2123,26 +2139,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("first");
-        let store = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
-        let cell = store.cell();
+        let open_cell = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
+        let cell = open_cell.cell();
         OpenCell::place(&path, 1).unwrap();
-        let kept = write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        let kept = write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         lose(&bucket, dir.path(), cell).await;
         // Ordered before its uploader finds the cell lost, which its next upload does: a loss
         // doc-4 accepts.
-        write(&store, 2, &pattern(2, BLOCK)).await;
-        store.commit_ordered(None).await.unwrap();
-        assert_eq!(store.wait_uploaded().await, Err(EROFS));
-        assert!(store.uploader().unwrap().failed().is_some());
+        write(&open_cell, 2, &pattern(2, BLOCK)).await;
+        open_cell.commit_ordered(None).await.unwrap();
+        assert_eq!(open_cell.wait_uploaded().await, Err(EROFS));
+        assert!(open_cell.uploader().unwrap().failed().is_some());
         let extent = ExtentId { cell: cell.id, sequence: 3 };
         let data = pattern(3, BLOCK);
-        assert_eq!(store.write(extent, 0, &[VolatileSlice::from(&data[..])]).await, Err(EROFS));
-        assert_eq!(store.free(kept), Err(EROFS));
-        assert_eq!(store.commit_ordered(None).await, Err(EROFS));
-        assert_eq!(store.commit_local(None).await, Err(EROFS));
-        assert_eq!(store.make_version(None).await.err().and_then(|err| err.errno()), Some(EROFS));
-        assert_eq!(store.set_capacity(2 << 30).await, Err(EROFS));
+        assert_eq!(open_cell.write(extent, 0, &[VolatileSlice::from(&data[..])]).await, Err(EROFS));
+        assert_eq!(open_cell.free(kept), Err(EROFS));
+        assert_eq!(open_cell.commit_ordered(None).await, Err(EROFS));
+        assert_eq!(open_cell.commit_local(None).await, Err(EROFS));
+        let made = open_cell.make_version(None).await.err().and_then(|err| err.errno());
+        assert_eq!(made, Some(EROFS));
+        assert_eq!(open_cell.set_capacity(2 << 30).await, Err(EROFS));
     }
 
     /// TASK-570: a cell names [`bucket_cell::layout::MAX_VERSIONS`] versions at most (doc-18):
@@ -2153,18 +2170,18 @@ mod tests {
         let most = bucket_cell::layout::MAX_VERSIONS;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         for _ in 0..most {
-            store.make_version(None).await.unwrap();
+            open_cell.make_version(None).await.unwrap();
         }
-        let refused = store.make_version(None).await.err().and_then(|err| err.errno());
+        let refused = open_cell.make_version(None).await.err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::EMLINK));
-        assert_eq!(store.versions().await.len(), most);
-        store.make_version(Some(1)).await.unwrap();
+        assert_eq!(open_cell.versions().await.len(), most);
+        open_cell.make_version(Some(1)).await.unwrap();
     }
 
     /// TASK-610: what this process made versions of it keeps for versions their cells name alone:
@@ -2174,20 +2191,20 @@ mod tests {
     async fn versions_made_here_are_forgotten_once_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         for _ in 0..20 {
-            store.make_version(Some(1)).await.unwrap();
+            open_cell.make_version(Some(1)).await.unwrap();
         }
-        store.wait_uploaded().await.unwrap();
-        let last = store.make_version(Some(1)).await.unwrap();
-        let named = store.versions().await.len();
+        open_cell.wait_uploaded().await.unwrap();
+        let last = open_cell.make_version(Some(1)).await.unwrap();
+        let named = open_cell.versions().await.len();
         assert!(named <= 2, "{named} versions named");
         assert_eq!(crate::host_cell::versions_made(), named);
-        store.drop_versions(&[last].into()).await.unwrap();
+        open_cell.drop_versions(&[last].into()).await.unwrap();
         assert_eq!(crate::host_cell::versions_made(), named - 1);
     }
 
@@ -2224,33 +2241,34 @@ mod tests {
         assert!(deleted.unwrap().unwrap().deleted(), "the cell lives");
     }
 
-    /// TASK-39.7: a store's copy never placed takes its cell with its host's token, as a store
-    /// restored or taken on a host is.
+    /// TASK-39.7: an open cell's copy never placed takes its cell with its host's token, as an open
+    /// cell restored or taken on a host is.
     #[tokio::test(flavor = "multi_thread")]
     async fn unplaced_copies_take_their_hosts_token() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let options = local_cell::upload::Options { token: 9, ..idle() };
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
-            .await
-            .unwrap();
-        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
+        let open_cell =
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
+                .await
+                .unwrap();
+        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, open_cell.cell()));
         let head = head.unwrap().unwrap();
         assert_eq!((head.token, head.epoch), (9, 1));
     }
 
-    /// TASK-165.9: a store whose bucket acknowledged commits of its cell, opened where the
+    /// TASK-165.9: an open cell whose bucket acknowledged commits of its cell, opened where the
     /// bucket has no such cell, deleted or another bucket, refuses (`ENOENT`), rather than make
     /// the cell anew without them.
     #[tokio::test(flavor = "multi_thread")]
-    async fn stores_whose_bucket_lacks_their_cell_refuse() {
+    async fn open_cells_whose_bucket_lacks_their_cell_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
-        let store = kept_in(&path, (1 << 30, None), &bucket, idle()).await.unwrap();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(Some(b"acknowledged")).await.unwrap();
-        drop(store);
+        let open_cell = kept_in(&path, (1 << 30, None), &bucket, idle()).await.unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(Some(b"acknowledged")).await.unwrap();
+        drop(open_cell);
         let other = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         naming(&path, &other);
         let refused = reopened(&path, idle()).await.err().and_then(|err| err.errno());
@@ -2260,23 +2278,23 @@ mod tests {
         assert_eq!(reopened(&path, idle()).await.unwrap().root(), Ok(b"acknowledged".to_vec()));
     }
 
-    /// TASK-192: a store dropped uploads what it committed, its open segment's commits too, as
+    /// TASK-192: an open cell dropped uploads what it committed, its open segment's commits too, as
     /// `local_cell::upload`'s docs say: its uploader closes the open segment, uploads it and
-    /// stops, before the store closes. Before, the store closed first, and its uploader found the
-    /// open segment's commits it could no longer close.
+    /// stops, before the open cell closes. Before, the open cell closed first, and its uploader
+    /// found the open segment's commits it could no longer close.
     #[tokio::test(flavor = "multi_thread")]
-    async fn dropped_stores_upload_their_open_segments_commits() {
+    async fn dropped_open_cells_upload_their_open_segments_commits() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        let cell = store.cell();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit_ordered(Some(b"ordered")).await.unwrap();
+        let cell = open_cell.cell();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit_ordered(Some(b"ordered")).await.unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
         assert_eq!(uploaded(&bucket, cell), (vec![], None));
-        drop(store);
+        drop(open_cell);
         assert_eq!(
             uploaded(&bucket, cell),
             (vec![(1, pattern(1, BLOCK))], Some(b"ordered".to_vec()))
@@ -2288,21 +2306,21 @@ mod tests {
     async fn waits_for_uploads() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit_ordered(Some(b"ordered")).await.unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit_ordered(Some(b"ordered")).await.unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
-        assert_eq!(uploaded(&bucket, store.cell()).1, None);
-        store.wait_uploaded().await.unwrap();
+        assert_eq!(uploaded(&bucket, open_cell.cell()).1, None);
+        open_cell.wait_uploaded().await.unwrap();
         assert_eq!(
-            uploaded(&bucket, store.cell()),
+            uploaded(&bucket, open_cell.cell()),
             (vec![(1, pattern(1, BLOCK))], Some(b"ordered".to_vec()))
         );
     }
 
-    /// Which writes a [`Gated`] store holds.
+    /// Which writes a [`Gated`] backend holds.
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Hold {
         Nothing,
@@ -2341,8 +2359,8 @@ mod tests {
         }
     }
 
-    /// What goes wrong with a write through a [`Gated`] store, as it fails: requests that fail, the
-    /// host's bucket's helpers send again.
+    /// What goes wrong with a write through a [`Gated`] backend, as it fails: requests that fail,
+    /// the host's bucket's helpers send again.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum Mishap {
         /// It takes no effect.
@@ -2380,7 +2398,7 @@ mod tests {
     /// its objects once it is severed.
     #[derive(Debug)]
     pub(super) struct Gated {
-        store: Arc<dyn object_store::ObjectStore>,
+        backend: Arc<dyn object_store::ObjectStore>,
         shut: std::sync::atomic::AtomicBool,
         /// Its writes fail as a file bucket's on a full disk do, `ENOSPC` behind a generic error
         /// (TASK-314).
@@ -2411,10 +2429,10 @@ mod tests {
             Self::over(Arc::new(InMemory::new()))
         }
 
-        /// The objects of `store`, gated.
-        pub(super) fn over(store: Arc<dyn object_store::ObjectStore>) -> Self {
+        /// The objects of `backend`, gated.
+        pub(super) fn over(backend: Arc<dyn object_store::ObjectStore>) -> Self {
             Self {
-                store,
+                backend,
                 shut: Default::default(),
                 full: Default::default(),
                 hold: tokio::sync::watch::channel(Hold::Nothing).0,
@@ -2428,7 +2446,7 @@ mod tests {
 
         /// The objects its requests reach.
         fn reached(&self) -> Arc<dyn object_store::ObjectStore> {
-            self.severed.lock().unwrap().clone().unwrap_or_else(|| self.store.clone())
+            self.severed.lock().unwrap().clone().unwrap_or_else(|| self.backend.clone())
         }
 
         /// Cuts it off from its objects, as a host dead is: its requests reach a copy of them from
@@ -2439,9 +2457,9 @@ mod tests {
             let copy = InMemory::new();
             futures::executor::block_on(async {
                 use futures::StreamExt as _;
-                for meta in self.store.list(None).collect::<Vec<_>>().await {
+                for meta in self.backend.list(None).collect::<Vec<_>>().await {
                     let location = meta.unwrap().location;
-                    let bytes = self.store.get(&location).await.unwrap().bytes().await.unwrap();
+                    let bytes = self.backend.get(&location).await.unwrap().bytes().await.unwrap();
                     copy.put(&location, bytes.into()).await.unwrap();
                 }
             });
@@ -2464,7 +2482,7 @@ mod tests {
         /// off from.
         pub(super) fn land_late(&self) {
             for (location, payload, options) in std::mem::take(&mut *self.late.lock().unwrap()) {
-                let landed = self.store.put_opts(&location, payload, options);
+                let landed = self.backend.put_opts(&location, payload, options);
                 if let Err(err) = futures::executor::block_on(landed) {
                     eprintln!("{location} landing late: {err}");
                 }
@@ -2635,7 +2653,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let store = Arc::new(
+        let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
                 .await
                 .unwrap(),
@@ -2643,17 +2661,17 @@ mod tests {
         let creates_failed = bucket.stats().failures(Request::Create);
         failing(&gated).store(true, std::sync::atomic::Ordering::Relaxed);
         for sequence in 1..=2 {
-            write(&store, sequence, &pattern(sequence as u8, BLOCK)).await;
-            commit(&store).await.unwrap();
+            write(&open_cell, sequence, &pattern(sequence as u8, BLOCK)).await;
+            commit(&open_cell).await.unwrap();
         }
         let third = {
-            let store = store.clone();
+            let open_cell = open_cell.clone();
             tokio::spawn(async move {
-                write(&store, 3, &pattern(3, 2 * BLOCK)).await;
-                commit(&store).await
+                write(&open_cell, 3, &pattern(3, 2 * BLOCK)).await;
+                commit(&open_cell).await
             })
         };
-        let uploader = store.uploader().unwrap();
+        let uploader = open_cell.uploader().unwrap();
         // Until it stalls, or finishes, which it must not: past the bound, it waits.
         while (uploader.stalls() == 0 || bucket.stats().failures(Request::Create) == creates_failed)
             && !third.is_finished()
@@ -2664,24 +2682,24 @@ mod tests {
         assert_eq!(uploader.failed(), None, "the uploader stopped");
         failing(&gated).store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(third.await.unwrap(), Ok(()));
-        store.commit(None).await.unwrap();
-        let (extents, _) = uploaded(&bucket, store.cell());
+        open_cell.commit(None).await.unwrap();
+        let (extents, _) = uploaded(&bucket, open_cell.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
     }
 
-    /// TASK-317: what a store's uploads hold in memory while the bucket takes none of them, however
-    /// far behind they fall, is their budget, the host's upload memory: segments of incompressible
-    /// data, a MiB an extent, each closed by a commit waiting for its upload, twice as many as the
-    /// store uploads at once, which the bucket holds unanswered. What waits is in the store's
-    /// write-ahead log, on disk.
+    /// TASK-317: what an open cell's uploads hold in memory while the bucket takes none of them,
+    /// however far behind they fall, is their budget, the host's upload memory: segments of
+    /// incompressible data, a MiB an extent, each closed by a commit waiting for its upload, twice
+    /// as many as the open cell uploads at once, which the bucket holds unanswered. What waits is
+    /// in the open cell's write-ahead log, on disk.
     #[tokio::test(flavor = "multi_thread")]
     async fn uploads_a_bucket_takes_none_of_hold_no_more_than_their_budget() {
         // Seven segments' room, of 32 MiB and their tails each: more than a framing holds.
         const BUDGET: u64 = 256 << 20;
-        // What a store's framing holds besides, one segment at a time: its data, and its framed
-        // bytes, twice as they grow (`local_cell::segments`, TASK-325).
+        // What an open cell's framing holds besides, one segment at a time: its data, and its
+        // framed bytes, twice as they grow (`local_cell::segments`, TASK-325).
         const FRAMING: u64 = 4 * (32 << 20);
-        // And the heap's own: the store's and the bucket's, and a commit's buffers.
+        // And the heap's own: the open cell's and the bucket's, and a commit's buffers.
         const SLACK: u64 = 16 << 20;
         super::set_upload_memory(BUDGET).unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -2689,7 +2707,7 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let options =
             local_cell::upload::Options { max_lag: u64::MAX, max_lag_bytes: u64::MAX, ..idle() };
-        let store = Arc::new(
+        let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (8 << 30, None), &bucket.clone(), options)
                 .await
                 .unwrap(),
@@ -2705,10 +2723,10 @@ mod tests {
                 for _ in 0..segments {
                     for _ in 0..32 {
                         sequence += 1;
-                        write(&store, sequence, &data).await;
-                        store.commit_ordered(None).await.unwrap();
+                        write(&open_cell, sequence, &data).await;
+                        open_cell.commit_ordered(None).await.unwrap();
                     }
-                    let committing = store.clone();
+                    let committing = open_cell.clone();
                     waiting.push(tokio::spawn(async move { committing.commit(None).await }));
                 }
                 // As many as the budget lets go at once: seven at least, or more of segments closed
@@ -2722,7 +2740,7 @@ mod tests {
             })
         });
         let memory = super::upload_memory();
-        let behind = store.uploader().unwrap().status().unwrap().pending_bytes;
+        let behind = open_cell.uploader().unwrap().status().unwrap().pending_bytes;
         gated.hold.send_replace(Hold::Nothing);
         for commit in waiting {
             assert_eq!(commit.await.unwrap(), Ok(()));
@@ -2731,8 +2749,8 @@ mod tests {
         assert!(behind >= (segments as u64) << 25, "{behind} bytes behind");
         assert_eq!(memory.budget, BUDGET);
         assert!(memory.max_held <= BUDGET, "{memory:?}");
-        // cladefs: and the stores' page cache's, which a backlog holds no more of than its bound
-        // (TASK-433): the backlog is on the disk.
+        // cladefs: and the open cells' page cache's, which a backlog holds no more of than its
+        // bound (TASK-433): the backlog is on the disk.
         let pages = local_cell::pages::shared().options().most;
         assert!(heap <= BUDGET + FRAMING + SLACK + pages, "{} MiB held", heap >> 20);
     }
@@ -2743,7 +2761,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let store = Arc::new(
+        let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
                 .await
                 .unwrap(),
@@ -2751,7 +2769,7 @@ mod tests {
         gated.hold.send_replace(Hold::Segments);
         let commits: Vec<_> = (1..=3)
             .map(|sequence| {
-                let committing = store.clone();
+                let committing = open_cell.clone();
                 let commit = tokio::spawn(async move {
                     write(&committing, sequence, &pattern(sequence as u8, BLOCK)).await;
                     committing.commit(None).await
@@ -2764,32 +2782,32 @@ mod tests {
         for commit in commits {
             assert_eq!(commit.await.unwrap(), Ok(()));
         }
-        let (extents, _) = uploaded(&bucket, store.cell());
+        let (extents, _) = uploaded(&bucket, open_cell.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
     }
 
-    /// TASK-92.15: an ordered commit that no one waits for stays in the store's open segment while
-    /// the uploader takes the segments that commits waiting for their uploads closed: it closes
-    /// the open segment for those waiting, or when it is due, not each time an upload is done.
-    /// Here four segments, one for each commit waiting, upload, held in the bucket; a commit is
-    /// made that no one waits for; then they land, one after another: the store closes none for
-    /// it, which uploads once one waits for it.
+    /// TASK-92.15: an ordered commit that no one waits for stays in the open cell's open segment
+    /// while the uploader takes the segments that commits waiting for their uploads closed: it
+    /// closes the open segment for those waiting, or when it is due, not each time an upload is
+    /// done. Here four segments, one for each commit waiting, upload, held in the bucket; a commit
+    /// is made that no one waits for; then they land, one after another: the open cell closes none
+    /// for it, which uploads once one waits for it.
     #[tokio::test(flavor = "multi_thread")]
     async fn uploads_done_close_no_segment_for_commits_no_one_waits_for() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let store = Arc::new(
+        let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
                 .await
                 .unwrap(),
         );
-        let cell = store.cell();
+        let cell = open_cell.cell();
         // The commits' segments are 0 to 3.
         gated.hold.send_replace(Hold::Segments);
         let waiting: Vec<_> = (1..=local_cell::upload::IN_FLIGHT as u64)
             .map(|sequence| {
-                let committing = store.clone();
+                let committing = open_cell.clone();
                 let commit = tokio::spawn(async move {
                     write(&committing, sequence, &pattern(sequence as u8, BLOCK)).await;
                     committing.commit(None).await
@@ -2799,8 +2817,8 @@ mod tests {
             })
             .collect();
         let ordered = local_cell::upload::IN_FLIGHT as u64 + 1;
-        write(&store, ordered, &pattern(ordered as u8, BLOCK)).await;
-        store.commit_ordered(None).await.unwrap();
+        write(&open_cell, ordered, &pattern(ordered as u8, BLOCK)).await;
+        open_cell.commit_ordered(None).await.unwrap();
         // The first lands alone: its commit is acknowledged; then the rest.
         let mut waiting = waiting.into_iter();
         gated.hold.send_replace(Hold::SegmentsFrom(1));
@@ -2809,27 +2827,27 @@ mod tests {
         for commit in waiting {
             assert_eq!(commit.await.unwrap(), Ok(()));
         }
-        // The store's segments closed, in the bucket: those of the commits waiting.
+        // The open cell's segments closed, in the bucket: those of the commits waiting.
         let prefix = bucket_cell::layout::segments(cell);
         let closed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
         assert_eq!(closed.len(), local_cell::upload::IN_FLIGHT);
-        store.wait_uploaded().await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
         let (extents, _) = uploaded(&bucket, cell);
         let sequences: Vec<_> = extents.iter().map(|(sequence, _)| *sequence).collect();
         assert_eq!(sequences, (1..=ordered).collect::<Vec<_>>());
     }
 
-    /// A cell survives the loss of its host. Cut off from object storage, the host's store goes
+    /// A cell survives the loss of its host. Cut off from object storage, the host's open cell goes
     /// on committing, ordered, until the lag reaches its bound, `max_lag` commits, then waits.
-    /// Lost then, its store, its uploader and its disk, its commits made durable, which waited for
-    /// their uploads, are all in the cell, which another host's empty store takes, losing the
-    /// lag's commits at most; and writes on. In the objects of `store` under `prefix`.
-    async fn survives_its_hosts_loss(store: Arc<dyn object_store::ObjectStore>, prefix: &str) {
+    /// Lost then, its open cell, its uploader and its disk, its commits made durable, which waited
+    /// for their uploads, are all in the cell, which another host's empty open cell takes, losing
+    /// the lag's commits at most; and writes on. In the objects of `objects` under `prefix`.
+    async fn survives_its_hosts_loss(objects: Arc<dyn object_store::ObjectStore>, prefix: &str) {
         use bucket_cell::layout;
         use std::sync::atomic::Ordering::Relaxed;
         let dir = tempfile::tempdir().unwrap();
-        let gated = Arc::new(Gated::over(store.clone()));
+        let gated = Arc::new(Gated::over(objects.clone()));
         let max_lag = 2;
         let options = local_cell::upload::Options {
             interval: Duration::from_millis(1),
@@ -2866,7 +2884,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(!waiting.is_finished(), "a commit past the lag went on");
-        // The uploader goes on, cut off: it closes the store's open segment, for the commit
+        // The uploader goes on, cut off: it closes the open cell's open segment, for the commit
         // waiting, writing to the host's disk, and takes the segment framed, the waiting commit
         // last, to upload. Only from then on does nothing write to the disk, the uploads refused,
         // never acknowledged: lost sooner, the disk would go as the uploader writes to it, which
@@ -2885,14 +2903,14 @@ mod tests {
             assert!(!waiting.is_finished(), "the commit waiting returned, its segment not framed");
             std::thread::yield_now();
         }
-        // The host is lost: its store and uploader, forgotten, never reach object storage again,
-        // and its disk is gone: renamed away at once, as its threads, forgotten, may still make
-        // files in it, which a removal racing them finds (TASK-301: a log becoming a spare).
+        // The host is lost: its open cell and uploader, forgotten, never reach object storage
+        // again, and its disk is gone: renamed away at once, as its threads, forgotten, may still
+        // make files in it, which a removal racing them finds (TASK-301: a log becoming a spare).
         std::mem::forget(lost);
         drop(waiting);
         std::fs::rename(dir.path().join("lost"), dir.path().join("gone")).unwrap();
 
-        let bucket = Arc::new(ObjectBucket::new(store, prefix));
+        let bucket = Arc::new(ObjectBucket::new(objects, prefix));
         let taken =
             kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                 .await
@@ -2921,9 +2939,9 @@ mod tests {
     }
 
     /// TASK-79.68: an extent freed while open and written anew before the commit is the cell's
-    /// still once a store taking the cell recovers it from object storage: its segment's footer
-    /// named it among the commit's frees too, which recovery applies after its extents, and the
-    /// cell recovered lacked it.
+    /// still once an open cell taking the cell recovers it from object storage: its segment's
+    /// footer named it among the commit's frees too, which recovery applies after its extents, and
+    /// the cell recovered lacked it.
     #[tokio::test(flavor = "multi_thread")]
     async fn extents_freed_and_written_anew_survive_recovery() {
         let dir = tempfile::tempdir().unwrap();
@@ -2947,10 +2965,10 @@ mod tests {
         assert!(data == pattern(2, BLOCK), "the extent read back is not its second write");
     }
 
-    /// TASK-92.6: a store taking a cell its host lost, the cell's segments since its last
+    /// TASK-92.6: an open cell taking a cell its host lost, the cell's segments since its last
     /// checkpoint many, recovers the cell once, its head taken between the start and the rest:
     /// by the tails of its segments, which hold their footers, a window of them at once, not by
-    /// the segments whole. The bucket, which the lost host's store probed, it probes not again.
+    /// the segments whole. The bucket, which the lost host's open cell probed, it probes not again.
     /// TASK-165.11: what a durable commit, an open, a fork and a fork's first open cost on a real
     /// bucket, CLADEFS_PHASES_BUCKET's (`s3://bucket/prefix`, under a prefix of the run's own), by
     /// phase: each one's time, and the bucket's requests it made, by kind, their count and time
@@ -2991,37 +3009,38 @@ mod tests {
         };
         let base = dir.path().join("base");
         let cell = crate::host_cell::new_alone();
-        let mut store = None;
+        let mut open_cell = None;
         measure(
             "create",
             Box::pin(async {
                 let made = OpenCell::create_kept_with(&base, 1 << 30, cell, &url, idle()).await;
-                store = Some(made.unwrap());
+                open_cell = Some(made.unwrap());
             }),
         )
         .await;
-        let store = store.unwrap();
+        let open_cell = open_cell.unwrap();
         for sequence in 1..=20 {
-            write(&store, sequence, &pattern(sequence as u8, BLOCK)).await;
-            measure("durable-commit", Box::pin(async { store.commit(None).await.unwrap() })).await;
+            write(&open_cell, sequence, &pattern(sequence as u8, BLOCK)).await;
+            measure("durable-commit", Box::pin(async { open_cell.commit(None).await.unwrap() }))
+                .await;
         }
-        drop(store);
+        drop(open_cell);
         for _ in 0..10 {
             measure("open", Box::pin(async { drop(reopened(&base, idle()).await.unwrap()) })).await;
         }
-        let store = reopened(&base, idle()).await.unwrap();
+        let open_cell = reopened(&base, idle()).await.unwrap();
         let forks: Vec<_> = (0..10).map(|fork| dir.path().join(format!("fork-{fork}"))).collect();
         for fork in &forks {
             let child = crate::host_cell::new_alone();
             measure(
                 "fork",
                 Box::pin(async {
-                    store.fork_to(fork, child).await.unwrap();
+                    open_cell.fork_to(fork, child).await.unwrap();
                 }),
             )
             .await;
         }
-        drop(store);
+        drop(open_cell);
         for fork in &forks {
             measure("fork-open", Box::pin(async { drop(reopened(fork, idle()).await.unwrap()) }))
                 .await;
@@ -3048,14 +3067,14 @@ mod tests {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
-        write(&store, 1, &pattern(1, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         let before = bucket.stats();
-        write(&store, 2, &pattern(2, BLOCK)).await;
-        store.commit(None).await.unwrap();
+        write(&open_cell, 2, &pattern(2, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
         let after = bucket.stats();
         let asked: Vec<_> = (Request::ALL.iter())
             .map(|&request| (request.name(), after.requests(request) - before.requests(request)))
@@ -3095,7 +3114,8 @@ mod tests {
         // The host is lost, its uploader stopping where it is, with no checkpoint.
         std::mem::forget(lost);
 
-        // cladefs: its head's slots as the take reads them, before its swap rewrites one (TASK-691).
+        // cladefs: its head's slots as the take reads them, before its swap rewrites one
+        // (TASK-691).
         let head: u64 = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
             .unwrap()
             .into_iter()
@@ -3148,15 +3168,15 @@ mod tests {
     }
 
     /// As `cells_survive_their_hosts_loss`, in the bucket CLADEFS_S3_URL names: RustFS's
-    /// (scripts/test-rustfs.sh), or another S3 store's.
+    /// (scripts/test-rustfs.sh), or another S3 bucket's.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     async fn rustfs_cells_survive_their_hosts_loss() {
         let url = std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket to use");
-        let (store, prefix) = bucket_cell::object_bucket::object_store_at(&url).unwrap();
+        let (objects, prefix) = bucket_cell::object_bucket::object_store_at(&url).unwrap();
         // A prefix of the run's own, in a bucket runs share.
         let prefix = format!("{prefix}/{:016x}", rand::random::<u64>());
-        survives_its_hosts_loss(store, prefix.trim_start_matches('/')).await;
+        survives_its_hosts_loss(objects, prefix.trim_start_matches('/')).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3166,7 +3186,7 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| Box::pin(store.commit_ordered(None)),
+            |open_cell| Box::pin(open_cell.commit_ordered(None)),
         )
         .await;
     }
@@ -3182,7 +3202,7 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| Box::pin(store.commit_local(None)),
+            |open_cell| Box::pin(open_cell.commit_local(None)),
         )
         .await;
     }
@@ -3200,7 +3220,7 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| Box::pin(store.commit_local(None)),
+            |open_cell| Box::pin(open_cell.commit_local(None)),
         )
         .await;
     }
@@ -3221,14 +3241,14 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| Box::pin(store.commit_ordered(None)),
+            |open_cell| Box::pin(open_cell.commit_ordered(None)),
         )
         .await;
     }
 
-    /// TASK-314: a bucket that keeps failing its writes, its disk full, holds its stores' commits
-    /// at the lag bound, failing none and losing none: as the guest sees it, its fsyncs wait once
-    /// the lag reaches its bound (its syncs at once), until the bucket has room (doc-12).
+    /// TASK-314: a bucket that keeps failing its writes, its disk full, holds its open cells'
+    /// commits at the lag bound, failing none and losing none: as the guest sees it, its fsyncs
+    /// wait once the lag reaches its bound (its syncs at once), until the bucket has room (doc-12).
     #[tokio::test(flavor = "multi_thread")]
     async fn commits_wait_at_the_lag_bound_while_the_bucket_is_full() {
         let interval = Duration::from_millis(1);
@@ -3236,13 +3256,13 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.full,
-            |store| Box::pin(store.commit_ordered(None)),
+            |open_cell| Box::pin(open_cell.commit_ordered(None)),
         )
         .await;
     }
 
-    /// A cell opens on a host without it: an empty store of it takes what the cell holds, and
-    /// writes on; the store it came from, opened again, finds the cell moved on, and refuses.
+    /// A cell opens on a host without it: an empty open cell of it takes what the cell holds, and
+    /// writes on; the open cell it came from, opened again, finds the cell moved on, and refuses.
     #[tokio::test(flavor = "multi_thread")]
     async fn opens_cells_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
@@ -3273,7 +3293,7 @@ mod tests {
         drop(second);
 
         // cladefs: the first, opened again, its write-ahead log empty, takes the cell as it is
-        // (TASK-165.9): before, a store that held the cell refused once it moved on.
+        // (TASK-165.9): before, an open cell that held the cell refused once it moved on.
         let first = reopened(dir.path().join("first"), idle()).await.unwrap();
         assert_eq!(first.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; BLOCK];
@@ -3312,7 +3332,7 @@ mod tests {
         lines.lock().unwrap().clear();
         let request = RequestId {
             guest: std::num::NonZeroU64::new(42).unwrap(),
-            store: Some("/stores/vm1".into()),
+            open_cell: Some("/stores/vm1".into()),
         };
         let mut data = vec![0; BLOCK];
         let extent = ExtentId { cell: cell.id, sequence: 1 };
@@ -3337,8 +3357,8 @@ mod tests {
         drop(second);
     }
 
-    /// Opens the store at `path`, whose bucket's objects `gated` reaches, the write of its cell's
-    /// head that takes it held until `meanwhile` ran.
+    /// Opens the cell directory at `path`, whose bucket's objects `gated` reaches, the write of its
+    /// cell's head that takes it held until `meanwhile` ran.
     async fn open_racing(
         path: std::path::PathBuf,
         gated: &Arc<Gated>,
@@ -3353,8 +3373,8 @@ mod tests {
         opening.await.unwrap()
     }
 
-    /// The directory of a store of `cell` at `path`, its cell kept in `bucket`, made whole, and
-    /// not opened: what opening takes the cell into, as the bucket holds it.
+    /// The directory of an open cell of `cell` at `path`, its cell kept in `bucket`, made whole,
+    /// and not opened: what opening takes the cell into, as the bucket holds it.
     fn made_for(path: &std::path::Path, cell: crate::CellId, bucket: &Arc<ObjectBucket>) {
         std::fs::create_dir(path).unwrap();
         let description =
@@ -3364,9 +3384,9 @@ mod tests {
         local_cell::made_host(path).unwrap();
     }
 
-    /// TASK-79.4: a store opening takes the cell as of its taking of the head, not as of what it
-    /// found before: the commit another writer made meanwhile, which frees the extent the cell
-    /// held before and writes another, is the cell's, and the store's.
+    /// TASK-79.4: an open cell opening takes the cell as of its taking of the head, not as of what
+    /// it found before: the commit another writer made meanwhile, which frees the extent the cell
+    /// held before and writes another, is the cell's, and the open cell's.
     #[tokio::test(flavor = "multi_thread")]
     async fn takes_take_what_the_cell_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
@@ -3397,13 +3417,13 @@ mod tests {
         );
     }
 
-    /// TASK-79.4, TASK-165.9: a store whose write-ahead log holds commits the cell moved past
+    /// TASK-79.4, TASK-165.9: an open cell whose write-ahead log holds commits the cell moved past
     /// refuses to open (`ESTALE`), those commits never acknowledged: before its head is taken, its
     /// log diverged as recovery first finds the cell; and once it holds it, another writer having
     /// committed between the two (`wal_follows`), having fenced that writer, whose commits stay the
-    /// cell's. `OpenCell::take` drops the log, and opens the store as the cell is.
+    /// cell's. `OpenCell::take` drops the log, and opens the open cell as the cell is.
     #[tokio::test(flavor = "multi_thread")]
-    async fn stores_whose_cell_moved_on_before_their_taking_refuse() {
+    async fn open_cells_whose_cell_moved_on_before_their_taking_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
@@ -3456,18 +3476,18 @@ mod tests {
             reopened(&path, idle()).await.err().and_then(|err| err.errno()),
             Some(crate::Errno::ESTALE)
         );
-        // Taken, its log dropped: the store holds the cell as it is, its local commit lost.
+        // Taken, its log dropped: the open cell holds the cell as it is, its local commit lost.
         OpenCell::take(&path, 1 << 30, cell, None).await.unwrap();
         let first = reopened(&path, idle()).await.unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }
 
-    /// A fork of a store kept in object storage is a fork of its cell there, recorded once the
+    /// A fork of an open cell kept in object storage is a fork of its cell there, recorded once the
     /// parent uploaded through it: it inherits the parent's extents rather than upload them again,
     /// and what either commits after is its own.
-    /// TASK-160.10: a store at a version refuses all that would change what it holds, with `EROFS`,
-    /// whoever asks: writes, frees, commits, a resize, a writer taking it over. What changes none
-    /// of its extents it does: it forks, and is made public.
+    /// TASK-160.10: an open cell at a version refuses all that would change what it holds, with
+    /// `EROFS`, whoever asks: writes, frees, commits, a resize, a writer taking it over. What
+    /// changes none of its extents it does: it forks, and is made public.
     #[tokio::test(flavor = "multi_thread")]
     async fn copies_of_versions_refuse_what_would_change_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -3635,10 +3655,10 @@ mod tests {
     }
 
     /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS has forgotten (answering
-    /// as for a tenant that never had one), and a tenant that never had one, get no store opened
-    /// here, encrypted or in the clear: `EACCES`, the cell not made.
+    /// as for a tenant that never had one), and a tenant that never had one, get no open cell
+    /// opened here, encrypted or in the clear: `EACCES`, the cell not made.
     #[tokio::test(flavor = "multi_thread")]
-    async fn tenants_with_no_kek_in_the_kms_open_no_store() {
+    async fn tenants_with_no_kek_in_the_kms_open_no_cell() {
         let keys = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         local.create(1).unwrap();
@@ -3659,12 +3679,12 @@ mod tests {
     }
 
     /// TASK-411.7: a host told a cell is shredded, or a tenant's KEK destroyed, forgets their keys:
-    /// their stores open here are halted, every request failing with `EACCES`, as their openings
-    /// do; their extents leave the extent cache, pages and all; its fetchers forget their rings.
-    /// The tenant's other cell's store, until its tenant goes, and another tenant's, read on, their
-    /// extents cached still. No file of the stores' directories holds what they wrote.
+    /// their open cells open here are halted, every request failing with `EACCES`, as their
+    /// openings do; their extents leave the extent cache, pages and all; its fetchers forget their
+    /// rings. The tenant's other cell's open cell, until its tenant goes, and another tenant's,
+    /// read on, their extents cached still. No file of the cell directories holds what they wrote.
     #[tokio::test(flavor = "multi_thread")]
-    async fn stores_of_shredded_cells_and_tenants_are_halted_and_leave_the_cache() {
+    async fn open_cells_of_shredded_cells_and_tenants_are_halted_and_leave_the_cache() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {
@@ -3675,28 +3695,29 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "sibling", "theirs"];
-        let mut stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
+        let mut open_cells: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
         for (at, (name, tenant)) in names.iter().zip([1, 1, 2]).enumerate() {
-            let store =
+            let open_cell =
                 kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle()).await;
-            let store = store.unwrap();
+            let open_cell = open_cell.unwrap();
             let data = noise(at as u64 + 1, 4 * BLOCK);
-            let extent = write(&store, 1, &data).await;
-            store.commit(None).await.unwrap();
-            store.wait_uploaded().await.unwrap();
-            stores.push((store, extent, data));
+            let extent = write(&open_cell, 1, &data).await;
+            open_cell.commit(None).await.unwrap();
+            open_cell.wait_uploaded().await.unwrap();
+            open_cells.push((open_cell, extent, data));
         }
         let read = async |at: usize| {
-            let (store, extent, data) = &stores[at];
+            let (open_cell, extent, data) = &open_cells[at];
             let mut read = vec![0; data.len()];
-            let done =
-                store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).await;
+            let done = open_cell
+                .read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
+                .await;
             done.map(|()| read == *data)
         };
         let cached = || {
             let extents: std::collections::BTreeSet<ExtentId> =
                 crate::cache::keys().into_iter().map(|(_, extent)| extent).collect();
-            stores.iter().map(|(_, extent, _)| extents.contains(extent)).collect::<Vec<_>>()
+            open_cells.iter().map(|(_, extent, _)| extents.contains(extent)).collect::<Vec<_>>()
         };
         assert_eq!(
             futures::future::join_all((0..3).map(read)).await,
@@ -3707,7 +3728,7 @@ mod tests {
             reopened(dir.path().join(names[at]), idle()).await.map(drop).map_err(|err| err.errno())
         };
 
-        let cell = stores[0].0.cell();
+        let cell = open_cells[0].0.cell();
         let shredded = futures::executor::block_on(crate::bucket::shred_cell(&bucket, cell));
         let (removed, forgotten) = shredded.unwrap();
         assert_eq!(removed, 1);
@@ -3721,9 +3742,9 @@ mod tests {
             [Err(crate::Errno::EACCES), Ok(true), Ok(true)]
         );
         assert_eq!(cached(), [false, true, true]);
-        assert_eq!(stores[0].0.commit(None).await, Err(crate::Errno::EACCES));
+        assert_eq!(open_cells[0].0.commit(None).await, Err(crate::Errno::EACCES));
         // Nor what the control API changes of it: its capacity, its versions (TASK-611).
-        let ours = &stores[0].0;
+        let ours = &open_cells[0].0;
         assert_eq!(ours.set_capacity(2 << 30).await, Err(crate::Errno::EACCES));
         let dropped = ours.drop_versions(&[1].into()).await.map_err(|err| err.errno());
         assert_eq!(dropped, Err(Some(crate::Errno::EACCES)));
@@ -3745,8 +3766,8 @@ mod tests {
         assert_eq!(cached(), [false, false, true]);
         assert_eq!(crate::bucket::kms().unwrap().in_pool(1), 0);
 
-        // Closed by their holders, the stores of the tenant open no more; the other's does.
-        let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
+        // Closed by their holders, the open cells of the tenant open no more; the other's does.
+        let written: Vec<Vec<u8>> = open_cells.into_iter().map(|(_, _, data)| data).collect();
         assert_eq!(
             futures::future::join_all((0..3).map(reopened_errno)).await,
             [Err(Some(crate::Errno::EACCES)), Err(Some(crate::Errno::EACCES)), Ok(())]
@@ -3754,21 +3775,21 @@ mod tests {
 
         let pieces: Vec<&[u8]> = written[..2].iter().map(|data| &data[..64]).collect();
         let held = crate::testing::files_holding(dir.path(), &pieces);
-        assert_eq!(held, Vec::<String>::new(), "files holding a store's data");
+        assert_eq!(held, Vec::<String>::new(), "files holding a cell's data");
     }
 
     /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its
-    /// tenants' KEKs in its bucket: every tenant's store is encrypted, its KEK made on its first use
-    /// at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, halts its store
-    /// (`EACCES`), which opens no more, nor any new store of the tenant's, nothing made; another
-    /// tenant's reads on. Shredding it again finds it so.
+    /// tenants' KEKs in its bucket: every tenant's open cell is encrypted, its KEK made on its
+    /// first use at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, halts its
+    /// open cell (`EACCES`), which opens no more, nor any new open cell of the tenant's, nothing
+    /// made; another tenant's reads on. Shredding it again finds it so.
     #[tokio::test(flavor = "multi_thread")]
-    async fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
+    async fn hosts_given_a_master_key_alone_encrypt_every_cell_under_the_bucket_kms() {
         use bucket_cell::bucket_kms::Destroyed;
         use bucket_cell::layout;
         let url = "memory:///bucket-kms";
         let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
-        // SAFETY: this test's process is its own (nextest), no store open yet.
+        // SAFETY: this test's process is its own (nextest), no open cell open yet.
         unsafe {
             std::env::remove_var("CLADEFS_KMS");
             std::env::set_var("CLADEFSD_BUCKET", url);
@@ -3778,23 +3799,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "theirs"];
-        let mut stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
+        let mut open_cells: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
         for (at, (name, tenant)) in names.iter().zip([1, 2]).enumerate() {
-            let store =
+            let open_cell =
                 kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle()).await;
-            let store = store.unwrap();
+            let open_cell = open_cell.unwrap();
             let data = noise(at as u64 + 1, 4 * BLOCK);
-            let extent = write(&store, 1, &data).await;
-            store.commit(None).await.unwrap();
-            store.wait_uploaded().await.unwrap();
-            stores.push((store, extent, data));
+            let extent = write(&open_cell, 1, &data).await;
+            open_cell.commit(None).await.unwrap();
+            open_cell.wait_uploaded().await.unwrap();
+            open_cells.push((open_cell, extent, data));
         }
         assert!(crate::bucket::bucket_kms().is_some());
-        for (store, _, _) in &stores {
+        for (open_cell, _, _) in &open_cells {
             let record =
-                futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
+                futures::executor::block_on(bucket_cell::head::get(&*bucket, open_cell.cell()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
-            let cell = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
+            let cell =
+                futures::executor::block_on(bucket_cell::head::get(&*bucket, open_cell.cell()));
             assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
         }
         let kek = |tenant| {
@@ -3804,10 +3826,11 @@ mod tests {
         };
         assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
         let read = async |at: usize| {
-            let (store, extent, data) = &stores[at];
+            let (open_cell, extent, data) = &open_cells[at];
             let mut read = vec![0; data.len()];
-            let done =
-                store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).await;
+            let done = open_cell
+                .read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
+                .await;
             done.map(|()| read == *data)
         };
 
@@ -3816,7 +3839,7 @@ mod tests {
         assert_eq!((destroyed, forgotten.stores, forgotten.rings), (Destroyed::Now, 1, 1));
         assert_eq!(kek(1), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x01".to_vec()));
         assert_eq!((read(0).await, read(1).await), (Err(crate::Errno::EACCES), Ok(true)));
-        let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
+        let written: Vec<Vec<u8>> = open_cells.into_iter().map(|(_, _, data)| data).collect();
         let reopened_errno = async |name: &str| {
             reopened(dir.path().join(name), idle()).await.map(drop).map_err(|err| err.errno())
         };
@@ -3847,13 +3870,13 @@ mod tests {
         );
     }
 
-    /// TASK-395.9: a store with a writer forks into a cell of another tenant's only if it is the
-    /// default tenant's (0). Another tenant's store is refused with `EACCES` by every kind of fork,
-    /// into any other tenant's cell, the default tenant's too, leaving nothing at the fork's path
-    /// nor in the bucket; into its own tenant's it forks. A store of the default tenant's, as
-    /// public bases are, forks into two tenants' cells, each reading what it holds.
+    /// TASK-395.9: an open cell with a writer forks into a cell of another tenant's only if it is
+    /// the default tenant's (0). Another tenant's open cell is refused with `EACCES` by every kind
+    /// of fork, into any other tenant's cell, the default tenant's too, leaving nothing at the
+    /// fork's path nor in the bucket; into its own tenant's it forks. An open cell of the default
+    /// tenant's, as public bases are, forks into two tenants' cells, each reading what it holds.
     #[tokio::test(flavor = "multi_thread")]
-    async fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
+    async fn open_cells_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
@@ -3861,17 +3884,17 @@ mod tests {
             let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""));
             listed.unwrap()
         };
-        let store = async |name: &str, tenant| {
-            let store =
+        let open_cell = async |name: &str, tenant| {
+            let open_cell =
                 kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle()).await;
-            let store = store.unwrap();
-            write(&store, 1, &pattern(tenant as u8, BLOCK)).await;
-            store.commit(Some(name.as_bytes())).await.unwrap();
-            store.wait_uploaded().await.unwrap();
-            store
+            let open_cell = open_cell.unwrap();
+            write(&open_cell, 1, &pattern(tenant as u8, BLOCK)).await;
+            open_cell.commit(Some(name.as_bytes())).await.unwrap();
+            open_cell.wait_uploaded().await.unwrap();
+            open_cell
         };
 
-        let acme = store("acme", 1).await;
+        let acme = open_cell("acme", 1).await;
         let before = listed();
         let errno = |forked: Result<(), crate::Error>| forked.map_err(|err| err.errno());
         for tenant in [2, crate::host_cell::DEFAULT_TENANT] {
@@ -3883,7 +3906,7 @@ mod tests {
             ];
             for (how, refused) in refused {
                 assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{how} to tenant {tenant}");
-                assert!(!to.exists(), "{how} to tenant {tenant} made a store");
+                assert!(!to.exists(), "{how} to tenant {tenant} made a cell");
             }
         }
         assert_eq!(listed(), before, "a refused fork wrote to the bucket");
@@ -3891,7 +3914,7 @@ mod tests {
         assert_eq!(acme.fork(&ours, 1).await.unwrap().tenant, 1);
         assert_eq!(reopened(&ours, idle()).await.unwrap().root().unwrap(), b"acme");
 
-        let base = store("base", crate::host_cell::DEFAULT_TENANT).await;
+        let base = open_cell("base", crate::host_cell::DEFAULT_TENANT).await;
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
             assert_eq!(base.fork(&to, tenant).await.unwrap().tenant, tenant);
@@ -3968,7 +3991,7 @@ mod tests {
         assert_eq!(inherited(&state), [small.sequence, own.sequence]);
         let held: Vec<_> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(held, [small.sequence, own.sequence, mine.sequence]);
-        // And one when the parent's uploader stops, the store closing.
+        // And one when the parent's uploader stops, the open cell closing.
         let parent_cell = parent.cell();
         drop(parent);
         let prefix = bucket_cell::layout::checkpoints(parent_cell);
@@ -4043,7 +4066,7 @@ mod tests {
             let open = write(&first, 2, &pattern(2, BLOCK)).await;
             first.free(open).unwrap();
             first.commit(None).await.unwrap();
-            // The store closing checkpoints the cell; a host lost doesn't.
+            // The open cell closing checkpoints the cell; a host lost doesn't.
             if checkpointed {
                 drop(first);
             } else {
@@ -4066,7 +4089,8 @@ mod tests {
 
     /// TASK-165.3: an extent sealed by one commit and freed by the next, both in one segment, whose
     /// footer frees it and seals it not, is spent on a host that takes the cell, as it is on the
-    /// store that made it: every reader of a footer spends every free of the cell's own extents.
+    /// open cell that made it: every reader of a footer spends every free of the cell's own
+    /// extents.
     #[tokio::test(flavor = "multi_thread")]
     async fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_cell_is_taken() {
         let dir = tempfile::tempdir().unwrap();
@@ -4098,8 +4122,8 @@ mod tests {
     }
 
     /// TASK-165.3: a cell's capacity is its state, set by the commit after a resize: a host that
-    /// takes the cell has it, not the capacity it made its store with, whether the cell's state
-    /// there comes from a checkpoint or from its segments' footers; and a store attaching to a
+    /// takes the cell has it, not the capacity it made its open cell with, whether the cell's state
+    /// there comes from a checkpoint or from its segments' footers; and an open cell attaching to a
     /// cell that has none, or another, sets its own with its next commit.
     #[tokio::test(flavor = "multi_thread")]
     async fn resizes_hold_where_their_cell_is_taken() {
@@ -4139,8 +4163,8 @@ mod tests {
     }
 
     /// TASK-141.2: a cell whose record says a format newer than this daemon's is refused, naming
-    /// the cell and the format, before anything of it is read or written: no store takes it, its
-    /// head is as it was, and no segment of it is written.
+    /// the cell and the format, before anything of it is read or written: no open cell takes it,
+    /// its head is as it was, and no segment of it is written.
     #[tokio::test(flavor = "multi_thread")]
     async fn cells_of_newer_formats_are_refused() {
         use bucket_cell::Bucket as _;
@@ -4218,14 +4242,14 @@ mod tests {
     }
 
     /// The host whose disk is at `from`, crashed, restarted with its disk as the crash left it at
-    /// `to`: its stores copied there, no store of them open. What the crashed host's writes
+    /// `to`: its open cells copied there, no open cell of them open. What the crashed host's writes
     /// had in flight may land still, as a dead host's PUTs may.
     ///
     /// Copied again if a file it listed went before it copied it, renamed or removed by the
-    /// host's stores meanwhile, as they go on: a crash leaves a renamed file under one name or the
-    /// other, where a copy that listed it under the first would have neither. The stores rename
-    /// files on threads of their own, framings made durable and the next segment's log placed
-    /// ahead of it (TASK-384), which a copy raced.
+    /// host's open cells meanwhile, as they go on: a crash leaves a renamed file under one name or
+    /// the other, where a copy that listed it under the first would have neither. The open cells
+    /// rename files on threads of their own, framings made durable and the next segment's log
+    /// placed ahead of it (TASK-384), which a copy raced.
     pub(super) fn restart(from: &std::path::Path, to: &std::path::Path) {
         for _ in 0..100 {
             match copy_dir(from, to) {
@@ -4262,10 +4286,10 @@ mod tests {
         (head.made, !head.deleted())
     }
 
-    /// What [`made`] says of a cell no fork made, its store's own, of no parent, live.
+    /// What [`made`] says of a cell no fork made, its open cell's own, of no parent, live.
     const OWN: (bucket_cell::record::Made, bool) = (bucket_cell::record::Made::Root, true);
 
-    /// The store of another cell, `cell`, at `path`, attached to `bucket`, holding an extent
+    /// The open cell of another cell, `cell`, at `path`, attached to `bucket`, holding an extent
     /// and a root: what a guest may name as its fork's child.
     async fn others(
         path: &std::path::Path,
@@ -4278,10 +4302,10 @@ mod tests {
         others
     }
 
-    /// What a store committing, and its commit uploading, gave, and what its cell then holds.
+    /// What an open cell committing, and its commit uploading, gave, and what its cell then holds.
     type Committed = (Result<(), crate::Errno>, Result<(), crate::Errno>, Uploaded);
 
-    /// Whether the cell of `others`, its store, is live still: it commits, and uploads its
+    /// Whether the cell of `others`, its open cell, is live still: it commits, and uploads its
     /// commits.
     async fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
         write(others, 2, &pattern(4, BLOCK)).await;
@@ -4360,7 +4384,7 @@ mod tests {
     }
 
     /// TASK-79.82: a fork whose child's ID another cell took in object storage while the fork
-    /// was being made, once it found the ID free, as a store of that cell made elsewhere then,
+    /// was being made, once it found the ID free, as an open cell of that cell made elsewhere then,
     /// fails, its parent's writer finding the child's record another's: and its cleanup deletes
     /// the child here alone, leaving the other cell as it was. A fork deletes no cell it did
     /// not make, whatever ID its guest gives. And it harms no parent: its writers go on, as a
@@ -4388,8 +4412,8 @@ mod tests {
         assert_eq!(parent.wait_uploaded().await, Ok(()));
     }
 
-    /// A store of a cell taken elsewhere keeps what it reads from the bucket in the host's cache,
-    /// and reads it there next.
+    /// An open cell of a cell taken elsewhere keeps what it reads from the bucket in the host's
+    /// cache, and reads it there next.
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_keep_what_they_fetch() {
         let dir = tempfile::tempdir().unwrap();

@@ -95,8 +95,8 @@ class Ci(unittest.TestCase):
     def test_the_vmms_own_tests_run_with_a_bucket(self):
         """TASK-220: the firecracker part runs the VMM's extent device's tests and its vCPUs'
         exits', from vendor/firecracker as cladefs builds it (scripts/firecracker-cargo.sh, TASK-269),
-        each extent test's daemon a host's, its stores' branches in a bucket in memory: with none
-        named, every store's opening fails EIO, which 8 of its 21 did, run by nothing but
+        each extent test's daemon a host's, its cells' branches in a bucket in memory: with none
+        named, every cell's opening fails EIO, which 8 of its 21 did, run by nothing but
         scripts/test-e2e.sh on GCE. And the cache keeps its builds, in target/firecracker."""
         script = TEST_SH.read_text()
         body = re.search(r"^if part firecracker; then\n(.*?)^fi$", script,
@@ -177,11 +177,12 @@ class Ci(unittest.TestCase):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a
         macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (physmem's
         physical map, local_cell's syncs, bucket_cell's cache, cladefs's storage I/O) ran on
-        laptops alone."""
+        laptops alone. Board 2912: and the madsim part, the daemon's simulation building on macOS
+        too."""
         text = CI.read_text()
         macos = re.search(r"^  macos:\n(.*?)^  \S", text, re.MULTILINE | re.DOTALL).group(1)
         self.assertIn("runs-on: macos-15", macos)
-        self.assertIn("parts: [workspace, shuttle]", macos)
+        self.assertIn("parts: [workspace, shuttle, madsim]", macos)
         self.assertIn("CLADEFS_TEST_PARTS: ${{ matrix.parts }}", macos)
         self.assertIn("run: scripts/test.sh --no-fail-fast", macos)
         self.assertIn("submodules: true", macos)

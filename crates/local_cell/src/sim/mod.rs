@@ -3,17 +3,17 @@
 // found in the LICENSE file.
 
 //! A deterministic simulation of cells in object storage (TASK-28.1): doc-7's protocol run by
-//! hosts' stores, this crate's, and their uploaders (`upload`), writing, committing, forking,
-//! taken over and crashing, and by deletions and collectors, over a bucket that delays, reorders
-//! and fails requests (TASK-88: bucket_cell's until then, whose writers made their segments
-//! with `SegmentBuilder`, so that the store's choice of what a segment seals and frees never
-//! met a takeover or a collector), checked after every step against what each cell's guests did
-//! and were told, every object a cell's acknowledged segments name there, and what its live
-//! writer and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
-//! stops, for garbage left behind, for tasks still waiting, a checkpoint, a deletion or anything
-//! else nothing will wake, and for uploaders that upload no more what they are asked to. A host's
-//! writers upload within one budget, a few PUTs at once, so that uploads wait for each other. `crates/bucket_cell/mutants.sh` puts
-//! back a bug of each kind, and sees a test fail.
+//! hosts' cells, this crate's, and their uploaders (`upload`), writing, committing, forking, taken
+//! over and crashing, and by deletions and collectors, over a bucket that delays, reorders and
+//! fails requests (TASK-88: bucket_cell's until then, whose writers made their segments with
+//! `SegmentBuilder`, so that the cell's choice of what a segment seals and frees never met a
+//! takeover or a collector), checked after every step against what each cell's guests did and were
+//! told, every object a cell's acknowledged segments name there, and what its live writer and its
+//! cell name of its guest's read back (TASK-149.32, TASK-195); and, once everything stops, for
+//! garbage left behind, for tasks still waiting, a checkpoint, a deletion or anything else nothing
+//! will wake, and for uploaders that upload no more what they are asked to. A host's writers upload
+//! within one budget, a few PUTs at once, so that uploads wait for each other.
+//! `crates/bucket_cell/mutants.sh` puts back a bug of each kind, and sees a test fail.
 //!
 //! Each case doc-7 lists is a profile that makes it likely, run over many seeds; each rule of the
 //! protocol has a test that turns it off and expects some seed to find the violation it prevents.
@@ -96,11 +96,11 @@ fn holds_with(profile: Profile, seeds: Range<u64>, found: &[u64]) {
 }
 
 /// cladefs: seeds drawn anew by each run, past the fixed ones, so that each run of the simulation
-/// reaches states none before it did, as FoundationDB's harness draws its seeds (doc-24, TASK-685.12):
-/// a run of fixed seeds replays the same states every time. `SIM_FRESH` of them (16 by default,
-/// 0 for none), from `SIM_FRESH_BASE` if set, to run a run's again, or else from a base drawn at
-/// random, said on standard output (which a failing test's output shows), at 2^40 or past it,
-/// away from the fixed seeds.
+/// reaches states none before it did, as FoundationDB's harness draws its seeds (doc-24,
+/// TASK-685.12): a run of fixed seeds replays the same states every time. `SIM_FRESH` of them (16
+/// by default, 0 for none), from `SIM_FRESH_BASE` if set, to run a run's again, or else from a base
+/// drawn at random, said on standard output (which a failing test's output shows), at 2^40 or past
+/// it, away from the fixed seeds.
 fn fresh() -> Range<u64> {
     let count: u64 = std::env::var("SIM_FRESH").map_or(16, |count| count.parse().unwrap());
     let base = match std::env::var("SIM_FRESH_BASE") {
@@ -221,7 +221,7 @@ fn one() {
             "collector_abandons" => rules.collector_abandons = false,
             "ways_from_seals" => rules.ways_from_seals = false,
             "moves_taken_first" => rules.moves_taken_first = false,
-            "stores_follow_moves" => rules.stores_follow_moves = false,
+            "hosts_follow_moves" => rules.hosts_follow_moves = false,
             "wal_follows" => rules.wal_follows = false,
             "references" => rules.references = false,
             "clones_refer_first" => rules.clones_refer_first = false,
@@ -429,21 +429,23 @@ fn deleted_bases() -> Profile {
 
 test_holds!(bases_deleted_under_live_forks, deleted_bases(), [6496]);
 
-/// cladefs: cells across the buckets of three cloud regions (TASK-633.10): each cell in the bucket of
-/// the host that made it, versions restored by hosts of other regions into their own buckets, bases
-/// deleted and collected while their children elsewhere live, a region's bucket down for stretches.
+/// cladefs: cells across the buckets of three cloud regions (TASK-633.10): each cell in the bucket
+/// of the host that made it, versions restored by hosts of other regions into their own buckets,
+/// bases deleted and collected while their children elsewhere live, a region's bucket down for
+/// stretches.
 fn regions() -> Profile {
     Profile { regions: 3, ..deleted_bases() }
 }
 
 test_holds!(cells_across_regions, regions(), [2325]);
 
-/// cladefs: versions mirrored across the buckets of three regions (TASK-633.10, TASK-633.8): restores
-/// as [`restores`] makes them, by hosts of three regions, two each, so that most land in another
-/// bucket than their versions' cells', whose hosts begin their versions' mirrors there, as their
-/// children's openings do, a host's mirrors of a version taking turns, two hosts' racing; hosts crashing midway, their pins left to go stale; versions dropped
-/// and bases deleted under them; collectors of each region passing over copies; and at its end every
-/// cell deleted, every copy collected with them.
+/// cladefs: versions mirrored across the buckets of three regions (TASK-633.10, TASK-633.8):
+/// restores as [`restores`] makes them, by hosts of three regions, two each, so that most land in
+/// another bucket than their versions' cells', whose hosts begin their versions' mirrors there, as
+/// their children's openings do, a host's mirrors of a version taking turns, two hosts' racing;
+/// hosts crashing midway, their pins left to go stale; versions dropped and bases deleted under
+/// them; collectors of each region passing over copies; and at its end every cell deleted, every
+/// copy collected with them.
 fn mirrors() -> Profile {
     let mut profile = Profile { regions: 3, hosts: 6, steps: 1000, teardown: true, ..restores() };
     profile.weights.complete = 200;
@@ -561,9 +563,9 @@ test_holds!(forks_with_children_opening, children());
 // NoCandidatesFirst shows it needed.
 test_holds!(passes_over_cells_being_made, fresh_cells());
 
-// A host's store naming what it reads where it was acknowledged, the collector deleting that and
+// A host's cell naming what it reads where it was acknowledged, the collector deleting that and
 // the moves after, compacted again, which its writer's checkpoints followed (TASK-195).
-test_needs!(stores_need_to_follow_moves, stores_follow_moves, collected());
+test_needs!(hosts_need_to_follow_moves, hosts_follow_moves, collected());
 
 /// Case 4: takeovers while the writer before is still uploading. Case 9: a stale writer
 /// recreating what the collector deleted.
@@ -605,8 +607,8 @@ fn recreated() -> Profile {
         weights.tick = 6;
     });
     profile.hold = 1.0;
-    // cladefs: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases with
-    // passes over every cell, none in 20,000 seeds with half the passes over one cell.
+    // cladefs: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases
+    // with passes over every cell, none in 20,000 seeds with half the passes over one cell.
     profile.one_cell = 0.0;
     profile.options.compact_below = 0.9;
     profile.options.grace = 1;
@@ -651,7 +653,7 @@ test_holds!(late_checkpoints_landing_past_takeovers, late_checkpoints());
 
 // The rule `ways_from_seals` (TASK-175), a writer taken over checkpointing late past where the
 // next recovered from, has no search here: bucket_cell's simulation reached its case at one seed
-// of 20,000 of `recreated` (677, where it was found), and this one, its writers the stores', at
+// of 20,000 of `recreated` (677, where it was found), and this one, its writers the cells', at
 // none of 40,000 of `recreated` or of `late_checkpoints` (TASK-88). The collector's
 // `writers_reading_past_checkpoints_landing_after_they_took_over_need_ways_from_seals` shows it
 // needed, and specs/bucket's mutation NoWaysFromSeals.
@@ -798,7 +800,7 @@ test_leaks!(forgotten_restores_need_clones_record_first, clones_record_first, fo
 // child's cell, skipping it, looks at it again (TASK-395.13, TASK-395.14).
 test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
 
-// cladefs: a clone a store resumed, its host having died after its record, made with no reference:
+// cladefs: a clone a cell resumed, its host having died after its record, made with no reference:
 // once its version goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
 // direct test is bucket_cell's `clones_resumed_need_resumes_refer`; its model specs/bucket's
 // NoResumesRefer. cladefs: ignored until the simulation resumes a fork at all (TASK-497): its
@@ -841,8 +843,8 @@ test_needs!(collection_needs_origins_kept, origins_kept, deleted_bases());
 
 /// Restores as [`restores`] makes them, but no host dying, no collector stopped and no request
 /// failing once it took effect: a pass that misses a restored cell then reclaims what it inherited,
-/// rather than stopping first. With `restores` itself, the trajectories TASK-175 moved put the first
-/// seed missing it at 64216, past the search (it was 5310).
+/// rather than stopping first. With `restores` itself, the trajectories TASK-175 moved put the
+/// first seed missing it at 64216, past the search (it was 5310).
 fn whole_restores() -> Profile {
     let mut profile = restores();
     profile.weights.crash = 0;
@@ -886,7 +888,7 @@ fn recovering() -> Profile {
 
 test_holds!(recoveries_racing_collection, recovering());
 
-/// cladefs: versions (doc-18, TASK-476): cut by cells' writers, their stores quiescent,
+/// cladefs: versions (doc-18, TASK-476): cut by cells' writers, their cells quiescent,
 /// acknowledged with their segments, carried by takeovers, dropped, uploaded or local, restored on
 /// any host, while their cells go on, free what they held, checkpoint past them,
 /// crash and are deleted, and collectors run.

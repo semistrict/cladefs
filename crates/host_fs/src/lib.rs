@@ -4,11 +4,11 @@
 
 //! cladefs: the host's file system, as cladefsd serves from it (doc-24, TASK-685.4).
 //!
-//! What the daemon keeps on its host's disk, its stores, replica directories, part cache, host
-//! state, it reads and writes through this crate rather than `std::fs`. Built normally, the crate is
-//! `std::fs`, re-exported, which costs the daemon nothing, with the calls on a file's descriptor
-//! the daemon makes beside it ([`punch_hole`], [`data_ranges`], [`Flock`]) and what `Path` asks the
-//! file system itself ([`exists`], [`is_dir`]).
+//! What the daemon keeps on its host's disk, its cell directories, replica directories, part cache,
+//! host state, it reads and writes through this crate rather than `std::fs`. Built normally, the
+//! crate is `std::fs`, re-exported, which costs the daemon nothing, with the calls on a
+//! file's descriptor the daemon makes beside it ([`punch_hole`], [`data_ranges`], [`Flock`]) and
+//! what `Path` asks the file system itself ([`exists`], [`is_dir`]).
 //!
 //! Under `--cfg madsim`, each simulated host has a disk of its own in memory, of the same calls,
 //! which keeps what a host's file system would have made durable: a file's contents as of its
@@ -38,7 +38,7 @@ pub use sim::{
     remove_dir_all, remove_file, rename, symlink_metadata, write,
 };
 #[cfg(madsim)]
-pub use sim::{FileExt, MetadataExt, OpenOptionsExt};
+pub use sim::{FileExt, MetadataExt, OpenOptionsExt, faults};
 
 mod flock;
 pub use flock::Flock;

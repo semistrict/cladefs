@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the guest Fxfs's tracepoints (fs/cladefs/cladefs_trace.h, TASK-44.16), as tracefs shows them:
-//! a write, an fsync, and on a DAX mount a load and a store through a mapping, each step's events
-//! in order, with the fields they say.
+//! cladefs: the guest Fxfs's tracepoints (fs/cladefs/cladefs_trace.h, TASK-44.16), as tracefs shows
+//! them: a write, an fsync, and on a DAX mount a load and a write through a mapping, each step's
+//! events in order, with the fields they say.
 
 use super::*;
 
@@ -304,7 +304,7 @@ pub(super) fn test_tracepoints(dax: bool) {
         let page = unsafe { map.cast::<u8>().add(2 * PAGE) };
         trace.mark("load");
         assert_eq!(unsafe { page.read_volatile() }, data[2 * PAGE]);
-        trace.mark("store");
+        trace.mark("mapped_write");
         unsafe { page.write_volatile(!data[2 * PAGE]) };
         trace.mark("fsync-dax");
         file.sync_all().unwrap();
@@ -326,7 +326,7 @@ pub(super) fn test_tracepoints(dax: bool) {
     let ino_is = |event: &Event| event.number("ino") == ino as i64;
     // The load: a read fault of page 2, a page's, the one fault of the load, which MAPs the
     // window, read-only, why it does said first.
-    let load = between(&events, "load", "store");
+    let load = between(&events, "load", "mapped_write");
     let mut at = 0;
     let fault_start = |e: &Event| e.name == "cladefs_dax_fault_start";
     let faults: Vec<&Event> = load.iter().filter(|e| fault_start(e) && ino_is(e)).collect();
@@ -351,14 +351,15 @@ pub(super) fn test_tracepoints(dax: bool) {
     assert!(ino_is(end) && end.number("pgoff") == 2, "{end:?}");
     assert_eq!(end.number("ret") & VM_FAULT_ERROR, 0, "the load's fault failed: {end:?}");
 
-    // The store: a write fault of page 2, which makes its window page private, copied on write.
-    let store = between(&events, "store", "fsync-dax");
+    // The write: a write fault of page 2, which makes its window page private, copied on write.
+    let mapped_write = between(&events, "mapped_write", "fsync-dax");
     let mut at = 0;
-    let fault = next(store, &mut at, "a write fault", |e| {
+    let fault = next(mapped_write, &mut at, "a write fault", |e| {
         e.name == "cladefs_dax_fault_start" && e.number("write") == 1
     });
     assert!(ino_is(fault) && fault.number("pgoff") == 2, "{fault:?}");
-    let private = next(store, &mut at, "a PRIVATE", |e| e.name == "cladefs_window_private_start");
+    let private =
+        next(mapped_write, &mut at, "a PRIVATE", |e| e.name == "cladefs_window_private_start");
     let window = private.number("window");
     assert!(private.number("len") >= PAGE as i64, "{private:?}");
     assert!(
@@ -367,11 +368,12 @@ pub(super) fn test_tracepoints(dax: bool) {
     );
     let id = private.number("id");
     let private_end =
-        next(store, &mut at, "the PRIVATE's end", |e| e.name == "cladefs_window_private_end");
+        next(mapped_write, &mut at, "the PRIVATE's end", |e| e.name == "cladefs_window_private_end");
     assert_eq!((private_end.number("id"), private_end.number("err")), (id, 0), "{private_end:?}");
-    let end = next(store, &mut at, "the fault's end", |e| e.name == "cladefs_dax_fault_end");
+    let end =
+        next(mapped_write, &mut at, "the fault's end", |e| e.name == "cladefs_dax_fault_end");
     assert!(ino_is(end) && end.number("pgoff") == 2, "{end:?}");
-    assert_eq!(end.number("ret") & VM_FAULT_ERROR, 0, "the store's fault failed: {end:?}");
+    assert_eq!(end.number("ret") & VM_FAULT_ERROR, 0, "the write's fault failed: {end:?}");
 
     // The fsync of the stored page: written back, then sealed.
     check_fsync(between(&events, "fsync-dax", "end"), ino, PAGE as i64, true);

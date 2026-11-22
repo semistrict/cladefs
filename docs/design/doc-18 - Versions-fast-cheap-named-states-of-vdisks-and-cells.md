@@ -9,7 +9,7 @@ updated_date: '2026-11-18 02:23'
 
 Design, 2026-11-16 (TASK-476). `specs/bucket` checked it before coding (The model, below).
 extent_bucket's simulation checks the code as it is written. *Implemented 2026-11-16 in
-extent_bucket and extent_store* (the bucket's protocol, the store's cuts, copies and restores,
+extent_bucket and extent_store* (the bucket's protocol, the extent store's cuts, copies and restores,
 the simulation's `sim::versions_*` tests); cladefs's interfaces and the whole-cell cut next. The user's decisions are marked *(decided)*: those of 2026-11-15
 in TASK-476's description, and that of 2026-11-16 on where a snapshot is recorded. doc-7 says where
 this fits in the bucket's protocol (Versions).
@@ -69,7 +69,7 @@ names, its versions' **at**, kept for as long as the head names the version.
   renumbers the segments it restamps. The ID names it from the start. A version is named
   `TENANT/CELL/BRANCH/ID`, with the ID in base 32 (`base32_id`, TASK-504).
 - **The cut** is a commit of the vdisk's that closes its segment, as a fork's does (doc-7,
-  Forks). The commit seals nothing: the store must be quiescent, with no extent written since its
+  Forks). The commit seals nothing: the cell must be quiescent, with no extent written since its
   last commit (`ExtentStore::is_quiescent`), as for a fork today. Its footer names the version
   (`Contents::versions`, `[(id, cut)]`, `cut` the ID of the cell's cut it is part of, if any), and
   so does its record in the segment's log. So the version survives the host's crash with its
@@ -87,11 +87,11 @@ FORMAT 14: a footer's `versions`, and a head's. Nothing reads format 13 (no buck
 
 ## Taking a version
 
-A vdisk's snapshot (VM process `SNAPSHOT`; control API `Snapshot`) runs on its host, the store
+A vdisk's snapshot (VM process `SNAPSHOT`; control API `Snapshot`) runs on its host, the cell
 quiescent and its VM paused by its manager (`virtio_extent`'s `Device::take_snapshot` checks the
 guest's filesystem is frozen, as it does now):
 
-1. **The cut**, `Store::commit_version(id, cut)`, under the store's commit lock: the commit that
+1. **The cut**, `Store::commit_version(id, cut)`, under the cell's commit lock: the commit that
    closes the segment and names the version, then the flush that makes it local.
 2. **Done.** The call returns the version's ID, local. The VM resumes. Its pause covered the
    freeze, the cut's commit and one local flush, and no request to the bucket (TASK-476 AC #2).
@@ -106,7 +106,7 @@ acknowledgement that names the new version drops the oldest past N, in the same 
 window costs no request of its own.
 
 **Waiting for it uploaded.** `WaitVersion` waits until the acknowledgement names it
-(`Remote::uploaded` of the version's commit). `ListVersions` reports each version of a store, local or uploaded. A
+(`Remote::uploaded` of the version's commit). `ListVersions` reports each version of a cell, local or uploaded. A
 host taking over from a host that lost its disk sees neither: what that host had local is lost.
 
 ## Deleting a version
@@ -115,7 +115,7 @@ host taking over from a host that lost its disk sees neither: what that host had
 request, conditional as every swap is (rule `headSwap`). A host holding the vdisk does it at
 once, between acknowledgements. A host holding no writer of the vdisk takes it first, with the
 cell's token as any taking does: a read of the head and a swap, then the drop, without recovering
-the branch. It writes nothing else. A local version is dropped from the store's log: its
+the branch. It writes nothing else. A local version is dropped from the cell's log: its
 acknowledgement will not name it.
 
 **Deleting a vdisk** with versions is refused (`ENOTEMPTY`) unless asked to delete its versions
@@ -208,11 +208,11 @@ gives the segments' keys: no request beyond those a pass makes now, but the foot
 The daemon holds every vdisk of a cell it serves (TASK-475): VMs' and the FUSE mount's alike
 (TASK-475.3, `Entry::Mounted`).
 
-- **The daemon's vdisks of a cell** (`cladefsd::stores::cell(tenant, cell)`, TASK-476 AC #5). It
-  lists every store of the cell the daemon holds, VM-served or mounted, each with a handle
-  (`Vdisk`): its name and kind in the cell, its store, and `pause()`. That returns a guard under
-  which the store takes no write and makes no commit: they wait. Requests in progress end first.
-  The guard does not wait for a commit; it reports whether the store is quiescent.
+- **The daemon's vdisks of a cell** (`cladefsd::cells::cell(tenant, cell)`, TASK-476 AC #5). It
+  lists every vdisk of the cell the daemon holds, VM-served or mounted, each with a handle
+  (`Vdisk`): its name and kind in the cell, and `pause()`. That returns a guard under
+  which the cell takes no write and makes no commit: they wait. Requests in progress end first.
+  The guard does not wait for a commit; it reports whether the cell is quiescent.
 - **Quiescence.** A vdisk of a VM is quiescent only if its VM manager paused the VM and its guest's
   filesystem is frozen, as for a vdisk's snapshot. A cut finding it otherwise refuses (`EBUSY`).
   A mounted vdisk is made quiescent by the daemon: its Fxfs synced, then paused. Nothing writes
@@ -297,29 +297,29 @@ kills (`mutants.sh`).
   `sim::versions_cut_dropped_and_restored`). A point's fork never meets it: the point's recording
   writes the checkpoint before any fork.
 - **Dropping a local version** puts its ID in the writer's set of dropped versions, which no
-  acknowledgement names, and the store forgets it. A host crashing before the acknowledgement
+  acknowledgement names, and the cell forgets it. A host crashing before the acknowledgement
   forgets the drop: the next writer, putting the log after the branch's end, names the version
   again. A drop asked again then drops it.
-- **A version's copy** is a store, read-only, its description naming the version
-  (`StoreFile::version`, store format 13): opened as a point's copy is, its state recovered at the
+- **A version's copy** is a cell, read-only, its description naming the version
+  (`StoreFile::version`, cell directory format 13): opened as a point's copy is, its state recovered at the
   version (`recovery::recover_version`), its forks restores of the version
   (`Remote::forked`, `branch::fork_version_with`), sealing the checkpoint under its keys, its
   branch's.
 - **Formats.** Bucket format 14 (`layout::FORMAT`): heads name versions, footers the versions cut
   at their ends, and a fork being made says whether it forks a point or a version
-  (`record::Forked`). Store format 12: logs' records hold footers' contents, versions among them.
+  (`record::Forked`). Cell directory format 12: logs' records hold footers' contents, versions among them.
 
 ## Interfaces
 
-- **VM process protocol** (doc-4): `SNAPSHOT { id, keep_last }` on a quiescent store, answering once
-  the cut is local; `VERSIONS` (the store's, local or uploaded). `virtio_extent`'s
+- **VM process protocol** (doc-4): `SNAPSHOT { id, keep_last }` on a quiescent cell, answering once
+  the cut is local; `VERSIONS` (the cell's, local or uploaded). `virtio_extent`'s
   `Device::take_snapshot` makes a version, and the device's saved state names it (branch, version)
   in place of a point's path and branch. A restore forks from the version.
 - **Control API** (`cladefsd.proto`): `Snapshot`, `ListVersions`, `WaitVersion`, `DeleteVersion`,
   `ShareVersion`, `RestoreVersion`; `SnapshotCell`, `ListCuts`, `DeleteCut`. `DeleteStore` gains
   `with_versions`. `cladefsctl` and the Go client follow.
 - **Points stay** for what outlives its vdisk: a base image's point, shared across tenants
-  (`ForkStore`'s `point`, doc-7 Points). Whether versions should replace them is a follow-up.
+  (`ForkCell`'s `point`, doc-7 Points). Whether versions should replace them is a follow-up.
 
 ## Order of work
 
@@ -339,7 +339,7 @@ kills (`mutants.sh`).
 
 - **An instant restore of a local version on its host.** Before the version is acknowledged, a
   restore would need the fork to start from the source's write-ahead log, which a local lineage
-  between stores would have to provide. TASK-165.7 removed local lineage. Here a restore of a
+  between cells would have to provide. TASK-165.7 removed local lineage. Here a restore of a
   local version waits for it to be uploaded. That takes the upload backlog, up to the lag bound.
   The VM no longer waits for it, but a restore asked right after the snapshot does.
 - **Versions replacing points.** One mechanism would serve bases too, but a base's versions would

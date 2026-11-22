@@ -55,14 +55,14 @@ enum Op {
     Write(&'static str),
 }
 
-/// The writer's commits, and the store's extents: a free is kept until the follower lets go of
+/// The writer's commits, and the cell's extents: a free is kept until the follower lets go of
 /// the commit before it, then released.
-struct Store {
-    state: Mutex<StoreState>,
+struct Cell {
+    state: Mutex<CellState>,
     committed: Condvar,
 }
 
-struct StoreState {
+struct CellState {
     tree: Tree,
     /// The commits' mutations, and what each freed: commit `c` is at `c - 1`.
     commits: Vec<Vec<(&'static str, u64)>>,
@@ -73,9 +73,9 @@ struct StoreState {
     released: BTreeSet<u64>,
 }
 
-impl Store {
+impl Cell {
     fn new() -> Self {
-        let state = StoreState {
+        let state = CellState {
             tree: initial(),
             commits: Vec::new(),
             frees: Vec::new(),
@@ -117,13 +117,13 @@ impl Store {
 /// What keeps the commit the follower was as of until dropped: then the frees of the commits it
 /// applied since are released.
 struct Previous {
-    store: Arc<Store>,
+    cell: Arc<Cell>,
     applied: usize,
 }
 
 impl Drop for Previous {
     fn drop(&mut self) {
-        let mut state = self.store.state.lock().unwrap();
+        let mut state = self.cell.state.lock().unwrap();
         shuttle_trace::event("LetGo", String::new);
         for commit in state.view + 1..=self.applied {
             let freed = state.frees[commit - 1].clone();
@@ -138,7 +138,7 @@ impl Drop for Previous {
 
 /// The follower: the tree readers read, and the commit it applied up to.
 struct Follower {
-    store: Arc<Store>,
+    cell: Arc<Cell>,
     tree: Arc<Mutex<Tree>>,
     applied: AtomicUsize,
 }
@@ -150,8 +150,8 @@ impl Follow for Follower {
 
     async fn fetch(&self) -> Result<(Self::Batch, Self::Changes), Error> {
         let applied = self.applied.load(Ordering::SeqCst);
-        let state = self.store.state.lock().unwrap();
-        let state = self.store.committed.wait_while(state, |s| s.commits.len() == applied).unwrap();
+        let state = self.cell.state.lock().unwrap();
+        let state = self.cell.committed.wait_while(state, |s| s.commits.len() == applied).unwrap();
         let latest = state.commits.len();
         shuttle_trace::event("Fetch", || format!("t |-> {latest}"));
         let mutations: Vec<_> = state.commits[applied..latest].concat();
@@ -165,7 +165,7 @@ impl Follow for Follower {
             shuttle_trace::event("ApplyOne", || format!("k |-> \"{key}\", v |-> {value}"));
         }
         self.applied.store(latest, Ordering::SeqCst);
-        Ok(Previous { store: self.store.clone(), applied: latest })
+        Ok(Previous { cell: self.cell.clone(), applied: latest })
     }
 }
 
@@ -202,21 +202,21 @@ impl Dax {
 
 type TestKernel = ShuttleKernel<BTreeSet<&'static str>>;
 
-/// What readers read through, and check against: the protocol, the follower's tree, the store,
+/// What readers read through, and check against: the protocol, the follower's tree, the cell,
 /// and the files' DAX state.
 struct Readers {
     protocol: Protocol<TestKernel>,
     tree: Arc<Mutex<Tree>>,
-    store: Arc<Store>,
+    cell: Arc<Cell>,
     dax: Arc<Dax>,
 }
 
 impl Readers {
-    fn new(tree: Arc<Mutex<Tree>>, store: Arc<Store>) -> Self {
+    fn new(tree: Arc<Mutex<Tree>>, cell: Arc<Cell>) -> Self {
         let dax = Arc::new(Dax::new());
         let dropping = dax.clone();
         let kernel = ShuttleKernel::new(move |changes| dropping.drop_mappings(changes));
-        Self { protocol: Protocol::new(kernel), tree, store, dax }
+        Self { protocol: Protocol::new(kernel), tree, cell, dax }
     }
 }
 
@@ -232,17 +232,14 @@ struct Scenario {
 
 /// Runs `scenario`: the writer, the follower, and its readers.
 fn run(scenario: &Scenario) {
-    let store = Arc::new(Store::new());
+    let cell = Arc::new(Cell::new());
     let tree = Arc::new(Mutex::new(initial()));
-    let follower = Arc::new(Follower {
-        store: store.clone(),
-        tree: tree.clone(),
-        applied: AtomicUsize::new(0),
-    });
-    let readers = Arc::new(Readers::new(tree, store.clone()));
+    let follower =
+        Arc::new(Follower { cell: cell.clone(), tree: tree.clone(), applied: AtomicUsize::new(0) });
+    let readers = Arc::new(Readers::new(tree, cell.clone()));
     let mut threads = Vec::new();
 
-    let (commits, writer) = (scenario.commits.clone(), store.clone());
+    let (commits, writer) = (scenario.commits.clone(), cell.clone());
     threads.push(thread::spawn(move || {
         for op in commits {
             writer.commit(op);
@@ -347,7 +344,7 @@ fn copy(readers: &Readers, index: usize) {
     for _ in 0..3 {
         thread::yield_now();
     }
-    let released = readers.store.released(extent);
+    let released = readers.cell.released(extent);
     shuttle_trace::reader_event("Copy", String::new);
     drop(filling);
     assert!(!released, "a read(2) of {file} copied from extent {extent}, released");
@@ -399,7 +396,7 @@ impl Follow for Failing {
 fn failing() {
     let tree = Arc::new(Mutex::new(initial()));
     let follower = Failing { tree: tree.clone() };
-    let readers = Arc::new(Readers::new(tree, Arc::new(Store::new())));
+    let readers = Arc::new(Readers::new(tree, Arc::new(Cell::new())));
     let reader = {
         let readers = readers.clone();
         thread::spawn(move || {
@@ -415,7 +412,7 @@ fn failing() {
 fn smallest() {
     let tree = Arc::new(Mutex::new(initial()));
     let follower = Renaming { tree: tree.clone() };
-    let readers = Arc::new(Readers::new(tree, Arc::new(Store::new())));
+    let readers = Arc::new(Readers::new(tree, Arc::new(Cell::new())));
     let reader = {
         let readers = readers.clone();
         thread::spawn(move || pair(&readers, 0))

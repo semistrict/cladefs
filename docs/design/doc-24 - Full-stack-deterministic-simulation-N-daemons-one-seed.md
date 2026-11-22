@@ -9,10 +9,10 @@ updated_date: '2026-11-21 02:17'
 
 FoundationDB runs its whole cluster, every role, in one process under one seed: the network, the
 disks and time are simulated, faults are injected, and a seed replays exactly. cladefs has that
-for its storage layer alone (`local_cell::sim`, TASK-88, TASK-680): the stores, their uploaders,
+for its storage layer alone (`local_cell::sim`, TASK-88, TASK-680): the open cells, their uploaders,
 the bucket protocol and, since TASK-680, replicated cells and their members, but not cladefsd. The
 daemon's own logic (its control API, its cell table and placements, its peers over gRPC, its page
-cache, its pools and governors, the restarts that reopen its stores) runs only in hand-written
+cache, its pools and governors, the restarts that reopen its cells) runs only in hand-written
 tests and on ubu1's end-to-end runs, which find what they look for and nothing else. TASK-678, a
 commit told Replicated lost on a retake, was found by reading the code against the spec; the
 replicated simulation then found two more defects in a night (TASK-680's base gap, TASK-683) and
@@ -102,11 +102,11 @@ that a simulated host's `/z/` pages are its own.
 
 ## The guest and the checker
 
-A simulated guest per open store: writes extents, commits at each level (Ordered, Local, and its
+A simulated guest per open cell: writes extents, commits at each level (Ordered, Local, and its
 cell's fsync level: Replicated or Uploaded), frees, cuts versions, forks; as `local_cell::sim`'s
 guests do, but through the daemon's request handling, so that its pools, its per-connection limits
 and its cell table run. The checker is `local_cell::sim::World`'s, lifted to the daemon: what each
-guest was told per level against the bucket and against the store of the writer that serves after
+guest was told per level against the bucket and against the cell of the writer that serves after
 every take; and doc-12's rows: a daemon killed with its disk keeps what was Local; a host lost,
 what was Replicated; every host lost, what was Uploaded.
 
@@ -128,7 +128,7 @@ what was Replicated; every host lost, what was Uploaded.
 
 ## The disk as built (TASK-685.4, 2026-11-20)
 
-Not `Dir` threaded through every caller, which would have made the store roots, replica roots, the
+Not `Dir` threaded through every caller, which would have made the cell directory roots, replica roots, the
 ephemeral journal, version directories and the part cache take a root `Dir` each, and given `Dir`
 `exists`, `remove_dir`, identities and holes: a seam beneath, path-based, `host_fs`.
 
@@ -139,16 +139,22 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
   pays nothing.
 - **Under madsim, each simulated host's disk is in memory**, of the same calls: a tree of inodes;
   files' bytes durable as of their last sync, directories' entries of files as of theirs, and
-  directories once made (`local_cell::MemDir`'s model, which the stores' own crash tests are
+  directories once made (`local_cell::MemDir`'s model, which the cells' own crash tests are
   written to, and ext4's with the next fsync); what changed since kept in order. A host started
   again finds its disk crashed at its first call: what was durable, each change since kept or not
-  as the seed says, in order, each block of each write whole, not at all, garbage, or torn. A host's
-  locks of files are its disk's, gone with the crash.
+  as the seed says, in order, each block of each write whole, not at all, garbage, or torn, its
+  garbage in the bytes the write changes alone: powersafe overwrite, which cladefs assumes of its
+  disks (decision-3, board 5890). A host's locks of files are its disk's, gone with the crash.
 - **Who goes through it**: local_cell and bucket_cell wholly (`DiskDir`, `DiskFile`, the part
   cache's files, `HostDisk::of`, which samples a terabyte under madsim), and cladefsd's serving
   files: `host_cell`, `open_cell`, `cell_dir`, `profile`, `ephemeral_host`, `cladefsd::{cells,
-  server, peers, boot, migration}`. A descriptor of a simulated host's file is none: what wants
-  one, FUSE's storage, panics, outside the simulation.
+  server, peers, boot, migration}`, and an image's device, which an import's storage and FUSE's
+  read and write through. A simulated host's file has no descriptor: the device's I/O, by its
+  files' descriptors on a real host (io_uring, `storage::io`), runs each operation in place on the
+  simulated disk instead, as it is submitted. And Fxfs, which an import fills the image's
+  filesystem with: its executor (`cladefs::executor`) is the simulated host's node, and
+  fuchsia-async's tasks and timers are madsim's; its executors, real tokio runtimes, stay outside
+  (board 5687).
 - **What stays on the real file system**, outside the simulation: FUSE, the VM sockets and a VM
   process's client, procfs, read traces and stats, the image an import reads, a `file://` bucket,
   the tools.
@@ -177,7 +183,7 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
 - **What stops cladefsd booting as a node is at run time, not at build time**: its `main` reads
   its configuration from the environment and the process's statics, spawns threads, parks the
   main thread, binds Unix sockets (madsim's are `todo!()`); about 100 thread spawns, about 140
-  statics; its page store (memfds, userfaultfd) is Linux's. So a daemon core that boots from a
+  statics; its page memory (memfds, userfaultfd) is Linux's. So a daemon core that boots from a
   configuration value, as an async task, comes first.
 - Its dependencies are MIT, Apache-2.0, or both (madsim, madsim-macros, madsim-tokio,
   madsim-tonic: Apache-2.0).
@@ -188,7 +194,7 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
 
 cladefsd starts its threads at 41 sites outside tests. They fall into four groups:
 
-- **12 become tasks**: the control, peers, VM-receive (`server::IO`), pager and bucket runtimes;
+- **12 become tasks**: the control, peers, VM-receive (`server::io`), pager and bucket runtimes;
   the request pool and the flushers; the HTTP server; the sweep and stats loops.
 - **5 already run inline** on a serial `Dir` (`Dir::concurrent()`); only `framing::on_threads`
   is not gated yet.
@@ -198,7 +204,7 @@ cladefsd starts its threads at 41 sites outside tests. They fall into four group
   - the page cache's flusher (`flush_pass`);
   - the replicators (`Replicator::idle`/`drive`).
 - **16 are outside** the simulation: the VM socket, FUSE, userfaultfd, signals and Fxfs, plus 3
-  sites in other binaries.
+  sites in other binaries. (Fxfs's executor has since moved in, for imports: board 5687.)
 
 **The hard part is blocking, not threads.** A request job is synchronous. On its pool thread it
 waits on:
@@ -218,7 +224,7 @@ There are also about 105 `block_on` calls outside tests:
 madsim runs one thread. A task that blocks on a condvar stops the whole simulation, because the
 task that would wake it never runs. And madsim has no `block_on` at all. So turning threads into
 tasks is not enough: every wait on these paths has to become an `.await`, which means the request
-path becomes async from the pool down to the store's durability and upload waits. That is a
+path becomes async from the pool down to the cell's durability and upload waits. That is a
 larger change than step 4 assumed. The ways forward:
 
 1. **Make the daemon async down to its waits** (madsim as planned). This is the biggest change.
@@ -245,7 +251,7 @@ paths. They group by the primitive they share, so one change moves a group:
 
 - uploader progress waits, all through `upload::Shared::wait`;
 - bucket calls through `upload::block_on`, about 12 functions;
-- the store's open and close handshake with its uploader task (`start.recv()`, and
+- the cell's open and close handshake with its uploader task (`start.recv()`, and
   `Uploader::drop`'s `stopped.recv()`), which has no async form today;
 - the cell table's blocking holds;
 - the read path (the pager's `bring_in`, the fetcher);
@@ -286,11 +292,11 @@ converts a path end to end, smallest first:
    serving without a thread wake.
 5. The read path async: the fetch and `bring_in` awaited, READ and MAP as futures, the boot
    profile's replay and writer as tasks.
-6. The store's open and close with its uploader: `upload::open_async`, `Uploader::stop`, and
+6. The cell's open and close with its uploader: `upload::open_async`, `Uploader::stop`, and
    `OpenCell`'s and `host_cell`'s open, create, take and close in async forms.
 7. The control handlers on the async forms: `blocking()` keeps only disk work.
 8. VM OPEN (writer and follower), bases, VERSION, DROP_VERSION and FORK as futures.
-9. An explicit async close for every store the daemon owns, and under madsim an assert in
+9. An explicit async close for every cell the daemon has open, and under madsim an assert in
    `Drop` that it was closed. The ordering rules of TASK-54, TASK-79.34 and TASK-129 rest on
    today's close in `Drop`.
 10. Replication async: `Members` and `MemberLink` returning futures, members served by tasks,
@@ -299,7 +305,7 @@ converts a path end to end, smallest first:
     and `cells::blocking` as tasks, or inline.
 12. The peers server, sweep, drain and control as tasks.
 
-The hardest are 9 (a store's close can't be awaited in `Drop`, and its last reference goes
+The hardest are 9 (a cell's close can't be awaited in `Drop`, and its last reference goes
 wherever the daemon drops it), 5 (`OpenCell::read` nests the pager, the fetcher and the bases'
 open under a synchronous call that DAX faults share) and 10.
 
@@ -326,13 +332,78 @@ Before the decision, the steps that served any of the three went on:
    `main` did.
 3. **Per-node statics** (`node_local!`), crate by crate.
 4. **Threads and runtimes** through one seam (tasks under madsim), `blocking()` inline.
-5. **Disk through `host_fs`** everywhere cladefsd writes (its stores, replica directories, the part
+5. **Disk through `host_fs`** everywhere cladefsd writes (its cell directories, replica directories, the part
    cache, its state files): see "The disk as built" below.
 6. **The in-process bucket** with faults, and the control API on TCP under madsim.
 7. **The simulated guest and the checker**, one profile (attrition alone), seed replay checked.
 8. **Fault profiles**, then a rule search per rule.
 9. **CI**: a few hundred seeds per profile on each push, a soak at night, failing seeds kept as
    regression seeds, as `local_cell::sim`'s are.
+
+## On macOS, and its known failures in CI (board 2912, 2026-11-21)
+
+- **The daemon builds under madsim on macOS**: its dependencies are Linux's and, under madsim,
+  every OS's (`cfg(any(target_os = "linux", madsim))`), its tests/madsim.rs no longer Linux's
+  alone. What stays Linux's is outside the simulation: a VM process's client (memfds,
+  userfaultfd) and its half of the wire, the FUSE mount (`mount::start` refuses under madsim),
+  pidfds (`VmProcess`, uninhabited under madsim) and a transfer area's seals (refused off Linux).
+  A shared memory object macOS unlinked as it made it can't be reopened read-only: the default
+  arena's is handed on as it is, to simulated guests that map nothing. The macOS CI job runs the
+  madsim part, 20 seeds; seeds differ between the OSes (seed 71 fails one way on Linux, seed 6
+  another on macOS).
+- **Known failures**: scripts/madsim-seeds.py runs every seed, then fails the part on any failure
+  but those crates/cladefs/tests/madsim-known lists, each an open bug's, by its test and the start
+  of its panic's message, said as known with its board task. Another test's failure, another
+  message, a hang (nextest's profile madsim ends a test at five minutes) or a crash fails it. A
+  line goes with its bug's fix.
+
+## Fault profiles and rule searches as built (board 2830, 2026-11-21)
+
+`crates/cladefs/tests/madsim.rs`'s attrition is one workload (a writer guest's rounds, each on the
+next of three hosts, takes at later placements, kills, zombie writers, the bucket failing and out
+of reach) over a `Profile` of fault families, each a test of its own, and all of them drawn at
+random per seed (`Profile::swarm`, FoundationDB's `addFailureInjection`):
+
+- **Network**: a host cut off both ways (`clog_node`), one way (`clog_node_in`/`_out`), or the
+  links between nodes cut one after another and mended in another order (FoundationDB's
+  swizzle); packets lost and delayed throughout, which TCP's streams ride out stalling.
+- **Replication**: a replicated cell's takes, a member killed with the writer's host and down
+  still as the next host takes the cell, forced (doc-21).
+- **Operations**: versions made and each forked at the end; writers freeing blocks told uploaded,
+  each freed reading no more; bases made, a version of each forked on another host, the base
+  deleted; the collector passing meanwhile and twice at the end, its grace gone between, from a
+  node of its own under the hosts' KMS; the hosts told other peers (SetPeers); a host drained, as
+  SIGTERM has it, before its kill.
+- **Pressure**: a host's memory and disk limited a while (SetMemoryLimit, ShrinkMemory,
+  SetDiskLimit), writes refused past them. The host's disk governor stays out of reach while a
+  simulated disk is a fixed terabyte (board 5899).
+- **Disks**: calls failing (board 5654), as before. BUGGIFY stays off in the full stack: turned on,
+  its sites switched by the madsim seed, it lost an ephemeral cell's Local commits (board 6034),
+  which it waits for.
+
+The checker: every block told uploaded and not freed reads as written on the last host, none freed
+does, each version's fork holds what was told uploaded before it, and each base's fork reads the
+block it inherited.
+
+**Rule searches** (`needs!`): a rule of `bucket_cell::Rules` off, seeds of its profile until one
+loses what a guest was told, each seed a process of its own (as scripts/test.sh runs them: a
+simulation's node-local values stay in its process, board 2890). Each rule was tried over 2,000
+seeds of the profile that reaches it. Five find theirs: `head_swap` (attrition),
+`collector_epochs` and `candidates_first` (frees and the collector), `references` and
+`references_relisted` (bases). `slots_at_birth` found its on Linux (seed 92 of the bases profile)
+but in none of 2,000 seeds on macOS, whose schedules differ; a search one platform misses would
+fail `scripts/test.sh` there, so it has none. The rest found none: `local_cell::sim`'s searches find each, their
+steps aimed at the protocol's races over 20,000 seeds, where a full-stack seed reaches them
+seldom; aiming the full stack's faults at those races is adoption 5 below. `local_cell::Rules`
+(the open cell's concurrency) found none either: its framings', flushes' and frees' rules over
+2,000 seeds of their profiles, and its views' and writes' rules guard a follower and a writer
+racing its own commits, which one simulated guest, its requests one at a time, never is; Shuttle's
+searches find them (`crates/local_cell/tests/shuttle`).
+
+**What it found**: cladefsd's drain counters were process statics, so each simulated host waited
+for every host's connections and calls, and simulations sharing a process woke each other's tasks
+(board 5806); with BUGGIFY on, an ephemeral cell's Local commits lost (board 6034); and, on main as
+it was, two live-migration endings of the ephemeral disk-faults profile (board 6032).
 
 ## What FoundationDB does that we don't (2026-11-20)
 
@@ -481,6 +552,54 @@ Within the simulation:
 - Knobs randomized in the production binary: compiled out instead.
 - Whether `MemDir::crash_corrupting` covers what `AsyncFileNonDurable` models (writes reordered
   unless they overlap, sectors torn) is not checked yet.
+
+## A second pass over FoundationDB (2026-11-21)
+
+Read at origin/main c06497f39c, 104 commits past the first pass, beyond the simulation: the storage
+engine and file layers, object storage and backup, recovery and fencing, overload control, and
+testing and observability. Each claim filed was checked in our code first.
+
+**The open question above, answered.** `MemDir::crash_corrupting`, and `host_fs::sim`'s crash,
+which copies it, model less than `AsyncFileNonDurable`:
+- they tear a chunk only at its midpoint, its left half written; never the right half, a random
+  offset, or valid bytes beside garbage;
+- they chunk at 512 B from a write's offset, not at the file's sector boundaries;
+- a directory made is durable at once, so a `sync_dir` missing is never caught;
+- they inject no read errors, stalls, or bit flips in what was synced (`AsyncFileChaos`,
+  `SimpleFile`'s `io_error` and `io_timeout`).
+Board 5748.
+
+**For the simulation** (posted on board 2830): `buggify!` has four sites in the whole tree, so
+every overload bound runs at its production size in the simulation, where FoundationDB shrinks
+them together (`smallStorageTarget`, `smallTlogTarget`); a simulated host's disk is a fixed 1 TiB,
+so disk pressure never happens; seeds don't fail on errors not injected, and no full-stack
+profile checks it settles clean after its heal (adoptions 3 and 6 above).
+
+**Bugs found, filed:**
+- live migration: a target crash between its rename and `accepted/` (5728); a stale hand-over
+  note deleting a later store at its path (5730); handlers racing, migration IDs unordered
+  (5732); abandoned migrations never reaped while a target runs (5734). Each is a handoff with
+  more than one durable step and no single commit point, or a step a late request can redo: the
+  class of board 2934. FoundationDB rolls a half-done handoff forward on reading it, and orders
+  every supersedable request by generation.
+- the bucket: auth and permission errors retried forever (5736); a lost create answered by
+  downloading the whole object (5738); faults turning paginated listing off (5740).
+- the store: raw and kept segments read with no integrity check, an ephemeral cell's for its
+  whole life (5742); recovery trusting files it never synced (5744), which `DiskQueue::recover`
+  syncs first; a stale tail block after a failed write (5746).
+
+**Worth doing, filed:** one host status with a health tier, active probes and latency past 1 s
+(5750); a bucket audit, scrub and layout-independent digest (5752); pacing writes before ENOSPC,
+fair shares across tenants, an age bound on upload lag (5754); replicated takes not stalling on
+dead members, nor a fenced writer lingering (5756, to verify); one retry loop with jitter and
+Retry-After, PUT checksums, every wire attempt counted (5758).
+
+**What doesn't transfer:** coordinators and their generation register (a cell's head is its
+authority), chains of old log generations (the bucket holds all but the bounded tail), Redwood's
+B-tree and remapping (extents are written once), a cluster-wide Ratekeeper with clients that
+throttle themselves (guests are untrusted; pacing is the daemon's), killing the process at its
+memory limit (it would take every VM on the host), format migrations. FoundationDB has no TLA+
+specs; ours are worth keeping, their atomic steps split where the code's are not (board 5732).
 
 ## Costs and risks
 

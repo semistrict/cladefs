@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The collector of the file buckets images keep their cells in, each its own, beside its
-//! directory (backlog doc-14, TASK-165.6): what reclaims what their cells no longer need, and
-//! compacts what is mostly freed, there, the only thing that deletes what images free
-//! (TASK-165.8). No `cladefs-gc` collects an image's own bucket, as one does a host's: the
-//! processes that have images of it open do, a pass after an image's commit, on a thread of its
-//! own, at most one every [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
+//! The collector of the file buckets images keep their cells in, each its own, beside its directory
+//! (backlog doc-14, TASK-165.6): what reclaims what their cells no longer need, and compacts what
+//! is mostly freed, there, the only thing that deletes what images free (TASK-165.8). No
+//! `cladefs-gc` collects an image's own bucket, as one does a host's: the processes that have
+//! images of it open do, a pass after an image's commit, on a thread of its own, at most one every
+//! [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
 //! image and its forks, which reads again only the cells' records that changed (`Collector`).
 
 use bucket_cell::collector::{Collector, Options, Report};
@@ -53,9 +53,9 @@ fn pace() -> Pace {
     PACE
 }
 
-/// A collector of `options`, which compacts the objects of images' cells, every one encrypted, under
-/// their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, the bucket runtime its
-/// pools refill on not to be made (TASK-449's review), it compacts none, deleting as ever.
+/// A collector of `options`, which compacts the objects of images' cells, every one encrypted,
+/// under their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, the bucket runtime
+/// its pools refill on not to be made (TASK-449's review), it compacts none, deleting as ever.
 fn new_collector(options: Options) -> Collector {
     Collector::new(options).kmses(crate::bucket::kms().ok().map(|kms| kms.kmses().clone()))
 }
@@ -82,7 +82,8 @@ pub(crate) fn of(url: &str, bucket: &Arc<ObjectBucket>) -> Arc<Collecting> {
     collector
 }
 
-/// An image's own bucket's collector in this process. Dropped, it waits for the pass it runs, if any.
+/// An image's own bucket's collector in this process. Dropped, it waits for the pass it runs, if
+/// any.
 pub(crate) struct Collecting {
     bucket: Arc<ObjectBucket>,
     pace: Pace,
@@ -215,7 +216,7 @@ impl Drop for Collecting {
 fn pass(collector: &mut Collector, bucket: &Arc<ObjectBucket>) -> Report {
     // Where a test holds a pass up, to drop the images it collects for meanwhile (TASK-291.3).
     fail::fail_point!("collect::pass", |_| Report::default());
-    // cladefs: copies of other buckets' cells' versions here, by its own store (TASK-633.8).
+    // cladefs: copies of other buckets' cells' versions here, by its own cell (TASK-633.8).
     let own = bucket.own();
     let collected = collector.collect_with_own(&**bucket, Some(&*own), rand::random());
     let failed = match local_cell::upload::block_on(collected) {

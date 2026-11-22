@@ -3,10 +3,10 @@
 /*
  * The process under the fake kernel: the one file built against libc rather than the shim.
  * Coroutines are ucontexts, told to ASan as it asks. The window is one mapping of address space,
- * read-only but for private pages, and a store through it that the host would refuse is a real
+ * read-only but for private pages, and a write through it that the host would refuse is a real
  * SIGSEGV. One it would copy on write (doc-13) faults too, as the host's userfaultfd write-protect
  * does, and the device's model says why it refuses it: the guest makes every page private
- * (PRIVATE) before a store can reach it, so a store the host would copy at is a bug of the guest's
+ * (PRIVATE) before a write can reach it, so a write the host would copy at is a bug of the guest's
  * (TASK-164.9).
  */
 
@@ -44,11 +44,11 @@ static int store_fd = -1;
 static char *window;
 static uint64_t window_len;
 /*
- * Takes a store the window faulted on: NULL if it made the page private, or why the host
+ * Takes a write the window faulted on: NULL if it made the page private, or why the host
  * refused it.
  */
 /* The device model's, whose u64 is unsigned long long: a pointer of another type is no call UBSan allows. */
-static const char *(*window_store)(unsigned long long offset);
+static const char *(*window_write)(unsigned long long offset);
 
 static void die(const char *what)
 {
@@ -181,7 +181,7 @@ void host_fiber_free(struct sim_fiber *fiber)
 
 void host_store_init(uint64_t len)
 {
-	store_fd = memfd_create("sim-store", MFD_CLOEXEC);
+	store_fd = memfd_create("sim-extent-store", MFD_CLOEXEC);
 	if (store_fd < 0)
 		die("memfd_create");
 	if (ftruncate(store_fd, len))
@@ -207,8 +207,8 @@ void host_store_zero(uint64_t offset, size_t len)
 }
 
 /*
- * A store the window faults on may be one the host copies on write: the device's model makes the
- * page private, and the store, returned to, goes on. It runs in the middle of the store, with no
+ * A write the window faults on may be one the host copies on write: the device's model makes the
+ * page private, and the write, returned to, goes on. It runs in the middle of the write, with no
  * scheduling point, as the host's copy runs with the vCPU stopped.
  */
 static void window_segv(int sig, siginfo_t *info, void *context)
@@ -217,8 +217,8 @@ static void window_segv(int sig, siginfo_t *info, void *context)
 	const char *why = "nothing mapped private there";
 
 	if (window && at >= base && at < base + window_len) {
-		if (sig == SIGSEGV && window_store)
-			why = window_store(at - base);
+		if (sig == SIGSEGV && window_write)
+			why = window_write(at - base);
 		if (!why)
 			return;
 		fprintf(stderr, "sim: the window refused an access at %#lx (%s): a host would have stopped the VM\n",
@@ -229,7 +229,7 @@ static void window_segv(int sig, siginfo_t *info, void *context)
 	_exit(3);
 }
 
-void *host_window_init(uint64_t len, const char *(*store)(unsigned long long offset))
+void *host_window_init(uint64_t len, const char *(*on_write)(unsigned long long offset))
 {
 	struct sigaction action = { .sa_sigaction = window_segv, .sa_flags = SA_SIGINFO };
 
@@ -240,7 +240,7 @@ void *host_window_init(uint64_t len, const char *(*store)(unsigned long long off
 		die("mmap");
 	window = (char *)(((uintptr_t)base + (2UL << 20) - 1) & ~((2UL << 20) - 1));
 	window_len = len;
-	window_store = store;
+	window_write = on_write;
 	if (sigaction(SIGSEGV, &action, NULL) || sigaction(SIGBUS, &action, NULL))
 		die("sigaction");
 	return window;
@@ -250,7 +250,7 @@ void host_window_map(uint64_t offset, uint64_t store_offset, uint64_t len)
 {
 	if (mmap(window + offset, len, PROT_READ, MAP_SHARED | MAP_FIXED, store_fd, store_offset) ==
 	    MAP_FAILED)
-		die("mmap of the store");
+		die("mmap of the extent store");
 }
 
 void host_window_map_zeros(uint64_t offset, uint64_t len)

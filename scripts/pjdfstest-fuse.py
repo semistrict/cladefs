@@ -2,11 +2,11 @@
 # Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-"""pjdfstest (BSD-2-Clause) on FUSE mounts of new stores, as root (TASK-149.38): POSIX's
+"""pjdfstest (BSD-2-Clause) on FUSE mounts of new cells, as root (TASK-149.38): POSIX's
 permissions, owners, setgid and sticky directories, times and errnos, as the host's Node layer,
 fxfs-posix under it and cladefs::fuse's server over it keep them.
 
-Two runs, each on a new store cladefs-mount makes (`--new`) and mounts:
+Two runs, each on a new cell cladefs-mount makes (`--new`) and mounts:
 
 - in a directory made in the mount, as the guest's pjdfstest case runs in its Fxfs;
 - from the mount's root itself, chowned and chmodded first: a new volume's root has no POSIX
@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PINNED = ROOT / "scripts" / "lib" / "pjdfstest.sh"
 KNOWN = ROOT / "scripts" / "pjdfstest-fuse-known"
-# The stores' size: room for what pjdfstest makes, which is little.
+# The cells' size: room for what pjdfstest makes, which is little.
 CAPACITY = 1 << 30
 
 
@@ -135,13 +135,13 @@ def unexpected(found, listed, dirs):
     return unlisted, gone
 
 
-# cladefs: the master key the mounts' stores are encrypted under, the tests', known to all
+# cladefs: the master key the mounts' cells are encrypted under, the tests', known to all
 # (scripts/lib/test-kms.sh), unless the environment names a KMS (TASK-411.28).
 TEST_MASTER_KEY = "7e" * 32
 
 
 def encrypted_env(dir):
-    """The environment of a mount of a new store in `dir`: every store is encrypted, and cladefs-mount
+    """The environment of a mount of a new cell in `dir`: every cell is encrypted, and cladefs-mount
     refuses to start with no KMS (TASK-411.28). Unless the environment names one, a host's: its
     bucket a directory in `dir`, placement 1, and the bucket KMS of the tests' master key."""
     env = dict(os.environ)
@@ -155,14 +155,14 @@ def encrypted_env(dir):
 
 
 def mounted(cladefs_mount, dir):
-    """cladefs-mount of a new store in `dir`, once it says it is mounted: the process, the mount
+    """cladefs-mount of a new cell in `dir`, once it says it is mounted: the process, the mount
     version and its log."""
-    store, mountpoint = dir / "store", dir / "mnt"
+    cell, mountpoint = dir / "cell", dir / "mnt"
     mountpoint.mkdir()
     log = open(dir / "cladefs-mount.log", "w")
     # Other users' too, which pjdfstest's tests become (`-u`, `-g`): a FUSE mount is its mounting
     # user's alone otherwise.
-    command = [cladefs_mount, "--allow-other", "--new", str(CAPACITY), str(store), str(mountpoint)]
+    command = [cladefs_mount, "--allow-other", "--new", str(CAPACITY), str(cell), str(mountpoint)]
     process = subprocess.Popen(command, env=encrypted_env(dir),
                                stdout=subprocess.PIPE, stderr=log, text=True)
     said = process.stdout.readline().strip()
@@ -174,7 +174,7 @@ def mounted(cladefs_mount, dir):
 
 
 def run(name, cladefs_mount, tests, dirs, setup, logs):
-    """One run: a new store mounted, `setup` given its mount point and saying where prove runs,
+    """One run: a new cell mounted, `setup` given its mount point and saying where prove runs,
     then pjdfstest; the mount unmounted. Its failures."""
     with tempfile.TemporaryDirectory(prefix=f"pjdfstest-fuse-{name}-") as dir:
         # Searchable by the users pjdfstest's tests become, as the mount is.

@@ -67,7 +67,7 @@ pub(crate) fn seed() -> u64 {
 /// syncing as the guest ends.
 const SETUP: Duration = Duration::from_secs(30);
 
-/// cladefs: what the checks' budgets are scaled by where the daemon keeps their stores in a real
+/// cladefs: what the checks' budgets are scaled by where the daemon keeps their cells in a real
 /// bucket (`CLADEFSD_BUCKET`): the most a check took of its budget on GCS, 3.3 times (GCE
 /// r980), and half that again (TASK-165.11).
 const REAL_BUCKET_SCALE: f64 = 5.0;
@@ -361,7 +361,7 @@ fn verify_delayed_unlinks(image: &Image) {
     assert!(block_on(lookup_path(fs, "delayed-kept").0.lookup(b"gone")).is_err());
 }
 
-/// cladefs: random_ops's file, as the store holds it, is as its model (TASK-119.2), and its
+/// cladefs: random_ops's file, as the cell holds it, is as its model (TASK-119.2), and its
 /// operations, which replay it, are there (TASK-119.15).
 fn verify_random_ops(image: &Image) {
     let (fs, seed) = (image.fs, image.seed);

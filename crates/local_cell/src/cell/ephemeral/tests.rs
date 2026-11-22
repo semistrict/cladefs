@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! An ephemeral cell's store (doc-25, TASK-698.2): writes, frees, checkpoints, givings back,
+//! An ephemeral cell (doc-25, TASK-698.2): writes, frees, checkpoints, givings back,
 //! reopenings and crashes, over a parent's version whose extents are read in the bucket.
 
 use super::*;
@@ -45,7 +45,7 @@ fn keys() -> Arc<Ring> {
     Ring::writing_under(CHILD, extent_frame::Secret::from_bytes(&UNKEPT_DEK))
 }
 
-/// A new ephemeral cell's store in `dir`, of the child's, forked from the parent's version.
+/// A new ephemeral cell in `dir`, of the child's, forked from the parent's version.
 fn make(dir: &MemDir) {
     let checkpoint = LocalCheckpoint::fork(
         Parent { cell: PARENT, version: 7, at: 3 },
@@ -57,27 +57,27 @@ fn make(dir: &MemDir) {
         .unwrap();
 }
 
-/// The ephemeral cell's store in `dir`, opened.
+/// The ephemeral cell in `dir`, opened.
 fn open(dir: &MemDir) -> LocalCell<MemDir> {
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
     assert!(recovering.is_ephemeral());
     assert_eq!(recovering.local_checkpoint().unwrap().keys(), b"wrapped");
     let opening = EphemeralOpening { parent: parent(), keys: keys(), cache: None, held: None };
-    let store = recovering.open_ephemeral(options(), opening).unwrap();
-    store.made().unwrap();
-    store
+    let cell = recovering.open_ephemeral(options(), opening).unwrap();
+    cell.made().unwrap();
+    cell
 }
 
 /// Writes and commits the child's extent `sequence`, a block of `byte`s.
-async fn commit(store: &LocalCell<MemDir>, sequence: u64, byte: u8) {
-    store.write(own(sequence), 0, &[byte; BLOCK]).await.unwrap();
-    store.commit(None).await.unwrap();
+async fn commit(cell: &LocalCell<MemDir>, sequence: u64, byte: u8) {
+    cell.write(own(sequence), 0, &[byte; BLOCK]).await.unwrap();
+    cell.commit(None).await.unwrap();
 }
 
 /// What the child's extent `sequence` holds: a block of one byte, or none.
-fn byte_of(store: &LocalCell<MemDir>, sequence: u64) -> Option<u8> {
+fn byte_of(cell: &LocalCell<MemDir>, sequence: u64) -> Option<u8> {
     let mut data = [0; BLOCK];
-    match store.read(own(sequence), 0, &mut data) {
+    match cell.read(own(sequence), 0, &mut data) {
         Ok(()) => {
             assert!(data.iter().all(|&byte| byte == data[0]), "extent {sequence} torn");
             Some(data[0])
@@ -105,22 +105,22 @@ fn allocated(dir: &MemDir, number: u64) -> u64 {
 async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     let dir = MemDir::new();
     make(&dir);
-    let store = open(&dir);
-    assert!(store.is_ephemeral());
-    assert_eq!(store.root().unwrap(), b"parent's root");
+    let cell = open(&dir);
+    assert!(cell.is_ephemeral());
+    assert_eq!(cell.root().unwrap(), b"parent's root");
     let mut data = [0; BLOCK];
-    let read = store.read(inherited(), 0, &mut data).unwrap_err();
+    let read = cell.read(inherited(), 0, &mut data).unwrap_err();
     let in_bucket = read.downcast::<BucketData>().unwrap();
     assert_eq!(in_bucket.location.key, "parent/segment");
     for sequence in 0..7 {
-        commit(&store, sequence, sequence as u8 + 1).await;
+        commit(&cell, sequence, sequence as u8 + 1).await;
     }
     assert_eq!(numbers(&dir, SEGMENTS), Vec::<u64>::new(), "nothing framed");
     assert_eq!(numbers(&dir, KEPT), Vec::<u64>::new(), "seven closed: no checkpoint yet");
     // Those of the seven closed and the open one's; the next one's, if prepared ahead yet.
     let logs = numbers(&dir, LOGS);
     assert_eq!(logs[..8], (0..8).collect::<Vec<_>>(), "{logs:?}");
-    commit(&store, 7, 8).await;
+    commit(&cell, 7, 8).await;
     assert_eq!(numbers(&dir, KEPT), (0..8).collect::<Vec<_>>(), "eight closed: covered");
     for kind in [LOGS, OPEN_SEGMENTS] {
         let left = numbers(&dir, kind);
@@ -130,16 +130,16 @@ async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     assert_eq!((checkpoint.through, checkpoint.own.len(), checkpoint.kept.len()), (Some(7), 8, 8));
     assert_eq!(checkpoint.last_commit, Some(tag(0, 18)), "the parent's commit 10, then eight");
     for sequence in 0..8 {
-        assert_eq!(byte_of(&store, sequence), Some(sequence as u8 + 1));
+        assert_eq!(byte_of(&cell, sequence), Some(sequence as u8 + 1));
     }
-    drop(store);
+    drop(cell);
 
-    let store = open(&dir);
+    let cell = open(&dir);
     for sequence in 0..8 {
-        assert_eq!(byte_of(&store, sequence), Some(sequence as u8 + 1));
+        assert_eq!(byte_of(&cell, sequence), Some(sequence as u8 + 1));
     }
-    assert_eq!(store.read(inherited(), 0, &mut data).unwrap_err().is::<BucketData>(), true);
-    assert_eq!(store.last_commit().unwrap(), 18);
+    assert_eq!(cell.read(inherited(), 0, &mut data).unwrap_err().is::<BucketData>(), true);
+    assert_eq!(cell.last_commit().unwrap(), 18);
 }
 
 /// What a checkpoint covers of frees gives back the runs of the extents freed, in their kept
@@ -149,33 +149,33 @@ async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
 async fn checkpoints_give_back_what_was_freed() {
     let dir = MemDir::new();
     make(&dir);
-    let store = open(&dir);
+    let cell = open(&dir);
     for sequence in 0..8 {
-        commit(&store, sequence, 1).await;
+        commit(&cell, sequence, 1).await;
     }
     assert_eq!(numbers(&dir, KEPT), (0..8).collect::<Vec<_>>());
     let whole = allocated(&dir, 0);
     assert!(whole >= BLOCK as u64, "a kept segment holds its block: {whole}");
-    store.free(own(0)).unwrap();
-    store.free(inherited()).unwrap();
-    store.commit(None).await.unwrap();
+    cell.free(own(0)).unwrap();
+    cell.free(inherited()).unwrap();
+    cell.commit(None).await.unwrap();
     // Eight more closed, the first with the commit freeing, all covered by the next checkpoint.
     for sequence in 8..16 {
-        commit(&store, sequence, 2).await;
+        commit(&cell, sequence, 2).await;
     }
-    assert_eq!(byte_of(&store, 0), None);
+    assert_eq!(byte_of(&cell, 0), None);
     assert!(!numbers(&dir, KEPT).contains(&0), "segment 0 held extent 0 alone: it goes");
     let checkpoint = LocalCheckpoint::read(&dir).unwrap();
     assert_eq!(checkpoint.freed, vec![inherited()]);
     assert!(checkpoint.own.iter().all(|(extent, _)| *extent != own(0)));
-    drop(store);
+    drop(cell);
 
-    let store = open(&dir);
+    let cell = open(&dir);
     let mut data = [0; BLOCK];
-    let read = store.read(inherited(), 0, &mut data).unwrap_err();
+    let read = cell.read(inherited(), 0, &mut data).unwrap_err();
     assert!(read.is::<NoExtent>(), "freed, the parent's extent is held no more: {read:#}");
     for sequence in 1..16 {
-        assert_eq!(byte_of(&store, sequence), Some(if sequence < 8 { 1 } else { 2 }));
+        assert_eq!(byte_of(&cell, sequence), Some(if sequence < 8 { 1 } else { 2 }));
     }
 }
 
@@ -188,25 +188,25 @@ async fn a_kept_segment_gives_back_a_run_alone() {
     let options = Options { segment_size: 4 * BLOCK as u64, ..Options::default() };
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
     let opening = EphemeralOpening { parent: parent(), keys: keys(), cache: None, held: None };
-    let store = recovering.open_ephemeral(options, opening).unwrap();
-    store.made().unwrap();
+    let cell = recovering.open_ephemeral(options, opening).unwrap();
+    cell.made().unwrap();
     // Four extents a segment, eight segments.
     for sequence in 0..32 {
-        commit(&store, sequence, sequence as u8).await;
+        commit(&cell, sequence, sequence as u8).await;
     }
     assert!(numbers(&dir, KEPT).contains(&0));
     let before = allocated(&dir, 0);
-    store.free(own(1)).unwrap();
-    store.commit(None).await.unwrap();
+    cell.free(own(1)).unwrap();
+    cell.commit(None).await.unwrap();
     for sequence in 32..64 {
-        commit(&store, sequence, sequence as u8).await;
+        commit(&cell, sequence, sequence as u8).await;
     }
     let after = allocated(&dir, 0);
     assert_eq!(after, before - BLOCK as u64, "extent 1's run given back");
     for sequence in [0, 2, 3] {
-        assert_eq!(byte_of(&store, sequence), Some(sequence as u8));
+        assert_eq!(byte_of(&cell, sequence), Some(sequence as u8));
     }
-    assert_eq!(byte_of(&store, 1), None);
+    assert_eq!(byte_of(&cell, 1), None);
 }
 
 /// Closing it covers every closed segment, however few: its next opening replays the open
@@ -215,35 +215,35 @@ async fn a_kept_segment_gives_back_a_run_alone() {
 async fn closing_covers_every_closed_segment() {
     let dir = MemDir::new();
     make(&dir);
-    let store = open(&dir);
+    let cell = open(&dir);
     for sequence in 0..3 {
-        commit(&store, sequence, 9).await;
+        commit(&cell, sequence, 9).await;
     }
     assert_eq!(numbers(&dir, KEPT), Vec::<u64>::new());
-    drop(store);
+    drop(cell);
     assert_eq!(numbers(&dir, KEPT), vec![0, 1, 2]);
-    let store = open(&dir);
+    let cell = open(&dir);
     for sequence in 0..3 {
-        assert_eq!(byte_of(&store, sequence), Some(9));
+        assert_eq!(byte_of(&cell, sequence), Some(9));
     }
 }
 
 /// A crash at any step of the commits, closings and checkpoints keeps every commit made local:
 /// the disk fails after `n` operations, for every `n` through a run of checkpoints, the directory
-/// is left as a crash would leave it, and the store opened again holds each extent whose commit
+/// is left as a crash would leave it, and the cell opened again holds each extent whose commit
 /// returned, and none torn.
 #[tokio::test(flavor = "multi_thread")]
 async fn crashes_at_every_step_keep_what_was_committed() {
     for fail_after in 1..400 {
         let dir = MemDir::new();
         make(&dir);
-        let store = open(&dir);
+        let cell = open(&dir);
         dir.fail_after(Some(fail_after));
         let mut committed = BTreeMap::new();
         for sequence in 0..20u64 {
-            let written = store.write(own(sequence), 0, &[sequence as u8 + 1; BLOCK]).await;
+            let written = cell.write(own(sequence), 0, &[sequence as u8 + 1; BLOCK]).await;
             let freed = match sequence {
-                12 => store.free(own(3)),
+                12 => cell.free(own(3)),
                 _ => Ok(()),
             };
             // A commit that failed may be local or not: what it changed is either way.
@@ -251,7 +251,7 @@ async fn crashes_at_every_step_keep_what_was_committed() {
                 committed.remove(&3);
             }
             let changed = match written.and(freed) {
-                Ok(()) => store.commit(None).await,
+                Ok(()) => cell.commit(None).await,
                 failed => failed,
             };
             if changed.is_err() {
@@ -259,15 +259,15 @@ async fn crashes_at_every_step_keep_what_was_committed() {
             }
             committed.insert(sequence, sequence as u8 + 1);
         }
-        drop(store);
+        drop(cell);
         let crashed = dir.crash(fail_after);
         crashed.fail_after(None);
-        let store = open(&crashed);
+        let cell = open(&crashed);
         for (&sequence, &byte) in &committed {
-            assert_eq!(byte_of(&store, sequence), Some(byte), "after {fail_after}: {sequence}");
+            assert_eq!(byte_of(&cell, sequence), Some(byte), "after {fail_after}: {sequence}");
         }
         let mut data = [0; BLOCK];
-        let parent = store.read(inherited(), 0, &mut data).unwrap_err();
+        let parent = cell.read(inherited(), 0, &mut data).unwrap_err();
         assert!(parent.is::<BucketData>(), "after {fail_after}: {parent:#}");
     }
 }

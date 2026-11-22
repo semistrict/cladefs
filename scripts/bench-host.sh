@@ -22,11 +22,11 @@
 # each workload, into the cases' logs. CLADEFS_BENCH_FILES and CLADEFS_BENCH_PGBENCH_SECS and
 # CLADEFS_BENCH_PGBENCH_SCALE size the metadata workloads and pgbench, and CLADEFS_BENCH_VCPUS and
 # CLADEFS_BENCH_JOBS the VMs' vCPUs and the scaling group's jobs (test_fs_bench.rs).
-# CLADEFSD_BUCKET, if set, names the bucket the extent daemon keeps the stores' cells in (an
-# object store's URL the test host reaches), and CLADEFSD_PART_CACHE the directory it keeps what it reads
-# from there in. CLADEFS_ZSTD_LEVEL is the zstd level stores compress their parts at (default 1; 0
+# CLADEFSD_BUCKET, if set, names the bucket the extent daemon keeps its cells in (a
+# bucket's URL the test host reaches), and CLADEFSD_PART_CACHE the directory it keeps what it reads
+# from there in. CLADEFS_ZSTD_LEVEL is the zstd level extent stores compress their parts at (default 1; 0
 # stores them raw), to measure others. CLADEFS_BUCKET_LATENCY_MS adds that many milliseconds to each
-# of the bucket's requests (bucket_cell's object_store_at), as a farther object store would.
+# of the bucket's requests (bucket_cell's object_store_at), as a farther bucket would.
 # CLADEFS_GUEST_CMDLINE adds to the guest kernel's arguments (such as cpuidle_haltpoll.force=1), to
 # measure them. CLADEFS_GUEST_KERNEL_BUILD (release or debug) builds the guest kernel from the
 # source on the test host. CLADEFS_TEST_HOST_LIMIT caps the run's time there (timeout's DURATION,

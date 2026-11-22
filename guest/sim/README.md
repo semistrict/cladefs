@@ -60,7 +60,7 @@ Written here (see each file's head for what it leaves out):
 | Scheduler, locks, wait queues, RCU, workqueues | `kernel/sched.c`, `locks.c`, `workqueue.c` | One task at a time; wait queues as the kernel's; rwsem order as the kernel's, not its optimistic spinning |
 | Page tables and faults | `kernel/mm.c` | Two flat arrays per VMA, with `mm/memory.c`'s insert and fault rules rewritten, and `mmap_lock`. A pin, as `get_user_pages` takes one (`sim_pin_user_page`), is the page's reference alone, faulted in as the kernel faults. No TLB, no MMU, no private mappings |
 | VFS and page cache | `kernel/vfs.c`, `mount.c` | What dax.c and data.c call; the VFS's checks before a clone, and its writing both back, as `generic_remap_file_range_prep`. `super.c` is not built: its fsync, and its writing of an inode's attributes, its size alone here, are rewritten, so that a bug in them shows on a real kernel alone |
-| Host device | `kernel/device.c`, `host.c` | The window copies on write (doc-13): real memory, a memfd mapped page by page, read-only, so that a store the host refuses is a SIGSEGV. A MAP maps sealed extents alone (EPERM for an open one, which tests count) and zeros past what was written; `MAP_ZEROS` maps zeros; `PRIVATE` copies pages to private memory at the same addresses, ENOMEM past `private_max` (a quarter of the window, or what a test sets); a MAP or UNMAP frees private pages, as doc-13's host. A store to a sealed or zero page, which the host's userfaultfd write-protect would copy at, fails the run: the guest makes each page it dirties private first (TASK-164.9), so such a store is to a page no iomap made private. Requests complete at once, or fail with EIO as a test asks, or a MAP waits on its way as a test holds it: no virtqueue, no second stage, no async page faults, whose writes the host takes as reads |
+| Host device | `kernel/device.c`, `host.c` | The window copies on write (doc-13): real memory, a memfd mapped page by page, read-only, so that a write the host refuses is a SIGSEGV. A MAP maps sealed extents alone (EPERM for an open one, which tests count) and zeros past what was written; `MAP_ZEROS` maps zeros; `PRIVATE` copies pages to private memory at the same addresses, ENOMEM past `private_max` (a quarter of the window, or what a test sets); a MAP or UNMAP frees private pages, as doc-13's host. A write to a sealed or zero page, which the host's userfaultfd write-protect would copy at, fails the run: the guest makes each page it dirties private first (TASK-164.9), so such a write is to a page no iomap made private. Requests complete at once, or fail with EIO as a test asks, or a MAP waits on its way as a test holds it: no virtqueue, no second stage, no async page faults, whose writes the host takes as reads |
 | Fxfs | `cladefs/cladefs.c` | A model of what the protocol assumes: blocks, open extents that go one way, shared blocks, the staging extent `zero_tail` moves a last block to, `FreeAfter::Flush`, one seal in four a flush, reservations that fail. Writeback (`cladefs_write_many`) allocating then: its copy of the pages, a page at a time, blocks of the staging extent for 256 KiB at most, as Fxfs packs small files, else a new extent, written, then the commit, which a test may hold to look at what a crash would leave, or fail; reservations of dirty pages, given back once. No seal comes between taking blocks and writing them, so the packed write a seal refuses, which Fxfs tries again in an extent of its own, has no counterpart. No journal, tree or crash consistency |
 
 So a run tests dax.c against a second writing of its assumptions. Where the model differs from
@@ -81,12 +81,12 @@ sleeps happen off the seed, and a run stops replaying.
 
 It finds, by construction: orderings of tasks at lock points, device requests, `cladefs_dax_delay()`
 and the sim's splits of non-atomic bitmap writes and kernel copies; deadlocks, with who holds what;
-livelocks, and faults that go round 256 times; use after free (ASan); stores to unmapped window
+livelocks, and faults that go round 256 times; use after free (ASan); writes to unmapped window
 pages, and to pages no `PRIVATE` made the VM's (dirty without private) (SIGSEGV); a MAP or UNMAP
-under a writable PTE, whether or not a store comes; a `PRIVATE` past `private_max` (159 on a
+under a writable PTE, whether or not a write comes; a `PRIVATE` past `private_max` (159 on a
 host); a sleep in an atomic section; every `WARN` and lockdep assertion in the real sources; bytes
 wrong through read(2), a mapping, or Fxfs's extents once written back, at every fsync as well as at
-the end; a store a rebind or a writeback lost, an fsync missing a store that ended before it
+the end; a write a rebind or a writeback lost, an fsync missing a write that ended before it
 began, a punch or truncate a writeback undoes, a crash's file other than old or new, and room for
 dirty pages given back twice or kept; a load faulting again on a page its mapping held, which nothing
 but a fault unmapped (`kernel/mm.c`, each mapping's pages held as a fault maps them and let go as a
@@ -95,12 +95,12 @@ own page from the others holding them still: read faults undoing each other's ma
 each, as TASK-152's livelock, which succeed, and nothing else checks; TASK-149.14). A MAP of an open
 extent fails EPERM, as the host's does, and is counted: the `cow_` scenarios, whose Fxfs says open of every extent until its seal, expect none.
 
-Every store carries a stamp, as ztest's blocks carry their tags: file, place, worker, generation, and
+Every write carries a stamp, as ztest's blocks carry their tags: file, place, worker, generation, and
 the seal it was made in. A task reads its own slots exactly, and any other's within bounds: no older
-than the last store that ended, or anything a read saw, before it began, nor newer than the last
-store begun as it ended, and zeros only if a store overlapped it. So a stale read, a zero read, data of
+than the last write that ended, or anything a read saw, before it began, nor newer than the last
+write begun as it ended, and zeros only if a write overlapped it. So a stale read, a zero read, data of
 another file or place, and a read from the future each fail as what they are, on the read that
-sees them, whichever task's it is; the log says which store the bytes came from, and how many seals
+sees them, whichever task's it is; the log says which write the bytes came from, and how many seals
 ago.
 
 It can't find:
@@ -145,7 +145,7 @@ what Fxfs doesn't, as a page cache does), its known bytes durable; then unmounte
 mappings gone, files evicted, the volume removed, the window mapping nothing, and holding no private
 page, but what UNMAPs that failed kept. Then how many calls the run reached, for the sweep.
 
-The file model (`kernel/shadow.c`) is what tasks were told: every byte a write(2), a store, a
+The file model (`kernel/shadow.c`) is what tasks were told: every byte a write(2), a mapped write, a
 truncate, a punch or a clone said a file holds, once the call ended, unless another call changed its
 page meanwhile, or the call failed, or its bytes were a task's memory. A read(2) or a load reads it;
 an fsync that returned 0, and the end's sync, find it in Fxfs's extents, and the size: every
@@ -160,7 +160,7 @@ In dax.c, found by the sweep and the file model, each fixed:
 
 1. **An fsync returned without a range dirtied before it began.** Writeback counted its file's dirty
    ranges with the semaphore shared, allocated its batch, and swapped no more than that many with it
-   held for writing: a store between dirtied the first chunk's range, which the swap took, passing the
+   held for writing: a write between dirtied the first chunk's range, which the swap took, passing the
    second's by. `failures 62`, the file model at the syncer's fsync. Counted again under the write lock,
    the batch made larger if need be. `cow_writeback_counts_again` (pause point 10, `COUNTED`),
    `task-149.15-writeback-batch-short`.
@@ -208,7 +208,7 @@ TASK-150.8 to .14, a static audit's findings, each a scenario here, and `tests/f
 of them without one: a short copy and a write from its own pages losing what whole pages held; an
 append cut short leaving the last block behind Fxfs; a double free; a sealed piece mapped writably
 outside the gate; a failed UNMAP stopping unmount; a range left behind its blocks after failed MAPs;
-writable bits a seal misses. And TASK-79.53 again, on DAX: a mapping's store past the end read back;
+writable bits a seal misses. And TASK-79.53 again, on DAX: a mapping's write past the end read back;
 and a writer killed between its move and its copy, which left zeros.
 
 In dax.c as it stood at TASK-149.14, first found here, the first since fixed:
@@ -217,7 +217,7 @@ In dax.c as it stood at TASK-149.14, first found here, the first since fixed:
 1. **A write over a hole leaves a mapping reading zeros.** Confirmed on a real kernel, GCE r395 and
    r396, whose `write_over_mapped_hole` said `page 1 through the mapping is stale`. A write whose pieces
    aren't in a row in the window takes several iomaps, and only the first says its pages are new; the
-   rest keep the zero page a load mapped. A write *from* that mapping then stores the zeros, for good.
+   rest keep the zero page a load mapped. A write *from* that mapping then writes the zeros, for good.
    `tests/hole_mapped_then_written`, `fixes/hole-pieces.patch`, which goes once dax.c has the fix.
 2. **A load through a PTE reads zeros while a move loops.** A fault that a seal keeps from the gate
    moves its blocks again, and a flush may free the old extent, whose window page maps zeros, before
@@ -284,7 +284,7 @@ before copying on write:
 | TASK-150.8, whole pages moved before the write has its bytes | 1 | bytes wrong: `short_copy`, `same_page` |
 | TASK-150.10, `maps` and `own` apart, freed twice | 1 | ASan: `allocations_failed` |
 | TASK-150.12, the pool destroyed with what an UNMAP failed for | 1 | `BUG_ON`: `unmap_failed` (`task-150.12-pool-kept`) |
-| TASK-79.53, a mapping's store past the end read back | 2 | bytes wrong (`task-79.53-gap-left`) |
+| TASK-79.53, a mapping's write past the end read back | 2 | bytes wrong (`task-79.53-gap-left`) |
 | A write past the end that copies nothing grows the file | not run | `write_past_end_copies_nothing` (`write-past-end-grows`) |
 
 ## Copying on write
@@ -294,52 +294,52 @@ a quarter of the window, the other tests' a quarter; and these scenarios, at 64 
 
 | Scenario | What it checks |
 | --- | --- |
-| `cow_rebind_against_stores` | stores through a mapping and by write(2) to some pages, each checked to read its last before the next, as writes to twice `private_max` more have the budget's worker write back and rebind: no rebind loses a store |
-| `cow_writeback_against_stores` | each of 40 fsyncs, once it returns, finds in Fxfs every page's round from before it began, stores going on |
+| `cow_rebind_against_mapped_writes` | writes through a mapping and by write(2) to some pages, each checked to read its last before the next, as writes to twice `private_max` more have the budget's worker write back and rebind: no rebind loses a write |
+| `cow_writeback_against_mapped_writes` | each of 40 fsyncs, once it returns, finds in Fxfs every page's round from before it began, writes going on |
 | `cow_truncate_dirty` | a truncate through dirty and clean private pages frees them, zeros the last page's tail, gives their room back; grown again, the file reads zeros there |
-| `cow_punch_dirty` | punches of dirty pages, a syncer writing back and a storer beside them, leave holes: no writeback undoes one |
-| `cow_crash_between_bytes_and_commit` | writeback's commit held after its bytes: Fxfs shows the file as it was, the commit would show what was copied; a store meanwhile reaches the fsync's writeback for its size |
+| `cow_punch_dirty` | punches of dirty pages, a syncer writing back and a writer beside them, leave holes: no writeback undoes one |
+| `cow_crash_between_bytes_and_commit` | writeback's commit held after its bytes: Fxfs shows the file as it was, the commit would show what was copied; a write meanwhile reaches the fsync's writeback for its size |
 | `cow_swap_during_write` | a write(2) paused between the iomap that dirtied its page and its copy (`dax_pause`): the fsync's swap waits for it |
 | `cow_rebind_during_writeback` | a rebind (`dax_rebind_now`) while writeback's commit is held waits for it (`wb_lock`) |
 | `cow_rebind_skips_dirty` | the worker's writeback held, a page dirtied again: its rebind leaves that page, and the PTEs faults made writable are write-protected |
-| `cow_rebind_against_write` | a rebind's MAP held on its way: a write(2) to a page it found clean waits for it, and so does a store's fault, and a load's, each blocking on the file's semaphore holding its DAX entry |
+| `cow_rebind_against_write` | a rebind's MAP held on its way: a write(2) to a page it found clean waits for it, and so does a write's fault, and a load's, each blocking on the file's semaphore holding its DAX entry |
 | `cow_commit_failed` | `dax_fail_commits`: the fsync fails EIO, Fxfs holds the file as it was, the next fsync succeeds |
 | `cow_reclaim_during_writeback` | a writeback paused after its swap (`dax_pause`), before it reads its pages from the window, as other files' chunks fill the ranges' half of it: reclaim takes their ranges, not the one the writeback reads (GCE r544's class: a range's space freed and given to another while something reads it there) |
-| `cow_writeback_during_fault` | a store's fault paused past its iomap_end (`dax_pause`), its PTE writable and its DAX entry held: the worker's writeback write-protects the PTE all the same, so that its rebind's read-only MAP finds none writable, and the store faults again and dirties its page |
-| `cow_fsync_during_writeback` | a writeback paused after its swap: a second fsync, and then a sync of the filesystem, nothing dirty, wait for it, and find every store before them in Fxfs as they return |
+| `cow_writeback_during_fault` | a write's fault paused past its iomap_end (`dax_pause`), its PTE writable and its DAX entry held: the worker's writeback write-protects the PTE all the same, so that its rebind's read-only MAP finds none writable, and the write faults again and dirties its page |
+| `cow_fsync_during_writeback` | a writeback paused after its swap: a second fsync, and then a sync of the filesystem, nothing dirty, wait for it, and find every write before them in Fxfs as they return |
 | `cow_truncate_held` | a truncate's MAP of zeros over 48 dirty private pages held on its way: a second file's write waits for the budget until it ends, the host never holding more than `private_max` |
-| `cow_writeback_before_store` | a store's fault paused past its iomap_end, its page dirty, its store not come: an fsync writes it back, and the seals after free its old extent; the store, let go, keeps the rest of the page as it was, not the zeros the freed extent reads, as its iomap made it private (TASK-164.9) |
-| `cow_map_during_seal` | an fsync's seal held after it began (`cladefs_sim_hold_seals`), Fxfs taking its writeback's extent for sealed already, the device not: a read's slice, a write's range, a load's fault and a store's, of the chunk, wait for the seal to map it, the faults holding their DAX entries, and ask no MAP the host refuses |
+| `cow_writeback_before_write` | a write's fault paused past its iomap_end, its page dirty, its write not come: an fsync writes it back, and the seals after free its old extent; the write, let go, keeps the rest of the page as it was, not the zeros the freed extent reads, as its iomap made it private (TASK-164.9) |
+| `cow_map_during_seal` | an fsync's seal held after it began (`cladefs_sim_hold_seals`), Fxfs taking its writeback's extent for sealed already, the device not: a read's slice, a write's range, a load's fault and a write's, of the chunk, wait for the seal to map it, the faults holding their DAX entries, and ask no MAP the host refuses |
 | `cow_reclaim_after_writeback_met_a_fault` | an fsync writes back a page whose DAX entry a load's fault, paused, holds, which stays tagged dirty: once other files' chunks fill the window, reclaim has taken the range all the same |
-| `cow_private_failed` | the device failing the `PRIVATE` of a write(2)'s iomap, and of a store's fault's: the write fails EIO, the store SIGBUS, nothing dirty nor reserved; again, both succeed |
+| `cow_private_failed` | the device failing the `PRIVATE` of a write(2)'s iomap, and of a write's fault's: the write fails EIO, the mapped write SIGBUS, nothing dirty nor reserved; again, both succeed |
 | `cow_rebind_seals_open_extents` | a truncate's writeback, which seals nothing after it, leaves clean pages private in an open extent, nothing dirty: a rebind (`dax_rebind_now`) seals, and rebinds every one (TASK-283) |
-| `cow_store_to_pinned_slice` | a pin of a slice's page, as vmsplice's (`sim_pin_user_page`): a store to it, which can't use the slice, waits for the pin to go, its fault from user mode holding none, then lands (TASK-79.49; the guest check `slice_held`'s steps, gone with writable DAX) |
+| `cow_write_to_pinned_slice` | a pin of a slice's page, as vmsplice's (`sim_pin_user_page`): a write to it, which can't use the slice, waits for the pin to go, its fault from user mode holding none, then lands (TASK-79.49; the guest check `slice_held`'s steps, gone with writable DAX) |
 
-Each ends with read(2) and Fxfs holding every page's last store, no room for dirty pages left
+Each ends with read(2) and Fxfs holding every page's last write, no room for dirty pages left
 reserved, and no MAP of an open extent asked. The rules' mutants:
 
 | Mutant | Caught by |
 | --- | --- |
 | `task-164.4-swap-shared` | `cow_swap_during_write` |
 | `task-164.4-writeback-unlocked` | `cow_rebind_during_writeback` |
-| `task-164.4-wb-sync-none` | `cow_rebind_against_stores`: a rebind's read-only MAP under a writable PTE; `cow_rebind_skips_dirty`; `cow_writeback_against_stores` |
+| `task-164.4-wb-sync-none` | `cow_rebind_against_mapped_writes`: a rebind's read-only MAP under a writable PTE; `cow_rebind_skips_dirty`; `cow_writeback_against_mapped_writes` |
 | `task-164.4-protect-by-entries` | `cow_writeback_during_fault`: the rebind's read-only MAP under the fault's writable PTE |
-| `task-164.4-fsync-skips-writeback` | `cow_fsync_during_writeback`: the second fsync returns, Fxfs holding the stores' rounds before |
+| `task-164.4-fsync-skips-writeback` | `cow_fsync_during_writeback`: the second fsync returns, Fxfs holding the writes' rounds before |
 | `task-164.4-sync-skips-writeback` | `cow_fsync_during_writeback`: the sync returns so |
 | `task-164.4-forget-before-free` | `cow_truncate_held`: the second file's write fails, its `PRIVATE` refused past `private_max` |
-| `task-164.4-writeback-unowned` | the first store of any `cow_` scenario, `cow_rebind_against_stores`'s: to a page no `PRIVATE` made the VM's. Before the host refused it, `cow_writeback_before_store`: the rest of page 3 read zeros |
+| `task-164.4-writeback-unowned` | the first write of any `cow_` scenario, `cow_rebind_against_mapped_writes`'s: to a page no `PRIVATE` made the VM's. Before the host refused it, `cow_writeback_before_write`: the rest of page 3 read zeros |
 | `task-164.4-extents-during-seal` | `cow_map_during_seal`: a MAP of an extent the host has open (`cladefs_dax_sealed_extents`, which ranges and slices both look extents up by) |
 | `task-164.4-slice-during-seal` | `cow_map_during_seal`'s read: the same, of a slice's region |
 | `task-164.4-release-stale-entries` | `cow_reclaim_after_writeback_met_a_fault`: the range is never reclaimed |
 | `task-164.4-rebind-shared` | `cladefs_dax_map_pages`' lockdep assertion, in any rebind; `cow_rebind_against_write` |
-| `task-164.4-rebind-dirty` | `cow_rebind_against_stores`: `pages.c`'s WARN of a rebind's MAP over dirty pages; before TASK-160.4, a rebind's read-only MAP under a dirty page's writable PTE; `cow_rebind_skips_dirty` |
+| `task-164.4-rebind-dirty` | `cow_rebind_against_mapped_writes`: `pages.c`'s WARN of a rebind's MAP over dirty pages; before TASK-160.4, a rebind's read-only MAP under a dirty page's writable PTE; `cow_rebind_skips_dirty` |
 | `task-164.4-commit-failure-dropped` | `cow_commit_failed` |
-| `task-164.4-private-uncounted` | `cow_rebind_against_stores`: a write fails, its `PRIVATE` refused past `private_max` |
+| `task-164.4-private-uncounted` | `cow_rebind_against_mapped_writes`: a write fails, its `PRIVATE` refused past `private_max` |
 | `task-164.4-truncate-unwritten` | expected equivalent: a grow drops the chunk at the old end, which writes it back |
-| `task-164.9-private-failure-ignored` | `cow_private_failed`: the write whose `PRIVATE` failed stores to a page no `PRIVATE` made the VM's |
+| `task-164.9-private-failure-ignored` | `cow_private_failed`: the write whose `PRIVATE` failed writes to a page no `PRIVATE` made the VM's |
 | `task-164.2-writeback-holds-no-range` | `cow_reclaim_during_writeback`: the writeback hands Fxfs the zeros of the chunk reclaim gave its range's space to, reads the window where nothing is mapped, or the range reclaim freed (ASan) |
 | `task-283-rebind-leaves-open` | `cow_rebind_seals_open_extents`: the worker leaves the 7 pages private |
-| `task-79.49-store-fails-on-pins` | `cow_store_to_pinned_slice`: the store fails (SIGBUS), its fault's drop of the slice refusing to wait for the pin (TASK-149.31) |
+| `task-79.49-write-fails-on-pins` | `cow_write_to_pinned_slice`: the write fails (SIGBUS), its fault's drop of the slice refusing to wait for the pin (TASK-149.31) |
 | `unmapped-page-read-as-hole` | `hole_mapped_then_written`: a load of page 2, which a truncate's failed MAP of zeros left with no window page, reads the kernel's zero page where read(2) reads a write's bytes |
 
 In dax.c's copying on write as it stood at batch 2026-11-04c (CI run 41823852629), behind
@@ -350,8 +350,8 @@ all six since fixed (the functions as dax.c names them since writable DAX went):
    `dax_writeback_mapping_range`, by the DAX entries; a write fault past its iomap_end has let the
    file's semaphore go, and holds its page's entry until it returns, and `dax_writeback_one`, finding
    the entry locked mid-walk, gives up on it (`get_next_unlocked_entry` says it gone). The rebind
-   then mapped the page read-only under the writable PTE, which the host refuses a store through
-   (`a read-only MAP ... maps writably`, 15 seeds); without a rebind, a store through it after the
+   then mapped the page read-only under the writable PTE, which the host refuses a write through
+   (`a read-only MAP ... maps writably`, 15 seeds); without a rebind, a write through it after the
    writeback's copy is in no set. Fixed by write-protecting the set's pages by the page tables, as
    the sealer does (`cladefs_dax_protect`). `cow_writeback_during_fault`, seed 22.
 2. **An fsync returned before a writeback under way committed.** `cladefs_dax_write_back` returned
@@ -361,7 +361,7 @@ all six since fixed (the functions as dax.c names them since writable DAX went):
    every file with private pages now. `cow_fsync_during_writeback`, seed 962.
 3. **Private pages counted free before the host freed them.** `cladefs_dax_forget` ran before the
    UNMAP of a range, or a truncate's MAP of zeros, past which the budget gave their room to another
-   store, refused past `private_max` (`the window refused an access`). Fixed by counting them free
+   write, refused past `private_max` (`the window refused an access`). Fixed by counting them free
    once the request ends, and never if it failed: the host holds them for good then.
    `cow_truncate_held`, seed 90.
 4. **A range a writeback cleaned could never be reclaimed.** 1's other half: the DAX entry a fault
@@ -372,12 +372,12 @@ all six since fixed (the functions as dax.c names them since writable DAX went):
    a clean range's entries as it is released. `cow_reclaim_after_writeback_met_a_fault`, seed 3390
    at 1,000 operations, one of 2,000.
 5. **A writeback took pages the host hadn't made private.** An iomap marks its pages dirty before
-   their stores, which make them private on the host; a fault's store comes after the writeback that
+   their writes, which make them private on the host; a fault's write comes after the writeback that
    write-protected its PTE (1), so that the writeback copied the window page while it still mapped
-   the old block, moved the block, and Fxfs freed the old extent at the flush after: the store then
+   the old block, moved the block, and Fxfs freed the old extent at the flush after: the write then
    made its page private from the zeros the window reads there, and the next writeback wrote them
    (`a zero read` of another worker's slot). Fixed by making the dirty set private (PRIVATE) before
-   it is swapped out (`cladefs_dax_cow_own`). `cow_writeback_before_store`, seed 2802 at 1,000
+   it is swapped out (`cladefs_dax_cow_own`). `cow_writeback_before_write`, seed 2802 at 1,000
    operations.
 6. **A range or a slice asked to MAP an extent a seal in progress had yet to seal.** Fxfs says an
    extent minted before a seal is sealed from the seal's beginning (cladefs-linux's `Seal::begin_with`
@@ -420,7 +420,7 @@ dax.c's dirty and private bits, the kernel's DAX entry (its dirty tag and lock),
 private page, and each bug was code trusting one to say what another held. Since TASK-164.9 the
 bits are the state, each changed by one function, one transition each: clean to dirty and private
 by the iomap that dirties a page (`cladefs_dax_dirty`), whose `PRIVATE` has the host make it the
-VM's own before any store can land, so that dirty implies private by construction; dirty to written
+VM's own before any write can land, so that dirty implies private by construction; dirty to written
 back by writeback alone (`cladefs_dax_write_back`), from dax.c's dirty set, write-protecting by the
 page tables; written back and sealed to rebound by a rebind's MAP (`cladefs_dax_rebind`); and gone
 by an UNMAP or a truncate's MAP of zeros (`cladefs_dax_forget`, `cladefs_dax_dropped` since).
@@ -431,14 +431,14 @@ release, under the invalidate_lock, so that invalidation takes its entries; no t
 them, nor waits on an entry's lock. A swap WARNs on a dirty page not private, and a rebind's MAP on
 a dirty page.
 
-And this host refuses a store to a page no `PRIVATE` made the VM's, where doc-13's would copy it:
-the oracle of the rule, at the store, whichever path dirtied the page without it. The three bugs'
+And this host refuses a write to a page no `PRIVATE` made the VM's, where doc-13's would copy it:
+the oracle of the rule, at the write, whichever path dirtied the page without it. The three bugs'
 mutants, written again against the new code, stay caught: `task-164.4-protect-by-entries` (the
 page tables' write-protect replaced by the entries' cleaning) by `cow_writeback_during_fault`;
 `task-164.4-release-stale-entries` by `cow_reclaim_after_writeback_met_a_fault`, now that only
 writepages and a release clean tags; and `task-164.4-writeback-unowned`, which no writeback can
 reintroduce, writeback making nothing private any more, written as the iomap leaving the page to
-its store, by the first store of any `cow_` scenario. `cow_private_failed` and
+its write, by the first write of any `cow_` scenario. `cow_private_failed` and
 `task-164.9-private-failure-ignored` check that a `PRIVATE` that fails fails its write.
 
 Since TASK-160.4 the bits aren't fields of a range any more, but a module's, `pages.c`, which

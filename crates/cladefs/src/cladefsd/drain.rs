@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the daemon's drain, what SIGTERM has it do before it exits (TASK-141.4): its stores
+//! cladefs: the daemon's drain, what SIGTERM has it do before it exits (TASK-141.4): its cells
 //! closed, so durable, and their commits uploaded, as a host upgrading its daemon needs before it
 //! starts the new one (backlog doc-11, `docs/upgrading-a-host.md`). Before, SIGTERM had the health
-//! service say NOT_SERVING and the daemon exit, its stores as a crash leaves them: their last
+//! service say NOT_SERVING and the daemon exit, its cells as a crash leaves them: their last
 //! ordered commits not durable, and none of what was durable since the last upload uploaded.
 //!
 //! [`drain`] does, in order:
@@ -15,21 +15,20 @@
 //!    tenant's, their listeners shut down; the control API refuses calls (`UNAVAILABLE`); and
 //!    every VM process's connection is closed, its VM told its daemon went, as at any daemon's
 //!    exit (`CladefsdLost`), its requests received served, its commits made durable and uploaded,
-//!    the open segment's too, which a store closed leaves for the next to open it, and its store
+//!    the open segment's too, which a cell closed leaves for the next to open it, and its cell
 //!    closed, as a connection whose VM process goes closes it.
 //! 3. It waits for the connections to be gone and the control API's calls in flight to be done
 //!    ([`Work`]); closes its FUSE mount of cells, if it has one, unmounted lazily, its cells
-//!    written back and their stores closed once nothing uses it ([`super::mount::close`],
-//!    TASK-475.2); closes the versions it keeps open for forks; and waits for every store's uploader
-//!    to have uploaded what its store made durable, and stopped, as each does as its store closes
+//!    written back and their cells closed once nothing uses it ([`super::mount::close`],
+//!    TASK-475.2); closes the versions it keeps open for forks; and waits for every cell's uploader
+//!    to have uploaded what its cell made durable, and stopped, as each does as its cell closes
 //!    ([`crate::bucket::uploaders`]).
 //!
 //! All of it within a bound, `CLADEFSD_DRAIN` seconds ([`bound`]): past it, what is left is
-//! logged, and the daemon exits anyway, failing; its stores' commits that weren't durable are
+//! logged, and the daemon exits anyway, failing; its cells' commits that weren't durable are
 //! lost, as at a crash, and those durable that weren't uploaded are uploaded by the next daemon to
-//! open their stores.
+//! open their cells.
 
-use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -51,7 +50,7 @@ pub(super) async fn started() {
 }
 
 /// How long a drain takes at most when `CLADEFSD_DRAIN` names none: long enough for a few
-/// stores' last uploads, short of an orchestrator's patience before it kills.
+/// cells' last uploads, short of an orchestrator's patience before it kills.
 pub const DEFAULT_BOUND: Duration = Duration::from_secs(60);
 
 /// How long a drain takes at most: `CLADEFSD_DRAIN` seconds, or [`DEFAULT_BOUND`].
@@ -69,11 +68,11 @@ pub fn bound() -> Result<Duration, String> {
 /// What a drain left, past its bound: nothing of it if it drained.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Left {
-    /// VM processes' connections not yet gone, their stores open.
+    /// VM processes' connections not yet gone, their cells open.
     pub connections: usize,
     /// The control API's calls in flight.
     pub calls: usize,
-    /// Stores whose uploaders have not stopped: open, or closing, uploading still.
+    /// Cells whose uploaders have not stopped: open, or closing, uploading still.
     pub uploaders: usize,
     /// Whether the FUSE mount of cells was left: not closed, as a file open in it holds it, or
     /// closed failing, as a cell's write-back failed (logged).
@@ -86,7 +85,7 @@ impl std::fmt::Display for Left {
         write!(
             f,
             "{connections} VM processes' connections, {calls} control calls and {uploaders} \
-             stores' uploaders left"
+             cells' uploaders left"
         )?;
         match mount {
             true => write!(f, ", and the FUSE mount of cells"),
@@ -129,41 +128,45 @@ pub async fn drain(within: Duration) -> Result<(), Left> {
 }
 
 /// cladefs: work of a kind that a drain waits for, counted as it begins and ends ([`Work::begin`]):
-/// VM processes' connections, the control API's calls.
-pub(super) struct Work(LazyLock<watch::Sender<usize>>);
+/// VM processes' connections, the control API's calls. Its count is the daemon's: node-local, so
+/// that each simulated host counts its own, and no simulation's tasks wait on another's (board
+/// 5806).
+pub(super) struct Work(node_local::NodeLocal<watch::Sender<usize>>);
 
 impl Work {
     pub const fn new() -> Self {
-        Self(LazyLock::new(|| watch::channel(0).0))
+        Self(node_local::NodeLocal::new(|| watch::channel(0).0))
     }
 
     /// Begins work of the kind, until what it returns is dropped; or none, `None`, once the daemon
     /// drains: counted first, and given up if then the daemon drains, so that a drain that
     /// finds none counted finds none begun after, whatever their order.
     pub fn begin(&'static self) -> Option<Doing> {
-        self.0.send_modify(|count| *count += 1);
-        let doing = Doing(self);
+        let count = self.0.get();
+        count.send_modify(|count| *count += 1);
+        let doing = Doing(count);
         (!draining()).then_some(doing)
     }
 
     /// How much of it is under way.
-    pub fn count(&self) -> usize {
-        *self.0.borrow()
+    pub fn count(&'static self) -> usize {
+        *self.0.get().borrow()
     }
 
     /// Returns once none of it is under way.
-    pub(super) async fn done(&self) {
-        let mut count = self.0.subscribe();
+    pub(super) async fn done(&'static self) {
+        let mut count = self.0.get().subscribe();
         // The sender lives as long as the process.
         let _ = count.wait_for(|count| *count == 0).await;
     }
 }
 
-/// Work under way ([`Work::begin`]), until dropped.
-pub(super) struct Doing(&'static Work);
+/// Work under way ([`Work::begin`]), until dropped: of the count it began in, wherever it is
+/// dropped.
+pub(super) struct Doing(&'static watch::Sender<usize>);
 
 impl Drop for Doing {
     fn drop(&mut self) {
-        self.0.0.send_modify(|count| *count -= 1);
+        self.0.send_modify(|count| *count -= 1);
     }
 }

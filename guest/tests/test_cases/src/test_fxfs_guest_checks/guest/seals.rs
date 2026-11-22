@@ -158,14 +158,14 @@ pub(super) fn test_log_writes() {
     fs::remove_file(path("log-sealing")).unwrap();
 }
 
-/// write(2)s and stores through a mapping to the same pages of a file, while its own fsyncs
+/// write(2)s and writes through a mapping to the same pages of a file, while its own fsyncs
 /// write it back, and another file's seal, again and again. On writable DAX, as the pages
 /// moved, a write(2) in the device's gate invalidated their DAX entries, which a fault holding
 /// an entry must not wait for the gate with (the seal waits for the write(2), the write(2) for
 /// the fault): a deadlock, which the test's timeout catches. cladefs: with DAX, the file is read
-/// in from sealed extents (doc-13, TASK-164.3), and its fsyncs write back pages the stores and
+/// in from sealed extents (doc-13, TASK-164.3), and its fsyncs write back pages the writes and
 /// write(2)s dirty meanwhile, write-protecting them. Each byte has one owner, the write(2)s a
-/// page's first, the stores its second: after each of its rounds, the owner finds its byte as
+/// page's first, the writes its second: after each of its rounds, the owner finds its byte as
 /// it left it, through the mapping and read(2) alike, and the other's no older than it found
 /// it last (TASK-119.1). Then each byte holds what was written last, by each in turn alone.
 pub(super) fn test_seal_race(dax: bool) {
@@ -245,11 +245,11 @@ pub(super) fn test_seal_race(dax: bool) {
             seen[n] = other;
         }
     };
-    let store = move |round: usize, seen: &mut [u8]| {
+    let mapped_write = move |round: usize, seen: &mut [u8]| {
         for page in (0..SIZE).step_by(PAGE) {
             unsafe { ((mapped + page + 1) as *mut u8).write_volatile(round as u8) };
         }
-        check("stores", round, 1, 0, seen);
+        check("mapped writes", round, 1, 0, seen);
     };
     let write = move |round: usize, seen: &mut [u8]| {
         for page in (0..SIZE).step_by(PAGE) {
@@ -269,18 +269,18 @@ pub(super) fn test_seal_race(dax: bool) {
                 fs::File::open(path("seal-race-other")).unwrap().sync_all().unwrap();
             }
         });
-        let storer = scope.spawn(move || {
+        let mapped_writer = scope.spawn(move || {
             let mut seen = [0; SIZE / PAGE];
-            (0..ROUNDS).for_each(|round| store(round, &mut seen));
+            (0..ROUNDS).for_each(|round| mapped_write(round, &mut seen));
         });
         let mut seen = [0; SIZE / PAGE];
         (0..ROUNDS).for_each(|round| write(round, &mut seen));
         sealing.store(false, Ordering::Relaxed);
-        storer.join().unwrap();
+        mapped_writer.join().unwrap();
     });
 
     write(ROUNDS, &mut [0; SIZE / PAGE]);
-    store(ROUNDS, &mut [0; SIZE / PAGE]);
+    mapped_write(ROUNDS, &mut [0; SIZE / PAGE]);
     let mut expected = vec![0; SIZE];
     for page in (0..SIZE).step_by(PAGE) {
         (expected[page], expected[page + 1]) = (ROUNDS as u8, ROUNDS as u8);

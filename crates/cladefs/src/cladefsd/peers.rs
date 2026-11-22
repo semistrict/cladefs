@@ -4,7 +4,7 @@
 
 //! cladefs: the daemon's part in the hosts sharing its bucket (TASK-406.2, `crate::bucket::peers`):
 //! it serves them parts of the bucket's objects over gRPC, at `CLADEFSD_PEER_ADDRESS`
-//! (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask them for the parts they own,
+//! (`proto/cladefs/peer/v1/peer.proto`), and its cells' fetchers ask them for the parts they own,
 //! `CLADEFSD_PEERS` naming them at its start and the control API's `SetPeers` at any time.
 //! What it serves comes from the host's memory and part cache, which it needs, or from the bucket
 //! once, however many hosts ask at once ([`crate::bucket::serving_peers`]).
@@ -65,8 +65,8 @@ static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
 
 /// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
 /// on `listening`, bound there (or, under madsim, its address on the simulated network), and its
-/// stores' fetchers ask them, `peers` at first (`CLADEFSD_PEERS`), for the parts they own: before
-/// any store opens. It needs the host's part cache, which keeps what it serves.
+/// cells' fetchers ask them, `peers` at first (`CLADEFSD_PEERS`), for the parts they own: before
+/// any cell opens. It needs the host's part cache, which keeps what it serves.
 pub async fn start(
     address: &str,
     listening: Listening,
@@ -120,7 +120,13 @@ pub async fn start(
             std::process::exit(1);
         }
     });
-    serving.map_err(|err| failed(&err.to_string()))
+    serving.map_err(|err| failed(&err.to_string()))?;
+    // cladefs: the migrations to it their sources abandoned, given up (board 5734).
+    if crate::ephemeral_host::host().is_ok() {
+        let idle = super::migration::idle().map_err(|err| failed(&err))?;
+        runtime.spawn(super::migration::target::reap(idle));
+    }
+    Ok(())
 }
 
 /// cladefs: what the daemon serves its peers on: a TCP listener, bound; under madsim, its address
@@ -161,7 +167,7 @@ fn check_address(address: &str) -> Result<(), String> {
     }
 }
 
-/// What the daemon's stores' fetchers asked its peers, and the parts it served them and had not as
+/// What the daemon's cells' fetchers asked its peers, and the parts it served them and had not as
 /// they asked, if it serves peers.
 pub(super) fn counts() -> Option<(crate::bucket::peers::Counts, u64, u64)> {
     let counts = crate::bucket::peers()?.counts();
@@ -422,18 +428,16 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigratePrepareRequest>,
     ) -> Result<Response<proto::MigratePrepareResponse>, Status> {
-        let incarnation = super::migration::target::prepare(request.into_inner()).await?;
-        Ok(Response::new(proto::MigratePrepareResponse { incarnation }))
+        let (incarnation, token) = super::migration::target::prepare(request.into_inner()).await?;
+        Ok(Response::new(proto::MigratePrepareResponse { incarnation, token }))
     }
 
     async fn migrate_file(
         &self,
         request: Request<proto::MigrateFileRequest>,
     ) -> Result<Response<proto::MigrateFileResponse>, Status> {
-        let request = request.into_inner();
-        let written = super::run::off_the_runtime(move || super::migration::target::file(request));
-        let written = written.await.map_err(|err| Status::internal(format!("writing: {err}")))?;
-        written.map(|()| Response::new(proto::MigrateFileResponse {}))
+        super::migration::target::file(request.into_inner()).await?;
+        Ok(Response::new(proto::MigrateFileResponse {}))
     }
 
     async fn migrate_hand_over(
@@ -450,6 +454,22 @@ impl proto::peer_server::Peer for Server {
     ) -> Result<Response<proto::MigrateAbortResponse>, Status> {
         super::migration::target::abort(request.into_inner()).await?;
         Ok(Response::new(proto::MigrateAbortResponse {}))
+    }
+
+    async fn migrate_renew(
+        &self,
+        request: Request<proto::MigrateRenewRequest>,
+    ) -> Result<Response<proto::MigrateRenewResponse>, Status> {
+        super::migration::target::renew(request.into_inner().migration)?;
+        Ok(Response::new(proto::MigrateRenewResponse {}))
+    }
+
+    async fn migrate_release(
+        &self,
+        request: Request<proto::MigrateReleaseRequest>,
+    ) -> Result<Response<proto::MigrateReleaseResponse>, Status> {
+        super::migration::target::release(request.into_inner().migration).await?;
+        Ok(Response::new(proto::MigrateReleaseResponse {}))
     }
 
     async fn read_log(

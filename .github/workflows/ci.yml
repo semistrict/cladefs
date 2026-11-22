@@ -66,7 +66,8 @@ jobs:
             packages: libclang-dev
     env:
       CLADEFS_TEST_PARTS: ${{ matrix.parts }}
-      # The madsim part's: 200 seeds of each full-stack profile on each push (TASK-685.8).
+      # The madsim part's: 200 seeds of each full-stack profile on each push (TASK-685.8), failures
+      # crates/cladefs/tests/madsim-known lists said as known, any other failing it (board 2912).
       CLADEFS_MADSIM_SEEDS: 200
     steps:
       # With vendor/firecracker, whose seccompiler cladefs's tests compile Firecracker's seccomp
@@ -140,10 +141,12 @@ jobs:
   # POSIX's permissions, owners, times and errnos, which the guest's pjdfstest case checks only in
   # the nightly (TASK-149.38). Failures but scripts/pjdfstest-fuse-known's fail it. A debug build, its
   # assertions and overflow checks on.
-  # The workspace's suite and the Shuttle suites on macOS, scripts/test.sh's parts as a Mac runs
-  # them: what cladefs compiles for macOS alone, and its tests, ran on laptops alone, so a regression
-  # there landed green (TASK-149.20.2): physmem's physical map, extent_store's syncs (F_FULLFSYNC),
-  # extent_bucket's cache, cladefs's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
+  # The workspace's suite, the Shuttle suites and the full-stack simulation on macOS,
+  # scripts/test.sh's parts as a Mac runs them: what cladefs compiles for macOS alone, and its tests,
+  # ran on laptops alone, so a regression there landed green (TASK-149.20.2): physmem's physical
+  # map, extent_store's syncs (F_FULLFSYNC), extent_bucket's cache, cladefs's storage I/O; and the
+  # daemon's build under madsim, which runs on Macs too, its default 20 seeds (board 2912). The
+  # guest's, the VMM's and the daemon's own are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
     runs-on: macos-15
@@ -151,7 +154,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parts: [workspace, shuttle]
+        parts: [workspace, shuttle, madsim]
     env:
       CLADEFS_TEST_PARTS: ${{ matrix.parts }}
     steps:

@@ -10,26 +10,34 @@
 //! bucket client, part cache, upload budget and drain.
 //!
 //! The mount is made as the daemon starts, if `CLADEFSD_MOUNT` names a mount point
-//! ([`Config::from_env`]), and closed as it drains ([`close`]): unmounted lazily, its cells'
-//! cells written back and their stores closed once nothing uses them, within the drain's
+//! ([`Config::from_env`]), and closed as it drains ([`close`]): unmounted lazily, its
+//! cells written back and closed once nothing uses them, within the drain's
 //! bound. Unmounted otherwise meanwhile (`umount`), it serves no more, and the daemon goes on
-//! serving VMs; its stores close as it drains.
+//! serving VMs; its cells close as it drains.
+//!
+//! cladefs: under madsim, a simulated host mounts nothing, FUSE being outside the simulation
+//! (doc-24): [`start`] refuses, and [`close`] has nothing to close, on macOS too, whose FUSE is
+//! not Linux's (board 2912).
 
 use crate::error::Error;
-use crate::fuse::control::{self, Stores};
-use crate::fuse::{MountOptions, StoresMount};
+#[cfg(not(madsim))]
+use crate::fuse::control::{self, CellSource};
+#[cfg(not(madsim))]
+use crate::fuse::{CellsMount, MountOptions};
 use std::path::PathBuf;
+#[cfg(not(madsim))]
 use std::sync::Mutex;
+#[cfg(not(madsim))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Where the daemon mounts its cells, and keeps their cells' stores.
+/// Where the daemon mounts its cells, and keeps their cell directories.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The mount point, a directory: `CLADEFSD_MOUNT`.
     pub mountpoint: PathBuf,
-    /// The directory the attached cells' stores are in, each at `TENANT/CELL`:
+    /// The directory the attached cell directories are in, each at `TENANT/CELL`:
     /// `CLADEFSD_MOUNT_STORES`.
-    pub stores: PathBuf,
+    pub cell_dirs: PathBuf,
     /// Whether users other than the daemon's may use the mount, as its files' permissions say
     /// (FUSE's `allow_other`): `CLADEFSD_MOUNT_ALLOW_OTHER=1`.
     pub allow_other: bool,
@@ -51,9 +59,9 @@ impl Config {
             }
             return Ok(None);
         };
-        let stores = var("CLADEFSD_MOUNT_STORES").ok_or_else(|| {
+        let cell_dirs = var("CLADEFSD_MOUNT_STORES").ok_or_else(|| {
             "CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for its \
-             cells' stores"
+             cell directories"
                 .to_owned()
         })?;
         let allow_other = match var("CLADEFSD_MOUNT_ALLOW_OTHER").as_deref() {
@@ -63,37 +71,43 @@ impl Config {
                 return Err(format!("CLADEFSD_MOUNT_ALLOW_OTHER is 0 or 1, not {other}"));
             }
         };
-        Ok(Some(Self { mountpoint: mountpoint.into(), stores: stores.into(), allow_other }))
+        Ok(Some(Self { mountpoint: mountpoint.into(), cell_dirs: cell_dirs.into(), allow_other }))
     }
 }
 
 /// The mount, and where its cells come from: from [`start`] until [`close`] takes it.
-static MOUNT: Mutex<Option<(StoresMount, Stores)>> = Mutex::new(None);
+#[cfg(not(madsim))]
+static MOUNT: Mutex<Option<(CellsMount, CellSource)>> = Mutex::new(None);
 
 /// Whether the daemon mounted its cells ([`start`]).
+#[cfg(not(madsim))]
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 
 /// Whether [`close`] closed the mount, its cells written back.
+#[cfg(not(madsim))]
 static CLOSED: AtomicBool = AtomicBool::new(false);
 
 /// Mounts the daemon's directory of cells as `config` says, its cells taken from the bucket at
 /// `bucket`, the host's: before the control API serves, whose Mount service it is ([`service`]).
+#[cfg(not(madsim))]
 pub fn start(config: &Config, bucket: String) -> Result<(), Error> {
-    std::fs::create_dir_all(&config.stores).map_err(|err| {
-        Error::new(anyhow::Error::new(err).context(format!("making {}", config.stores.display())))
+    std::fs::create_dir_all(&config.cell_dirs).map_err(|err| {
+        Error::new(
+            anyhow::Error::new(err).context(format!("making {}", config.cell_dirs.display())),
+        )
     })?;
     let mut options = MountOptions::new();
     options.allow_other(config.allow_other);
-    let mount = options.mount_stores(&config.mountpoint).map_err(|err| {
+    let mount = options.mount_cells(&config.mountpoint).map_err(|err| {
         err.context(format!("mounting a directory of cells at {}", config.mountpoint.display()))
     })?;
     log::info!(
-        "cladefsd: cells mounted at {}, their stores in {}",
+        "cladefsd: cells mounted at {}, their cell directories in {}",
         config.mountpoint.display(),
-        config.stores.display()
+        config.cell_dirs.display()
     );
-    let stores = Stores { dir: config.stores.clone(), bucket };
-    let replaced = MOUNT.lock().unwrap().replace((mount, stores));
+    let cells = CellSource { dir: config.cell_dirs.clone(), bucket };
+    let replaced = MOUNT.lock().unwrap().replace((mount, cells));
     assert!(replaced.is_none(), "the daemon mounts its cells once");
     MOUNTED.store(true, Ordering::Release);
     Ok(())
@@ -106,19 +120,33 @@ pub(super) fn service() -> Option<
     control::proto::mount_server::MountServer<impl control::proto::mount_server::Mount + use<>>,
 > {
     let mount = MOUNT.lock().unwrap();
-    let (mount, stores) = mount.as_ref()?;
-    Some(control::service(mount.server(), stores.clone()))
+    let (mount, cells) = mount.as_ref()?;
+    Some(control::service(mount.server(), cells.clone()))
+}
+
+/// cladefs: under madsim, refused: a simulated host mounts no cells, FUSE being outside the
+/// simulation (doc-24).
+#[cfg(madsim)]
+pub fn start(config: &Config, _: String) -> Result<(), Error> {
+    Err(Error::new(anyhow::anyhow!(
+        "a simulated host mounts no cells at {}: FUSE is outside the simulation",
+        config.mountpoint.display()
+    )))
 }
 
 /// Whether the daemon mounted its cells and has not closed them, as [`close`] does, or failed to:
 /// what a drain past its bound left.
 pub(super) fn left() -> bool {
-    MOUNTED.load(Ordering::Acquire) && !CLOSED.load(Ordering::Acquire)
+    #[cfg(not(madsim))]
+    return MOUNTED.load(Ordering::Acquire) && !CLOSED.load(Ordering::Acquire);
+    #[cfg(madsim)]
+    false
 }
 
 /// Closes the daemon's mount, if it has one, as it drains: unmounted lazily, so at once from its
-/// mount point, and once nothing uses it, its cells written back and their stores closed. Holds
+/// mount point, and once nothing uses it, its cells written back and closed. Holds
 /// no thread of the runtime while it waits.
+#[cfg(not(madsim))]
 pub(super) async fn close() -> Result<(), Error> {
     let Some((mount, _)) = MOUNT.lock().unwrap().take() else { return Ok(()) };
     let mountpoint = mount.mountpoint().to_owned();
@@ -132,6 +160,12 @@ pub(super) async fn close() -> Result<(), Error> {
     })?;
     CLOSED.store(true, Ordering::Release);
     log::info!("cladefsd: the cells mounted at {} closed", mountpoint.display());
+    Ok(())
+}
+
+/// cladefs: under madsim, nothing to close: a simulated host mounts no cells ([`start`]).
+#[cfg(madsim)]
+pub(super) async fn close() -> Result<(), Error> {
     Ok(())
 }
 
@@ -151,16 +185,20 @@ mod tests {
     }
 
     #[test]
-    fn a_mount_point_needs_a_directory_of_stores() {
+    fn a_mount_point_needs_a_directory_of_cells() {
         assert_eq!(
             config(&[("CLADEFSD_MOUNT", "/m")]),
             Err("CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for its \
-                 cells' stores"
+                 cell directories"
                 .to_owned())
         );
         assert_eq!(
             config(&[("CLADEFSD_MOUNT", "/m"), ("CLADEFSD_MOUNT_STORES", "/s")]),
-            Ok(Some(Config { mountpoint: "/m".into(), stores: "/s".into(), allow_other: false }))
+            Ok(Some(Config {
+                mountpoint: "/m".into(),
+                cell_dirs: "/s".into(),
+                allow_other: false
+            }))
         );
         assert_eq!(
             config(&[
@@ -168,7 +206,7 @@ mod tests {
                 ("CLADEFSD_MOUNT_STORES", "/s"),
                 ("CLADEFSD_MOUNT_ALLOW_OTHER", "1")
             ]),
-            Ok(Some(Config { mountpoint: "/m".into(), stores: "/s".into(), allow_other: true }))
+            Ok(Some(Config { mountpoint: "/m".into(), cell_dirs: "/s".into(), allow_other: true }))
         );
     }
 

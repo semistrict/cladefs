@@ -51,9 +51,9 @@ struct KernelReport {
     report: String,
 }
 
-/// cladefs: the first report of each kernel of a test's VMs that complained, on their consoles in its
-/// directory `dir`, saying each to standard error: what went wrong first, which the soft lockups
-/// after an oops push out of a console's tail and a log's (TASK-311).
+/// cladefs: the first report of each kernel of a test's VMs that complained, on their consoles in
+/// its directory `dir`, saying each to standard error: what went wrong first, which the soft
+/// lockups after an oops push out of a console's tail and a log's (TASK-311).
 fn first_kernel_reports(dir: &Path) -> Vec<KernelReport> {
     let consoles = consoles(dir).unwrap_or_else(|err| {
         eprintln!("the consoles in {}: {err}", dir.display());
@@ -75,9 +75,9 @@ fn first_kernel_reports(dir: &Path) -> Vec<KernelReport> {
     reports
 }
 
-/// cladefs: the checks a test's guest said failed, as the checks suites' guest says them as it ends,
-/// a line `FAILED: a, b`, or as one outruns its budget, `FAILED: a, still running after …`: the
-/// names of checks, identifiers, the rest of such a line left out.
+/// cladefs: the checks a test's guest said failed, as the checks suites' guest says them as it
+/// ends, a line `FAILED: a, b`, or as one outruns its budget, `FAILED: a, still running after …`:
+/// the names of checks, identifiers, the rest of such a line left out.
 fn failed_checks(stdout: &str) -> Vec<String> {
     let identifier = |word: &&str| {
         !word.is_empty()
@@ -159,7 +159,8 @@ fn kill_cleanup_pids(test_dir: &Path) {
 enum Isolation {
     /// `unshare --net`, as root: root maps its own IDs.
     Net,
-    /// `buildah unshare`, mapping the user's subordinate IDs, then `unshare --net`: as any other user.
+    /// `buildah unshare`, mapping the user's subordinate IDs, then `unshare --net`: as any other
+    /// user.
     MappedNet,
     /// None, and why.
     None(&'static str),
@@ -171,7 +172,7 @@ struct Host {
     root: bool,
     /// CLADEFS_NO_UNSHARE: set, the cases run as they are.
     no_unshare: bool,
-    /// CLADEFSD_BUCKET, the bucket cases' own extent daemons keep their stores in.
+    /// CLADEFSD_BUCKET, the bucket cases' own extent daemons keep their cells in.
     bucket: Option<String>,
     has: fn(&str) -> bool,
 }
@@ -188,9 +189,9 @@ impl Host {
     }
 }
 
-/// cladefs: whether `command` is an executable file in a directory of PATH. Not whether it runs with
-/// `--version`, which `ip` refuses: the hosts ran every case unisolated, `ip` taken for missing
-/// (GCE r961).
+/// cladefs: whether `command` is an executable file in a directory of PATH. Not whether it runs
+/// with `--version`, which `ip` refuses: the hosts ran every case unisolated, `ip` taken for
+/// missing (GCE r961).
 fn on_path(command: &str) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     let Some(path) = std::env::var_os("PATH") else { return false };
@@ -204,8 +205,8 @@ fn on_path(command: &str) -> bool {
 /// cladefs: how a case runs on `host`. Root, as on the test host, unshares its network itself:
 /// `buildah unshare` as root, with no subordinate IDs, entered user namespace after user namespace
 /// till its memfd's name, which grows with each, was past the kernel's 249 bytes (`memfd_create:
-/// invalid argument`), which once had the hosts run every case unisolated (CLADEFS_NO_UNSHARE). A case
-/// whose own extent daemons keep their stores in a bucket over the network, as a GCS run's do,
+/// invalid argument`), which once had the hosts run every case unisolated (CLADEFS_NO_UNSHARE). A
+/// case whose own extent daemons keep their cells in a bucket over the network, as a GCS run's do,
 /// runs in the host's network.
 fn isolation(host: &Host) -> Isolation {
     let networked = |url: &str| !url.starts_with("file://") && !url.starts_with("memory://");
@@ -405,7 +406,7 @@ fn run_single_test(
     // Runs after check() regardless of outcome, so leaked processes are
     // cleaned up even if the test crashed.
     kill_cleanup_pids(&test_dir);
-    // cladefs: a test that passed fails if the run's stores are to be encrypted and its are not
+    // cladefs: a test that passed fails if the run's cells are to be encrypted and its are not
     // (TASK-411.15): checked once its processes are gone, before its directory is.
     let outcome = match outcome {
         TestOutcome::Pass | TestOutcome::Report(_)
@@ -420,7 +421,7 @@ fn run_single_test(
                     Err(err) => TestOutcome::Fail(format!("{err:#}")),
                 },
                 Err(err) => {
-                    TestOutcome::Fail(format!("checking its stores are encrypted: {err:#}"))
+                    TestOutcome::Fail(format!("checking its cells are encrypted: {err:#}"))
                 }
             }
         }
@@ -604,8 +605,8 @@ fn write_github_summary(
     Ok(())
 }
 
-/// cladefs: the most of a log a GitHub summary shows, its last bytes: half of the 1 MiB GitHub keeps
-/// of a step's summary, the rest for the error and the kernels' first reports above it.
+/// cladefs: the most of a log a GitHub summary shows, its last bytes: half of the 1 MiB GitHub
+/// keeps of a step's summary, the rest for the error and the kernels' first reports above it.
 const MAX_LOG_SIZE: usize = 512 * 1024;
 
 /// cladefs: the last MAX_LOG_SIZE bytes of `log` at most, from a character's start, saying so if
@@ -668,8 +669,8 @@ fn outcome_json(result: &TestResult, run: &serde_json::Value, repeat: u32) -> se
     })
 }
 
-/// cladefs: the command that runs `case` again on a host as it ran (scripts/test-host.sh), its knobs
-/// `knobs`.
+/// cladefs: the command that runs `case` again on a host as it ran (scripts/test-host.sh), its
+/// knobs `knobs`.
 fn replay(case: &str, knobs: &BTreeMap<String, String>) -> String {
     let mut words =
         vec!["CLADEFS_WORKSPACE_TESTS=0".to_owned(), format!("CLADEFS_E2E_TEST={case}")];
@@ -681,8 +682,8 @@ fn replay(case: &str, knobs: &BTreeMap<String, String>) -> String {
     words.join(" ")
 }
 
-/// cladefs: `value` as a shell reads it back: as it is if it holds nothing a shell treats specially,
-/// in single quotes otherwise.
+/// cladefs: `value` as a shell reads it back: as it is if it holds nothing a shell treats
+/// specially, in single quotes otherwise.
 fn shell_word(value: &str) -> String {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:=,@%+-".contains(&b);
     if !value.is_empty() && value.bytes().all(plain) {
@@ -824,9 +825,9 @@ enum CliCommand {
         tmp_dir: PathBuf,
     },
     /// cladefs: makes a local KMS in DIR holding a KEK for each tenant the cases use, for a run's
-    /// stores to be encrypted under (CLADEFS_KMS=local://DIR, TASK-411.15)
+    /// cells to be encrypted under (CLADEFS_KMS=local://DIR, TASK-411.15)
     Kms { dir: PathBuf },
-    /// cladefs: checks, holding no key, that the stores under DIRS and the buckets BUCKETS, whole,
+    /// cladefs: checks, holding no key, that the cells under DIRS and the buckets BUCKETS, whole,
     /// are encrypted: the run's own bucket and part cache, at its end (TASK-411.15)
     Encrypted {
         /// A bucket, by its URL, checked whole
@@ -934,9 +935,9 @@ fn main() -> anyhow::Result<()> {
             repeat,
         } => {
             sockets_fit(&std::env::temp_dir())?;
-            // cladefs: the stores its cases make and open in its own processes are encrypted under the
-            // host's KMS: none named (CLADEFS_KMS, CLADEFS_MASTER_KEY), it refuses to start, as every
-            // process that opens stores does (TASK-411.28); scripts/test-e2e.sh names one.
+            // cladefs: the cells its cases make and open in its own processes are encrypted under
+            // the host's KMS: none named (CLADEFS_KMS, CLADEFS_MASTER_KEY), it refuses to start, as
+            // every process that opens cells does (TASK-411.28); scripts/test-e2e.sh names one.
             encrypted::require_kms()?;
             let record = outcome.map(|outcome| Record { outcome, run, repeat });
             run_tests(&test_case, base_dir, keep_all, github_summary, record)

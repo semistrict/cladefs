@@ -8,11 +8,11 @@
 //!
 //! The protocol (doc-4, Snapshots): the guest's filesystem is frozen, nothing open on the device
 //! (`VIRTIO_EXTENT_T_FREEZE`), and the VM paused, its requests in flight served; the device forks
-//! its store then, to the version the snapshot holds of it, and records the window's mappings
+//! its cell then, to the version the snapshot holds of it, and records the window's mappings
 //! ([`Device::take_snapshot`](crate::Device::take_snapshot)). A VM restored from the snapshot opens
-//! a store of its own, forked from that version if it doesn't exist (each restore its own, given
+//! a cell of its own, forked from that version if it doesn't exist (each restore its own, given
 //! its path as it loads), and maps the window as it was, where it was in guest memory
-//! ([`Device::restore`](crate::Device::restore)); its guest learns its store's cell as its
+//! ([`Device::restore`](crate::Device::restore)); its guest learns its cell ID as its
 //! filesystem thaws.
 //!
 //! [`VIRTIO_EXTENT_VERSION`]: crate::protocol::VIRTIO_EXTENT_VERSION
@@ -26,12 +26,12 @@ use crate::config::{CacheType, Config};
 /// protocol version. Firecracker's snapshots hold its fields in this order, after those two.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
-    /// Its configuration: its store's path is the one a restore opens, unless the snapshot's
+    /// Its configuration: its cell's path is the one a restore opens, unless the snapshot's
     /// load overrides it.
     pub config: ConfigState,
     /// Where the window was in guest memory, if the device has one.
     pub window_addr: Option<u64>,
-    /// The version of the store's cell the snapshot holds, which its restores fork, on any host.
+    /// The version of the cell the snapshot holds, which its restores fork, on any host.
     pub version: cladefs::CellVersion,
     /// The window's mappings.
     pub mappings: Vec<MappingState>,
@@ -145,7 +145,7 @@ impl From<&MappingState> for cladefs::WindowMapping {
     }
 }
 
-/// What a snapshot of the device holds of its store (TASK-39.1): the version of its cell it was
+/// What a snapshot of the device holds of its cell (TASK-39.1): the version of its cell it was
 /// taken at, which each VM restored from it forks, and the window's mappings then, which the
 /// restored VM's window maps again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,9 +171,9 @@ pub enum SnapshotError {
          snapshot, and thaw it after)"
     )]
     NotFrozen(String),
-    #[error("Extent device {0}: it follows a store read-only, which a snapshot doesn't hold")]
+    #[error("Extent device {0}: it follows a cell read-only, which a snapshot doesn't hold")]
     ReadOnly(String),
-    #[error("Extent device {0}: cannot make a version of its store's cell: {1}")]
+    #[error("Extent device {0}: cannot make a version of its cell: {1}")]
     Version(String, cladefs::Errno),
     #[error("Extent device {0}: cannot list its DAX window's mappings: {1}")]
     Mappings(String, cladefs::Errno),

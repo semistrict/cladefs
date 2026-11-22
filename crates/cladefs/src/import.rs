@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Container images as filesystems (TASK-39.5): an image's layers, tar archives of what each
-//! changes, applied in turn to a [`Filesystem`], such as a base store's, which VMs boot forks of.
+//! changes, applied in turn to a [`Filesystem`], such as a base cell's, which VMs boot forks of.
 //!
 //! A layer is applied as the OCI image spec says (`layer.md`, "Applying Changesets"):
 //!
@@ -35,13 +35,17 @@ use crate::filesystem::{Filesystem, Node};
 use crate::node::{FileType, Owner, SetAttr, SetTime, XattrMode};
 use crate::storage::Storage;
 use anyhow::{Context as _, bail, ensure};
+use futures::StreamExt as _;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 
 /// The prefix of a whiteout's name.
 const WHITEOUT: &[u8] = b".wh.";
@@ -56,11 +60,11 @@ const HOLE: usize = 4096;
 /// The root's path.
 const ROOT: &[u8] = b"";
 
-/// Makes a store at `path`, which must not exist, of `capacity` bytes, holding a filesystem of
-/// the image `image`, checked: the image `reference` names in an OCI image layout (see
-/// [`OciImage::open`]), or, if `image` is a file, the image of that one layer, which `reference`
-/// cannot name. A store that cannot be made whole is deleted.
-pub async fn store(
+/// Makes a base: a cell directory at `path`, which must not exist, of `capacity` bytes, holding a
+/// filesystem of the image `image`, checked: the image `reference` names in an OCI image layout
+/// (see [`OciImage::open`]), or, if `image` is a file, the image of that one layer, which
+/// `reference` cannot name. A cell that cannot be made whole is deleted.
+pub async fn make_base(
     path: impl AsRef<Path>,
     capacity: u64,
     image: &Path,
@@ -68,68 +72,93 @@ pub async fn store(
 ) -> Result<(), Error> {
     let keeping = crate::host_cell::keeping().map_err(Error::new)?;
     let made = (capacity, crate::host_cell::DEFAULT_TENANT);
-    make_store(path.as_ref(), made, keeping, |storage| fill(storage, image, reference)).await
+    make_base_dir(path.as_ref(), made, keeping, |storage| fill(storage, image, reference)).await
 }
 
-/// cladefs: makes a store at `path` as [`store`] does, its cell kept as `keeping` says: as the
-/// extent daemon's stores keep theirs, with the host's cache of the bucket's objects, which what
+/// cladefs: makes a base at `path` as [`make_base`] does, its cell kept as `keeping` says: as the
+/// extent daemon's cells keep theirs, with the host's cache of the bucket's objects, which what
 /// the bucket acknowledged of the image goes into, and the import's check reads (TASK-237).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) async fn store_keeping(
+pub(crate) async fn make_base_keeping(
     path: impl AsRef<Path>,
     (capacity, tenant): (u64, u64),
     (image, reference): (&Path, Option<&str>),
     keeping: local_cell::upload::Options,
 ) -> Result<(), Error> {
     let filled = |storage| fill(storage, image, reference);
-    make_store(path.as_ref(), (capacity, tenant), keeping, filled).await
+    make_base_dir(path.as_ref(), (capacity, tenant), keeping, filled).await
 }
 
-/// Makes a store at `path`, which must not exist, of `capacity` bytes, a new cell
-/// of `tenant`'s, which `fill` fills. A store
-/// that `fill` fails to fill, or panics filling, is deleted, as is one whose making is given up
-/// on, its future dropped as `fill` fills it.
-async fn make_store<F: Future<Output = anyhow::Result<()>>>(
+/// Makes a cell directory at `path`, which must not exist, of `capacity` bytes, a new cell
+/// of `tenant`'s, which `fill` fills. A cell that `fill` fails to fill, or panics filling, is
+/// deleted, as is one whose making is given up on, its future dropped as `fill` fills it.
+async fn make_base_dir<F: Future<Output = anyhow::Result<()>>>(
     path: &Path,
     (capacity, tenant): (u64, u64),
     keeping: local_cell::upload::Options,
     fill: impl FnOnce(Storage) -> F,
 ) -> Result<(), Error> {
-    // cladefs: what an import its process died in left, unmade, is no store: made anew (TASK-196).
+    // cladefs: what an import its process died in left, unmade, is no cell: made anew (TASK-196).
     if Storage::is_unmade(path) {
-        Storage::delete(path)?;
+        Storage::delete(path).await?;
     }
-    let storage = Storage::create_unmade_keeping(path, (capacity, tenant), keeping)?;
-    let unfinished = Unfinished(path);
-    fill(storage).await.map_err(Error::new)?;
-    // Whole once filled, and closed: until then, its making's dying leaves no store.
+    let storage = Storage::create_unmade_keeping(path, (capacity, tenant), keeping).await?;
+    let unfinished = Unfinished(Some(path.to_owned()));
+    // The future filling it, which owns its storage, closes it as it ends, failed or not, before
+    // the deletion, which needs it closed.
+    if let Err(err) = fill(storage).await {
+        unfinished.delete().await;
+        return Err(Error::new(err));
+    }
+    // Whole once filled, and closed: until then, its making's dying leaves no cell.
     Storage::made(path)?;
     unfinished.finish();
     Ok(())
 }
 
-/// A store being made, at the path it holds, which is deleted as this drops unless it is
-/// [`finish`](Self::finish)ed: as filling it fails, or panics, or the future making it is dropped.
-/// The future filling it, which owns its storage, is made after this, so it is dropped first,
-/// closing the storage, which [`Storage::delete`] needs closed.
-struct Unfinished<'a>(&'a Path);
+/// A cell being made, at the path it holds, which is deleted unless it is
+/// [`finish`](Self::finish)ed: as filling it fails ([`delete`](Self::delete)), or panics, or the
+/// future making it is dropped, as this drops. The future filling it, which owns its storage, is
+/// made after this, so it is dropped first, closing the storage, which [`Storage::delete`] needs
+/// closed.
+struct Unfinished(Option<PathBuf>);
 
-impl Unfinished<'_> {
-    /// Keeps the store, made whole.
-    fn finish(self) {
-        std::mem::forget(self);
+impl Unfinished {
+    /// Keeps the cell, made whole.
+    fn finish(mut self) {
+        self.0 = None;
+    }
+
+    /// Deletes the cell, half made.
+    async fn delete(mut self) {
+        delete_half_made(self.0.take().expect("a cell being made")).await;
     }
 }
 
-impl Drop for Unfinished<'_> {
+/// Deletes the cell half made at `path` ([`Unfinished`]).
+async fn delete_half_made(path: PathBuf) {
+    if let Err(err) = Storage::delete(&path).await {
+        log::error!("cladefs: deleting the cell half made at {}: {err:#}", path.display());
+    }
+}
+
+impl Drop for Unfinished {
+    /// cladefs: given up on, or panicking: deleted by a task of the runtime the making ran on, its
+    /// own; or, on a thread no runtime runs, waiting here, an outermost entry's (board 5614). A
+    /// task its host dies before leaves the cell unmade, which its next making deletes
+    /// (TASK-196).
     fn drop(&mut self) {
-        if let Err(err) = Storage::delete(self.0) {
-            log::error!("cladefs: deleting the store half made at {}: {err:#}", self.0.display());
+        let Some(path) = self.0.take() else { return };
+        let deleting = delete_half_made(path);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn(deleting)),
+            Err(_) => local_cell::upload::wait_on(deleting),
         }
     }
 }
 
-/// Formats `storage` with a filesystem of the image `image`, as [`store`] has it, and checks it.
+/// Formats `storage` with a filesystem of the image `image`, as [`make_base`] has it, and checks
+/// it.
 async fn fill(storage: Storage, image: &Path, reference: Option<&str>) -> anyhow::Result<()> {
     let fs = Filesystem::format(storage).await?;
     let imported = async {
@@ -145,8 +174,11 @@ async fn fill(storage: Storage, image: &Path, reference: Option<&str>) -> anyhow
     }
     .await;
     let storage = fs.close().await?;
-    imported?;
-    storage.check().await?;
+    if let Err(err) = imported {
+        storage.close().await;
+        return Err(err);
+    }
+    storage.check().await?.close().await;
     Ok(())
 }
 
@@ -220,14 +252,14 @@ impl Importer {
     }
 
     /// Applies the layer `layer`, a tar archive, gzipped or not, read as it is applied.
-    pub async fn apply(&mut self, layer: impl Read) -> Result<(), Error> {
+    pub async fn apply(&mut self, layer: impl Read + Send) -> Result<(), Error> {
         self.apply_layer(layer).await.map_err(Error::new)
     }
 
-    async fn apply_layer<'r>(&mut self, layer: impl Read + 'r) -> anyhow::Result<()> {
+    async fn apply_layer<'r>(&mut self, layer: impl Read + Send + 'r) -> anyhow::Result<()> {
         let mut layer = BufReader::with_capacity(CHUNK, layer);
         let magic = layer.fill_buf().context("reading the layer")?;
-        let layer: Box<dyn Read + 'r> = match magic {
+        let layer: Box<dyn Read + Send + 'r> = match magic {
             [0x1f, 0x8b, ..] => Box::new(flate2::bufread::MultiGzDecoder::new(layer)),
             [0x28, 0xb5, 0x2f, 0xfd, ..] => {
                 return Err(refused("zstd-compressed layers are not supported"));
@@ -236,10 +268,21 @@ impl Importer {
         };
         self.made.clear();
         self.kept.clear();
-        let mut archive = tar::Archive::new(layer);
-        for entry in archive.entries().context("reading the layer")? {
-            let mut entry = entry.context("reading the layer")?;
-            let path = entry.path_bytes().into_owned();
+        // cladefs: walked as it is awaited, its entries held across the filesystem's awaits, which
+        // the `tar` crate's, not `Send`, were not (board 5614).
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut archive = tokio_tar::Archive::new(InPlace { layer, failed: failed.clone() });
+        let mut entries = archive.entries().context("reading the layer")?;
+        while let Some(entry) = entries.next().await {
+            // What the walk itself refused, not a read of the layer, is the image's fault: a PAX
+            // record it parses, a header's checksum (TASK-79.88).
+            let read = std::sync::atomic::Ordering::Relaxed;
+            let mut entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if !failed.load(read) => return Err(refused(err)),
+                Err(err) => return Err(anyhow::Error::new(err).context("reading the layer")),
+            };
+            let path = entry.path_bytes().context("reading the layer")?.into_owned();
             self.entry(&mut entry)
                 .await
                 .with_context(|| format!("applying {:?}", String::from_utf8_lossy(&path)))?;
@@ -248,18 +291,21 @@ impl Importer {
     }
 
     /// Applies the layer's entry `entry`.
-    async fn entry(&mut self, entry: &mut tar::Entry<'_, impl Read>) -> anyhow::Result<()> {
+    async fn entry(
+        &mut self,
+        entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
+    ) -> anyhow::Result<()> {
         let entry_type = entry.header().entry_type();
         if entry_type.is_pax_global_extensions() {
             return Ok(());
         }
-        let path = normalize(&entry.path_bytes())?;
+        let path = normalize(&entry.path_bytes()?)?;
         let Some((parent, name)) = split(&path) else {
             // The root, which only takes the entry's attributes.
             if !entry_type.is_dir() {
                 return Err(refused("the root is not a directory"));
             }
-            let metadata = metadata(entry)?;
+            let metadata = metadata(entry).await?;
             return self.update_directory(&self.root(), &path, metadata).await;
         };
         if name == OPAQUE {
@@ -268,7 +314,7 @@ impl Importer {
         if let Some(whited_out) = name.strip_prefix(WHITEOUT) {
             return self.remove_lower(&join(parent, whited_out)).await;
         }
-        let metadata = metadata(entry)?;
+        let metadata = metadata(entry).await?;
         let dir = self.directory(parent).await?;
         match dir.lookup(name).await {
             Ok((existing, attr))
@@ -290,13 +336,13 @@ impl Importer {
         self.made.insert(path.clone());
         let (perm, owner) = (metadata.perm, metadata.owner);
         let (node, attr) = match entry_type {
-            tar::EntryType::Directory => {
+            tokio_tar::EntryType::Directory => {
                 let (made, _) = dir.mkdir(name, perm, owner).await?;
                 let made = self.remember_directory(&path, made);
                 return self.update_directory(&made, &path, metadata).await;
             }
-            tar::EntryType::Link => {
-                let target = entry.link_name_bytes().ok_or_else(|| refused("no link target"))?;
+            tokio_tar::EntryType::Link => {
+                let target = entry.link_name_bytes()?.ok_or_else(|| refused("no link target"))?;
                 let target = normalize(&target)?;
                 let target = self.find(&target).await?;
                 let target = target.ok_or_else(|| refused("the link's target is missing"))?;
@@ -305,17 +351,20 @@ impl Importer {
                 target.link(&dir, name).await?;
                 return Ok(());
             }
-            tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse => {
-                dir.create(name, perm, owner).await?
-            }
-            tar::EntryType::Symlink => {
-                let target = entry.link_name_bytes().ok_or_else(|| refused("no symlink target"))?;
+            tokio_tar::EntryType::Regular
+            | tokio_tar::EntryType::Continuous
+            | tokio_tar::EntryType::GNUSparse => dir.create(name, perm, owner).await?,
+            tokio_tar::EntryType::Symlink => {
+                let target =
+                    entry.link_name_bytes()?.ok_or_else(|| refused("no symlink target"))?;
                 dir.symlink(name, &target, owner).await?
             }
-            tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
+            tokio_tar::EntryType::Char
+            | tokio_tar::EntryType::Block
+            | tokio_tar::EntryType::Fifo => {
                 let (file_type, rdev) = match entry_type {
-                    tar::EntryType::Fifo => (FileType::Fifo, 0),
-                    tar::EntryType::Char => (FileType::CharDevice, device(entry.header())?),
+                    tokio_tar::EntryType::Fifo => (FileType::Fifo, 0),
+                    tokio_tar::EntryType::Char => (FileType::CharDevice, device(entry.header())?),
                     _ => (FileType::BlockDevice, device(entry.header())?),
                 };
                 dir.mknod(name, file_type, perm, rdev, owner).await?
@@ -493,15 +542,15 @@ impl Importer {
 /// a chunk at a time, and leaving their runs of zeros a block long as holes.
 async fn write_contents(
     file: &Node,
-    entry: &mut tar::Entry<'_, impl Read>,
+    entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
     chunk: &mut [u8],
 ) -> anyhow::Result<()> {
-    let size = entry.size();
+    let size = entry.effective_size();
     // Where the data written ends: the file's size, as it was empty.
     let mut written = 0;
     let mut offset = 0;
     while offset < size {
-        let len = read_full(entry, chunk)?;
+        let len = read_entry(entry, chunk).await?;
         ensure!(len > 0, "the layer ends in the file, at {offset} of {size} bytes");
         // One write a run of data: a write waits for Fxfs's pager to let it dirty its pages,
         // which it asks for together, so a run of blocks costs one round trip, not one each.
@@ -614,7 +663,9 @@ fn refused(what: impl std::fmt::Display + Send + Sync + 'static) -> anyhow::Erro
 
 /// What `entry` says of the node it makes: its header, and its PAX records, which take
 /// precedence.
-fn metadata(entry: &mut tar::Entry<'_, impl Read>) -> anyhow::Result<Metadata> {
+async fn metadata(
+    entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
+) -> anyhow::Result<Metadata> {
     let header = entry.header();
     let perm = (header.mode()? & 0o7777) as u16;
     let too_large = |_| refused("the owner's uid or gid is too large");
@@ -624,7 +675,8 @@ fn metadata(entry: &mut tar::Entry<'_, impl Read>) -> anyhow::Result<Metadata> {
     let mut times = Times { atime: mtime, mtime };
     let mut atime = None;
     let mut xattrs = Vec::new();
-    for record in entry.pax_extensions()?.into_iter().flatten() {
+    let pax = entry.pax_extensions().await?;
+    for record in pax.into_iter().flatten() {
         let record = record?;
         let key = record.key()?;
         if let Some(name) = key.strip_prefix(PAX_XATTR) {
@@ -671,7 +723,7 @@ fn since_epoch(since: Duration) -> anyhow::Result<SystemTime> {
 
 /// The device a device node's header names, as Linux encodes it for user space (`new_encode_dev`,
 /// as glibc's `makedev`), which Fxfs keeps.
-fn device(header: &tar::Header) -> anyhow::Result<u32> {
+fn device(header: &tokio_tar::Header) -> anyhow::Result<u32> {
     let major = header.device_major()?.ok_or_else(|| refused("no device major number"))?;
     let minor = header.device_minor()?.ok_or_else(|| refused("no device minor number"))?;
     if major >= 1 << 12 || minor >= 1 << 20 {
@@ -680,9 +732,19 @@ fn device(header: &tar::Header) -> anyhow::Result<u32> {
     Ok((minor & 0xff) | (major << 8) | ((minor & !0xff) << 12))
 }
 
+/// The most bytes of an entry's path, Linux's `PATH_MAX` less its NUL: what no path of a file
+/// system the image is of holds more of. cladefs: an image is untrusted (AGENTS.md, Trust
+/// boundaries): past it, an entry's path, of any length in a PAX record, made the importer hold a
+/// copy of each of its prefixes, memory quadratic in its depth (board 2526).
+const MAX_PATH: usize = 4095;
+
 /// `path`, an entry's, relative to the root: without leading slashes, `.` or empty components.
-/// Paths through `..` are refused, as images are not to name what is outside them.
+/// Paths through `..` are refused, as images are not to name what is outside them; and those
+/// longer than [`MAX_PATH`].
 fn normalize(path: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if path.len() > MAX_PATH {
+        return Err(refused(format!("a path of {} bytes, past {MAX_PATH}", path.len())));
+    }
     let mut normal = Vec::with_capacity(path.len());
     for component in path.split(|&byte| byte == b'/') {
         match component {
@@ -719,6 +781,58 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
 /// `path0`, as `0` follows `/`.
 fn inside(path: &[u8]) -> Range<Vec<u8>> {
     [path, b"/"].concat()..[path, b"0"].concat()
+}
+
+/// A layer's entry, as its walk gives it.
+type LayerEntry<R> = tokio_tar::Entry<tokio_tar::Archive<R>>;
+
+/// cladefs: a layer, read as its walk awaits it ([`tokio_tar`]), in place: the file, or what
+/// decompresses it, read on the awaiting thread, a disk read, synchronous as the extent store's are
+/// (board 2944), never pending (board 5614). `failed` says whether a read of it failed, which tells
+/// the walk's own refusals from the layer's I/O errors.
+struct InPlace<R> {
+    layer: R,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R: Read + Unpin> AsyncRead for InPlace<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            match this.layer.read(buf.initialize_unfilled()) {
+                Ok(read) => {
+                    buf.advance(read);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    this.failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
+    }
+}
+
+/// Reads from `entry` into `buf` until it is full or `entry` ends, and returns how much it read.
+async fn read_entry(
+    entry: &mut (impl AsyncRead + Unpin),
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut len = 0;
+    while len < buf.len() {
+        match entry.read(&mut buf[len..]).await {
+            Ok(0) => break,
+            Ok(read) => len += read,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(len)
 }
 
 /// Reads from `reader` into `buf` until it is full or `reader` ends, and returns how much it read.
@@ -822,7 +936,9 @@ impl OciImage {
     /// first.
     pub async fn import(&self, importer: &mut Importer) -> Result<(), Error> {
         for layer in &self.layers {
-            let path = verified_blob(&self.layout, &layer.digest).map_err(Error::new)?;
+            // cladefs: its whole blob hashed, off the runtime's other tasks (board 5614).
+            let verified = || verified_blob(&self.layout, &layer.digest);
+            let path = local_cell::upload::blocking(verified).map_err(Error::new)?;
             let file = std::fs::File::open(&path)
                 .with_context(|| format!("opening {}", path.display()))
                 .map_err(Error::new)?;
@@ -900,43 +1016,43 @@ mod tests {
     use futures::future::{Either, select};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    /// How a store an import here makes keeps its cell: where no host's daemon serves it.
+    /// How a cell an import here makes keeps its cell: where no host's daemon serves it.
     fn keeping() -> local_cell::upload::Options {
         crate::host_cell::keeping().unwrap()
     }
 
-    /// A store whose filling panics is deleted as the panic unwinds, as one whose filling fails
+    /// A cell whose filling panics is deleted as the panic unwinds, as one whose filling fails
     /// is, once the filesystem filling it has dropped, closing it.
     #[test]
-    fn a_store_whose_filling_panics_is_deleted() {
+    fn a_cell_whose_filling_panics_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let made = catch_unwind(AssertUnwindSafe(|| {
-            block_on(make_store(
+            block_on(make_base_dir(
                 &path,
                 (64 << 20, crate::host_cell::DEFAULT_TENANT),
                 keeping(),
                 |storage| async {
                     let _fs = Filesystem::format(storage).await?;
-                    panic!("filling the store panicked");
+                    panic!("filling the cell panicked");
                 },
             ))
         }));
-        let panic = made.expect_err("filling the store did not panic");
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"filling the store panicked"));
-        assert!(!path.exists(), "the store is left half made");
+        let panic = made.expect_err("filling the cell did not panic");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"filling the cell panicked"));
+        assert!(!path.exists(), "the cell is left half made");
     }
 
-    /// A store whose making is given up on, its future dropped as a filesystem fills it, is
+    /// A cell whose making is given up on, its future dropped as a filesystem fills it, is
     /// deleted, once the filesystem filling it has dropped, closing it: one closed after would
-    /// leave the store half made.
+    /// leave the cell half made.
     #[test]
-    fn a_store_given_up_on_is_deleted() {
+    fn a_cell_given_up_on_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         block_on(async {
             let (formatted, filling) = oneshot::channel();
-            let made = Box::pin(make_store(
+            let made = Box::pin(make_base_dir(
                 &path,
                 (64 << 20, crate::host_cell::DEFAULT_TENANT),
                 keeping(),
@@ -947,27 +1063,27 @@ mod tests {
                 },
             ));
             let Either::Right((formatted, made)) = select(made, filling).await else {
-                panic!("the store was made");
+                panic!("the cell was made");
             };
             formatted.unwrap();
             drop(made);
         });
-        assert!(!path.exists(), "the store is left half made");
+        assert!(!path.exists(), "the cell is left half made");
     }
 
-    /// Where [`child_dies_importing`] imports, which [`a_store_whose_importer_died_is_made_anew`]
+    /// Where [`child_dies_importing`] imports, which [`a_cell_whose_importer_died_is_made_anew`]
     /// names.
-    const CHILD_STORE: &str = "CLADEFS_IMPORT_TEST_STORE";
+    const CHILD_CELL_DIR: &str = "CLADEFS_IMPORT_TEST_STORE";
 
-    /// An import whose process dies, for [`a_store_whose_importer_died_is_made_anew`]: fills the
-    /// store at [`CHILD_STORE`] with a file, synced, says so, and waits to be killed.
+    /// An import whose process dies, for [`a_cell_whose_importer_died_is_made_anew`]: fills the
+    /// cell at [`CHILD_CELL_DIR`] with a file, synced, says so, and waits to be killed.
     #[test]
-    #[ignore = "run by a_store_whose_importer_died_is_made_anew"]
+    #[ignore = "run by a_cell_whose_importer_died_is_made_anew"]
     fn child_dies_importing() {
         use crate::import::testing::{Entry, Kind, layer};
-        let Ok(path) = std::env::var(CHILD_STORE) else { return };
+        let Ok(path) = std::env::var(CHILD_CELL_DIR) else { return };
         let half = layer(&[Entry::new("half", Kind::File(b"half an image"))]).unwrap();
-        let made = block_on(make_store(
+        let made = block_on(make_base_dir(
             Path::new(&path),
             (64 << 20, crate::host_cell::DEFAULT_TENANT),
             keeping(),
@@ -983,20 +1099,20 @@ mod tests {
         panic!("the import ended: {made:?}");
     }
 
-    /// TASK-196: a store whose import's process died as it filled it, killed or its host crashing,
-    /// is no store: what the import made of it opens as none, and an import to its path makes it
-    /// anew. On main the half-made store opened, a filesystem holding part of its image, and
+    /// TASK-196: a cell whose import's process died as it filled it, killed or its host crashing,
+    /// is no cell: what the import made of it opens as none, and an import to its path makes it
+    /// anew. On main the half-made cell opened, a filesystem holding part of its image, and
     /// every import to the path after failed with `EEXIST` (`ImportImage`'s ALREADY_EXISTS),
-    /// which a caller that retries an import its daemon's restart cut off takes for the store.
+    /// which a caller that retries an import its daemon's restart cut off takes for the cell.
     #[test]
-    fn a_store_whose_importer_died_is_made_anew() {
+    fn a_cell_whose_importer_died_is_made_anew() {
         use crate::import::testing::{Entry, Kind, layer};
         use std::io::BufRead as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "import::tests::child_dies_importing", "--ignored", "--nocapture"])
-            .env(CHILD_STORE, &path)
+            .env(CHILD_CELL_DIR, &path)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -1004,17 +1120,17 @@ mod tests {
         let filled = stdout.lines().map(Result::unwrap).any(|line| line == "FILLED");
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(filled, "the child's import never filled the store");
+        assert!(filled, "the child's import never filled the cell");
 
-        let opened = block_on(async { Filesystem::mount(Storage::open(&path)?).await });
-        assert!(opened.is_err(), "the store half made opens");
+        let opened = block_on(async { Filesystem::mount(Storage::open(&path).await?).await });
+        assert!(opened.is_err(), "the cell half made opens");
         drop(opened);
         let image = dir.path().join("whole.tar");
         let whole = layer(&[Entry::new("whole", Kind::File(b"the whole image"))]).unwrap();
         std::fs::write(&image, whole).unwrap();
-        block_on(store(&path, 64 << 20, &image, None)).unwrap();
+        block_on(make_base(&path, 64 << 20, &image, None)).unwrap();
         let names = block_on(async {
-            let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.unwrap();
+            let fs = Filesystem::mount(Storage::open(&path).await.unwrap()).await.unwrap();
             let entries = fs.root().entries().await.unwrap();
             fs.close().await.unwrap();
             entries.into_iter().map(|entry| entry.name).collect::<Vec<_>>()

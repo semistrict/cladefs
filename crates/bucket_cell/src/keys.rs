@@ -9,22 +9,22 @@
 //! a KEK, but a shredded cell's, and every cell that writes has a DEK: nothing is in the clear
 //! (TASK-411.28), and every host has a KMS ([`Host::kms`]).
 //!
-//! **Taking a cell** unwraps its KEK with one call of the KMS, which a host's [`CachingKms`] keeps for
-//! that taking, whatever number of the cell's volumes it opens: its cells' DEKs are unwrapped
+//! **Taking a cell** unwraps its KEK with one call of the KMS, which a host's [`CachingKms`] keeps
+//! for that taking, whatever number of the cell's volumes it opens: its cells' DEKs are unwrapped
 //! with it locally ([`CellKeys`]). A cell made by a host gets a KEK the host wrapped before, which
 //! it keeps in a pool for the cells it makes: none is unwrapped then. Every cell is made encrypted
 //! ([`new_cell_kek`]): any refusal of the KMS fails the making, naming the tenant, a KMS saying it
 //! has no KEK for the tenant among them, as destroyed (a real KMS forgets a deleted key, answering
-//! as for one never made: AWS KMS, OpenBao, TASK-411.19). (Before TASK-411.28, a tenant with no
-//! KEK had its cells made in the clear, that answer believed for a minute, TASK-411.10, and an
+//! as for one never made: AWS KMS, OpenBao, TASK-411.19). (Before TASK-411.28, a tenant with no KEK
+//! had its cells made in the clear, that answer believed for a minute, TASK-411.10, and an
 //! encrypted marker in the bucket told a forgotten KEK from none, TASK-411.19: both went with the
 //! clear cells.)
 //!
-//! **Opening a store** gives every writer and reader of it a [`Ring`]: its cell's DEKs, every
+//! **Opening a cell** gives every writer and reader of it a [`Ring`]: its cell's DEKs, every
 //! generation of them, and its ancestors', unwrapped under the cell's KEK ([`ring`]); and which of
 //! those cells are encrypted, whose objects authenticated under keys it lacks its readers refuse
-//! ([`Ring::of`], `extent_frame::Keys::encrypted`). A host's fetchers, which share what they keep for
-//! all its stores, open parts with the union of its stores' rings ([`HostRing`]).
+//! ([`Ring::of`], `extent_frame::Keys::encrypted`). A host's fetchers, which share what they keep
+//! for all its cells, open parts with the union of its cells' rings ([`HostRing`]).
 //!
 //! **Forks into other cells** (doc-16, Forks and shared versions; TASK-411.4). A cell's record
 //! keeps, beside its own DEKs, the DEKs of every ancestor of another cell whose objects it reads,
@@ -32,11 +32,11 @@
 //! [`crate::record::Record::inherited`]), given with its first DEK, in one conditional update: a
 //! record with DEKs holds all it inherits from other cells, so that its readers need no other
 //! cell's KEK, nor another tenant's KMS, and shredding a parent leaves it what it inherited. A
-//! fork's host gives them as it makes the fork, from the keys its parent's store holds, its
-//! child's cell made with a KEK of its pool ([`inheriting`], [`give_inherited`]): no KMS call on
-//! the fork's path. A record without them yet (a fork's child before its keys, a version) is read by
-//! crossing into its ancestors' cells, their KEKs unwrapped by the KMS, which its first writer
-//! then rewraps ([`with_dek`]).
+//! fork's host gives them as it makes the fork, from the keys its parent's cell holds, its child's
+//! cell made with a KEK of its pool ([`inheriting`], [`give_inherited`]): no KMS call on the fork's
+//! path. A record without them yet (a fork's child before its keys, a version) is read by crossing
+//! into its ancestors' cells, their KEKs unwrapped by the KMS, which its first writer then rewraps
+//! ([`with_dek`]).
 //!
 //! **Pools.** A host wraps new cell KEKs ahead, a pool a tenant, refilled in batches on its
 //! runtime as a take leaves one low, off the fork's path ([`Pooling`]). A tenant whose KEK the KMS
@@ -56,7 +56,7 @@
 //! KMS, a cell by taking its wrapped KEKs out of its object ([`crate::cell::shred`]): a cell
 //! shredded is encrypted and refuses its KEKs, naming itself. A host told either forgets what it
 //! holds of it ([`Host::forget`], a [`Scope`]): its KMS's unwrapped cell KEKs and pool, and its
-//! fetchers' keys of the scope's stores; DEKs other tenants' stores hold, which they inherited,
+//! fetchers' keys of the scope's cells; DEKs other tenants' cells hold, which they inherited,
 //! stay theirs.
 //!
 //! A DEK is wrapped with AES-KW under a key HKDF derives from the cell's KEK and the DEK's place:
@@ -184,7 +184,7 @@ pub fn unwrap_inherited(
     })
 }
 
-/// What a reader of a store's objects holds: the DEKs of its cell and its ancestors, by which
+/// What a reader of a cell's objects holds: the DEKs of its cell and its ancestors, by which
 /// they are; and the key its writer encrypts new objects under, its cell's newest, if it writes.
 /// Holding any key, it refuses every object authenticated under a key it lacks ([`View`]). Empty
 /// ([`Ring::keyless`]): a reader of metadata alone, as the collector's marking is ([`compacting`]
@@ -197,10 +197,11 @@ pub struct Ring {
     places: HashMap<u64, CellId>,
     encrypted: BTreeSet<u64>,
     encrypting: Option<KeyId>,
-    /// cladefs: a store at a version's, the DEK it encrypts what nothing writes under ([`Ring::for_version`]): none of
-    /// its DEKs, which nothing inherits nor any host's fetchers hold.
+    /// cladefs: a cell at a version's, the DEK it encrypts what nothing writes under
+    /// ([`Ring::for_version`]): none of its DEKs, which nothing inherits nor any host's fetchers
+    /// hold.
     unwritten: Option<Arc<Secret>>,
-    /// The cell whose store it was opened for ([`ring`]): what a host forgetting a tenant's or a
+    /// The cell it was opened for ([`ring`]): what a host forgetting a tenant's or a
     /// cell's keys goes by ([`HostRing::forget`], TASK-411.7). None for others'.
     owner: Option<CellId>,
 }
@@ -264,9 +265,9 @@ impl Ring {
         self.deks.keys().map(|id| id.cell).chain(self.encrypted.iter().copied()).collect()
     }
 
-    /// A writer's ring of `cell`, encrypting under `dek` as its DEK of the first generation, given by
-    /// its maker rather than read from a record (TASK-411.28): a store's kept in no bucket, whose
-    /// maker keeps its DEK (`local_cell`'s unkept stores: tests', benches', simulations').
+    /// A writer's ring of `cell`, encrypting under `dek` as its DEK of the first generation, given
+    /// by its maker rather than read from a record (TASK-411.28): a cell's kept in no bucket, whose
+    /// maker keeps its DEK (`local_cell`'s unkept cells: tests', benches', simulations').
     pub fn writing_under(cell: CellId, dek: Secret) -> Arc<Self> {
         let id = KeyId { cell: cell.id, generation: FIRST };
         let mut ring = Self { encrypting: Some(id), owner: Some(cell), ..Self::default() };
@@ -274,9 +275,9 @@ impl Ring {
         Arc::new(ring)
     }
 
-    /// cladefs: this ring, a store's at a version of `cell`, given a key to encrypt what nothing
+    /// cladefs: this ring, a cell's at a version of `cell`, given a key to encrypt what nothing
     /// writes under (TASK-411.28): its open segment, which no write reaches, is encrypted as every
-    /// store's is, under a DEK drawn for it alone, of generation 0, which no record keeps, never
+    /// cell's is, under a DEK drawn for it alone, of generation 0, which no record keeps, never
     /// written out.
     pub fn for_version(&self, cell: CellId) -> Arc<Self> {
         let id = KeyId { cell: cell.id, generation: 0 };
@@ -409,9 +410,9 @@ pub fn of_key<'a>(ring: &'a Ring, key: &str) -> RingView<'a> {
     ring.of(cell_of(key).unwrap_or(u64::MAX))
 }
 
-/// The keys a host's fetchers open parts with, which they share for all the host's stores, as they
-/// share what they keep (TASK-92.21): the union of the rings of the stores the host serves, each
-/// held for as long as its store is open ([`HostRing::hold`]).
+/// The keys a host's fetchers open parts with, which they share for all the host's cells, as they
+/// share what they keep (TASK-92.21): the union of the rings of the cells the host serves, each
+/// held for as long as its cell is open ([`HostRing::hold`]).
 #[derive(Default)]
 pub struct HostRing {
     held: Mutex<Held>,
@@ -441,14 +442,14 @@ impl HostRing {
         Arc::default()
     }
 
-    /// The keys it holds now, of every store open.
+    /// The keys it holds now, of every cell open.
     pub fn ring(&self) -> Arc<Ring> {
         self.held.lock().unwrap().union.clone()
     }
 
-    /// Forgets the rings of the stores of `scope`'s cells ([`Ring`]'s owner), which its
+    /// Forgets the rings of `scope`'s cells ([`Ring`]'s owner), which its
     /// fetchers then open nothing with, as a host told a tenant's KEK is revoked or destroyed, or a
-    /// cell shredded, does (TASK-411.7): the keys other stores hold stay, those of cells of the
+    /// cell shredded, does (TASK-411.7): the keys other cells hold stay, those of cells of the
     /// scope among them, as a fork of another tenant's keeps what it inherited. Returns how many it
     /// forgot.
     pub fn forget(&self, scope: Scope) -> usize {
@@ -477,7 +478,7 @@ impl HostRing {
     }
 }
 
-/// A store's ring held by its host's ([`HostRing::hold`]): let go of when dropped.
+/// A cell's ring held by its host's ([`HostRing::hold`]): let go of when dropped.
 pub struct RingHold {
     host: Option<Arc<HostRing>>,
     id: u64,
@@ -514,7 +515,7 @@ type Epoch = (u64, u64);
 
 /// How a host keeps its pools of new cell KEKs (doc-16, Forks and shared versions; TASK-411.4): a
 /// tenant's refilled in batches, on `handle`, off the paths that take from it, once a take leaves
-/// fewer than `low`, or an encrypted store of the tenant opens.
+/// fewer than `low`, or an encrypted cell of the tenant opens.
 #[derive(Clone, Debug)]
 pub struct Pooling {
     pub low: usize,
@@ -602,10 +603,10 @@ pub struct CachingKms {
     shredded: Mutex<BTreeSet<CellId>>,
 }
 
-/// cladefs: what a host keeps of its KMSes' answers, under one lock (TASK-633.6's review): so that a
-/// revocation, which refuses a tenant, moves its epoch and drops its pools at once, and what checks
-/// the refusal or the epoch and then adds to a pool, or gives out or takes back a KEK, are each
-/// one step, none of them landing between a revocation's.
+/// cladefs: what a host keeps of its KMSes' answers, under one lock (TASK-633.6's review): so that
+/// a revocation, which refuses a tenant, moves its epoch and drops its pools at once, and what
+/// checks the refusal or the epoch and then adds to a pool, or gives out or takes back a KEK, are
+/// each one step, none of them landing between a revocation's.
 #[derive(Default)]
 struct Ledger {
     /// New cell KEKs by their KMSes' tenants, wrapped, for the cells made.
@@ -623,8 +624,9 @@ struct Ledger {
 impl Ledger {
     /// Takes the new cell KEK `wrapped` off those given out: the KMS's tenant it was given out for,
     /// if it was wrapped in the revocation epoch of now and the tenant is not refused there. Every
-    /// KEK made into a cell is given out here first ([`CachingKms::new_kek`], [`CachingKms::wrap`]):
-    /// one not among them, taken off by a revocation since, is neither given back nor kept.
+    /// KEK made into a cell is given out here first ([`CachingKms::new_kek`],
+    /// [`CachingKms::wrap`]): one not among them, taken off by a revocation since, is neither given
+    /// back nor kept.
     fn issued_now(&mut self, wrapped: &Wrapped) -> Option<Tenancy> {
         let ((key, tenant), epoch) = self.issued.remove(&wrapped.0)?;
         let current = epoch == self.refused.epoch(&key, tenant)
@@ -866,10 +868,11 @@ impl CachingKms {
 
     /// cladefs: as [`CachingKms::refuses`], the KMS of `cell`'s bucket looked up first, if it is
     /// refused at all (TASK-633.6's review): so that what that KMS answered since a revocation the
-    /// control API told counts for the cells of a bucket this host takes no KEK of, whose keys forks
-    /// inherit, as it does for the buckets it does. Nothing is asked of the KMS: a revocation stops
-    /// the fork it exists to stop until the KMS answers another call. Refused by none, nothing is
-    /// looked up, as forks go; a KMS not to be looked up leaves the refusal as it stands.
+    /// control API told counts for the cells of a bucket this host takes no KEK of, whose keys
+    /// forks inherit, as it does for the buckets it does. Nothing is asked of the KMS: a revocation
+    /// stops the fork it exists to stop until the KMS answers another call. Refused by none,
+    /// nothing is looked up, as forks go; a KMS not to be looked up leaves the refusal as it
+    /// stands.
     async fn refuses_resolving(&self, cell: CellId) -> Option<Error> {
         if self.key_of(cell).is_some() {
             return self.refuses(cell);
@@ -1262,7 +1265,7 @@ impl CellKeys {
     }
 }
 
-/// The refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its stores
+/// The refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its cells
 /// opening no more (`EACCES`), and the collector leaving its encrypted objects uncompacted.
 pub fn shredded(cell: CellId) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
@@ -1289,11 +1292,11 @@ pub async fn shred(bucket: &impl Bucket, cell: CellId) -> Result<usize, Error> {
     .await
 }
 
-/// The KEK a cell made by a host gets: one the host wrapped ahead, by its KMS ([`CachingKms::new_kek`]),
-/// refused as the KMS refuses it, naming the tenant: a tenant the KMS says has no KEK among them,
-/// as destroyed (TASK-411.28: no cell is made in the clear). What every maker of a cell asks
-/// before making it: a store's opening, a fork into a new cell ([`inheriting`]), the control API's
-/// attaching.
+/// The KEK a cell made by a host gets: one the host wrapped ahead, by its KMS
+/// ([`CachingKms::new_kek`]), refused as the KMS refuses it, naming the tenant: a tenant the KMS
+/// says has no KEK among them, as destroyed (TASK-411.28: no cell is made in the clear). What every
+/// maker of a cell asks before making it: a cell's opening, a fork into a new cell
+/// ([`inheriting`]), the control API's attaching.
 pub async fn new_cell_kek(
     kms: &Arc<CachingKms>,
     cell: CellId,
@@ -1303,7 +1306,7 @@ pub async fn new_cell_kek(
 }
 
 /// cladefs: makes `cell`, a root of `owner`'s, never taken, its KEK from `kms`'s pool, the host's
-/// ([`new_cell_kek`]): what a host making a new cell does before its store first opens, so that a
+/// ([`new_cell_kek`]): what a host making a new cell does before its cell first opens, so that a
 /// tenant the KMS refuses gets no cell, nothing made (TASK-411.28), and the cell's first taking
 /// here unwraps nothing. Returns whether it made it: a head there already, whoever's, is left as it
 /// is, the KEK given back.
@@ -1328,10 +1331,10 @@ pub async fn make(
 }
 
 /// Takes `cell` as `taking` says ([`head::take`]), from `read`, what a read of its head found,
-/// giving it what keys it lacks in the same write ([`head::Given`]): a KEK from `kms`'s pool if
-/// it has none, a new cell's, never taken; its first DEK, and those it inherits from ancestors of other cells
-/// rewrapped under its KEK, if it has none ([`Inherited`]): read by crossing into their cells,
-/// their KEKs unwrapped by the KMS ([`ring`]). A fork's host gives them as it makes the fork
+/// giving it what keys it lacks in the same write ([`head::Given`]): a KEK from `kms`'s pool if it
+/// has none, a new cell's, never taken; its first DEK, and those it inherits from ancestors of
+/// other cells rewrapped under its KEK, if it has none ([`Inherited`]): read by crossing into their
+/// cells, their KEKs unwrapped by the KMS ([`ring`]). A fork's host gives them as it makes the fork
 /// ([`inheriting`]), so that its child's first taking gives none. Its keys changed meanwhile by
 /// another's taking, made anew and taken again. Returns the head as taken, and its keys.
 pub async fn taking(
@@ -1522,10 +1525,10 @@ pub async fn rotate(
     Ok((generation, rewrapped))
 }
 
-/// The ring of a store of `cell`, whose head is `head`, of the cell `keys` are of: its DEKs, every
-/// generation, and the newest to encrypt new objects under if `writes`, a writer's head having its
-/// first ([`taking`]: refused otherwise); those its head keeps of ancestors of other cells
-/// ([`Inherited`]); and its ancestors', along its origins, each head read.
+/// The ring of an open cell of `cell`, whose head is `head`, of the cell `keys` are of: its DEKs,
+/// every generation, and the newest to encrypt new objects under if `writes`, a writer's head
+/// having its first ([`taking`]: refused otherwise); those its head keeps of ancestors of other
+/// cells ([`Inherited`]); and its ancestors', along its origins, each head read.
 ///
 /// An ancestor of another cell (TASK-411.4): a head with its keys holds those of every one it
 /// reads, as they were given it with them ([`taking`]), so that it needs no other cell's KEK, and
@@ -1629,7 +1632,7 @@ impl Parents<'_> {
 }
 
 /// What a fork into another cell gives its child (doc-16, Forks and shared versions; TASK-411.4),
-/// made before anything of the fork is ([`inheriting`]): the keys its parent's store holds, which
+/// made before anything of the fork is ([`inheriting`]): the keys its parent's cell holds, which
 /// its child inherits, and a KEK for its child's cell from the host's pool, given back if no head
 /// is made with it.
 pub struct Inheriting {
@@ -1666,12 +1669,12 @@ impl Drop for Inheriting {
     }
 }
 
-/// What a fork of `parent`, whose store holds `source`, to `child` gives its child ([`Inheriting`]).
+/// What a fork of `parent`, whose cell holds `source`, to `child` gives its child ([`Inheriting`]).
 /// Asked for before anything of the fork is made, so that a fork refused makes nothing: refused if
 /// `kms`, the host's, last heard that a tenant of the cells its keys are of has its KEK revoked or
-/// destroyed ([`Kms::revoked`]), by the KMS of that cell's bucket ([`CachingKms::refuses_resolving`]);
-/// or as the KMS refuses a KEK for the child's cell, which comes from the host's pool, no call made
-/// then ([`new_cell_kek`]).
+/// destroyed ([`Kms::revoked`]), by the KMS of that cell's bucket
+/// ([`CachingKms::refuses_resolving`]); or as the KMS refuses a KEK for the child's cell, which
+/// comes from the host's pool, no call made then ([`new_cell_kek`]).
 pub async fn inheriting(
     kms: &Arc<CachingKms>,
     source: &Arc<Ring>,
@@ -1689,8 +1692,8 @@ pub async fn inheriting(
     Ok(Inheriting { kms: kms.clone(), child, source: source.clone(), kek })
 }
 
-/// What a host gives its stores to encrypt and read under (TASK-411.3): its KMS, which every host
-/// has (TASK-411.28: every store is encrypted), and the keys its fetchers share, of the stores it
+/// What a host gives its cells to encrypt and read under (TASK-411.3): its KMS, which every host
+/// has (TASK-411.28: every cell is encrypted), and the keys its fetchers share, of the cells it
 /// serves ([`HostRing`], the host's fetchers' `fetch::Memory::keys`).
 #[derive(Clone)]
 pub struct Host {
@@ -1706,7 +1709,7 @@ impl Host {
 
     /// Forgets what the host holds of `scope`'s keys, as it is told a tenant's KEK is revoked or
     /// destroyed, or a cell shredded, `why` saying which (TASK-411.7): its KMS's
-    /// ([`CachingKms::forget`]) and its fetchers' ([`HostRing::forget`]). Returns how many stores'
+    /// ([`CachingKms::forget`]) and its fetchers' ([`HostRing::forget`]). Returns how many cells'
     /// rings its fetchers forgot.
     pub fn forget(&self, scope: Scope, why: impl Into<String>) -> usize {
         self.kms.forget(scope, why);
@@ -1815,7 +1818,7 @@ mod tests {
 
     /// A ring's keys, as a reader of one cell holds them: that cell's DEKs alone, its objects
     /// encrypted if it has any; a cell of none it reads keyless. A host's ring is the union of its
-    /// stores', each held while its store is open.
+    /// cells', each held while its cell is open.
     #[test]
     fn rings_hold_each_cells_keys_for_its_objects_alone() {
         let one = KeyId { cell: 7, generation: 1 };
@@ -2297,7 +2300,8 @@ mod tests {
             assert_eq!(counted.wraps(), wraps);
         }
         assert_eq!(kms.refuses(two), Some(none));
-        // Tenant 1, encrypted, its pool filled; its KEK forgotten: a refill hearing it drops the pool.
+        // Tenant 1, encrypted, its pool filled; its KEK forgotten: a refill hearing it drops the
+        // pool.
         let tenant = TEST_CELL.tenant;
         assert_eq!(new(TEST_CELL).map(|kek| kek.generation), Ok(FIRST));
         runtime.block_on(kms.filled(tenant));
@@ -2315,7 +2319,7 @@ mod tests {
         let forgotten = Error::Kms("tenant 1: no KEK in the KMS".into());
         assert_eq!(new(TEST_CELL), Err(forgotten.clone()));
         assert_eq!(kms.refuses(TEST_CELL), Some(forgotten.clone()));
-        // A fork of an encrypted store into a new cell of the tenant's: refused before anything is
+        // A fork of an encrypted cell into a new cell of the tenant's: refused before anything is
         // made.
         let source = Ring::encrypting_for_tests(7, 1, Secret::random(), []);
         let child = crate::layout::Child { cell: CellId { tenant, id: 8 }, owner: 1 };
@@ -2326,7 +2330,7 @@ mod tests {
     /// TASK-411.7: a cell shredded keeps no KEK, by one conditional update whoever holds it, and
     /// is taken by no one again, its rings refused naming it. A host that took it before, told
     /// nothing, still reads under what it unwrapped; told, it forgets the cell's KEK, refusing it
-    /// under the head it read before, and its fetchers forget the ring of the cell's store, the
+    /// under the head it read before, and its fetchers forget the ring of the cell, the
     /// tenant's other cell's staying. Told the tenant's KEK is revoked, it forgets the rest.
     #[test]
     fn shredded_cells_refuse_their_keys_and_hosts_told_forget_them() {
@@ -2339,7 +2343,7 @@ mod tests {
         }
         let head = |cell| block_on(head::get(&bucket, cell)).unwrap().unwrap();
 
-        // Another host takes both cells, and opens a store of each.
+        // Another host takes both cells, and opens a cell of each.
         counted.reset();
         let (_, other) = kms_over(&counted);
         let host = Host::new(other.clone(), HostRing::new());

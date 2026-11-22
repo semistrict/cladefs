@@ -72,7 +72,7 @@ def base32(text):
 
 @dataclass
 class Read:
-    at: float  # seconds since the store's opening
+    at: float  # seconds since the cell's opening
     kind: str
     extent: tuple  # (cell, sequence)
     extent_len: int

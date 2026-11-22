@@ -40,7 +40,7 @@ pub enum ConfigError {
     InvalidDaxPrivateMaxBytes(u64),
 }
 
-/// An extent-store device: the store of extents that a guest running cladefs's Fxfs itself keeps
+/// An extent-store device: the cell of extents that a guest running cladefs's Fxfs itself keeps
 /// its filesystem in (cladefs's backlog doc-4), which cladefs's extent daemon serves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,9 +49,9 @@ pub struct Config {
     pub id: String,
     /// The filesystem's name, which the guest mounts it by.
     pub tag: String,
-    /// The extent store's directory, created if it doesn't exist.
+    /// The cell directory, created if it doesn't exist.
     pub path_on_host: String,
-    /// The most bytes a store created holds.
+    /// The most bytes a cell created holds.
     pub capacity: u64,
     /// The size in bytes of the DAX window, the device's shared memory region the guest maps
     /// files' data from: none without one.
@@ -66,15 +66,15 @@ pub struct Config {
     /// refused now, not read as bytes. A follower's window copies nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_private_max_bytes: Option<u64>,
-    /// The socket of cladefs's extent daemon, which serves the store.
+    /// The socket of cladefs's extent daemon, which serves the cell.
     pub cladefsd_socket: String,
-    /// cladefs: whether the device follows the store, read-only, as another VM writes it (cladefs's
-    /// backlog doc-8): the store must exist, and the guest mounts it read-only.
+    /// cladefs: whether the device follows the cell, read-only, as another VM writes it (cladefs's
+    /// backlog doc-8): the cell must exist, and the guest mounts it read-only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
     /// cladefs: what the device does with the guest's asks for uploaded commits, as a block
     /// device's `cache_type` does with its flushes (TASK-363): `Writeback`, the default, waits for
-    /// each, the store's commits uploaded as the extent daemon makes them; `Unsafe` answers them
+    /// each, the cell's commits uploaded as the extent daemon makes them; `Unsafe` answers them
     /// once ordered, as a block device's dropped flushes are, the daemon making them local soon
     /// after, without the guest waiting: sync, syncfs, a freeze and an unmount wait for nothing
     /// past the host, and what a host's crash takes since its last upload is lost, as it is of a

@@ -8,11 +8,11 @@ updated_date: '2026-11-17 01:09'
 # Live read-only followers of a mounted Fxfs
 
 Status: planned, 2026-10-17; the protocol's TLA+ spec written and checked (TASK-42.8, testing 0);
-store views built (TASK-42.2, 2026-10-18); the simulation (TASK-42.1), the follower in Fxfs
+cell views built (TASK-42.2, 2026-10-18); the simulation (TASK-42.1), the follower in Fxfs
 (TASK-42.4), its protocol under Shuttle (TASK-42.5, the host's side) and cladefsd's followers
 (TASK-42.3, but Firecracker) built, 2026-10-18; the fill barrier in place of the seqcount, its
 mutex fallback and SRCU (TASK-42.10), 2026-10-19. Tasks: TASK-42, in order: the protocol in TLA+
-(42.8), store views (42.2), the test foundation (42.1: simulation on Shuttle, history checker,
+(42.8), cell views (42.2), the test foundation (42.1: simulation on Shuttle, history checker,
 per-batch comparison, trace validation), the follower in Fxfs (42.4), the concurrency protocol
 under Shuttle (42.5, once 42.8 is done), cladefsd, doc-4 and Firecracker (42.3), the guest kernel
 (42.6), the guest torture test and measurements (42.7).
@@ -22,7 +22,7 @@ the code stays, tested and kept working through later changes, but nothing new i
 Copy-on-write DAX (doc-13) left a follower's window mapping sealed extents read-only, as before;
 local cleaning is gone (TASK-165.8), so nothing moves a view's extents but their upload.
 
-Other VMs on the host mount a store read-only while a VM has it mounted read-write, and follow
+Other VMs on the host mount a cell read-only while a VM has it mounted read-write, and follow
 it: they see what the writer commits, as it commits it, without remounting. This is the design
 agreed with the user on 2026-10-17, and, above all, how it is tested: the hard part of a
 follower is concurrency, whose bugs are silent (a stale read crashes nothing), so the plan is
@@ -30,7 +30,7 @@ built around testing techniques that make them loud and reproducible.
 
 ## Decisions
 
-1. **Live follow, only.** No point-in-time-only stage ships. A follower mounts the store as of a
+1. **Live follow, only.** No point-in-time-only stage ships. A follower mounts the cell as of a
    commit, then applies each commit after it. (Point-in-time mounts fall out of it: a follower
    that never advances.)
 2. **Followers are VMs on the writer's host**, served by the same cladefsd, so a follower reads
@@ -59,7 +59,7 @@ built around testing techniques that make them loud and reproducible.
 ## Why it works: commits seal
 
 A commit seals every open extent (doc-4): what the writer wrote before it is immutable after it.
-The store as of commit N is its extent table and root at N, all of it sealed, and the journal up
+The cell as of commit N is its extent table and root at N, all of it sealed, and the journal up
 to N's sealed lengths. So a follower needs no fork and no forced commit: it needs the writer's
 frees after N kept while it may still read what they freed. ExtentStore already keeps freed
 extents for one other party, the uploader (`State::kept`, crates/extent_store/src/kept.rs, until
@@ -70,14 +70,14 @@ nothing past commit N's sealed lengths, so a follower's replay ends exactly at c
 
 ## Design
 
-### Store views (crates/extent_store)
+### Cell views (crates/extent_store)
 
 Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view, locate_view}`.
 
 - `Store::view()`: the branch as of its latest commit, its commit number (`View::epoch`) and root. `View::advance()` moves
   it to the latest commit. Sealed extents never change and IDs are never reused, so a view copies
   no extent table: an extent its commit holds is held still, as it was, wherever its data is now,
-  in the store or, acknowledged, in the bucket (TASK-165.8), or freed since and kept. A view
+  in the cell or, acknowledged, in the bucket (TASK-165.8), or freed since and kept. A view
   refuses open extents, which no commit holds; extents of later commits it doesn't tell from its
   own, as its follower never asks for them.
 - A free of an extent sealed before is kept while a view older than the commit that freed it
@@ -86,7 +86,7 @@ Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view,
 - What a commit's frees keep is decided as the commit is published to views, in one critical
   section: a view opened before is of an earlier commit, one opened after needs none of them.
   Until its commit, a free is undecided, and its data stays.
-- Opening, advancing, pinning and dropping a view take the views' lock alone, never the store's
+- Opening, advancing, pinning and dropping a view take the views' lock alone, never the cell's
   state or commit lock: a follower never waits for the writer.
 - Pins of single extents beyond the view's commit (`View::pin`, the follower's graveyard, below).
 - Views live as long as their holder. A view stale for `Options::view_lag`, or keeping more than
@@ -96,33 +96,33 @@ Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view,
 ### cladefsd and the device protocol (doc-4)
 
 Built (TASK-42.3): `ExtentStore::{follow, advance, let_go, pin, unpin, newer, take_over}`
-(crates/cladefs/src/extents.rs), cladefsd's read-only connections (`cladefsd/{server, stores,
+(crates/cladefs/src/extents.rs), cladefsd's read-only connections (`cladefsd/{server, cells,
 client}.rs`), doc-4's Followers.
 
-- A follower is an `ExtentStore` of its own (`ExtentStore::follow`), sharing its writer's store
+- A follower is an `ExtentStore` of its own (`ExtentStore::follow`), sharing its writer's cell
   and the extent cache, with a window of its own and a view: it reads and maps through the view,
-  refusing what is outside it and its pins with EIO, logged, and what would change the store with
+  refusing what is outside it and its pins with EIO, logged, and what would change the cell with
   EROFS. `advance` keeps the commits between until `let_go` (`View::advance_keeping`), as the
   guest's follower reads them while it applies them, and its readers may still read them.
-- cladefsd keeps one instance of a store for its connections: its writer's, whose connection holds
-  the path, and its followers' (`stores::followed`). Followers that find no writer open the store
+- cladefsd keeps one instance of a cell for its connections: its writer's, whose connection holds
+  the path, and its followers' (`cells::followed`). Followers that find no writer open the cell
   as a writer would; a writer opening it then takes that instance over
   (`ExtentStore::take_over`), as it does a writer's that went, if nothing is open in it (its last
   commit all it wrote): its followers go on following. A writer that went with writes
   uncommitted retires its instance: its followers are cut off (ESTALE), and no connection opens
-  the store until they are gone (a writer's open fails with EBUSY meanwhile). A follower's guest
+  the cell until they are gone (a writer's open fails with EBUSY meanwhile). A follower's guest
   unmounting is its going: it resets its device, which closes the connection, and mounting opens
   a new one, as of the writer's latest commit (doc-4's Reset).
-- The daemon's work on a store followers have open: synced, grown and forked through their
+- The daemon's work on a cell followers have open: synced, grown and forked through their
   instance; not deleted, placed or made public (EBUSY).
-- OPEN takes a read-only flag: a connection opening a store another connection holds gets a view
-  of it, rather than EBUSY; with no writer connected, a view of the store as of its last commit
+- OPEN takes a read-only flag: a connection opening a cell another connection holds gets a view
+  of it, rather than EBUSY; with no writer connected, a view of the cell as of its last commit
   (a writer may open it meanwhile).
 - On a read-only connection, READ, MAP, ROOT and INFO are served from the view; WRITE, COMMIT,
   FREE, FORK and RESIZE fail with EROFS. ADVANCE moves the view, and
   PIN/UNPIN keep single extents (the graveyard).
-- The writer's commits notify its stores' read-only connections (`COMMITTED`, from a thread of
-  each that waits on the store's publishes, `Store::newer`, never on its commits); the device
+- The writer's commits notify its cells' read-only connections (`COMMITTED`, from a thread of
+  each that waits on the cell's publishes, `Store::newer`, never on its commits); the device
   tells the guest with a configuration change (doc-4's `committed`).
 - A read-only feature bit: the driver offers no write, and Fxfs mounts read-only.
 - Firecracker's `extent` configuration takes `read_only: true` (a commit in the fxdax-v1.16.1
@@ -270,9 +270,9 @@ Mutation testing covers the real code too, two ways:
 - **Automatic mutants, with cargo-mutants** (sourcefrog/cargo-mutants, MIT): it rewrites the Rust
   code a mutation at a time (an operator flipped, a condition negated, a function body replaced by
   a default, a call removed) and runs the tests against each; a mutant no test kills is code the
-  tests don't check. It runs over the follower's crates (store views, the follower, the protocol),
+  tests don't check. It runs over the follower's crates (cell views, the follower, the protocol),
   its surviving mutants reviewed: each gets a test that kills it, or a reason it is equivalent.
-  `scripts/mutants-followers.sh` runs it, each part against the tests that check it (the store's
+  `scripts/mutants-followers.sh` runs it, each part against the tests that check it (the cell's
   views against extent_store's tests and then its Shuttle tests; the Fxfs follower against the
   followers' simulation; the protocol under Shuttle; the history checker with the simulation's).
   Of what its first run left (TASK-42), tests kill all but three, which are equivalent: kept frees'
@@ -287,7 +287,7 @@ Mutation testing covers the real code too, two ways:
 The design itself is model-checked first (TASK-42.8): `specs/follower/Follower.tla`, a TLA+ spec
 of the writer (transactions of ordered key mutations over a tiny filesystem: a token renamed
 between two directories, so that a half-applied rename shows as the token in neither; files
-rewritten into new extents, the old freed; files deleted), the store (kept frees, releases, pins,
+rewritten into new extents, the old freed; files deleted), the cell (kept frees, releases, pins,
 cut-off), the follower (batches waiting for the fill barrier, then, holding it, dropping each
 changed file's mappings and applying mutation by mutation; advancing its view; the graveyard) and
 readers (operations holding the barrier shared: pair reads, DAX faults, read(2)s, opens; loads
@@ -304,7 +304,7 @@ fetched once into ~/.cache.
   (MappingsLive, NoReleasedReads, GravesLive); outside a batch, no mapping maps what a file held
   before (NoStaleMappings); a file deleted while open reads to its end (OpenFilesReadable); every
   pin is a graveyard's (NoLeakedPins).
-- Liveness, under weak fairness of the follower, store and started reader operations
+- Liveness, under weak fairness of the follower, cell and started reader operations
   (FollowerLive): the writer is never blocked by the follower (WriterNeverWaits, over ENABLED);
   the follower catches up; what the writer freed goes once the view is past it (FreesGo);
   readers' operations end; and even a follower that hangs is cut off
@@ -318,7 +318,7 @@ fetched once into ~/.cache.
 
 What the spec leaves out, as the protocol doesn't depend on it: Fxfs's flushes and journal moves
 (mutations like any other to the follower), files' many keys (one key each), the page cache path
-(DAX's, without mappings), compression and object storage (below the store's view).
+(DAX's, without mappings), compression and object storage (below the cell's view).
 
 The spec and the code then meet: the simulation's histories (3) are checked against the spec by
 TLC trace validation, so the spec stays the implementation's, not a separate story.
@@ -386,7 +386,7 @@ history checker checks every read, and holders' reads of files deleted under the
 turn each of the follower's rules off (`fxfs::follower::Rules`), and simulate its bugs (reading
 past its view, skipping changes, splitting commits), each caught.
 
-The real Fxfs, writer and follower, on one store, with many reader tasks, in one process, under
+The real Fxfs, writer and follower, on one cell, with many reader tasks, in one process, under
 Shuttle's scheduler, as FoundationDB and TigerBeetle test, and as crates/extent_store/src/sim
 does for doc-7. Shuttle is the deterministic executor: our fuchsia-async (tasks, timers) and
 fuchsia-sync (locks, condition variables) get a `shuttle` feature backed by Shuttle's futures and
@@ -457,7 +457,7 @@ Measured (docs/measurements): a writer alone runs as it did before the follower 
 the fill barrier, within noise (gce-fs-bench-ac5-*, TASK-42.7). With followers attached it does
 not yet: pgbench 1.28x slower with two reading, 1.43x with two idle (TASK-42.11). Not the
 followers' CPUs (the followed case's writer pinned alike, no followers started, runs as fast as
-alone), nor their reads' disk I/O (reading through the extent cache made it worse): the store's
+alone), nor their reads' disk I/O (reading through the extent cache made it worse): the cell's
 state lock, which the writer's writes, frees and commits take, waited on ~10 s in a run with
 idle followers against 0.5 s alone, held meanwhile by the uploader's closes of the open segment
 (`Store::close_now`, framing and syncing under the lock), which it makes back to back, seven

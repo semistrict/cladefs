@@ -41,13 +41,13 @@ impl Daemon {
         Self { vms, client, runtime }
     }
 
-    /// A VM process's store at `path`, created with `capacity` bytes if it doesn't exist.
+    /// A VM process's cell at `path`, created with `capacity` bytes if it doesn't exist.
     pub fn open(&self, path: &Path, capacity: u64) -> CellClient {
         CellClient::connect(&self.vms, path, capacity).unwrap()
     }
 
-    /// Makes a store at `path` of `cell`, an Fxfs cell: a new cell if its cell's
-    /// ID is 0, a new cell there if its ID is (TASK-364).
+    /// Makes a cell at `path` as `cell`, an Fxfs cell: a new cell if its ID is 0, a new cell
+    /// there if its ID is (TASK-364).
     pub fn create(
         &mut self,
         path: &Path,
@@ -67,7 +67,7 @@ impl Daemon {
         Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// The cell of the store at `path`, in its cell, as StatCell says it (TASK-364).
+    /// The ID of the cell at `path`, as StatCell says it (TASK-364).
     pub fn cell(&mut self, path: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let stat = self.stat(path)?;
         Ok(cladefs::CellId { tenant: stat.tenant, id: stat.cell })
@@ -78,14 +78,14 @@ impl Daemon {
         Ok(self.runtime.block_on(self.client.stat_cell(request))?.into_inner())
     }
 
-    /// Forks the store at `from` to `to` (ForkCell).
+    /// Forks the cell at `from` to `to` (ForkCell).
     pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let request = ForkCellRequest { from: name(from), to: name(to), ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
         Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Makes a version of the cell of the store at `from` (MakeVersion), and returns it.
+    /// Makes a version of the cell at `from` (MakeVersion), and returns it.
     pub fn version(&mut self, from: &Path) -> Result<cladefs::CellVersion, tonic::Status> {
         let request = MakeVersionRequest { path: name(from), keep_last: 0 };
         let version = self.runtime.block_on(self.client.make_version(request))?.into_inner();
@@ -105,7 +105,7 @@ impl Daemon {
         Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Drops the versions `versions` of the cell of the store at `path` (DropVersions).
+    /// Drops the versions `versions` of the cell at `path` (DropVersions).
     pub fn drop_versions(&mut self, path: &Path, versions: &[u64]) -> Result<(), tonic::Status> {
         let request = DropVersionsRequest { path: name(path), versions: versions.to_vec() };
         self.runtime.block_on(self.client.drop_versions(request)).map(drop)
@@ -121,13 +121,13 @@ impl Daemon {
         self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 
-    /// Places the store at `path` at `token`'s placement, its takings forced (TASK-681).
+    /// Places the cell at `path` at `token`'s placement, its takings forced (TASK-681).
     pub fn place_forced(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
         let request = PlaceCellRequest { path: name(path), token, force: true };
         self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 
-    /// Shares the version `version` of the cell of the store at `path`, or no longer
+    /// Shares the version `version` of the cell at `path`, or no longer
     /// (ShareVersion, TASK-395.7).
     pub fn share(&mut self, path: &Path, version: u64, shared: bool) -> Result<(), tonic::Status> {
         let request = ShareVersionRequest { path: name(path), version, shared };
@@ -166,7 +166,7 @@ impl Daemon {
         Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose stores are in `dir`,
+    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose cells are in `dir`,
     /// its socket, given to `uid`, if named.
     pub fn grant(
         &mut self,
@@ -183,14 +183,14 @@ impl Daemon {
         self.runtime.block_on(self.client.revoke(request)).map(drop)
     }
 
-    /// The stores the daemon serves, by their paths, in order.
+    /// The cells the daemon serves, by their paths, in order.
     pub fn list(&mut self) -> Vec<(PathBuf, StatCellResponse)> {
         let listed = self.runtime.block_on(self.client.list_cells(ListCellsRequest {}));
-        let mut stores: Vec<_> = (listed.unwrap().into_inner().stores.into_iter())
-            .map(|store| (PathBuf::from(store.path), store.stat.unwrap()))
+        let mut cells: Vec<_> = (listed.unwrap().into_inner().stores.into_iter())
+            .map(|cell| (PathBuf::from(cell.path), cell.stat.unwrap()))
             .collect();
-        stores.sort_by(|a, b| a.0.cmp(&b.0));
-        stores
+        cells.sort_by(|a, b| a.0.cmp(&b.0));
+        cells
     }
 
     /// Limits the memory of `tenant`, or of every tenant, to `bytes`, or lifts the limit.
@@ -235,7 +235,7 @@ impl Daemon {
     }
 
     /// What the disk of `tenant`, or of every tenant, holds past what it takes against its limit:
-    /// its stores' reserves and its writes admitted (doc-22).
+    /// its cells' reserves and its writes admitted (doc-22).
     pub fn tenant_reserved(&mut self, tenant: Option<u64>) -> u64 {
         let request = GetTenantDiskRequest { tenant };
         let response = self.runtime.block_on(self.client.get_tenant_disk(request)).unwrap();
@@ -263,9 +263,9 @@ pub fn failure<T: std::fmt::Debug>(result: Result<T, tonic::Status>) -> (Code, E
     (status.code(), errno(&status).expect("the status carries an errno"))
 }
 
-/// Writes `bytes` as the first extent of `store` and commits, setting its root to `root`.
-pub fn write(store: &CellClient, bytes: &[u8], root: &[u8]) {
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
-    store.commit(Some(root)).unwrap();
+/// Writes `bytes` as the first extent of `client` and commits, setting its root to `root`.
+pub fn write(client: &CellClient, bytes: &[u8], root: &[u8]) {
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    client.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
+    client.commit(Some(root)).unwrap();
 }

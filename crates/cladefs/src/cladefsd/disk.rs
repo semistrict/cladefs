@@ -5,35 +5,35 @@
 //! cladefs: the host's disk a tenant takes (TASK-94), counted, and limited at runtime through the
 //! control API, a tenant's and every tenant's together, as its memory is ([`super::memory`]).
 //!
-//! **What is counted.** A tenant takes what its stores' files do, the stores in its directory, the
-//! one its VM processes name stores in: each store's footprint (`local_cell::footprint`, backlog
+//! **What is counted.** A tenant takes what its cells' files do, the cells in its directory, the
+//! one its VM processes name cells in: each cell's footprint (`local_cell::footprint`, backlog
 //! doc-22): its files' lengths, each rounded up to 4 KiB and counted once however many names it
-//! has, and its directories, counted as its store writes them. One rule for what is shared: a
-//! store is the tenant's whose directory holds it, and one in no tenant's directory is no
+//! has, and its directories, counted as its cell writes them. One rule for what is shared: a
+//! cell is the tenant's whose directory holds it, and one in no tenant's directory is no
 //! tenant's. A fork's directory holds what the fork wrote; what it shares of its base is in the
 //! bucket, and read through the host's part cache (`CLADEFSD_PART_CACHE`), which is no tenant's:
-//! copies of the bucket's objects that any tenant's stores read, which the disk governor bounds. A
+//! copies of the bucket's objects that any tenant's cells read, which the disk governor bounds. A
 //! tenant's reads can't fill the disk through it, and no tenant's limit depends on what another
 //! read. The default tenant, of the daemon's own socket, has no directory, and is not counted.
 //!
 //! **How.** Nothing walks a tenant's directory but once, as it is granted, counting what the
-//! stores in it hold that this process hasn't counted yet (TASK-539.5): from then on, each store
-//! counts what it writes as it writes it, and what goes as it goes, a write as the stores' page
+//! cells in it hold that this process hasn't counted yet (TASK-539.5): from then on, each cell
+//! counts what it writes as it writes it, and what goes as it goes, a write as the cells' page
 //! cache takes it, uploaded or not. What the control API asks (`GetTenantDisk`) is read, not
 //! counted anew. Until TASK-539.5 each tenant's directory was walked every 10 s, each walk writing
 //! back every tenant's dirty pages first (TASK-538, TASK-525).
 //!
 //! **Limits.** Past its limit a tenant's writes fail with `ENOSPC`, and so do its VM processes'
-//! makings of stores (an `OPEN` making one, a `FORK`), which its guest sees as a full disk; the
+//! makings of cells (an `OPEN` making one, a `FORK`), which its guest sees as a full disk; the
 //! daemon goes on, and so do other tenants' writes. Past the limit of every tenant's together, any
 //! tenant's do. Commits go on: what was written commits, uploads, and leaves the disk, as do
 //! frees, which commits make. There are no limits until set. Its metrics name tenants by their
 //! IDs.
 //!
 //! **Not directory quotas.** A filesystem's quota of a tenant's directory (XFS project quotas,
-//! ext4's) refuses whichever write of the directory's comes past it: a store closing and framing a
-//! segment, which fails the store (`local_cell`'s `Phase::Failed`), or a flush appending a
-//! commit's record, rather than the guest's next write, which the daemon refuses before the store
+//! ext4's) refuses whichever write of the directory's comes past it: a cell closing and framing a
+//! segment, which fails the cell (`local_cell`'s `Phase::Failed`), or a flush appending a
+//! commit's record, rather than the guest's next write, which the daemon refuses before the cell
 //! takes any of it. And it is the host's setup, a filesystem's that has them, which the daemon
 //! can't set as tenants are granted.
 
@@ -45,12 +45,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
-/// What a store a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
+/// What a cell a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
 pub const STORE_MADE: u64 = footprint::STORE_MADE;
 
 node_local::node_local! {
-    /// The tenants' disks alive, and their limits, under one lock, so that a tenant made as its limit
-    /// is set is limited as it was set.
+    /// The tenants' disks alive, and their limits, under one lock, so that a tenant made as its
+    /// limit is set is limited as it was set.
     static REGISTRY: Mutex<Registry> =
         Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None });
 }
@@ -89,7 +89,7 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// The disk of the tenant of the ID `tenant`, whose directory is `dir`: its stores counted,
+    /// The disk of the tenant of the ID `tenant`, whose directory is `dir`: its cells counted,
     /// those this process hasn't counted yet by one listing each, limited as its ID is.
     pub(super) fn new(tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
         let allotment = footprint::allotment(dir)?;
@@ -102,7 +102,7 @@ impl Disk {
         Ok(disk)
     }
 
-    /// What it takes, in bytes: what its stores' files take, counted as they write.
+    /// What it takes, in bytes: what its cells' files take, counted as they write.
     pub fn used(&self) -> u64 {
         self.allotment.bytes()
     }
@@ -167,11 +167,11 @@ pub fn total() -> u64 {
 /// A tenant's disk, or every tenant's, as the control API reports it ([`count`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Counted {
-    /// What its stores' files take.
+    /// What its cells' files take.
     pub bytes: u64,
     /// Its limit, if it has one.
     pub limit: Option<u64>,
-    /// What it holds past `bytes` against its limit: its stores' reserves, and its writes
+    /// What it holds past `bytes` against its limit: its cells' reserves, and its writes
     /// admitted ([`Allotment::reserved`]).
     pub reserved: u64,
 }
@@ -210,7 +210,7 @@ fn allotments(disks: &[Arc<Disk>]) -> Vec<&Arc<Allotment>> {
 pub struct TenantDisk {
     /// Its tenant's ID.
     pub tenant: u64,
-    /// What it takes, in bytes, counted as its stores write.
+    /// What it takes, in bytes, counted as its cells write.
     pub bytes: u64,
     /// Its limit, if it has one.
     pub limit: Option<u64>,
@@ -256,7 +256,7 @@ pub fn tenants() -> Vec<TenantDisk> {
 pub struct DiskConfig {
     /// `CLADEFSD_DISK_HEADROOM`'s, if set ([`super::governor::disk_headroom`]).
     pub headroom: Option<DiskHeadroom>,
-    /// `CLADEFSD_DISK_BYTES`, if set: stores and part cache together, on every disk.
+    /// `CLADEFSD_DISK_BYTES`, if set: cells and part cache together, on every disk.
     pub fixed: Option<u64>,
 }
 
@@ -281,8 +281,9 @@ impl DiskConfig {
 }
 
 /// cladefs: starts, once, the daemon's disk governor, on a thread of its own, looking at its disks
-/// every [`super::governor::INTERVAL`], and at once when a write is refused or the part cache passes
-/// what its stores leave it (`bucket_cell::host_disk::wake_governor`). Later starts change nothing.
+/// every [`super::governor::INTERVAL`], and at once when a write is refused or the part cache
+/// passes what its cells leave it (`bucket_cell::host_disk::wake_governor`). Later starts change
+/// nothing.
 pub fn start(config: DiskConfig) -> Result<(), String> {
     node_local::node_local! {
         static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -301,11 +302,11 @@ pub fn start(config: DiskConfig) -> Result<(), String> {
         .map_err(|err| format!("starting the disk governor: {err}"))
 }
 
-/// cladefs: the disk governor's look at the host's disks, as `config` says (doc-22, TASK-539.9): each
-/// one's allowance, what its stores and part cache may keep on it, the headroom it leaves, and
-/// whether it is under pressure, published on it; the part cache on it sized to what its stores
-/// leave, evicting at once; its stores' uploaders urged as pressure begins. A disk whose space
-/// can't be read keeps what it was allowed, logged once until it is read again (`errors`).
+/// cladefs: the disk governor's look at the host's disks, as `config` says (doc-22, TASK-539.9):
+/// each one's allowance, what its cells and part cache may keep on it, the headroom it leaves, and
+/// whether it is under pressure, published on it; the part cache on it sized to what its cells
+/// leave, evicting at once; its cells' uploaders urged as pressure begins. A disk whose space can't
+/// be read keeps what it was allowed, logged once until it is read again (`errors`).
 pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u64>) {
     let disks = HostDisk::all();
     let cache = super::cells::opened_cache();
@@ -324,7 +325,7 @@ pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u6
             }
         };
         let headroom = super::governor::disk_headroom(sample.size, config.headroom);
-        // What it counts that its filesystem doesn't hold yet: the stores' pages dirty, and the
+        // What it counts that its filesystem doesn't hold yet: the cells' pages dirty, and the
         // cache's fills in flight.
         let in_flight = local_cell::pages::shared().usage().dirty + disk.cache_writing.get();
         let mut allowance =
@@ -336,8 +337,8 @@ pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u6
                 .sum();
             allowance = allowance.min(fixed.saturating_sub(others));
         }
-        let spare = allowance.saturating_sub(disk.stores.committed());
-        // Derived first: the part cache keeps what the stores leave, down a band below it once it
+        let spare = allowance.saturating_sub(disk.cells.committed());
+        // Derived first: the part cache keeps what the cells leave, down a band below it once it
         // must give back, so that it doesn't evict at every look.
         if let Some(cache) = cache.as_ref().filter(|cache| Arc::ptr_eq(cache.disk(), disk)) {
             let limit = match cache.bytes() > spare {
@@ -352,14 +353,14 @@ pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u6
         let pressure = super::governor::pressured(was, spare, headroom);
         disk.govern(allowance, headroom, pressure);
         share(disk, allowance, pressure);
-        // Urged as it begins: each urging closes the stores' open segments, however little they
+        // Urged as it begins: each urging closes the cells' open segments, however little they
         // hold.
         if pressure && !was {
             log::warn!(
-                "cladefsd: disk {dev:#x} under pressure: its stores take {} bytes and reserve \
+                "cladefsd: disk {dev:#x} under pressure: its cells take {} bytes and reserve \
                  {} more of {allowance}, its filesystem {} bytes free; urging their uploads",
-                disk.stores.bytes(),
-                disk.stores.reserved() + disk.stores.pledged(),
+                disk.cells.bytes(),
+                disk.cells.reserved() + disk.cells.pledged(),
                 sample.free
             );
             disk.urge();
@@ -386,29 +387,29 @@ pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
             "What the disk governor allows the daemon on a disk.",
             |disk, _| disk.allowance(),
         ),
-        ("cladefsd_host_disk_stores_bytes", "What the stores on a disk take.", |disk, _| {
-            disk.stores.bytes()
+        ("cladefsd_host_disk_stores_bytes", "What the cells on a disk take.", |disk, _| {
+            disk.cells.bytes()
         }),
         (
             "cladefsd_host_disk_unframed_bytes",
             "Of that, their files whose framing is to come.",
-            |disk, _| disk.stores.unframed(),
+            |disk, _| disk.cells.unframed(),
         ),
         (
             "cladefsd_host_disk_reserved_bytes",
-            "What the stores' own work on a disk may still add.",
-            |disk, _| disk.stores.reserved(),
+            "What the cells' own work on a disk may still add.",
+            |disk, _| disk.cells.reserved(),
         ),
         ("cladefsd_host_disk_pledged_bytes", "What writes admitted on a disk hold.", |disk, _| {
-            disk.stores.pledged()
+            disk.cells.pledged()
         }),
         ("cladefsd_host_disk_cache_bytes", "What the part cache keeps on a disk.", |disk, _| {
             disk.cache.get()
         }),
         (
             "cladefsd_host_disk_spare_bytes",
-            "What the stores on a disk leave of its allowance.",
-            |disk, _| disk.allowance().saturating_sub(disk.stores.committed()),
+            "What the cells on a disk leave of its allowance.",
+            |disk, _| disk.allowance().saturating_sub(disk.cells.committed()),
         ),
         (
             "cladefsd_host_disk_other_bytes",
@@ -437,9 +438,10 @@ pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
         .collect()
 }
 
-/// cladefs: the host's disks as the stats file says them (doc-22, TASK-539.11): after `disks:`, each
-/// disk's device, `MAJOR:MINOR`, and its gauges ([`host_disks`]), `NAME=VALUE`, by the part of their
-/// names after `cladefsd_host_disk_`; disks separated by `;`. `disks: none` before any is opened.
+/// cladefs: the host's disks as the stats file says them (doc-22, TASK-539.11): after `disks:`,
+/// each disk's device, `MAJOR:MINOR`, and its gauges ([`host_disks`]), `NAME=VALUE`, by the part of
+/// their names after `cladefsd_host_disk_`; disks separated by `;`. `disks: none` before any is
+/// opened.
 pub fn line() -> String {
     let mut by_device: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for (name, _, values) in host_disks() {
@@ -457,9 +459,9 @@ pub fn line() -> String {
     }
 }
 
-/// cladefs: shares what `disk`'s allowance leaves the tenants by their allotments' weights while it is
-/// under pressure, each allotment on it refused past its share; none otherwise (TASK-539.10).
-/// What its stores in no allotment take, the default tenant's, comes off first.
+/// cladefs: shares what `disk`'s allowance leaves the tenants by their allotments' weights while it
+/// is under pressure, each allotment on it refused past its share; none otherwise (TASK-539.10).
+/// What its cells in no allotment take, the default tenant's, comes off first.
 fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
     let on_disk: Vec<_> = (footprint::allotments().into_iter())
         .filter(|allotment| Arc::ptr_eq(allotment.disk(), disk))
@@ -469,7 +471,7 @@ fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
         return;
     }
     let allotted: u64 = on_disk.iter().map(|allotment| allotment.committed()).sum();
-    let others = disk.stores.committed().saturating_sub(allotted);
+    let others = disk.cells.committed().saturating_sub(allotted);
     let weighted: Vec<_> =
         on_disk.iter().enumerate().map(|(at, allotment)| (at as u64, allotment.weight())).collect();
     for (at, share) in super::governor::shares(allowance.saturating_sub(others), &weighted) {
@@ -485,20 +487,20 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
 
-    /// A write admitted holds its bytes, and what its store's own work may add for them, until it
-    /// lands, and is counted as its store's file grows, whether or not the stores' page cache wrote
+    /// A write admitted holds its bytes, and what its cell's own work may add for them, until it
+    /// lands, and is counted as its cell's file grows, whether or not the cells' page cache wrote
     /// it back: nothing counts the tenant anew between (doc-22).
     #[test]
     fn writes_are_held_until_they_land_and_counted_as_they_do() {
         use local_cell::footprint::DiskFull;
         let dir = tempfile::tempdir().unwrap();
-        let store = dir.path().join("store");
-        std::fs::create_dir(&store).unwrap();
+        let cell_dir = dir.path().join("store");
+        std::fs::create_dir(&cell_dir).unwrap();
         let disk = Disk::new(0xace, dir.path()).unwrap();
-        let opened = HostDir::new(&store).unwrap();
+        let opened = HostDir::new(&cell_dir).unwrap();
         let footprint = opened.footprint().clone();
         let empty = disk.used();
-        // A MiB written to no file the store frames is admitted as four: it, and its reserve.
+        // A MiB written to no file the cell frames is admitted as four: it, and its reserve.
         let admitted = (1 + bucket_cell::host_disk::RESERVE_FACTOR) * MIB;
         set_limit(Some(0xace), Some(empty + footprint.reserved() + 2 * admitted)).unwrap();
         let writing = footprint.admit(MIB, 0).unwrap();
@@ -511,17 +513,17 @@ mod tests {
     }
 
     /// TASK-538: counting one tenant, every tenant, and rendering their metrics write back no
-    /// store's pages: another tenant's dirty ones stay dirty, counted as written.
+    /// cell's pages: another tenant's dirty ones stay dirty, counted as written.
     #[test]
     fn counting_tenants_writes_back_nothing() {
         use local_cell::pages::{Options, PageCache};
         let (one, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let _disk = Disk::new(0x538, one.path()).unwrap();
         let theirs = Disk::new(0x539, other.path()).unwrap();
-        let store = other.path().join("store");
-        std::fs::create_dir(&store).unwrap();
+        let cell_dir = other.path().join("store");
+        std::fs::create_dir(&cell_dir).unwrap();
         let cache = PageCache::without_flusher(Options::default());
-        let dir = HostDir::on(local_cell::DiskDir::new(&store).unwrap(), cache.clone()).unwrap();
+        let dir = HostDir::on(local_cell::DiskDir::new(&cell_dir).unwrap(), cache.clone()).unwrap();
         // Open, its pages held: its last opening's going writes them back.
         let file = dir.create("dirty", true).unwrap();
         file.write_at(&vec![1; 4 << 12], 0).unwrap();
@@ -555,12 +557,12 @@ mod tests {
         );
     }
 
-    /// TASK-539.9: the governor sizes the part cache to what its disk's stores leave of what it
-    /// allows; urges the stores' uploaders as the disk comes under pressure, its stores leaving it
+    /// TASK-539.9: the governor sizes the part cache to what its disk's cells leave of what it
+    /// allows; urges the cells' uploaders as the disk comes under pressure, its cells leaving it
     /// less than its headroom, and not again while it stays so; and lets it go a quarter of the
     /// headroom past it (doc-22).
     #[test]
-    fn the_governor_sizes_the_cache_to_what_stores_leave_and_urges_under_pressure() {
+    fn the_governor_sizes_the_cache_to_what_cells_leave_and_urges_under_pressure() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
@@ -568,15 +570,15 @@ mod tests {
         std::fs::create_dir(dir.path().join("cache")).unwrap();
         let cache = super::super::cells::part_cache().unwrap().unwrap();
         let disk = cache.disk().clone();
-        let store = dir.path().join("store");
-        std::fs::create_dir(&store).unwrap();
-        let opened = HostDir::new(&store).unwrap();
+        let cell_dir = dir.path().join("store");
+        std::fs::create_dir(&cell_dir).unwrap();
+        let opened = HostDir::new(&cell_dir).unwrap();
         opened.create("data", true).unwrap().write_at(&vec![1; MIB as usize], 0).unwrap();
         let urged = Arc::new(Urged::default());
         let weak: std::sync::Weak<dyn super::host_disk::Urge> = Arc::downgrade(&urged) as _;
         disk.on_pressure(weak);
         let urgings = || urged.0.load(std::sync::atomic::Ordering::Relaxed);
-        let committed = disk.stores.committed();
+        let committed = disk.cells.committed();
 
         governing(committed + 10 * MIB);
         assert_eq!((cache.capacity(), disk.under_pressure(), urgings()), (10 * MIB, false, 0));
@@ -592,8 +594,8 @@ mod tests {
     }
 
     /// TASK-539.10: under pressure, the governor shares what the disk's allowance leaves by the
-    /// tenants' weights, a tenant past its share refused while one within its own writes; out of it,
-    /// no share holds any. The metrics show the disk, and the tenants' weights and shares.
+    /// tenants' weights, a tenant past its share refused while one within its own writes; out of
+    /// it, no share holds any. The metrics show the disk, and the tenants' weights and shares.
     #[test]
     fn weights_share_a_disk_under_pressure() {
         use local_cell::footprint::DiskFull;
@@ -604,12 +606,12 @@ mod tests {
         let (heavy_disk, light_disk) =
             (Disk::new(0x3, &heavy).unwrap(), Disk::new(0x1, &light).unwrap());
         super::set_weight(0x3, 3).unwrap();
-        let (heavy_store, light_store) = (
+        let (heavy_cell, light_cell) = (
             HostDir::new(&heavy.join("store")).unwrap(),
             HostDir::new(&light.join("store")).unwrap(),
         );
-        let disk = heavy_store.footprint().disk().unwrap().clone();
-        let committed = disk.stores.committed();
+        let disk = heavy_cell.footprint().disk().unwrap().clone();
+        let committed = disk.cells.committed();
         let others =
             committed - heavy_disk.allotment.committed() - light_disk.allotment.committed();
 
@@ -620,9 +622,9 @@ mod tests {
         assert_eq!(light_disk.allotment.share(), Some(base / 4));
         let light_room = base / 4 - light_disk.allotment.committed();
         let past = light_room / (1 + bucket_cell::host_disk::RESERVE_FACTOR) + MIB / 64;
-        let refused = light_store.footprint().admit(past, 0).map(drop);
+        let refused = light_cell.footprint().admit(past, 0).map(drop);
         assert_eq!(refused, Err(DiskFull::Share));
-        assert!(heavy_store.footprint().admit(4096, 0).is_ok());
+        assert!(heavy_cell.footprint().admit(4096, 0).is_ok());
         assert!(super::line().contains(" pressure=1"), "{}", super::line());
         // Each of its disk's gauges, as its counters say them.
         let dev = disk.dev().unwrap() as libc::dev_t;
@@ -637,12 +639,12 @@ mod tests {
         assert_eq!(gauge("cladefsd_host_disk_size_bytes"), sample.size);
         assert_eq!(gauge("cladefsd_host_disk_allowance_bytes"), committed + MIB / 2);
         assert_eq!(gauge("cladefsd_host_disk_headroom_bytes"), MIB);
-        assert_eq!(gauge("cladefsd_host_disk_stores_bytes"), disk.stores.bytes());
-        assert_eq!(gauge("cladefsd_host_disk_unframed_bytes"), disk.stores.unframed());
-        assert_eq!(gauge("cladefsd_host_disk_reserved_bytes"), disk.stores.reserved());
-        assert_eq!(gauge("cladefsd_host_disk_pledged_bytes"), disk.stores.pledged());
+        assert_eq!(gauge("cladefsd_host_disk_stores_bytes"), disk.cells.bytes());
+        assert_eq!(gauge("cladefsd_host_disk_unframed_bytes"), disk.cells.unframed());
+        assert_eq!(gauge("cladefsd_host_disk_reserved_bytes"), disk.cells.reserved());
+        assert_eq!(gauge("cladefsd_host_disk_pledged_bytes"), disk.cells.pledged());
         assert_eq!(gauge("cladefsd_host_disk_cache_bytes"), disk.cache.get());
-        let spare = (committed + MIB / 2).saturating_sub(disk.stores.committed());
+        let spare = (committed + MIB / 2).saturating_sub(disk.cells.committed());
         assert_eq!(gauge("cladefsd_host_disk_spare_bytes"), spare);
         assert_eq!(gauge("cladefsd_host_disk_pressure"), 1);
         // What its filesystem holds of others': within what others wrote between the samples.
@@ -664,6 +666,6 @@ mod tests {
 
         governing(committed + 64 * MIB);
         assert_eq!((heavy_disk.allotment.share(), light_disk.allotment.share()), (None, None));
-        assert!(light_store.footprint().admit(past, 0).is_ok());
+        assert!(light_cell.footprint().admit(past, 0).is_ok());
     }
 }

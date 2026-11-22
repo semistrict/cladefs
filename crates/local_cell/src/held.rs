@@ -25,8 +25,8 @@
 //! segment's framing is near for those held longest, and those held last are those whose raw pages
 //! the host is likeliest to hold still, as it lets the least recently used go first.
 //!
-//! The stores of a process share one, which they take as they open
-//! ([`Opening::held`](crate::Opening::held)); without one, a store holds its parts in one of its
+//! The cells of a process share one, which they take as they open
+//! ([`Opening::held`](crate::Opening::held)); without one, a cell holds its parts in one of its
 //! own, which nothing makes let go of any: the parts of its open segment and of those being framed,
 //! at most.
 
@@ -34,7 +34,7 @@ use crate::framing::Stored;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-/// cladefs: the parts of segments packed ahead of their framings, held in memory for the stores that
+/// cladefs: the parts of segments packed ahead of their framings, held in memory for the cells that
 /// share it, as the module's docs say.
 #[derive(Default)]
 pub struct HeldParts {
@@ -149,8 +149,8 @@ impl HeldParts {
     }
 }
 
-/// cladefs: a part to hold once packed ([`HeldParts::pend`]), as the packing ahead fills it, or skips
-/// it. Dropped neither, it is held never.
+/// cladefs: a part to hold once packed ([`HeldParts::pend`]), as the packing ahead fills it, or
+/// skips it. Dropped neither, it is held never.
 pub(crate) struct Pending {
     key: u64,
     parts: Arc<HeldParts>,
@@ -208,8 +208,8 @@ impl HeldParts {
     }
 }
 
-/// cladefs: a part held ([`HeldParts::hold`]): its segment's, which its framing takes, if it is still
-/// held then ([`Hold::take`]). Dropped, the part is held no more.
+/// cladefs: a part held ([`HeldParts::hold`]): its segment's, which its framing takes, if it is
+/// still held then ([`Hold::take`]). Dropped, the part is held no more.
 pub(crate) struct Hold {
     key: u64,
     parts: Arc<HeldParts>,

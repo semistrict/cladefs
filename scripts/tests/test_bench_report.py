@@ -56,7 +56,7 @@ class ObjectStorage(unittest.TestCase):
         self.assertEqual(
             section,
             """ the extent daemon's requests to its bucket, for the cases that kept their
-stores there, at GCS Standard single-region prices (class A $0.005 per 1,000, class B
+cells there, at GCS Standard single-region prices (class A $0.005 per 1,000, class B
 $0.0004 per 1,000, deletes free).
 
 | Request | Count | Class | Cost |
@@ -138,7 +138,7 @@ reply.
 | write | 4 | 350.0 µs |
 | map | 10 | 250.0 µs |
 
-Commits: 4, 300.0 µs each: writing the open extents' 4.0 KiB 50.0 µs, committing the store 50.0 µs, sealing the windows' mappings 150.0 µs, waiting for object storage 25.0 µs.
+Commits: 4, 300.0 µs each: writing the open extents' 4.0 KiB 50.0 µs, committing the extent store 50.0 µs, sealing the windows' mappings 150.0 µs, waiting for object storage 25.0 µs.
 
 Segments closed and framed: 2, 15.0 ms each.
 
@@ -156,7 +156,7 @@ Segments closed and framed: 2, 15.0 ms each.
         section = report(self.results(STATS + daemon + requests)).split("Commits: ", 1)[1]
         self.assertEqual(
             section,
-            "4, 300.0 µs each: committing the store 50.0 µs, sealing the windows' mappings "
+            "4, 300.0 µs each: committing the extent store 50.0 µs, sealing the windows' mappings "
             "150.0 µs, waiting for object storage 25.0 µs.\n\n",
         )
 
@@ -170,7 +170,7 @@ Segments closed and framed: 2, 15.0 ms each.
         section = report(self.results(STATS + daemon + requests)).split("Commits: ", 1)[1]
         self.assertEqual(
             section,
-            "4, 300.0 µs each: committing the store 50.0 µs, waiting for object storage 25.0 µs."
+            "4, 300.0 µs each: committing the extent store 50.0 µs, waiting for object storage 25.0 µs."
             "\n\n",
         )
 

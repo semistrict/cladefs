@@ -22,7 +22,7 @@ fn images() -> tempfile::TempDir {
 
 /// A formatted image at `path`, holding `file` with `contents`, closed.
 async fn image_with(path: &Path, file: &[u8], contents: &[u8]) -> Storage {
-    let fs = Filesystem::format(Storage::create(path, IMAGE_SIZE).unwrap()).await.unwrap();
+    let fs = Filesystem::format(Storage::create(path, IMAGE_SIZE).await.unwrap()).await.unwrap();
     let (node, _) = fs.root().create(file, 0o644, OWNER).await.unwrap();
     node.write(0, contents).await.unwrap();
     fs.close().await.unwrap()
@@ -46,10 +46,10 @@ fn allocated(path: &Path) -> u64 {
 }
 
 /// Image I/O bypasses the host's page cache.
-#[test]
-fn images_bypass_the_page_cache() {
+#[tokio::test(flavor = "multi_thread")]
+async fn images_bypass_the_page_cache() {
     let dir = images();
-    let storage = Storage::create(dir.path().join("image"), IMAGE_SIZE).unwrap();
+    let storage = Storage::create(dir.path().join("image"), IMAGE_SIZE).await.unwrap();
     assert!(storage.bypasses_page_cache());
     assert!(!Storage::memory(IMAGE_SIZE).bypasses_page_cache());
 }
@@ -117,16 +117,16 @@ fn delete_images_and_their_forks() {
         let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let storage = image_with(&path, b"file", b"original").await;
         let fork = storage.fork_to(&fork_path).await.unwrap();
-        assert!(Storage::delete(&fork_path).is_err(), "deleted an open fork");
-        assert!(Storage::delete(&path).is_err(), "deleted an open image");
+        assert!(Storage::delete(&fork_path).await.is_err(), "deleted an open fork");
+        assert!(Storage::delete(&path).await.is_err(), "deleted an open image");
         drop((fork, storage));
-        Storage::delete(&path).unwrap();
+        Storage::delete(&path).await.unwrap();
         assert!(!path.exists());
-        assert!(Storage::open(&path).is_err(), "opened a deleted image");
-        let fs = Filesystem::mount(Storage::open(&fork_path).unwrap()).await.unwrap();
+        assert!(Storage::open(&path).await.is_err(), "opened a deleted image");
+        let fs = Filesystem::mount(Storage::open(&fork_path).await.unwrap()).await.unwrap();
         assert_eq!(read(&fs, b"file").await, b"original");
         fs.close().await.unwrap();
-        Storage::delete(&fork_path).unwrap();
+        Storage::delete(&fork_path).await.unwrap();
         assert!(!fork_path.exists());
     })
 }

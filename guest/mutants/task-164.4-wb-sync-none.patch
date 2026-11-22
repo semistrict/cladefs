@@ -6,8 +6,8 @@
 #
 # TASK-164.4, doc-13: writeback write-protects nothing, as when it left it to
 # dax_writeback_mapping_range, not forced to WB_SYNC_ALL, which alone acts: a fault's PTE stays
-# writable, and a store through it after the copy is in no set. cow_rebind_skips_dirty: the store
-# after the rebind never reaches Fxfs; and cow_writeback_against_stores, an fsync missing a store
+# writable, and a write through it after the copy is in no set. cow_rebind_skips_dirty: the write
+# after the rebind never reaches Fxfs; and cow_writeback_against_mapped_writes, an fsync missing a write
 # before it. Since TASK-164.9 writeback cleans no DAX entries: this takes its write-protect away.
 
 --- a/guest/linux/fs/cladefs/dax.c

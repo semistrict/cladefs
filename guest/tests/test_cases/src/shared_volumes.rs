@@ -4,8 +4,8 @@
 
 //! What the tests of shared volumes (backlog doc-10) have in common. A publisher VM keeps a repo
 //! current with Git in a volume and publishes it: it freezes, flushes and asks for the volume's
-//! manifest, and the host forks its store, with no `snapshot_volume`, and keeps the manifest, which
-//! it doesn't read. Consumer VMs, on stores of their own, ask the host for a generation as they
+//! manifest, and the host forks its cell, with no `snapshot_volume`, and keeps the manifest, which
+//! it doesn't read. Consumer VMs, on cells of their own, ask the host for a generation as they
 //! run, and import it as a volume.
 
 use macros::{guest, host};
@@ -34,12 +34,12 @@ pub mod host {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    /// Makes the publisher's store at `path`: its default volume, and the volume it publishes.
+    /// Makes the publisher's cell at `path`: its default volume, and the volume it publishes.
     pub fn format(path: &Path, capacity: u64) -> anyhow::Result<()> {
         format_with(path, capacity, &[VOLUME])
     }
 
-    /// Makes the publisher's store at `path`: its default volume, and `volumes`.
+    /// Makes the publisher's cell at `path`: its default volume, and `volumes`.
     pub fn format_with(path: &Path, capacity: u64, volumes: &[&str]) -> anyhow::Result<()> {
         block_on(async {
             let image = Image::format(Storage::create(path, capacity)?).await?;
@@ -66,14 +66,14 @@ pub mod host {
         Ok(())
     }
 
-    /// A published generation: a fork of the publisher's store, and the manifest of its volume.
+    /// A published generation: a fork of the publisher's cell, and the manifest of its volume.
     #[derive(Clone)]
     pub struct Generation {
         path: PathBuf,
         manifest: Vec<u8>,
     }
 
-    /// The next generation of the publisher talking on `stream`, whose store is at `publisher`, at
+    /// The next generation of the publisher talking on `stream`, whose cell is at `publisher`, at
     /// `path`: public, and the publisher told that it is forked.
     pub fn next_generation(
         stream: &mut UnixStream,
@@ -88,7 +88,7 @@ pub mod host {
         Ok(Generation { path, manifest })
     }
 
-    /// Attaches the `generations` the consumer on `stream`, whose store is at `consumer`, asks for,
+    /// Attaches the `generations` the consumer on `stream`, whose cell is at `consumer`, asks for,
     /// by number, each time it does, and gives it their manifests, until it hangs up.
     pub fn attach_generations(
         stream: UnixStream,
@@ -107,7 +107,7 @@ pub mod host {
 
     /// The sandbox manager, as the tests stand in for it, for VMs' automounters and
     /// `git-remote-fxfs` (TASK-136.6, 136.7): it answers their asks ([`fxfs_automount::upcall`]),
-    /// attaching to their store the generation each name has, and naming the newest generation of
+    /// attaching to their cell the generation each name has, and naming the newest generation of
     /// each repo URL it has, refusing the rest, counting what each name and URL was asked.
     pub struct Manager {
         /// The daemon's control socket's, as [`crate::common::control`] finds it.
@@ -117,10 +117,10 @@ pub mod host {
         asked: Arc<Mutex<BTreeMap<String, usize>>>,
     }
 
-    /// A [`Manager`]'s answers, for one VM's store, through the daemon's control API.
+    /// A [`Manager`]'s answers, for one VM's cell, through the daemon's control API.
     struct Answering {
         control: Client,
-        store: PathBuf,
+        cell_dir: PathBuf,
         names: BTreeMap<String, Generation>,
         newest: BTreeMap<String, String>,
         asked: Arc<Mutex<BTreeMap<String, usize>>>,
@@ -138,7 +138,7 @@ pub mod host {
             let Some(generation) = self.names.get(name) else {
                 return Answer::Refused(format!("no {name} for this sandbox"));
             };
-            self.control.attach_base(&self.store, &generation.path).expect("attaching");
+            self.control.attach_base(&self.cell_dir, &generation.path).expect("attaching");
             Answer::Manifest(generation.manifest.clone())
         }
 
@@ -162,18 +162,18 @@ pub mod host {
             Self { cladefsd, names, newest, asked: Default::default() }
         }
 
-        /// Answers, on a thread of its own, the asks of the VM of `role`, on the store at `store`,
-        /// at the vsock port they ask at: listening before it boots.
-        pub fn serve(&self, role: &str, store: &Path) -> anyhow::Result<()> {
+        /// Answers, on a thread of its own, the asks of the VM of `role`, on the cell at
+        /// `cell_dir`, at the vsock port they ask at: listening before it boots.
+        pub fn serve(&self, role: &str, cell_dir: &Path) -> anyhow::Result<()> {
             let path = Vms::vsock_port(role, fxfs_automount::PORT);
-            self.serve_at(UnixListener::bind(path)?, store)
+            self.serve_at(UnixListener::bind(path)?, cell_dir)
         }
 
         /// Answers, as [`Manager::serve`], the asks that come to `listener`.
-        pub fn serve_at(&self, listener: UnixListener, store: &Path) -> anyhow::Result<()> {
+        pub fn serve_at(&self, listener: UnixListener, cell_dir: &Path) -> anyhow::Result<()> {
             let mut answering = Answering {
                 control: crate::common::control(&self.cladefsd)?,
-                store: store.to_owned(),
+                cell_dir: cell_dir.to_owned(),
                 names: self.names.clone(),
                 newest: self.newest.clone(),
                 asked: self.asked.clone(),
@@ -202,10 +202,10 @@ pub mod host {
         pub root: PathBuf,
         pub cpus: u8,
         pub memory_mib: u32,
-        /// Their stores' capacity, and their DAX windows' size, none if 0.
+        /// Their cells' capacity, and their DAX windows' size, none if 0.
         pub capacity: u64,
         pub window: u64,
-        /// The socket of the extent daemon that serves their stores.
+        /// The socket of the extent daemon that serves their cells.
         pub cladefsd: PathBuf,
         /// What says the host's memory as their guests ask ([`crate::measure`]), if they do.
         pub memory: Option<HostMemory>,
@@ -222,7 +222,7 @@ pub mod host {
     }
 
     impl<'a> Vms<'a> {
-        /// VMs of 2 vCPUs and 1 GiB each, on stores of `capacity` that the daemon at `cladefsd`
+        /// VMs of 2 vCPUs and 1 GiB each, on cells of `capacity` that the daemon at `cladefsd`
         /// serves, with DAX windows of `window`, not measured.
         pub fn new(
             test_setup: &'a TestSetup,
@@ -236,16 +236,16 @@ pub mod host {
             Self { test_setup, root, cpus, memory_mib, capacity, window, cladefsd, memory, booted }
         }
 
-        /// A VM of the guest's `role`, on the store at `store`, and the host's end of the
+        /// A VM of the guest's `role`, on the cell at `cell_dir`, and the host's end of the
         /// connection it opens, if `talks`.
         pub fn run(
             &self,
             role: &str,
-            store: &Path,
+            cell_dir: &Path,
             talks: bool,
         ) -> anyhow::Result<(Running, Option<UnixStream>)> {
             self.boot(role, talks, |vm| {
-                vm.cell_served("extents", store, self.capacity, self.window, &self.cladefsd);
+                vm.cell_served("extents", cell_dir, self.capacity, self.window, &self.cladefsd);
                 Ok(())
             })
         }
@@ -293,23 +293,23 @@ pub mod host {
             PathBuf::from(format!("{}_{port}", Requests::uds_of(&Self::vsock_name(role)).display()))
         }
 
-        /// A VM of `role` on the store at `store`, run to its end: a consumer of `generations`.
+        /// A VM of `role` on the cell at `cell_dir`, run to its end: a consumer of `generations`.
         pub fn run_consumer(
             &self,
             role: &str,
-            store: &Path,
+            cell_dir: &Path,
             control: &Client,
             generations: &[Generation],
         ) -> anyhow::Result<()> {
-            let (vm, stream) = self.run(role, store, true)?;
+            let (vm, stream) = self.run(role, cell_dir, true)?;
             let stream = stream.context("the consumer's connection")?;
-            attach_generations(stream, control, store, generations)?;
+            attach_generations(stream, control, cell_dir, generations)?;
             vm.wait()
         }
     }
 
     impl<'a> Vms<'a> {
-        /// The snapshot at `snapshot` and `memory`, restored as the VM of `role`, its store where
+        /// The snapshot at `snapshot` and `memory`, restored as the VM of `role`, its cell where
         /// it was, resumed, and the host's end of the connection its guest makes on `PORT`.
         pub fn restore(
             &self,
@@ -552,7 +552,7 @@ pub mod guest {
         unsafe { libc::sync() };
     }
 
-    /// Publishes the volume at `REPO` to the host, which forks the store, and tells this it did.
+    /// Publishes the volume at `REPO` to the host, which forks the cell, and tells this it did.
     /// Returns the size of its manifest.
     pub fn publish(host: &mut File) -> usize {
         publish_volume(host, REPO, &[MNT])

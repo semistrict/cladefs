@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! TASK-136.5: forks attached to stores through the control API: a VM reads and maps what they
-//! hold, read-only, through its one device, as a stopped store's next VM does, and a fork's, and a
+//! TASK-136.5: forks attached to cells through the control API: a VM reads and maps what they
+//! hold, read-only, through its one device, as a stopped cell's next VM does, and a fork's, and a
 //! tenant reaches no other tenant's.
 
 #![cfg(target_os = "linux")]
@@ -17,8 +17,8 @@ use common::{copies, pattern};
 use std::path::{Path, PathBuf};
 use tonic::Code;
 
-fn attach(daemon: &mut Daemon, store: &Path, base: &Path) -> Result<(), tonic::Status> {
-    let request = AttachBaseRequest { path: name(store), base: name(base) };
+fn attach(daemon: &mut Daemon, cell_dir: &Path, base: &Path) -> Result<(), tonic::Status> {
+    let request = AttachBaseRequest { path: name(cell_dir), base: name(base) };
     daemon.runtime.block_on(daemon.client.attach_base(request)).map(drop)
 }
 
@@ -27,14 +27,14 @@ fn make_public_attach_only(daemon: &mut Daemon, path: &Path) -> Result<(), tonic
     daemon.runtime.block_on(daemon.client.make_public(request)).map(drop)
 }
 
-fn read(store: &CellClient, extent: ExtentId) -> Result<Vec<u8>, Errno> {
+fn read(client: &CellClient, extent: ExtentId) -> Result<Vec<u8>, Errno> {
     let mut data = pattern(0);
     data.fill(0);
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])])?;
+    client.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])])?;
     Ok(data)
 }
 
-/// A VM's store at `dir`/publisher holding `pattern(seed)` in its first extent, and the generation
+/// A VM's cell at `dir`/publisher holding `pattern(seed)` in its first extent, and the generation
 /// forked from it at `dir`/`generation`, which outlasts the VM: the extent, and the fork's path.
 fn publish(daemon: &mut Daemon, dir: &Path, seed: u64, generation: &str) -> (ExtentId, PathBuf) {
     let (publisher, fork) = (dir.join(format!("publisher-{generation}")), dir.join(generation));
@@ -45,7 +45,7 @@ fn publish(daemon: &mut Daemon, dir: &Path, seed: u64, generation: &str) -> (Ext
     (extent, fork)
 }
 
-/// A VM reads what is attached to its store as it runs, and nothing before, nor of what isn't.
+/// A VM reads what is attached to its cell as it runs, and nothing before, nor of what isn't.
 #[test]
 fn vms_read_what_is_attached_as_they_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -61,10 +61,10 @@ fn vms_read_what_is_attached_as_they_run() {
     assert_eq!(read(&vm, other_extent), Err(Errno::ENOENT));
 }
 
-/// What is attached to a store stopped is there for its next VM, as for the VM after, for its
+/// What is attached to a cell stopped is there for its next VM, as for the VM after, for its
 /// forks' and for a VM restored from a version of it.
 #[test]
-fn stores_keep_what_is_attached() {
+fn cells_keep_what_is_attached() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (extent, base) = publish(&mut daemon, dir.path(), 3, "base");
@@ -96,7 +96,7 @@ fn stores_keep_what_is_attached() {
     assert!(read(&vm_restored, extent).unwrap() == pattern(3), "the restored VM reads other bytes");
 }
 
-/// A store that isn't public attaches only to stores of its tenant, and a public generation to
+/// A cell that isn't public attaches only to cells of its tenant, and a public generation to
 /// any, whose VMs share its pages, of the default arena, once.
 #[test]
 fn tenants_reach_their_own_bases_and_public_ones() {
@@ -124,12 +124,12 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     attach(&mut daemon, &acme.join("vm"), &generation).unwrap();
     assert!(read(&acme_vm, private).unwrap() == pattern(5), "acme reads other bytes");
 
-    // A public one, of a store of the default tenant's that goes on being written.
+    // A public one, of a cell of the default tenant's that goes on being written.
     let (public, base) = publish(&mut daemon, dir.path(), 6, "public");
     make_public_attach_only(&mut daemon, &base).unwrap();
     assert!(daemon.stat(&base).unwrap().public);
-    for (store, vm) in [(acme.join("vm"), &acme_vm), (globex.join("vm"), &globex_vm)] {
-        attach(&mut daemon, &store, &base).unwrap();
+    for (cell_dir, vm) in [(acme.join("vm"), &acme_vm), (globex.join("vm"), &globex_vm)] {
+        attach(&mut daemon, &cell_dir, &base).unwrap();
         assert!(read(vm, public).unwrap() == pattern(6), "a tenant reads other bytes");
     }
     let publisher = dir.path().join("publisher-public");
@@ -142,8 +142,8 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     assert_eq!(copies(globex_vm.physical_memory(), &pattern(6)), 0, "in globex's arena");
 }
 
-/// A generation goes as a store does, once no VM reads through to it, and stays until then
-/// whatever its store does.
+/// A generation goes as a cell does, once no VM reads through to it, and stays until then
+/// whatever its cell does.
 #[test]
 fn generations_go_once_nothing_reads_them() {
     let dir = tempfile::tempdir().unwrap();
@@ -165,7 +165,7 @@ fn generations_go_once_nothing_reads_them() {
     drop(vm);
     daemon.sync(&sandbox).unwrap();
     daemon.delete(&base).unwrap();
-    // The store it was attached to says so as it reads, and opens all the same.
+    // The cell it was attached to says so as it reads, and opens all the same.
     let vm = daemon.open(&sandbox, CAPACITY);
     assert_eq!(read(&vm, extent), Err(Errno::ENOENT));
 }

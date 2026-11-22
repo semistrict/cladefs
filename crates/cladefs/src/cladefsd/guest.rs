@@ -71,7 +71,7 @@ impl Guest {
         }
     }
 
-    /// Opens the store at `path` to write, made of `capacity` bytes if it isn't there: its cell's
+    /// Opens the cell at `path` to write, made of `capacity` bytes if it isn't there: its cell's
     /// ID.
     pub async fn open(&self, path: &Path, capacity: u64) -> Result<u64, Errno> {
         let opening = Opening::Create(capacity, Kind::Fxfs);
@@ -97,7 +97,7 @@ impl Guest {
         Ok(self.call(&read).await?.payload)
     }
 
-    /// The sequence its store gives the next extent minted: as a guest that took the cell over
+    /// The sequence its cell gives the next extent minted: as a guest that took the cell over
     /// mints from.
     pub async fn next_sequence(&self) -> Result<u64, Errno> {
         let reply = self.call(&Request::Info).await?;
@@ -109,14 +109,14 @@ impl Guest {
         self.call(&Request::Free(extent)).await.map(drop)
     }
 
-    /// Makes a version of its store's cell, as a VM snapshot does: its number. cladefs: the reply's
+    /// Makes a version of its cell, as a VM snapshot does: its number. cladefs: the reply's
     /// version, as `CellClient::make_version` reads it, not its first argument, the cell's
     /// (TASK-698.5 found it so).
     pub async fn make_version(&self) -> Result<u64, Errno> {
         Ok(Forked::from_args(self.call(&Request::Version).await?.header.args).version)
     }
 
-    /// Closes its connection, as a VM process that exits does: the daemon lets its store go once
+    /// Closes its connection, as a VM process that exits does: the daemon lets its cell go once
     /// what it committed is durable.
     pub fn close(self) {
         self.sender.shutdown();

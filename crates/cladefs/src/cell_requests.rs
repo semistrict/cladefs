@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What the extent daemon's requests do with a store a connection may hold (TASK-44.6): resizing
+//! What the extent daemon's requests do with a cell a connection may hold (TASK-44.6): resizing
 //! it, through the connection holding it, whose guest agrees to a shrink first, or here, if none
-//! does, growing it alone; and choosing the store a fork forks: the holder's, live, or the store
-//! opened here, which no connection opens meanwhile. Generic over the store, its guest and its
+//! does, growing it alone; and choosing the cell a fork forks: the holder's, live, or the cell
+//! opened here, which no connection opens meanwhile. Generic over the cell, its guest and its
 //! connection, as `cell_table` is over its writers, so that its Shuttle tests run this code, the
 //! daemon's own, with models of them: every interleaving of opens, commits, resizes, forks and
 //! closes the scheduler chooses, against what the daemon promises.
@@ -25,17 +25,17 @@ use std::sync::Mutex;
 /// it off.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rules {
-    /// A resize of a store a connection holds goes through the connection, rather than to the
-    /// store here.
+    /// A resize of a cell a connection holds goes through the connection, rather than to the
+    /// cell here.
     pub through_holder: bool,
     /// A shrink waits for the guest to agree.
     pub guest_agrees: bool,
-    /// A fork of a store a connection holds forks the connection's store, rather than the store
+    /// A fork of a cell a connection holds forks the connection's cell, rather than the cell
     /// opened here, which the daemon holds while it forks it.
     pub fork_through_holder: bool,
-    /// A connection's resizes of its store run one at a time (TASK-79.41).
+    /// A connection's resizes of its cell run one at a time (TASK-79.41).
     pub resizes_one_at_a_time: bool,
-    /// A fork's store opened here keeps what holds its path, let go once the store is closed,
+    /// A fork's cell opened here keeps what holds its path, let go once the cell is closed,
     /// rather than the fork's call, which, cancelled, lets it go before then (TASK-79.34).
     pub forks_hold_their_paths: bool,
 }
@@ -63,13 +63,13 @@ fn rules() -> Rules {
     *RULES.lock().unwrap()
 }
 
-/// A store a request works on, which it closes once done.
+/// A cell a request works on, which it closes once done.
 pub(crate) trait Close: Send {
-    /// Closes it: returns once it is, as a store opened here closes on a blocking thread.
+    /// Closes it: returns once it is, as a cell opened here closes on a blocking thread.
     fn close(self) -> impl Future<Output = ()> + Send;
 }
 
-/// A store's capacity, as a request sees it.
+/// A cell's capacity, as a request sees it.
 pub(crate) trait Capacity: Close + Sync {
     /// Its capacity, and the bytes it holds, which no shrink goes below.
     fn capacity(&self) -> Result<(u64, u64), Errno>;
@@ -78,20 +78,20 @@ pub(crate) trait Capacity: Close + Sync {
     fn set_capacity(&self, capacity: u64) -> impl Future<Output = Result<(), Errno>> + Send;
 }
 
-/// The guest of a connection holding a store.
+/// The guest of a connection holding a cell.
 pub(crate) trait Guest: Send + Sync {
-    /// Tells the guest its store's capacity is `capacity` bytes, or, if `ask`, asks it to shrink
+    /// Tells the guest its cell's capacity is `capacity` bytes, or, if `ask`, asks it to shrink
     /// to it, which it answers through the connection's [`Shrinking::answered`].
     fn tell(&self, capacity: u64, ask: bool) -> Result<(), Errno>;
 }
 
-/// A connection writing a store, which resizes it ([`resize_held`]).
+/// A connection writing a cell, which resizes it ([`resize_held`]).
 pub(crate) trait Resizes: Writer {
     fn resize(&self, capacity: u64) -> impl Future<Output = Result<(), Errno>> + Send;
 }
 
 /// The shrink a connection's guest was asked to take, and where its answer goes; and the resize of
-/// its store under way, which the next waits for ([`resize_held`], TASK-79.41).
+/// its cell under way, which the next waits for ([`resize_held`], TASK-79.41).
 pub(crate) struct Shrinking {
     asked: Mutex<Option<(u64, futures::channel::oneshot::Sender<bool>)>>,
     resizing: futures::lock::Mutex<()>,
@@ -151,9 +151,9 @@ impl Drop for Waiting<'_> {
     }
 }
 
-/// A shrink the guest was asked to take, which, unless the store took it or the guest refused it,
-/// tells the guest the capacity the store keeps as it is dropped, however it ends: unanswered in
-/// time, its call dropped, or the store's new capacity failing; so that the guest, having taken it
+/// A shrink the guest was asked to take, which, unless the cell took it or the guest refused it,
+/// tells the guest the capacity the cell keeps as it is dropped, however it ends: unanswered in
+/// time, its call dropped, or the cell's new capacity failing; so that the guest, having taken it
 /// late, grows back (TASK-79.41).
 struct Asked<'a, G: Guest> {
     guest: &'a G,
@@ -170,15 +170,15 @@ impl<G: Guest> Drop for Asked<'_, G> {
     }
 }
 
-/// Sets `store`'s capacity to `capacity` bytes, as the connection holding it does, whose guest is
+/// Sets `cell`'s capacity to `capacity` bytes, as the connection holding it does, whose guest is
 /// `guest`: grows it, and tells the guest; or asks the guest to shrink, through `shrinking`, and
 /// shrinks it if the guest does (`ENOSPC` if it doesn't), waiting `wait` at most for its answer
 /// (`ETIMEDOUT`), or until its call's caller gives up (`ECONNABORTED`, [`crate::caller::gone`]),
-/// holding no thread meanwhile. Never below what the store holds (`ENOSPC`). One at
-/// a time: a grow landing between a shrink's answer and the store's taking it would leave the
-/// store smaller than its guest was told (TASK-79.41).
+/// holding no thread meanwhile. Never below what the cell holds (`ENOSPC`). One at a
+/// time: a grow landing between a shrink's answer and the cell's taking it would leave the
+/// cell smaller than its guest was told (TASK-79.41).
 pub(crate) async fn resize_held(
-    store: &impl Capacity,
+    cell: &impl Capacity,
     guest: &impl Guest,
     shrinking: &Shrinking,
     capacity: u64,
@@ -188,12 +188,12 @@ pub(crate) async fn resize_held(
         true => Some(shrinking.resizing.lock().await),
         false => None,
     };
-    let (current, held) = store.capacity()?;
+    let (current, held) = cell.capacity()?;
     if capacity < held {
         return Err(Errno::ENOSPC);
     }
     if capacity >= current || !rules().guest_agrees {
-        store.set_capacity(capacity).await?;
+        cell.set_capacity(capacity).await?;
         return guest.tell(capacity, false);
     }
     let mut asked = Asked { guest, kept: current, settled: false };
@@ -215,7 +215,7 @@ pub(crate) async fn resize_held(
     };
     match took {
         Some(Ok(true)) => {
-            store.set_capacity(capacity).await?;
+            cell.set_capacity(capacity).await?;
             asked.settled = true;
             Ok(())
         }
@@ -231,9 +231,9 @@ pub(crate) async fn resize_held(
     }
 }
 
-/// Sets the capacity of the store `key` names to `capacity` bytes: through the connection
+/// Sets the capacity of the cell `key` names to `capacity` bytes: through the connection
 /// writing it, if one does ([`Resizes::resize`]); or, if none does, here, as `open` opens it,
-/// given the daemon's hold of it meanwhile, which the store keeps until it is closed, so that its
+/// given the daemon's hold of it meanwhile, which the cell keeps until it is closed, so that its
 /// path is let go only once it is (TASK-79.34): growing it, and not shrinking it (`EBUSY`), its
 /// guest not here to agree. `EBUSY` while a connection whose VM process is gone holds it, or the
 /// daemon.
@@ -255,21 +255,21 @@ where
         },
         false => None,
     };
-    let store = open(held).await?;
-    let set = match store.capacity() {
+    let cell = open(held).await?;
+    let set = match cell.capacity() {
         Ok((current, _)) if capacity < current => Err(Errno::EBUSY),
-        Ok(_) => store.set_capacity(capacity).await,
+        Ok(_) => cell.set_capacity(capacity).await,
         Err(errno) => Err(errno),
     };
     // Closed before those waiting to open it may (it once let them wait out CLOSING_WAIT: found
-    // by the store table's Shuttle tests, TASK-44.6).
-    store.close().await;
+    // by the cell table's Shuttle tests, TASK-44.6).
+    cell.close().await;
     set
 }
 
-/// The store a fork of the store `key` names forks: `live`'s, of the connection writing it, if
-/// one does whose VM process isn't gone (`EBUSY` if it has none yet); or, if none does, the store
-/// as `open` opens it here, given the daemon's hold of it meanwhile, which the store keeps until
+/// The cell a fork of the cell `key` names forks: `live`'s, of the connection writing it, if
+/// one does whose VM process isn't gone (`EBUSY` if it has none yet); or, if none does, the cell
+/// as `open` opens it here, given the daemon's hold of it meanwhile, which the cell keeps until
 /// it is closed, so that no connection opens it until then; once one going lets it go, waiting
 /// `wait` at most (`EBUSY`).
 pub(crate) async fn forking<'a, C, I, P, S, F>(
@@ -298,13 +298,13 @@ where
     open(Some(held)).await
 }
 
-/// The requests under Shuttle: a VM's connection opening a store, committing, its guest
-/// answering shrinks, and closing once its manager's resizes are done; a fork of the store at any
-/// version; and the VM restored, opening the store as the first lets it go: every interleaving of
-/// them the scheduler chooses. Invariants: the store is open once at a time, by a connection or
-/// here; the resizes end with the store's capacity and its guest's view agreeing, the guest never
+/// The requests under Shuttle: a VM's connection opening a cell, committing, its guest
+/// answering shrinks, and closing once its manager's resizes are done; a fork of the cell at any
+/// version; and the VM restored, opening the cell as the first lets it go: every interleaving of
+/// them the scheduler chooses. Invariants: the cell is open once at a time, by a connection or
+/// here; the resizes end with the cell's capacity and its guest's view agreeing, the guest never
 /// shrunk below what it holds without agreeing; no fork misses a commit made before it. Each rule
-/// turned off fails: the guest's agreement as it prevents, the others opening the store twice.
+/// turned off fails: the guest's agreement as it prevents, the others opening the cell twice.
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use super::*;
@@ -316,13 +316,13 @@ mod shuttle_tests {
     use shuttle::{Runner, thread};
     use std::sync::Arc;
 
-    const KEY: &str = "/store";
-    /// The store's capacity at first.
+    const KEY: &str = "/cell";
+    /// The cell's capacity at first.
     const CAPACITY: u64 = 8;
-    /// What the guest holds of its store, which it agrees to shrink no lower.
+    /// What the guest holds of its cell, which it agrees to shrink no lower.
     const GUEST_HOLDS: u64 = 4;
 
-    /// A store: its capacity, its commits, ordered and made durable, how many have it open, and
+    /// A cell: its capacity, its commits, ordered and made durable, how many have it open, and
     /// how many had it open at once, at most.
     struct Model {
         capacity: AtomicU64,
@@ -333,7 +333,7 @@ mod shuttle_tests {
     }
 
     impl Model {
-        /// A store of [`CAPACITY`], which nothing has open, nor committed to.
+        /// A cell of [`CAPACITY`], which nothing has open, nor committed to.
         fn new() -> Arc<Self> {
             Arc::new(Model {
                 capacity: CAPACITY.into(),
@@ -356,7 +356,7 @@ mod shuttle_tests {
 
         fn opened_once_at_a_time(&self) {
             let most = self.most_open.load(Ordering::SeqCst);
-            assert!(most <= 1, "the store is open twice at once: {most} at most");
+            assert!(most <= 1, "the cell is open twice at once: {most} at most");
         }
 
         fn close(&self) {
@@ -364,18 +364,19 @@ mod shuttle_tests {
         }
     }
 
-    /// A store as a request sees it: a connection's, as it holds it, or opened here, as its files
+    /// A cell as a request sees it: a connection's, as it holds it, or opened here, as its files
     /// hold it, as of its last durable commit, with what holds it meanwhile, if anything does.
     enum View<'a> {
         Live(Arc<Model>),
         Here(Arc<Model>, Option<ModelHold<'a>>),
     }
 
-    /// The table of the store, which holds no store open for connections, nor versions.
+    /// The table of the cell, which holds no cell open for connections, nor versions.
     type Table = CellTable<Conn, (), ()>;
     type ModelHold<'a> = Hold<'a, Conn, (), ()>;
 
-    /// Holds the store at `KEY` for `conn` to write it, as a connection does as it opens it.
+    /// Holds the cell directory at `KEY` for `conn` to write it, as a connection does as it opens
+    /// it.
     fn write<'a>(table: &'a Table, conn: &Arc<Conn>) -> ModelHold<'a> {
         let held = table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX);
         block_on(held).unwrap().0
@@ -418,7 +419,7 @@ mod shuttle_tests {
         }
     }
 
-    /// A guest: the capacity it sees its store as having, and where the shrinks it is asked to
+    /// A guest: the capacity it sees its cell as having, and where the shrinks it is asked to
     /// take go, to be answered ([`answer`]).
     struct ModelGuest {
         view: AtomicU64,
@@ -438,18 +439,18 @@ mod shuttle_tests {
         }
     }
 
-    /// A connection holding the store, with its guest.
+    /// A connection holding the cell, with its guest.
     struct Conn {
-        store: Arc<Model>,
+        model: Arc<Model>,
         guest: ModelGuest,
         shrinking: Shrinking,
         going: AtomicBool,
     }
 
     impl Conn {
-        fn new(store: Arc<Model>, asks: Option<mpsc::Sender<u64>>) -> Arc<Self> {
+        fn new(model: Arc<Model>, asks: Option<mpsc::Sender<u64>>) -> Arc<Self> {
             Arc::new(Conn {
-                store,
+                model,
                 guest: ModelGuest { view: CAPACITY.into(), asks: asks.into() },
                 shrinking: Shrinking::new(),
                 going: false.into(),
@@ -465,13 +466,13 @@ mod shuttle_tests {
 
     impl Resizes for Conn {
         async fn resize(&self, capacity: u64) -> Result<(), Errno> {
-            let store = View::Live(self.store.clone());
-            resize_held(&store, &self.guest, &self.shrinking, capacity, Duration::MAX).await
+            let model = View::Live(self.model.clone());
+            resize_held(&model, &self.guest, &self.shrinking, capacity, Duration::MAX).await
         }
     }
 
     /// Answers the shrinks `conn`'s guest is asked to take, as its guest does: taking those that
-    /// leave it what it holds, and seeing its store so.
+    /// leave it what it holds, and seeing its cell so.
     fn answer(conn: Arc<Conn>, asks: mpsc::Receiver<u64>) {
         while let Ok(capacity) = asks.recv() {
             let took = capacity >= GUEST_HOLDS;
@@ -482,7 +483,7 @@ mod shuttle_tests {
         }
     }
 
-    /// Opens the store here, as its files hold it, keeping what holds it until it is closed.
+    /// Opens the cell here, as its files hold it, keeping what holds it until it is closed.
     fn here<'a>(
         model: &Arc<Model>,
     ) -> impl FnOnce(Option<ModelHold<'a>>) -> std::future::Ready<Result<View<'a>, Errno>> {
@@ -503,7 +504,7 @@ mod shuttle_tests {
         let (resized_tx, resized) = mpsc::channel::<()>();
         let (going_tx, going) = mpsc::channel::<()>();
 
-        // The VM's connection: opens the store, commits, lets its guest answer shrinks, and
+        // The VM's connection: opens the cell, commits, lets its guest answer shrinks, and
         // closes once the resizes are done, its commits durable first.
         let first = {
             let (model, committed) = (model.clone(), committed.clone());
@@ -526,8 +527,8 @@ mod shuttle_tests {
                 model.opened_once_at_a_time();
                 let capacity = model.capacity.load(Ordering::SeqCst);
                 let view = conn.guest.view.load(Ordering::SeqCst);
-                assert_eq!(capacity, view, "the store's capacity and its guest's view differ");
-                // Its VM process gone: its store goes once its commits are durable.
+                assert_eq!(capacity, view, "the cell's capacity and its guest's view differ");
+                // Its VM process gone: its cell goes once its commits are durable.
                 conn.going.store(true, Ordering::SeqCst);
                 going_tx.send(()).unwrap();
                 model.durable.store(model.ordered.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -538,7 +539,7 @@ mod shuttle_tests {
             })
         };
 
-        // The VM's manager: resizes the store while the VM has it open: grows it, shrinks it,
+        // The VM's manager: resizes the cell while the VM has it open: grows it, shrinks it,
         // which the guest agrees to, and shrinks it below what the guest holds, which it doesn't.
         let resizer = {
             let model = model.clone();
@@ -553,13 +554,13 @@ mod shuttle_tests {
             })
         };
 
-        // A fork of the store, at any point: of the connection's store, live, or of the store as
+        // A fork of the cell, at any point: of the connection's cell, live, or of the cell as
         // its files hold it, once no connection has it open.
         let fork = {
             let (model, committed) = (model.clone(), committed.clone());
             thread::spawn(move || {
                 let before = committed.load(Ordering::SeqCst);
-                let live = |conn: &Conn| Some(View::Live(conn.store.clone()));
+                let live = |conn: &Conn| Some(View::Live(conn.model.clone()));
                 let forking =
                     block_on(forking(table, key, live, Duration::MAX, here(&model))).unwrap();
                 let forked = forking.forked();
@@ -571,7 +572,7 @@ mod shuttle_tests {
             })
         };
 
-        // The VM restored from a snapshot, opening its store as the first goes.
+        // The VM restored from a snapshot, opening its cell as the first goes.
         let second = {
             let model = model.clone();
             thread::spawn(move || {
@@ -587,16 +588,16 @@ mod shuttle_tests {
             thread.join().unwrap();
         }
         model.opened_once_at_a_time();
-        assert!(table.is_empty(), "the store is held once all let it go");
+        assert!(table.is_empty(), "the cell is held once all let it go");
     }
 
     fn randomly() {
         Runner::new(RandomScheduler::new(runs(2000)), config()).run(run);
     }
 
-    /// A store opened here whose closing, its call cancelled, is left to a thread of its own, as
+    /// A cell opened here whose closing, its call cancelled, is left to a thread of its own, as
     /// `cladefsd::cells::Here`'s is to a blocking thread, with what holds it, which it lets go once
-    /// the store is closed.
+    /// the cell is closed.
     struct ClosedBehind(Option<(Arc<Model>, Option<ModelHold<'static>>)>);
 
     impl Close for ClosedBehind {
@@ -619,8 +620,8 @@ mod shuttle_tests {
         }
     }
 
-    /// TASK-79.34: a fork of the store opened here, its call cancelled once it has the store,
-    /// whose closing is left to a thread of its own, lets the store's path go once it is closed:
+    /// TASK-79.34: a fork of the cell opened here, its call cancelled once it has the cell,
+    /// whose closing is left to a thread of its own, lets the cell's path go once it is closed:
     /// a connection opening it at once finds it closed.
     fn cancelled_fork() {
         let key = Path::new(KEY);
@@ -670,7 +671,7 @@ mod shuttle_tests {
         Runner::new(PctScheduler::new(3, runs(2000)), config()).run(cancelled_fork);
     }
 
-    /// Let go of as its call returns, a fork's store's path is opened as the store is still open.
+    /// Let go of as its call returns, a fork's cell's path is opened as the cell is still open.
     #[test]
     fn needs_forks_to_hold_their_paths() {
         *RULES.lock().unwrap() = Rules { forks_hold_their_paths: false, ..Rules::ALL };
@@ -679,8 +680,8 @@ mod shuttle_tests {
         });
     }
 
-    /// TASK-79.41: two resizes at once of a store a connection holds, a grow and a shrink its
-    /// guest agrees to, both through the connection, end with the store's capacity and its guest's
+    /// TASK-79.41: two resizes at once of a cell a connection holds, a grow and a shrink its
+    /// guest agrees to, both through the connection, end with the cell's capacity and its guest's
     /// view agreeing.
     fn resizes_at_once() {
         let key = Path::new(KEY);
@@ -707,7 +708,7 @@ mod shuttle_tests {
         guest.join().unwrap();
         let capacity = model.capacity.load(Ordering::SeqCst);
         let view = conn.guest.view.load(Ordering::SeqCst);
-        assert_eq!(capacity, view, "the store's capacity and its guest's view differ");
+        assert_eq!(capacity, view, "the cell's capacity and its guest's view differ");
         drop(held);
     }
 
@@ -723,12 +724,12 @@ mod shuttle_tests {
         Runner::new(PctScheduler::new(3, runs(2000)), config()).run(resizes_at_once);
     }
 
-    /// A grow landing between a shrink's answer and its new capacity leaves the store smaller than
+    /// A grow landing between a shrink's answer and its new capacity leaves the cell smaller than
     /// its guest was told.
     #[test]
     fn needs_resizes_one_at_a_time() {
         *RULES.lock().unwrap() = Rules { resizes_one_at_a_time: false, ..Rules::ALL };
-        fails_with("the store's capacity and its guest's view differ", || {
+        fails_with("the cell's capacity and its guest's view differ", || {
             Runner::new(RandomScheduler::new(runs(2000)), config()).run(resizes_at_once);
         });
     }
@@ -751,7 +752,7 @@ mod shuttle_tests {
         fails_with(expected, randomly);
     }
 
-    /// Resized here while a connection has it open, the store is open twice.
+    /// Resized here while a connection has it open, the cell is open twice.
     #[test]
     fn needs_resizes_through_the_holder() {
         fails_without(Rules { through_holder: false, ..Rules::ALL }, "open twice at once");
@@ -762,14 +763,14 @@ mod shuttle_tests {
         fails_without(Rules { guest_agrees: false, ..Rules::ALL }, "shrunk without agreeing");
     }
 
-    /// Forked here while a connection has it open, the store is open twice; which would miss
+    /// Forked here while a connection has it open, the cell is open twice; which would miss
     /// the commits the connection didn't make durable yet.
     #[test]
     fn needs_forks_through_the_holder() {
         fails_without(Rules { fork_through_holder: false, ..Rules::ALL }, "open twice at once");
     }
 
-    /// The store is open once at a time: as the store table's Shuttle tests show, here through
+    /// The cell is open once at a time: as the cell table's Shuttle tests show, here through
     /// the requests.
     #[test]
     fn needs_one_holder() {
@@ -786,14 +787,14 @@ mod shuttle_tests {
 mod tests {
     use super::*;
 
-    /// A store of 8 bytes, holding 1.
-    struct Store;
+    /// A cell of 8 bytes, holding 1.
+    struct SmallCell;
 
-    impl Close for Store {
+    impl Close for SmallCell {
         async fn close(self) {}
     }
 
-    impl Capacity for Store {
+    impl Capacity for SmallCell {
         fn capacity(&self) -> Result<(u64, u64), Errno> {
             Ok((8, 1))
         }
@@ -814,14 +815,14 @@ mod tests {
         }
     }
 
-    /// TASK-79.41: a shrink its guest leaves unanswered tells the guest the store's capacity as it
+    /// TASK-79.41: a shrink its guest leaves unanswered tells the guest the cell's capacity as it
     /// stays, as an answer coming after, the guest having taken the shrink, shrinks nothing.
     #[test]
     fn shrinks_unanswered_tell_the_guest_the_capacity_kept() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let (guest, shrinking) = (Silent::default(), Shrinking::new());
         let wait = Duration::from_millis(10);
-        let resized = runtime.block_on(resize_held(&Store, &guest, &shrinking, 6, wait));
+        let resized = runtime.block_on(resize_held(&SmallCell, &guest, &shrinking, 6, wait));
         assert_eq!(resized, Err(Errno::ETIMEDOUT));
         assert_eq!(*guest.0.lock().unwrap(), [(6, true), (8, false)]);
     }

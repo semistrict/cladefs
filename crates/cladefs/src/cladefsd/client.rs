@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A VM process's side of a connection: an extent store the daemon serves, and the store's window
+//! A VM process's side of a connection: an extent store the daemon serves, and the cell's window
 //! in the VM's memory.
 
 pub(crate) use super::codec::Opening;
@@ -58,47 +58,51 @@ impl CellClient {
     /// ([`CellClient::answer_stats`], TASK-111.4).
     pub const MAX_STATS: usize = MAX_STATS;
 
-    /// The store at `store` that the daemon listening at `socket` serves, created with `capacity`
+    /// The cell at `cell_dir` that the daemon listening at `socket` serves, created with `capacity`
     /// bytes if it doesn't exist ([`DaemonConnection::open`]).
     pub fn connect(
         socket: impl AsRef<Path>,
-        store: impl AsRef<Path>,
+        cell_dir: impl AsRef<Path>,
         capacity: u64,
     ) -> Result<Self, Error> {
-        DaemonConnection::connect(socket)?.open(store, capacity)
+        DaemonConnection::connect(socket)?.open(cell_dir, capacity)
     }
 
-    /// The store at `store` that the daemon listening at `socket` serves, forked from the version
+    /// The cell at `cell_dir` that the daemon listening at `socket` serves, forked from the version
     /// `from` if it doesn't exist ([`DaemonConnection::open_forked`]).
     pub fn connect_forked(
         socket: impl AsRef<Path>,
-        store: impl AsRef<Path>,
+        cell_dir: impl AsRef<Path>,
         from: CellVersion,
         capacity: u64,
     ) -> Result<Self, Error> {
-        DaemonConnection::connect(socket)?.open_forked(store, from, capacity)
+        DaemonConnection::connect(socket)?.open_forked(cell_dir, from, capacity)
     }
 
-    /// cladefs: a follower of the store at `store` that the daemon listening at `socket` serves
+    /// cladefs: a follower of the cell at `cell_dir` that the daemon listening at `socket` serves
     /// ([`DaemonConnection::open_read_only`]).
     pub fn connect_read_only(
         socket: impl AsRef<Path>,
-        store: impl AsRef<Path>,
+        cell_dir: impl AsRef<Path>,
     ) -> Result<Self, Error> {
-        DaemonConnection::connect(socket)?.open_read_only(store)
+        DaemonConnection::connect(socket)?.open_read_only(cell_dir)
     }
 
-    /// The store at `store`, served over `stream` ([`DaemonConnection::opening`]).
+    /// The cell at `cell_dir`, served over `stream` ([`DaemonConnection::opening`]).
     #[cfg(test)]
-    pub(crate) fn over(stream: UnixStream, store: &Path, opening: Opening) -> Result<Self, Error> {
-        DaemonConnection::over(stream)?.opening(store, opening)
+    pub(crate) fn over(
+        stream: UnixStream,
+        cell_dir: &Path,
+        opening: Opening,
+    ) -> Result<Self, Error> {
+        DaemonConnection::over(stream)?.opening(cell_dir, opening)
     }
 
-    /// Opens the store at `store` over `client`'s connection ([`DaemonConnection::opening`]): its
+    /// Opens the cell at `cell_dir` over `client`'s connection ([`DaemonConnection::opening`]): its
     /// `OPEN`, the VM process's build, and its transfer area.
-    fn open(client: Arc<Client>, store: &Path, opening: Opening) -> Result<Self, Error> {
+    fn open(client: Arc<Client>, cell_dir: &Path, opening: Opening) -> Result<Self, Error> {
         let read_only = matches!(opening, Opening::ReadOnly);
-        let open = Request::Open { path: store.to_owned(), opening };
+        let open = Request::Open { path: cell_dir.to_owned(), opening };
         let reply = client.request_blocking(&open).map_err(|errno| match errno {
             Errno::EPROTONOSUPPORT => Error::new(anyhow::Error::new(errno).context(format!(
                 "the extent daemon refused this VM process's wire version {VERSION}: it is of \
@@ -150,7 +154,7 @@ impl CellClient {
     /// the latest heard of as it began: each commit is heard of from one or the other, or a later
     /// one, one as it begins perhaps from both; a second read, of
     /// [`CellClient::committed`], might miss one that the call misses (TASK-444.2.2). Once,
-    /// of a store.
+    /// of a cell.
     pub fn on_committed(&self, committed: impl Fn(u64) + Send + Sync + 'static) -> u64 {
         self.client.committed.listen(Box::new(committed))
     }
@@ -179,8 +183,8 @@ impl CellClient {
         self.client.request(&Request::LetGo { commit }).await.map(drop)
     }
 
-    /// cladefs: keeps `extent`, which a follower's view holds, whatever commit it advances to, until
-    /// unpinned (`PIN`).
+    /// cladefs: keeps `extent`, which a follower's view holds, whatever commit it advances to,
+    /// until unpinned (`PIN`).
     pub fn pin(&self, extent: ExtentId) -> Result<()> {
         blocking(self.pin_async(extent))
     }
@@ -200,10 +204,9 @@ impl CellClient {
         self.client.request(&Request::Unpin(extent)).await.map(drop)
     }
 
-    /// Calls `changed` with the store's capacity each time the daemon resizes it (the control API's `ResizeCell`), and
-    /// whether the guest is asked to shrink to it, which it answers
-    /// ([`CellClient::resized`]). Unless something is called so, the guest refuses every
-    /// shrink.
+    /// Calls `changed` with the cell's capacity each time the daemon resizes it (the control API's
+    /// `ResizeCell`), and whether the guest is asked to shrink to it, which it answers
+    /// ([`CellClient::resized`]). Unless something is called so, the guest refuses every shrink.
     pub fn on_capacity(&self, changed: impl Fn(u64, bool) + Send + Sync + 'static) {
         let _ = self.client.capacity.set(Box::new(changed));
     }
@@ -221,7 +224,7 @@ impl CellClient {
     /// cladefs: calls `asked` with each of the daemon's asks for this process's stats and its
     /// guest's (`STATS_ASK`, TASK-111.4): it asks the guest, if it has one that answers, and says
     /// so, the guest's answer then going to [`CellClient::answer_stats`]; otherwise the
-    /// store answers at once, with no guest's stats, as it does unless something is called so.
+    /// cell answers at once, with no guest's stats, as it does unless something is called so.
     /// Called on the thread receiving the daemon's messages, it must not wait.
     pub fn on_stats_asked(&self, asked: impl Fn(u64) -> bool + Send + Sync + 'static) {
         let _ = self.client.stats_asked.set(Box::new(asked));
@@ -256,7 +259,7 @@ impl CellClient {
         self.memories[1].1.as_fd()
     }
 
-    /// What the store holds (`INFO`).
+    /// What the cell holds (`INFO`).
     pub fn info(&self) -> Result<ExtentInfo> {
         blocking(self.info_async())
     }
@@ -436,8 +439,8 @@ impl CellClient {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
 
-    /// Forks the store, as of its last commit made uploaded, to a new cell, whose handle is a new
-    /// directory at `path`, which the daemon serves sharing the store's pages (`FORK`), and returns
+    /// Forks the cell, as of its last commit made uploaded, to a new cell, whose handle is a new
+    /// directory at `path`, which the daemon serves sharing the cell's pages (`FORK`), and returns
     /// the cell's ID, the bucket's to give (TASK-364).
     pub fn fork(&self, path: &Path) -> Result<u64> {
         let fork = Request::Fork { path: path.to_owned() };
@@ -445,7 +448,7 @@ impl CellClient {
         Ok(Forked::from_args(reply.header.args).cell)
     }
 
-    /// Makes a version of the store's cell, once nothing is open
+    /// Makes a version of the cell, once nothing is open
     /// ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)), as with its guest's
     /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
     /// fork at once ([`DaemonConnection::open_forked`]), and none writes.
@@ -505,15 +508,15 @@ impl CellClient {
     }
 
     /// cladefs: maps zeros, read-only, at `len` bytes of the window at `window_offset` (doc-4's
-    /// `MAP_ZEROS`, backlog doc-13): a hole's, or what is past a file's end, whose store makes a
+    /// `MAP_ZEROS`, backlog doc-13): a hole's, or what is past a file's end, whose write makes a
     /// private page of zeros, nothing copied.
     pub async fn map_zeros_async(&self, window_offset: u64, len: u64) -> Result<()> {
         let zeros = WindowMapping { window_offset, len, contents: MappingContents::Zeros };
         self.client.request(&Request::Map(zeros)).await.map(drop)
     }
 
-    /// cladefs: makes `len` bytes of the window at `window_offset` private now, as stores to each of
-    /// their pages would, mapped writable (doc-4's `PRIVATE`, backlog doc-13): `ENOMEM` past its
+    /// cladefs: makes `len` bytes of the window at `window_offset` private now, as writes to each
+    /// of their pages would, mapped writable (doc-4's `PRIVATE`, backlog doc-13): `ENOMEM` past its
     /// private pages, none made private; `EINVAL` unless the window copies on write.
     pub fn make_private(&self, window_offset: u64, len: u64) -> Result<()> {
         blocking(self.make_private_async(window_offset, len))
@@ -565,14 +568,14 @@ impl CellClient {
         self.client.request(&Request::Unmap { window_offset, len }).await.map(drop)
     }
 
-    /// cladefs: the stage operations this process made of the store's window so far, and the
+    /// cladefs: the stage operations this process made of the cell's window so far, and the
     /// nanoseconds they took, which it tells the daemon ([`STAGE_COUNTS`]).
     #[cfg(test)]
     pub(super) fn stage_counts(&self) -> StageCounts {
         self.client.stage_counts()
     }
 
-    /// cladefs: the runs of private pages this process made of the store's window so far, their
+    /// cladefs: the runs of private pages this process made of the cell's window so far, their
     /// pages and nanoseconds, which it tells the daemon ([`STAGE_PRIVATE_COUNTS`]).
     #[cfg(test)]
     pub(super) fn private_counts(&self) -> PrivateCosts {
@@ -592,28 +595,28 @@ impl CellClient {
     }
 
     /// Has `lost` called once the daemon goes, closing the connection: at once if it went already.
-    /// Nothing the store asks is served from then on, its window's faults included, and it doesn't
+    /// Nothing the cell asks is served from then on, its window's faults included, and it doesn't
     /// connect again: a VMM stops its VM, which can't go on, visibly to its host (TASK-50.2).
-    /// [`DaemonConnection::on_lost`] says it before the store opens, so that a daemon going as it
-    /// opens is told of too (TASK-232). Called once, of the store and its connection.
+    /// [`DaemonConnection::on_lost`] says it before the cell opens, so that a daemon going as it
+    /// opens is told of too (TASK-232). Called once, of the cell and its connection.
     pub fn on_daemon_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
         self.client.lost.listen(Box::new(lost));
     }
 
-    /// Creates the store's window in the `size` bytes of this process's memory at `base`, which
-    /// a hypervisor such as KVM maps as guest memory: the daemon maps its pages there, read-only,
-    /// and the guest's faults there go to it. `prefault`, if any, is told of the pages mapped
-    /// for the guest ahead of its accesses. cladefs: a writer's copies on write (backlog doc-13), of
+    /// Creates the cell's window in the `size` bytes of this process's memory at `base`, which a
+    /// hypervisor such as KVM maps as guest memory: the daemon maps its pages there, read-only, and
+    /// the guest's faults there go to it. `prefault`, if any, is told of the pages mapped for the
+    /// guest ahead of its accesses. cladefs: a writer's copies on write (backlog doc-13), of
     /// `private_max` private pages at most, one at least, this process's memory, for which the
-    /// daemon reserves nothing (TASK-501): a store to a page, by the guest's own threads
+    /// daemon reserves nothing (TASK-501): a write to a page, by the guest's own threads
     /// ([`crate::guest_thread_started`]), or one of a page mapped here, makes the page private. A
-    /// follower's copies nothing, refusing every store, its `private_max` 0 (`EINVAL` otherwise, as
+    /// follower's copies nothing, refusing every write, its `private_max` 0 (`EINVAL` otherwise, as
     /// a writer's of 0).
     ///
     /// # Safety
     ///
     /// The memory must be a page-aligned mapping that nothing else in the process uses, and that
-    /// outlives the store.
+    /// outlives the cell.
     pub unsafe fn create_dax_window_in_host_memory(
         &self,
         base: NonNull<u8>,
@@ -625,7 +628,7 @@ impl CellClient {
         unsafe { self.create_window(base, size, prefault, private_max, None) }
     }
 
-    /// cladefs: creates the store's window as [`Self::create_dax_window_in_host_memory`] does, a
+    /// cladefs: creates the cell's window as [`Self::create_dax_window_in_host_memory`] does, a
     /// writer's, copying on write, of as many private pages as it has, over a VM's memory, whose
     /// faults on a page the daemon may not have mapped yet have `unmapped` map it first: a memory
     /// cell's (TASK-456.3), whose window nothing else maps.
@@ -679,9 +682,9 @@ impl CellClient {
         if private_max.is_some() {
             stage.copy_on_write()?;
         }
-        // cladefs: a VM's memory's window, every write a store (TASK-456.3).
+        // cladefs: a VM's memory's window, every write a guest's (TASK-456.3).
         if unmapped.is_some() {
-            stage.writes_are_stores();
+            stage.writes_are_guests();
         }
         let _ = self.client.stage.set(stage.clone());
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
@@ -712,13 +715,13 @@ impl Drop for CellClient {
     }
 }
 
-/// cladefs: a VM process's connection to its extent daemon, which opens a store over it, once: a
+/// cladefs: a VM process's connection to its extent daemon, which opens a cell over it, once: a
 /// [`CellClient`]. What the VM process does once the daemon goes is said of it before the
-/// store opens ([`DaemonConnection::on_lost`]), so that a daemon going as it opens the store, as
-/// one killed while the store recovers from its bucket does, is told of as one going later is,
+/// cell opens ([`DaemonConnection::on_lost`]), so that a daemon going as it opens the cell, as
+/// one killed while the cell recovers from its bucket does, is told of as one going later is,
 /// rather than as the open's failure (TASK-232).
 pub struct DaemonConnection {
-    /// Its client, until a store opened over it takes it.
+    /// Its client, until a cell opened over it takes it.
     client: Option<Arc<Client>>,
 }
 
@@ -740,77 +743,89 @@ impl DaemonConnection {
     }
 
     /// Has `lost` called once the daemon goes, closing the connection: at once if it went already;
-    /// before what was asked of it then fails, a store's open included. Nothing is served from then
-    /// on, a store's window's faults included, and it doesn't connect again: a VMM stops its VM,
+    /// before what was asked of it then fails, a cell's open included. Nothing is served from then
+    /// on, a cell's window's faults included, and it doesn't connect again: a VMM stops its VM,
     /// which can't go on, visibly to its host (TASK-50.2), as it creates the VM too (TASK-232).
-    /// Called once, of the connection and its store ([`CellClient::on_daemon_lost`]).
+    /// Called once, of the connection and its cell ([`CellClient::on_daemon_lost`]).
     pub fn on_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
         self.client().lost.listen(Box::new(lost));
     }
 
-    /// The store at `store`, created with `capacity` bytes if it doesn't exist.
-    pub fn open(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
-        self.opening(store.as_ref(), Opening::Create(capacity, Kind::Fxfs))
+    /// The cell at `cell_dir`, created with `capacity` bytes if it doesn't exist.
+    pub fn open(self, cell_dir: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
+        self.opening(cell_dir.as_ref(), Opening::Create(capacity, Kind::Fxfs))
     }
 
-    /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
-    /// exist, a SQLite cell, which the sqlite_extents VFS alone opens, rather
+    /// cladefs: the cell at `cell_dir`, as [`DaemonConnection::open`] has it, made, if it doesn't
+    /// exist, a SQLite cell, which the sqlite_cladefs VFS alone opens, rather
     /// than an Fxfs one (TASK-364).
-    pub fn open_sqlite(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
-        self.opening(store.as_ref(), Opening::Create(capacity, Kind::Sqlite))
+    pub fn open_sqlite(
+        self,
+        cell_dir: impl AsRef<Path>,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        self.opening(cell_dir.as_ref(), Opening::Create(capacity, Kind::Sqlite))
     }
 
-    /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
+    /// cladefs: the cell at `cell_dir`, as [`DaemonConnection::open`] has it, made, if it doesn't
     /// exist, a memory cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
-    pub fn open_memory(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
-        self.opening(store.as_ref(), Opening::Create(capacity, Kind::Memory))
+    pub fn open_memory(
+        self,
+        cell_dir: impl AsRef<Path>,
+        capacity: u64,
+    ) -> Result<CellClient, Error> {
+        self.opening(cell_dir.as_ref(), Opening::Create(capacity, Kind::Memory))
     }
 
-    /// The store at `store`, of `capacity` bytes, forked from the version `from` if it doesn't
+    /// The cell at `cell_dir`, of `capacity` bytes, forked from the version `from` if it doesn't
     /// exist: of a VM restored from a snapshot (TASK-39.1), on any host. cladefs: the daemon opens
     /// the version once for the restores of one snapshot here, and keeps it open for them
     /// (TASK-92.5).
     pub fn open_forked(
         self,
-        store: impl AsRef<Path>,
+        cell_dir: impl AsRef<Path>,
         from: CellVersion,
         capacity: u64,
     ) -> Result<CellClient, Error> {
         let CellVersion { tenant, cell, version } = from;
-        self.opening(store.as_ref(), Opening::ForkOf { tenant, cell, version, capacity })
+        self.opening(cell_dir.as_ref(), Opening::ForkOf { tenant, cell, version, capacity })
     }
 
-    /// cladefs: a follower of the store at `store` (backlog doc-8): read-only, as of the latest
-    /// commit of its writer, another VM's, which goes on, or of the store as of its last commit, if
+    /// cladefs: a follower of the cell at `cell_dir` (backlog doc-8): read-only, as of the latest
+    /// commit of its writer, another VM's, which goes on, or of the cell as of its last commit, if
     /// no VM writes it; and which it moves to the writer's latest as it advances
     /// ([`CellClient::advance`]).
-    pub fn open_read_only(self, store: impl AsRef<Path>) -> Result<CellClient, Error> {
-        self.opening(store.as_ref(), Opening::ReadOnly)
+    pub fn open_read_only(self, cell_dir: impl AsRef<Path>) -> Result<CellClient, Error> {
+        self.opening(cell_dir.as_ref(), Opening::ReadOnly)
     }
 
-    /// The store at `store`, opened as `opening` says. cladefs: by a daemon of this VM process's
+    /// The cell at `cell_dir`, opened as `opening` says. cladefs: by a daemon of this VM process's
     /// wire version alone, which takes every request there is (TASK-141.3): one of another, or
     /// that refuses any of what opening asks, the connection is closed on, failing; and one that
-    /// goes as the store opens fails it saying so (TASK-232).
-    pub(crate) fn opening(mut self, store: &Path, opening: Opening) -> Result<CellClient, Error> {
-        let client = self.client.take().expect("a connection opens one store");
-        CellClient::open(client.clone(), store, opening).map_err(|err| {
+    /// goes as the cell opens fails it saying so (TASK-232).
+    pub(crate) fn opening(
+        mut self,
+        cell_dir: &Path,
+        opening: Opening,
+    ) -> Result<CellClient, Error> {
+        let client = self.client.take().expect("a connection opens one cell");
+        CellClient::open(client.clone(), cell_dir, opening).map_err(|err| {
             let err = match client.lost.happened() {
                 true => err.context("the extent daemon went"),
                 false => err,
             };
             client.close();
-            err.context(format!("opening the extent store at {}", store.display()))
+            err.context(format!("opening the extent store at {}", cell_dir.display()))
         })
     }
 
     fn client(&self) -> &Client {
-        self.client.as_ref().expect("a connection opens one store")
+        self.client.as_ref().expect("a connection opens one cell")
     }
 }
 
 impl Drop for DaemonConnection {
-    /// Closes it, if no store was opened over it.
+    /// Closes it, if no cell was opened over it.
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             client.close();
@@ -826,7 +841,7 @@ thread_local! {
     static RECEIVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Waits for `future`, a store's request, holding this thread. On a thread receiving a daemon's
+/// Waits for `future`, a cell's request, holding this thread. On a thread receiving a daemon's
 /// replies, as a future [`spawn_on_replies`] runs, it would wait for itself: no such path is left
 /// (the VMM's requests are made with `_async` methods, its callbacks make none), but one that
 /// came to be fails its request rather than the VM process (`EIO`, TASK-56).
@@ -835,19 +850,21 @@ fn blocking<T, E: From<Errno>>(
 ) -> std::result::Result<T, E> {
     if RECEIVING.get() {
         log::error!(
-            "a store's request waited for on a thread receiving replies: {}",
+            "a cell's request waited for on a thread receiving replies: {}",
             std::backtrace::Backtrace::force_capture()
         );
         return Err(Errno::EIO.into());
     }
-    // cladefs: outside the simulation: a VM process's client, which blocks at its entry.
+    // cladefs: outside the simulation: the sync twins of the client's `_async` calls, for sync
+    // callers, tools' and tests', which wait here, an outermost entry's (board 2948); the VMM's
+    // backend calls the `_async` ones (board 5614).
     futures::executor::block_on(future)
 }
 
-/// Runs `future`, which makes requests of stores daemons serve (their `_async` methods), on this
+/// Runs `future`, which makes requests of cells daemons serve (their `_async` methods), on this
 /// thread until it waits for a reply, and from then on on the thread receiving each reply it
 /// waits for, as it arrives: what follows a reply runs with no thread's wake-up between them
-/// (TASK-41). So it must not block, as a store's blocking calls would, nor take long: the replies
+/// (TASK-41). So it must not block, as a cell's blocking calls would, nor take long: the replies
 /// and window changes behind it wait.
 pub fn spawn_on_replies(future: impl std::future::Future<Output = ()> + Send + 'static) {
     // Run as scheduled, by the thread that wakes it; woken while running, by the thread running
@@ -866,14 +883,14 @@ struct Client {
     next: AtomicU64,
     /// The requests waiting for replies; `None` once the connection is gone.
     waiting: Mutex<Option<Waiting>>,
-    /// cladefs: signaled as replies come, making room for requests ([`Waiting::has_room`]), to those
-    /// waiting for it ([`Waiting::for_room`]).
+    /// cladefs: signaled as replies come, making room for requests ([`Waiting::has_room`]), to
+    /// those waiting for it ([`Waiting::for_room`]).
     room: std::sync::Condvar,
     stage: OnceLock<Arc<UffdSecondStage>>,
     /// cladefs: what making the stage operations cost this process, which it tells the daemon
     /// (TASK-91.16).
     stage_counts: StageCosts,
-    /// What the daemon's changes of the store's capacity go to
+    /// What the daemon's changes of the cell's capacity go to
     /// ([`CellClient::on_capacity`]).
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
     /// cladefs: what the daemon's asks for stats go to ([`CellClient::on_stats_asked`]).
@@ -921,9 +938,9 @@ impl Client {
         self.request_with(request, None)
     }
 
-    /// [`Client::request`], for a request whose data is in the transfer area's `slot`, which it keeps
-    /// from other requests until the daemon answers, as until then the daemon may access it: the
-    /// slot taken until both it and the request's caller are done with it, though the caller
+    /// [`Client::request`], for a request whose data is in the transfer area's `slot`, which it
+    /// keeps from other requests until the daemon answers, as until then the daemon may access it:
+    /// the slot taken until both it and the request's caller are done with it, though the caller
     /// drops its request first (TASK-444.15).
     fn request_keeping(&self, request: &Request<'_>, slot: &Slot) -> BoxFuture<'static, Reply> {
         self.request_with(request, Some(slot.0.clone()))
@@ -1008,9 +1025,9 @@ impl Client {
     }
 
     /// Receives from the daemon until it closes the connection: makes the stage operations, in
-    /// order, and hands replies to their requests. cladefs: it tells the daemon what they cost, with
-    /// each acknowledgement, and otherwise once [`STAGE_COUNTS_EVERY`] has passed since it last
-    /// did, as it makes them (TASK-91.16).
+    /// order, and hands replies to their requests. cladefs: it tells the daemon what they cost,
+    /// with each acknowledgement, and otherwise once [`STAGE_COUNTS_EVERY`] has passed since it
+    /// last did, as it makes them (TASK-91.16).
     fn receive(&self, mut receiver: Receiver) {
         RECEIVING.set(true);
         // What a reply to MAPPINGS holds at most, past a message's most otherwise: a mapping a page
@@ -1120,10 +1137,10 @@ impl Client {
         // served, nor the window's faults, from now on, and the VM can't go on. Said before the
         // requests waiting fail, so that what their failures do knows why, as the window's faults
         // do, which wait for the VM process to stop then rather than abort it (TASK-231); and told
-        // of then too, so that a VMM stops its VM for it, rather than for what fails, a store's
+        // of then too, so that a VMM stops its VM for it, rather than for what fails, a cell's
         // open as its VM is created among them (TASK-232).
         if !self.closing.load(Ordering::Acquire) {
-            log::error!("the extent daemon went: the store's requests fail from now on");
+            log::error!("the extent daemon went: the cell's requests fail from now on");
             self.lost.happen();
         }
         // The requests waiting fail, as do those made from now on.
@@ -1458,8 +1475,9 @@ impl Slot {
         assert!(len <= Transfer::SLOT);
         // SAFETY: within the area, mapped while `self.0.transfer` is held, `len` bytes from the
         // slot's start, at most a slot's; no other request has the slot until it is given back,
-        // when neither this nor the request's waiting holds it (`TakenSlot`'s drop), and the daemon,
-        // which writes it in serving a read, has answered: the caller reads only once it did.
+        // when neither this nor the request's waiting holds it (`TakenSlot`'s drop), and the
+        // daemon, which writes it in serving a read, has answered: the caller reads only once it
+        // did.
         unsafe {
             std::slice::from_raw_parts(
                 self.0.transfer.addr.as_ptr().add(self.offset() as usize),

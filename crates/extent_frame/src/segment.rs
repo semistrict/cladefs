@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A segment's footer (doc-7, Segments), the same in a store's closed segments and in object
+//! A segment's footer (doc-7, Segments), the same in a cell's closed segments and in object
 //! storage, which hold the same bytes: a closed local segment is uploaded as it is; and the chain
 //! of one writer's footers ([`Chain`]), which stamps every footer its segments close with, a
-//! store's and a writer's alike, and admits those another closed for it.
+//! cell's and a writer's alike, and admits those another closed for it.
 
 use crate::Corrupt;
 use base32_id::{Padded, Short};
@@ -22,7 +22,8 @@ pub struct Location {
 
 /// cladefs: a tenant's cell: its tenant, and its ID, unique across buckets, which its bucket's
 /// allocator gives under the bucket's number (doc-20, doc-23): what its keys are under, and what an
-/// extent's ID names as the cell that wrote it. Tenants are IDs alone; what they stand for, their callers keep.
+/// extent's ID names as the cell that wrote it. Tenants are IDs alone; what they stand for, their
+/// callers keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CellId {
     pub tenant: u64,
@@ -90,7 +91,7 @@ impl Footer {
 }
 
 /// What a segment's commits made, which its footer holds, stamped with its place by its writer's
-/// chain ([`Chain::close`]): its commits' tags, unique to each commit (a store's segment names the
+/// chain ([`Chain::close`]): its commits' tags, unique to each commit (a cell's segment names the
 /// last of its commits, [`tag`]); the extents they sealed in its data, at an offset, of a length;
 /// the cell's extents they sealed that are stored on their own, by their sequence numbers, of a
 /// length, at the writer's keys ([`Footer::own`]): an inherited extent a cell uploads goes in its
@@ -119,10 +120,10 @@ pub struct Contents {
 /// cladefs: a version made at a segment's end (doc-18, doc-20): a name for its cell's state as of
 /// the segment, of no record, kept for as long as the head names it, which the acknowledgement
 /// naming the segment does, in the same swap. Making it is local: the commit closing the segment
-/// in the store's log, nothing in the bucket, which the upload names later. Its ID is random,
+/// in the cell's log, nothing in the bucket, which the upload names later. Its ID is random,
 /// unique to its making, as an owner is: the segment's number may change, as a WAL is put after the
-/// cell's end (a store's `Wal::rebase`), its ID never. The commit making it seals nothing, its
-/// store quiescent.
+/// cell's end (its `Wal::rebase`), its ID never. The commit making it seals nothing, its
+/// cell quiescent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NewVersion {
     pub id: u64,
@@ -159,7 +160,7 @@ impl Contents {
 
     /// cladefs: whether a segment of these contents, following one that went on with commit
     /// `commit` ([`Continued`]), ends it: it names a commit of `commit`'s writer, `commit` or a
-    /// later one, as the segment a store's commit ends in names its last; one that names none, a
+    /// later one, as the segment a cell's commit ends in names its last; one that names none, a
     /// fence, ends it not, nor does one going on with it.
     pub fn ends(&self, commit: u64) -> bool {
         self.commits.last().is_some_and(|&last| {
@@ -192,7 +193,7 @@ impl Contents {
 /// One writer's footers, in the order its segments close (doc-7, The head): numbered on without
 /// gaps from the cell's end as its head named it; all of the writer's epoch, their extents
 /// of their own at its keys; the next sequence number each names never below its floor nor the one
-/// before's. Whatever closes a writer's segments, a store
+/// before's. Whatever closes a writer's segments, a cell
 /// or the writer, stamps their footers with the writer's chain, and the writer admits each footer
 /// only if its chain would have stamped it so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,7 +234,7 @@ impl Chain {
         self.next_sequence
     }
 
-    /// The tag its writer gives the store's commit `epoch` ([`tag`]).
+    /// The tag its writer gives the cell's commit `epoch` ([`tag`]).
     pub fn tag(&self, epoch: u64) -> u64 {
         tag(self.epoch, epoch)
     }
@@ -274,16 +275,16 @@ impl Chain {
     }
 }
 
-/// Commits' tags: the writer's epoch above this bit, the store's epoch below, so that no two
+/// Commits' tags: the writer's epoch above this bit, the cell's epoch below, so that no two
 /// writers' commits share one.
 pub const TAG_SHIFT: u32 = 40;
 
-/// The tag of the store's commit `epoch` that the writer of epoch `writer` uploads.
+/// The tag of the cell's commit `epoch` that the writer of epoch `writer` uploads.
 pub fn tag(writer: u64, epoch: u64) -> u64 {
     (writer << TAG_SHIFT) | epoch
 }
 
-/// The store's epoch a commit's tag names.
+/// The cell's epoch a commit's tag names.
 pub fn epoch_of(tag: u64) -> u64 {
     tag & ((1 << TAG_SHIFT) - 1)
 }
@@ -321,7 +322,7 @@ mod tests {
         CellId { tenant: CELL.tenant, id }
     }
 
-    /// A footer decodes as it was encoded: a store's segments and the bucket's objects hold them.
+    /// A footer decodes as it was encoded: a cell's segments and the bucket's objects hold them.
     #[test]
     fn footers_decode_as_encoded() {
         let footer = Footer {
@@ -348,8 +349,8 @@ mod tests {
         assert!(Footer::decode(&bytes[..bytes.len() - 1]).is_err());
     }
 
-    /// cladefs: a commit a segment goes on with is ended by a segment naming it, or a later commit of
-    /// its writer's, as the segment a store's commit ends in names its last; gone on with by one
+    /// cladefs: a commit a segment goes on with is ended by a segment naming it, or a later commit
+    /// of its writer's, as the segment a cell's commit ends in names its last; gone on with by one
     /// naming no commit and going on with it; and neither by a fence, nor by another writer's
     /// segment, nor by one going on with another commit (TASK-92.41). A segment's runs are its
     /// commits', then its continued commit's.
@@ -388,7 +389,7 @@ mod tests {
         }
     }
 
-    /// A tag holds its writer's epoch above `TAG_SHIFT` and the store's below, each recovered whole.
+    /// A tag holds its writer's epoch above `TAG_SHIFT` and the cell's below, each recovered whole.
     #[test]
     fn tags_hold_both_epochs() {
         assert_eq!(tag(3, 5), 0x0300_0000_0005);
@@ -400,8 +401,9 @@ mod tests {
         assert_eq!((writer_of(tag(7, 0)), epoch_of(tag(7, 0))), (7, 0));
     }
 
-    /// A chain numbers the segments it closes on from where it starts, of its writer's epoch; the next sequence number each names is the chain's floor at
-    /// least, and never below the one before's.
+    /// A chain numbers the segments it closes on from where it starts, of its writer's epoch; the
+    /// next sequence number each names is the chain's floor at least, and never below the one
+    /// before's.
     #[test]
     fn chains_number_what_they_close() {
         let own = ExtentId { cell: 2, sequence: 7 };

@@ -5,7 +5,7 @@
 +++ b/crates/virtio_extent/src/notices.rs
 @@ -66,7 +66,7 @@ impl std::fmt::Debug for Resizing {
  impl Resizing {
-     /// The store's capacity, as the guest is told it.
+     /// The cell's capacity, as the guest is told it.
      pub fn capacity(&self) -> u64 {
 -        self.capacity.load(Ordering::Acquire)
 +        self.capacity.load(Ordering::Relaxed)

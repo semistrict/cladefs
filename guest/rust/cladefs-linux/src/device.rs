@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The extent-store device the filesystem lives on (guest/linux/fs/cladefs/device.h, backlog doc-4),
-//! as Fxfs's `Device`.
+//! The extent-store device the filesystem lives on (guest/linux/fs/cladefs/device.h, backlog
+//! doc-4), as Fxfs's `Device`.
 //!
 //! Each operation is one or more of the device's requests, which the device completes from its
 //! interrupt: a request's future wakes then. Its data is a transfer buffer, which the kernel's
@@ -20,9 +20,9 @@
 //!
 //! cladefs: frozen with its filesystem (`Freezer`), the device takes no writes, frees or commits
 //! until it thaws: those wait at its `Gate`, as a snapshot of the VM is taken, which a VM restored
-//! from, with a store of its own, thaws in (TASK-39.1).
+//! from, with a cell of its own, thaws in (TASK-39.1).
 //!
-//! cladefs: a follower's device (doc-4's F_READ_ONLY, backlog doc-8) reads a store another VM
+//! cladefs: a follower's device (doc-4's F_READ_ONLY, backlog doc-8) reads a cell another VM
 //! writes, as of one of its commits, which it advances to the writer's latest (`Device::advance`),
 //! letting go of the commits before once the follower is done with them, and keeps single extents
 //! (`Device::pin`). It writes nothing.
@@ -219,7 +219,7 @@ impl Drop for Request<'_> {
 pub struct ExtentDevice {
     device: NonNull<ffi::Device>,
     info: ffi::Info,
-    /// cladefs: how many bytes the store holds at most, as resizing changes it (`Resizer`).
+    /// cladefs: how many bytes the cell holds at most, as resizing changes it (`Resizer`).
     capacity: Arc<AtomicU64>,
     allocator: BufferAllocator,
     /// What Fxfs may take for open, which `sealer` seals.
@@ -336,8 +336,8 @@ impl Drop for UploadingGuard {
 }
 
 /// cladefs: how many of something there were, and their nanoseconds, all told; and how many took
-/// each power of two of time (TASK-111.6), as the C side's histograms (fs/cladefs/hist.h) count them:
-/// bucket k those under 1.024 us times 2 to the k, the last the rest.
+/// each power of two of time (TASK-111.6), as the C side's histograms (fs/cladefs/hist.h) count
+/// them: bucket k those under 1.024 us times 2 to the k, the last the rest.
 #[derive(Default)]
 pub struct Timed {
     pub count: AtomicU64,
@@ -378,9 +378,9 @@ pub struct DeviceStats {
     pub commits: Timed,
     pub uploaded_commits: AtomicU64,
     /// Seals begun, from asking to begin, waiting for another seal, the writes in flight and the
-    /// window's stores, to beginning.
+    /// window's writes, to beginning.
     pub seal_waits: Timed,
-    /// Seals, from beginning to ending: what they held the writes and the window's stores off for.
+    /// Seals, from beginning to ending: what they held the writes and the window's writes off for.
     pub seals: Timed,
     /// Writes a seal held off, and for how long.
     pub writes_held: Timed,
@@ -521,7 +521,7 @@ impl ExtentDevice {
         let info = this.info().await?;
         this.capacity.store(info.capacity, Ordering::Release);
         // The cell, as the device says it now: the configuration the driver read as it bound
-        // the device says the cell of the store its VM had then, which a VM restored from a
+        // the device says the cell its VM had then, which a VM restored from a
         // snapshot doesn't have (TASK-39.1).
         if this.info.flags & DEVICE_FREEZE != 0 {
             this.cell.store(info.cell, Ordering::Release);
@@ -537,7 +537,7 @@ impl ExtentDevice {
         self
     }
 
-    /// How many bytes the store holds at most.
+    /// how many bytes the cell holds at most.
     pub fn capacity(&self) -> u64 {
         self.capacity.load(Ordering::Acquire)
     }
@@ -573,7 +573,7 @@ impl ExtentDevice {
         Uploading(self.uploading.clone())
     }
 
-    /// cladefs: whether it is a follower's device, which reads a store another VM writes
+    /// cladefs: whether it is a follower's device, which reads a cell another VM writes
     /// (DEVICE_READ_ONLY): its filesystem is read-only.
     pub fn follows(&self) -> bool {
         self.info.flags & DEVICE_READ_ONLY != 0
@@ -589,7 +589,7 @@ impl ExtentDevice {
         self.advanced.clone()
     }
 
-    /// Whether the store holds nothing yet: no root, so no filesystem.
+    /// Whether the cell holds nothing yet: no root, so no filesystem.
     pub async fn is_empty(&self) -> Result<bool, Error> {
         Ok(self.root().await?.is_empty())
     }
@@ -750,8 +750,8 @@ fn call<'a>(
     }
 }
 
-/// cladefs: resizes the device while the filesystem is mounted, as the host resizes its store: what
-/// the device's configuration says the store's capacity is, and the shrink the guest is asked to
+/// cladefs: resizes the device while the filesystem is mounted, as the host resizes its cell: what
+/// the device's configuration says the cell's capacity is, and the shrink the guest is asked to
 /// take; the device's capacity, which its block count follows; and the guest's answer to a shrink.
 pub struct Resizer {
     device: NonNull<ffi::Device>,
@@ -764,7 +764,7 @@ unsafe impl Send for Resizer {}
 unsafe impl Sync for Resizer {}
 
 impl Resizer {
-    /// The store's capacity, and the shrink the guest is asked to take, or 0, as the device's
+    /// The cell's capacity, and the shrink the guest is asked to take, or 0, as the device's
     /// configuration says: none if the device says neither.
     pub fn configured(&self) -> Option<(u64, u64)> {
         let (mut capacity, mut asked) = (0, 0);
@@ -841,7 +841,7 @@ impl Drop for LetGo {
     }
 }
 
-/// What the store holds (`INFO`).
+/// What the cell holds (`INFO`).
 fn info(device: NonNull<ffi::Device>) -> impl Future<Output = Result<InfoReply, Error>> + Send {
     let mut reply = Box::new(InfoReply::default());
     let data = &mut *reply as *mut InfoReply as *mut c_void;
@@ -908,7 +908,7 @@ impl Freezer {
         frozen
     }
 
-    /// Tells the device the filesystem thaws, and takes its cell, which is of a store of its own
+    /// Tells the device the filesystem thaws, and takes its cell, which is its own
     /// in a VM restored from a snapshot; returns the cell. Its capacity, which may differ too, is
     /// for the filesystem to take (`resize`), which compares it with the device's and grows the
     /// allocator with it (TASK-79.52). The device takes writes, frees and commits again once opened
@@ -972,7 +972,7 @@ impl std::fmt::Display for DeviceError {
 
 impl std::error::Error for DeviceError {}
 
-/// Whether `error` is the device's saying that it was cut off from its store: a follower's, which
+/// Whether `error` is the device's saying that it was cut off from its cell: a follower's, which
 /// its guest remounts.
 pub(crate) fn is_stale(error: &(dyn std::error::Error + 'static)) -> bool {
     error.downcast_ref::<DeviceError>().is_some_and(|error| error.errno == ESTALE)
@@ -1105,10 +1105,11 @@ impl Device for ExtentDevice {
         self.call(op(T_FREE, 0, Some(extent), 0, std::ptr::null_mut(), 0), Some(extent)).await
     }
 
-    /// cladefs: a flush's dead extents in as few requests as the device takes (`FREE_MANY`, TASK-41),
-    /// one at a time: each request a round trip, which nested virtualization makes dear, and which
-    /// the device's servers, shared with the syncs, serve one of at a time. A request that fails
-    /// fails its extents, which the allocator tries again: freeing one freed does nothing.
+    /// cladefs: a flush's dead extents in as few requests as the device takes (`FREE_MANY`,
+    /// TASK-41), one at a time: each request a round trip, which nested virtualization makes dear,
+    /// and which the device's servers, shared with the syncs, serve one of at a time. A request
+    /// that fails fails its extents, which the allocator tries again: freeing one freed does
+    /// nothing.
     async fn free_extents(&self, extents: &[ExtentId]) -> Vec<Result<(), Error>> {
         if self.info.flags & DEVICE_FREE_MANY == 0 {
             return futures::future::join_all(extents.iter().map(|extent| self.free(*extent)))
@@ -1168,8 +1169,8 @@ impl Device for ExtentDevice {
     }
 
     /// cladefs: ordered, as the device's other commits, uploaded only while a sync wants it: each
-    /// journal compaction ends in one, and uploaded, its seal held the guest's fsyncs and stores
-    /// for as long as the object store's uploads took (TASK-91.2). A crash keeps a prefix of the
+    /// journal compaction ends in one, and uploaded, its seal held the guest's fsyncs and writes
+    /// for as long as the bucket's uploads took (TASK-91.2). A crash keeps a prefix of the
     /// commits (doc-4), the root with what came before it, or neither.
     async fn commit_root(&self, root: &[u8]) -> Result<(), Error> {
         let _passage = self.gate.pass().await;

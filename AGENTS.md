@@ -154,13 +154,39 @@ Check the file before starting work: an answer may be there. As soon as the user
 
 The user's rule (2026-11-05), not a phase: cladefs never migrates data. On-disk, bucket and wire formats change whenever that's the better design, and the new code refuses the old format (`Error::Format` and its kind) rather than reading, converting or upgrading it: no migration code, no compatibility shim, no dual-format reader, nothing kept to read old data, and no task or plan step proposing one. Don't trade a design down to avoid a format change.
 
+## Trust boundaries: check untrusted input once, where it enters
+
+The user's rule (2026-11-21, board 5702). These are untrusted, whoever made them: a VM process's
+requests (the extent daemon's wire, `cladefsd::codec`); a guest's virtio chains (the VMM,
+`virtio_extent`); a peer's replica logs, migration files and parts; what the host's own disk holds
+when read back (logs, frames, descriptions, journals), and a bucket's objects before their MACs
+are checked; an image's layers; a snapshot's state; and, in the guest, a disk image or a shared
+version another tenant may have crafted. A compromised or buggy sender must never panic, wrap,
+hang or exhaust what reads them, as one daemon serves every tenant on its host.
+
+- **Decode once, at the boundary, into values that mean something.** The decoder refuses
+  (`EINVAL`, or the format's error) what means nothing: a flag its kind doesn't know (one mask per
+  kind, checked before any handler acts), an extent of the last sequence, a range whose end is past
+  a u64 or past the largest window, a path that leaves its directory, a size or depth past what the
+  format allows. Past the decoder, code may rely on that; it never re-derives or skips the check.
+- **No unchecked arithmetic or indexing on raw input.** A function that parses untrusted bytes
+  reads them through a checked cursor (`local_cell::untrusted::Cursor`, or `get`, `split_at_checked`,
+  `checked_add`) and says so with
+  `#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]`, so that a slip doesn't
+  compile.
+- **Bound the work an input can ask for** by the protocol's limits (the most a request returns, a
+  path's length, a payload's size), never by what its length field fits in.
+- **Generators reach the edges.** A hostile test's values include 0, 1, the limits and their
+  neighbours, and `u64::MAX`, drawn as often as random ones: `any::<u64>()` alone almost never
+  draws them. Its oracle checks the refusals, not only that something answered.
+
 ## No silent fallbacks to a costlier path: fail hard
 
 The user's rule (2026-11-11): when the cheap way of doing something can't work, fail hard (refuse to start or open, return the error) so the setup gets fixed. Never fall back, silently or with only a log line, to a way that costs vastly more: a copy where a rename failed, the bucket where a local file was meant to serve, a slow path on an unexpected error. Check such a precondition up front where it can be checked (two directories on one filesystem, a cache usable), and treat an existing warn-and-carry-on path that degrades performance as a bug. Found by TASK-350: the host cache's rename of uploaded WAL segments failed across filesystems (EXDEV), a warning hid it, and every read past the daemon's memory went to the bucket, ~30 ms each.
 
 ## Never rely on the OS page cache for substantial data: one memory budget
 
-The user's rule (2026-11-15, TASK-433): cladefs holds what it caches in memory of its own, under one budget, which the extent daemon's governor bounds (`cladefs::cladefsd::memory`, `governor`): the extent cache's arenas, held parts, fetches' parts and tails, uploads, and the stores' page cache (`local_cell::pages`). The host's page cache is a second memory, counted as free by the governor, unbudgeted by cladefs, holding the same bytes again: two budgets of one memory end badly. So every file holding a store's data, or a cache's, is read and written bypassing it (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; `bucket_cell::direct`, `local_cell::HostDir`). What the host's page cache gave (write-behind, reads of what was just written, batching into large writes), get from `local_cell::pages`, which does it under the budget; a new data path that needs caching or buffering uses it, or a budgeted holder of its own the governor counts, never the host's. Small metadata (a lock file, a description) may go through it; data, never. A file system that can't bypass it fails the opening (`HostDir`, the part cache: `bucket_cell::direct::bypass` returns an error, and no read or write takes a `direct: bool`), never falling back; tests refuse it with the `direct::bypass` failpoint. Every directory a store opens holds its data files in the page cache (`local_cell::CachedDir`: `HostDir` in the process's, `MemDir` in a small one of its own with no flusher), so that no test, crash rounds and Shuttle schedules included, runs a store around it. Tests that read store files behind its back write the page cache back first (`pages::shared().write_back_all()`, or a `MemDir`'s `files()`).
+The user's rule (2026-11-15, TASK-433): cladefs holds what it caches in memory of its own, under one budget, which the extent daemon's governor bounds (`cladefs::cladefsd::memory`, `governor`): the extent cache's arenas, held parts, fetches' parts and tails, uploads, and the open cells' page cache (`local_cell::pages`). The host's page cache is a second memory, counted as free by the governor, unbudgeted by cladefs, holding the same bytes again: two budgets of one memory end badly. So every file holding a cell's data, or a cache's, is read and written bypassing it (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; `bucket_cell::direct`, `local_cell::HostDir`). What the host's page cache gave (write-behind, reads of what was just written, batching into large writes), get from `local_cell::pages`, which does it under the budget; a new data path that needs caching or buffering uses it, or a budgeted holder of its own the governor counts, never the host's. Small metadata (a lock file, a description) may go through it; data, never. A file system that can't bypass it fails the opening (`HostDir`, the part cache: `bucket_cell::direct::bypass` returns an error, and no read or write takes a `direct: bool`), never falling back; tests refuse it with the `direct::bypass` failpoint. Every directory a cell opens holds its data files in the page cache (`local_cell::CachedDir`: `HostDir` in the process's, `MemDir` in a small one of its own with no flusher), so that no test, crash rounds and Shuttle schedules included, runs a cell around it. Tests that read a cell's files behind its back write the page cache back first (`pages::shared().write_back_all()`, or a `MemDir`'s `files()`).
 
 ## Never write a test around a bug
 

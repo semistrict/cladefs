@@ -59,16 +59,21 @@ impl<T: Send + Sync + 'static> NodeLocal<T> {
         self.value.get_or_init(self.init)
     }
 
-    /// The value of `node`'s, made if it has none.
+    /// The value of `node`'s, made if it has none: made holding none of this crate's locks, as
+    /// its `init` may use other statics, registering them, while another simulation's thread lets
+    /// its node's values go (board 5473: made holding `nodes`, an `init` registering a static
+    /// waited for [`REGISTRY`], whose holder, letting its node's values go, waited for `nodes`,
+    /// every simulation in the process stopping with them). Only `node`'s thread makes or lets go
+    /// of `node`'s value, so none is made meanwhile.
     #[cfg(madsim)]
     fn node_value(&'static self, node: Node) -> &'static T {
         self.registered.call_once(|| REGISTRY.lock().unwrap().push(self));
-        let mut nodes = self.nodes.lock().unwrap();
-        if let Some((_, value)) = nodes.iter().find(|(of, _)| *of == node) {
+        let found = self.nodes.lock().unwrap().iter().find(|(of, _)| *of == node).map(|(_, v)| *v);
+        if let Some(value) = found {
             return value;
         }
         let value: &'static T = Box::leak(Box::new((self.init)()));
-        nodes.push((node, value));
+        self.nodes.lock().unwrap().push((node, value));
         value
     }
 }
@@ -112,6 +117,16 @@ impl<T: Send + Sync + 'static> Reset for NodeLocal<T> {
 #[cfg(madsim)]
 static REGISTRY: std::sync::Mutex<Vec<&'static dyn Reset>> = std::sync::Mutex::new(Vec::new());
 
+/// Lets every value of `node`'s go, holding [`REGISTRY`] only to list the statics: no lock of this
+/// crate's is held while another is taken (board 5473).
+#[cfg(madsim)]
+fn reset(node: Node) {
+    let locals = REGISTRY.lock().unwrap().clone();
+    for local in locals {
+        local.reset(node);
+    }
+}
+
 /// Whether the simulated node this runs in is dying: killed, its tasks dropped, as a host's process
 /// dies, closing nothing, waiting for nothing. Never, built normally, nor outside a node.
 pub fn dying() -> bool {
@@ -127,10 +142,7 @@ pub fn dying() -> bool {
 /// its boot, where a simulation's runtime has no [`Plugin`] to (a `#[madsim::test]`'s).
 #[cfg(madsim)]
 pub fn starting() {
-    let node = (std::thread::current().id(), madsim::plugin::node());
-    for local in REGISTRY.lock().unwrap().iter() {
-        local.reset(node);
-    }
+    reset((std::thread::current().id(), madsim::plugin::node()));
 }
 
 /// madsim's simulator plugin that lets a killed node's values go, so that it starts again with
@@ -145,10 +157,7 @@ impl madsim::plugin::Simulator for Plugin {
     }
 
     fn reset_node(&self, node: madsim::task::NodeId) {
-        let node = (std::thread::current().id(), node);
-        for local in REGISTRY.lock().unwrap().iter() {
-            local.reset(node);
-        }
+        reset((std::thread::current().id(), node));
     }
 }
 

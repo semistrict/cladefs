@@ -2,11 +2,11 @@
 # Copyright 2026 The cladefs Authors.
 #
 # Kernel: sim
-# Killer: scenarios cow_rebind_against_stores
+# Killer: scenarios cow_rebind_against_mapped_writes
 #
 # TASK-164.4, doc-13: an iomap doesn't count its pages private: the budget never holds a write up,
-# nor has the worker rebind, and a store past private_max is refused, as the VM stops.
-# cow_rebind_against_stores, writing twice private_max.
+# nor has the worker rebind, and a write past private_max is refused, as the VM stops.
+# cow_rebind_against_mapped_writes, writing twice private_max.
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c

@@ -21,8 +21,8 @@ follows from that.
 1. Start `cladefsd` with `CLADEFSD_GRPC` naming its control socket. Keep that socket away
    from jails. It can do everything, so it is mode 0600, the daemon's user's, whatever the umask
    (TASK-159): run the VM manager as that user, or as root.
-2. For each tenant, call `Grant` with the tenant's ID, the directory of its stores, and its jails'
-   uid and gid. It returns the path of a socket.
+2. For each tenant, call `Grant` with the tenant's ID, the directory of its cell directories, and its
+   jails' uid and gid. It returns the path of a socket.
 3. Bind-mount **that socket alone** into the tenant's jails. Never mount the daemon's default VM
    socket into a jail: it can take any cell by its ID.
 4. Run jails with Firecracker's jailer, as a uid other than the daemon's. The default VM socket is
@@ -35,14 +35,14 @@ Grants don't survive a restart of the daemon. After one, call `Grant` again, and
 socket.
 
 To show tenants' cells on the host as files, start `cladefsd` with `CLADEFSD_MOUNT` naming a mount
-version and `CLADEFSD_MOUNT_STORES` a directory for their stores: it mounts them with FUSE and serves
+version and `CLADEFSD_MOUNT_STORES` a directory for their cell directories: it mounts them with FUSE and serves
 the Mount service (`proto/cladefs/mount/v1/mount.proto`, Go `go/mount/v1`) on the same control
 socket. One daemon then holds every cell of the host, whether VMs or the mount serve it (TASK-475.2).
 
 ## Upgrading the daemon
 
 Upgrade a host's daemon and Firecracker by draining the host: move its VMs off, then SIGTERM the
-daemon, which closes every store before it exits. `docs/upgrading-a-host.md` is the runbook, and
+daemon, which closes every cell before it exits. `docs/upgrading-a-host.md` is the runbook, and
 says what a format change refuses.
 
 ## Restoring a snapshot, on any number of hosts at once
@@ -59,7 +59,7 @@ tenants' cells only while those are shared (`ShareVersion`); any other restore f
 ### 1. Before restoring on another host than the snapshot's
 
 ```
-SyncCell(<the snapshotted VM's store>)
+SyncCell(<the snapshotted VM's cell>)
 ```
 
 A version is made locally and uploaded behind. Once `SyncCell` returns, it is in the bucket for
@@ -71,19 +71,19 @@ In `cladefs_overrides`:
 
 | Field | Value |
 |---|---|
-| `path_on_host` | The VM's store, in the tenant's directory |
+| `path_on_host` | The VM's cell directory, in the tenant's directory |
 | `cladefsd_socket` | The tenant's socket, as the jail sees it |
 
 Do this as often as you like, on any host, at the same time. Each restore makes a new cell for the
 VM; the daemon opens the version once on a host for all the restores of it there.
 
-Name a `path_on_host` where no store is yet: the restore forks the version there. A store already
-there is opened only if it holds exactly what the version does: the store the snapshot was taken
-of, if its VM wrote nothing after the snapshot, or the fork an earlier restore of this snapshot
-made there, if that VM wrote nothing. Any other store there, such as the snapshotted VM's own
-store once it resumed and wrote on, fails the restore with `EEXIST` and is left as it is: its
-guest, running from the snapshot's memory, would corrupt it (TASK-194). Without
-`cladefs_overrides`, `path_on_host` is the snapshotted VM's own store.
+Name a `path_on_host` where no cell directory is yet: the restore forks the version there. A cell
+directory already there is opened only if it holds exactly what the version does: the cell the
+snapshot was taken of, if its VM wrote nothing after the snapshot, or the fork an earlier restore
+of this snapshot made there, if that VM wrote nothing. Any other cell there, such as the
+snapshotted VM's own cell once it resumed and wrote on, fails the restore with `EEXIST` and is
+left as it is: its guest, running from the snapshot's memory, would corrupt it (TASK-194). Without
+`cladefs_overrides`, `path_on_host` is the snapshotted VM's own cell directory.
 
 A VM's memory restored from a memory cell names the version in `memory_cell`'s `tenant`, `cell`
 and `version`, as the disk's are named in the snapshot file.
@@ -91,7 +91,7 @@ and `version`, as the disk's are named in the snapshot file.
 ### 3. When the snapshot is finished with, everywhere
 
 ```
-DropVersions(<the snapshotted VM's store>, [version])
+DropVersions(<the snapshotted VM's cell>, [version])
 ```
 
 **This drops the snapshot's version on every host.** VMs already restored from it keep running and
@@ -126,8 +126,8 @@ hang forever.
 
 ## Forking a base on any number of hosts at once
 
-A fork of a store with a writer, such as a base from `ImportImage`, is a commit on its cell, so only
-its writer makes it, one host at a time. To fork a base on many hosts, make a version of it once,
+A fork of a cell with a writer, such as a base from `ImportImage`, is a commit on it, so only its
+writer makes it, one host at a time. To fork a base on many hosts, make a version of it once,
 then fork the version, as a snapshot's is restored:
 
 ```
@@ -135,7 +135,7 @@ then fork the version, as a snapshot's is restored:
 version = MakeVersion(<base>).version
 SyncCell(<base>)
 # Then, as often as you like, on every host at the same time:
-ForkCell(to = <VM's store>, version, tenant, cell)
+ForkCell(to = <VM's cell>, version, tenant, cell)
 ```
 
 The base stays writable on its host. What it writes after reaches no fork of the version: make a new
@@ -144,14 +144,14 @@ version to pass that on. `DropVersions` drops it everywhere, and the forks keep 
 
 ## Limits
 
-**Forks of a store with a writer.** A fork of anything but a version, a VM's store or a base, is a
-commit on that store's cell, so its host needs to be the cell's writer. Fork those on one host
+**Forks of a cell with a writer.** A fork of anything but a version, a VM's cell or a base, is a
+commit on that cell, so its host needs to be its writer. Fork those on one host
 at a time, or make a version first (above).
 
 **Memory.** The pages a guest writes through its DAX window are its own, private copies, in its VM
-process's memory (backlog doc-13), until the guest writes them back to the store, as a page cache
+process's memory (backlog doc-13), until the guest writes them back to the cell, as a page cache
 writes back dirty pages, and the window shares them again. They are charged to the VM process, as
-its guest memory is, not to the daemon or the store's tenant: the daemon reserves none of it, so its
+its guest memory is, not to the daemon or the cell's tenant: the daemon reserves none of it, so its
 memory sizes its cache alone (TASK-501). Bound the VM process's memory, its cgroup, for guest memory
 and private pages together. Everything else the window maps is sealed extents' pages, shared and
 evictable.
@@ -160,18 +160,18 @@ evictable.
 them a VM holds at once (`PUT /cladefs/{id}`, in Firecracker's swagger spec): a multiple of the page
 size, a page at least, the window's size at most; 1 GiB unless set, or the window's size if less.
 The guest keeps under it, writing back as it nears it, so a smaller cap means earlier writeback.
-The host refuses what would go past it: a `write(2)` fails `EIO`, and a store through a mapping
+The host refuses what would go past it: a `write(2)` fails `EIO`, and a write through a mapping
 stops that VM (exit 159). The VM manager sizes it per VM (TASK-502): the cap bounds a burst of
 writes between writebacks, which grows with how fast the guest writes (its vCPUs) and is memory the
 VM process holds (weigh it against its guest memory). Forked pgbench at 2 vCPUs needed 1 GiB
 (TASK-227); measure your workloads. The cap was a page count, `dax_private_max`, before TASK-502: a
 device naming that field is refused.
 
-**Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its
+**Extents.** The daemon holds a few hundred bytes of memory for each extent of every open cell, its
 own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,
 whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it). StatCell says
-how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
-prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
-open, StatCell reads the count kept as it changes, at no cost; of one none has, it opens the store
+how many a cell holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
+prints them. Read a base's before choosing how many forks of it a host serves. Of a cell a VM has
+open, StatCell reads the count kept as it changes, at no cost; of one none has, it opens the cell
 as a VM's would (its state read, its cell's head taken, the map of its extents built: time and,
 until it closes it again, memory as its extents), as for every other field.

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! An open cell's state, as its store holds it ([`State`]), which its lock guards: its extents,
+//! An open cell's state, as its cell holds it ([`State`]), which its lock guards: its extents,
 //! epoch and root, and an owner of each part of the rest, which keeps that part's invariants: the
 //! room its extents take ([`Space`]), what it changed since its last commit ([`Uncommitted`]), the
 //! gate writes pass ([`Gate`]), its segments ([`Segments`]), its extents' own files
@@ -75,7 +75,7 @@ pub(crate) struct State<F> {
     pub kept: KeptExtents,
     /// cladefs: the extents views refuse, sealed after their commits.
     pub sealed: Sealed,
-    /// cladefs: where the store is in its life: open, closed, or failed, and why ([`Standing`],
+    /// cladefs: where the cell is in its life: open, closed, or failed, and why ([`Standing`],
     /// TASK-160.19), which its guards read ([`Guarded`]).
     pub standing: Standing,
     /// cladefs: the segments closed for want of room since the last commit, which the next frames,
@@ -91,7 +91,7 @@ pub(crate) struct State<F> {
 }
 
 /// cladefs: a cell as the one replay of its segments' footers has it, the bucket's and its
-/// write-ahead log's from its store's opening on, its extents by their lengths: which the state,
+/// write-ahead log's from its cell's opening on, its extents by their lengths: which the state,
 /// as of each commit that closes a segment, must hold, the audit asserts (TASK-165.9's AC #5).
 #[cfg(any(test, feature = "audit"))]
 pub(crate) type Replay = bucket_cell::State<Lengths>;
@@ -113,10 +113,10 @@ impl bucket_cell::recovery::Places for Lengths {
     }
 }
 
-/// cladefs: the segments closed whose framings are yet to run, in the order they closed, and whether
-/// a framer runs them, one after another (`wal`'s docs, TASK-165.9), with the looks ahead at parts
-/// of segments filling between them (TASK-400); and those it framed, written, not yet durable,
-/// since when the first of them waits, and whether a thread makes them durable, together
+/// cladefs: the segments closed whose framings are yet to run, in the order they closed, and
+/// whether a framer runs them, one after another (`wal`'s docs, TASK-165.9), with the looks ahead
+/// at parts of segments filling between them (TASK-400); and those it framed, written, not yet
+/// durable, since when the first of them waits, and whether a thread makes them durable, together
 /// (`segments::make_durable`, TASK-310).
 pub(crate) struct Framing<F> {
     pub queue: std::collections::VecDeque<Job<F>>,
@@ -129,7 +129,7 @@ pub(crate) struct Framing<F> {
     pub syncing: bool,
 }
 
-/// cladefs: what a store's framer does ([`Framing`]), in order: a look ahead at a part of a segment,
+/// cladefs: what a cell's framer does ([`Framing`]), in order: a look ahead at a part of a segment,
 /// written whole, as it fills (`framing::see`, TASK-400); or a segment's framing.
 pub(crate) enum Job<F> {
     See(SegmentId, u64),
@@ -164,10 +164,10 @@ impl<F> Framing<F> {
     }
 }
 
-/// Whom a read is for: the store's own, of what it holds; of what it holds or keeps, freed, for
-/// views or for the bucket ([`LocalCell::read_kept`](crate::LocalCell::read_kept)); or a view's, as of the commit of `epoch`, of what that commit and those since `since`
-/// held, which the store holds or keeps, and of what it pins, if `pinned`: decided in the critical
-/// section that locates it.
+/// Whom a read is for: the cell's own, of what it holds; of what it holds or keeps, freed, for
+/// views or for the bucket ([`LocalCell::read_kept`](crate::LocalCell::read_kept)); or a view's, as
+/// of the commit of `epoch`, of what that commit and those since `since` held, which the cell holds
+/// or keeps, and of what it pins, if `pinned`: decided in the critical section that locates it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reader {
     Own,
@@ -175,9 +175,9 @@ pub(crate) enum Reader {
     View { epoch: u64, since: u64, pinned: bool },
 }
 
-/// cladefs: where an extent is in its life, as the store's state has it, found in one place
+/// cladefs: where an extent is in its life, as the cell's state has it, found in one place
 /// ([`State::life`], TASK-160.18), which readers and writers decide by. cladefs: its entry borrowed
-/// from the layer of the store's map that holds it ([`Entry`], TASK-453).
+/// from the layer of the cell's map that holds it ([`Entry`], TASK-453).
 pub(crate) enum Life<'a> {
     /// Written since the last commit, which seals it: its entry, as the writes that finished left
     /// it, if one did.
@@ -193,7 +193,7 @@ pub(crate) enum Life<'a> {
 }
 
 impl<'a> Life<'a> {
-    /// Its entry, if the store holds it: open or sealed.
+    /// Its entry, if the cell holds it: open or sealed.
     pub fn held(&self) -> Option<Entry<'a>> {
         match *self {
             Life::Open(entry) => entry,
@@ -205,7 +205,7 @@ impl<'a> Life<'a> {
 
 impl<F: File> State<F> {
     /// Runs `change`, which changes the state ahead of the files it writes: failing part way, it
-    /// leaves the state other than the files say, and fails the store, which does nothing more.
+    /// leaves the state other than the files say, and fails the cell, which does nothing more.
     pub fn failing<T>(
         &mut self,
         change: impl FnOnce(&mut Self) -> Result<T, Error>,
@@ -217,7 +217,7 @@ impl<F: File> State<F> {
         changed
     }
 
-    /// cladefs: fails the store, for `error`, unless it failed before ([`Standing::fail`]).
+    /// cladefs: fails the cell, for `error`, unless it failed before ([`Standing::fail`]).
     pub fn fail(&mut self, error: &Error) {
         self.standing.fail(error);
     }
@@ -237,8 +237,8 @@ impl<F: File> State<F> {
         }
     }
 
-    /// `extent`'s entry, which `reader` may read: of what the store holds, or keeps, if not the
-    /// store's own; a view's, of what its commits hold (not open, not sealed after its commit, not
+    /// `extent`'s entry, which `reader` may read: of what the cell holds, or keeps, if not the
+    /// cell's own; a view's, of what its commits hold (not open, not sealed after its commit, not
     /// freed before the one it holds since), or it pins. Fails with `NoExtent` otherwise.
     pub fn entry_for(&self, extent: ExtentId, reader: Reader) -> Result<Extent, Error> {
         let life = self.life(extent);
@@ -285,8 +285,9 @@ impl<F: File> State<F> {
         }
     }
 
-    /// cladefs: the extents `moved` says the collector moved, from where to where, held or kept, named
-    /// where they went, if they are named on their way there ([`LocalCell::moved`](crate::LocalCell::moved)).
+    /// cladefs: the extents `moved` says the collector moved, from where to where, held or kept,
+    /// named where they went, if they are named on their way there
+    /// ([`LocalCell::moved`](crate::LocalCell::moved)).
     pub fn moved(&mut self, moved: &[(ExtentId, Location, Location)]) {
         for (extent, _, to) in moved {
             self.extents.follow(extent, to);
@@ -297,7 +298,7 @@ impl<F: File> State<F> {
     /// cladefs: segment `segment`, closed, is acknowledged in the bucket, at `key`, and the extents
     /// stored on their own its footer names are at `own` there (TASK-165.8): its extents sealed in
     /// it, and those stored on their own, held or kept, are the bucket's from now on, read there,
-    /// and their files leave the store, for the host's cache if `cached`, its framed file being
+    /// and their files leave the cell, for the host's cache if `cached`, its framed file being
     /// the object at `key`. Returns those that leave now, by their paths, with their keys in the
     /// bucket, if into the cache: the extents' own files, those no extent holds nor keeps any more
     /// too, which the segment kept for the bucket (TASK-165.9); the segment's leaves once no
@@ -389,13 +390,13 @@ impl<F: File> State<F> {
         self.space.check(grows, self.kept.for_views(), wasted)
     }
 
-    /// cladefs: the bucket needs the frees of the commits up to `epoch` no more, acknowledged there:
-    /// trims let them go once views need them no more either.
+    /// cladefs: the bucket needs the frees of the commits up to `epoch` no more, acknowledged
+    /// there: trims let them go once views need them no more either.
     pub fn release_kept(&mut self, epoch: u64) {
         self.kept.release(epoch);
     }
 
-    /// What the store holds, as doc-4's `INFO` reports it.
+    /// What the cell holds, as doc-4's `INFO` reports it.
     pub fn info(&self) -> Info {
         self.space.info(self.next_sequence, self.kept.for_views(), self.uncommitted.wasted())
     }
@@ -411,11 +412,11 @@ impl<F: File> State<F> {
     }
 }
 
-/// cladefs: where a store is in its life, one value (TASK-160.19): open; closed
-/// ([`LocalCell::close`](crate::LocalCell::close)), when it reads what it holds, and changes nothing; or
-/// failed, its state ahead of its files, when it does nothing more, saying why: the first
-/// failure's error (TASK-165.9: a framing's failure, which no flush waits for, failed a later
-/// call), and whether it was closed too, as a failed store is closed all the same.
+/// cladefs: where a cell is in its life, one value (TASK-160.19): open; closed
+/// ([`LocalCell::close`](crate::LocalCell::close)), when it reads what it holds, and changes
+/// nothing; or failed, its state ahead of its files, when it does nothing more, saying why: the
+/// first failure's error (TASK-165.9: a framing's failure, which no flush waits for, failed a later
+/// call), and whether it was closed too, as a failed cell is closed all the same.
 #[derive(Default)]
 pub(crate) enum Standing {
     #[default]
@@ -454,7 +455,7 @@ impl Standing {
         matches!(self, Standing::Closed | Standing::Failed { closed: true, .. })
     }
 
-    /// Fails, saying why, if the store failed.
+    /// Fails, saying why, if the cell failed.
     pub fn whole(&self) -> Result<(), Error> {
         match self {
             Standing::Failed { cause, .. } => {
@@ -472,7 +473,7 @@ pub(crate) trait Holds {
     fn check<F: File>(state: &State<F>, cell: CellId) -> Result<(), Error>;
 }
 
-/// cladefs: a store not failed: what reading takes ([`Readable`]).
+/// cladefs: a cell not failed: what reading takes ([`Readable`]).
 pub(crate) struct Whole;
 
 impl Holds for Whole {
@@ -481,7 +482,7 @@ impl Holds for Whole {
     }
 }
 
-/// cladefs: a store not failed, nor closed, its cell no version: what changing it takes
+/// cladefs: a cell not failed, nor closed, its cell no version: what changing it takes
 /// ([`Writable`]).
 pub(crate) struct Changeable;
 
@@ -496,7 +497,7 @@ impl Holds for Changeable {
 
 /// cladefs: the state, locked, as `H` holds it to (TASK-160.19): made only by checking it, and
 /// checked again by each of its waits, which let the lock go meanwhile, so that no caller goes on
-/// after waiting as if the store couldn't have failed, or closed, since (TASK-83). With the rule
+/// after waiting as if the cell couldn't have failed, or closed, since (TASK-83). With the rule
 /// `recheck_after_waiting` off, as a Shuttle test has it to show it needed, its waits check
 /// nothing.
 pub(crate) struct Guarded<'a, F: File, H> {
@@ -504,10 +505,10 @@ pub(crate) struct Guarded<'a, F: File, H> {
     holds: std::marker::PhantomData<H>,
 }
 
-/// cladefs: the state of a store not failed ([`Whole`]).
+/// cladefs: the state of a cell not failed ([`Whole`]).
 pub(crate) type Readable<'a, F> = Guarded<'a, F, Whole>;
 
-/// cladefs: the state of a store to change ([`Changeable`]).
+/// cladefs: the state of a cell to change ([`Changeable`]).
 pub(crate) type Writable<'a, F> = Guarded<'a, F, Changeable>;
 
 impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
@@ -549,14 +550,14 @@ impl<F: File, H> DerefMut for Guarded<'_, F, H> {
 
 /// cladefs: the state, locked, which the builds of the tests audit as they let it go, waiting or
 /// done ([`State::audit`], TASK-160.16): so that whatever changed it, its counts are found right
-/// before anything else reads them. Unless the store failed, which changes nothing more, its
+/// before anything else reads them. Unless the cell failed, which changes nothing more, its
 /// state other than its files say; or the thread is panicking, which another panic would abort.
 pub(crate) struct Locked<'a, F: File> {
     /// None only as it waits ([`Locked::wait`]).
     guard: Option<StateGuard<'a, F>>,
 }
 
-/// cladefs: the state's lock held, shared beyond one store, as its followers share it with its
+/// cladefs: the state's lock held, shared beyond one cell, as its followers share it with its
 /// writer, which a panic holding aborts the extent daemon (`crate::shared`, TASK-149.24).
 pub(crate) type StateGuard<'a, F> = Shared<MutexGuard<'a, State<F>>>;
 
@@ -590,14 +591,14 @@ impl<F: File> Drop for Locked<'_, F> {
 
 /// cladefs: the most extents a cell may hold for the audit to recount its state ([`Locked`]): it
 /// goes through them all each time the state is let go, which took a test of cladefs's, writing a
-/// base of 32,768 extents one at a time and forking it a hundred times, past an hour; the stores
-/// of the store's own tests hold hundreds at most (TASK-160.16).
+/// base of 32,768 extents one at a time and forking it a hundred times, past an hour; the cells
+/// of the crate's own tests hold hundreds at most (TASK-160.16).
 #[cfg(any(test, feature = "audit"))]
 const AUDITED_EXTENTS: usize = 4096;
 
 /// cladefs: `guard`'s state, audited, in the builds of the tests ([`Locked`]), if its cell holds
 /// [`AUDITED_EXTENTS`] at most. An audit that fails panics once it has let the state go,
-/// unpoisoned, saying what it found after [`AUDIT_FAILED`]: the store's drop, closing its cell,
+/// unpoisoned, saying what it found after [`AUDIT_FAILED`]: the cell's drop, closing its cell,
 /// locks it again, which a lock poisoned would panic in, aborting as the audit's panic unwinds.
 #[cfg(any(test, feature = "audit"))]
 fn audited<F: File>(guard: StateGuard<'_, F>) -> StateGuard<'_, F> {
@@ -690,22 +691,22 @@ impl<F: File> State<F> {
 }
 
 /// The room a cell's extents take: the most they may hold, as its record says
-/// ([`LocalCell::set_capacity`](crate::LocalCell::set_capacity)), the bytes they hold, and those writes
-/// in progress may add. A write takes room only if what they hold and may add, with what views
-/// keep of the frees, which counts as used, fits. cladefs: and with what writes since the last
-/// commit wasted past the capacity's worth, which counts as used too (TASK-79.2): what they wrote
-/// over, in segments, and what frees of extents open let go of, and writes dropped, of what they
-/// wrote. That is its writer's own, which no commit held, and which its next commit takes back:
-/// so that a writer that never commits takes twice the capacity of the host's disk at most,
+/// ([`LocalCell::set_capacity`](crate::LocalCell::set_capacity)), the bytes they hold, and those
+/// writes in progress may add. A write takes room only if what they hold and may add, with what
+/// views keep of the frees, which counts as used, fits. cladefs: and with what writes since the
+/// last commit wasted past the capacity's worth, which counts as used too (TASK-79.2): what they
+/// wrote over, in segments, and what frees of extents open let go of, and writes dropped, of what
+/// they wrote. That is its writer's own, which no commit held, and which its next commit takes
+/// back: so that a writer that never commits takes twice the capacity of the host's disk at most,
 /// rewriting, or writing extents and freeing them. Past it, the writes a commit comes with are
-/// refused too (doc-4's `WRITE_COMMIT`'s, and those of the extents a DAX guest maps writably,
-/// which its commits write first), so that a writer past it may be unable to commit: a guest's
-/// filesystem comes nowhere near it, Fxfs freeing an extent only once a flush has committed it,
-/// and writing over little between commits. What the commits leave in the cell's segments
-/// that no extent is in, freed, takes none of the room, however much: the segments leave the
-/// store once acknowledged in the bucket, whose collector takes it back (TASK-165.8). Counted as
-/// used past the capacity's worth, it found a guest's store full with a tenth of it used
-/// (`ENOSPC`), which the guest's filesystem did not survive.
+/// refused too (doc-4's `WRITE_COMMIT`'s, and those of the extents a DAX guest maps writably, which
+/// its commits write first), so that a writer past it may be unable to commit: a guest's filesystem
+/// comes nowhere near it, Fxfs freeing an extent only once a flush has committed it, and writing
+/// over little between commits. What the commits leave in the cell's segments that no extent is in,
+/// freed, takes none of the room, however much: the segments leave the cell once acknowledged in
+/// the bucket, whose collector takes it back (TASK-165.8). Counted as used past the capacity's
+/// worth, it found a guest's cell full with a tenth of it used (`ENOSPC`), which the guest's
+/// filesystem did not survive.
 pub(crate) struct Space {
     capacity: u64,
     /// The extents it holds and the bytes they hold: of them all, and of its own.
@@ -836,7 +837,7 @@ impl Space {
         self.capacity = capacity;
     }
 
-    /// What the store holds, as doc-4's `INFO` reports it: `next_sequence` its next sequence
+    /// What the cell holds, as doc-4's `INFO` reports it: `next_sequence` its next sequence
     /// number, views keeping `kept_for_views` of the frees, which take room as the extents did,
     /// and writes since the last commit wasting `wasted` bytes, what is past the capacity's worth
     /// of which room is not available either.
@@ -921,8 +922,8 @@ impl<F> Default for Uncommitted<F> {
     }
 }
 
-/// cladefs: the extents open let go of in the order they were opened, as [`Uncommitted::let_go_open`]
-/// lets them go.
+/// cladefs: the extents open let go of in the order they were opened, as
+/// [`Uncommitted::let_go_open`] lets them go.
 impl<F> Drop for Uncommitted<F> {
     fn drop(&mut self) {
         self.let_go_open();
@@ -1089,10 +1090,10 @@ impl<F> Uncommitted<F> {
     }
 }
 
-/// The gate writes pass ([`LocalCell::begin_write`](crate::LocalCell::begin_write)): held while a commit,
-/// or a closing between commits ([`LocalCell::close_now`](crate::LocalCell::close_now)), waits for the
-/// writes in progress, which new ones wait for; and the writes in progress, to segments or
-/// extents' own files: the extents a commit seals hold what they write.
+/// The gate writes pass ([`LocalCell::begin_write`](crate::LocalCell::begin_write)): held while a
+/// commit, or a closing between commits ([`LocalCell::close_now`](crate::LocalCell::close_now)),
+/// waits for the writes in progress, which new ones wait for; and the writes in progress, to
+/// segments or extents' own files: the extents a commit seals hold what they write.
 #[derive(Default)]
 pub(crate) struct Gate {
     held: bool,
@@ -1144,7 +1145,7 @@ pub(crate) struct OwnFiles<F> {
     /// Their directory, the cell's, and whether its entries changed since the last commit.
     dir: String,
     written: bool,
-    /// cladefs: the store's keys, which its files are read under (TASK-411.3).
+    /// cladefs: the cell's keys, which its files are read under (TASK-411.3).
     keys: Arc<bucket_cell::keys::Ring>,
 }
 
@@ -1220,7 +1221,7 @@ impl<F: File> OwnFiles<F> {
 pub(crate) struct Unreferenced {
     /// Raw files whose extents were sealed from them, or freed, and files of extents' data no
     /// extent is in any more: they wait for the cell's commits, in its queue of them, and are
-    /// forgotten with a failed store's, as its next opening removes what nothing refers to.
+    /// forgotten with a failed cell's, as its next opening removes what nothing refers to.
     pub doomed: Vec<String>,
 }
 
@@ -1235,8 +1236,8 @@ impl Unreferenced {
 mod tests {
     use super::*;
 
-    /// cladefs: a store's standing: closing says whether it was open; failing keeps its first cause,
-    /// and whether it was closed, closed or failed in either order; a failed store refuses, saying
+    /// cladefs: a cell's standing: closing says whether it was open; failing keeps its first cause,
+    /// and whether it was closed, closed or failed in either order; a failed cell refuses, saying
     /// why, and closes all the same, once (TASK-160.19).
     #[test]
     fn standings_fail_and_close_in_either_order() {

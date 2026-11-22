@@ -17,7 +17,7 @@ hand is wrapped the same way):
                                                            status, RESULTS/contamination.json written
     contamination.py said RESULTS                          the record, in a line
 
-DISK is a path on each disk the round keeps its stores on (default: RESULTS, and TMPDIR if set).
+DISK is a path on each disk the round keeps its cells on (default: RESULTS, and TMPDIR if set).
 The record says, over the round:
 
 - **others' I/O**, by disk. The disk under each path is found from /proc/self/mountinfo and /sys:

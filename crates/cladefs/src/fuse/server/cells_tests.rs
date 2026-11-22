@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Tests of a server of many stores (TASK-302): stores attached by name in its root, their nodes'
-//! IDs apart, nothing made or moved in the root or between stores, and stores detached once the
+//! Tests of a server of many cells (TASK-302): cells attached by name in its root, their nodes'
+//! IDs apart, nothing made or moved in the root or between cells, and cells detached once the
 //! kernel forgets their nodes, or at once by force; driven by requests as the kernel sends them.
 
 use super::*;
@@ -14,10 +14,10 @@ use std::sync::mpsc;
 const STORAGE_SIZE: u64 = 16 << 20;
 const OWNER: Owner = Owner { uid: 1000, gid: 100 };
 
-/// A server of many stores, none attached, and the names it tells the kernel to drop
+/// A server of many cells, none attached, and the names it tells the kernel to drop
 /// (`INVAL_ENTRY`), as detaches do: not the nodes changes tell it of (`INVAL_INODE`, TASK-495),
 /// which `tests/fuse.rs` checks.
-fn stores() -> (Server, mpsc::Receiver<Vec<u8>>) {
+fn cells() -> (Server, mpsc::Receiver<Vec<u8>>) {
     let (sent, notified) = mpsc::channel();
     let sent = Mutex::new(sent);
     let notify = move |message: &[u8]| {
@@ -27,7 +27,7 @@ fn stores() -> (Server, mpsc::Receiver<Vec<u8>>) {
         }
         Ok(())
     };
-    (Server::stores(OWNER, Box::new(notify)), notified)
+    (Server::cells(OWNER, Box::new(notify)), notified)
 }
 
 /// A new filesystem, empty, in memory, and its root's object ID.
@@ -121,18 +121,18 @@ fn readdir(server: &Server, dir: u64) -> Vec<(String, u64)> {
     listed
 }
 
-/// The node ID of the object `object` of the store in `slot`.
+/// The node ID of the object `object` of the cell in `slot`.
 fn id(slot: u64, object: u64) -> u64 {
     slot << SLOT_SHIFT | object
 }
 
-/// Stores attached are their names in the root, which lists them; their nodes' IDs, and inode
-/// numbers, are their slots' and their object IDs, apart though the stores number objects alike;
+/// Cells attached are their names in the root, which lists them; their nodes' IDs, and inode
+/// numbers, are their slots' and their object IDs, apart though the cells number objects alike;
 /// a name attached at nowhere is absent for no time; and the root is the server's, `OWNER`'s,
-/// 0755, nothing made in it nor moved in or out of it, or between stores.
+/// 0755, nothing made in it nor moved in or out of it, or between cells.
 #[test]
-fn stores_attached_are_in_the_root_and_their_nodes_are_apart() {
-    let (server, notified) = stores();
+fn cells_attached_are_in_the_root_and_their_nodes_are_apart() {
+    let (server, notified) = cells();
     let root = root_object();
     block_on(server.attach("a", filesystem())).unwrap();
     block_on(server.attach("b", filesystem())).unwrap();
@@ -187,7 +187,7 @@ fn stores_attached_are_in_the_root_and_their_nodes_are_apart() {
     let unlinked = send(&server, &request(opcode::RMDIR, ROOT_ID, &named("a")));
     assert_eq!(unlinked, Err(Errno::EPERM));
 
-    // Each store's usage is its own; the root holds nothing.
+    // Each cell's usage is its own; the root holds nothing.
     let statfs = |nodeid| {
         let reply = send(&server, &request(opcode::STATFS, nodeid, &[])).unwrap();
         Kstatfs::read_from_bytes(&reply).unwrap()
@@ -199,14 +199,14 @@ fn stores_attached_are_in_the_root_and_their_nodes_are_apart() {
     assert!(notified.try_recv().is_err(), "nothing was detached");
 }
 
-/// A store detached goes from the root at once, the kernel told to drop every name it was given a
-/// node of the store under, as they are after renames and removals, so that it forgets them, those
-/// in use once let go of; names it is given meanwhile are given for no time. The store is unmounted
+/// A cell detached goes from the root at once, the kernel told to drop every name it was given a
+/// node of the cell under, as they are after renames and removals, so that it forgets them, those
+/// in use once let go of; names it is given meanwhile are given for no time. The cell is unmounted
 /// once the kernel forgets the last of its nodes, and the detach returns then; its slot, and its
-/// name, are free again after. The other store is untouched.
+/// name, are free again after. The other cell is untouched.
 #[test]
-fn a_store_detached_is_unmounted_once_the_kernel_forgets_its_nodes() {
-    let (server, notified) = stores();
+fn a_cell_detached_is_unmounted_once_the_kernel_forgets_its_nodes() {
+    let (server, notified) = cells();
     block_on(server.attach("a", filesystem())).unwrap();
     block_on(server.attach("b", filesystem())).unwrap();
     let a = lookup(&server, ROOT_ID, "a").unwrap();
@@ -243,7 +243,7 @@ fn a_store_detached_is_unmounted_once_the_kernel_forgets_its_nodes() {
             Some(Errno::EBUSY)
         );
         // The nodes the kernel holds are served until it forgets them, and what it finds through
-        // them is given for no time; the other store's, as long as it likes.
+        // them is given for no time; the other cell's, as long as it likes.
         assert_eq!(getattr(&server, x.nodeid).unwrap().attr.ino, x.nodeid);
         let found = lookup(&server, a.nodeid, "moved").unwrap();
         assert_eq!((found.nodeid, found.entry_valid), (y.nodeid, 0));
@@ -267,11 +267,11 @@ fn a_store_detached_is_unmounted_once_the_kernel_forgets_its_nodes() {
     block_on(server.unmount()).unwrap();
 }
 
-/// A store detached by force is unmounted at once: the nodes the kernel holds of it fail with
+/// A cell detached by force is unmounted at once: the nodes the kernel holds of it fail with
 /// `ENOTCONN`, and its slot is used again only once the kernel has forgotten them.
 #[test]
-fn a_store_detached_by_force_is_unmounted_at_once() {
-    let (server, notified) = stores();
+fn a_cell_detached_by_force_is_unmounted_at_once() {
+    let (server, notified) = cells();
     block_on(server.attach("a", filesystem())).unwrap();
     let a = lookup(&server, ROOT_ID, "a").unwrap();
     let x = mkdir(&server, a.nodeid, "x").unwrap();
@@ -298,11 +298,11 @@ fn a_store_detached_by_force_is_unmounted_at_once() {
 }
 
 /// What attaching and detaching refuse: a name taken, a path of a name no directory holds, a
-/// name not attached; a store that fails to open leaves its name free; a server of one
+/// name not attached; a cell that fails to open leaves its name free; a server of one
 /// filesystem attaches none; and once the kernel destroys the mount, none is attached.
 #[test]
 fn attaching_and_detaching_refuse_what_they_cant_do() {
-    let (server, _notified) = stores();
+    let (server, _notified) = cells();
     let errno = |attached: Result<(), Error>| attached.unwrap_err().errno();
     block_on(server.attach("a", filesystem())).unwrap();
     assert_eq!(errno(block_on(server.attach("a", filesystem()))), Some(Errno::EEXIST));
@@ -322,7 +322,7 @@ fn attaching_and_detaching_refuse_what_they_cant_do() {
     let destroy = block_on(server.handle(&request(opcode::DESTROY, 0, &[])));
     assert_eq!(destroy.unwrap(), None);
     assert_eq!(errno(block_on(server.attach("c", filesystem()))), Some(Errno::ENOTCONN));
-    // The stores are unmounted.
+    // The cells are unmounted.
     assert_eq!(lookup(&server, ROOT_ID, "a").unwrap_err(), Errno::ENOTCONN);
 
     let one = Server::new(block_on(filesystem()).unwrap(), Box::new(|_| Ok(())));
@@ -336,20 +336,20 @@ fn attaching_and_detaching_refuse_what_they_cant_do() {
 #[test]
 fn attaching_and_detaching_are_send() {
     fn send<T: Send>(_: T) {}
-    let (server, _notified) = stores();
+    let (server, _notified) = cells();
     send(server.attach("a", filesystem()));
     send(server.detach("a", false));
 }
 
-/// cladefs: stores attached at paths are under directories of the server's own, one a name a path
-/// goes through, made as the first store under it is attached and gone with the last: as a host's
+/// cladefs: cells attached at paths are under directories of the server's own, one a name a path
+/// goes through, made as the first cell under it is attached and gone with the last: as a host's
 /// mount shows cells at `TENANT/CELL` (TASK-364). Those directories are the
 /// server's, `OWNER`'s, 0755, given for no time, nothing made in them nor moved in or out of them;
-/// each store's root's parent is the directory it is in. A path through a store's root, or ending
-/// at a directory of the server's, or another store's, is refused; one with an empty name too.
+/// each cell's root's parent is the directory it is in. A path through a cell's root, or ending
+/// at a directory of the server's, or another cell's, is refused; one with an empty name too.
 #[test]
-fn stores_attached_at_paths_are_under_directories_of_the_servers() {
-    let (server, _notified) = stores();
+fn cells_attached_at_paths_are_under_directories_of_the_servers() {
+    let (server, _notified) = cells();
     let root = root_object();
     block_on(server.attach("t/c/root", filesystem())).unwrap();
     block_on(server.attach("t/c/data", filesystem())).unwrap();
@@ -369,9 +369,9 @@ fn stores_attached_at_paths_are_under_directories_of_the_servers() {
         (attr.ino, attr.mode, attr.uid, attr.gid),
         (c.nodeid, FileType::Directory.mode_bits() | 0o755, OWNER.uid, OWNER.gid)
     );
-    let (data, store) =
+    let (data, cell_root) =
         (lookup(&server, c.nodeid, "data").unwrap(), lookup(&server, c.nodeid, "root").unwrap());
-    assert_eq!((store.nodeid, data.nodeid), (id(1, root), id(2, root)));
+    assert_eq!((cell_root.nodeid, data.nodeid), (id(1, root), id(2, root)));
     assert_eq!(
         readdir(&server, ROOT_ID),
         [
@@ -390,8 +390,8 @@ fn stores_attached_at_paths_are_under_directories_of_the_servers() {
             ("root".into(), id(1, root))
         ]
     );
-    // A store's root is in its cell's directory.
-    let listed = readdir(&server, store.nodeid);
+    // A cell's root is in its cell's directory.
+    let listed = readdir(&server, cell_root.nodeid);
     assert_eq!(listed[..2], [(".".into(), id(1, root)), ("..".into(), c.nodeid)]);
 
     for (dir, name) in [(ROOT_ID, "x"), (t.nodeid, "x"), (c.nodeid, "x")] {
@@ -399,9 +399,9 @@ fn stores_attached_at_paths_are_under_directories_of_the_servers() {
     }
     assert_eq!(rename(&server, (c.nodeid, "root"), (c.nodeid, "other")), Err(Errno::EPERM));
     assert_eq!(rename(&server, (t.nodeid, "c"), (u.nodeid, "c")), Err(Errno::EPERM));
-    let x = mkdir(&server, store.nodeid, "x").unwrap();
-    assert_eq!(rename(&server, (store.nodeid, "x"), (data.nodeid, "x")), Err(Errno::EXDEV));
-    assert_eq!(rename(&server, (store.nodeid, "x"), (c.nodeid, "x")), Err(Errno::EXDEV));
+    let x = mkdir(&server, cell_root.nodeid, "x").unwrap();
+    assert_eq!(rename(&server, (cell_root.nodeid, "x"), (data.nodeid, "x")), Err(Errno::EXDEV));
+    assert_eq!(rename(&server, (cell_root.nodeid, "x"), (c.nodeid, "x")), Err(Errno::EXDEV));
 
     for (taken, refused) in [
         ("t/c/root/deeper", Errno::EEXIST),
@@ -415,9 +415,9 @@ fn stores_attached_at_paths_are_under_directories_of_the_servers() {
     }
     assert_eq!(names(server.attached()), ["t/c/root", "t/c/data", "u/d/root"]);
 
-    // The last store under a directory gone, it goes, and its parents with it; the others stay.
+    // The last cell under a directory gone, it goes, and its parents with it; the others stay.
     forget(&server, x.nodeid, 1);
-    forget(&server, store.nodeid, 1);
+    forget(&server, cell_root.nodeid, 1);
     block_on(server.detach("t/c/root", false)).unwrap();
     assert_eq!(listed_names(&readdir(&server, c.nodeid)), [".", "..", "data"]);
     forget(&server, data.nodeid, 1);

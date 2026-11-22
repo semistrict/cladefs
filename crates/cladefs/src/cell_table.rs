@@ -2,28 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The extent daemon's stores (`crate::cladefsd`), by the keys that name them
-//! (`cladefsd::cells::store_key`): one table, whose entry for a key says all there is of its store
-//! (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what is
-//! open of it for others: the store its writer's connection, or its followers', have open, or a
-//! kept store the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
-//! holders, the stores open for connections and whether retired, the stores kept, a connection's
-//! own fields, and a store's following of its writer's; which TASK-79.34, 150.5, 54, 79.84,
+//! The extent daemon's cells (`crate::cladefsd`), by the keys that name them
+//! (`cladefsd::cells::cell_dir_key`): one table, whose entry for a key says all there is of its
+//! cell (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what
+//! is open of it for others: the cell its writer's connection, or its followers', have open, or a
+//! kept cell the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
+//! holders, the cells open for connections and whether retired, the cells kept, a connection's
+//! own fields, and a cell's following of its writer's; which TASK-79.34, 150.5, 54, 79.84,
 //! 79.95, 92.5, 79.103 and 79.36 came of.
 //!
-//! A store has one holder at a time, whose hold ([`Hold`]) is a value that lets the store go as it
-//! is dropped: a connection's, from its `OPEN` until it is gone and its store closed; the daemon's,
-//! while it forks, syncs or resizes a store no connection writes. A connection whose VM process is
-//! gone, still holding its store, lets it go to the next that asks, as a VM restored from a
-//! snapshot at once opens its VM's store (TASK-39.1). What is open of a store outlives its holder:
-//! a store followers follow, read-only (backlog doc-8), as long as one has it, which a writer
-//! holding it then takes over, unless its writer retired it, gone with writes uncommitted; a kept store
-//! kept open for forks, until a writer holds the store, which closes it first (TASK-92.5). A
-//! connection holds no kept store: its entry ([`Entry::Writer`]) has no room for one.
+//! A cell has one holder at a time, whose hold ([`Hold`]) is a value that lets the cell go as it
+//! is dropped: a connection's, from its `OPEN` until it is gone and its cell closed; the daemon's,
+//! while it forks, syncs or resizes a cell no connection writes. A connection whose VM process is
+//! gone, still holding its cell, lets it go to the next that asks, as a VM restored from a
+//! snapshot at once opens its VM's cell (TASK-39.1). What is open of a cell outlives its holder:
+//! a cell followers follow, read-only (backlog doc-8), as long as one has it, which a writer
+//! holding it then takes over, unless its writer retired it, gone with writes uncommitted; a kept
+//! cell kept open for forks, until a writer holds the cell, which closes it first (TASK-92.5). A
+//! connection holds no kept cell: its entry ([`Entry::Writer`]) has no room for one.
 //!
-//! Generic over its connections, stores and kept stores, so that its tests run it with models of them:
-//! under Shuttle (awslabs/shuttle), with the `shuttle` feature, whose scheduler chooses every
-//! interleaving of the threads writing, following, retiring and keeping kept stores of a store as its
+//! Generic over its connections, cells and kept cells, so that its tests run it with models of
+//! them: under Shuttle (awslabs/shuttle), with the `shuttle` feature, whose scheduler chooses every
+//! interleaving of the threads writing, following, retiring and keeping kept cells of a cell as its
 //! writer's VM process goes (TASK-44.6).
 
 use crate::Errno;
@@ -42,18 +42,18 @@ use std::sync::Mutex;
 /// off.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rules {
-    /// A store held by a holder that isn't going holds no other.
+    /// A cell held by a holder that isn't going holds no other.
     pub one_holder: bool,
-    /// Letting a store go wakes those waiting to hold it.
+    /// Letting a cell go wakes those waiting to hold it.
     pub release_wakes: bool,
-    /// What is open of a store, the store followers have open or a store kept, stays as its holder
-    /// lets the store go.
+    /// What is open of a cell, the cell followers have open or a cell kept, stays as its holder
+    /// lets the cell go.
     pub open_outlives_holders: bool,
-    /// A store retired stays so while followers have it.
+    /// A cell retired stays so while followers have it.
     pub retirement: bool,
-    /// A store is marked retired before its followers are cut off.
+    /// A cell is marked retired before its followers are cut off.
     pub marks_before_cutting: bool,
-    /// A follower made looks again for the store retired, as it was made.
+    /// A follower made looks again for the cell retired, as it was made.
     pub followers_look_again: bool,
 }
 
@@ -116,7 +116,7 @@ fn wait_blocking(released: EventListener, deadline: Option<Instant>) -> bool {
     #[cfg(not(feature = "shuttle"))]
     {
         use event_listener::Listener as _;
-        local_cell::blocks!("a hold of a store, waiting for its holder on this thread");
+        local_cell::blocks!("a hold of a cell, waiting for its holder on this thread");
         match deadline {
             None => {
                 released.wait();
@@ -127,30 +127,30 @@ fn wait_blocking(released: EventListener, deadline: Option<Instant>) -> bool {
     }
 }
 
-/// A connection writing a store.
+/// A connection writing a cell.
 pub(crate) trait Writer: Send + Sync {
-    /// Whether it is going: its VM process gone, it lets its store go to the next that asks.
+    /// Whether it is going: its VM process gone, it lets its cell go to the next that asks.
     fn going(&self) -> bool;
 }
 
-/// The stores, by their keys: an entry each, while anything holds a store or has it open.
+/// The cells, by their keys: an entry each, while anything holds a cell or has it open.
 pub(crate) struct CellTable<C, S, P> {
     inner: Mutex<Inner<C, S, P>>,
 }
 
 struct Inner<C, S, P> {
     entries: HashMap<PathBuf, Entry<C, S, P>>,
-    /// What says a store is let go, to those waiting to hold it, on threads or not, by its key:
-    /// woken as its holder lets it go, and none of another's, as every store's were, at each
-    /// store's letting go (TASK-92.5). From the first that waits until then.
+    /// What says a cell is let go, to those waiting to hold it, on threads or not, by its key:
+    /// woken as its holder lets it go, and none of another's, as every cell's were, at each
+    /// cell's letting go (TASK-92.5). From the first that waits until then.
     waiting: HashMap<PathBuf, Event>,
 }
 
-/// A key's entry: who holds its store, and what is open of it meanwhile.
+/// A key's entry: who holds its cell, and what is open of it meanwhile.
 enum Entry<C, S, P> {
-    /// A connection writes it, from its `OPEN` on: its store, once open, which followers may follow
+    /// A connection writes it, from its `OPEN` on: its cell, once open, which followers may follow
     /// too; and what to call as a writer waits for it, going ([`Hold::when_wanted`]).
-    Writer { connection: Weak<C>, store: Instance<S>, wanted: Option<Wanted> },
+    Writer { connection: Weak<C>, cell: Instance<S>, wanted: Option<Wanted> },
     /// The daemon holds it, to work on it, over what is open of it, which stays.
     Daemon(Open<S, P>),
     /// None holds it: what is open of it, never [`Open::Nothing`].
@@ -161,28 +161,28 @@ enum Entry<C, S, P> {
     Mounted,
 }
 
-/// What is open of a store, for others than its holder.
+/// What is open of a cell, for others than its holder.
 enum Open<S, P> {
     Nothing,
-    /// The store connections have open, its followers', its writer gone or never there.
+    /// The cell connections have open, its followers', its writer gone or never there.
     Followed(Instance<S>),
-    /// A store kept open for forks (TASK-92.5).
+    /// A cell kept open for forks (TASK-92.5).
     Kept(P),
 }
 
-/// What a connection holding a store has done as a writer waits for it to let the store go, its
+/// What a connection holding a cell has done as a writer waits for it to let the cell go, its
 /// VM process gone (TASK-216): a callback of its own, which outlives the connection, as letting
-/// the store go comes after its last reference does.
+/// the cell go comes after its last reference does.
 pub(crate) type Wanted = Arc<dyn Fn() + Send + Sync>;
 
-/// The store connections have open, a writer's or followers', while one of them has it: retired
+/// The cell connections have open, a writer's or followers', while one of them has it: retired
 /// once its writer went with writes uncommitted, which neither a writer nor a follower opens then.
 struct Instance<S> {
-    store: Weak<S>,
+    cell: Weak<S>,
     retired: bool,
 }
 
-/// Who asks to hold a store.
+/// Who asks to hold a cell.
 enum Claim<C> {
     /// The daemon, to work on it.
     Daemon,
@@ -194,7 +194,7 @@ enum Claim<C> {
     Mount,
 }
 
-/// What a claim got: the store held, with the store kept open of it that a writer's claim took
+/// What a claim got: the cell held, with the cell kept open of it that a writer's claim took
 /// out, to close, and, past [`Rules::one_holder`], the connection holding it, which it passed:
 /// dropped once the table's lock is, as a [`Refused`]'s; or the connection writing it.
 enum Claimed<C, P> {
@@ -202,8 +202,8 @@ enum Claimed<C, P> {
     Writer(Arc<C>),
 }
 
-/// Why a claim failed, with the connection holding the store, if one does: dropped once the
-/// table's lock is, as a connection, dropped last, lets its store go, which takes the lock.
+/// Why a claim failed, with the connection holding the cell, if one does: dropped once the
+/// table's lock is, as a connection, dropped last, lets its cell go, which takes the lock.
 enum Refused<C> {
     /// A connection not going writes it: `EBUSY`.
     Busy(Arc<C>),
@@ -215,43 +215,43 @@ enum Refused<C> {
     Now,
 }
 
-/// A store held, by a connection writing it or by the daemon working on it, which nothing else
-/// holds until it is dropped: it lets the store go then, and those waiting to hold it may. What is
-/// open of the store stays ([`Rules::open_outlives_holders`]): the store its connection had open,
+/// A cell held, by a connection writing it or by the daemon working on it, which nothing else
+/// holds until it is dropped: it lets the cell go then, and those waiting to hold it may. What is
+/// open of the cell stays ([`Rules::open_outlives_holders`]): the cell its connection had open,
 /// if followers have it still.
-#[must_use = "a store held is let go as its hold is dropped"]
+#[must_use = "a cell held is let go as its hold is dropped"]
 pub(crate) struct Hold<'t, C, S, P> {
     table: &'t CellTable<C, S, P>,
     key: PathBuf,
 }
 
-/// A store held, with the store kept open of it that the claim took out, to close, if one was:
+/// A cell held, with the cell kept open of it that the claim took out, to close, if one was:
 /// what a writer's claim, and the mount's, get.
 pub(crate) type HeldTaking<'t, C, S, P> = (Hold<'t, C, S, P>, Option<P>);
 
-/// A store a connection writes, or held by the daemon ([`CellTable::writer_or_hold`]).
+/// A cell a connection writes, or held by the daemon ([`CellTable::writer_or_hold`]).
 pub(crate) enum Holding<'t, C, S, P> {
     Writer(Arc<C>),
     Held(Hold<'t, C, S, P>),
 }
 
 impl<S> Instance<S> {
-    /// No store yet: a writer's, as it opens it.
+    /// No cell yet: a writer's, as it opens it.
     fn none() -> Self {
-        Self { store: Weak::new(), retired: false }
+        Self { cell: Weak::new(), retired: false }
     }
 
-    /// The store, if one has it still, and whether retired.
+    /// The cell, if one has it still, and whether retired.
     fn get(&self) -> Option<(Arc<S>, bool)> {
-        Some((self.store.upgrade()?, self.retired))
+        Some((self.cell.upgrade()?, self.retired))
     }
 }
 
 impl<S, P> Open<S, P> {
-    /// As it is, but a store none has open any more, which is nothing.
+    /// As it is, but a cell none has open any more, which is nothing.
     fn live(self) -> Self {
         match self {
-            Open::Followed(instance) if instance.store.strong_count() == 0 => Open::Nothing,
+            Open::Followed(instance) if instance.cell.strong_count() == 0 => Open::Nothing,
             open => open,
         }
     }
@@ -260,18 +260,18 @@ impl<S, P> Open<S, P> {
         matches!(self, Open::Nothing)
     }
 
-    /// Whether nothing is open: nothing, or a store none has open any more.
+    /// Whether nothing is open: nothing, or a cell none has open any more.
     fn is_closed(&self) -> bool {
         match self {
             Open::Nothing => true,
-            Open::Followed(instance) => instance.store.strong_count() == 0,
+            Open::Followed(instance) => instance.cell.strong_count() == 0,
             Open::Kept(_) => false,
         }
     }
 }
 
 impl<C: Writer, S, P> Entry<C, S, P> {
-    /// What a claim of the store meets, if anything holds it: a connection not going, or a
+    /// What a claim of the cell meets, if anything holds it: a connection not going, or a
     /// connection going, or the daemon, which let it go soon.
     fn holder(&self) -> Option<Refused<C>> {
         match self {
@@ -287,26 +287,26 @@ impl<C: Writer, S, P> Entry<C, S, P> {
 }
 
 impl<C, S, P> Entry<C, S, P> {
-    /// What is open of the store, its holder gone: the store a writer had open, followers' now.
+    /// What is open of the cell, its holder gone: the cell a writer had open, followers' now.
     fn into_open(self) -> Open<S, P> {
         match self {
-            Entry::Writer { store, .. } => Open::Followed(store).live(),
+            Entry::Writer { cell, .. } => Open::Followed(cell).live(),
             Entry::Daemon(open) | Entry::Unheld(open) => open.live(),
             Entry::Mounted => Open::Nothing,
         }
     }
 
-    /// The store connections have open, its writer's or followers', if one is.
+    /// The cell connections have open, its writer's or followers', if one is.
     fn instance(&mut self) -> Option<&mut Instance<S>> {
         match self {
-            Entry::Writer { store, .. }
-            | Entry::Daemon(Open::Followed(store))
-            | Entry::Unheld(Open::Followed(store)) => Some(store),
+            Entry::Writer { cell, .. }
+            | Entry::Daemon(Open::Followed(cell))
+            | Entry::Unheld(Open::Followed(cell)) => Some(cell),
             _ => None,
         }
     }
 
-    /// The store kept open of the store, if one is.
+    /// The cell kept open of the cell, if one is.
     fn kept(&mut self) -> Option<&mut P> {
         match self {
             Entry::Daemon(Open::Kept(kept)) | Entry::Unheld(Open::Kept(kept)) => Some(kept),
@@ -314,16 +314,16 @@ impl<C, S, P> Entry<C, S, P> {
         }
     }
 
-    /// Whether it is followers' store, none having it any more: a stale entry.
+    /// Whether it is followers' cell, none having it any more: a stale entry.
     fn is_stale(&self) -> bool {
-        matches!(self, Entry::Unheld(Open::Followed(instance)) if instance.store.strong_count() == 0)
+        matches!(self, Entry::Unheld(Open::Followed(instance)) if instance.cell.strong_count() == 0)
     }
 }
 
 impl<C: Writer, S, P> Inner<C, S, P> {
-    /// Holds the store `key` names for `claim`, if it may now: unless a connection not going
+    /// Holds the cell `key` names for `claim`, if it may now: unless a connection not going
     /// writes it, which fails, or a connection going holds it, or the daemon, which is waited for.
-    /// A writer takes over the store followers have open, and the store kept open, to close.
+    /// A writer takes over the cell followers have open, and the cell kept open, to close.
     fn claim(&mut self, key: &Path, claim: &Claim<C>) -> Result<Claimed<C, P>, Refused<C>> {
         let passed = match (self.entries.get(key).and_then(Entry::holder), claim) {
             (Some(Refused::Busy(writer)), Claim::DaemonOrWriter) => {
@@ -334,7 +334,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             (Some(refused), _) => return Err(refused),
             (None, _) => None,
         };
-        // cladefs: the mount opens a store of its own, where followers have none open.
+        // cladefs: the mount opens a cell of its own, where followers have none open.
         let followed = |entry: &Entry<C, S, P>| match entry {
             Entry::Daemon(open) | Entry::Unheld(open) => {
                 matches!(open, Open::Followed(_)) && !open.is_closed()
@@ -349,16 +349,16 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             Claim::Writer(connection) => {
                 let connection = connection.clone();
                 match open {
-                    Open::Followed(store) => {
-                        (Entry::Writer { connection, store, wanted: None }, None)
+                    Open::Followed(cell) => {
+                        (Entry::Writer { connection, cell, wanted: None }, None)
                     }
                     Open::Kept(kept) => {
-                        let store = Instance::none();
-                        (Entry::Writer { connection, store, wanted: None }, Some(kept))
+                        let cell = Instance::none();
+                        (Entry::Writer { connection, cell, wanted: None }, Some(kept))
                     }
                     Open::Nothing => {
-                        let store = Instance::none();
-                        (Entry::Writer { connection, store, wanted: None }, None)
+                        let cell = Instance::none();
+                        (Entry::Writer { connection, cell, wanted: None }, None)
                     }
                 }
             }
@@ -378,7 +378,7 @@ impl<C, S, P> CellTable<C, S, P> {
         Self { inner: Mutex::new(Inner { entries: HashMap::new(), waiting: HashMap::new() }) }
     }
 
-    /// The connection writing the store `key` names, if one does, going or not.
+    /// The connection writing the cell `key` names, if one does, going or not.
     pub fn writer(&self, key: &Path) -> Option<Arc<C>> {
         match self.inner.lock().unwrap().entries.get(key)? {
             Entry::Writer { connection, .. } => connection.upgrade(),
@@ -386,13 +386,13 @@ impl<C, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// The store connections have open at `key`, its writer's or followers', if one is, and
+    /// The cell connections have open at `key`, its writer's or followers', if one is, and
     /// whether it is retired.
     pub fn instance(&self, key: &Path) -> Option<(Arc<S>, bool)> {
         self.inner.lock().unwrap().entries.get_mut(key)?.instance()?.get()
     }
 
-    /// A follower of the store connections have open at `key`, as `follow` makes it, if one is:
+    /// A follower of the cell connections have open at `key`, as `follow` makes it, if one is:
     /// `EBUSY` if it is retired, or was retired as `follow` made it, which its writer's retirement
     /// may not have cut off ([`Hold::retire`]).
     pub fn follow<F>(
@@ -400,40 +400,40 @@ impl<C, S, P> CellTable<C, S, P> {
         key: &Path,
         follow: impl FnOnce(&Arc<S>) -> Result<F, Errno>,
     ) -> Result<Option<F>, Errno> {
-        let Some((store, retired)) = self.instance(key) else { return Ok(None) };
+        let Some((cell, retired)) = self.instance(key) else { return Ok(None) };
         if retired {
             return Err(Errno::EBUSY);
         }
-        let follower = follow(&store)?;
-        let retired = |(now, retired): (Arc<S>, bool)| retired && Arc::ptr_eq(&now, &store);
+        let follower = follow(&cell)?;
+        let retired = |(now, retired): (Arc<S>, bool)| retired && Arc::ptr_eq(&now, &cell);
         if rules().followers_look_again && self.instance(key).is_some_and(retired) {
             return Err(Errno::EBUSY);
         }
         Ok(Some(follower))
     }
 
-    /// `f`'s of the store kept open at `key`, if one is: under the table's lock, which `f` takes
+    /// `f`'s of the cell kept open at `key`, if one is: under the table's lock, which `f` takes
     /// for no longer than to look at it.
     pub fn kept<R>(&self, key: &Path, f: impl FnOnce(&mut P) -> R) -> Option<R> {
         self.inner.lock().unwrap().entries.get_mut(key)?.kept().map(f)
     }
 
-    /// The stores connections have open, writers' and followers', by their keys.
+    /// The cells connections have open, writers' and followers', by their keys.
     pub fn instances(&self) -> Vec<(PathBuf, Arc<S>)> {
         let mut inner = self.inner.lock().unwrap();
         (inner.entries.iter_mut())
-            .filter_map(|(key, entry)| Some((key.clone(), entry.instance()?.store.upgrade()?)))
+            .filter_map(|(key, entry)| Some((key.clone(), entry.instance()?.cell.upgrade()?)))
             .collect()
     }
 
-    /// cladefs: the keys of the stores a kept store is kept open of (TASK-141.4).
+    /// cladefs: the keys of the cells a kept cell is kept open of (TASK-141.4).
     pub fn kept_keys(&self) -> Vec<PathBuf> {
         let mut inner = self.inner.lock().unwrap();
         let kept = inner.entries.iter_mut().filter_map(|(key, entry)| entry.kept().map(|_| key));
         kept.cloned().collect()
     }
 
-    /// How many stores connections write.
+    /// How many cells connections write.
     pub fn writers(&self) -> usize {
         let inner = self.inner.lock().unwrap();
         (inner.entries.values())
@@ -441,20 +441,20 @@ impl<C, S, P> CellTable<C, S, P> {
             .count()
     }
 
-    /// Whether something waits to hold the store `key` names.
+    /// Whether something waits to hold the cell `key` names.
     #[cfg(test)]
     pub fn is_waited_for(&self, key: &Path) -> bool {
         self.inner.lock().unwrap().waiting.contains_key(key)
     }
 
-    /// Whether nothing holds a store, nor has one open.
+    /// Whether nothing holds a cell, nor has one open.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.entries.values().all(Entry::is_stale)
     }
 
-    /// Lets the store `key` names go, its hold dropped: what is open of it stays, but a store none
+    /// Lets the cell `key` names go, its hold dropped: what is open of it stays, but a cell none
     /// has open any more; those waiting for it alone are woken.
     fn release(&self, key: &Path) {
         let mut inner = self.inner.lock().unwrap();
@@ -472,13 +472,13 @@ impl<C, S, P> CellTable<C, S, P> {
             released.notify(usize::MAX);
         }
         drop(inner);
-        // Without the lock: a kept store closes as it is dropped.
+        // Without the lock: a kept cell closes as it is dropped.
         drop(discarded);
     }
 }
 
 impl<C: Writer, S, P> CellTable<C, S, P> {
-    /// Holds the store `key` names, for the daemon: once its holder, if it has one, lets it go,
+    /// Holds the cell `key` names, for the daemon: once its holder, if it has one, lets it go,
     /// if that holder is going, or is the daemon, waiting at most `wait` (for ever, if none);
     /// unless a connection not going writes it, which fails with `EBUSY`. What is open of it stays.
     /// It blocks: the table's tests', whose threads the models schedule; the daemon holds no thread
@@ -492,7 +492,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// Holds the store `key` names, for the daemon, as [`CellTable::hold`] does, waiting at most
+    /// Holds the cell `key` names, for the daemon, as [`CellTable::hold`] does, waiting at most
     /// `wait`: a future, which holds no thread while it waits (TASK-43.6).
     pub async fn hold_async(&self, key: &Path, wait: Duration) -> Result<Hold<'_, C, S, P>, Errno> {
         match self.claim_async(key, Claim::Daemon, wait).await? {
@@ -501,9 +501,9 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// Holds the store `key` names, for `connection` to write it, as [`CellTable::hold_async`]
-    /// does; with the store kept open of it, if one was, which the connection closes before it
-    /// opens the store. The store followers have open, it takes over, or finds retired
+    /// Holds the cell `key` names, for `connection` to write it, as [`CellTable::hold_async`]
+    /// does; with the cell kept open of it, if one was, which the connection closes before it
+    /// opens the cell. The cell followers have open, it takes over, or finds retired
     /// ([`Hold::instance`]).
     pub async fn hold_to_write(
         &self,
@@ -517,8 +517,8 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// The connection writing the store `key` names, if one does that isn't going; or, if none
-    /// does, the store held for the daemon. `EBUSY` if a connection going holds it, or the
+    /// The connection writing the cell `key` names, if one does that isn't going; or, if none
+    /// does, the cell held for the daemon. `EBUSY` if a connection going holds it, or the
     /// daemon: one going would carry out no request of its guest's, which is gone (TASK-79.34).
     pub fn writer_or_hold(&self, key: &Path) -> Result<Holding<'_, C, S, P>, Errno> {
         match self.try_claim(key, &Claim::DaemonOrWriter, Some(Instant::now()))? {
@@ -527,8 +527,8 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// The connection writing the store `key` names, if one does that isn't going; or, if none
-    /// does, the store held for the daemon: once a connection going, or the daemon, lets it go,
+    /// The connection writing the cell `key` names, if one does that isn't going; or, if none
+    /// does, the cell held for the daemon: once a connection going, or the daemon, lets it go,
     /// waiting at most `wait` (`EBUSY`), holding no thread meanwhile.
     pub async fn writer_or_hold_async(
         &self,
@@ -539,10 +539,10 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         Ok(self.holding(key, claimed))
     }
 
-    /// cladefs: holds the store `key` names for the daemon's FUSE mount, to attach it (TASK-475.3),
+    /// cladefs: holds the cell `key` names for the daemon's FUSE mount, to attach it (TASK-475.3),
     /// as [`CellTable::hold`] holds it for the daemon, waiting at most `wait`: `EBUSY` at once if a
     /// connection not going writes it, followers have it open, or the mount has it already. With
-    /// the store kept open of it, if one was, to close. Until the hold is dropped, every claim of
+    /// the cell kept open of it, if one was, to close. Until the hold is dropped, every claim of
     /// it fails with `EBUSY` at once, waiting for nothing: the mount lets it go only as it
     /// detaches its cell. Awaited, holding no thread (board 2946).
     pub async fn hold_mounted(
@@ -567,7 +567,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// Claims the store `key` names for `claim` now; or, if its holder lets it go soon, says what
+    /// Claims the cell `key` names for `claim` now; or, if its holder lets it go soon, says what
     /// tells it did, unless `deadline` passed: `EBUSY` then, and if a connection not going writes
     /// it.
     fn try_claim(
@@ -599,7 +599,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         tried
     }
 
-    /// Claims the store `key` names, waiting on this thread, until `deadline` at most (for ever,
+    /// Claims the cell `key` names, waiting on this thread, until `deadline` at most (for ever,
     /// if none): `EBUSY` then. The tests' ([`CellTable::hold`]).
     #[cfg(test)]
     fn claim_blocking(
@@ -619,7 +619,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// Claims the store `key` names, waiting at most `wait` (`EBUSY` then), holding no thread
+    /// Claims the cell `key` names, waiting at most `wait` (`EBUSY` then), holding no thread
     /// meanwhile.
     async fn claim_async(
         &self,
@@ -643,33 +643,33 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
 }
 
 impl<C, S, P> Hold<'_, C, S, P> {
-    /// The key of the store it holds.
+    /// The key of the cell it holds.
     pub fn key(&self) -> &Path {
         &self.key
     }
 
-    /// The store connections have open at its key, if one is, and whether it is retired: its
+    /// The cell connections have open at its key, if one is, and whether it is retired: its
     /// writer's, or followers', which a writer holding it takes over.
     pub fn instance(&self) -> Option<(Arc<S>, bool)> {
         self.table.instance(&self.key)
     }
 
-    /// `store` is the store connections have open at its key from now on, while one has it: the
+    /// `cell` is the cell connections have open at its key from now on, while one has it: the
     /// writer's holding it, or, held by the daemon, followers'. `EBUSY`, and nothing changed, if
-    /// a store is open there, or a store kept: what holds the store opens it only where it found
+    /// a cell is open there, or a cell kept: what holds the cell opens it only where it found
     /// nothing open, or takes over what it found ([`Hold::instance`]).
     ///
     /// Its methods change its entry only if it is its holder's, which nothing but a claim past
     /// [`Rules::one_holder`] takes from it, and only as they say, refusing otherwise: none panics,
-    /// which, under the table's lock, would poison every store's entry, as under Shuttle it would
+    /// which, under the table's lock, would poison every cell's entry, as under Shuttle it would
     /// abort the run (TASK-55).
-    pub fn open(&self, store: &Arc<S>) -> Result<(), Errno> {
-        let instance = Instance { store: Arc::downgrade(store), retired: false };
+    pub fn open(&self, cell: &Arc<S>) -> Result<(), Errno> {
+        let instance = Instance { cell: Arc::downgrade(cell), retired: false };
         let mut inner = self.table.inner.lock().unwrap();
         inner.entries.retain(|_, entry| !entry.is_stale());
         match inner.entries.get_mut(&self.key) {
-            Some(Entry::Writer { store, .. }) if store.store.strong_count() == 0 => {
-                *store = instance;
+            Some(Entry::Writer { cell, .. }) if cell.cell.strong_count() == 0 => {
+                *cell = instance;
                 Ok(())
             }
             Some(Entry::Daemon(open)) if open.is_closed() => {
@@ -680,8 +680,8 @@ impl<C, S, P> Hold<'_, C, S, P> {
         }
     }
 
-    /// Has `wanted` called as a writer waits for it to let the store go, its connection going
-    /// (TASK-216): a writer's hold alone, whose connection's store, closing, may take as long as
+    /// Has `wanted` called as a writer waits for it to let the cell go, its connection going
+    /// (TASK-216): a writer's hold alone, whose connection's cell, closing, may take as long as
     /// its bucket. Nothing for the daemon's.
     pub fn when_wanted(&self, wanted: Wanted) {
         let mut inner = self.table.inner.lock().unwrap();
@@ -690,13 +690,13 @@ impl<C, S, P> Hold<'_, C, S, P> {
         }
     }
 
-    /// Retires the store connections have open at its key, its writer gone with writes
+    /// Retires the cell connections have open at its key, its writer gone with writes
     /// uncommitted: `cut` cuts its followers off, without the table's lock, and neither a writer
     /// nor a follower opens it while followers have it.
     ///
     /// Marked first, then cut (TASK-160.8): a follower made before the cut is cut off, and one made
     /// after finds it marked as it looks again ([`CellTable::follow`]). Cut first, a follower
-    /// finding it unmarked between the two followed a store retired, never cut off.
+    /// finding it unmarked between the two followed a cell retired, never cut off.
     pub fn retire(&self, cut: impl FnOnce()) {
         let mut cut = Some(cut);
         if !rules().marks_before_cutting {
@@ -712,7 +712,7 @@ impl<C, S, P> Hold<'_, C, S, P> {
     }
 
     /// Keeps `kept` open at its key for forks, after its hold too: the daemon's, which found
-    /// nothing open there. Refused, `kept` given back, if a store is open there or a store kept
+    /// nothing open there. Refused, `kept` given back, if a cell is open there or a cell kept
     /// already, or a writer holds it.
     pub fn keep(&self, kept: P) -> Result<(), P> {
         let mut inner = self.table.inner.lock().unwrap();
@@ -721,12 +721,12 @@ impl<C, S, P> Hold<'_, C, S, P> {
                 *open = Open::Kept(kept);
                 Ok(())
             }
-            // Dropped without the lock: a kept store closes as it is dropped.
+            // Dropped without the lock: a kept cell closes as it is dropped.
             _ => Err(kept),
         }
     }
 
-    /// Takes the store kept open at its key, if one is, to close it.
+    /// Takes the cell kept open at its key, if one is, to close it.
     pub fn take_kept(&self) -> Option<P> {
         let mut inner = self.table.inner.lock().unwrap();
         match inner.entries.get_mut(&self.key) {
@@ -749,14 +749,15 @@ impl<C, S, P> Drop for Hold<'_, C, S, P> {
     }
 }
 
-/// The table under Shuttle: a VM's connection writing a store, whose VM process goes, with
-/// writes uncommitted or not; as it goes, the VM restored from its snapshot opening the store to
-/// write it, and followers following it, before and after it went; and a fork of the store at any
-/// kept store, which keeps it open as a kept store if nothing has it open. Every interleaving of them
+/// The table under Shuttle: a VM's connection writing a cell, whose VM process goes, with
+/// writes uncommitted or not; as it goes, the VM restored from its snapshot opening the cell to
+/// write it, and followers following it, before and after it went; and a fork of the cell at any
+/// kept cell, which keeps it open as a kept cell if nothing has it open. Every interleaving of them
 /// Shuttle's scheduler chooses (TASK-160.8). Waits are unbounded, so that a holder that never
 /// wakes those waiting is a deadlock, which Shuttle reports, rather than a wait of `CLOSING_WAIT`.
-/// Invariants: one holder at a time; the store open once at a time, as a writer's, followers' or a
-/// kept store; no follower following the store once its writer retired it. Each rule turned off fails.
+/// Invariants: one holder at a time; the cell open once at a time, as a writer's, followers' or a
+/// kept cell; no follower following the cell once its writer retired it. Each rule turned off
+/// fails.
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use super::*;
@@ -767,10 +768,10 @@ mod shuttle_tests {
     use shuttle::sync::mpsc;
     use shuttle::{Runner, thread};
 
-    const KEY: &str = "/store";
+    const KEY: &str = "/cell";
 
-    /// A connection: going once its VM process is; and, if it writes the store, the store and its
-    /// hold of it, let go as the last of the connection is dropped, the store first, as
+    /// A connection: going once its VM process is; and, if it writes the cell, the cell and its
+    /// hold of it, let go as the last of the connection is dropped, the cell first, as
     /// `cladefsd::server::Connection`'s are: wherever that is, but under the table's lock, which
     /// letting the hold go takes.
     struct Conn {
@@ -793,9 +794,9 @@ mod shuttle_tests {
     impl Drop for Conn {
         fn drop(&mut self) {
             let writing = self.writing.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(Writing { store, hold }) = writing.take() else { return };
-            drop(store);
-            // Gone, its hold not let go yet: what claims the store meets a writer whose
+            let Some(Writing { cell, hold }) = writing.take() else { return };
+            drop(cell);
+            // Gone, its hold not let go yet: what claims the cell meets a writer whose
             // connection is gone, and waits.
             if hold.hold().table.is_waited_for(Path::new(KEY)) {
                 reached("a claim waited for a writer gone");
@@ -804,12 +805,12 @@ mod shuttle_tests {
         }
     }
 
-    /// What a run counts: the store's openings open at once, and the most at once; its holders at
+    /// What a run counts: the cell's openings open at once, and the most at once; its holders at
     /// once, and whether ever two. Checked once the run is done: a task panicking unwinds through
     /// the holds it has, whose drops take Shuttle's locks, which fail in a failed run with panics
     /// that abort (TASK-55). Not Shuttle's atomics, whose every access the scheduler may switch
-    /// threads at: a store's closing is counted as its last holder drops it, rather than after
-    /// another thread found it gone and opened it anew, which the table doesn't order: the store's
+    /// threads at: a cell's closing is counted as its last holder drops it, rather than after
+    /// another thread found it gone and opened it anew, which the table doesn't order: the cell's
     /// own lock of its files does (`OpenCell::open`).
     #[derive(Default)]
     struct Counts {
@@ -819,17 +820,17 @@ mod shuttle_tests {
         two_holders: std::sync::atomic::AtomicBool,
     }
 
-    /// The store, opened: counted open until it is dropped, closed; dirty once its writer went
-    /// with writes uncommitted; and how many times its followers were cut off. A kept store's says it
-    /// is closed, dropping what does.
-    struct Store {
+    /// The cell, opened: counted open until it is dropped, closed; dirty once its writer went
+    /// with writes uncommitted; and how many times its followers were cut off. A kept cell's says
+    /// it is closed, dropping what does.
+    struct ModelCell {
         counts: Arc<Counts>,
         dirty: AtomicBool,
         cuts: AtomicUsize,
         _closing: Option<mpsc::Sender<()>>,
     }
 
-    impl Store {
+    impl ModelCell {
         fn open(counts: &Arc<Counts>) -> Arc<Self> {
             Self::opened(counts, None)
         }
@@ -838,42 +839,42 @@ mod shuttle_tests {
             let others = counts.open.fetch_add(1, Ordering::SeqCst);
             counts.most_open.fetch_max(others + 1, Ordering::SeqCst);
             let (dirty, cuts) = (AtomicBool::new(false), AtomicUsize::new(0));
-            Arc::new(Store { counts: counts.clone(), dirty, cuts, _closing: closing })
+            Arc::new(ModelCell { counts: counts.clone(), dirty, cuts, _closing: closing })
         }
     }
 
-    impl Drop for Store {
+    impl Drop for ModelCell {
         fn drop(&mut self) {
             self.counts.open.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
-    /// A store kept open, as `cladefsd::cells::Kept` is: the store opened, which each fork of it
+    /// A cell kept open, as `cladefsd::cells::Kept` is: the cell opened, which each fork of it
     /// holds while it forks it, and what says it is closed, once the last lets it go.
     struct Kept {
-        store: Arc<Store>,
+        cell: Arc<ModelCell>,
         closed: mpsc::Receiver<()>,
     }
 
     impl Kept {
         fn open(counts: &Arc<Counts>) -> Self {
             let (closing, closed) = mpsc::channel();
-            Kept { store: Store::opened(counts, Some(closing)), closed }
+            Kept { cell: ModelCell::opened(counts, Some(closing)), closed }
         }
     }
 
     /// Closes `kept`, if given, and returns once it is closed: once the forks forking it are
     /// done, as `cladefsd::cells::close_kept` does.
     fn close(kept: Option<Kept>) {
-        let Some(Kept { store, closed }) = kept else { return };
-        drop(store);
+        let Some(Kept { cell, closed }) = kept else { return };
+        drop(cell);
         if closed.try_recv() == Err(mpsc::TryRecvError::Empty) {
             reached("a kept closed waited for a fork of it");
         }
         let _ = closed.recv();
     }
 
-    type Table = CellTable<Conn, Store, Kept>;
+    type Table = CellTable<Conn, ModelCell, Kept>;
 
     /// What the runs reached, of the ways through the table a test is to take
     /// ([`reaching`]): across runs, outside Shuttle's.
@@ -893,31 +894,31 @@ mod shuttle_tests {
         assert!(missed.is_empty(), "no run reached {missed:?}, only {reached:?}");
     }
 
-    /// A hold counted among the store's holders, which none other may be, until dropped.
+    /// A hold counted among the cell's holders, which none other may be, until dropped.
     struct Counted<'t> {
         counts: Arc<Counts>,
-        _hold: Hold<'t, Conn, Store, Kept>,
+        _hold: Hold<'t, Conn, ModelCell, Kept>,
     }
 
     impl<'t> Counted<'t> {
-        fn new(counts: &Arc<Counts>, hold: Hold<'t, Conn, Store, Kept>) -> Self {
+        fn new(counts: &Arc<Counts>, hold: Hold<'t, Conn, ModelCell, Kept>) -> Self {
             if counts.holders.fetch_add(1, Ordering::SeqCst) > 0 {
                 counts.two_holders.store(true, Ordering::SeqCst);
             }
             Self { counts: counts.clone(), _hold: hold }
         }
 
-        fn hold(&self) -> &Hold<'t, Conn, Store, Kept> {
+        fn hold(&self) -> &Hold<'t, Conn, ModelCell, Kept> {
             &self._hold
         }
 
-        /// Opens `store` where it holds, as [`Hold::open`] does, which refuses (`EBUSY`) what holds
-        /// a store found with nothing open only if another holder took it from under it: a claim
+        /// Opens `cell` where it holds, as [`Hold::open`] does, which refuses (`EBUSY`) what holds
+        /// a cell found with nothing open only if another holder took it from under it: a claim
         /// past [`Rules::one_holder`], and nothing else, does. Counted as two holders as it shows,
         /// rather than left to the refusal, which the holder meets first and the run would report
         /// in its place, as a schedule may have it before its check of the holders.
-        fn open(&self, store: &Arc<Store>) -> Result<(), Errno> {
-            let opened = self._hold.open(store);
+        fn open(&self, cell: &Arc<ModelCell>) -> Result<(), Errno> {
+            let opened = self._hold.open(cell);
             if opened.is_err() {
                 self.counts.two_holders.store(true, Ordering::SeqCst);
             }
@@ -931,15 +932,15 @@ mod shuttle_tests {
         }
     }
 
-    /// What a connection writing the store has: its store, closed before its hold lets it go
+    /// What a connection writing the cell has: its cell, closed before its hold lets it go
     /// ([`Conn`]).
     struct Writing {
-        store: Arc<Store>,
+        cell: Arc<ModelCell>,
         hold: Counted<'static>,
     }
 
-    /// Opens the store for `conn` to write, as a connection does (`cladefsd::server`): holding it,
-    /// closing the store kept of it, taking over the store followers have open, unless it is
+    /// Opens the cell for `conn` to write, as a connection does (`cladefsd::server`): holding it,
+    /// closing the cell kept of it, taking over the cell followers have open, unless it is
     /// retired, or not quiescent, its writer gone with writes uncommitted (`OpenCell::take_over`);
     /// or opening it. The connection has it from then on.
     fn write(table: &'static Table, counts: &Arc<Counts>, conn: &Arc<Conn>) -> Result<(), Errno> {
@@ -947,82 +948,82 @@ mod shuttle_tests {
             block_on(table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX))?;
         let hold = Counted::new(counts, hold);
         if kept.is_some() {
-            reached("a writer closed a store kept");
+            reached("a writer closed a cell kept");
         }
         close(kept);
-        let store = match hold.hold().instance() {
+        let cell = match hold.hold().instance() {
             Some((_, true)) => {
-                reached("a writer found the store retired");
+                reached("a writer found the cell retired");
                 return Err(Errno::EBUSY);
             }
-            Some((store, false)) if store.dirty.load(Ordering::SeqCst) => {
+            Some((cell, false)) if cell.dirty.load(Ordering::SeqCst) => {
                 return Err(Errno::EBUSY);
             }
-            Some((store, false)) => {
-                reached("a writer took the store over");
-                store
+            Some((cell, false)) => {
+                reached("a writer took the cell over");
+                cell
             }
             None => {
-                let store = Store::open(counts);
-                hold.open(&store)?;
-                store
+                let cell = ModelCell::open(counts);
+                hold.open(&cell)?;
+                cell
             }
         };
-        *conn.writing.lock().unwrap() = Some(Writing { store, hold });
+        *conn.writing.lock().unwrap() = Some(Writing { cell, hold });
         Ok(())
     }
 
-    /// A follower of the store, as `OpenCell::follow` makes one: its view of it, which a cut of
+    /// A follower of the cell, as `OpenCell::follow` makes one: its view of it, which a cut of
     /// its followers made after it cuts off.
     struct Follower {
-        store: Arc<Store>,
+        cell: Arc<ModelCell>,
         cuts: usize,
     }
 
     impl Follower {
-        fn of(store: Arc<Store>) -> Self {
-            let cuts = store.cuts.load(Ordering::SeqCst);
-            Follower { store, cuts }
+        fn of(cell: Arc<ModelCell>) -> Self {
+            let cuts = cell.cuts.load(Ordering::SeqCst);
+            Follower { cell, cuts }
         }
 
-        /// Whether it follows a store its writer retired, gone with writes uncommitted, without
+        /// Whether it follows a cell its writer retired, gone with writes uncommitted, without
         /// having been cut off.
         fn uncut_of_retired(&self) -> bool {
-            self.store.dirty.load(Ordering::SeqCst)
-                && self.store.cuts.load(Ordering::SeqCst) == self.cuts
+            self.cell.dirty.load(Ordering::SeqCst)
+                && self.cell.cuts.load(Ordering::SeqCst) == self.cuts
         }
     }
 
-    /// Follows the store, as a follower does (`cladefsd::cells::followed`): the store connections
+    /// Follows the cell, as a follower does (`cladefsd::cells::followed`): the cell connections
     /// have open, unless retired ([`CellTable::follow`]); or, held by the daemon, which no writer
-    /// retires a store under, its kept store closed, the store opened.
+    /// retires a cell under, its kept cell closed, the cell opened.
     fn follow(table: &Table, counts: &Arc<Counts>) -> Result<Follower, Errno> {
-        let open = |found: Option<(Arc<Store>, bool)>| match found {
+        let open = |found: Option<(Arc<ModelCell>, bool)>| match found {
             Some((_, true)) => Err(Errno::EBUSY),
-            Some((store, false)) => Ok(Some(store)),
+            Some((cell, false)) => Ok(Some(cell)),
             None => Ok(None),
         };
-        let follow = |store: &Arc<Store>| Ok(Follower::of(store.clone()));
+        let follow = |cell: &Arc<ModelCell>| Ok(Follower::of(cell.clone()));
         if let Some(follower) = table.follow(Path::new(KEY), follow)? {
-            reached("a follower followed the store open");
+            reached("a follower followed the cell open");
             return Ok(follower);
         }
         let hold = Counted::new(counts, table.hold(Path::new(KEY), None)?);
         close(hold.hold().take_kept());
-        if let Some(store) = open(hold.hold().instance())? {
-            return Ok(Follower::of(store));
+        if let Some(cell) = open(hold.hold().instance())? {
+            return Ok(Follower::of(cell));
         }
-        reached("a follower opened the store");
-        let store = Store::open(counts);
-        hold.open(&store)?;
-        Ok(Follower::of(store))
+        reached("a follower opened the cell");
+        let cell = ModelCell::open(counts);
+        hold.open(&cell)?;
+        Ok(Follower::of(cell))
     }
 
-    /// Forks the store, as the daemon does (`cladefsd::cells::fork`): through its writer, or the
-    /// store followers have open, live; or the store kept, or else the store opened, kept open as
-    /// a kept store, which it holds while it forks it, as a restore's fork does, its hold let go.
+    /// Forks the cell, as the daemon does (`cladefsd::cells::fork`): through its writer, or the
+    /// cell followers have open, live; or the cell kept, or else the cell opened, kept open as
+    /// a kept cell, which it holds while it forks it, as a restore's fork does, its hold let go.
     fn fork(table: &Table, counts: &Arc<Counts>) -> Result<(), Errno> {
-        let kept = |kept: &mut Kept| kept.store.clone();
+        let kept = |kept: &mut Kept| kept.cell.clone();
         let forking = match table.kept(Path::new(KEY), kept) {
             Some(forking) => forking,
             None => {
@@ -1039,7 +1040,7 @@ mod shuttle_tests {
                     None => {
                         reached("a fork kept a kept");
                         let kept = Kept::open(counts);
-                        let forking = kept.store.clone();
+                        let forking = kept.cell.clone();
                         // Refused only past one holder, which the run then fails for.
                         let _ = hold.hold().keep(kept);
                         forking
@@ -1060,16 +1061,16 @@ mod shuttle_tests {
         let (later_tx, later) = mpsc::channel::<()>();
         let (going_tx, going) = mpsc::channel::<()>();
         let released = Arc::new(AtomicBool::new(false));
-        // That the first went, its store retired if it is to be, to each follower.
+        // That the first went, its cell retired if it is to be, to each follower.
         let (gone_to_follower, gone_follower) = mpsc::channel::<()>();
         let (gone_to_later, gone_later) = mpsc::channel::<()>();
 
-        // The VM's connection, whose VM process goes while it writes the store.
+        // The VM's connection, whose VM process goes while it writes the cell.
         let first = {
             let (counts, released) = (counts.clone(), released.clone());
             thread::spawn(move || {
                 let conn = Conn::new();
-                // Refused only if another holder took the store from under it, which the run's
+                // Refused only if another holder took the cell from under it, which the run's
                 // check of the holders reports.
                 let wrote = match write(table, &counts, &conn) {
                     Ok(()) => true,
@@ -1085,14 +1086,14 @@ mod shuttle_tests {
                 going_tx.send(()).unwrap();
                 if dirty && wrote {
                     let writing = conn.writing.lock().unwrap();
-                    let Writing { store, hold } = writing.as_ref().unwrap();
-                    store.dirty.store(true, Ordering::SeqCst);
+                    let Writing { cell, hold } = writing.as_ref().unwrap();
+                    cell.dirty.store(true, Ordering::SeqCst);
                     hold.hold().retire(|| {
-                        store.cuts.fetch_add(1, Ordering::SeqCst);
+                        cell.cuts.fetch_add(1, Ordering::SeqCst);
                     });
                 }
-                // The last of it, unless a claim of the store has it as it meets it: it lets the
-                // store go then, outside the table's lock.
+                // The last of it, unless a claim of the cell has it as it meets it: it lets the
+                // cell go then, outside the table's lock.
                 drop(conn);
                 released.store(true, Ordering::SeqCst);
                 // Unheard by a follower that follows nothing.
@@ -1100,8 +1101,8 @@ mod shuttle_tests {
                 let _ = gone_to_later.send(());
             })
         };
-        // The VM restored from its snapshot, opening the store as the first goes: it gets it
-        // once the first lets it go, unless followers have the first's store, retired.
+        // The VM restored from its snapshot, opening the cell as the first goes: it gets it
+        // once the first lets it go, unless followers have the first's cell, retired.
         let second = {
             let counts = counts.clone();
             thread::spawn(move || {
@@ -1113,7 +1114,7 @@ mod shuttle_tests {
                 drop(conn);
             })
         };
-        // A follower of the first's store, following it until the first went: cut off, if it
+        // A follower of the first's cell, following it until the first went: cut off, if it
         // retired it.
         let follower = {
             let counts = counts.clone();
@@ -1123,11 +1124,11 @@ mod shuttle_tests {
                     gone_follower.recv().unwrap();
                     let uncut = follower.uncut_of_retired();
                     drop(follower);
-                    assert!(!uncut, "a follower of a store its writer retired wasn't cut off");
+                    assert!(!uncut, "a follower of a cell its writer retired wasn't cut off");
                 }
             })
         };
-        // A follower, following the store as the first goes: never its store once it retired it,
+        // A follower, following the cell as the first goes: never its cell once it retired it,
         // and, before or as it does, cut off.
         let following_later = {
             let (counts, released) = (counts.clone(), released.clone());
@@ -1135,16 +1136,16 @@ mod shuttle_tests {
                 later.recv().unwrap();
                 let after = released.load(Ordering::SeqCst);
                 if let Ok(follower) = follow(table, &counts) {
-                    let retired = after && follower.store.dirty.load(Ordering::SeqCst);
+                    let retired = after && follower.cell.dirty.load(Ordering::SeqCst);
                     gone_later.recv().unwrap();
                     let uncut = follower.uncut_of_retired();
                     drop(follower);
-                    assert!(!retired, "a follower followed a store its writer retired");
-                    assert!(!uncut, "a follower of a store its writer retired wasn't cut off");
+                    assert!(!retired, "a follower followed a cell its writer retired");
+                    assert!(!uncut, "a follower of a cell its writer retired wasn't cut off");
                 }
             })
         };
-        // A fork of the store, at any kept store.
+        // A fork of the cell, at any kept cell.
         let forking = {
             let counts = counts.clone();
             thread::spawn(move || fork(table, &counts).unwrap())
@@ -1152,15 +1153,15 @@ mod shuttle_tests {
         for thread in [first, second, follower, following_later, forking] {
             thread.join().unwrap();
         }
-        // The kept store a fork kept, closed, as it is once no fork forks it.
+        // The kept cell a fork kept, closed, as it is once no fork forks it.
         let hold = table.hold(Path::new(KEY), None).unwrap();
         close(hold.take_kept());
         drop(hold);
         let two = counts.two_holders.load(Ordering::SeqCst);
-        assert!(!two, "two holders hold the store at once");
+        assert!(!two, "two holders hold the cell at once");
         let most = counts.most_open.load(Ordering::SeqCst);
-        assert!(most <= 1, "the store is open twice at once: {most} at most");
-        assert!(table.is_empty(), "the store is held or open once all let it go");
+        assert!(most <= 1, "the cell is open twice at once: {most} at most");
+        assert!(table.is_empty(), "the cell is held or open once all let it go");
     }
 
     fn randomly(dirty: bool) {
@@ -1171,21 +1172,21 @@ mod shuttle_tests {
         Runner::new(PctScheduler::new(3, runs(3000)), config()).run(move || run(dirty));
     }
 
-    /// What runs of a writer going quiescent reach: its store taken over, followed, and kept stores
+    /// What runs of a writer going quiescent reach: its cell taken over, followed, and kept cells
     /// kept and closed.
     const QUIESCENT: &[&str] = &[
-        "a writer took the store over",
-        "a writer closed a store kept",
+        "a writer took the cell over",
+        "a writer closed a cell kept",
         "a kept closed waited for a fork of it",
         "a claim waited for a writer gone",
-        "a follower followed the store open",
-        "a follower opened the store",
+        "a follower followed the cell open",
+        "a follower opened the cell",
         "a fork kept a kept",
     ];
 
-    /// What runs of a writer going with writes uncommitted reach besides: its store retired.
+    /// What runs of a writer going with writes uncommitted reach besides: its cell retired.
     const UNCOMMITTED: &[&str] =
-        &["a writer found the store retired", "a follower followed the store open"];
+        &["a writer found the cell retired", "a follower followed the cell open"];
 
     #[test]
     fn writers_going_quiescent_randomly() {
@@ -1220,44 +1221,44 @@ mod shuttle_tests {
     #[test]
     fn needs_one_holder() {
         let rules = Rules { one_holder: false, ..Rules::ALL };
-        fails_without(rules, false, "two holders hold the store");
+        fails_without(rules, false, "two holders hold the cell");
     }
 
-    /// CI run 42234149254's schedule: a claim past the rule took the first writer's store from
+    /// CI run 42234149254's schedule: a claim past the rule took the first writer's cell from
     /// under it, whose opening it then refused (`EBUSY`), which the writer met, and the run
     /// reported, before its check of the holders. Counted as two holders as it shows, it is.
     #[test]
     fn needs_one_holder_where_the_first_writer_meets_the_second() {
         set_rules(Rules { one_holder: false, ..Rules::ALL });
-        fails_with("two holders hold the store", || {
+        fails_with("two holders hold the cell", || {
             let scheduler = RandomScheduler::new_from_seed(4791423815028538899, 1);
             Runner::new(scheduler, config()).run(|| run(false));
         });
     }
 
-    /// The resize that let the store go without waking those waiting for it (fixed by having it
+    /// The resize that let the cell go without waking those waiting for it (fixed by having it
     /// release through `release`): they waited `CLOSING_WAIT` out.
     #[test]
     fn needs_releases_to_wake() {
         fails_without(Rules { release_wakes: false, ..Rules::ALL }, false, "deadlock!");
     }
 
-    /// A writer's store followers have, forgotten as it goes, is opened anew by the next.
+    /// A writer's cell followers have, forgotten as it goes, is opened anew by the next.
     #[test]
     fn needs_what_is_open_to_outlive_its_holders() {
         let rules = Rules { open_outlives_holders: false, ..Rules::ALL };
         fails_without(rules, false, "open twice at once");
     }
 
-    /// A store its writer retired, forgotten as such, is followed after, and on, uncut, by a
+    /// A cell its writer retired, forgotten as such, is followed after, and on, uncut, by a
     /// follower made as it was retired: whichever a schedule meets first.
     #[test]
     fn needs_retirement() {
         let rules = Rules { retirement: false, ..Rules::ALL };
-        fails_without(rules, true, "a store its writer retired");
+        fails_without(rules, true, "a cell its writer retired");
     }
 
-    /// TASK-160.8: a store's followers cut off before it is marked retired, a follower finding it
+    /// TASK-160.8: a cell's followers cut off before it is marked retired, a follower finding it
     /// unmarked between the two is followed on, uncut (`cladefsd::cells::retire` did so).
     #[test]
     fn needs_retirement_to_mark_before_cutting() {
@@ -1265,8 +1266,8 @@ mod shuttle_tests {
         fails_without(rules, true, "retired wasn't cut off");
     }
 
-    /// A follower that found the store unmarked before its writer retired it, and was made after
-    /// its followers were cut off, follows a retired store on, uncut, unless it looks again.
+    /// A follower that found the cell unmarked before its writer retired it, and was made after
+    /// its followers were cut off, follows a retired cell on, uncut, unless it looks again.
     #[test]
     fn needs_followers_to_look_again() {
         let rules = Rules { followers_look_again: false, ..Rules::ALL };
@@ -1292,7 +1293,7 @@ mod tests {
         Arc::new(Connection(AtomicBool::new(going)))
     }
 
-    /// A store, and a store kept open, each named.
+    /// A cell, and a cell kept open, each named.
     type Table = CellTable<Connection, &'static str, &'static str>;
 
     /// Holds `key` for `connection` to write it, at once.
@@ -1304,12 +1305,12 @@ mod tests {
         block_on(table.hold_to_write(key, Arc::downgrade(connection), Duration::ZERO))
     }
 
-    /// One waiting for a store a going holder never lets go gives up once its wait is over.
+    /// One waiting for a cell a going holder never lets go gives up once its wait is over.
     #[test]
-    fn waits_for_stores_never_let_go_end() {
+    fn waits_for_cells_never_let_go_end() {
         let table = Table::new();
         let (going, next) = (connection(true), connection(false));
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let _held = write(&table, key, &going).unwrap();
         let wait = Duration::from_millis(10);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
@@ -1320,26 +1321,26 @@ mod tests {
         assert_eq!(table.hold(key, Some(wait)).err(), Some(Errno::EBUSY));
     }
 
-    /// TASK-79.34: a store whose holder is going, its VM process gone, is the daemon's neither to
+    /// TASK-79.34: a cell whose holder is going, its VM process gone, is the daemon's neither to
     /// work on through its holder, nor here, until it lets it go: `EBUSY`.
     #[test]
-    fn stores_of_going_holders_are_busy() {
+    fn cells_of_going_holders_are_busy() {
         let table = Table::new();
         let going = connection(true);
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let held = write(&table, key, &going).unwrap();
         assert_eq!(table.writer_or_hold(key).err(), Some(Errno::EBUSY));
         drop(held);
         assert!(matches!(table.writer_or_hold(key), Ok(Holding::Held(_))));
     }
 
-    /// A store a connection not going writes is its: the daemon works through it, and no other
+    /// A cell a connection not going writes is its: the daemon works through it, and no other
     /// holds it, but fails at once with `EBUSY`.
     #[test]
-    fn stores_writers_write_are_theirs() {
+    fn cells_writers_write_are_theirs() {
         let table = Table::new();
         let (writer, next) = (connection(false), connection(false));
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let _held = write(&table, key, &writer).unwrap();
         let through = table.writer_or_hold(key);
         assert!(matches!(through, Ok(Holding::Writer(found)) if Arc::ptr_eq(&found, &writer)));
@@ -1347,10 +1348,10 @@ mod tests {
         assert_eq!(table.hold(key, None).err(), Some(Errno::EBUSY));
     }
 
-    /// TASK-92.5: a store let go wakes those waiting to hold it, whose wait goes with it: those
-    /// waiting for another store wait on.
+    /// TASK-92.5: a cell let go wakes those waiting to hold it, whose wait goes with it: those
+    /// waiting for another cell wait on.
     #[test]
-    fn releases_wake_those_waiting_for_their_store() {
+    fn releases_wake_those_waiting_for_their_cell() {
         let table = Table::new();
         let going = connection(true);
         let (first, second) = (Path::new("first"), Path::new("second"));
@@ -1377,9 +1378,9 @@ mod tests {
         drop(ours_held);
     }
 
-    /// The stores connections write are counted, not the daemon's, nor those of connections gone.
+    /// The cells connections write are counted, not the daemon's, nor those of connections gone.
     #[test]
-    fn stores_writers_write_are_counted() {
+    fn cells_writers_write_are_counted() {
         let table = Table::new();
         let (first, second) = (connection(false), connection(false));
         let _first = write(&table, Path::new("first"), &first).unwrap();
@@ -1390,21 +1391,21 @@ mod tests {
         assert_eq!(table.writers(), 1);
     }
 
-    /// A writer's store outlives its writer while followers have it: the next writer takes it
+    /// A writer's cell outlives its writer while followers have it: the next writer takes it
     /// over; gone once none has it, it is nothing, and the next opens its own.
     #[test]
-    fn stores_followers_have_outlive_their_writers() {
+    fn cells_followers_have_outlive_their_writers() {
         let table = Table::new();
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let (writer, next) = (connection(false), connection(false));
         let (held, _) = write(&table, key, &writer).unwrap();
-        let store = Arc::new("writer's");
-        held.open(&store).unwrap();
+        let cell = Arc::new("writer's");
+        held.open(&cell).unwrap();
         let followed = table.instance(key).unwrap().0;
         writer.0.store(true, Ordering::Relaxed);
-        drop((held, store));
+        drop((held, cell));
         assert_eq!(
-            table.instance(key).map(|(store, retired)| (*store, retired)),
+            table.instance(key).map(|(cell, retired)| (*cell, retired)),
             Some(("writer's", false))
         );
         let (held, _) = write(&table, key, &next).unwrap();
@@ -1417,16 +1418,16 @@ mod tests {
         assert_eq!(held.instance(), None);
     }
 
-    /// A store retired, its writer gone with writes uncommitted, is so while followers have it:
+    /// A cell retired, its writer gone with writes uncommitted, is so while followers have it:
     /// to the next writer, and to the daemon.
     #[test]
-    fn stores_retired_stay_retired_while_followed() {
+    fn cells_retired_stay_retired_while_followed() {
         let table = Table::new();
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let writer = connection(false);
         let (held, _) = write(&table, key, &writer).unwrap();
-        let store = Arc::new("writer's");
-        held.open(&store).unwrap();
+        let cell = Arc::new("writer's");
+        held.open(&cell).unwrap();
         held.retire(|| ());
         drop(held);
         assert_eq!(table.instance(key).map(|(_, retired)| retired), Some(true));
@@ -1435,11 +1436,11 @@ mod tests {
         drop(held);
         let (held, _) = write(&table, key, &connection(false)).unwrap();
         assert_eq!(held.instance().map(|(_, retired)| retired), Some(true));
-        drop((held, store));
+        drop((held, cell));
         assert!(table.is_empty());
     }
 
-    /// A store kept open outlives the daemon's hold, which forks see; the daemon's next holds keep
+    /// A cell kept open outlives the daemon's hold, which forks see; the daemon's next holds keep
     /// it, unless they take it; a writer's takes it, to close.
     #[test]
     fn copies_kept_go_to_writers() {
@@ -1464,12 +1465,12 @@ mod tests {
         assert!(table.is_empty());
     }
 
-    /// A store opened where one is open, or a store kept, is refused, and changes nothing: its
+    /// A cell opened where one is open, or a cell kept, is refused, and changes nothing: its
     /// holder takes over what it found, or works on it, rather than open it twice.
     #[test]
-    fn stores_opened_where_something_is_open_are_refused() {
+    fn cells_opened_where_something_is_open_are_refused() {
         let table = Table::new();
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let (held, _) = write(&table, key, &connection(false)).unwrap();
         let (first, second) = (Arc::new("first"), Arc::new("second"));
         held.open(&first).unwrap();
@@ -1488,7 +1489,7 @@ mod tests {
         assert!(Arc::ptr_eq(&held.instance().unwrap().0, &second));
     }
 
-    /// A store kept where one is kept already, or a store is open, or by a writer, is refused,
+    /// A cell kept where one is kept already, or a cell is open, or by a writer, is refused,
     /// given back, and changes nothing.
     #[test]
     fn copies_kept_where_something_is_open_are_refused() {
@@ -1499,22 +1500,22 @@ mod tests {
         assert_eq!(held.keep("second"), Err("second"));
         assert_eq!(table.kept(key, |kept| *kept), Some("first"));
         assert_eq!(held.take_kept(), Some("first"));
-        let store = Arc::new("store");
-        held.open(&store).unwrap();
+        let cell = Arc::new("cell");
+        held.open(&cell).unwrap();
         assert_eq!(held.keep("second"), Err("second"));
-        drop((held, store));
+        drop((held, cell));
         let (held, _) = write(&table, key, &connection(false)).unwrap();
         assert_eq!(held.keep("second"), Err("second"));
         assert_eq!(table.kept(key, |kept| *kept), None);
     }
 
-    /// TASK-475.3: a store the mount has attached is its alone: a writer, the daemon, and the
+    /// TASK-475.3: a cell the mount has attached is its alone: a writer, the daemon, and the
     /// daemon working through a writer each fail at once with `EBUSY`, however long they would
     /// wait; let go, a writer holds it.
     #[test]
-    fn stores_mounted_are_the_mounts_alone() {
+    fn cells_mounted_are_the_mounts_alone() {
         let table = Table::new();
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let (held, kept) = block_on(table.hold_mounted(key, Duration::ZERO)).unwrap();
         assert_eq!(kept, None);
         let writer = connection(false);
@@ -1531,20 +1532,20 @@ mod tests {
         assert!(write(&table, key, &writer).is_ok());
     }
 
-    /// TASK-475.3: the mount attaches no store a writer writes, nor one followers have open; it
-    /// takes the store kept open of a store, to close, as a writer does.
+    /// TASK-475.3: the mount attaches no cell a writer writes, nor one followers have open; it
+    /// takes the cell kept open of a cell, to close, as a writer does.
     #[test]
-    fn the_mount_attaches_stores_nothing_else_has() {
+    fn the_mount_attaches_cells_nothing_else_has() {
         let table = Table::new();
-        let key = Path::new("store");
+        let key = Path::new("cell");
         let writer = connection(false);
         let written = write(&table, key, &writer).unwrap().0;
         assert_eq!(block_on(table.hold_mounted(key, Duration::ZERO)).err(), Some(Errno::EBUSY));
-        let store = Arc::new("store");
-        written.open(&store).unwrap();
+        let cell = Arc::new("cell");
+        written.open(&cell).unwrap();
         drop(written);
         assert_eq!(block_on(table.hold_mounted(key, Duration::ZERO)).err(), Some(Errno::EBUSY));
-        drop(store);
+        drop(cell);
         let other = Path::new("other");
         let held = table.hold(other, None).unwrap();
         held.keep("kept").unwrap();

@@ -5,7 +5,7 @@
 //! cladefs: random sequences of what a filesystem's user asks of an image and of its forks, all
 //! kept in the image's own bucket, among passes of the bucket's collector, checked against a model
 //! of their files (TASK-291.4). fxfs-posix's model holds Fxfs to a model on a device of memory,
-//! under which no bucket is: this one holds the images' extents, in their stores and their
+//! under which no bucket is: this one holds the images' extents, in their cells and their
 //! bucket, to what their files were written, as the collector compacts and deletes under them.
 //!
 //! Files are made, written over and past their ends, truncated, removed and synced; images are
@@ -152,7 +152,7 @@ fn name(file: usize) -> Vec<u8> {
 impl Images {
     fn new(dir: &Path) -> Self {
         let path = dir.join("image");
-        let storage = Storage::create(&path, SIZE).unwrap();
+        let storage = local_cell::upload::wait_on(Storage::create(&path, SIZE)).unwrap();
         let super::Kind::Image { image, .. } = &storage.kind else { panic!("memory") };
         let collecting = image.collecting().expect("its own bucket's").clone();
         let fs = block_on(Filesystem::format(storage)).unwrap();
@@ -264,7 +264,10 @@ impl Images {
         assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
         drop(collecting);
         for (path, files) in closed {
-            let fs = block_on(Filesystem::mount(Storage::open(&path).unwrap())).unwrap();
+            let fs = block_on(Filesystem::mount(
+                local_cell::upload::wait_on(Storage::open(&path)).unwrap(),
+            ))
+            .unwrap();
             block_on(holds(&fs, &files, &format!("{} opened anew", path.display())));
             drop(block_on(fs.close()).unwrap());
         }

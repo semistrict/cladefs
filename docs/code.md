@@ -75,7 +75,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 | Crate | Stands in for | How |
 |---|---|---|
 | `fidl` | FIDL runtime | No channels or wire format: the types the generated bindings use. |
-| `fidl-fuchsia-io`, `-fs`, `-fxfs`, `-diagnostics-types` | generated FIDL bindings | Written to the shape of the generated types, for the types Fxfs uses. |
+| `fidl-fuchsia-io`, `-fxfs`, `-diagnostics-types` | generated FIDL bindings | Written to the shape of the generated types, for the types Fxfs uses. |
 | `fuchsia-inspect`, `diagnostics-log` | diagnostics | No-ops, and stderr logging. |
 | `bssl-crypto`, `mundane` | BoringSSL bindings | SHA-256/512 on the `sha2` crate. |
 | `fxfs-unicode-gen` | build-time generated tables | Tables generated once from UCD 12.1.0 by Fxfs's own generator (`scripts/generate-unicode-tables.sh`). |
@@ -87,7 +87,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 
 - `extents.rs` holds `OpenCell`, an extent store as a VM's device serves
   it: its I/O, and `MAP` and `UNMAP` into its DAX window.
-- `cache.rs` holds the cache of sealed extents' pages, shared by every store
+- `cache.rs` holds the cache of sealed extents' pages, shared by every open cell
   in the process, each extent a table of its pages, read in a part at a time
   and evicted as memory runs out.
 - `cladefsd/` holds the daemon (`bin/cladefsd.rs`) and its client,
@@ -98,7 +98,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   KVM follows (`architecture.md`, DAX on Linux).
 - `filesystem.rs`, `volume.rs`, `image.rs` and `node.rs` hold the host's view
   of an Fxfs image: `Filesystem` and `Image`, which format, fill and check
-  images, such as the stores a guest's Fxfs mounts, through `crates/fxfs-posix`
+  images, such as the cells a guest's Fxfs mounts, through `crates/fxfs-posix`
   as the guest's kernel does. A `Filesystem` is a volume whose nodes are `Node`
   handles, each holding its node, with the checks Linux's VFS makes for the
   guest; `volume.rs` keeps the nodes held, and runs the volume's one unmount.
@@ -107,15 +107,15 @@ of these stands in with the items the code copied from Fuchsia uses:
   layout's layers, or a `docker export` tarball, applied as the OCI image spec
   applies changesets (whiteouts, opaque directories), files keeping their
   owners, permissions, times and extended attributes. `cladefsctl import` makes
-  a base store of one, for VMs to boot forks of.
+  a base cell of one, for VMs to boot forks of.
 - `fuse/` mounts a `Filesystem` on the host with FUSE (TASK-222): a server of
   the protocol, a request's bytes in and its reply's out, on every host, and on
   Linux a mount through `/dev/fuse`, by mount(2) as root or `fusermount3`
-  otherwise. `cladefs-mount STORE MOUNTPOINT` mounts a store nothing else has
+  otherwise. `cladefs-mount CELL_DIR MOUNTPOINT` mounts a cell nothing else has
   open, read-write, until it is unmounted or sent SIGINT or SIGTERM; with
-  `--new CAPACITY`, a new store it makes. cladefsd, with `CLADEFSD_MOUNT`
+  `--new CAPACITY`, a new cell it makes. cladefsd, with `CLADEFSD_MOUNT`
   naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
-  number of stores (TASK-302, TASK-475.2): its Mount service, on the daemon's
+  number of cells (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
   attach`, `create`, `detach`, `list`), takes a tenant's cell of the bucket
   (TASK-364), its head with it, into `DIR/TENANT/CELL`, an Fxfs cell shown
@@ -130,9 +130,9 @@ of these stands in with the items the code copied from Fuchsia uses:
   Fxfs's errors, and `Error`, for setting up.
 - `storage/` holds `Storage`: an image, or memory. It checks filesystems
   (fsck), and forks images: a fork's cell is a fork of the image's in the
-  bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
+  bucket its cell is kept in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
-  (`CLADEFSD_BUCKET`); the fork's directory is a store of its own, which
+  (`CLADEFSD_BUCKET`); the fork's directory is a cell directory of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
   deletes forks and images alike: the cell in its bucket, whose collector
   reclaims what no other cell inherited, and the directory; forks live on.
@@ -146,9 +146,9 @@ of these stands in with the items the code copied from Fuchsia uses:
   - `io.rs` runs extents' I/O off Fxfs's executor threads: on an io_uring on
     Linux, and a small thread pool elsewhere.
 - `host_cell.rs` makes, opens, forks and deletes both host stacks' extent
-  stores in the host's directories, images (`Storage`) and guests' stores
+  stores in the host's directories, images (`Storage`) and guests' cells
   (`OpenCell`), with one block size, one set of options and one way of
-  minting cells. Neither stack collects its stores: the collector alone
+  minting cells. Neither stack collects its cells: the collector alone
   deletes (TASK-165.8).
 - `pages.rs` configures physical memory (`crates/physmem`): its size, which
   extents' pages come from, and tenants' arenas of it.
@@ -157,8 +157,8 @@ of these stands in with the items the code copied from Fuchsia uses:
 `crates/local_cell` is cladefs's too: backlog doc-4's extent store on local
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
-store's directory holds one cell; forks, versions and deletion are the
-bucket's (`crates/bucket_cell`, TASK-165.7). Nothing collects in a store:
+cell directory holds one cell; forks, versions and deletion are the
+bucket's (`crates/bucket_cell`, TASK-165.7). Nothing collects in a cell directory:
 once a segment is acknowledged in the bucket, it and the extents' files it
 names leave the directory, for the host's cache of the bucket's objects, and
 the bucket's collector, the only thing that deletes, takes back what no extent
@@ -175,8 +175,8 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 | `extent_frame` | How objects holding extents' data are framed, locally and in object storage. |
 | `extent_keys` | The keys a tenant's data is encrypted under at rest, the KMS backends, and the primitives that use them (backlog doc-16). |
 | `virtio_extent` | The extent store device but its virtio transport (backlog doc-4), which every VMM hosting it shares; its `README.md` says what a VMM's adapter does. |
-| `extent_files` | Named files kept straight on an extent device, with no filesystem between: file sets. |
-| `sqlite_extents` | SQLite databases kept so, each transaction one commit of the device. |
+| `block_device` | A block device kept straight on an extent device, with no filesystem between: one array of blocks a cell, what SQLite and memory cells hold. |
+| `sqlite_cladefs` | A SQLite cell's one database kept on its block device, each transaction one commit of the device. |
 | `fxfs-automount` | A guest's automounter of shared volumes (backlog doc-10), and `git-remote-fxfs`. |
 | `follower`, `follower_sim`, `follower_history` | Live read-only followers' concurrency protocol, its deterministic simulation and its history checker (backlog doc-8). |
 | `fxfs-sim-diff` | `guest/sim`'s model of Fxfs run beside Fxfs on the same operations, each file compared after each. |
@@ -224,12 +224,12 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 
 | Change | Why |
 |---|---|
-| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /cladefs/{id}` before boot, or the configuration file's `cladefs` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`cladefsd_socket`). Its store is served by the daemon (`cladefs::CellClient`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
+| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /cladefs/{id}` before boot, or the configuration file's `cladefs` list, names its tag, cell, capacity, DAX window and the extent daemon's socket (`cladefsd_socket`). Its cell is served by the daemon (`cladefs::CellClient`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a cell in the VM process: the daemon owns the open cells and their cache, which the host's VMs share. |
 | Virtio shared memory regions on the PCI transport, a BAR with `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities (a general fix), and `KvmMemSlot`, a KVM memory slot any device may map host memory with. | The device's DAX window is a shared memory region, the daemon's memory mapped in; KVM follows it. |
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see `architecture.md`, DAX on Linux (TASK-25.4). |
-| `WRITE_COMMIT`, INFO's `sequence_floor`, and the store's capacity in the device's configuration, changed while the guest runs. | doc-4's requests (TASK-36, TASK-37). |
-| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own store, forks it from that version and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's cell (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
+| `WRITE_COMMIT`, INFO's `sequence_floor`, and the cell's capacity in the device's configuration, changed while the guest runs. | doc-4's requests (TASK-36, TASK-37). |
+| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the cell to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own cell, forks it from that version and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its cell (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a cell of its own (TASK-39.1). |
 
 ## `guest/`: Fxfs in the guest's kernel
 
@@ -287,7 +287,7 @@ suites' `unsupported` check pins deduplication's and `MAP_SYNC`'s):
   makes) can't be shared: a reflink of them fails with `EOPNOTSUPP`.
 - `MAP_SYNC` mmaps fail with `EOPNOTSUPP`: the DAX window is the host's
   memory, not persistent memory, and what is stored through it is in a private
-  page until writeback writes it to the store, and ordered once an fsync
+  page until writeback writes it to the cell, and ordered once an fsync
   commits it, never at the fault.
 - chattr's other flags (`FS_IOC_FSSETXATTR`'s project IDs and extent sizes,
   synchronous, compressed, no-COW) fail with `EOPNOTSUPP`.

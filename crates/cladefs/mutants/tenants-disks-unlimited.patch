@@ -1,6 +1,6 @@
 # A tenant's disk limit holds nothing: its VM processes' writes are admitted whatever its disk
-# takes, so one tenant fills the host's disk, every tenant's stores with it, its stores' capacities
-# alone bounding it, and it makes as many as it likes (TASK-94; admitted by its stores since
+# takes, so one tenant fills the host's disk, every tenant's cells with it, its cells' capacities
+# alone bounding it, and it makes as many as it likes (TASK-94; admitted by its cells since
 # TASK-539.8).
 # Kind: disk
 # Killer: cladefsd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing

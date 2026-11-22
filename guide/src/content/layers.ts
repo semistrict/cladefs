@@ -52,9 +52,9 @@ export const layers: Layer[] = [
   {
     id: "daemon",
     name: "cladefsd",
-    what: "one daemon per host: every VM's store and window",
+    what: "one daemon per host: every VM's cell and window",
     role:
-      "One process serves the extent stores of a host's hundreds of VMs, so each sealed extent is " +
+      "One process serves the cells of a host's hundreds of VMs, so each sealed extent is " +
       "one copy in memory, shared by every VM that maps it. It keeps each VM's window (its page " +
       "tables, mappings and private pages) and makes commits local behind the guest.",
     dirs: ["crates/cladefs/src/cladefsd", "crates/cladefs/src/open_cell.rs", "crates/cladefs/src/dax.rs"],
@@ -78,7 +78,7 @@ export const layers: Layer[] = [
   },
   {
     id: "disk",
-    name: "Local store",
+    name: "Local extent store",
     what: "the bucket's write-ahead log and cache, on local disk",
     role:
       "Each cell's extents on the host's disk: open extents written raw, sealed ones framed into " +

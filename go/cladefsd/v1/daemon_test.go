@@ -42,7 +42,7 @@ func daemon(t *testing.T, dir string) *cladefsdv1.Client {
 		"CLADEFSD_GRPC="+control,
 		"CLADEFSD_BUCKET=memory:///cells",
 		"CLADEFSD_TOKEN=1",
-		// cladefs: every store encrypted, under the bucket KMS of a test master key, known to all
+		// cladefs: every cell encrypted, under the bucket KMS of a test master key, known to all
 		// (TASK-411.28): a daemon given no KMS refuses to start.
 		"CLADEFS_MASTER_KEY=7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e",
 	)
@@ -88,11 +88,11 @@ func TestDaemon(t *testing.T) {
 	client := daemon(t, dir)
 	ctx := t.Context()
 
-	store := filepath.Join(dir, "store")
-	if _, err := client.CreateCell(ctx, &cladefsdv1.CreateCellRequest{Path: store, Capacity: 1 << 24}); err != nil {
+	cellDir := filepath.Join(dir, "store")
+	if _, err := client.CreateCell(ctx, &cladefsdv1.CreateCellRequest{Path: cellDir, Capacity: 1 << 24}); err != nil {
 		t.Fatal(err)
 	}
-	stat, err := client.StatCell(ctx, &cladefsdv1.StatCellRequest{Path: store})
+	stat, err := client.StatCell(ctx, &cladefsdv1.StatCellRequest{Path: cellDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,18 +102,18 @@ func TestDaemon(t *testing.T) {
 
 	_, err = client.StatCell(ctx, &cladefsdv1.StatCellRequest{Path: filepath.Join(dir, "missing")})
 	if !errors.Is(err, syscall.ENOENT) {
-		t.Errorf("StatCell of no store: errors.Is(%v, ENOENT) = false", err)
+		t.Errorf("StatCell of no cell: errors.Is(%v, ENOENT) = false", err)
 	}
 	if code := status.Code(err); code != codes.NotFound {
-		t.Errorf("StatCell of no store: status.Code(%v) = %v, want NotFound", err, code)
+		t.Errorf("StatCell of no cell: status.Code(%v) = %v, want NotFound", err, code)
 	}
 
-	stores := filepath.Join(dir, "a")
-	if err := os.Mkdir(stores, 0o755); err != nil {
+	tenantDir := filepath.Join(dir, "a")
+	if err := os.Mkdir(tenantDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Tenant 42, whose socket is named in base 32, 1a (2a in hexadecimal).
-	granted, err := client.Grant(ctx, &cladefsdv1.GrantRequest{Tenant: 42, Dir: stores})
+	granted, err := client.Grant(ctx, &cladefsdv1.GrantRequest{Tenant: 42, Dir: tenantDir})
 	if err != nil {
 		t.Fatal(err)
 	}

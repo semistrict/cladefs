@@ -21,7 +21,7 @@
 # results are (bench-*.json): the cases' measurements and the checks they failed, and the
 # daemons' budgets' (bench-budgets.json, scripts/qualify-budgets.py), which scripts/bench-ab.py
 # compares, LangSmith's pin's rounds against the candidate's (scripts/bench-ab-host.sh's
-# CLADEFS_AB_SUITE=qualify, TASK-330.4). Not the stores, images and caches a failed case leaves,
+# CLADEFS_AB_SUITE=qualify, TASK-330.4). Not the cells, images and caches a failed case leaves,
 # gigabytes of them. What others wrote to its disk meanwhile is its caller's to record, the A/B's
 # each round (scripts/contamination.py, TASK-375); by hand: `contamination.py run RESULTS --
 # qualify.sh RESULTS`.
@@ -82,7 +82,7 @@ if (( soak_secs > 0 )); then
 fi
 "$root/scripts/qualify-budgets.py" "$results" "${parts[@]}" || status=1
 not_run budgets bench-budgets.json
-# What a failed case leaves of its stores, buckets, caches, images and roots: not results.
+# What a failed case leaves of its cells, buckets, caches, images and roots: not results.
 find "$results" -mindepth 2 -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' \
     -o -name '*-cache' -o -name '.cladefsd-cache.*' -o -name '*.bucket' -o -name 'store-*' \
     -o -name sandbox-image -o -name rootfs -o -name extents \) -prune -exec rm -rf {} +

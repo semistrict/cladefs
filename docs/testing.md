@@ -11,11 +11,11 @@ installs what they need in it; run again, it installs only what is missing.
 
 The guest tests (`guest/tests`) boot cladefs's guest kernel in cladefs's
 Firecracker, on Linux with KVM, and mount its Fxfs from an extent-store device,
-whose store cladefs's extent daemon serves (`scripts/test-e2e.sh` starts one):
+whose cell cladefs's extent daemon serves (`scripts/test-e2e.sh` starts one):
 `extent-guest` (the driver), `fxfs-guest`, `fxfs-guest-dax`, `fxfs-guest-checks`
 and `fxfs-guest-checks-dax` (file workloads, including `mmap`, after which the
-host remounts the store, fscks it, and checks what the guest wrote), the crash
-tests, resizing a mounted store, and pjdfstest. The harness (runner, guest agent
+host remounts the cell, fscks it, and checks what the guest wrote), the crash
+tests, resizing a mounted cell, and pjdfstest. The harness (runner, guest agent
 and test cases) came from libkrun's tests, Apache-2.0 (`guest/tests/LICENSE.libkrun`).
 
 ```sh
@@ -45,11 +45,11 @@ sudo scripts/pjdfstest-fuse.py target/debug/cladefs-mount   # Linux
 
 What the extent daemon costs is a test's assertion too, its budgets the design's (TASK-330): its
 anonymous memory, sampled as its stats are, against the sum of what its design bounds
-(`cladefs::cladefsd::process`: its upload memory, a framing for each store written, its fetches,
+(`cladefs::cladefsd::process`: its upload memory, a framing for each cell written, its fetches,
 its tenants' bytes in flight, its own), which its stats' `process:` line and its metrics say; and what it
 writes, by kind, against what it says it wrote. `scripts/test-e2e.sh` fails a run whose daemons
 passed either (`scripts/budgets.py`, which says too what each wrote for each guest byte, by kind);
-a host's store held to what its design writes for a guest's large file and its small files, each
+a host's cell held to what its design writes for a guest's large file and its small files, each
 byte raw once and framed once, a commit's copies a segment's worth at most
 (`bucket::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
 then answering again, VM processes writing all the while (`cladefsd::tests::soak`, five minutes in

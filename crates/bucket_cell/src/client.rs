@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! cladefs: the HTTP client of buckets in the cloud (TASK-205), which [`crate::object_bucket`]
-//! gives `object_store`'s S3, GCS and Azure stores. It is `object_store`'s own, reqwest, built from
-//! the same options as `object_store` builds it, but for how a request times out.
+//! gives `object_store`'s S3, GCS and Azure backends. It is `object_store`'s own, reqwest, built
+//! from the same options as `object_store` builds it, but for how a request times out.
 //!
 //! `object_store`'s gives a request 30 s, its body included. A host's uploads, up to 512 MiB of
 //! single PUTs at once, share its upstream: below 18 MB/s they all ran out of time together, part
@@ -51,8 +51,8 @@ impl Client {
     pub const DEFAULT: Self =
         Self { connect: Duration::from_secs(5), stall: Duration::from_secs(30) };
 
-    /// The options it builds stores with, which the environment's may add to: its connect timeout,
-    /// and no timeout of a whole request.
+    /// The options it builds backends with, which the environment's may add to: its connect
+    /// timeout, and no timeout of a whole request.
     pub(crate) fn options(&self) -> ClientOptions {
         ClientOptions::new().with_connect_timeout(self.connect).with_timeout_disabled()
     }

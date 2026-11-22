@@ -102,9 +102,7 @@ flate2 = { version = "1.1.9", default-features = false, features = ["rust_backen
 futures = "=0.3.34"
 futures-lite = "2.6.1"
 futures-test = "=0.3.34"
-paste = "1.0.15"
 lock_api = "0.4.14"
-parking_lot = "0.12.5"
 parking_lot_core = "0.9.12"
 pin-project-lite = "0.2.17"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
@@ -112,8 +110,9 @@ quote = "1.0.47"
 smallvec = { version = "1.15.2", features = ["const_generics", "const_new", "union"] }
 syn = { version = "2.0.119", features = ["full", "visit", "visit-mut", "extra-traits"] }
 # madsim's tokio (doc-24, TASK-685.1): tokio itself, built normally, which madsim-tokio re-exports;
-# madsim's simulated one under `--cfg madsim`. Crates outside the simulation (Fxfs's executor and
-# FUSE, the KMS backends over HTTP) name tokio itself, at the version Cargo.lock holds: 1.53.1.
+# madsim's simulated one under `--cfg madsim`. Crates outside the simulation (fuchsia-async's
+# executors, FUSE, the KMS backends over HTTP) name tokio itself, at the version Cargo.lock holds:
+# 1.53.1; fuchsia-async's tasks and timers are madsim's under it (board 5687).
 tokio = { package = "madsim-tokio", version = "=0.2.30", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
 zeroize = "1.9.1"
@@ -130,9 +129,6 @@ fxfs_trace_macros = { path = "crates/fxfs_trace_macros" }
 storage_ptr_slice = { path = "crates/storage_ptr_slice" }
 storage_trace = { path = "crates/storage_trace" }
 storage_units = { path = "crates/storage_units" }
-name = { path = "crates/name" }
-fidl-fuchsia-fs = { path = "crates/fidl-fuchsia-fs" }
-test_util = { path = "crates/test_util" }
 storage_xts = { path = "crates/storage_xts" }
 zx-status = { path = "crates/zx-status" }
 zx-status-ext = { path = "crates/zx-status-ext" }
@@ -150,7 +146,7 @@ fsverity_merkle = { path = "crates/fsverity_merkle" }
 blob_metadata = { path = "crates/blob_metadata" }
 block_protocol = { path = "crates/block_protocol" }
 storage_device = { path = "crates/storage_device" }
-extent_files = { path = "crates/extent_files" }
+block_device = { path = "crates/block_device" }
 local_cell = { path = "crates/local_cell" }
 follower = { path = "crates/follower" }
 follower_history = { path = "crates/follower_history" }

@@ -19,22 +19,34 @@ unasked. Available: Claude Sonnet 5.5, a second Claude instance (claudeAgent_cla
 and Codex. Recommend: the second Claude instance on Opus, else wait for the reset. Until answered:
 the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
 
+## Delete the dead crates `name` and `test_util`? (board 5762, 2026-11-21)
+
+Needed: your OK to delete two workspace members nothing depends on, with their tests:
+`crates/name` (the vfs library's names, 22 tests) and `crates/test_util` (18 tests), both copied
+from Fuchsia for code since removed (last touched by 7f8d6b69e). Why: your instructions reserve
+deleting tests to you; they build and run in every workspace run for nothing. Recommend: delete
+both. Until answered: they stay; their `[workspace.dependencies]` entries, which nothing took and
+Cargo warned of, are gone, as is `crates/fidl-fuchsia-fs`, dead with no tests.
+
 # Decisions
 
 ## A full host: the daemon's floor, cells refused, page-ins waiting (board 5662, 2026-11-21)
 
 You chose floor + refuse + wait. Decided without you:
-- **The floor defaults to a sixty-fourth of the host's memory, 256 MiB at least**
-  (`CLADEFSD_MEMORY_FLOOR` overrides it): 432 MiB on ubu1, where 176 small DAX VMs used about
+- **The floor defaults to a sixty-fourth of the memory the daemon's cgroup may have (the host's
+  without one), 256 MiB at least and an eighth of it at most** (`CLADEFSD_MEMORY_FLOOR` overrides
+  it): 432 MiB on ubu1, where 176 small DAX VMs used about
   40 MiB. That is about 4 VMs of density given up for a margin over bigger bases' working sets.
   *Undo:* `governor::floor`'s default.
 - **"Full" is entered under the floor and left only past it and a quarter more**, so that a host
   at the edge doesn't refuse and accept cells by turns.
 - **Only CreateCell and ForkCell are refused** (RESOURCE_EXHAUSTED, ENOMEM). Opening a cell that
   already exists, as a VM restarting does, is not, nor is ImportImage.
-- **Page-ins wait only when the host is full** (every arena's memory at the governor's cap, or no
-  chunk the host maps). A tenant at its own memory limit still fails with ENOMEM, as its limit is
-  its own to keep to (`physmem::Wait::UntilHostRoom`).
+- **Page-ins wait only when the host is full**: no page left while the governor's cap is the
+  host's (not a total an operator or test set lower) and the arena is not at its own cap. They wait
+  on the pager's runtime, retrying, never holding one of its threads. A tenant at its own memory
+  limit, or a daemon at a total set for it, still fails with ENOMEM, as that limit is its own to
+  keep to (`physmem::room_may_come`, `cache::TOTAL_IS_THE_HOSTS`).
 
 ## Cells per host: what a cell is and what stops the count (board 5581, 5583, 2026-11-21)
 
@@ -53,6 +65,14 @@ Decided without you:
   production never fixes.
 - **Hitting a limit is not a failure, but anything breaking past one is:** a VM exiting, a guest
   silent for 60 s, or the daemon letting a VM process go each fail the case, as bugs.
+
+## A cell's contents are one block device: `extent_files` became `block_device` (board 5790, 2026-11-21)
+
+The user's direction: a SQLite or memory cell holds a block device on its extents, not another filesystem ("if we need a file system, then we should have just used Fxfs"); a Durable Object's facets are cells of their own. Picked **block device** (crate `block_device`, type `BlockDevice`, trait `Window`; CONTEXT.md's term, **file set** retired) over keeping "file" words. Its calls: `read`, `write`, `discard` (was punch), `resize` (was truncate), `flush` (was a file's sync), `runs`, `fetch`. Gone: names, `open_file`/`close_file`/`exists`/`delete`, the file list in the root and the extent listing more of them (TASK-551: the root's largest now fits 4 KiB, asserted at compile time), the window's regions (`Options::window_regions`: the contents map from the window's offset 0). The format changed outright (root magic `CLADEBLK`, version 1); old roots are refused. `sqlite_cladefs::FileSet` became `Database`: the first name SQLite opens it by is its name while it lives, a second (another file, `ATTACH`) is refused with `OneDatabase`, and the name is not kept on the cell. `MemoryCell::punch` became `discard`, and `IMAGE` went. Tests of the multiplexing itself were turned into their one-device analogues, none dropped: TASK-516's failed delete into a failed discard, TASK-530's region given back into a first flush fetched in place, TASK-551's many files into the largest root fitting and a cell opening its one database by any name. Undoing: a later change bringing names back would be a new format.
+
+## "store" retired for a cell on a host: cell directory and open cell (board 5622, 2026-11-21)
+
+The user asked for "store" to go. Picked **cell directory** (`cell_dir`) for the directory on a host's disk and **open cell** (`OpenCell`, already the type) for the cell opened in the daemon, else just **cell**, over **host copy**, which misleads for an ephemeral cell, whose only copy it is. A CPU's store is a **write**; the object-storage backend's calls `object_*`, its `ObjectStore` implementations `...Backend`. Kept for a later task: the cell directory's file names (`store`, `store.deleted`: renaming them is a format change, and a directory with no description is deleted as never made), metric names, proto and JSON fields, CLI flags, environment variables, the guest scripts' language. Undoing: rename back, CONTEXT.md first.
 
 ## Control calls run to their end whoever gives up; waits that change nothing end with their caller (board 5599, 2026-11-21)
 
@@ -73,7 +93,7 @@ choice. *Undo:* `Drained::call` awaiting `self.0.call(request)` itself; the cont
 The first arm64 test host (16 KiB pages, SELinux) failed three ways. A window maps a store's 4 KiB
 blocks, and mmap maps only whole host pages at whole-page offsets in an extent, so on such a host
 a memory cell's window is refused as it is made (`cladefs::pages::window_fits_host`), and
-sqlite_extents' daemon file set opens with no window, reading copies. Supporting it instead would
+sqlite_cladefs' daemon database opens with no window, reading copies. Supporting it instead would
 mean blocks (or extents' layout) of the host's page size, a format change; arm64 servers mostly run
 4 KiB pages. cladefs-mount stores no SELinux label: the FUSE differential leaves the host's label
 out. Undoing: blocks of the host's page size for memory and SQLite cells, then drop the refusal; or

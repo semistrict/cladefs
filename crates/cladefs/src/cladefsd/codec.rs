@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the messages of the wire ([`super::wire`]) as types, each encoded and decoded here alone,
-//! so that both ends read a field at the index they write it at (TASK-160.9): the requests a VM
-//! process makes ([`Request`]), what it says of the stage operations it made ([`Made`]), what the
-//! daemon tells it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what
+//! cladefs: the messages of the wire ([`super::wire`]) as types, each encoded and decoded here
+//! alone, so that both ends read a field at the index they write it at (TASK-160.9): the requests a
+//! VM process makes ([`Request`]), what it says of the stage operations it made ([`Made`]), what
+//! the daemon tells it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what
 //! replies say besides their status ([`Opened`], [`Info`], [`Advanced`], [`mappings`]). The bytes
 //! are those each end wrote by hand before.
 //!
@@ -17,7 +17,11 @@
 //! flags it knows together that it doesn't, an argument out of its range, a payload or descriptors
 //! it has no use for, a status, which replies alone have, and a path that is empty or holds a NUL.
 //! The words a kind doesn't use it ignores. What a request names is checked as far as the message
-//! goes: whether its tenant may name it, and its store holds it, is the daemon's to say.
+//! goes: whether its tenant may name it, and its cell holds it, is the daemon's to say. cladefs:
+//! and the values it carries, as far as no meaning is theirs: an extent's sequence the last, which
+//! no cell's next sequence is past; a range whose end is past a u64's, or a window's past
+//! [`MAX_WINDOW`], as no window is larger (board 2762, 2776). The daemon is a trust boundary
+//! (AGENTS.md): past decoding, nothing it does with a request's values overflows.
 
 use super::wire::*;
 use crate::pages::{ArenaId, PhysLocation};
@@ -34,8 +38,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub(crate) enum Request<'a> {
-    /// [`OPEN`]: the store at `path`, opened as `opening` says. Its paths are owned: the daemon
-    /// opens a store to write holding no thread, beyond the message.
+    /// [`OPEN`]: the cell at `path`, opened as `opening` says. Its paths are owned: the daemon
+    /// opens a cell to write holding no thread, beyond the message.
     Open { path: PathBuf, opening: Opening },
     /// [`READ`]: `len` bytes at `offset` in `extent`, into its reply's payload, [`MAX_PAYLOAD`]
     /// at most, or the connection's transfer area.
@@ -67,7 +71,7 @@ pub(crate) enum Request<'a> {
     Fault(Fault),
     /// [`FORK`]: to `cell`, a new directory at `path`.
     Fork { path: PathBuf },
-    /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the store's cell, a VM snapshot's.
+    /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the cell, a VM snapshot's.
     Version,
     /// cladefs: [`FORK`] with [`FORK_DROP`]: drops the version `version`, one the connection made.
     DropVersion { version: u64 },
@@ -95,7 +99,7 @@ pub(crate) enum Request<'a> {
     Stats { ask: u64, guest: Option<&'a str> },
 }
 
-/// How an [`OPEN`] opens its store.
+/// How an [`OPEN`] opens its cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Opening {
     /// To write, if it exists (no flags).
@@ -133,7 +137,7 @@ pub(crate) enum Data<'a> {
 pub(crate) struct Fault {
     /// Where in the window.
     pub offset: u64,
-    /// A store ([`FAULT_WRITE`]), or not.
+    /// A write ([`FAULT_WRITE`]), or not.
     pub access: Access,
     /// On that page alone ([`FAULT_PAGE`]).
     pub page: bool,
@@ -246,7 +250,7 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// The paths it names, of stores: which the daemon authorizes, all of them, before it serves
+    /// The paths it names, of cells: which the daemon authorizes, all of them, before it serves
     /// it.
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
         match self {
@@ -387,7 +391,7 @@ impl<'a> Request<'a> {
         let has = |flag: u32| flags & flag != 0;
         // The payload of a request that carries none.
         let nothing = || if payload.is_empty() { Ok(()) } else { Err(Errno::EINVAL) };
-        let extent = ExtentId { cell: args[0], sequence: args[1] };
+        let extent = || extent_of(args[0], args[1]);
         Ok(match kind {
             OPEN => {
                 let (named, opening) = match flags {
@@ -419,7 +423,8 @@ impl<'a> Request<'a> {
                     false if len > MAX_PAYLOAD => return Err(Errno::EINVAL),
                     false => ReadInto::Reply,
                 };
-                Request::Read { extent, offset: args[2], len, into }
+                ends(args[2], len)?;
+                Request::Read { extent: extent()?, offset: args[2], len, into }
             }
             WRITE => {
                 // A commit's flags, without a commit.
@@ -451,23 +456,32 @@ impl<'a> Request<'a> {
                     });
                 let root = has(WRITE_ROOT).then_some(root);
                 let barriers = WriteBarriers { before: has(WRITE_BARRIER), after, root };
-                Request::Write { extent, offset: args[2], data, barriers }
+                let len = match data {
+                    Data::Inline(data) => data.len() as u64,
+                    Data::Transfer { len, .. } => len,
+                };
+                ends(args[2], len)?;
+                Request::Write { extent: extent()?, offset: args[2], data, barriers }
             }
             FREE => {
                 nothing()?;
-                Request::Free(extent)
+                Request::Free(extent()?)
             }
             FREE_MANY => {
                 let rest: Cow<'a, [ExtentId]> = Cow::Owned(extent_ids(payload)?.collect());
-                Request::FreeMany { first: extent, rest }
+                Request::FreeMany { first: extent()?, rest }
             }
             MAP => {
                 nothing()?;
                 let contents = match has(MAP_ZEROS) {
-                    false => MappingContents::Extent { extent, offset: args[2] },
+                    false => MappingContents::Extent { extent: extent()?, offset: args[2] },
                     true => MappingContents::Zeros,
                 };
-                Request::Map(WindowMapping { window_offset: args[4], len: args[3], contents })
+                Request::Map(mapping(WindowMapping {
+                    window_offset: args[4],
+                    len: args[3],
+                    contents,
+                })?)
             }
             // cladefs: one mapping at least (TASK-92.14).
             MAP_MANY => match mappings(payload)? {
@@ -476,6 +490,7 @@ impl<'a> Request<'a> {
             },
             UNMAP => {
                 nothing()?;
+                in_window(args[0], args[1])?;
                 Request::Unmap { window_offset: args[0], len: args[1] }
             }
             COMMIT => {
@@ -552,7 +567,7 @@ impl<'a> Request<'a> {
             }
             PIN | UNPIN => {
                 nothing()?;
-                if kind == PIN { Request::Pin(extent) } else { Request::Unpin(extent) }
+                if kind == PIN { Request::Pin(extent()?) } else { Request::Unpin(extent()?) }
             }
             TRANSFER => {
                 nothing()?;
@@ -561,6 +576,7 @@ impl<'a> Request<'a> {
             BUILD => Request::Build(build(payload)?),
             PRIVATE => {
                 nothing()?;
+                in_window(args[0], args[1])?;
                 Request::Private { window_offset: args[0], len: args[1] }
             }
             STATS => {
@@ -578,14 +594,14 @@ impl<'a> Request<'a> {
     }
 }
 
-/// cladefs: the bytes of data the request `header` is of moves through the stream: its payload, and,
-/// a `READ`'s, its reply's: [`MAX_PAYLOAD`] at most, as one asking for more is refused (`EINVAL`),
-/// its reply's payload empty, whatever the VM process asks for: so a word that would overflow the
-/// bytes counted is counted as no more (TASK-79.16). Of the header alone, as the daemon admits a
-/// request before it reads its payload, and decodes it. cladefs: and what the daemon makes of a
-/// payload besides, as long as it holds the payload, counted too (TASK-614): a `FREE_MANY`'s
-/// extents, decoded, as many bytes again; a `MAP_MANY`'s mappings, and the window's pieces mapping
-/// them makes, [`MAP_MANY_HELD`] times its payload in all.
+/// cladefs: the bytes of data the request `header` is of moves through the stream: its payload,
+/// and, a `READ`'s, its reply's: [`MAX_PAYLOAD`] at most, as one asking for more is refused
+/// (`EINVAL`), its reply's payload empty, whatever the VM process asks for: so a word that would
+/// overflow the bytes counted is counted as no more (TASK-79.16). Of the header alone, as the
+/// daemon admits a request before it reads its payload, and decodes it. cladefs: and what the
+/// daemon makes of a payload besides, as long as it holds the payload, counted too (TASK-614): a
+/// `FREE_MANY`'s extents, decoded, as many bytes again; a `MAP_MANY`'s mappings, and the window's
+/// pieces mapping them makes, [`MAP_MANY_HELD`] times its payload in all.
 pub(crate) fn stream_bytes(header: &Header) -> u64 {
     match header.kind {
         READ if header.flags & READ_TRANSFER == 0 => header.len + header.args[3].min(MAX_PAYLOAD),
@@ -613,7 +629,9 @@ pub(crate) fn guest_request(message: &Message) -> Result<(Option<NonZeroU64>, &[
     Ok((Some(guest), rest))
 }
 
-/// cladefs: the bytes a [`REQUEST`] says the guest request `guest` in (TASK-260).
+/// cladefs: the bytes a [`REQUEST`] says the guest request `guest` in (TASK-260): a VM process's
+/// client's, Linux's alone.
+#[cfg(target_os = "linux")]
 pub(crate) fn request_bytes(guest: NonZeroU64) -> [u8; REQUEST_BYTES] {
     guest.get().to_le_bytes()
 }
@@ -659,17 +677,53 @@ fn extent_ids_payload(extents: &[ExtentId]) -> Vec<u8> {
         .collect()
 }
 
-/// cladefs: the extents a [`FREE_MANY`]'s payload names: `EINVAL` unless it is whole IDs.
+/// cladefs: the extents a [`FREE_MANY`]'s payload names: `EINVAL` unless it is whole IDs, each
+/// one [`extent_of`] takes.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn extent_ids(payload: &[u8]) -> Result<impl Iterator<Item = ExtentId> + '_, Errno> {
     let (ids, []) = payload.as_chunks::<EXTENT_ID_BYTES>() else {
         return Err(Errno::EINVAL);
     };
-    Ok(ids.iter().map(|id| ExtentId { cell: word(&id[..8]), sequence: word(&id[8..]) }))
+    let ids = ids.iter().map(|id| {
+        let ([cell, sequence], []) = id.as_chunks::<8>() else { unreachable!("16 bytes") };
+        extent_of(u64::from_le_bytes(*cell), u64::from_le_bytes(*sequence))
+    });
+    // Checked before any is used: none names the last sequence.
+    let ids: Vec<ExtentId> = ids.collect::<Result<_, _>>()?;
+    Ok(ids.into_iter())
 }
 
-/// The little-endian word `bytes`, eight of them, hold.
-fn word(bytes: &[u8]) -> u64 {
-    u64::from_le_bytes(bytes.try_into().expect("a word's bytes"))
+/// cladefs: the extent `cell` and `sequence` name, a request's: `EINVAL` for the last sequence,
+/// past which no cell's next sequence is, nor a spent run's end (board 2762).
+fn extent_of(cell: u64, sequence: u64) -> Result<ExtentId, Errno> {
+    match sequence {
+        u64::MAX => Err(Errno::EINVAL),
+        sequence => Ok(ExtentId { cell, sequence }),
+    }
+}
+
+/// cladefs: `EINVAL` unless the `len` bytes at `offset` end within a u64 (board 2776).
+fn ends(offset: u64, len: u64) -> Result<(), Errno> {
+    offset.checked_add(len).map(drop).ok_or(Errno::EINVAL)
+}
+
+/// cladefs: `EINVAL` unless the `len` bytes at `offset` of a window end within [`MAX_WINDOW`], as
+/// every window does (board 2776): so that what sums them, as a `MAP_MANY`'s pieces, holds.
+fn in_window(offset: u64, len: u64) -> Result<(), Errno> {
+    match offset.checked_add(len) {
+        Some(end) if end <= MAX_WINDOW => Ok(()),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// cladefs: `mapping`, its range in the window within [`MAX_WINDOW`] and its range in its extent
+/// within a u64 ([`in_window`], [`ends`]).
+fn mapping(mapping: WindowMapping) -> Result<WindowMapping, Errno> {
+    in_window(mapping.window_offset, mapping.len)?;
+    if let MappingContents::Extent { offset, .. } = mapping.contents {
+        ends(offset, mapping.len)?;
+    }
+    Ok(mapping)
 }
 
 /// What a VM process says of the stage operations it made, which nothing replies to.
@@ -696,6 +750,7 @@ pub(crate) struct StageCounts {
 }
 
 impl StageCounts {
+    #[cfg(target_os = "linux")]
     fn args(&self) -> [u64; 5] {
         let [ops, ns, overwrites, leave_outs] = self.costs;
         [ops, ns, overwrites, leave_outs, self.installed]
@@ -713,6 +768,7 @@ impl StageCounts {
 pub(crate) type PrivateCosts = [u64; 5];
 
 impl Made {
+    #[cfg(target_os = "linux")]
     pub fn encode(&self) -> Header {
         match *self {
             Made::Ack { id, counts } => Header::new(ACK, id).with_args(&counts.args()),
@@ -743,7 +799,7 @@ impl Made {
 pub(crate) enum Told {
     /// A stage operation, which the VM process makes of its window.
     Stage(Stage),
-    /// [`CAPACITY`]: the store's capacity is `capacity` bytes now; or, if `ask`, the guest is asked
+    /// [`CAPACITY`]: the cell's capacity is `capacity` bytes now; or, if `ask`, the guest is asked
     /// to shrink to it ([`CAPACITY_ASK`]).
     Capacity { capacity: u64, ask: bool },
     /// cladefs: [`COMMITTED`].
@@ -889,11 +945,11 @@ pub(crate) fn with_version(mut header: Header) -> Header {
 /// What a reply to an [`OPEN`] says, with the physical memory it carries (TASK-43, TASK-79.17).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Opened {
-    /// The store's cell.
+    /// The cell.
     pub cell: u64,
     /// The arena of the memory it carries first: the VM process's tenant's.
     pub arena: ArenaId,
-    /// cladefs: a follower's view's commit number; 0 of a store opened to write.
+    /// cladefs: a follower's view's commit number; 0 of a cell opened to write.
     pub commit: u64,
     /// cladefs: how many mappings the host lets a process make, if it limits them
     /// (`physmem::max_map_count`), which the VM process's window budgets its own by: the daemon
@@ -920,7 +976,7 @@ impl Opened {
     }
 }
 
-/// What a reply to an [`INFO`] says: the store's [`ExtentInfo`].
+/// What a reply to an [`INFO`] says: the cell's [`ExtentInfo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Info(pub ExtentInfo);
 
@@ -945,7 +1001,7 @@ pub(crate) struct Advanced {
 /// cladefs: a [`FORK`]'s reply: the fork's cell's ID, the bucket's to give (TASK-364).
 pub(crate) struct Forked {
     pub cell: u64,
-    /// cladefs: of a quiescent [`FORK`], the version of the store's cell made, a VM snapshot's, and
+    /// cladefs: of a quiescent [`FORK`], the version of the cell made, a VM snapshot's, and
     /// the cell's tenant; else 0.
     pub version: u64,
     pub tenant: u64,
@@ -966,6 +1022,7 @@ impl Advanced {
         [self.commit, 0, 0, 0, 0]
     }
 
+    #[cfg(target_os = "linux")]
     pub fn from_args(args: [u64; 5]) -> Self {
         Self { commit: args[0] }
     }
@@ -990,20 +1047,22 @@ pub(crate) fn mappings_payload(mappings: &[WindowMapping]) -> Vec<u8> {
 
 /// The mappings a reply to [`MAPPINGS`], or a [`MAP_MANY`], carries, `payload`: `EINVAL` unless
 /// whole ones, of flags known.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub(crate) fn mappings(payload: &[u8]) -> Result<Vec<WindowMapping>, Errno> {
     let (mappings, []) = payload.as_chunks::<{ MAPPING_BYTES as usize }>() else {
         return Err(Errno::EINVAL);
     };
     (mappings.iter())
-        .map(|mapping| {
-            let [window_offset, len, cell, sequence, offset, flags] =
-                std::array::from_fn(|at| word(&mapping[8 * at..8 * (at + 1)]));
+        .map(|bytes| {
+            let (words, []) = bytes.as_chunks::<8>() else { unreachable!("48 bytes") };
+            let words: [[u8; 8]; 6] = words.try_into().expect("48 bytes are 6 words");
+            let [window_offset, len, cell, sequence, offset, flags] = words.map(u64::from_le_bytes);
             let contents = match flags {
-                0 => MappingContents::Extent { extent: ExtentId { cell, sequence }, offset },
+                0 => MappingContents::Extent { extent: extent_of(cell, sequence)?, offset },
                 MAPPING_ZEROS => MappingContents::Zeros,
                 _ => return Err(Errno::EINVAL),
             };
-            Ok(WindowMapping { window_offset, len, contents })
+            mapping(WindowMapping { window_offset, len, contents })
         })
         .collect()
 }
@@ -1072,15 +1131,34 @@ mod tests {
     /// each of its ways.
     fn requests<'a>(fields: &'a Fields, area: BorrowedFd<'a>) -> Vec<Request<'a>> {
         let Fields { words: [a, b, c, d, e], flags: [one, two, three], .. } = *fields;
-        let extent = ExtentId { cell: a, sequence: b };
-        let other = ExtentId { cell: c, sequence: d };
+        // cladefs: each value as far as it means anything (board 2762, 2776), what decoding refuses
+        // otherwise (`values_meaning_nothing_are_refused`).
+        let (extent, other) = (known(a, b), known(c, d));
+        let (window_offset, window_len) = windowed(d, e);
         let path = fields.path.clone();
         let commit = fields.commit;
         let root = (one && two).then_some(&fields.root[..]);
         let barriers = WriteBarriers { before: three, after: two.then_some(commit), root };
-        let read = |len, into| Request::Read { extent, offset: c, len, into };
-        let write = |data| Request::Write { extent, offset: c, data, barriers };
-        let map = |contents| Request::Map(WindowMapping { window_offset: d, len: e, contents });
+        let read = |len, into| Request::Read { extent, offset: ending(c, len), len, into };
+        let write = |data: Data<'a>| {
+            let len = match data {
+                Data::Inline(data) => data.len() as u64,
+                Data::Transfer { len, .. } => len,
+            };
+            Request::Write { extent, offset: ending(c, len), data, barriers }
+        };
+        let map = |contents| {
+            let contents = match contents {
+                MappingContents::Extent { extent, offset } => {
+                    MappingContents::Extent { extent, offset: ending(offset, window_len) }
+                }
+                zeros => zeros,
+            };
+            Request::Map(WindowMapping { window_offset, len: window_len, contents })
+        };
+        let rest: Vec<ExtentId> =
+            fields.extents.iter().map(|id| known(id.cell, id.sequence)).collect();
+        let (unmapped, unmapped_len) = windowed(a, b);
         let open = |opening| Request::Open { path: path.clone(), opening };
         vec![
             open(Opening::Existing),
@@ -1094,18 +1172,25 @@ mod tests {
             write(Data::Inline(&fields.data[..])),
             write(Data::Transfer { at: d, len: e }),
             Request::Free(extent),
-            Request::FreeMany { first: extent, rest: Cow::Borrowed(&fields.extents[..]) },
+            Request::FreeMany { first: extent, rest: Cow::Owned(rest) },
             map(MappingContents::Extent { extent: other, offset: a }),
             map(MappingContents::Zeros),
             Request::MapMany(Cow::Owned(vec![
                 WindowMapping {
-                    window_offset: d,
-                    len: e,
-                    contents: MappingContents::Extent { extent: other, offset: a },
+                    window_offset,
+                    len: window_len,
+                    contents: MappingContents::Extent {
+                        extent: other,
+                        offset: ending(a, window_len),
+                    },
                 },
-                WindowMapping { window_offset: a, len: b, contents: MappingContents::Zeros },
+                WindowMapping {
+                    window_offset: unmapped,
+                    len: unmapped_len,
+                    contents: MappingContents::Zeros,
+                },
             ])),
-            Request::Unmap { window_offset: a, len: b },
+            Request::Unmap { window_offset: unmapped, len: unmapped_len },
             Request::Commit { commit, root: one.then_some(&fields.data[..]) },
             Request::Root,
             Request::Info,
@@ -1128,10 +1213,71 @@ mod tests {
             Request::Unpin(other),
             Request::Transfer { len: a, area: Area(area) },
             Request::Build(&fields.build),
-            Request::Private { window_offset: a, len: b },
+            Request::Private { window_offset: unmapped, len: unmapped_len },
             Request::Stats { ask: a, guest: None },
             Request::Stats { ask: b, guest: Some(&fields.stats) },
         ]
+    }
+
+    /// cladefs: the extent of `cell` and `sequence`, as far as its sequence means one: the last
+    /// none (board 2762).
+    fn known(cell: u64, sequence: u64) -> ExtentId {
+        ExtentId { cell, sequence: sequence.min(u64::MAX - 1) }
+    }
+
+    /// cladefs: `offset`, as far as the `len` bytes there end within a u64 (board 2776).
+    fn ending(offset: u64, len: u64) -> u64 {
+        offset.min(u64::MAX - len)
+    }
+
+    /// cladefs: a range of a window of `offset` and `len`, as far as it ends within
+    /// [`MAX_WINDOW`] (board 2776).
+    fn windowed(offset: u64, len: u64) -> (u64, u64) {
+        let len = len % (MAX_WINDOW + 1);
+        (offset % (MAX_WINDOW - len + 1), len)
+    }
+
+    /// cladefs board 2762, 2776: a request's values that mean nothing are refused, `EINVAL`, where
+    /// they are decoded: an extent's sequence the last, of a request's own extent, a `FREE_MANY`'s
+    /// further one or a mapping's; a range whose end is past a u64's; a window's range past
+    /// [`MAX_WINDOW`]. The same requests a step inside, decoded.
+    #[test]
+    fn values_meaning_nothing_are_refused() {
+        let decoded = |header: Header, payload: Vec<u8>| {
+            Request::decode(&Message { header, payload, fds: vec![] }).err()
+        };
+        let refused = Some(Errno::EINVAL);
+        let last = u64::MAX;
+        for (kind, args, past, inside) in [
+            (WRITE, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
+            (FREE, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
+            (PIN, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
+            (READ, [1, 1, 0, 4096, 0], [1, 1, last - 4095, 4096, 0], [1, 1, last - 4096, 4096, 0]),
+            (UNMAP, [0, 4096, 0, 0, 0], [MAX_WINDOW, 1, 0, 0, 0], [MAX_WINDOW - 1, 1, 0, 0, 0]),
+            (PRIVATE, [0, 4096, 0, 0, 0], [1, MAX_WINDOW, 0, 0, 0], [0, MAX_WINDOW, 0, 0, 0]),
+            (MAP, [1, 1, 0, 4096, 0], [1, 1, last, 1, 0], [1, 1, last - 1, 1, 0]),
+            (MAP, [1, 1, 0, 4096, 0], [1, 1, 0, 2, MAX_WINDOW - 1], [1, 1, 0, 1, MAX_WINDOW - 1]),
+        ] {
+            let payload = if kind == WRITE { vec![7; 4096] } else { vec![] };
+            let header = |args: [u64; 5]| Header::new(kind, 1).with_args(&args);
+            assert_eq!(decoded(header(args), payload.clone()), None, "{kind} {args:?}");
+            assert_eq!(decoded(header(past), payload.clone()), refused, "{kind} {past:?}");
+            assert_eq!(decoded(header(inside), payload), None, "{kind} {inside:?}");
+        }
+        let ids = |sequence: u64| [1u64, sequence].map(u64::to_le_bytes).concat();
+        let freeing = Header::new(FREE_MANY, 1).with_args(&[1, 1]);
+        assert_eq!(decoded(freeing, ids(last)), refused);
+        assert_eq!(decoded(freeing, ids(last - 1)), None);
+        let mapping =
+            |len: u64, sequence: u64| [0, len, 1, sequence, 0, 0].map(u64::to_le_bytes).concat();
+        for (bad, why) in [(mapping(last, 1), "its length"), (mapping(1, last), "its sequence")] {
+            assert_eq!(mappings(&bad).err(), refused, "{why}");
+            assert_eq!(decoded(Header::new(MAP_MANY, 1), bad), refused, "{why}");
+        }
+        // As many as a payload holds, each the largest a window holds: their sum within a u64.
+        let many = mapping(MAX_WINDOW, 1).repeat((MAX_PAYLOAD / MAPPING_BYTES) as usize);
+        let sum: u64 = mappings(&many).unwrap().iter().map(|mapping| mapping.len).sum();
+        assert_eq!(sum, MAX_WINDOW * (MAX_PAYLOAD / MAPPING_BYTES));
     }
 
     /// Every kind of request.
@@ -1612,16 +1758,20 @@ mod tests {
             let advanced = Advanced { commit: a };
             prop_assert_eq!(Advanced::from_args(advanced.args()), advanced);
             let mapped: Vec<WindowMapping> = (mappings_of.into_iter())
-                .map(|([window_offset, len, cell, sequence, offset], zeros)| WindowMapping {
-                    window_offset,
-                    len,
-                    contents: match zeros {
-                        true => MappingContents::Zeros,
-                        false => {
-                            let extent = ExtentId { cell, sequence };
-                            MappingContents::Extent { extent, offset }
-                        }
-                    },
+                .map(|([window_offset, len, cell, sequence, offset], zeros)| {
+                    // cladefs: as far as they mean anything (board 2762, 2776).
+                    let (window_offset, len) = windowed(window_offset, len);
+                    WindowMapping {
+                        window_offset,
+                        len,
+                        contents: match zeros {
+                            true => MappingContents::Zeros,
+                            false => {
+                                let extent = known(cell, sequence);
+                                MappingContents::Extent { extent, offset: ending(offset, len) }
+                            }
+                        },
+                    }
                 })
                 .collect();
             let payload = mappings_payload(&mapped);

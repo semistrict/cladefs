@@ -11,7 +11,7 @@
 use crate::script::Rng;
 use std::collections::BTreeSet;
 
-/// The VMs that run at once, each on a store of its own forked from the base.
+/// The VMs that run at once, each on a cell of its own forked from the base.
 pub const SLOTS: usize = 5;
 
 /// The writers of a writer's VM, each with files of its own in its run's directory.
@@ -58,16 +58,16 @@ pub enum Fault {
     VmCrash,
     /// The extent daemon killed (SIGKILL) and started again, its VMs booted again.
     DaemonKill,
-    /// An upload failing, which stops its store's uploader until the store is attached again.
+    /// An upload failing, which stops its cell's uploader until the cell is attached again.
     UploadFail,
     /// The bucket answering late: uploads lag behind the commits, which a lost host loses.
     Latency,
-    /// The host lost: its stores and cache taken away, every cell taken again from the bucket
+    /// The host lost: its cells and cache taken away, every cell taken again from the bucket
     /// by a daemon of a later placement.
     HostLoss,
     /// The host's cache of the bucket lost between two daemons.
     CacheLoss,
-    /// A VM's store deleted, its cell with it, and forked again from the base.
+    /// A VM's cell directory deleted, its cell with it, and forked again from the base.
     Refork,
 }
 
@@ -117,7 +117,7 @@ impl Fault {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotPlan {
     pub load: Load,
-    /// Whether its store is deleted as the repeat begins, and forked from the base again.
+    /// Whether its cell directory is deleted as the repeat begins, and forked from the base again.
     pub refork: bool,
     /// When its VM's process is killed, in seconds from the repeat's start.
     pub crash_at: Option<u64>,
@@ -134,7 +134,7 @@ pub struct Plan {
     pub slots: Vec<SlotPlan>,
     /// The bucket's latency, in milliseconds, for the repeat's daemons but the checking one.
     pub latency_ms: u64,
-    /// The upload after which one fails, its store's uploader stopping: FAILPOINTS'
+    /// The upload after which one fails, its cell's uploader stopping: FAILPOINTS'
     /// `writer::upload` ([`Plan::failpoints`]).
     pub upload_fails_after: Option<u64>,
     /// When the daemon is killed, and started again.
@@ -272,7 +272,7 @@ pub fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-/// The name of slot's run of boot `boot` of repeat `repeat`, of its store's generation `generation`
+/// The name of slot's run of boot `boot` of repeat `repeat`, of its cell's generation `generation`
 /// (how many times it was forked again): in the order they were made.
 pub fn run_name(generation: u32, repeat: u64, boot: u32) -> String {
     format!("g{generation:03}r{repeat:04}b{boot}")

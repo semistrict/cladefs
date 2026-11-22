@@ -19,14 +19,14 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     /// An Fxfs filesystem.
     Fxfs,
-    /// A database of `sqlite_extents`.
+    /// A database of `sqlite_cladefs`.
     Sqlite,
-    /// A VM's memory: an `extent_files` file set of one file, its image (TASK-456).
+    /// A VM's memory: a `block_device` whose contents are its image (TASK-456).
     Memory,
 }
 
 impl Kind {
-    /// Its name, as a store's description says it: `fxfs`, `sqlite` or `memory`.
+    /// Its name, as a cell's description says it: `fxfs`, `sqlite` or `memory`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Fxfs => "fxfs",
@@ -41,12 +41,12 @@ impl Kind {
     }
 }
 
-/// cladefs: every cell of `bucket` with an object under its prefix, in the order of their keys: found
-/// by delimiter listings of `tenants/` then of each tenant's `cells/`, listing none of their objects
-/// (TASK-395.4, TASK-395.5): what a sweep of the collector over every cell visits. A page at a
-/// time, of tenants and of a tenant's cells, each listed as the cells before it are taken: so it
-/// holds no more than a page of each, a tenant of millions of cells as one of a few. A request for
-/// every [`LIST_PAGE`](bucket::LIST_PAGE) tenants, and one for every
+/// cladefs: every cell of `bucket` with an object under its prefix, in the order of their keys:
+/// found by delimiter listings of `tenants/` then of each tenant's `cells/`, listing none of their
+/// objects (TASK-395.4, TASK-395.5): what a sweep of the collector over every cell visits. A page
+/// at a time, of tenants and of a tenant's cells, each listed as the cells before it are taken: so
+/// it holds no more than a page of each, a tenant of millions of cells as one of a few. A request
+/// for every [`LIST_PAGE`](bucket::LIST_PAGE) tenants, and one for every
 /// [`LIST_PAGE`](bucket::LIST_PAGE) cells of each.
 pub fn listed<B: Bucket>(bucket: &B) -> impl Stream<Item = CellId> + Send + '_ {
     tenants(bucket).flat_map(move |tenant| of_tenant(bucket, tenant))
@@ -59,9 +59,9 @@ pub fn tenants<B: Bucket>(bucket: &B) -> impl Stream<Item = u64> + Send + '_ {
     tenants.filter_map(|prefix| std::future::ready(layout::tenant_of_prefix(&prefix)))
 }
 
-/// cladefs: every cell of `tenant` with an object under its prefix, in order: by a delimiter listing
-/// of the tenant's `cells/`, a page at a time, listing none of their objects (`cladefs-gc --usage`,
-/// TASK-395.8).
+/// cladefs: every cell of `tenant` with an object under its prefix, in order: by a delimiter
+/// listing of the tenant's `cells/`, a page at a time, listing none of their objects (`cladefs-gc
+/// --usage`, TASK-395.8).
 pub fn of_tenant<B: Bucket>(bucket: &B, tenant: u64) -> impl Stream<Item = CellId> + Send + '_ {
     let cells = bucket::prefixes(bucket, layout::cells_of(tenant));
     cells.filter_map(|prefix| std::future::ready(layout::cell_of_prefix(&prefix)))

@@ -5,12 +5,12 @@
 //! cladefs's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
 //! KMS making every tenant's KEK on first use, in memory, the tests' default ([`MemoryKms`],
 //! TASK-411.28); one whose every tenant's KEK is one known key, which tests' processes share with
-//! those they start ([`KnownKms`], TASK-411.28); a KMS that counts the calls made of it ([`Counted`]), so that a test can say how
-//! many a path costs: none on a fork's, one for a host taking a cell; a KMS forgetting destroyed
-//! KEKs, as real ones forget deleted keys ([`Forgetting`], TASK-411.19); AWS KMS's emulator,
-//! started for a test ([`LocalAwsKms`], TASK-411.17); an OpenBao dev server
-//! ([`openbao::DevServer`], TASK-411.16), the real KMS a test can start; and what tests against
-//! real Google Cloud KMS need ([`gcp`], TASK-411.18).
+//! those they start ([`KnownKms`], TASK-411.28); a KMS that counts the calls made of it
+//! ([`Counted`]), so that a test can say how many a path costs: none on a fork's, one for a host
+//! taking a cell; a KMS forgetting destroyed KEKs, as real ones forget deleted keys
+//! ([`Forgetting`], TASK-411.19); AWS KMS's emulator, started for a test ([`LocalAwsKms`],
+//! TASK-411.17); an OpenBao dev server ([`openbao::DevServer`], TASK-411.16), the real KMS a test
+//! can start; and what tests against real Google Cloud KMS need ([`gcp`], TASK-411.18).
 
 use crate::kms::{Error, Kms};
 use crate::{Secret, Wrapped};
@@ -79,7 +79,7 @@ impl<K: Kms> Kms for Counted<K> {
     }
 }
 
-/// cladefs: the tests' KMS by default (TASK-411.28: every store encrypted, every test too): each
+/// cladefs: the tests' KMS by default (TASK-411.28: every cell encrypted, every test too): each
 /// tenant's KEK made on its first wrap and kept in memory, as the bucket KMS makes them in the
 /// bucket (`bucket_cell::bucket_kms`), so that any tenant a test names is encrypted with no setup.
 /// Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]). A tenant [`MemoryKms::destroy`]ed
@@ -136,11 +136,11 @@ impl Kms for MemoryKms {
 }
 
 /// A KMS whose every tenant's KEK is one known key, [`KnownKms::KEK`], in every process, never a
-/// host's: what cladefs's tests' processes, and those they start, encrypt under when their environment
-/// names no KMS, agreeing with no state shared, whatever bucket each keeps its stores in (cladefs's
-/// `tests-kms`, TASK-411.28). Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]), each
-/// under a key derived for its tenant alone: one tenant's key unwraps for no other. No tenant's is
-/// ever destroyed: a test of that has a KMS of its own.
+/// host's: what cladefs's tests' processes, and those they start, encrypt under when their
+/// environment names no KMS, agreeing with no state shared, whatever bucket each keeps its cells in
+/// (cladefs's `tests-kms`, TASK-411.28). Its wraps are the bucket KMS's
+/// ([`crate::kms::bucket::wrap`]), each under a key derived for its tenant alone: one tenant's key
+/// unwraps for no other. No tenant's is ever destroyed: a test of that has a KMS of its own.
 pub struct KnownKms;
 
 impl KnownKms {
@@ -169,7 +169,7 @@ impl Kms for KnownKms {
 /// KMS once its deletion's waiting period is over, OpenBao Transit's key deleted (TASK-411.19).
 /// Where `inner` answers [`Error::Destroyed`], it answers [`Error::NoSuchTenant`], as for a tenant
 /// that never had a KEK: so a [`crate::kms::LocalKms`]'s `destroy` reads as a real KMS's deletion,
-/// which every store refuses as destroyed all the same (TASK-411.28).
+/// which every cell refuses as destroyed all the same (TASK-411.28).
 pub struct Forgetting<K> {
     inner: K,
 }

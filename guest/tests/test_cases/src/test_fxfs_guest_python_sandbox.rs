@@ -46,11 +46,12 @@
 //! restarted, its peers warm (`warm_peers`).
 //!
 //! Each sandbox is timed by phase, on the host's clock from just before its fork: the fork, the VM
-//! process started, the guest's boot to its agent (the guest's own clock, from its kernel's
-//! start), marimo serving (the notebook's alone), and the answers, each as the guest says it on its
-//! console, which the host watches. And what it cost the hosts between them: their bucket GETs and the bytes those
-//! downloaded, the parts asked of peers and given, the parts each served. It fails if a sandbox's
-//! answers are not [`ANSWERS`], what the notebook answered outside any VM, on the same files.
+//! process started, the guest's boot to its agent (the guest's own clock, from its kernel's start),
+//! marimo serving (the notebook's alone), and the answers, each as the guest says it on its
+//! console, which the host watches. And what it cost the hosts between them: their bucket GETs and
+//! the bytes those downloaded, the parts asked of peers and given, the parts each served. It fails
+//! if a sandbox's answers are not [`ANSWERS`], what the notebook answered outside any VM, on the
+//! same files.
 
 use macros::{guest, host};
 
@@ -770,7 +771,7 @@ RUN find / -xdev -name '*.pyc' -delete
                 measured.failed("sandbox", failure.clone());
             }
             ensure!(failed.is_empty(), "{} sandboxes failed", failed.len());
-            // Passed: its stores, caches and image go; its logs stay.
+            // Passed: its cells, caches and image go; its logs stay.
             for entry in std::fs::read_dir(dir)? {
                 let path = entry?.path();
                 let name = path.file_name().unwrap_or_default().to_string_lossy();

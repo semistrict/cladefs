@@ -4,11 +4,11 @@
 
 //! cladefs: a byte of a framed file, a closed segment's or a sealed extent's own, that the host's
 //! disk damaged fails whatever reads it, rather than giving another byte, and goes nowhere under a
-//! CRC of its own (TASK-153.11): the store's reads, which the guest's and the extent cache's
-//! page-ins are (`LocalCell::read`), the uploader's (`LocalCell::read_kept`, and the segments it takes as
-//! they are, `Closed::bytes`), a follower's (`LocalCell::read_view`), a fork's of what it inherited,
-//! and the copies of a seal. Of parts stored compressed and stored raw alike: a raw
-//! part was read in place, unchecked, until TASK-153.11.
+//! CRC of its own (TASK-153.11): the cell's reads, which the guest's and the extent cache's
+//! page-ins are (`LocalCell::read`), the uploader's (`LocalCell::read_kept`, and the segments it
+//! takes as they are, `Closed::bytes`), a follower's (`LocalCell::read_view`), a fork's of what it
+//! inherited, and the copies of a seal. Of parts stored compressed and stored raw alike: a raw part
+//! was read in place, unchecked, until TASK-153.11.
 
 mod common;
 
@@ -59,15 +59,15 @@ fn contents() -> Vec<(ExtentId, Vec<u8>, Encoding)> {
     ]
 }
 
-/// A store holding [`contents`], sealed, its segment closed.
+/// A cell holding [`contents`], sealed, its segment closed.
 async fn holding(dir: &MemDir) -> LocalCell<MemDir> {
-    let store = create(dir, OPTIONS);
+    let cell = create(dir, OPTIONS);
     for (extent, data, _) in contents() {
-        store.write(extent, 0, &data).await.unwrap();
+        cell.write(extent, 0, &data).await.unwrap();
     }
-    store.close_segment().unwrap();
-    store.commit(None).await.unwrap();
-    store
+    cell.close_segment().unwrap();
+    cell.commit(None).await.unwrap();
+    cell
 }
 
 /// A byte of a framed file, as stored: in a file at a path, at an offset.
@@ -78,10 +78,10 @@ struct Stored {
     encoding: Encoding,
 }
 
-/// The stored byte of `extent`, which `store` holds sealed, at `offset` in it: the byte itself in
-/// a part stored raw, the middle of the part's stored bytes in one stored compressed.
-fn stored(dir: &MemDir, store: &LocalCell<MemDir>, extent: ExtentId, offset: u64) -> Stored {
-    let (path, at) = match store.place(extent).unwrap().unwrap() {
+/// The stored byte of `extent`, which `open_cell` holds sealed, at `offset` in it: the byte itself
+/// in a part stored raw, the middle of the part's stored bytes in one stored compressed.
+fn stored(dir: &MemDir, open_cell: &LocalCell<MemDir>, extent: ExtentId, offset: u64) -> Stored {
+    let (path, at) = match open_cell.place(extent).unwrap().unwrap() {
         Place::Run { cell, number, offset: run } => {
             (format!("segments/{}/{}", Padded(cell), Padded(number)), run + offset)
         }
@@ -117,8 +117,8 @@ fn corrupt<T>(result: Result<T, anyhow::Error>) {
 }
 
 /// A byte flipped in a part of a closed segment or of a sealed extent's own file, stored
-/// compressed or raw, fails the store's reads of the part, its uploader's and a follower's, read
-/// by a store opened anew, which has none of it unpacked: of a block, or the whole extent. Its
+/// compressed or raw, fails the cell's reads of the part, its uploader's and a follower's, read
+/// by a cell opened anew, which has none of it unpacked: of a block, or the whole extent. Its
 /// other parts read as written.
 #[tokio::test(flavor = "multi_thread")]
 async fn flipped_bytes_fail_the_reads_of_their_parts() {
@@ -127,29 +127,29 @@ async fn flipped_bytes_fail_the_reads_of_their_parts() {
     for (extent, data, encoding) in contents() {
         // Its last block, in another part than its first.
         let offset = (data.len() - BLOCK) as u64;
-        let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-        let byte = stored(&dir, &store, extent, offset);
+        let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+        let byte = stored(&dir, &cell, extent, offset);
         assert_eq!(byte.encoding, encoding, "{extent:?}");
         flip(&dir, &byte);
-        drop(store);
+        drop(cell);
 
-        let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-        let view = store.view();
+        let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+        let view = cell.view();
         let mut block = vec![0; BLOCK];
-        corrupt(store.read(extent, offset, &mut block));
-        corrupt(store.read_view(&view, extent, offset, &mut block));
-        corrupt(store.read(extent, 0, &mut vec![0; data.len()]));
+        corrupt(cell.read(extent, offset, &mut block));
+        corrupt(cell.read_view(&view, extent, offset, &mut block));
+        corrupt(cell.read(extent, 0, &mut vec![0; data.len()]));
         // Its first block is in another part, whole.
-        store.read(extent, 0, &mut block).unwrap();
+        cell.read(extent, 0, &mut block).unwrap();
         assert!(block == data[..BLOCK], "{extent:?}'s first block");
 
         flip(&dir, &byte);
-        drop((view, store));
+        drop((view, cell));
     }
-    let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
+    let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
     for (extent, data, _) in contents() {
         let mut read = vec![0; data.len()];
-        store.read(extent, 0, &mut read).unwrap();
+        cell.read(extent, 0, &mut read).unwrap();
         assert!(read == data, "{extent:?}, flipped back");
     }
 }
@@ -159,13 +159,13 @@ async fn flipped_bytes_fail_the_reads_of_their_parts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments() {
     let dir = MemDir::new();
-    let store = create(&dir, OPTIONS);
-    store.write(extent(1), 0, &noise(1, BLOCK)).await.unwrap();
-    store.commit(None).await.unwrap();
+    let cell = create(&dir, OPTIONS);
+    cell.write(extent(1), 0, &noise(1, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
     // Open, in pieces, the first in the segment closed between commits.
-    store.write(extent(2), 0, &noise(2, BLOCK)).await.unwrap();
-    assert!(store.close_now().await.unwrap());
-    store.write(extent(2), BLOCK as u64, &noise(3, BLOCK)).await.unwrap();
+    cell.write(extent(2), 0, &noise(2, BLOCK)).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    cell.write(extent(2), BLOCK as u64, &noise(3, BLOCK)).await.unwrap();
     let segment = format!("segments/{}/{}", Padded(CELL.id), Padded(0));
     let bytes = local_cell::read_whole(&dir.open(&segment, true).unwrap()).unwrap();
     let part = Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
@@ -175,8 +175,8 @@ async fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments()
         &dir,
         &Stored { path: segment, at: part.offset + BLOCK as u64 + 7, encoding: part.encoding },
     );
-    corrupt(store.read(extent(2), 0, &mut vec![0; 2 * BLOCK]));
-    corrupt(store.commit(None).await);
+    corrupt(cell.read(extent(2), 0, &mut vec![0; 2 * BLOCK]));
+    corrupt(cell.commit(None).await);
 }
 
 /// The bytes of a closed segment the uploader takes, which it uploads as they are, are checked:
@@ -185,13 +185,13 @@ async fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments()
 async fn closed_segments_with_flipped_bytes_are_not_taken() {
     for compressed in [false, true] {
         let dir = MemDir::new();
-        let store = create(&dir, OPTIONS);
+        let cell = create(&dir, OPTIONS);
         let data = if compressed { pattern(1, 2 * MIB) } else { noise(1, 2 * MIB) };
-        store.write(extent(1), 0, &data).await.unwrap();
-        store.close_segment().unwrap();
-        store.commit(None).await.unwrap();
-        store.flush().await.unwrap();
-        let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).await.unwrap()).ok().unwrap();
+        cell.write(extent(1), 0, &data).await.unwrap();
+        cell.close_segment().unwrap();
+        cell.commit(None).await.unwrap();
+        cell.flush().await.unwrap();
+        let [closed] = <[_; 1]>::try_from(cell.closed(usize::MAX).await.unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
         assert_eq!(
             extent_frame::data(&bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap(),
@@ -199,8 +199,8 @@ async fn closed_segments_with_flipped_bytes_are_not_taken() {
         );
         // The framed file under its own name, which the thread making framings durable renames it
         // to once durable, after the flush returns (TASK-399): what `stored` opens.
-        store.wait_idle().await.unwrap();
-        let byte = stored(&dir, &store, extent(1), MIB as u64 + 5);
+        cell.wait_idle().await.unwrap();
+        let byte = stored(&dir, &cell, extent(1), MIB as u64 + 5);
         flip(&dir, &byte);
         let Err(error) = closed.bytes() else { panic!("took a flipped byte") };
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);

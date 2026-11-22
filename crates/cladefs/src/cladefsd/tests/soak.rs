@@ -5,16 +5,16 @@
 //! TASK-330.3: the daemon against a degraded bucket, for a long while, with VM processes writing
 //! all the while: the bucket slow, then full, then out of service, then answering again as slowly
 //! as before ([`bucket_cell::faults`], its file `CLADEFS_BUCKET_FAULTS`), as LangSmith's RustFS
-//! beside their hosts' daemons on a shared disk was (TASK-310, TASK-314, TASK-317). The simulation of the
-//! bucket's protocol checks that nothing a failing bucket does is wrong; this checks what it costs
-//! the daemon over time, and what it says of it:
+//! beside their hosts' daemons on a shared disk was (TASK-310, TASK-314, TASK-317). The simulation
+//! of the bucket's protocol checks that nothing a failing bucket does is wrong; this checks what it
+//! costs the daemon over time, and what it says of it:
 //!
 //! - **its memory stays within its budget** (`super::super::process`): no sample of its anonymous
 //!   memory past what its design bounds it by, its uploads within their memory however often each
 //!   is tried (TASK-317);
 //! - **the failures show** in the stats line (`failed-NAME`) and the metrics
 //!   (`cladefsd_object_storage_failures_total`), by kind (TASK-314);
-//! - **commits wait at the lag bound and never fail** (doc-7, decision 3; doc-12): each store's
+//! - **commits wait at the lag bound and never fail** (doc-7, decision 3; doc-12): each cell's
 //!   commits stall, none returning an error, for as long as the bucket fails;
 //! - **everything uploads once the bucket answers, within doc-12's bound**: every commit made
 //!   before it answered uploaded within its next retry, 5 s at most, the upload interval's second,
@@ -26,13 +26,14 @@
 //!   writes that failed, each its object sent whole, are a wave of the host's uploads at once and
 //!   then a probe of each kind every [`bucket_cell::object_bucket`]'s backoff at most, not every
 //!   upload tried again and again, most of the daemon's CPU in the qualification's soak;
-//! - **its background threads live** (TASK-493): a panic holding what is shared beyond one store,
+//! - **its background threads live** (TASK-493): a panic holding what is shared beyond one cell,
 //!   the page cache's flusher's work among it, aborts it, as the daemon's does; and the page
 //!   cache's flusher is alive throughout, where its death once went unseen, the soak passing.
 //!
 //! `CLADEFS_SOAK_SECS` says how long it runs (default 300 s, CI's; 1,800 or more each night, Hunt's
 //! `soak` job), the phases each a fraction of it. Ignored by the workspace's suite, which it would
-//! outlast: `cargo nextest run -p cladefs --lib --run-ignored all -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'`.
+//! outlast: `cargo nextest run -p cladefs --lib --run-ignored all -E
+//! 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'`.
 //! `crates/cladefs/mutants.sh` puts back TASK-314's dropped failures and TASK-317's copy of each
 //! upload's bytes for each try, and sees this fail.
 
@@ -47,18 +48,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-/// The VM processes writing, each its store's.
+/// The VM processes writing, each its cell's.
 const VMS: usize = 4;
 
-/// The host's upload memory: as much as its stores upload at once, the host's 64 PUTs
+/// The host's upload memory: as much as its cells upload at once, the host's 64 PUTs
 /// (`crate::bucket::UPLOADS`' requests) of segments some 24 MiB each, as these close a second
 /// after their first commit (`local_cell::upload::Options::interval`), at the rate they are
 /// written: so that its uploads, holding each object twice, TASK-317's bug, hold more than every
 /// other part of the daemon's budget may (`process::AnonBudget`), 1.5 GiB more against some 1.4
-/// (four stores' framings, its fetches and its own).
+/// (four cells' framings, its fetches and its own).
 const UPLOAD_MEMORY: u64 = 1536 << 20;
 
-/// What the guests write while the bucket fails: past every store's lag bound (1 GiB of its
+/// What the guests write while the bucket fails: past every cell's lag bound (1 GiB of its
 /// write-ahead log, `local_cell::upload::Options::max_lag_bytes`), so that their commits stall
 /// there, and past the host's upload memory, so that its uploads hold all of it.
 const WRITTEN_WHILE_FAILING: u64 = 6 << 30;
@@ -72,8 +73,8 @@ const WRITE: usize = 256 << 10;
 /// The extents a VM process writes between commits, its fsyncs: 4 MiB.
 const COMMIT_EVERY: u64 = 4;
 
-/// The extents a VM process's store holds at most: it frees each this many after it wrote it, as a
-/// guest's files come and go, so that its store, and the host's disk, hold no more than 256 MiB of
+/// The extents a VM process's cell holds at most: it frees each this many after it wrote it, as a
+/// guest's files come and go, so that its cell, and the host's disk, hold no more than 256 MiB of
 /// it but what waits for the bucket.
 const LIVE: u64 = 256;
 
@@ -136,7 +137,7 @@ struct Wrote {
     longest_commit_ms: AtomicU64,
 }
 
-/// A VM process writing its store at `rate` bytes a second, extent after extent, committing each
+/// A VM process writing its cell at `rate` bytes a second, extent after extent, committing each
 /// [`COMMIT_EVERY`], freeing each [`LIVE`] after it wrote it, until `stop`: every request of its
 /// succeeding, or the test fails. Its last commit durable, uploaded, as at its guest's `sync`.
 fn vm_process(
@@ -146,8 +147,8 @@ fn vm_process(
     wrote: Arc<Wrote>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let (store, served) = connect(&path, 8 << 30);
-        let cell = store.cell();
+        let (client, served) = connect(&path, 8 << 30);
+        let cell = client.cell();
         let started = Instant::now();
         let mut sequence = 0;
         while !stop.load(Ordering::Relaxed) {
@@ -156,15 +157,15 @@ fn vm_process(
             let data = noise(cell ^ sequence, EXTENT);
             for (at, piece) in data.chunks(WRITE).enumerate() {
                 let offset = (at * WRITE) as u64;
-                store.write(extent, offset, &[VolatileSlice::from(piece)]).unwrap();
+                client.write(extent, offset, &[VolatileSlice::from(piece)]).unwrap();
             }
             if sequence > LIVE {
-                store.free(ExtentId { cell, sequence: sequence - LIVE }).unwrap();
+                client.free(ExtentId { cell, sequence: sequence - LIVE }).unwrap();
             }
             let bytes = wrote.bytes.fetch_add(EXTENT as u64, Ordering::Relaxed) + EXTENT as u64;
             if sequence % COMMIT_EVERY == 0 {
                 let committing = Instant::now();
-                store.commit_ordered(None).unwrap();
+                client.commit_ordered(None).unwrap();
                 let ms = committing.elapsed().as_millis() as u64;
                 wrote.longest_commit_ms.fetch_max(ms, Ordering::Relaxed);
                 wrote.commits.fetch_add(1, Ordering::Relaxed);
@@ -175,11 +176,11 @@ fn vm_process(
                 std::thread::sleep(ahead);
             }
         }
-        store.commit(None).unwrap();
+        client.commit(None).unwrap();
         let last = ExtentId { cell, sequence };
-        let read = read(&store, last, 0, EXTENT).unwrap();
+        let read = read(&client, last, 0, EXTENT).unwrap();
         assert!(read == noise(cell ^ sequence, EXTENT), "{last:?} reads otherwise");
-        drop(store);
+        drop(client);
         served.join().unwrap();
     })
 }
@@ -225,7 +226,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     // limit of open files raised.
     super::super::memory::return_large_allocations();
     super::super::raise_open_files_limit().unwrap();
-    // A panic holding what no store's halt contains, the page cache's flusher's work among it,
+    // A panic holding what no cell's halt contains, the page cache's flusher's work among it,
     // aborting the process (TASK-149.24, TASK-493).
     local_cell::shared::abort_on_panics();
     let flusher_lives = || {
@@ -333,7 +334,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
             crate::bucket::upload_memory(),
         );
         if name == "out of service" {
-            // Its commits waited at the lag bound, every store's.
+            // Its commits waited at the lag bound, every cell's.
             for (cell, status) in &statuses {
                 assert!(status.stalls > 0, "{cell}: no commit waited at the lag bound");
             }

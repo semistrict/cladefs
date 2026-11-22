@@ -6,7 +6,7 @@ import { describe, expect, test } from "vitest";
 import type { Progress } from "../src/data/progress.ts";
 import { notebookText } from "../src/notebook/export.ts";
 
-const place = { view: "Page Pilot, step 2: A store in fork A", hash: "pilot-2" };
+const place = { view: "Page Pilot, step 2: A write in fork A", hash: "pilot-2" };
 
 const progress: Progress = {
   copied: 0,
@@ -41,7 +41,7 @@ describe("the notebook's blob for Claude", () => {
   test("it says what I got wrong, with the right answer", () => {
     expect(text).toContain("## Predictions: 1 of 2 right");
     expect(text).toContain(
-      '- **Wrong**, on Page Pilot, step 2: A store in fork A: "Who copies the page, and when?" I answered "The guest, into its page cache"; the answer is "The host, when asked".',
+      '- **Wrong**, on Page Pilot, step 2: A write in fork A: "Who copies the page, and when?" I answered "The guest, into its page cache"; the answer is "The host, when asked".',
     );
     expect(text).toContain("- **Wrong**: without `swapExclusive` I said `NoLostStore` breaks; TLC finds `FsyncKeepsStores` violated first.");
   });
@@ -55,7 +55,7 @@ describe("the notebook's blob for Claude", () => {
 
   test("a question carries its quote and the code it was on", () => {
     expect(text).toContain(
-      "1. **Question** on Page Pilot, step 2: A store in fork A, at `guest/linux/fs/cladefs/dax.c`: `static int cladefs_dax_dirty(`:\n\n   > holding the file's semaphore shared\n\n   Why shared here?",
+      "1. **Question** on Page Pilot, step 2: A write in fork A, at `guest/linux/fs/cladefs/dax.c`: `static int cladefs_dax_dirty(`:\n\n   > holding the file's semaphore shared\n\n   Why shared here?",
     );
   });
 

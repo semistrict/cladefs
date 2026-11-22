@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what framing an object costs, encrypted, as every object is (TASK-411.2, TASK-411.28,
-//! backlog doc-16): packing N MiB (256) of data into one object, part by part on one thread, as a
-//! store's framing thread packs each, and unpacking it again, each part checked, opened and
-//! decompressed. Say:
+//! cladefs's own: what framing an object costs, encrypted, as every object is (TASK-411.2,
+//! TASK-411.28, backlog doc-16): packing N MiB (256) of data into one object, part by part on one
+//! thread, as a cell's framing thread packs each, and unpacking it again, each part checked, opened
+//! and decompressed. Say:
 //!
 //! ```sh
 //! cargo run --release -p cladefs-examples --example frame-bench -- [N]
@@ -13,7 +13,8 @@
 //!
 //! For each of `text`, sixteen letters at random, which compresses about by half, as a build's
 //! files do, and `noise`, which doesn't compress, it prints the MiB/s of packing and of unpacking,
-//! encrypted, the best of five rounds. (Its numbers in the clear, before TASK-411.28: an old pin's.)
+//! encrypted, the best of five rounds. (Its numbers in the clear, before TASK-411.28: an old
+//! pin's.)
 
 use extent_frame::{Keys, PART, Packer, Parts};
 use extent_keys::{KeyId, Secret};

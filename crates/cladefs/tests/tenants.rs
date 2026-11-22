@@ -21,7 +21,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A tenant of the ID `id` in the bucket (TASK-364), whose stores are in the directory `name` in
+/// A tenant of the ID `id` in the bucket (TASK-364), whose cells are in the directory `name` in
 /// `dir`.
 fn tenant(dir: &Path, name: &str, id: u64) -> Arc<Tenant> {
     std::fs::create_dir(dir.join(name)).unwrap();
@@ -94,23 +94,25 @@ async fn public_bases_are_shared_read_only() {
     let refused = CellClient::connect(&one, &base_in_one, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
 
-    let mut stores = Vec::new();
+    let mut clients = Vec::new();
     for (socket, fork) in [(&one, &forks[0]), (&two, &forks[1])] {
-        let store = CellClient::connect(socket, fork, 1 << 24).unwrap();
+        let client = CellClient::connect(socket, fork, 1 << 24).unwrap();
         let pages = base_bytes.len() / cladefs::pages::page_size() as usize;
         let window = memory(pages);
         // SAFETY: The memory is this test's, which it leaks: the window maps it while the process
         // lives.
-        unsafe { store.create_dax_window_in_host_memory(window, base_bytes.len() as u64, None, 1) }
-            .unwrap();
-        store.map(extent, 0, base_bytes.len() as u64, 0).unwrap();
-        // SAFETY: The window's memory, whose faults the store serves.
+        unsafe {
+            client.create_dax_window_in_host_memory(window, base_bytes.len() as u64, None, 1)
+        }
+        .unwrap();
+        client.map(extent, 0, base_bytes.len() as u64, 0).unwrap();
+        // SAFETY: The window's memory, whose faults its cell serves.
         let mapped = unsafe { std::slice::from_raw_parts(window.as_ptr(), base_bytes.len()) };
         assert!(mapped == base_bytes, "the fork maps other bytes");
-        assert!(!holds(store.physical_memory(), &base_bytes), "the base's pages are a tenant's");
-        stores.push(store);
+        assert!(!holds(client.physical_memory(), &base_bytes), "the base's pages are a tenant's");
+        clients.push(client);
     }
-    let public = stores[0].public_memory();
+    let public = clients[0].public_memory();
     assert_eq!(copies(public, &base_bytes), 1, "the base's pages, once, in the default arena");
 
     // Neither tenant's VM process can map the default arena writably.

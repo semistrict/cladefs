@@ -2,21 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A store's directory in memory, which simulates crashes, for tests.
+//! A cell directory in memory, which simulates crashes, for tests.
 //!
 //! It keeps what a host's file system would have made durable: a file's contents as of its last
-//! sync, and a directory's entries as of its last sync. A crash ([`MemDir::crash`]) keeps that,
-//! and any of what happened since, at random: each block of each write since the file's last sync,
-//! and each file created or removed since the directory's last sync, in order. Directories
-//! themselves are durable once created. cladefs: a crash may also corrupt what it kept of the
-//! writes since ([`MemDir::crash_corrupting`], TASK-680, as FoundationDB's simulation's power losses
-//! do): each block written since its file's last sync there whole, not at all, garbage, or torn,
-//! its first half written and the rest as it was. [`MemDir::fail_after`] makes the file system fail every
-//! operation that would change it after a number of them, as a crash would interrupt them.
-//! cladefs: which of them fails, and so what a crash keeps, is a function of the store's calls, and
-//! of the crash's seed, only if the store does no I/O on threads of its own, in a directory made
+//! sync, and a directory's entries as of its last sync. A crash ([`MemDir::crash`]) keeps that, and
+//! any of what happened since, at random: each block of each write since the file's last sync, and
+//! each file created or removed since the directory's last sync, in order. Directories themselves
+//! are durable once created. cladefs: a crash may also corrupt what it kept of the writes since
+//! ([`MemDir::crash_corrupting`], TASK-680, as FoundationDB's simulation's power losses do): each
+//! block written since its file's last sync there whole, not at all, garbage, or torn, its first
+//! half written and the rest as it was. [`MemDir::fail_after`] makes the file system fail every
+//! operation that would change it after a number of them, as a crash would interrupt them. cladefs:
+//! which of them fails, and so what a crash keeps, is a function of the cell's calls, and of the
+//! crash's seed, only if the cell does no I/O on threads of its own, in a directory made
 //! [`MemDir::serial`], or if a seeded schedule orders that I/O, as Shuttle's do; it says whether
-//! the first that failed was a thread's of the store's ([`MemDir::failed_elsewhere`], TASK-79.79).
+//! the first that failed was a thread's of the cell's ([`MemDir::failed_elsewhere`], TASK-79.79).
 
 use crate::cached::{CachedDir, CachedFile};
 use crate::dir::{Dir, DirFile, File};
@@ -33,15 +33,15 @@ use std::sync::Arc;
 /// all.
 const BLOCK: usize = 512;
 
-/// A store's directory in memory, under its page cache ([`MemDir`]). See the module docs.
+/// A cell directory in memory, under its page cache ([`MemDir`]). See the module docs.
 #[derive(Clone)]
 pub struct MemDisk {
     fs: Arc<Mutex<Fs>>,
     /// cladefs: its disk, of its capacity ([`MemDisk::with_capacity`], doc-22).
     disk: Arc<HostDisk>,
-    /// cladefs: the footprint its store's files are counted in ([`crate::footprint`]).
+    /// cladefs: the footprint its cell's files are counted in ([`crate::footprint`]).
     footprint: Arc<crate::footprint::Footprint>,
-    /// cladefs: whether the store does all of its I/O in it on its callers' threads
+    /// cladefs: whether the cell does all of its I/O in it on its callers' threads
     /// ([`MemDir::serial`]): as it never changes, asking takes no lock ([`Dir::concurrent`]), which
     /// under Shuttle would be a scheduling point of its own.
     serial: bool,
@@ -248,9 +248,9 @@ impl MemDisk {
         Self { fs, disk, footprint, serial }
     }
 
-    /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads,
+    /// cladefs: an empty directory in which the cell does all of its I/O on its callers' threads,
     /// none on threads of its own ([`Dir::concurrent`]): so that its operations come in an order
-    /// the store's calls alone decide, and so where it fails ([`MemDir::fail_after`]), and what a
+    /// the cell's calls alone decide, and so where it fails ([`MemDir::fail_after`]), and what a
     /// crash of a seed keeps; as do the directories its crashes leave (TASK-79.79).
     pub fn serial() -> Self {
         Self { serial: true, ..Self::new() }
@@ -282,7 +282,7 @@ impl MemDisk {
 
     /// cladefs: whether the first operation the file system failed, since its budget was last set
     /// ([`MemDir::fail_after`]), was another thread's than the one that set it: in a test whose
-    /// thread runs the store, and sets the budget, one of the store's own, framing a segment or
+    /// thread runs the cell, and sets the budget, one of the cell's own, framing a segment or
     /// syncing a flush's files, which a crash then interrupted (TASK-79.79).
     pub fn failed_elsewhere(&self) -> bool {
         let fs = self.fs.lock().unwrap();
@@ -310,12 +310,25 @@ impl MemDisk {
     }
 
     /// cladefs: the directory as a crash would leave it, as [`MemDisk::crash`] says, each block
-    /// written since its file's last sync also garbage, or torn, at random (TASK-680).
+    /// written since its file's last sync also garbage, or torn, at random (TASK-680): garbage in
+    /// the bytes its write changes alone, as powersafe overwrite has it (board 5890, decision-3).
     pub fn crash_corrupting(&self, seed: u64) -> MemDisk {
         self.crash_with(seed, true)
     }
 
     fn crash_with(&self, seed: u64, corrupting: bool) -> MemDisk {
+        // cladefs: a block a crash cut short as garbage: the bytes its write changes, at random;
+        // those it writes as they were, as they were: powersafe overwrite, which cladefs assumes of
+        // its disks, as SQLite does of Linux's by default (board 5890, decision-3).
+        fn garbled(on: &mut [u8], written: &[u8], rng: &mut StdRng) {
+            let mut noise = vec![0; on.len()];
+            rng.fill(&mut noise[..]);
+            for ((byte, &new), noise) in on.iter_mut().zip(written).zip(noise) {
+                if *byte != new {
+                    *byte = noise;
+                }
+            }
+        }
         let mut rng = StdRng::seed_from_u64(seed);
         let fs = self.fs.lock().unwrap();
         let mut dirs = BTreeMap::new();
@@ -367,7 +380,7 @@ impl MemDisk {
                     let at = &mut data[start..start + block.len()];
                     match fate {
                         1 => at.copy_from_slice(block),
-                        2 => rng.fill(at),
+                        2 => garbled(at, block, &mut rng),
                         _ => {
                             let half = block.len() / 2;
                             at[..half].copy_from_slice(&block[..half]);
@@ -393,14 +406,14 @@ impl MemDisk {
     }
 }
 
-/// A store's directory in memory, which simulates crashes ([`MemDisk`]), its extents' files through
+/// A cell directory in memory, which simulates crashes ([`MemDisk`]), its extents' files through
 /// a page cache of its own, as a host's are through the process's ([`crate::HostDir`], TASK-433):
-/// small, so that the store's tests write back often, and with no flusher, so that what is written
-/// when is a function of the store's calls alone ([`PageCache::without_flusher`]). What its pages
+/// small, so that the cell's tests write back often, and with no flusher, so that what is written
+/// when is a function of the cell's calls alone ([`PageCache::without_flusher`]). What its pages
 /// hold dirty a crash loses, as a host's crash loses a process's memory.
 ///
-/// cladefs: its changes counted, as it makes them, in its footprint ([`crate::Metered`], TASK-539.4),
-/// as a host's are.
+/// cladefs: its changes counted, as it makes them, in its footprint ([`crate::Metered`],
+/// TASK-539.4), as a host's are.
 pub type MemDir = crate::Metered<CachedDir<MemDisk>>;
 
 /// A file of a [`MemDir`].
@@ -423,12 +436,12 @@ impl MemDir {
     }
 
     /// An empty directory whose page cache goes by `options`, with no flusher: what a test of how
-    /// the store paces its own write-back holds dirty under a cache as large as a host's.
+    /// the cell paces its own write-back holds dirty under a cache as large as a host's.
     pub fn with_cache(options: Options) -> Self {
         Self::on(MemDisk::new(), PageCache::without_flusher(options))
     }
 
-    /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads
+    /// cladefs: an empty directory in which the cell does all of its I/O on its callers' threads
     /// ([`MemDisk::serial`]).
     pub fn serial() -> Self {
         Self::on(MemDisk::serial(), page_cache())
@@ -796,6 +809,30 @@ mod tests {
         assert_eq!((whole, torn, garbage), ([true, true], true, true));
     }
 
+    /// cladefs: a corrupting crash damages no byte a write leaves as it was, the block's others
+    /// included (powersafe overwrite, board 5890, decision-3): a log's append, written back a page
+    /// at a time, writes again the end of the record synced before it, which every crash keeps,
+    /// whatever it makes of the bytes after.
+    #[test]
+    fn corrupting_crashes_damage_no_byte_written_as_it_was() {
+        const SYNCED: usize = BLOCK + 188;
+        let dir = MemDisk::new();
+        let file = dir.create("f", true).unwrap();
+        file.write_at(&[1; SYNCED], 0).unwrap();
+        file.sync().unwrap();
+        dir.sync_dir("").unwrap();
+        let mut page = vec![1; SYNCED];
+        page.resize(2 * BLOCK, 3);
+        file.write_at(&page, 0).unwrap();
+        let mut garbage = false;
+        for seed in 0..64 {
+            let data = read(&dir.crash_corrupting(seed).open("f", true).unwrap());
+            assert_eq!(data[..SYNCED], [1; SYNCED], "seed {seed} damaged what was synced");
+            garbage |= data.len() == 2 * BLOCK && data[SYNCED..].iter().any(|&byte| byte != 3);
+        }
+        assert!(garbage, "no crash made garbage of the new bytes");
+    }
+
     /// Creating a file where one is fails, as a host's `create_new` does, leaving the one there as
     /// it was, and those made after it their own.
     #[test]
@@ -885,8 +922,8 @@ mod tests {
         assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
     }
 
-    /// cladefs: it says whether the first operation it failed, since its budget was set, was another
-    /// thread's than the one that set it (TASK-79.79).
+    /// cladefs: it says whether the first operation it failed, since its budget was set, was
+    /// another thread's than the one that set it (TASK-79.79).
     #[test]
     fn says_whose_operation_failed_first() {
         let dir = MemDisk::new();

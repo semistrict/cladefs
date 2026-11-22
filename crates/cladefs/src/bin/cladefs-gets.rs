@@ -4,7 +4,7 @@
 
 //! cladefs's measurement of ranged GETs from object storage (TASK-28.11; doc-7, decision 9): the
 //! throughput a host gets reading parts of objects, by the parts' size and how many GETs it keeps
-//! in flight, which choose the size of the parts stores frame their data in (`extent_frame::PART`)
+//! in flight, which choose the size of the parts cells frame their data in (`extent_frame::PART`)
 //! and a host's budget of GETs in flight (`cladefs::bucket`'s).
 //!
 //! ```sh
@@ -67,7 +67,7 @@ fn incompressible(len: usize) -> Vec<u8> {
 /// GETs parts of `part` bytes of the object of `len` bytes, at random, `in_flight` at once, for
 /// `secs`.
 async fn measure(
-    store: &Arc<ObjectBucket>,
+    bucket: &Arc<ObjectBucket>,
     len: u64,
     part: u64,
     in_flight: usize,
@@ -82,10 +82,10 @@ async fn measure(
     loop {
         while gets.len() < in_flight && Instant::now() < deadline {
             let at = rand::random_range(0..parts) * part;
-            let store = store.clone();
+            let bucket = bucket.clone();
             gets.push(async move {
                 let start = Instant::now();
-                let got = store.get_range(KEY, ByteRange::Bounded(at..at + part)).await;
+                let got = bucket.get_range(KEY, ByteRange::Bounded(at..at + part)).await;
                 (start.elapsed(), got)
             });
         }
@@ -109,17 +109,17 @@ fn main() -> Result<(), String> {
     };
     let len = number(1, 512)? << 20;
     let secs = Duration::from_secs(number(2, 10)?);
-    let store = Arc::new(ObjectBucket::from_url(url)?);
+    let bucket = Arc::new(ObjectBucket::from_url(url)?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| format!("a runtime: {err}"))?;
     runtime.block_on(async {
         let bytes = incompressible(len as usize);
-        let put = store.put(KEY, bytes.into(), PutMode::Overwrite).await;
+        let put = bucket.put(KEY, bytes.into(), PutMode::Overwrite).await;
         put.map_err(|err| format!("putting the object: {err:?}"))?;
         // Connections made, and the object where it is read from, before what is measured.
-        measure(&store, len, 1 << 20, 16, Duration::from_secs(2)).await?;
+        measure(&bucket, len, 1 << 20, 16, Duration::from_secs(2)).await?;
         println!(
             "Ranged GETs of an object of {} MiB at {url}, {} s each.\n",
             len >> 20,
@@ -129,7 +129,7 @@ fn main() -> Result<(), String> {
         println!("|---:|---:|---:|---:|---:|---:|");
         for part in PARTS {
             for in_flight in IN_FLIGHT {
-                let measured = measure(&store, len, part, in_flight, secs).await?;
+                let measured = measure(&bucket, len, part, in_flight, secs).await?;
                 let elapsed = measured.elapsed.as_secs_f64();
                 println!(
                     "| {} KiB | {in_flight} | {:.1} | {:.1} | {:.1} | {:.1} |",
@@ -141,6 +141,6 @@ fn main() -> Result<(), String> {
                 );
             }
         }
-        store.delete(KEY).await.map_err(|err| format!("deleting the object: {err:?}"))
+        bucket.delete(KEY).await.map_err(|err| format!("deleting the object: {err:?}"))
     })
 }

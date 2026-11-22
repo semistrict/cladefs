@@ -176,14 +176,14 @@ fn mounted() -> bool {
 /// meanwhile for the host, the device having a request in flight (the driver's `busy_ns`). The
 /// host's time differs from host to host, and with their load: its disk's, making the guest's
 /// commits durable, 4 times as long on some GCE hosts as on others; and its writes', which took
-/// xattrs_bounded's fill from 0.6 s to 5.8 s on a host whose CPUs 8 agents shared (load 40
-/// to 150). What a check's budget bounds is its work, the guest's, and its waits on anything but
-/// the device: a hang is still killed at its budget. The host's time counts too, but a
-/// [`HOST_SCALE`]th of it, so that a device that never answers has the check killed, by name, as
-/// any hang; what a check asks of the host, a check counts, as xattrs_bounded does. Budgets were of a store in the
-/// daemon's memory (TASK-168), whose requests took little; since stores keep their extents in
-/// files on the host's disk, the checks that fill the filesystem and sync waited seconds for it,
-/// and overran (TASK-263).
+/// xattrs_bounded's fill from 0.6 s to 5.8 s on a host whose CPUs 8 agents shared (load 40 to 150).
+/// What a check's budget bounds is its work, the guest's, and its waits on anything but the device:
+/// a hang is still killed at its budget. The host's time counts too, but a [`HOST_SCALE`]th of it,
+/// so that a device that never answers has the check killed, by name, as any hang; what a check
+/// asks of the host, a check counts, as xattrs_bounded does. Budgets were of a cell in the daemon's
+/// memory (TASK-168), whose requests took little; since cells keep their extents in files on the
+/// host's disk, the checks that fill the filesystem and sync waited seconds for it, and overran
+/// (TASK-263).
 struct Clock {
     began: Instant,
     /// The host's time since it began.
@@ -223,10 +223,10 @@ fn charged(guest: Duration, host: Duration) -> Duration {
     guest.max(host.div_f64(HOST_SCALE))
 }
 
-/// cladefs: what of the guest's time the host took, so far: the time its vCPUs waited for the host's
-/// CPUs (steal), and the device's requests, by type, how many and how long they took, all told
-/// (the driver's `requests` and `request_ns`), which overlap. Of a check, the difference of two:
-/// where its time went besides the guest (TASK-263).
+/// cladefs: what of the guest's time the host took, so far: the time its vCPUs waited for the
+/// host's CPUs (steal), and the device's requests, by type, how many and how long they took, all
+/// told (the driver's `requests` and `request_ns`), which overlap. Of a check, the difference of
+/// two: where its time went besides the guest (TASK-263).
 struct HostTook {
     stolen: Duration,
     requests: std::collections::BTreeMap<String, (u64, Duration)>,

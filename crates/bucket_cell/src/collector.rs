@@ -67,21 +67,22 @@
 //!
 //! Objects mostly freed are compacted: their live extents copied to their moves, one object,
 //! written whole, before the object goes, a grace period later. Writers record moves in their next
-//! checkpoints, after which the moves go too, unless a state's way to its extents still goes through
-//! them.
+//! checkpoints, after which the moves go too, unless a state's way to its extents still goes
+//! through them.
 //!
 //! cladefs: marking reads metadata alone, which is authenticated, not encrypted, holding no key;
-//! compacting copies extents out of objects' data, encrypted there, so a pass compacting one unwraps
-//! its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and its
-//! cells' DEKs from their records; and encrypts each one's moves under the key it was encrypted under,
-//! with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting nothing
-//! encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's KEK revoked
-//! or destroyed, or the collector having no KMS, the pass marks and deletes as ever, and leaves
-//! the cell uncompacted, every object encrypted (TASK-411.28), saying so ([`Report::locked`]): a revoked tenant's
-//! compaction stops, its garbage still goes. It records its listing's digest as any pass does, and
-//! what it left ([`Passed::uncompacted`]): a pass after it, the cell unchanged, skips the cell while
-//! the tenant's KEK is still not to be had, which the KMS is asked once a sweep, for all of the
-//! tenant's cells ([`Heard`], TASK-411.13), and goes over it in full once it is.
+//! compacting copies extents out of objects' data, encrypted there, so a pass compacting one
+//! unwraps its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and
+//! its cells' DEKs from their records; and encrypts each one's moves under the key it was encrypted
+//! under, with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting
+//! nothing encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's
+//! KEK revoked or destroyed, or the collector having no KMS, the pass marks and deletes as ever,
+//! and leaves the cell uncompacted, every object encrypted (TASK-411.28), saying so
+//! ([`Report::locked`]): a revoked tenant's compaction stops, its garbage still goes. It records
+//! its listing's digest as any pass does, and what it left ([`Passed::uncompacted`]): a pass after
+//! it, the cell unchanged, skips the cell while the tenant's KEK is still not to be had, which the
+//! KMS is asked once a sweep, for all of the tenant's cells ([`Heard`], TASK-411.13), and goes over
+//! it in full once it is.
 //!
 //! A cell's writer names its extents where the checkpoint it recovered from, or its own since,
 //! said, which the state a pass reads may name further along their moves: a checkpoint another
@@ -93,7 +94,7 @@
 //! checkpoint or a later one, and the writer that made it took its moves first (TASK-175).
 //!
 //! A pass reads records, recovers cells, reads moves and compacts objects many at once, and
-//! deletes objects in batches where the store deletes so (TASK-395.5); what forks inherited
+//! deletes objects in batches where the backend deletes so (TASK-395.5); what forks inherited
 //! together, their parent's state where they were forked, it reads once and takes once for them
 //! all; and a pass reads a record again only once it changed ([`Collector`], TASK-92.7).
 //!
@@ -151,7 +152,7 @@ const COMPACTIONS_AT_ONCE: usize = 8;
 pub struct Options {
     /// Objects whose live extents take less than this fraction of their data are compacted.
     pub compact_below: f64,
-    /// How long, by the store's clock, a compacted object stays after its moves are written, and
+    /// How long, by the backend's clock, a compacted object stays after its moves are written, and
     /// moves after nothing names the object they are of: what spares a reader that looked an
     /// extent up just before a round trip.
     pub grace: u64,
@@ -162,12 +163,13 @@ pub struct Options {
 /// tests' and the simulation's race, the later fencing the earlier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Holding {
-    /// How long a pass holds its cell, in milliseconds by the store's clock, from when it takes
+    /// How long a pass holds its cell, in milliseconds by the backend's clock, from when it takes
     /// the lease or last renews it, which it does between its steps; 0: not at all (its lease's
-    /// `until` 0), a pass after it taking the cell at once. Long enough for the longest step of a pass over the
-    /// largest cell: one that takes longer is taken from, fenced, and deletes nothing.
+    /// `until` 0), a pass after it taking the cell at once. Long enough for the longest step of a
+    /// pass over the largest cell: one that takes longer is taken from, fenced, and deletes
+    /// nothing.
     pub lease: u64,
-    /// When its sweep began, by the store's clock, if it is a sweep's: a pass leaves its cell to
+    /// When its sweep began, by the backend's clock, if it is a sweep's: a pass leaves its cell to
     /// another's that ended since ([`crate::Left::Swept`]), so that processes sweeping at once
     /// split the cells rather than go over each other's again.
     pub since: Option<u64>,
@@ -178,9 +180,10 @@ pub struct Report {
     /// The objects of the cell it deleted.
     pub deleted: usize,
     pub compacted: usize,
-    /// cladefs: the references of the cell's deleted children it retired, under their parents' cells
-    /// (TASK-395.4), once, whether there or not, as it can't tell without listing other cells; and
-    /// those of its own it deleted, marked, written again since their retirements (TASK-395.13).
+    /// cladefs: the references of the cell's deleted children it retired, under their parents'
+    /// cells (TASK-395.4), once, whether there or not, as it can't tell without listing other
+    /// cells; and those of its own it deleted, marked, written again since their retirements
+    /// (TASK-395.13).
     pub retired: usize,
     /// cladefs: the bytes of what it deleted, as listed (TASK-395.5).
     pub deleted_bytes: u64,
@@ -190,10 +193,11 @@ pub struct Report {
     /// cladefs: the passes that skipped their cells, each unchanged since its last pass, deleting
     /// only what that pass deferred (TASK-395.6).
     pub skipped: usize,
-    /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had: the
-    /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
-    /// having no KMS (TASK-411.6). Each still marked and deleted what no live cell needs, warning of the cell and why. And those that skipped a cell a
-    /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
+    /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had:
+    /// the KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the
+    /// collector having no KMS (TASK-411.6). Each still marked and deleted what no live cell needs,
+    /// warning of the cell and why. And those that skipped a cell a pass before left so, its
+    /// tenant's KEK still not to be had (TASK-411.13).
     pub locked: usize,
     /// cladefs: the objects encrypted that those passes would have compacted, or the pass before a
     /// skipping one would have.
@@ -235,7 +239,8 @@ pub struct DryRun {
     /// What a pass would delete, as listed, in the order of their keys; less what it would compact
     /// and so delete a grace period after.
     pub doomed: Vec<Meta>,
-    /// What a pass would compact, as listed: what it deletes too, a grace period after, once no state's way to an extent goes through it.
+    /// What a pass would compact, as listed: what it deletes too, a grace period after, once no
+    /// state's way to an extent goes through it.
     pub compactable: Vec<Meta>,
     /// The references, under other cells, a pass would retire, which may be gone already.
     pub retired: Vec<String>,
@@ -258,7 +263,7 @@ pub async fn collect(
     Collector::new(*options).kms(kms).collect(bucket, holder).await
 }
 
-/// cladefs: [`collect`], of a bucket whose own store is `own` (TASK-633.8): its copies of other
+/// cladefs: [`collect`], of a bucket whose own bucket is `own` (TASK-633.8): its copies of other
 /// buckets' cells passed over as such ([`Collector::collect_with_own`]).
 #[cfg(any(test, feature = "testing"))]
 pub async fn collect_with_own(
@@ -299,8 +304,8 @@ pub struct Collector {
     /// outlives the pass, and a tenant's KEK revoked stops the next. None: they compact only what
     /// is in the clear.
     kms: Option<Arc<dyn keys::Kmses>>,
-    /// cladefs: what its passes heard of their cells' tenants' KEKs, shared with the other passes of
-    /// its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
+    /// cladefs: what its passes heard of their cells' tenants' KEKs, shared with the other passes
+    /// of its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
     /// [`Collector::collect`] (TASK-411.13).
     heard: Option<Arc<Heard>>,
 }
@@ -382,19 +387,19 @@ impl Collector {
         Self { heard: Some(heard), ..self }
     }
 
-    /// cladefs: a pass over every cell of `bucket`, one after another, as `holder`, which must differ
-    /// from every other pass's over each ([`Collector::collect_cell`]): the cells found by
+    /// cladefs: a pass over every cell of `bucket`, one after another, as `holder`, which must
+    /// differ from every other pass's over each ([`Collector::collect_cell`]): the cells found by
     /// delimiter listings, a page at a time ([`crate::cell::listed`]). A pass that fails stops none
     /// of the others; the first error is returned once all ran, what they did then unsaid. A cell
-    /// another pass holds it leaves ([`Error::Left`]), as no failure. cladefs: its passes share what
-    /// they heard of their tenants' KEKs ([`Heard`]).
+    /// another pass holds it leaves ([`Error::Left`]), as no failure. cladefs: its passes share
+    /// what they heard of their tenants' KEKs ([`Heard`]).
     pub async fn collect<B: Bucket>(&mut self, bucket: &B, holder: u64) -> Result<Report, Error> {
         self.collect_with_own(bucket, None::<&B>, holder).await
     }
 
-    /// cladefs: as [`Collector::collect`], `bucket` routed, `own` its own store, unrouted, if given
-    /// (TASK-633.8): a cell listed here of another bucket, by its ID, is a copy of that cell's
-    /// mirrored versions, passed over as such ([`Collector::collect_copy`]).
+    /// cladefs: as [`Collector::collect`], `bucket` routed, `own` its own bucket, unrouted, if
+    /// given (TASK-633.8): a cell listed here of another bucket, by its ID, is a copy of that
+    /// cell's mirrored versions, passed over as such ([`Collector::collect_copy`]).
     pub async fn collect_with_own<B: Bucket, O: Bucket>(
         &mut self,
         bucket: &B,
@@ -429,7 +434,7 @@ impl Collector {
     }
 
     /// cladefs: a pass over the copy of `cell`, a cell of another bucket, in this one, `own`, its
-    /// own store, numbered `number` (doc-23, Mirrors; TASK-633.8): what mirrors of `cell`'s
+    /// own bucket, numbered `number` (doc-23, Mirrors; TASK-633.8): what mirrors of `cell`'s
     /// versions copied here, their pins and markers, and the references of children of this
     /// bucket that refer here. `bucket`, routed, reads `cell`'s head in its own bucket and the
     /// children's heads here.
@@ -438,15 +443,15 @@ impl Collector {
     /// it races either shows in the listing or reads the head this read. A reference whose child
     /// has no head, or one naming another origin, is retired here; one of a child deleted stands,
     /// as the child's cell may hold its own children's references still, until the child's own
-    /// pass, its cell dead, retires it here and in `cell`'s bucket (rule `references_held`). The copy is kept whole while `cell` lives (`copiesKeptWhileAlive`), a
-    /// mirror is under way (a pin), or a child refers here: a live cell cuts versions after this
-    /// read, whose mirrors take the objects they share with the copy as copied, and once the cell
-    /// is deleted it cuts none. Else its mirrors' holds in `cell`'s bucket go first, then its
-    /// markers (`markerGoesFirst`), so that no read is sent here for a version whose objects go,
-    /// then its objects, then the marks of references retired here: the cell's prefix here left
-    /// empty. Nothing is compacted (a copy has no head, no writer, no KEK of `cell`'s here) and no
-    /// digest recorded: what it keeps turns on `cell`'s head, in another bucket. A head not to be
-    /// read deletes nothing.
+    /// pass, its cell dead, retires it here and in `cell`'s bucket (rule `references_held`). The
+    /// copy is kept whole while `cell` lives (`copiesKeptWhileAlive`), a mirror is under way (a
+    /// pin), or a child refers here: a live cell cuts versions after this read, whose mirrors take
+    /// the objects they share with the copy as copied, and once the cell is deleted it cuts none.
+    /// Else its mirrors' holds in `cell`'s bucket go first, then its markers (`markerGoesFirst`),
+    /// so that no read is sent here for a version whose objects go, then its objects, then the
+    /// marks of references retired here: the cell's prefix here left empty. Nothing is compacted (a
+    /// copy has no head, no writer, no KEK of `cell`'s here) and no digest recorded: what it keeps
+    /// turns on `cell`'s head, in another bucket. A head not to be read deletes nothing.
     ///
     /// A pin unrefreshed for [`crate::mirror::PIN_STALE`], its mirror's host dead, keeps nothing:
     /// its mirror is begun again here, taking it over, and the copy kept this pass whatever that
@@ -552,8 +557,8 @@ impl Collector {
         Ok(report)
     }
 
-    /// cladefs: one pass over `cell`, as `holder`, which must differ from every other pass's over the
-    /// cell: [`Error::Left`] if it leaves the cell to another, as its lease says.
+    /// cladefs: one pass over `cell`, as `holder`, which must differ from every other pass's over
+    /// the cell: [`Error::Left`] if it leaves the cell to another, as its lease says.
     ///
     /// It takes the cell's lease, reading what the last pass to end recorded there, and lists the
     /// cell. A listing of the digest recorded, its options the same, is decided as it was: the pass
@@ -715,8 +720,8 @@ impl Collector {
         Ok(Some(Report { deleted, deleted_bytes, retired, removed: 1, ..Report::default() }))
     }
 
-    /// cladefs: a pass over `cell`, which holds its lease as `taken` says, and what the last pass to
-    /// end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
+    /// cladefs: a pass over `cell`, which holds its lease as `taken` says, and what the last pass
+    /// to end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
     /// that left objects encrypted uncompacted skips the cell only while its tenant's KEK is still
     /// not to be had, as `heard` says (TASK-411.13).
     async fn collect_held(
@@ -756,7 +761,7 @@ impl Collector {
         if !self.holds(bucket, cell, taken).await? {
             return Ok((report, None));
         }
-        // Many at once, in batches where the store deletes so, in any order: none of it is what a
+        // Many at once, in batches where the backend deletes so, in any order: none of it is what a
         // live cell needs, whatever else goes (TASK-395.5).
         let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
         bucket::delete_all(bucket, &keys).await;
@@ -773,10 +778,10 @@ impl Collector {
         let (marked, unmarked) = (keys(&marked), keys(&unmarked));
         lifecycle::retire(bucket, &marked.iter().map(String::as_str).collect::<Vec<_>>()).await;
         bucket::delete_all(bucket, &unmarked.iter().map(String::as_str).collect::<Vec<_>>()).await;
-        // cladefs: and here, under cells of other buckets, where a mirror moved them, or forks wrote
-        // them, those cells' versions mirrored here (TASK-633.8): the copy's pass keeps a reference
-        // of a child deleted standing, until this one, its cell dead, retires it, counted apart from
-        // its original there.
+        // cladefs: and here, under cells of other buckets, where a mirror moved them, or forks
+        // wrote them, those cells' versions mirrored here (TASK-633.8): the copy's pass keeps a
+        // reference of a child deleted standing, until this one, its cell dead, retires it, counted
+        // apart from its original there.
         if let Some(here) = bucket.mirrors() {
             let all: Vec<&str> = marked.iter().chain(&unmarked).map(String::as_str).collect();
             report.retired += here.retire(&all).await;
@@ -870,8 +875,8 @@ impl Collector {
         passed::take(bucket, cell, found, holder, self.holding).await.map(Some)
     }
 
-    /// cladefs: whether the pass that took `cell`'s lease as `taken` says holds it still, renewing it
-    /// for as long again as a pass holds it, if it does: what a pass checks before it deletes.
+    /// cladefs: whether the pass that took `cell`'s lease as `taken` says holds it still, renewing
+    /// it for as long again as a pass holds it, if it does: what a pass checks before it deletes.
     async fn holds(
         &self,
         bucket: &impl Bucket,
@@ -884,8 +889,8 @@ impl Collector {
         }
     }
 
-    /// cladefs: renews `cell`'s lease for the pass that took it as `taken` says, for as long again as
-    /// a pass holds it, if it holds it still: whether it does. A collector holding cells for no
+    /// cladefs: renews `cell`'s lease for the pass that took it as `taken` says, for as long again
+    /// as a pass holds it, if it holds it still: whether it does. A collector holding cells for no
     /// time writes nothing, and goes on: it checks before it deletes ([`Collector::holds`]).
     async fn renew(
         &self,
@@ -1196,9 +1201,9 @@ async fn first_listing(bucket: &impl Bucket, cell: CellId) -> Option<Listed> {
 
 /// cladefs: `report`, of a pass over `cell` that skips it, its listing `listed`, with the read
 /// evidence it deletes counted: all but each tenant's newest of each version
-/// ([`crate::evidence::doomed`], TASK-702.2), which a cell's listing leaves out of its digest, so that
-/// forks' hosts writing it as they open the cell's versions leave it skipped. It needs no lease,
-/// nothing relying on evidence.
+/// ([`crate::evidence::doomed`], TASK-702.2), which a cell's listing leaves out of its digest, so
+/// that forks' hosts writing it as they open the cell's versions leave it skipped. It needs no
+/// lease, nothing relying on evidence.
 async fn trim_evidence(
     bucket: &impl Bucket,
     cell: CellId,
@@ -1287,8 +1292,8 @@ async fn fenced(bucket: &impl Bucket, cell: CellId, epoch: u64) -> Result<bool, 
     Ok(passed::epoch(bucket, cell).await? != epoch)
 }
 
-/// Gives up on the forks being made of versions that are gone, as their cells' heads say, which
-/// it says are deleted then, or made, if that came first ([`lifecycle::abandon`]); without `writes`,
+/// Gives up on the forks being made of versions that are gone, as their cells' heads say, which it
+/// says are deleted then, or made, if that came first ([`lifecycle::abandon`]); without `writes`,
 /// takes them as deleted, writing nothing (TASK-476).
 async fn abandon(
     bucket: &impl Bucket,
@@ -1538,16 +1543,16 @@ async fn lost_is_ok(
     let gone = version_gone(bucket, origin, id).await?;
     // cladefs: a restore of a version into another cell, being made, recovers through its version's
     // cell's checkpoint at the version, by its key, which the restore writes after its reference,
-    // before it makes the restore (`lifecycle::fork_version`): none there yet, it holds nothing, nothing
-    // relies on it, and its reference keeps what it would inherit in that cell. Lost
+    // before it makes the restore (`lifecycle::fork_version`): none there yet, it holds nothing,
+    // nothing relies on it, and its reference keeps what it would inherit in that cell. Lost
     // nothing; decided again by the next pass (TASK-476).
     if !gone {
         return Ok(true);
     }
     match writes {
         // cladefs: made since, its version checkpointed at its origin before (TASK-653): what this
-        // pass read of it, a fork being made, is stale; decided again by the next pass, as one still
-        // being made is. It held nothing of its own when listed.
+        // pass read of it, a fork being made, is stale; decided again by the next pass, as one
+        // still being made is. It held nothing of its own when listed.
         Writes::Some => {
             let head = lifecycle::abandon(bucket, cell).await?;
             Ok(head.deleted() || made_since(&head))
@@ -1585,9 +1590,9 @@ struct Live {
     moves: rustc_hash::FxHashMap<String, bool>,
     /// cladefs: the origins whose states it keeps, each once ([`Live::keep_origin`]).
     origins: BTreeSet<Origin>,
-    /// cladefs: whether what it found went by more than the cell holds, which may change with nothing
-    /// of the cell's changing: a recovery that found what it needs lost, and then nothing lost; a
-    /// origin found lost, its children's records read (TASK-395.6).
+    /// cladefs: whether what it found went by more than the cell holds, which may change with
+    /// nothing of the cell's changing: a recovery that found what it needs lost, and then nothing
+    /// lost; a origin found lost, its children's records read (TASK-395.6).
     unsettled: bool,
 }
 
@@ -1685,11 +1690,11 @@ impl Live {
     }
 
     /// cladefs: keeps `state`, an origin's, whole, for the forks of it to other cells, which
-    /// `touched` was read to recover (TASK-395.4): the extents it names, along their ways from where
-    /// they were sealed, as a child with no checkpoint of its own names them where it read them;
-    /// and what recovering it read, through which such a child recovers, unless the rule that it is
-    /// kept is off, as a test shows it needed. What its forks freed of it since is no matter: the
-    /// collector is conservative.
+    /// `touched` was read to recover (TASK-395.4): the extents it names, along their ways from
+    /// where they were sealed, as a child with no checkpoint of its own names them where it read
+    /// them; and what recovering it read, through which such a child recovers, unless the rule that
+    /// it is kept is off, as a test shows it needed. What its forks freed of it since is no matter:
+    /// the collector is conservative.
     fn keep_origin(&mut self, state: &State, touched: BTreeSet<String>) {
         self.keep_read(touched);
         self.keep_places(&state.extents);
@@ -1745,10 +1750,10 @@ impl Live {
     }
 }
 
-/// cladefs: how deep a chain of moves of moves the collector makes: the deepest it compacts no more,
-/// what it holds staying there. Each is in its key, 20 bytes or so more each, which buckets take
-/// 1024 of (S3, GCS, Azure), a segment's at 78 bytes, and each a hop that a read of an extent moved
-/// that many times follows, `moves::MOVES` at most (TASK-572).
+/// cladefs: how deep a chain of moves of moves the collector makes: the deepest it compacts no
+/// more, what it holds staying there. Each is in its key, 20 bytes or so more each, which buckets
+/// take 1024 of (S3, GCS, Azure), a segment's at 78 bytes, and each a hop that a read of an extent
+/// moved that many times follows, `moves::MOVES` at most (TASK-572).
 pub(crate) const MOVES_DEPTH: usize = 32;
 
 /// Whether `extents`, live in an object of `len` bytes of data, take less than `options`' fraction
@@ -1832,10 +1837,10 @@ struct Compactable<'a> {
 
 /// Compacts the object at `key`, of which `extents` are live: copies them to its moves by the pass
 /// of epoch `pass`, at a key of the pass's (TASK-407.1), unless it is gone. The moves' key and
-/// size, if it did: those there first, if the pass created them before. cladefs: it reads the object
-/// under `ring`'s keys of its cell, and encrypts its moves under the key the object was encrypted
-/// under, the DEK of the same generation, with a salt of their own (TASK-411.6): every reader
-/// following the moves read the object under that key, where a store opened before a newer
+/// size, if it did: those there first, if the pass created them before. cladefs: it reads the
+/// object under `ring`'s keys of its cell, and encrypts its moves under the key the object was
+/// encrypted under, the DEK of the same generation, with a salt of their own (TASK-411.6): every
+/// reader following the moves read the object under that key, where a cell opened before a newer
 /// generation was added holds none of it.
 async fn compact_object(
     bucket: &impl Bucket,
@@ -1903,7 +1908,7 @@ fn moves_listed<'a>(
 enum Fate {
     Stays,
     Goes,
-    /// It goes once the store's clock reads this.
+    /// It goes once the backend's clock reads this.
     GoesAt(u64),
 }
 
@@ -2107,9 +2112,9 @@ impl Pass {
     }
 
     /// cladefs: the keys `compactable`'s objects, all encrypted (TASK-411.28), are compacted under
-    /// ([`keys::compacting`], TASK-411.6): their cells' DEKs, as the pass's records of them
-    /// keep them, unwrapped under the cell's KEK by a [`keys::CachingKms`] of this pass's over `kms`, each
-    /// generation of the KEK once: the pass's one call of the KMS, however many objects it
+    /// ([`keys::compacting`], TASK-411.6): their cells' DEKs, as the pass's records of them keep
+    /// them, unwrapped under the cell's KEK by a [`keys::CachingKms`] of this pass's over `kms`,
+    /// each generation of the KEK once: the pass's one call of the KMS, however many objects it
     /// compacts. Nothing to compact, it asks nothing. The KEK not to be had, `kms` refusing it (a
     /// tenant's KEK revoked or destroyed, the KMS failing) or none given, the objects are left
     /// uncompacted, counted in `report` and warned of, and the pass goes on marking and deleting.
@@ -2161,10 +2166,10 @@ impl Pass {
         Ok(doomed)
     }
 
-    /// What goes, as [`Pass::doomed`] says; and what would but that it was written too recently,
-    /// or what it was compacted to was, with when it may go (TASK-395.6), in the order of its keys.
-    /// cladefs: a cell with no live cell and no reference, all of it but its records and its object,
-    /// and the collector's own, goes.
+    /// What goes, as [`Pass::doomed`] says; and what would but that it was written too recently, or
+    /// what it was compacted to was, with when it may go (TASK-395.6), in the order of its keys.
+    /// cladefs: a cell with no live cell and no reference, all of it but its records and its
+    /// object, and the collector's own, goes.
     async fn fates(
         &self,
         bucket: &impl Bucket,
@@ -2179,8 +2184,8 @@ impl Pass {
             moves.last().map(|moves| due(&self.objects[*moves]))
         };
         let goes = |goes: bool| if goes { Fate::Goes } else { Fate::Stays };
-        // cladefs: the read evidence that goes (TASK-702.2): of versions the head names no more, all
-        // of a dead cell's, and all but each tenant's newest of each.
+        // cladefs: the read evidence that goes (TASK-702.2): of versions the head names no more,
+        // all of a dead cell's, and all but each tenant's newest of each.
         let named: BTreeSet<u64> = (self.records.get(&self.cell).filter(|head| !head.deleted()))
             .map(|head| head.versions.iter().map(|version| version.at).collect())
             .unwrap_or_default();
@@ -2226,9 +2231,9 @@ impl Pass {
                 // ([`Pass::removal`], TASK-455). The collector's own: its lease, and its marks,
                 // which a mark-only pass never deletes, and an operator removes (TASK-264); and
                 // references, which the passes of their children's cells retire (TASK-395.4), and
-                // their marks, kept for good (TASK-395.13). cladefs: a block of object IDs taken for
-                // good (TASK-364), and the bucket's identity (TASK-633.9); a tenant's KEK object, no
-                // cell's, which no pass lists, for good too (TASK-411.27).
+                // their marks, kept for good (TASK-395.13). cladefs: a block of object IDs taken
+                // for good (TASK-364), and the bucket's identity (TASK-633.9); a tenant's KEK
+                // object, no cell's, which no pass lists, for good too (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
@@ -2398,7 +2403,7 @@ mod tests {
     /// No compaction, and compacted objects kept long.
     const KEEP: Options = Options { compact_below: 0.0, grace: 3_600_000 };
 
-    fn store() -> Arc<ObjectBucket> {
+    fn memory_bucket() -> Arc<ObjectBucket> {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
     }
 
@@ -2425,7 +2430,7 @@ mod tests {
     #[test]
     fn extents_minted_and_freed_go_and_those_ahead_of_their_segments_stay() {
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
@@ -2458,7 +2463,7 @@ mod tests {
     #[test]
     fn passes_stop_at_cells_of_newer_formats() {
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let freed = ExtentId::new(1, writer.chain().next_sequence());
@@ -2485,7 +2490,7 @@ mod tests {
 
     /// An extent stored on its own, uploaded ahead of the segment that names it, stays, though
     /// the cell's segments landed say its next sequence number is past it: as when the guest
-    /// commits extents out of the order it minted them, or a store closes a segment between
+    /// commits extents out of the order it minted them, or the cell closes a segment between
     /// commits while extents are open (TASK-79.3): of the head's epoch, its segment at or past the
     /// head's end, the head may yet name it (TASK-407). Its segment acknowledged, the cell reads
     /// it.
@@ -2497,7 +2502,7 @@ mod tests {
     /// What reading an extent stored on its own gives, uploaded ahead of the segment naming it,
     /// committed after one past it in sequence, once a pass ran and then the segment landed.
     async fn extent_ahead_of_its_segment_read() -> Result<Vec<u8>, Error> {
-        let bucket = store();
+        let bucket = memory_bucket();
         lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let first = writer.chain().next_sequence();
@@ -2528,7 +2533,7 @@ mod tests {
     #[test]
     fn objects_are_compacted_once() {
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
@@ -2561,7 +2566,7 @@ mod tests {
     #[test]
     fn compressed_objects_are_compacted_by_their_data() {
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
@@ -2595,7 +2600,7 @@ mod tests {
     fn objects_with_flipped_bytes_are_not_compacted() {
         for compressible in [true, false] {
             block_on(async {
-                let bucket = store();
+                let bucket = memory_bucket();
                 lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
                 let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
                 let first = writer.chain().next_sequence();
@@ -2665,9 +2670,10 @@ mod tests {
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
-    /// What the writer reads of the extent [`writers_name_what_their_checkpoints_move_before_they_land`]
-    /// keeps, where it names it as its checkpoint recording the extent's moves lands, passes of
-    /// the collector having run until they delete nothing more.
+    /// What the writer reads of the extent
+    /// [`writers_name_what_their_checkpoints_move_before_they_land`] keeps, where it names it as
+    /// its checkpoint recording the extent's moves lands, passes of the collector having run until
+    /// they delete nothing more.
     async fn read_as_a_checkpoint_lands() -> Result<Vec<u8>, Error> {
         let direct = Arc::new(Direct(SimBucket::new()));
         let bucket = Arc::new(Hooked::new(direct.clone(), Hook::Swapped));
@@ -2757,7 +2763,7 @@ mod tests {
     async fn acknowledge_once_taken_over(
         more: u64,
     ) -> (Result<Option<u64>, Error>, Option<u64>, bool) {
-        let bucket = store();
+        let bucket = memory_bucket();
         lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         let taken = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
@@ -2799,7 +2805,7 @@ mod tests {
     /// The last commit of cell 1, whose writer acknowledged its commit 1 after a pass ran
     /// between its upload and its acknowledgement: none if the cell is lost.
     async fn acknowledge_past_a_pass() -> Option<u64> {
-        let bucket = store();
+        let bucket = memory_bucket();
         lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
@@ -2838,7 +2844,7 @@ mod tests {
     /// where the writer taken over uploaded its commit 1, never acknowledged; and the cell's last
     /// commit, once it acknowledged what it could.
     async fn upload_where_a_writer_taken_over_did() -> (Result<(), Error>, Option<u64>) {
-        let bucket = store();
+        let bucket = memory_bucket();
         lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         let taken = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
@@ -2934,7 +2940,7 @@ mod tests {
         (listed.into_iter().map(|meta| meta.key).collect(), report)
     }
 
-    /// TASK-455's review: a clone a store resumed, its host stalling before its reference, made,
+    /// TASK-455's review: a clone a cell resumed, its host stalling before its reference, made,
     /// deleted and its cell removed, the host's reference landing after: its retirement marked, the
     /// base's next pass deletes it, and nothing is left; the host's fork fails, its record gone.
     #[test]
@@ -2973,9 +2979,9 @@ mod tests {
         (writer, extent, Origin { parent: origin_cell, at })
     }
 
-    /// What [`crate::testing::uncollected`] finds, what the host's fork gave and how many marks
-    /// the base's cell holds, once a clone of a version of the base, of an ID an allocator gave, was
-    /// begun by its host, which stalled before its reference; a store resumed it; it was deleted,
+    /// What [`crate::testing::uncollected`] finds, what the host's fork gave and how many marks the
+    /// base's cell holds, once a clone of a version of the base, of an ID an allocator gave, was
+    /// begun by its host, which stalled before its reference; a cell resumed it; it was deleted,
     /// and passes ran until quiet, which removed its cell; and the host's reference landed, and
     /// passes ran again. And the reference's key.
     async fn left_by_a_late_host_of_a_resumed_clone()
@@ -3013,7 +3019,7 @@ mod tests {
     }
 
     /// TASK-455's review: a clone whose host died after its record, before its reference, which a
-    /// store resumed: the resume writes its reference, which keeps the base's state at the fork
+    /// cell resumed: the resume writes its reference, which keeps the base's state at the fork
     /// version once the base freed it and the version was dropped, and the clone holds what it did.
     #[test]
     fn clones_resumed_keep_their_references() {
@@ -3034,7 +3040,7 @@ mod tests {
     }
 
     /// Whether a clone of a version of the base has its reference once its host died after its
-    /// record and a store resumed it; and how many of the extents it names, recovered, are where
+    /// record and a cell resumed it; and how many of the extents it names, recovered, are where
     /// it says, once the version was dropped, the base freed what it held and checkpointed, and
     /// passes ran until quiet.
     async fn clone_resumed_after_its_host_died() -> (bool, Result<usize, Error>) {
@@ -3404,7 +3410,7 @@ mod tests {
     #[test]
     fn moves_outlive_what_they_are_of() {
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
@@ -3489,9 +3495,9 @@ mod tests {
         assert_eq!(segments.iter().filter(|segment| left.contains(segment)).count(), 0);
     }
 
-    /// TASK-395.5: over S3, a pass deletes what goes in one DeleteObjects, no DELETE: the S3
-    /// server and the store count one batch, of the segments [`mostly_freed`] makes, which the
-    /// pass before compacted.
+    /// TASK-395.5: over S3, a pass deletes what goes in one DeleteObjects, no DELETE: /// server
+    /// and the bucket count one batch, of the segments [`mostly_freed`] makes, which the pass
+    /// before compacted.
     #[test]
     fn passes_delete_in_batches_over_s3() {
         use crate::object_bucket::Request;
@@ -3533,7 +3539,7 @@ mod tests {
     /// it: the next pass frees what only it held.
     #[test]
     fn cells_no_host_holds_keep_what_they_inherited_until_deleted() {
-        let bucket = store();
+        let bucket = memory_bucket();
         let (extent, held_in) = block_on(async {
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
             let base = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
@@ -3581,7 +3587,8 @@ mod tests {
     impl Bucket for DeletedAt {
         fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
             if key == self.key && !self.done.swap(true, Ordering::Relaxed) {
-                // cladefs: the swap after its maker's last copy, as a deletion writes it (TASK-691).
+                // cladefs: the swap after its maker's last copy, as a deletion writes it
+                // (TASK-691).
                 let swaps = crate::identity::DEFAULT_HEAD_SLOTS;
                 let record = Head { epoch: Head::FINAL, swaps, ..Head::of(Made::Own, 0) };
                 let key = layout::head(self.child, swaps % crate::identity::DEFAULT_HEAD_SLOTS);
@@ -3718,8 +3725,9 @@ mod tests {
         );
     }
 
-    /// What the restored cell of [`forks_of_versions_made_and_gone_within_a_pass_keep_what_they_hold`]
-    /// reads of the extent it inherited, once the pass is done.
+    /// What the restored cell of
+    /// [`forks_of_versions_made_and_gone_within_a_pass_keep_what_they_hold`] reads of the extent it
+    /// inherited, once the pass is done.
     fn read_what_a_fork_of_a_version_made_and_gone_within_a_pass_holds() -> Result<Vec<u8>, Error> {
         let sim = SimBucket::new();
         let direct = Arc::new(Direct(sim.clone()));
@@ -3779,8 +3787,8 @@ mod tests {
         })
     }
 
-    /// TASK-411.2: compacting an object encrypted under a key the ring given doesn't hold copies none
-    /// of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
+    /// TASK-411.2: compacting an object encrypted under a key the ring given doesn't hold copies
+    /// none of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
     /// compacts under its cell's keys, TASK-411.6, or leaves it); under a ring holding its key it
     /// is compacted, its live extent copied to its moves, encrypted under that key.
     #[test]
@@ -3895,7 +3903,7 @@ mod tests {
     #[test]
     fn dry_runs_write_nothing_and_find_what_passes_delete() {
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             garbage(&bucket).await;
             let before = held(&*bucket).await;
             let options = Options { compact_below: 0.5, grace: 0 };
@@ -3956,7 +3964,7 @@ mod tests {
     fn mark_only_passes_compact_and_mark_what_passes_delete() {
         let compacting = Options { compact_below: 0.5, grace: 0 };
         let deleted = block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             garbage(&bucket).await;
             let before = keys(&*bucket).await;
             let report = collect(&*bucket, 2, &compacting).await.unwrap();
@@ -3966,7 +3974,7 @@ mod tests {
         });
         assert_eq!(deleted, garbage_doomed());
         block_on(async {
-            let bucket = store();
+            let bucket = memory_bucket();
             garbage(&bucket).await;
             let before = held(&*bucket).await;
             let mut collector = Collector::new(compacting).kms(Some(crate::keys::testing::kms()));
@@ -4291,9 +4299,9 @@ mod tests {
         Yes,
     }
 
-    /// cladefs: an ephemeral cell's reference keeps its version's state, its cell having dropped the
-    /// version, freed what it named and checkpointed past it, as a child's reference does (doc-25,
-    /// TASK-698.3); deleted by its host, or by its host's decommissioning, the next sweep
+    /// cladefs: an ephemeral cell's reference keeps its version's state, its cell having dropped
+    /// the version, freed what it named and checkpointed past it, as a child's reference does
+    /// (doc-25, TASK-698.3); deleted by its host, or by its host's decommissioning, the next sweep
     /// reclaims it. Its index entry goes with it.
     #[test]
     fn ephemeral_references_keep_their_versions_until_their_hosts_let_go() {
@@ -4490,7 +4498,7 @@ mod tests {
     /// extent: how many segments it has, and the ranged GETs, which read footers, and the GETs the
     /// pass made.
     async fn pass_over_versions(versions: u64) -> (u64, u64, u64) {
-        let bucket = store();
+        let bucket = memory_bucket();
         let cell = test_cell(1);
         lifecycle::create(&*bucket, cell, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
@@ -4532,8 +4540,8 @@ mod tests {
     }
 
     /// What the second of two versions of a cell reads of an extent the cell sealed on its own
-    /// between them and freed after both, the cell checkpointed past them, sweeps having run until they
-    /// did nothing more: read by a reader of another host's.
+    /// between them and freed after both, the cell checkpointed past them, sweeps having run until
+    /// they did nothing more: read by a reader of another host's.
     async fn read_the_second_version() -> Result<Vec<u8>, Error> {
         let objects: Arc<InMemory> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
@@ -4685,7 +4693,7 @@ mod tests {
     /// reads of what it inherited from the root: the child deleted, the root having freed it and
     /// checkpointed, sweeps having run until they did nothing more. With the bucket.
     async fn read_through_a_deleted_child() -> (Result<Vec<u8>, Error>, Arc<ObjectBucket>) {
-        let bucket = store();
+        let bucket = memory_bucket();
         let (root, child, grandchild) = (test_cell(1), test_cell(2), test_cell(3));
         lifecycle::create(&*bucket, root, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), root, 10, 0).await.unwrap();
@@ -4915,10 +4923,10 @@ mod tests {
         assert_eq!(asked(8), (one, read));
     }
 
-    /// TASK-395.12: a pass over a cell whose cell was forked at many versions to other cells, a
-    /// VM snapshotted many times, lists none of the cell's checkpoints: its recovery reads what
-    /// its head names (TASK-407), and the listing of the cell serves each origin's; and it reads
-    /// each origin's checkpoint, which the restore into another cell wrote, once. Before, it listed them
+    /// TASK-395.12: a pass over a cell whose cell was forked at many versions to other cells, a VM
+    /// snapshotted many times, lists none of the cell's checkpoints: its recovery reads what its
+    /// head names (TASK-407), and the listing of the cell serves each origin's; and it reads each
+    /// origin's checkpoint, which the restore into another cell wrote, once. Before, it listed them
     /// once after the cell's segments (`newest_checkpoint`), and before that once more a fork
     /// version.
     #[test]
@@ -4967,7 +4975,7 @@ mod tests {
     #[test]
     fn fork_versions_to_other_cells_keep_their_checkpoints_past_later_writers() {
         use crate::layout::Origin;
-        let bucket = store();
+        let bucket = memory_bucket();
         let (parent, child) = (test_cell(1), test_cell(2));
         let at = block_on(async {
             lifecycle::create(&*bucket, parent, 0).await.unwrap();
@@ -4995,7 +5003,7 @@ mod tests {
     /// not; a mark-only pass retires none either; a pass does.
     #[test]
     fn dry_runs_and_mark_only_passes_retire_nothing() {
-        let bucket = store();
+        let bucket = memory_bucket();
         let (parent, child) = (test_cell(1), test_cell(2));
         let at = block_on(async {
             lifecycle::create(&*bucket, parent, 0).await.unwrap();
@@ -5291,8 +5299,8 @@ mod tests {
             cells.iter().map(|&cell| (cell, idle(cell))).collect();
         assert_eq!(sweep(&mut collector), all_idle);
 
-        // Each write, the cell it is in, and what the pass over it in full asks that a pass skipping
-        // it never does.
+        // Each write, the cell it is in, and what the pass over it in full asks that a pass
+        // skipping it never does.
         let garbage = |cell: u64| test_cell(cell);
         // At the garbage cell's checkpoint, its state there whole: an origin found lost would
         // have its pass read its children's records, in other cells, and skip it never.
@@ -5407,13 +5415,13 @@ mod tests {
         assert_eq!((report, asked), (skipped, idle(cell)));
     }
 
-    /// TASK-395.6: a pass skips nothing it went by more than the cell for. A clone being made in the
-    /// cell, of a version in another, its pass reads the version's record for: deleted then, with
-    /// nothing of the cell's changed, the next pass gives the clone up, as a pass in full does. The
-    /// cell dead, the pass in full retires the clone's reference, marking it, and passes that skip
-    /// the cell after ask its lease and listing alone (TASK-395.14): the reference written again,
-    /// by a writer whose read came before, the pass over the parent's cell deletes, by its mark.
-    /// And passes of other options, or that only mark, go over the cell in full.
+    /// TASK-395.6: a pass skips nothing it went by more than the cell for. A clone being made in
+    /// the cell, of a version in another, its pass reads the version's record for: deleted then,
+    /// with nothing of the cell's changed, the next pass gives the clone up, as a pass in full
+    /// does. The cell dead, the pass in full retires the clone's reference, marking it, and passes
+    /// that skip the cell after ask its lease and listing alone (TASK-395.14): the reference
+    /// written again, by a writer whose read came before, the pass over the parent's cell deletes,
+    /// by its mark. And passes of other options, or that only mark, go over the cell in full.
     #[test]
     fn passes_skip_only_what_the_cell_alone_decides() {
         use crate::layout::Origin;
@@ -5571,8 +5579,8 @@ mod tests {
 
     /// TASK-411.6: what the tests of compacting encrypted cells share: a bucket; a KMS holding the
     /// KEK of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of cell 1 of the
-    /// cell, encrypted, its record's DEK wrapped under the cell's KEK, holding the ring its store
-    /// holds.
+    /// cell, encrypted, its record's DEK wrapped under the cell's KEK, holding the ring an open
+    /// cell holds.
     struct Encrypted {
         bucket: Arc<ObjectBucket>,
         counted: Arc<Counted<LocalKms>>,
@@ -5597,7 +5605,7 @@ mod tests {
             let counted = Arc::new(Counted::new(local));
             let kms: kms::Shared = counted.clone();
             let host = keys::CachingKms::new(kms.clone());
-            let bucket = store();
+            let bucket = memory_bucket();
             let cell = layout::TEST_CELL;
             lifecycle::create(&*bucket, cell, 0).await.unwrap();
             let kind = Some(crate::cell::Kind::Fxfs);
@@ -5675,7 +5683,7 @@ mod tests {
     }
 
     /// `extent`'s data at `location`, read by a host's fetcher holding `ring`, as a host serving
-    /// the cell's store holds its keys; none, if `ring` is clear.
+    /// the cell holds its keys; none, if `ring` is clear.
     async fn read_holding(
         bucket: &Arc<ObjectBucket>,
         ring: &Arc<Ring>,
@@ -5778,7 +5786,7 @@ mod tests {
     }
 
     /// TASK-411.6: an object encrypted under a DEK's generation older than its record's newest is
-    /// compacted to moves encrypted under its own: a store opened before the newer was added, which
+    /// compacted to moves encrypted under its own: a cell opened before the newer was added, which
     /// holds none of it, reads the extents moved.
     #[test]
     fn moves_are_encrypted_under_the_generation_their_objects_were() {
@@ -5928,12 +5936,12 @@ mod tests {
         assert_eq!(counted.wraps(), 3);
     }
 
-    /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's moves
-    /// of its cell, are refused there, by readers holding the cell's keys and by those holding
-    /// none: their footer, which its MAC covers, names the object they are the moves of
-    /// (TASK-411.3). Their footer made to name the other, framed anew under a key not the
-    /// cell's, is refused by readers holding the keys, by its MAC (none can be framed in the
-    /// clear, TASK-411.28).
+    /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's
+    /// moves of its cell, are refused there, by readers holding the cell's keys and by those
+    /// holding none: their footer, which its MAC covers, names the object they are the moves of
+    /// (TASK-411.3). Their footer made to name the other, framed anew under a key not the cell's,
+    /// is refused by readers holding the keys, by its MAC (none can be framed in the clear,
+    /// TASK-411.28).
     #[test]
     fn encrypted_moves_copied_to_another_key_of_their_cell_are_refused() {
         block_on(async {

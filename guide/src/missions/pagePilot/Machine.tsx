@@ -166,7 +166,7 @@ export function Machine({ scene }: { scene: Scene }) {
       )}
       <g opacity={dim("extents") ? 0.42 : 1}>
         <text x={14} y={HOST_Y + 136} fontFamily="var(--display)" fontWeight={700} fontSize={13} fill="var(--l-disk)">
-          Extents (the store):
+          Extents (the cell):
         </text>
         {scene.extents.map((e, i) => (
           <g key={e.id}>

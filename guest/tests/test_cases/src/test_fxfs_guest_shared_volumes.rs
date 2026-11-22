@@ -5,8 +5,8 @@
 //! Shared volumes (cladefs's TASK-136.4, backlog doc-10), with Git, in the guests that use them. A
 //! publisher VM clones a repo into a volume and publishes it twice, updating it in between: for
 //! each generation it freezes, flushes and asks for the volume's manifest, and the host forks its
-//! store, with no `snapshot_volume`, and goes on keeping the manifest, which it doesn't read. A
-//! consumer VM, on a store of its own, asks the host for the generations as it runs, newest first,
+//! cell, with no `snapshot_volume`, and goes on keeping the manifest, which it doesn't read. A
+//! consumer VM, on a cell of its own, asks the host for the generations as it runs, newest first,
 //! so that the older is attached after the publisher moved on. It imports each as a volume and
 //! mounts it, and as the publisher's user:
 //!

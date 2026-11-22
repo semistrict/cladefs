@@ -91,7 +91,7 @@ LANGUAGES = {
 COUNT = re.compile(r"cases|seeds?\b|rounds|iterations|operations|\bops\b|PROPTEST_CASES|\s-s\s")
 TEST_FILE = re.compile(r"(^|/)tests?/|_tests?\.rs$|(^|/)tests\.rs$|(^|/)test_[^/]*\.py$")
 KNOWN_LISTS = {"scripts/pjdfstest-fuse-known", "guest/sim/known-failures",
-               "crates/fxfs-posix/known-panics"}
+               "crates/fxfs-posix/known-panics", "crates/cladefs/tests/madsim-known"}
 MUTANTS = re.compile(r"^specs/[^/]+/mutations/|^guest/mutants/")
 SPEC_CONFIG = re.compile(r"^specs/.*\.cfg$")
 CONFIG_SECTION = re.compile(r"^([A-Z_]+)\b")

@@ -3,11 +3,11 @@
 // found in the LICENSE file.
 
 //! TASK-539.13: the disk governor on a small real filesystem (backlog doc-22). An extent daemon's
-//! stores and its part cache share a 1.5 GiB ext4, over a loop device on tmpfs, with a 256 MiB
+//! cells and its part cache share a 1.5 GiB ext4, over a loop device on tmpfs, with a 256 MiB
 //! headroom; its bucket is gated, as one out of reach is, while a tenant's VM fills the disk and a
 //! neighbour takes a share of it. The filesystem never comes within a quarter of the headroom of
-//! full; the part cache, copies of the bucket, gives back what the stores need first; the guest is
-//! refused with ENOSPC on its writes alone, and its store goes on committing; once the bucket is
+//! full; the part cache, copies of the bucket, gives back what the cells need first; the guest is
+//! refused with ENOSPC on its writes alone, and its cell goes on committing; once the bucket is
 //! back, what waited uploads, leaves the disk, and the guest writes again.
 //!
 //! Root's: it mounts the filesystem (`mount -o loop`), as the test host's runs do (`sudo`, under
@@ -34,7 +34,7 @@ const MIB: u64 = 1 << 20;
 const SIZE: u64 = 1536 * MIB;
 /// What the governor leaves free of it.
 const HEADROOM: u64 = 256 * MIB;
-/// The VMs' stores' capacities: more than the filesystem, which it is that fills.
+/// The VMs' cells' capacities: more than the filesystem, which it is that fills.
 const CAPACITY: u64 = 4 << 30;
 
 /// An ext4 of [`SIZE`] over a loop device on tmpfs, mounted at a directory of its own: unmounted
@@ -75,7 +75,7 @@ impl Disk {
 
 impl Drop for Disk {
     fn drop(&mut self) {
-        // Lazily: the daemon's threads hold its stores open until the process ends, the loop
+        // Lazily: the daemon's threads hold its cells open until the process ends, the loop
         // device let go then.
         let _ = Command::new("umount").arg("-l").arg(self.mount.path()).status();
         let _ = std::fs::remove_file(&self.image);
@@ -83,10 +83,10 @@ impl Drop for Disk {
 }
 
 /// An extent of a MiB, `seed`'s bytes, which don't compress.
-fn write(store: &CellClient, sequence: u64, seed: u64) -> Result<(), Errno> {
+fn write(client: &CellClient, sequence: u64, seed: u64) -> Result<(), Errno> {
     let bytes: Vec<u8> = (0..16).flat_map(|part| common::pattern(seed << 8 | part)).collect();
-    let extent = ExtentId { cell: store.cell(), sequence };
-    store.write(extent, 0, &[VolatileSlice::from(&bytes[..])])
+    let extent = ExtentId { cell: client.cell(), sequence };
+    client.write(extent, 0, &[VolatileSlice::from(&bytes[..])])
 }
 
 /// The value of the metric `series` in the daemon's metrics.
@@ -177,8 +177,8 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     // The bucket out of reach: a VM writes until refused, committing as it goes, as a guest's
     // fsyncs do, ordered: a commit waiting for its upload would wait for the bucket.
     std::fs::write(&faults, "failing=unavailable").unwrap();
-    let store = tenant.join("vm");
-    let vm = CellClient::connect(&socket, &store, CAPACITY).unwrap();
+    let cell_dir = tenant.join("vm");
+    let vm = CellClient::connect(&socket, &cell_dir, CAPACITY).unwrap();
     let mut written = 0;
     let (refused, cache) = loop {
         match write(&vm, 1 + written, 1000 + written) {
@@ -193,7 +193,7 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     assert!(written > 100, "refused after {written} MiB");
     // The cache gave way first: no more than a band of the headroom left of it.
     assert!(cache <= HEADROOM / 4, "{cache} bytes cached as the first write was refused");
-    // Refused, its store commits, not failed: its commit frees what its extents open held, which
+    // Refused, its cell commits, not failed: its commit frees what its extents open held, which
     // a few more writes take, then it refuses again, and commits again.
     vm.commit_ordered(None).unwrap();
     let more = (0..64).take_while(|more| write(&vm, 1 + written + more, 3).is_ok()).count() as u64;

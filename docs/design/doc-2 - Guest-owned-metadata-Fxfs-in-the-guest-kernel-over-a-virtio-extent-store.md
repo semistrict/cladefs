@@ -11,11 +11,11 @@ Status: agreed design, 2026-10-13. Milestone 1 is planned; later milestones are 
 are provisional, and milestone 1 settles them (see Open decisions).
 
 **Status, 2026-11-06:** built, on Firecracker rather than libkrun (TASK-40): Fxfs in the guest kernel
-(TASK-26.6), snapshots and live forks of a running VM's store (TASK-39.1, TASK-39.3), object storage
+(TASK-26.6), snapshots and live forks of a running VM's cell (TASK-39.1, TASK-39.3), object storage
 (TASK-28, doc-7), local disk becoming its write-ahead log and cache (doc-14, TASK-165), copy-on-write
 DAX (doc-13). Milestone 1's open question, the write path, was decided on 2026-11-04 from the
 first-principles review's measurements (docs/reviews/2026-11-04-first-principles.md, section 1):
-sealed extents alone on DAX, a store's page copied on write, data written by `WRITE` requests at
+sealed extents alone on DAX, a written page copied on write, data written by `WRITE` requests at
 writeback (doc-13, TASK-164). The host's shared pages are cladefs's own extent cache
 (`crates/cladefs/src/cache.rs`); the in-process Zircon kernel was deleted (TASK-96.1). The plan below
 is kept as written, with revisions marked.
@@ -184,7 +184,7 @@ keyed by extent (the in-process kernel's pager-backed memory until TASK-96.1). T
 with:
 
 - userfaultfd faults (`crates/cladefs/src/dax/uffd.rs`);
-- write-protect faults, a store's copy on write (doc-13);
+- write-protect faults, a write's copy on write (doc-13);
 - KVM pre-faulting;
 - the EFAULT retry (`crates/cladefs/src/dax/failures.rs`).
 
@@ -228,13 +228,13 @@ with only its filesystem.
 Provisional choices, which milestone 1 or the fork milestone settles:
 
 1. **The write path.** Settled 2026-11-04 (doc-13, TASK-164): writes copy on write in host memory,
-   and are allocated at writeback. A store makes its window page a private page of the VM's, at the
+   and are allocated at writeback. A write makes its window page a private page of the VM's, at the
    same address; writeback (fsync, msync, sync, the flusher) sends the dirty pages' bytes as `WRITE`
    requests to extents Fxfs allocates then, and commits after them, as the page cache's path does;
    once sealed, the pages are rebound to those extents, shared again.
    - The provisional choice, DAX writes with barriers on commit (the window page the open extent's
      block, sealed by the next barrier), was built and given up: every fsync sealed, so the next
-     store to any page moved its block, racing the next seal, and DAX ran at 0.51-0.61x no-DAX's
+     write to any page moved its block, racing the next seal, and DAX ran at 0.51-0.61x no-DAX's
      pgbench (dead-ends/writable-dax.md).
    - `WRITE` requests, one copy each and ordered by the queue, are what writeback sends.
 2. **Immutable extents.** Settled by doc-4: extents are write-once, sealed by the next barrier, and
@@ -270,7 +270,7 @@ and DAX windows are cladefs's own. libkrun was removed for Firecracker (TASK-40)
    - Measures metadata operations and `git status` against ext4 in the guest, and settles the write
      path.
 2. **KVM fork in libkrun.** Snapshot and live fork with copy-on-write guest RAM, with branches and O(1)
-   extent forks in the store.
+   extent forks in the extent store.
 3. **Object storage.** Segments, index, uploads with bounded lag, leases, garbage collection, the NVMe
    cache tier, and GCS and S3 backends. doc-7 designs it; its segment footers replace the
    separate index deltas and free lists above.

@@ -406,9 +406,9 @@ fn rename_noreplace_fails_as_linux_does() {
 /// A rename that must not replace, racing a create of its new name, takes the name or fails with
 /// `EEXIST`, and never replaces the file created: exactly one of the two fails, with `EEXIST`.
 ///
-/// It joins futures rather than run under Shuttle, which doesn't reach this code: cladefs's `shuttle`
-/// feature doesn't enable fuchsia-async's, whose executor and tasks vfs and Fxfs run on, and a
-/// filesystem runs them on a `SendExecutor` of its own, on threads Shuttle doesn't schedule.
+/// It joins futures rather than run under Shuttle, which doesn't reach this code: cladefs's
+/// `shuttle` feature doesn't enable fuchsia-async's, whose executor and tasks vfs and Fxfs run on,
+/// and a filesystem runs them on a `SendExecutor` of its own, on threads Shuttle doesn't schedule.
 #[test]
 fn rename_noreplace_racing_a_create_never_replaces_it() {
     with_fs(async |fs| {
@@ -817,9 +817,9 @@ fn entries_of_many() {
 /// Listings of one directory at once, many entries long, each list every entry, once: none moves
 /// where another reads from.
 ///
-/// It joins futures rather than run under Shuttle, which doesn't reach this code: cladefs's `shuttle`
-/// feature doesn't enable fuchsia-async's, whose executor and tasks vfs and Fxfs run on, and a
-/// filesystem runs them on a `SendExecutor` of its own, on threads Shuttle doesn't schedule.
+/// It joins futures rather than run under Shuttle, which doesn't reach this code: cladefs's
+/// `shuttle` feature doesn't enable fuchsia-async's, whose executor and tasks vfs and Fxfs run on,
+/// and a filesystem runs them on a `SendExecutor` of its own, on threads Shuttle doesn't schedule.
 #[test]
 fn concurrent_listings_each_list_every_entry_once() {
     with_fs(async |fs| {
@@ -928,29 +928,31 @@ fn contents_survive_remount() {
 }
 
 /// cladefs TASK-79.6: an image formatted, closed, then opened again and mounted, as a guest mounts
-/// the store its host formatted, takes writes, synced: its journal writes the blocks of its tail
-/// minted before, never written, below the store's next sequence number, which the store took for
-/// spent once, failing the journal's flush.
+/// the cell its host formatted, takes writes, synced: its journal writes the blocks of its tail
+/// minted before, never written, below the cell's next sequence number, which it took for spent
+/// once, failing the journal's flush.
 #[test]
 fn images_opened_again_take_synced_writes() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
-        let fs = Filesystem::format(Storage::create(&path, 64 << 20).unwrap()).await.unwrap();
+        let fs = Filesystem::format(Storage::create(&path, 64 << 20).await.unwrap()).await.unwrap();
         let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
         file.write(0, b"formatted").await.unwrap();
         drop(file);
         drop(fs.close().await.expect("close failed"));
 
         for round in 0..3u8 {
-            let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.expect("mount failed");
+            let fs =
+                Filesystem::mount(Storage::open(&path).await.unwrap()).await.expect("mount failed");
             let (file, _) = fs.root().lookup(b"file").await.unwrap();
             file.write(0, &[round; 8192]).await.unwrap();
             file.fsync().await.expect("fsync failed");
             drop(file);
             drop(fs.close().await.expect("close failed"));
         }
-        let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.expect("mount failed");
+        let fs =
+            Filesystem::mount(Storage::open(&path).await.unwrap()).await.expect("mount failed");
         let (file, _) = fs.root().lookup(b"file").await.unwrap();
         assert!(read_all(&file).await == [2; 8192], "the file holds other data");
         drop(file);
@@ -963,9 +965,9 @@ fn contents_survive_remount_of_an_image() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
-        let storage = Storage::create(&path, 64 << 20).expect("create failed");
+        let storage = Storage::create(&path, 64 << 20).await.expect("create failed");
         assert_eq!(storage.size(), 64 << 20);
-        assert!(Storage::create(&path, 64 << 20).is_err(), "created an image over another");
+        assert!(Storage::create(&path, 64 << 20).await.is_err(), "created an image over another");
 
         let fs = Filesystem::format(storage).await.expect("format failed");
         let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
@@ -975,7 +977,7 @@ fn contents_survive_remount_of_an_image() {
         drop(fs);
         assert_eq!(errno(file.getattr().await), Errno::ENOTCONN);
         let storage =
-            Storage::open(&path).expect("open failed").check().await.expect("check failed");
+            Storage::open(&path).await.expect("open failed").check().await.expect("check failed");
         drop(file);
 
         // The storage a filesystem gives back can be mounted again.
@@ -1021,10 +1023,10 @@ fn storage_errors() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let missing =
-            Storage::open(dir.path().join("missing")).expect_err("opened a missing image");
+            Storage::open(dir.path().join("missing")).await.expect_err("opened a missing image");
         assert!(format!("{missing:#}").contains("missing"), "{missing:#}");
         let empty =
-            Storage::create(dir.path().join("empty"), 0).expect_err("created an empty image");
+            Storage::create(dir.path().join("empty"), 0).await.expect_err("created an empty image");
         assert_eq!(empty.to_string(), "the image is smaller than a block");
         assert!(!dir.path().join("empty").exists(), "left an empty image behind");
         let unformatted = Filesystem::mount(Storage::memory(STORAGE_SIZE)).await;

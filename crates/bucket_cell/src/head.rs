@@ -4,10 +4,10 @@
 
 //! cladefs: a cell's head (doc-7, The head; TASK-407, TASK-515): its one swapped object ([`Head`]),
 //! what made it, its keys, its writer's taking and its commit. Every object of a cell's is written
-//! once, at a key naming its writer's epoch, and is the cell's only once the head names it: a writer
-//! acknowledges its segments by swapping the head to name them, with the condition that it is
-//! still the version it last wrote, its own taking's. A takeover swaps it to the next epoch, so that
-//! the writer before fails at its next swap: the head is the fence. A deletion swaps it to
+//! once, at a key naming its writer's epoch, and is the cell's only once the head names it: a
+//! writer acknowledges its segments by swapping the head to name them, with the condition that it
+//! is still the version it last wrote, its own taking's. A takeover swaps it to the next epoch, so
+//! that the writer before fails at its next swap: the head is the fence. A deletion swaps it to
 //! [`Head::FINAL`], which no writer takes, and nothing swaps after.
 //!
 //! A taking is a host's placement of the cell and its writer's at once, one conditional write
@@ -42,12 +42,12 @@ use bytes::Bytes;
 use std::collections::BTreeMap;
 
 /// cladefs: how long the collector keeps a failed head's marks ([`fail`]), in milliseconds by the
-/// store's clock: a day, which no maker's request outlives, so that none of its creates lands
+/// backend's clock: a day, which no maker's request outlives, so that none of its creates lands
 /// where a mark was (specs/head-slots' marksKept).
 pub const MARKS_KEPT: u64 = 24 * 60 * 60 * 1000;
 
 /// cladefs: how long the collector leaves a head unmade before it fails it ([`fail`]), in
-/// milliseconds by the store's clock, from its first slot's making: an hour, which a maker making
+/// milliseconds by the backend's clock, from its first slot's making: an hour, which a maker making
 /// it takes far less of, so that a making is failed only once its maker is dead, or slower than any
 /// is. Safety needs none of it: a making failed sooner fails as a fork given up on does.
 pub const UNMADE_FOR: u64 = 60 * 60 * 1000;
@@ -176,7 +176,7 @@ impl Held {
         self.slots.clone()
     }
 
-    /// cladefs: the key of the slot the next swap writes: what that swap waits for its store to
+    /// cladefs: the key of the slot the next swap writes: what that swap waits for its backend to
     /// take ([`Bucket::rewritable`], TASK-690).
     pub fn next_key(&self, cell: CellId) -> String {
         layout::head(cell, (self.head.swaps + 1) % self.slots.n)
@@ -616,9 +616,9 @@ mod tests {
     }
 
     /// A head whose maker made its first slot alone, dying before the rest, or still making them,
-    /// is none to a reader (rule `whole_or_final`), and to a change of it, which no one but its maker
-    /// makes ([`Error::Unmade`]); a taking finds no cell. Without the rule, the first slot's head is
-    /// read, and taken, a head its maker is still making.
+    /// is none to a reader (rule `whole_or_final`), and to a change of it, which no one but its
+    /// maker makes ([`Error::Unmade`]); a taking finds no cell. Without the rule, the first slot's
+    /// head is read, and taken, a head its maker is still making.
     fn unmade() -> (Result<Option<Head>, Error>, Result<u64, Error>) {
         let bucket = Direct(SimBucket::new());
         let first = Head::of(Made::Root, 7);
@@ -691,8 +691,8 @@ mod tests {
         assert_eq!(found.map(|head| head.map(|head| (head.owner, head.swaps))), Ok(Some((7, 0))));
     }
 
-    /// TASK-691: a bucket formatted with 3 slots a head keeps its heads in 3, made, read and swapped
-    /// round them; a bucket of no identity, the default's.
+    /// TASK-691: a bucket formatted with 3 slots a head keeps its heads in 3, made, read and
+    /// swapped round them; a bucket of no identity, the default's.
     #[test]
     fn heads_are_kept_in_their_buckets_count_of_slots() {
         let memory = Arc::new(object_store::memory::InMemory::new());

@@ -27,7 +27,7 @@ All of them are in tracefs under `events/cladefs/`.
 | `cladefs_window_map_start` | A MAP of the window, read-only: an extent's pages, or zeros. A MAP_MANY counts as one, with `count` maps | `id`, `cell`, `sequence`, `offset` (the first map's), `len` (all of them), `window` (the first map's window offset), `count`, `zeros` |
 | `cladefs_window_map_end` | The MAP returns | `id`, `err` |
 | `cladefs_window_unmap_start`, `_end` | An UNMAP of `len` bytes at `window` | `id`, `window`, `len`; then `id`, `err` |
-| `cladefs_window_private_start`, `_end` | A PRIVATE: a store's copy-on-write of window pages | `id`, `window`, `len`; then `id`, `err` |
+| `cladefs_window_private_start`, `_end` | A PRIVATE: a guest write's copy-on-write of window pages | `id`, `window`, `len`; then `id`, `err` |
 | `cladefs_dax_map` | Why the window is about to map, just before the MAPs that follow on the same task | `why` (see below), `ino` (0 for `reach`), `window`, `len`, `count` |
 | `cladefs_seal_begin` | A seal begins | `seals`: the device's count, odd while a seal is in progress |
 | `cladefs_seal_end` | The seal ends | `seals` (one more), `bytes`: what WRITEs submitted since the last seal ended wrote, which this seal sealed |
@@ -150,7 +150,7 @@ bpftrace scripts/bpftrace/cladefs-latency.bt
 ```
 
 The guest test `fxfs-guest-bpftrace-dax` runs this script in a guest with Alpine's bpftrace. Its
-workload writes and fsyncs files, reads them in sealed through a mapping, stores to them and fsyncs
+workload writes and fsyncs files, reads them in sealed through a mapping, writes to them and fsyncs
 again. The test checks that the script prints each histogram.
 
 The guest has no BPF JIT (`CONFIG_BPF_JIT` is off), so bpftrace's programs run in the
@@ -162,7 +162,7 @@ interpreter, which adds to what each traced event costs. That cost is not measur
   turns the events on through tracefs. It writes a file and fsyncs it. It checks, in order: the
   fsync's start, a device WRITE completed with the same id, a seal's begin and end (counts n and
   n + 1), and the fsync's end, and that the seals sealed what was written. On a DAX mount it then
-  checks a load, a store and another fsync, in order: the read fault, the `range` MAP of the file's
+  checks a read, a write and another fsync, in order: the read fault, the `range` MAP of the file's
   pages, the write fault's PRIVATE of a window page within what that MAP mapped, the fsync's
   writeback, the seal, and each one's end. Across the whole trace, it checks that every start has
   one end with the same id.

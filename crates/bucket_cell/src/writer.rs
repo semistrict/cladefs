@@ -13,8 +13,8 @@
 //! ([`Writer::stopped`], [`Error::Fenced`]): what it uploaded since, no head names, nor ever will.
 //! Only a writer taking the cell anew goes on with it.
 //!
-//! Its segments' footers are stamped by its chain ([`Writer::chain`]): those a local store closed,
-//! framed, which it uploads as they are (a store's closed segment is the object, doc-7, decision
+//! Its segments' footers are stamped by its chain ([`Writer::chain`]): those a local cell closed,
+//! framed, which it uploads as they are (a cell's closed segment is the object, doc-7, decision
 //! 1), and those of batches of commits it is given ([`SegmentBuilder`](crate::SegmentBuilder))
 //! alike. It takes each one way ([`Writer::add_segment`]), admitting it only if its chain would
 //! have stamped it so.
@@ -23,9 +23,9 @@
 //! budget it may share with other writers, a host's ([`Writer::uploading_within`]), and held only
 //! while they go: what a host's writers hold at once is bounded, however far behind they are.
 //!
-//! cladefs: a writer holds its store's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
+//! cladefs: a writer holds its cell's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
 //! cell reading under it, and encrypts its fences and authenticates its checkpoints under its
-//! cell's newest DEK; the segments it is given come encrypted by their store.
+//! cell's newest DEK; the segments it is given come encrypted by their cell.
 
 use crate::bucket::{self, Bucket, Created};
 use crate::fetch::{Budget, Limits, Priority};
@@ -108,7 +108,7 @@ pub struct Writer<B: Bucket> {
     /// cladefs: the keys it reads and encrypts under (TASK-411.3).
     keys: Arc<Ring>,
     /// cladefs: the decoded state its recovery started from, if any ([`Recovered::layer`]), which
-    /// its state's map shares, as the store opened with its state does (TASK-453).
+    /// its state's map shares, as the cell opened with its state does (TASK-453).
     layer: Option<Arc<State>>,
 }
 
@@ -152,7 +152,7 @@ impl<B: Bucket> Writer<B> {
     /// Takes `cell` over: its head, as `holder`, which must differ from every other taking's, of
     /// the placement whose fencing token is `token`, given the keys it lacks
     /// ([`crate::keys::taking`]): its KEK unwrapped by `kms`, the host's; then its state, recovered
-    /// from it once it holds it. What takes a cell outside a store: tools, tests.
+    /// from it once it holds it. What takes a cell outside the daemon: tools, tests.
     pub async fn open_under(
         bucket: Arc<B>,
         cell: CellId,
@@ -179,7 +179,7 @@ impl<B: Bucket> Writer<B> {
         Self::open_under(bucket, cell, (holder, token), &kms).await
     }
 
-    /// The writer of `cell`, whose head its taking took, `held`, holding `keys`, its store's ring
+    /// The writer of `cell`, whose head its taking took, `held`, holding `keys`, its cell's ring
     /// (TASK-411.3): its state recovered from the head it took, anew, or on from `before`, a
     /// recovery of it made before the taking ([`recovery::recover_on`]), which reads only what came
     /// since (TASK-165.11).
@@ -235,7 +235,7 @@ impl<B: Bucket> Writer<B> {
 
     /// Has `mover` told of the extents the writer's checkpoints record as moved, from where to
     /// where, as the writer names them where they went, before each checkpoint lands: a host's
-    /// store reading them, which so names none further back along its way than the writer's newest
+    /// cell reading them, which so names none further back along its way than the writer's newest
     /// checkpoint, from which the collector keeps the moves (TASK-195). Once.
     pub fn following(
         &self,
@@ -295,7 +295,7 @@ impl<B: Bucket> Writer<B> {
     }
 
     /// Where the writer's next segment goes: its chain, as of the last segment it took, which
-    /// stamps the footer of the next, a store's or a batch's ([`Writer::add_segment`]). The
+    /// stamps the footer of the next, a cell's or a batch's ([`Writer::add_segment`]). The
     /// cell's next sequence number it names is what the guest mints from.
     pub fn chain(&self) -> Chain {
         self.inner().chain
@@ -310,7 +310,7 @@ impl<B: Bucket> Writer<B> {
         self.inner().stopped.get_or_insert(error).clone()
     }
 
-    /// Takes a segment, `objects`, as the next to upload ([`Writer::upload`]): one a store closed,
+    /// Takes a segment, `objects`, as the next to upload ([`Writer::upload`]): one a cell closed,
     /// or a segment builder's ([`SegmentBuilder`](crate::SegmentBuilder)), closed on the writer's
     /// chain. Its footer must be the next the chain would have stamped ([`Chain::admit`]), and the
     /// objects of the extents it says are stored on their own must come with it, by their keys.
@@ -361,7 +361,8 @@ impl<B: Bucket> Writer<B> {
         span.set_count(trace::BYTES, bytes);
         // Its extents of their own, a few at once, then it.
         let creates = futures::stream::iter(own).map(|(key, body)| async move {
-            // One uploaded before, by this writer, whose key names its epoch, is created: its bytes.
+            // One uploaded before, by this writer, whose key names its epoch, is created: its
+            // bytes.
             match self.create(&key, &body, |_| Ok(())).await? {
                 Created::Created(_) => Ok(()),
                 Created::Exists(_) => Err(Error::Corrupt(format!("{key} holds another extent"))),
@@ -413,9 +414,9 @@ impl<B: Bucket> Writer<B> {
     }
 
     /// cladefs: activates `configuration` as the cell's replicated configuration (doc-21,
-    /// TASK-537.3.3): a swap of the head it holds naming it, conditional as every swap is, so that a
-    /// writer fenced since fails it, and stops. Refused for a cell its head says is not replicated
-    /// ([`Error::Corrupt`]): its taking asked for no replication.
+    /// TASK-537.3.3): a swap of the head it holds naming it, conditional as every swap is, so that
+    /// a writer fenced since fails it, and stops. Refused for a cell its head says is not
+    /// replicated ([`Error::Corrupt`]): its taking asked for no replication.
     pub async fn configure(&self, configuration: layout::Configuration) -> Result<(), Error> {
         if let Some(error) = &self.inner().stopped {
             return Err(error.clone());
@@ -458,18 +459,18 @@ impl<B: Bucket> Writer<B> {
         self.held.lock().await.head.clone()
     }
 
-    /// Acknowledges the segments uploaded with every one before them, by swapping the cell's
-    /// head to name them, with the condition that it is the one this writer last wrote ([`head`],
-    /// doc-7, The head; TASK-407): a writer taken over, or a deleted cell's, fails, and stops.
-    /// Returns the last segment acknowledged. cladefs: to the last that goes on with no commit, a
-    /// commit spanning segments acknowledged with the segment it ends in, not part of it
-    /// (`extent_frame::segment::Continued`, TASK-92.41): what a store lets go of, once
-    /// acknowledged, the bucket has whole, and a head names no commit begun. cladefs: the swap names
-    /// the versions cut at the ends of the segments it names too ([`layout::Head::naming`], doc-18,
-    /// TASK-476): a version is uploaded once it does.
-    /// cladefs: one swap names all that is uploaded until the bucket's store takes the head's next
-    /// write ([`Bucket::rewritable`]): a cell's head is swapped no faster than the store takes it,
-    /// GCS about once a second, however many segments upload meanwhile (TASK-690).
+    /// Acknowledges the segments uploaded with every one before them, by swapping the cell's head
+    /// to name them, with the condition that it is the one this writer last wrote ([`head`], doc-7,
+    /// The head; TASK-407): a writer taken over, or a deleted cell's, fails, and stops. Returns the
+    /// last segment acknowledged. cladefs: to the last that goes on with no commit, a commit
+    /// spanning segments acknowledged with the segment it ends in, not part of it
+    /// (`extent_frame::segment::Continued`, TASK-92.41): what a cell lets go of, once acknowledged,
+    /// the bucket has whole, and a head names no commit begun. cladefs: the swap names the versions
+    /// cut at the ends of the segments it names too ([`layout::Head::naming`], doc-18, TASK-476): a
+    /// version is uploaded once it does. cladefs: one swap names all that is uploaded until the
+    /// bucket's backend takes the head's next write ([`Bucket::rewritable`]): a cell's head is
+    /// swapped no faster than the backend takes it, GCS about once a second, however many segments
+    /// upload meanwhile (TASK-690).
     pub async fn acknowledge(&self) -> Result<Option<u64>, Error> {
         if self.naming()?.is_none() {
             return Ok(self.inner().state.through);
@@ -694,7 +695,7 @@ impl<B: Bucket> Writer<B> {
         }
         drop(inner);
         // And what follows them with it.
-        if rules().stores_follow_moves
+        if rules().hosts_follow_moves
             && let Some(mover) = self.mover.get()
         {
             mover(moved);
@@ -1240,11 +1241,11 @@ mod tests {
         });
     }
 
-    /// A writer takes a segment a store closed for it, and uploads it as it is; one numbered
+    /// A writer takes a segment a cell closed for it, and uploads it as it is; one numbered
     /// otherwise, of another writer, or without the objects of its extents of their own at the
     /// keys it names them at, it refuses, and goes on as before.
     #[test]
-    fn writers_upload_segments_stores_closed() {
+    fn writers_upload_segments_cells_closed() {
         futures::executor::block_on(async {
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();

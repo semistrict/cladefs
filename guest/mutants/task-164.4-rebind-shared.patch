@@ -4,7 +4,7 @@
 # Kernel: sim
 # Killer: scenarios cow_rebind_against_write
 #
-# TASK-164.4, doc-13: a rebind under the file's semaphore shared: a write(2) dirties and stores to a
+# TASK-164.4, doc-13: a rebind under the file's semaphore shared: a write(2) dirties and writes to a
 # page between the rebind's look and its MAP, which replaces it with the extent's.
 # cow_rebind_against_write; cladefs_dax_rebind_range's lockdep assertion fails first, in every scenario
 # that rebinds.

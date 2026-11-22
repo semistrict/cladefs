@@ -7,7 +7,7 @@
 Reads each pgbench case's log under the results directories given (test_fxfs_guest_pgbench.rs's,
 `.../CASE/CASE/log.txt`, as scripts/test-host.sh and scripts/bench-host.sh keep them), and its
 daemon's samples beside it (samples.txt, which the host writes every 2 s of the loading VM's life,
-the store cases' alone). For each case:
+the cell cases' alone). For each case:
 
 - the load: `pgbench -i`'s time and its phases, as pgbench says them ("done in ... (drop tables
   ..., create tables ..., client-side generate ..., vacuum ..., primary keys ...)");

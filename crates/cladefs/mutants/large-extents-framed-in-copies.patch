@@ -3,7 +3,7 @@
 # LangSmith's sandbox hosts' daemons writing 2.3 times what their guests did, framings stalling
 # seconds behind it (TASK-310, TASK-330.2).
 # Kind: writes
-# Killer: bucket::write_budgets::a_hosts_store_writes_what_its_design_says
+# Killer: bucket::write_budgets::a_hosts_cell_writes_what_its_design_says
 --- a/crates/local_cell/src/cell.rs
 +++ b/crates/local_cell/src/cell.rs
 @@ -2348,10 +2348,6 @@
@@ -16,4 +16,4 @@
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 // Its raw parts before are no parts of a store at a version's, encrypted with AES-GCM: framed anew,
+                 // Its raw parts before are no parts of a cell at a version's, encrypted with AES-GCM: framed anew,

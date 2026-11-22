@@ -42,20 +42,20 @@ export const predictions = {
     ],
   },
   forkB: {
-    question: "Fork A stores one byte to page 0. Fork B then reads page 0. What does B see?",
+    question: "Fork A writes one byte to page 0. Fork B then reads page 0. What does B see?",
     options: [
-      { text: "The old byte", right: true, why: "B still maps base·7, which never changes: it is sealed. A's store went to a page of its own." },
-      { text: "A's new byte", right: false, why: "Forks share nothing writable. A sealed extent never changes, so no store can reach B through it." },
-      { text: "It faults, and waits for A's fsync", right: false, why: "Nothing about B's mapping changes. B never hears of A's store." },
+      { text: "The old byte", right: true, why: "B still maps base·7, which never changes: it is sealed. A's write went to a page of its own." },
+      { text: "A's new byte", right: false, why: "Forks share nothing writable. A sealed extent never changes, so no write can reach B through it." },
+      { text: "It faults, and waits for A's fsync", right: false, why: "Nothing about B's mapping changes. B never hears of A's write." },
     ],
   },
   address: {
-    question: "Does page 0's guest physical address in fork A change when A stores to it?",
+    question: "Does page 0's guest physical address in fork A change when A writes to it?",
     options: [
       {
         text: "No: same window offset, now backed by a private page",
         right: true,
-        why: "doc-13's invariant 2: a private page's window address never changes. No store moves a page, so no guest PTE changes for a store.",
+        why: "doc-13's invariant 2: a private page's window address never changes. No write moves a page, so no guest PTE changes for a write.",
       },
       {
         text: "Yes: the guest remaps it to a fresh page",
@@ -70,13 +70,13 @@ export const predictions = {
       {
         text: "The host, when the guest's iomap_begin asks (PRIVATE), before the page goes in the dirty set",
         right: true,
-        why: "Dirty implies private. The guest asks first, so the host never copies at a store.",
+        why: "Dirty implies private. The guest asks first, so the host never copies at a write.",
       },
       {
-        text: "The host, when the store itself faults on the read-only page",
+        text: "The host, when the write itself faults on the read-only page",
         right: false,
         why:
-          "The design before TASK-164.9. A fault's store lands after its iomap_end, maybe after a writeback moved the block and a seal freed it: the host would copy the freed block's zeros. guest/sim found it (seed 2802).",
+          "The design before TASK-164.9. A fault's write lands after its iomap_end, maybe after a writeback moved the block and a seal freed it: the host would copy the freed block's zeros. guest/sim found it (seed 2802).",
       },
       {
         text: "The guest, into its page cache",
@@ -102,9 +102,9 @@ export const predictions = {
   },
   oldStore: {
     question:
-      "Before copy-on-write, a store went straight to the open extent's block, mapped writable in the window. Every fsync seals every open extent. What must the next store to that page do?",
+      "Before copy-on-write, a write went straight to the open extent's block, mapped writable in the window. Every fsync seals every open extent. What must the next write to that page do?",
     options: [
-      { text: "Nothing: the block is still the page's", right: false, why: "Sealed means immutable. After any fsync, anywhere in the filesystem, the page's block can't take a store." },
+      { text: "Nothing: the block is still the page's", right: false, why: "Sealed means immutable. After any fsync, anywhere in the filesystem, the page's block can't take a write." },
       {
         text: "Move the page to a new open block, in the fault path, while the next seal may come",
         right: true,

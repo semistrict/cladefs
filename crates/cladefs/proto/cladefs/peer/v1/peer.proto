@@ -56,21 +56,32 @@ service Peer {
 
   // Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
   // specs/ephemeral): the source prepares it here, which writes this host's reference to the
-  // cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+  // cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
   // segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
   // this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
-  // ephemeral cells (CLADEFSD_EPHEMERAL).
+  // ephemeral cells (CLADEFSD_EPHEMERAL). This host serves one request of a cell's migrations at a
+  // time (board 5732). Asked again, it prepares again, answering as before. A migration older than
+  // one of the cell it takes, by the cell's epoch, it refuses (ABORTED); one it takes it gives up
+  // for a newer (supersedes). UNAVAILABLE if its bucket calls timed out, what it noted undone.
   rpc MigratePrepare(MigratePrepareRequest) returns (MigratePrepareResponse);
-  // A piece of a file of the store being migrated, or its holes.
+  // A piece of a file of the cell being migrated, or its holes.
   rpc MigrateFile(MigrateFileRequest) returns (MigrateFileResponse);
   // Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-  // store put at its path, durably, and the migration remembered as accepted for good
-  // (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
-  // what it took dropped and its reference retired, so that it never takes that migration after
-  // (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
+  // cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
+  // until its source releases it, so that this answers yes to it again, however often asked.
+  // Otherwise no, what it took dropped and its reference retired, so that it never takes that
+  // migration after (refuseFinal): a hand-over naming another take of it than its prepare's answer
+  // (boundToPrepare) among them. No to a migration it never prepared. FAILED_PRECONDITION, neither
+  // yes nor no, asked of another incarnation of this host's, which alone knows the migration.
   rpc MigrateHandOver(MigrateHandOverRequest) returns (MigrateHandOverResponse);
   // Gives a migration up before its hand-over: what it took dropped, its reference retired.
   rpc MigrateAbort(MigrateAbortRequest) returns (MigrateAbortResponse);
+  // Says the migration goes on, its source there still: one this host heard nothing of for
+  // CLADEFSD_MIGRATION_IDLE it gives up (board 5734). NOT_FOUND if it gave it up.
+  rpc MigrateRenew(MigrateRenewRequest) returns (MigrateRenewResponse);
+  // Forgets this host accepted the migration: its source let the cell go, and asks no more
+  // (board 5734).
+  rpc MigrateRelease(MigrateReleaseRequest) returns (MigrateReleaseResponse);
 }
 
 // A migration of an ephemeral cell to prepare.
@@ -89,14 +100,20 @@ message MigratePrepareRequest {
   uint64 at = 6;
   // The URL of the bucket its parent is kept in.
   string bucket = 7;
-  // Where its store goes on this host.
+  // Where it goes on this host.
   string to = 8;
+  // The cell's epoch, as of this migration: greater than every migration's of the cell before it
+  // (board 5732).
+  uint64 epoch = 9;
 }
 
 // A migration prepared.
 message MigratePrepareResponse {
   // This host's incarnation, which its reference to the cell names, and the hand-over must name.
   uint64 incarnation = 1;
+  // This host's token for its take of the migration, new to it, which the hand-over must name
+  // (specs/ephemeral, boundToPrepare).
+  uint64 token = 2;
 }
 
 // A range of a file.
@@ -107,11 +124,11 @@ message Range {
   uint64 len = 2;
 }
 
-// A piece of a file of the store being migrated.
+// A piece of a file of the cell being migrated.
 message MigrateFileRequest {
   // The migration.
   uint64 migration = 1;
-  // The file's path in the store; a directory's, made if it is not there, ends with `/`.
+  // The file's path in the cell; a directory's, made if it is not there, ends with `/`.
   string path = 2;
   // Where `bytes` go in it.
   uint64 offset = 3;
@@ -126,9 +143,9 @@ message MigrateFileRequest {
 // A piece written.
 message MigrateFileResponse {}
 
-// A file of the store a hand-over names.
+// A file of the cell a hand-over names.
 message FileDigest {
-  // Its path in the store.
+  // Its path in the cell.
   string path = 1;
   // Its length.
   uint64 len = 2;
@@ -142,8 +159,10 @@ message MigrateHandOverRequest {
   uint64 migration = 1;
   // The incarnation of this host's its preparation answered.
   uint64 incarnation = 2;
-  // Every file of the store.
+  // Every file of the cell.
   repeated FileDigest files = 3;
+  // The token its preparation answered.
+  uint64 token = 4;
 }
 
 // A hand-over's answer.
@@ -160,6 +179,24 @@ message MigrateAbortRequest {
 
 // A migration given up.
 message MigrateAbortResponse {}
+
+// A migration going on.
+message MigrateRenewRequest {
+  // The migration.
+  uint64 migration = 1;
+}
+
+// A migration renewed.
+message MigrateRenewResponse {}
+
+// A migration accepted, its cell let go of by its source.
+message MigrateReleaseRequest {
+  // The migration.
+  uint64 migration = 1;
+}
+
+// A migration released.
+message MigrateReleaseResponse {}
 
 // A configuration of a cell: its number, and the epoch of the writer that made it.
 message Configuration {

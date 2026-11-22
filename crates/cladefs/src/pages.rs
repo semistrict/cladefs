@@ -6,7 +6,7 @@
 //! (`crate::cache`) and the zeros DAX windows map are of: host shared memory, in arenas, each its
 //! own object (a memfd on Linux), which a process given an arena's object maps the arena's pages
 //! from (TASK-43). As an arena runs out, its relief evicts cached extents' pages. Open extents are
-//! written to their stores' segments (`local_cell`), and a window's private pages, copy-on-write
+//! written to their cells' segments (`local_cell`), and a window's private pages, copy-on-write
 //! DAX's, are of its VM's memory (`crate::dax`): neither is of it.
 //!
 //! Its size is set once, with [`configure`], before its first page is allocated, or is the
@@ -65,7 +65,7 @@ pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedF
 }
 
 /// An arena of physical memory of its own (TASK-43), a tenant's, held by what allocates in it: its
-/// tenant, the stores opened in it ([`OpenCell::open_in`]), and what reads into the extent cache
+/// tenant, the cells opened in it ([`OpenCell::open_in`]), and what reads into the extent cache
 /// for them (TASK-79.36). Once none of them holds it, the extents
 /// cached in it go, and it goes, its memory once the pages of it still allocated, those page-ins in
 /// flight hold, are freed: nothing allocates in it after, which would fail.
@@ -98,11 +98,12 @@ pub fn page_size() -> u64 {
     physmem::page_size()
 }
 
-/// Fails with `EINVAL` unless a window of `block`-byte blocks, as a store's extents hold them, maps
+/// Fails with `EINVAL` unless a window of `block`-byte blocks, as a cell's extents hold them, maps
 /// on a host of `host_page`-byte pages ([`page_size`]): one whose pages are no larger, as mmap maps
 /// whole host pages alone, at offsets of whole ones in an extent. A host of larger pages (an arm64
-/// kernel of 16 KiB, a store's blocks 4 KiB) maps no extent's blocks into a window: a memory cell
-/// restores none there, and a file set reads from its device instead (board 5230, board 5232).
+/// kernel of 16 KiB, a cell's blocks 4 KiB) maps no extent's blocks into a window: a memory cell
+/// restores none there, and a SQLite cell's block device reads from its device instead (board 5230,
+/// board 5232).
 pub fn window_fits_host(block: u64, host_page: u64) -> Result<(), Error> {
     match host_page <= block {
         true => Ok(()),

@@ -2,7 +2,7 @@
 // Copyright 2026 The cladefs Authors.
 /*
  * One task, with no VM: mounts a file on the DAX window, writes it, reads it back, takes faults
- * through a mapping, whose stores copy on write (doc-13), and writes it back and seals.
+ * through a mapping, whose writes copy on write (doc-13), and writes it back and seals.
  * Every step checks the bytes as read(2), the mapping and Fxfs's extents, written back, have them.
  */
 
@@ -65,17 +65,17 @@ static void scenario(void *arg)
 	err = sim_user_load(addr + PAGE_SIZE + 5, back, 16);
 	check(!err && !memcmp(back, data + PAGE_SIZE + 5, 16), "a load through a mapping: %d", err);
 	memcpy(data + PAGE_SIZE + 100, "through a mapping", 17);
-	err = sim_user_store(addr + PAGE_SIZE + 100, "through a mapping", 17);
-	check(!err, "a store through a mapping: %d", err);
-	check_file("after a store", 0, data, sizeof(data));
+	err = sim_user_write(addr + PAGE_SIZE + 100, "through a mapping", 17);
+	check(!err, "a write through a mapping: %d", err);
+	check_file("after a write", 0, data, sizeof(data));
 
-	/* Writeback write-protects the page, and the next store faults again. */
+	/* Writeback write-protects the page, and the next write faults again. */
 	err = sim_fsync(file);
 	check(!err, "fsync: %d", err);
 	check_file("after the second seal", 0, data, sizeof(data));
 	memcpy(data + PAGE_SIZE + 200, "and again", 9);
-	err = sim_user_store(addr + PAGE_SIZE + 200, "and again", 9);
-	check(!err, "a store after a seal: %d", err);
+	err = sim_user_write(addr + PAGE_SIZE + 200, "and again", 9);
+	check(!err, "a write after a seal: %d", err);
 	err = sim_fsync(file);
 	check(!err, "fsync: %d", err);
 	cond_resched();

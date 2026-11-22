@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefsd, cladefs's daemon, one a host (TASK-475): serves the extent stores of the VMs on this
+//! cladefsd, cladefs's daemon, one a host (TASK-475): serves the cells of the VMs on this
 //! host, from one memory, to VM processes that connect to its socket (`cladefs::cladefsd`); and, if
 //! told to, mounts tenants' cells with FUSE (`cladefs::cladefsd::mount`). A cell is held
 //! by this one process, whichever serves them.
@@ -12,62 +12,62 @@
 //! ```
 //!
 //! Its memory, which the sealed extents it caches are kept in, and VMs' DAX windows map read-only,
-//! is a page cache (`cladefs::cladefsd::governor`, TASK-358): as much of the host's as is free, less a
-//! headroom (`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's memory, 1 GiB at
-//! least), given back as the host's free memory falls, each tenant kept its share by weight
+//! is a page cache (`cladefs::cladefsd::governor`, TASK-358): as much of the host's as is free,
+//! less a headroom (`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's memory, 1 GiB
+//! at least), given back as the host's free memory falls, each tenant kept its share by weight
 //! (`SetMemoryWeight`). MEMORY_BYTES, if given, fixes it at that instead, ungoverned, as a test's
-//! daemon may have it. A store's
-//! private pages, which copy-on-write DAX gives a VM's stores, are of the VM's memory, not of it
-//! (backlog doc-13). Out of it, or past a limit the control API sets, the daemon evicts the cached
-//! extents asked for longest ago, and fails what it cannot make room for with ENOMEM, rather than
-//! stop (TASK-50.3); cladefs: but a page-in while the host's memory is full, which waits for room
-//! (board 5662). A VMM's extent device
-//! connects to the socket its configuration names (cladefs's Firecracker's `cladefsd_socket`).
+//! daemon may have it. A cell's private pages, which copy-on-write DAX gives a VM's writes, are of
+//! the VM's memory, not of it (backlog doc-13). Out of it, or past a limit the control API sets,
+//! the daemon evicts the cached extents asked for longest ago, and fails what it cannot make room
+//! for with ENOMEM, rather than stop (TASK-50.3); but a page-in while the host's memory is full
+//! waits for room (board 5662). A VMM's extent device connects to the socket its configuration
+//! names (cladefs's Firecracker's `cladefsd_socket`).
 //!
 //! It runs as a host of cladefs's multi-node system: `CLADEFSD_BUCKET` names the bucket its
-//! stores' cells are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
+//! their cells are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
 //! the system's control plane gives it, and which fences earlier placements' writes and deletes;
 //! without them, it refuses to start (`cladefs::bucket::Host`, TASK-45). Tests and development use
 //! an in-memory bucket (`memory:///NAME`).
 //!
 //! One daemon serves every VM on a host. Connections to SOCKET are of the default tenant: with
-//! `CLADEFSD_ROOTS` naming directories, separated by colons, they name stores in them alone
-//! (`cladefs::cladefsd`, Isolation). SOCKET is the daemon's user's alone, mode 0600: a VM process of
-//! another user, as a jail's, connects to a tenant's socket, granted to its user, and never to this
-//! one, mounted or not (TASK-155). The VM manager runs jails as another user than the daemon's, and
-//! hands them SOCKET's path no more than it does the control socket's.
+//! `CLADEFSD_ROOTS` naming directories, separated by colons, they name cells in them alone
+//! (`cladefs::cladefsd`, Isolation). SOCKET is the daemon's user's alone, mode 0600: a VM process
+//! of another user, as a jail's, connects to a tenant's socket, granted to its user, and never to
+//! this one, mounted or not (TASK-155). The VM manager runs jails as another user than the
+//! daemon's, and hands them SOCKET's path no more than it does the control socket's.
 //!
 //! With `CLADEFSD_GRPC` naming a path, the daemon serves its control API there too, gRPC over a
-//! Unix socket (`cladefs::cladefsd::control`; `crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto`),
-//! through which the host's VM manager makes, forks, syncs and deletes stores, and grants tenants
-//! VM sockets of their own: whoever connects may do all of it, so that it is the daemon's user's
-//! alone, mode 0600, as SOCKET is, whatever the umask (TASK-159): the VM manager runs as that
-//! user, or as root. The tenants' sockets go in the directory `CLADEFSD_TENANTS` names, or
-//! `tenants` beside the control socket, each mode 0660 from the first. The control socket serves
-//! the standard gRPC health service too (`grpc.health.v1.Health`, TASK-48): SERVING while the
-//! daemon accepts VM processes, NOT_SERVING as it starts and as it stops.
+//! Unix socket (`cladefs::cladefsd::control`;
+//! `crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto`), through which the host's VM manager
+//! makes, forks, syncs and deletes cells, and grants tenants VM sockets of their own: whoever
+//! connects may do all of it, so that it is the daemon's user's alone, mode 0600, as SOCKET is,
+//! whatever the umask (TASK-159): the VM manager runs as that user, or as root. The tenants'
+//! sockets go in the directory `CLADEFSD_TENANTS` names, or `tenants` beside the control socket,
+//! each mode 0660 from the first. The control socket serves the standard gRPC health service too
+//! (`grpc.health.v1.Health`, TASK-48): SERVING while the daemon accepts VM processes, NOT_SERVING
+//! as it starts and as it stops.
 //!
-//! SIGTERM drains it, and it exits (`cladefs::cladefsd::drain`, TASK-141.4): once the health service
-//! reports NOT_SERVING, it takes no more VM processes nor control calls (`UNAVAILABLE`), closes
-//! every VM process's connection, whose VM goes as at the daemon's exit, and closes their stores,
-//! durable, and the rest it has open, and waits for their uploads: within `CLADEFSD_DRAIN`
+//! SIGTERM drains it, and it exits (`cladefs::cladefsd::drain`, TASK-141.4): once the health
+//! service reports NOT_SERVING, it takes no more VM processes nor control calls (`UNAVAILABLE`),
+//! closes every VM process's connection, whose VM goes as at the daemon's exit, and closes their
+//! cells, durable, and the rest it has open, and waits for their uploads: within `CLADEFSD_DRAIN`
 //! seconds (60 by default), exiting 0; past them, it logs what is left and exits 1. A host is
 //! upgraded so, its VMs moved off or stopped first (`docs/upgrading-a-host.md`).
 //!
 //! With `CLADEFSD_MOUNT` naming a mount point, a directory, and `CLADEFSD_MOUNT_STORES` a directory
-//! for their stores, the daemon mounts a directory of tenants' cells there with FUSE, none at first
+//! for their cells, the daemon mounts a directory of tenants' cells there with FUSE, none at first
 //! (TASK-302, TASK-364, TASK-475.2), and serves its Mount service on the control socket
 //! (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount`), which `CLADEFSD_GRPC` must name.
 //! Attaching a cell (`Attach`; a cell of 0, a new Fxfs one, its filesystem made empty) takes it
 //! from the daemon's bucket, at the placement of the token the call gives, the daemon's if none,
-//! into a store at `STORES/TENANT/CELL`, an Fxfs cell shown at `MOUNT/TENANT/CELL` (doc-20),
-//! TENANT and CELL in base 32, padded (`base32_id::Padded`); a
-//! SQLite cell, or a VM's, is not shown. `Detach` takes a cell away once nothing uses
-//! it, written back, or at once if forced; `List` says what is attached. The mount is the daemon's user's; with `CLADEFSD_MOUNT_ALLOW_OTHER=1`, other users may
-//! use it as its permissions say (for a user other than root, `/etc/fuse.conf` must have
-//! `user_allow_other`). Root mounts with mount(2), any other user through libfuse's
-//! `fusermount3`. The drain closes it: unmounted lazily, its cells written back and their
-//! stores closed once nothing uses it, within the drain's bound.
+//! into a cell directory at `CELLS/TENANT/CELL`, an Fxfs cell shown at `MOUNT/TENANT/CELL`
+//! (doc-20), TENANT and CELL in base 32, padded (`base32_id::Padded`); a SQLite cell, or a VM's, is
+//! not shown. `Detach` takes a cell away once nothing uses it, written back, or at once if forced;
+//! `List` says what is attached. The mount is the daemon's user's; with
+//! `CLADEFSD_MOUNT_ALLOW_OTHER=1`, other users may use it as its permissions say (for a user other
+//! than root, `/etc/fuse.conf` must have `user_allow_other`). Root mounts with mount(2), any other
+//! user through libfuse's `fusermount3`. The drain closes it: unmounted lazily, its cells written
+//! back and their cells closed once nothing uses it, within the drain's bound.
 //!
 //! With `CLADEFSD_METRICS` naming an address (`HOST:PORT`), the daemon serves its metrics
 //! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::cladefsd::metrics`,
@@ -76,24 +76,25 @@
 //! operators reach.
 //!
 //! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
-//! `az://container/prefix`) each store it opens keeps its cell in (backlog doc-7), with
-//! credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded behind them, within a second. With
-//! `CLADEFSD_PART_CACHE` naming a directory too, what stores read from the bucket is kept there,
-//! sparse, as much as its stores leave of its filesystem, and kept across the daemon's restarts:
-//! one daemon at a time has the directory. `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in
-//! bytes (TASK-406.1): those read least recently go first.
+//! `az://container/prefix`) each cell it opens keeps its cell in (backlog doc-7), with credentials
+//! from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded
+//! behind them, within a second. With `CLADEFSD_PART_CACHE` naming a directory too, what cells read
+//! from the bucket is kept there, sparse, as much as its cells leave of its filesystem, and kept
+//! across the daemon's restarts: one daemon at a time has the directory.
+//! `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in bytes (TASK-406.1): those read least
+//! recently go first.
 //!
 //! The host's disks are governed as its memory is (backlog doc-22): every filesystem the daemon
-//! keeps stores or its part cache on is its but for a headroom (`CLADEFSD_DISK_HEADROOM`, bytes or
+//! keeps cells or its part cache on is its but for a headroom (`CLADEFSD_DISK_HEADROOM`, bytes or
 //! `N%`; by default a twentieth of the filesystem, 4 GiB at least, half of it at most), and no more
-//! than `CLADEFSD_DISK_BYTES` on all of them together, if set. The stores come first, the part cache
-//! taking what they leave and giving it back at once; near the allowance, the stores' uploaders are
+//! than `CLADEFSD_DISK_BYTES` on all of them together, if set. The cells come first, the part cache
+//! taking what they leave and giving it back at once; near the allowance, the cells' uploaders are
 //! urged and each tenant held to its share by weight; past it, guests' writes are refused with
-//! ENOSPC, while every store goes on committing (`docs/operating-a-host.md`).
+//! ENOSPC, while every cell goes on committing (`docs/operating-a-host.md`).
 //!
 //! With `CLADEFSD_PEER_ADDRESS` naming this host's `HOST:PORT` among the hosts sharing its
 //! bucket, and `CLADEFSD_PART_CACHE` a cache, the daemon serves them parts of the bucket's objects
-//! there, over gRPC (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask the host that
+//! there, over gRPC (`proto/cladefs/peer/v1/peer.proto`), and its cells' fetchers ask the host that
 //! owns a part, by rendezvous hashing over them, before the bucket (TASK-406.2): a part many hosts
 //! read comes from the bucket about once for them all. `CLADEFSD_PEERS` names them at start,
 //! comma-separated, each spelled as it names itself; the control API's `SetPeers` replaces them.
@@ -113,14 +114,14 @@
 //! A writer of a replicated cell replaces a member down for `CLADEFSD_REPLACE_AFTER` seconds
 //! (default 30), and, its configuration holding no quorum that long, none to be had, drops it to
 //! f = 0 once the bucket holds what it told.
-//! However far behind the bucket its stores fall, what waits for it is on the host's disk, each
-//! store's write-ahead log, bounded by its lag (backlog doc-7, Uploads); what of it the daemon
+//! However far behind the bucket its cells fall, what waits for it is on the host's disk, each
+//! cell's write-ahead log, bounded by its lag (backlog doc-7, Uploads); what of it the daemon
 //! holds in memory is what it uploads at once, `CLADEFSD_UPLOAD_MEMORY` bytes at most (512 MiB
-//! by default, 64 MiB at least: an extent, which goes alone), every store's together (TASK-317).
+//! by default, 64 MiB at least: an extent, which goes alone), every cell's together (TASK-317).
 //! With `CLADEFSD_STATS` naming a file too, the daemon keeps there what it did with the
 //! bucket, its requests by kind and its bytes up and down
-//! (`bucket_cell::object_bucket::Stats::line`), what the stores' followers are, what serving the
-//! stores cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
+//! (`bucket_cell::object_bucket::Stats::line`), what the cells' followers are, what serving the
+//! cells cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
 //! rewritten as they change.
 //!
 //! With `CLADEFSD_READ_TRACES` naming a directory, the daemon writes there a trace of what each VM
@@ -144,9 +145,10 @@ fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     cladefs::renamed::refuse_old_variables().map_err(anyhow::Error::msg)?;
     cladefs::cladefsd::logging::to_stderr()?;
-    // cladefs: its large buffers given back as they are freed, before any thread is made (TASK-317).
+    // cladefs: its large buffers given back as they are freed, before any thread is made
+    // (TASK-317).
     cladefs::cladefsd::memory::return_large_allocations();
-    // cladefs: a panic holding a lock shared beyond one store, which no halt contains, stops the
+    // cladefs: a panic holding a lock shared beyond one cell, which no halt contains, stops the
     // daemon, rather than poison the lock for every user after (TASK-149.24).
     local_cell::shared::abort_on_panics();
     // cladefs: the failpoints FAILPOINTS sets, in a daemon built with them (TASK-44.10).
@@ -173,15 +175,15 @@ fn main() -> anyhow::Result<()> {
     // cladefs: its boot awaited at its outermost entry, the one place it blocks (doc-24).
     local_cell::upload::wait_on(cladefs::cladefsd::boot(std::path::Path::new(&socket), memory))?;
     // Serving stops only as the daemon drains, whose thread exits the process once it has
-    // (`drain_on_sigterm`): not here, its stores still closing.
+    // (`drain_on_sigterm`): not here, its cells still closing.
     loop {
         std::thread::park();
     }
 }
 
 /// Drains the daemon on SIGTERM, as an orchestrator stops it, within `bound`, and exits
-/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound. SIGTERM is blocked
-/// in every thread but one, made here first, which waits for it (`cladefs::signals`).
+/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound. SIGTERM is
+/// blocked in every thread but one, made here first, which waits for it (`cladefs::signals`).
 #[cfg(target_os = "linux")]
 fn drain_on_sigterm(bound: std::time::Duration) -> std::io::Result<()> {
     let sigterm = cladefs::signals::Signals::block(&[libc::SIGTERM])?;
@@ -196,7 +198,7 @@ fn drain_on_sigterm(bound: std::time::Duration) -> std::io::Result<()> {
         cladefs::cladefsd::otel::shutdown();
         match drained {
             Ok(()) => {
-                log::info!("cladefsd: drained in {:.1?}: every store closed", began.elapsed());
+                log::info!("cladefsd: drained in {:.1?}: every cell closed", began.elapsed());
                 std::process::exit(0);
             }
             Err(left) => {

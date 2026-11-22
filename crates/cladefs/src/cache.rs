@@ -5,19 +5,19 @@
 //! The process's cache of sealed extents (`crate::extents`), in pages of physical memory
 //! (`crate::pages`).
 //!
-//! A sealed extent is cached once, keyed by its ID and the arena its pages are of, which every store
+//! A sealed extent is cached once, keyed by its ID and the arena its pages are of, which every cell
 //! and window in the process shares: a table of its pages ([`CachedExtent`]), each read in from a
-//! store that holds the extent as it is first read or mapped, a part (`extent_frame::PART`) at a
+//! cell that holds the extent as it is first read or mapped, a part (`extent_frame::PART`) at a
 //! time, on the pager's threads, and evicted, its extents asked for longest ago first, as memory
 //! runs out (`physmem::relieve_with`) or the daemon is asked to give memory back. Windows map its
-//! pages read-only: one copy of each page, whichever store or fork maps it, as an extent never
-//! changes once sealed, its ID its cell's to write once, which the store keeps to (TASK-79.6).
+//! pages read-only: one copy of each page, whichever cell or fork maps it, as an extent never
+//! changes once sealed, its ID its cell's to write once, which the cell keeps to (TASK-79.6).
 //! A page evicted is unmapped from each window that maps it first; freed, it waits in quarantine
 //! for the VM processes that may reach it still (`physmem::quarantine_with`, TASK-79.9).
 //!
-//! An extent the default arena holds is that one copy for a tenant's store too, as every VM
-//! process may read the default arena; and one a tenant's arena holds that a store reads into the
-//! default arena, as a public base's extent its publisher's store had read, moves there: its pages
+//! An extent the default arena holds is that one copy for a tenant's cell too, as every VM
+//! process may read the default arena; and one a tenant's arena holds that a cell reads into the
+//! default arena, as a public base's extent its publisher's cell had read, moves there: its pages
 //! copied in memory, rather than paged in again, and evicted from the tenant's (TASK-234).
 
 use crate::dax::{Origin, Source, Window};
@@ -37,7 +37,7 @@ use storage_device::ExtentId;
 use storage_device::NoExtent;
 
 /// The process's cache of sealed extents (see the module docs): its pager's threads, which read
-/// their pages from the stores, and the extents, by arena and ID.
+/// their pages from the cells, and the extents, by arena and ID.
 struct ExtentCache {
     /// The threads the pager reads extents' parts on.
     pager: tokio::runtime::Runtime,
@@ -52,14 +52,14 @@ struct ExtentCache {
 /// A sealed extent cached.
 pub(crate) struct Cached {
     extent: Arc<CachedExtent>,
-    /// The stores it is read through (TASK-79.7).
+    /// The cells it is read through (TASK-79.7).
     holders: Arc<Holders>,
 }
 
-/// The stores a cached extent's pages are read from (TASK-79.7): each that asked for it, as forks
+/// The cells a cached extent's pages are read from (TASK-79.7): each that asked for it, as forks
 /// of a base share it, held weakly, so that the cache keeps none open, nor its files and disk
 /// space, once it closes. A page-in reads through the first open still that holds the extent, or
-/// keeps it for a follower's view: a store that frees an extent its siblings map, or closes,
+/// keeps it for a follower's view: a cell that frees an extent its siblings map, or closes,
 /// leaves them reading it through theirs. Each holds the same data by its ID, which its cell
 /// writes once (TASK-79.6).
 struct Holders(SharedLock<Mutex<Vec<Holder>>>);
@@ -70,10 +70,10 @@ impl Default for Holders {
     }
 }
 
-/// A store a cached extent's pages are read from, and its object storage, which holds them if the
-/// store holds them without their data.
+/// A cell a cached extent's pages are read from, and its object storage, which holds them if the
+/// cell holds them without their data.
 struct Holder {
-    store: Weak<LocalCell<HostDir>>,
+    local: Weak<LocalCell<HostDir>>,
     fetcher: Option<Weak<crate::bucket::HostFetcher>>,
 }
 
@@ -81,24 +81,24 @@ struct Holder {
 type OpenHolder = (Arc<LocalCell<HostDir>>, Option<Arc<crate::bucket::HostFetcher>>);
 
 impl Holders {
-    /// Adds `store`, reading through `fetcher`, unless it is there, letting go of those closed.
+    /// Adds `local`, reading through `fetcher`, unless it is there, letting go of those closed.
     fn add(
         &self,
-        store: &Arc<LocalCell<HostDir>>,
+        local: &Arc<LocalCell<HostDir>>,
         fetcher: Option<&Arc<crate::bucket::HostFetcher>>,
     ) {
         let mut holders = self.0.with(Mutex::lock);
-        holders.retain(|holder| holder.store.strong_count() > 0);
-        if !holders.iter().any(|holder| std::ptr::eq(holder.store.as_ptr(), Arc::as_ptr(store))) {
-            let (store, fetcher) = (Arc::downgrade(store), fetcher.map(Arc::downgrade));
-            holders.push(Holder { store, fetcher });
+        holders.retain(|holder| holder.local.strong_count() > 0);
+        if !holders.iter().any(|holder| std::ptr::eq(holder.local.as_ptr(), Arc::as_ptr(local))) {
+            let (local, fetcher) = (Arc::downgrade(local), fetcher.map(Arc::downgrade));
+            holders.push(Holder { local, fetcher });
         }
     }
 
     /// Adds those of `other` open still, as [`Holders::add`] does.
     fn adopt(&self, other: &Holders) {
-        for (store, fetcher) in other.open() {
-            self.add(&store, fetcher.as_ref());
+        for (local, fetcher) in other.open() {
+            self.add(&local, fetcher.as_ref());
         }
     }
 
@@ -107,7 +107,7 @@ impl Holders {
         let holders = self.0.with(Mutex::lock);
         (holders.iter())
             .filter_map(|holder| {
-                Some((holder.store.upgrade()?, holder.fetcher.as_ref().and_then(Weak::upgrade)))
+                Some((holder.local.upgrade()?, holder.fetcher.as_ref().and_then(Weak::upgrade)))
             })
             .collect()
     }
@@ -116,9 +116,9 @@ impl Holders {
     /// page-in reads through them again (TASK-411.7). Returns whether it let go of one of `scope`.
     fn forget(&self, scope: &dyn Fn(crate::CellId) -> bool) -> bool {
         let mut forgot = false;
-        self.0.with(Mutex::lock).retain(|holder| match holder.store.upgrade() {
+        self.0.with(Mutex::lock).retain(|holder| match holder.local.upgrade() {
             None => false,
-            Some(store) if scope(store.description().cell) => {
+            Some(local) if scope(local.description().cell) => {
                 forgot = true;
                 false
             }
@@ -129,13 +129,13 @@ impl Holders {
 
     /// Whether one is open still.
     fn any_open(&self) -> bool {
-        self.0.with(Mutex::lock).iter().any(|holder| holder.store.strong_count() > 0)
+        self.0.with(Mutex::lock).iter().any(|holder| holder.local.strong_count() > 0)
     }
 
-    /// Whether one open still, but `store`, holds `extent`.
-    fn another_holds(&self, store: &Arc<LocalCell<HostDir>>, extent: ExtentId) -> bool {
+    /// Whether one open still, but `local`, holds `extent`.
+    fn another_holds(&self, local: &Arc<LocalCell<HostDir>>, extent: ExtentId) -> bool {
         (self.open().into_iter())
-            .filter(|(holder, _)| !Arc::ptr_eq(holder, store))
+            .filter(|(holder, _)| !Arc::ptr_eq(holder, local))
             .any(|(holder, _)| holder.extent(extent).is_ok_and(|held| held.is_some()))
     }
 }
@@ -146,25 +146,25 @@ node_local::node_local! {
 }
 
 node_local::node_local! {
-    /// The most extents the cache keeps (TASK-104): each its table of pages, and the stores it reads
-    /// through, which an extent nothing maps and whose pages were evicted keeps still. Under pgbench,
-    /// small extents by the hundred thousand, the tables of extents never asked for again would be
-    /// most of what the cache holds. Past this, those asked for longest ago that nothing else holds (no
-    /// window maps them) go, down to seven eighths of it; one asked for again is read anew from its
-    /// store. Tests lower it.
+    /// The most extents the cache keeps (TASK-104): each its table of pages, and the cells it reads
+    /// through, which an extent nothing maps and whose pages were evicted keeps still. Under
+    /// pgbench, small extents by the hundred thousand, the tables of extents never asked for again
+    /// would be most of what the cache holds. Past this, those asked for longest ago that nothing
+    /// else holds (no window maps them) go, down to seven eighths of it; one asked for again is
+    /// read anew from its cell. Tests lower it.
     pub(crate) static MOST_CACHED: AtomicUsize = AtomicUsize::new(1 << 16);
 }
 
 node_local::node_local! {
-    /// The number of extents past which the cache next lets go of those over its bound: the bound, or,
-    /// if its last pass couldn't get below it, as the windows' mappings hold the extents they map, an
-    /// eighth of the bound more than it left (TASK-109.2). Each lookup past the bound sorted every
-    /// extent cached, under the cache's lock, and let go of none: an 8 GiB window, mapping more than
-    /// the bound, never full, so never reclaiming, made each MAP 3-6 ms.
+    /// The number of extents past which the cache next lets go of those over its bound: the bound,
+    /// or, if its last pass couldn't get below it, as the windows' mappings hold the extents they
+    /// map, an eighth of the bound more than it left (TASK-109.2). Each lookup past the bound
+    /// sorted every extent cached, under the cache's lock, and let go of none: an 8 GiB window,
+    /// mapping more than the bound, never full, so never reclaiming, made each MAP 3-6 ms.
     static TRIM_AT: AtomicUsize = AtomicUsize::new(0);
 }
 
-/// How many threads the cache's pager reads extents' pages on: a read of the store, and the
+/// How many threads the cache's pager reads extents' pages on: a read of the cell, and the
 /// decompression of a part, keep one busy, while page-ins of other extents wait for theirs.
 pub(crate) const PAGER_THREADS: usize = 6;
 
@@ -245,7 +245,7 @@ fn evict_in_order(arena: Option<ArenaId>, mut enough: impl FnMut(u64) -> bool) -
 }
 
 /// Gives, once, the relief of arenas under pressure (TASK-50.3) its evictor, which frees pages of
-/// cached extents (`physmem::relieve_with`): before a store of any arena opens, whose allocations
+/// cached extents (`physmem::relieve_with`): before a cell of any arena opens, whose allocations
 /// may wait for it.
 pub(crate) fn relieve_pressure() {
     node_local::node_local! {
@@ -279,12 +279,12 @@ pub(crate) fn evict_arena(arena: ArenaId) {
     drop(evicted);
 }
 
-/// cladefs: forgets the stores whose cells `scope` says are of it, as their host does as it is
+/// cladefs: forgets the cells whose cells `scope` says are of it, as their host does as it is
 /// told their tenant's KEK is revoked or destroyed, or their cell shredded (doc-16, Shredding;
 /// TASK-411.7): no cached extent's page is read in through them again, and an extent no other open
-/// store holds goes from the cache, its pages evicted, unmapped from every window that maps them
-/// first, so that what the stores' keys decrypted is no longer in memory, nor read in again: a
-/// window that maps it, faulting, finds no store to read it through. An extent another store open
+/// cell holds goes from the cache, its pages evicted, unmapped from every window that maps them
+/// first, so that what the cells' keys decrypted is no longer in memory, nor read in again: a
+/// window that maps it, faulting, finds no cell to read it through. An extent another cell open
 /// holds stays, its pages theirs to read (another tenant's fork of a shared version, a public
 /// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
 /// extents.
@@ -306,10 +306,10 @@ pub(crate) fn forget(scope: impl Fn(crate::CellId) -> bool) -> (u64, u64) {
 /// arena: only an extent reachable from a published generation may (TASK-234), as every VM process
 /// maps the default arena, and a tenant's pages there would be every tenant's to read.
 pub(crate) enum CachedIn {
-    /// Of `arena`: a tenant's, or the default for a store of none, which takes no other arena's
+    /// Of `arena`: a tenant's, or the default for a cell of none, which takes no other arena's
     /// copy.
     Arena(ArenaId),
-    /// Of the default arena, reachable from a published generation, as its store found: a
+    /// Of the default arena, reachable from a published generation, as its cell found: a
     /// tenant's copy of it moves there.
     Public(PublicReach),
 }
@@ -323,18 +323,18 @@ impl CachedIn {
     }
 }
 
-/// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `store` if it isn't:
-/// read from it, or from `fetcher`; and from any
-/// other store that asked for it, which `store` is one of from now on (TASK-79.7). cladefs: a copy of
-/// it a tenant's arena held, moved here, has its pages brought in awaited (doc-24, step 5).
+/// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `local`
+/// if it isn't: read from it, or from `fetcher`; and from any
+/// other cell that asked for it, which `local` is one of from now on (TASK-79.7). cladefs: a copy
+/// of it a tenant's arena held, moved here, has its pages brought in awaited (doc-24, step 5).
 pub(crate) async fn cached(
-    store: &Arc<LocalCell<HostDir>>,
+    local: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
     fetcher: Option<Arc<crate::bucket::HostFetcher>>,
     extent: ExtentId,
     len: u64,
 ) -> Result<Arc<CachedExtent>> {
-    let (found, moved) = cache_now(store, cached_in, fetcher, extent, len);
+    let (found, moved) = cache_now(local, cached_in, fetcher, extent, len);
     if let Some(from) = moved {
         // What of it the tenant's arena holds, moved before the caller maps it, so that its MAP
         // maps those pages: moved as asked for, each was a fault of the guest's, and the first
@@ -349,11 +349,11 @@ pub(crate) async fn cached(
     Ok(found)
 }
 
-/// cladefs: the cache's part of [`cached`], under its lock, which holds no await: the extent cached,
-/// and a tenant's copy of it moved here, if one was, its windows rebound, whose pages its caller
-/// brings in.
+/// cladefs: the cache's part of [`cached`], under its lock, which holds no await: the extent
+/// cached, and a tenant's copy of it moved here, if one was, its windows rebound, whose pages its
+/// caller brings in.
 fn cache_now(
-    store: &Arc<LocalCell<HostDir>>,
+    local: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
     fetcher: Option<Arc<crate::bucket::HostFetcher>>,
     extent: ExtentId,
@@ -365,7 +365,7 @@ fn cache_now(
     let mut moved = None;
     if !extents.contains_key(&key) {
         let holders = Arc::new(Holders::default());
-        let stored = StoredExtent::new(holders.clone(), store, extent);
+        let stored = StoredExtent::new(holders.clone(), local, extent);
         let mut contents: Box<dyn Contents> = Box::new(stored);
         if let CachedIn::Public(reach) = &cached_in {
             // A tenant's copy, which moves here (TASK-234): of this extent alone.
@@ -386,7 +386,7 @@ fn cache_now(
     }
     let cached = extents.get_mut(&key).expect("cached");
     cached.extent.used();
-    cached.holders.add(store, fetcher.as_ref());
+    cached.holders.add(local, fetcher.as_ref());
     let found = cached.extent.clone();
     let most = MOST_CACHED.get().load(Ordering::Relaxed);
     let gone = (extents.len() > most.max(TRIM_AT.get().load(Ordering::Relaxed))).then(|| {
@@ -434,12 +434,12 @@ pub(crate) fn find(arena: ArenaId, extent: ExtentId) -> Option<Arc<CachedExtent>
     extents.get(&(arena, extent)).map(|cached| cached.extent.clone())
 }
 
-/// Lets go of the cached `extent` of `arena`, which `store` frees, unless another store that asked
+/// Lets go of the cached `extent` of `arena`, which `local` frees, unless another cell that asked
 /// for it holds it still, which reads its pages through itself (TASK-79.7): one that holds it reads
 /// them anew. Returns what keeps its pages, which the window's mappings of it map zeros in place
 /// of, if it was cached.
 pub(crate) fn freed(
-    store: &Arc<LocalCell<HostDir>>,
+    local: &Arc<LocalCell<HostDir>>,
     arena: ArenaId,
     extent: ExtentId,
 ) -> Option<Arc<CachedExtent>> {
@@ -451,7 +451,7 @@ pub(crate) fn freed(
             extents.get(&key).map(|cached| (cached.extent.clone(), cached.holders.clone()))?;
         (key, cached, holders)
     };
-    if !holders.another_holds(store, extent) {
+    if !holders.another_holds(local, extent) {
         let mut extents = cache.extents.with(Mutex::lock);
         let same = extents.get(&key).is_some_and(|now| Arc::ptr_eq(&now.extent, &cached));
         let removed = same.then(|| extents.remove(&key));
@@ -495,7 +495,7 @@ fn let_go_least_used(
     extents: &mut HashMap<(ArenaId, ExtentId), Cached>,
     most: usize,
 ) -> Vec<Cached> {
-    // Those no store open reads first, which none asks for but to cache them anew.
+    // Those no cell open reads first, which none asks for but to cache them anew.
     let mut idle: Vec<((bool, u64), (ArenaId, ExtentId))> = (extents.iter())
         .filter(|(_, cached)| Arc::strong_count(&cached.extent) == 1)
         .map(|(key, cached)| {
@@ -565,7 +565,7 @@ fn waiting_for_memory() {
 struct NoPages;
 
 /// The errno a page-in that failed with `error` fails its readers with: `ENOENT` for an extent
-/// the store doesn't hold, `ENOMEM` for want of pages, `EIO` for the rest.
+/// the cell doesn't hold, `ENOMEM` for want of pages, `EIO` for the rest.
 fn read_errno(error: &anyhow::Error) -> Errno {
     if error.downcast_ref::<NoExtent>().is_some() {
         Errno::ENOENT
@@ -594,10 +594,10 @@ pub(crate) trait Contents: Send + Sync {
     }
 }
 
-/// A sealed extent's contents, in the stores that hold it, or in object storage, if one holds it
+/// A sealed extent's contents, in the cells that hold it, or in object storage, if one holds it
 /// without its data.
 struct StoredExtent {
-    /// The stores it is read through (TASK-79.7).
+    /// The cells it is read through (TASK-79.7).
     holders: Arc<Holders>,
     extent: ExtentId,
     /// Where the parts of the object its data is in begin in it: its offset in the object, in
@@ -606,11 +606,11 @@ struct StoredExtent {
 }
 
 impl StoredExtent {
-    /// `extent`, read through `holders`, laid out as `store` holds it.
-    fn new(holders: Arc<Holders>, store: &LocalCell<HostDir>, extent: ExtentId) -> Self {
+    /// `extent`, read through `holders`, laid out as `local` holds it.
+    fn new(holders: Arc<Holders>, local: &LocalCell<HostDir>, extent: ExtentId) -> Self {
         // Its offset in the data of the object it is in: a segment's, its own file's, or the one
         // object storage holds it in.
-        let offset = match store.place(extent) {
+        let offset = match local.place(extent) {
             Ok(Some(local_cell::Place::Run { offset, .. })) => offset,
             Ok(Some(local_cell::Place::Bucket(location))) => location.offset,
             _ => 0,
@@ -621,7 +621,7 @@ impl StoredExtent {
 }
 
 impl Contents for StoredExtent {
-    /// A read of the local store, which doesn't wait for long, on the pager's thread; or a fetch,
+    /// A read of the local cell, which doesn't wait for long, on the pager's thread; or a fetch,
     /// which the page-in waits for holding no thread.
     fn read<'a>(
         &'a self,
@@ -630,14 +630,14 @@ impl Contents for StoredExtent {
     ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
         stats::add(Counter::PageIns, 1);
         let id = self.extent;
-        // Through the first of the stores that asked for it that holds it still (TASK-79.7).
+        // Through the first of the cells that asked for it that holds it still (TASK-79.7).
         let mut failed = anyhow::Error::new(NoExtent(id));
-        for (store, fetcher) in self.holders.open() {
+        for (local, fetcher) in self.holders.open() {
             // An extent freed since it was mapped, which a follower's view keeps, reads as kept
             // (doc-8).
-            let read = match store.read(id, offset, buf) {
+            let read = match local.read(id, offset, buf) {
                 Err(error) if error.downcast_ref::<NoExtent>().is_some() => {
-                    store.read_kept(id, offset, buf)
+                    local.read_kept(id, offset, buf)
                 }
                 read => read,
             };
@@ -671,7 +671,7 @@ impl Contents for StoredExtent {
 }
 
 /// An extent's contents read into the default arena from a tenant's copy of it (TASK-234): its
-/// pages in memory copied, and the rest read from the stores; either way, the copy's pages go, and
+/// pages in memory copied, and the rest read from the cells; either way, the copy's pages go, and
 /// the copy once none is left.
 struct Promoted {
     from: SharedLock<Mutex<Option<Arc<CachedExtent>>>>,
@@ -708,7 +708,7 @@ impl Contents for Promoted {
 }
 
 /// cladefs: where a page-in read its part from, which it says once it has, before its pages are
-/// in: none if from the host's stores alone, which go to no fetcher ([`trace::sourced`],
+/// in: none if from the host's cells alone, which go to no fetcher ([`trace::sourced`],
 /// TASK-672.2).
 type Landed = OnceLock<Option<trace::Source>>;
 
@@ -941,7 +941,7 @@ impl CachedExtent {
     }
 
     /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`bucket_cell::trace`,
-    /// TASK-258): its reads, from the store or the bucket, its children.
+    /// TASK-258): its reads, from the cell or the bucket, its children.
     fn page_in_span(&self, pages: &Range<u64>) -> trace::Span {
         let span = trace::Span::start("cache.page_in");
         span.set_with(trace::CELL, || base32_id::Short(self.extent.cell).to_string());
@@ -954,7 +954,7 @@ impl CachedExtent {
     /// Reads in the part `pages` of the extent, which a page-in marked filling, into pages of its
     /// arena, and puts those still filling then in its table: `span` the page-in's, the parent of
     /// its reads (TASK-258). cladefs: says where it read them from on `span`, `local` if from the
-    /// host's stores alone, and tells `landed`, if a bring-in waits to hear it, before the pages
+    /// host's cells alone, and tells `landed`, if a bring-in waits to hear it, before the pages
     /// are in; `span` ended before those waiting for them are told, so that their spans end after
     /// it (TASK-672.2).
     async fn read_part(
@@ -1201,7 +1201,7 @@ impl Source for Zeros {
 
 /// Zeros, for windows to map ([`Zeros`]): made once, and kept for the process's life. `ENOMEM` if
 /// the first can't be made, which each window has made as it is created (`Dax::new`): a free maps
-/// them holding the store's locks, memory out, as memory run out finds them.
+/// them holding the cell's locks, memory out, as memory run out finds them.
 pub(crate) fn zeros() -> Result<Arc<dyn Source>> {
     static ZEROS: OnceLock<Arc<Zeros>> = OnceLock::new();
     if let Some(zeros) = ZEROS.get() {

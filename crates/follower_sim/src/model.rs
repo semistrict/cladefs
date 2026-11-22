@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The writer, Fxfs read-write on the store, its operations on a few files of its root directory,
+//! The writer, Fxfs read-write on the cell, its operations on a few files of its root directory,
 //! and the model of what they leave: the oracle of what a follower may show. The model knows each
 //! file's object, so that what a reader holding one open reads of it can be checked too.
 
@@ -46,7 +46,7 @@ pub enum Op {
     Write(&'static str, u8),
     Rename(&'static str, &'static str),
     Unlink(&'static str),
-    /// Fxfs's sync, which flushes the device: a commit of the store, after which every operation
+    /// Fxfs's sync, which flushes the device: a commit of the cell, after which every operation
     /// before it is in a commit.
     Sync,
     /// A compaction of the journal: every store's tree flushed to new layers, the old ones freed,
@@ -99,16 +99,16 @@ impl Op {
     }
 }
 
-/// The writer: Fxfs, read-write, on the store's cell.
+/// The writer: Fxfs, read-write, on the cell.
 pub struct Writer {
     pub fs: OpenFxFilesystem,
     root: Directory<ObjectStore>,
 }
 
 impl Writer {
-    /// Makes a filesystem on `store`, empty.
-    pub async fn new<D: Dir + 'static>(store: Arc<LocalCell<D>>) -> Self {
-        let device = DeviceHolder::new(CellDevice::new(store));
+    /// Makes a filesystem on `cell`, empty.
+    pub async fn new<D: Dir + 'static>(cell: Arc<LocalCell<D>>) -> Self {
+        let device = DeviceHolder::new(CellDevice::new(cell));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let root_store = fs.root_store();
         let root = Directory::open(&root_store, root_store.root_directory_object_id())

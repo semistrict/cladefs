@@ -2,19 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: locks shared beyond one store, whose poison no halt contains (TASK-149.24). A store's
-//! own locks halt the store a panic holding one went through (cladefs's `halt`): it fails each
+//! cladefs: locks shared beyond one cell, whose poison no halt contains (TASK-149.24). A cell's
+//! own locks halt the cell a panic holding one went through (cladefs's `halt`): it fails each
 //! request after with `EIO`, the others serve on. A lock shared beyond it, as the process's cache
-//! of extents, a store's state, which its followers share with its writer, or a window's, which its
+//! of extents, a cell's state, which its followers share with its writer, or a window's, which its
 //! connection and the guest's faults share, would be found poisoned by every user after, one panic
 //! each, or read half changed. So the extent daemon stops instead: a panic on a thread holding one
 //! of these aborts the process, at the panic, before anything unwinds, once [`abort_on_panics`]
-//! asks, as the daemon does as it starts. Its VMs' stores open anew as of their last commits, as
+//! asks, as the daemon does as it starts. Its VMs' cells open anew as of their last commits, as
 //! after a crash, once systemd has it running again.
 //!
 //! Such a lock is a [`SharedLock`], locked only through it ([`SharedLock::with`]), which has its
 //! guard a [`Shared`]: the thread's locks held are what the panic hook looks at. A thread whose
-//! work is the process's, as the page cache's flusher, which every store's files wait on, holds
+//! work is the process's, as the page cache's flusher, which every cell's files wait on, holds
 //! that work as it would such a lock, for as long as it does it ([`Holding::work`]): its death too
 //! no halt contains (TASK-493). Elsewhere, as in tests, a panic holding one unwinds as any panic
 //! does.
@@ -49,7 +49,7 @@ pub fn held() -> Vec<&'static str> {
 
 /// cladefs: who holds a shared lock taken by awaiting it, which it holds across its awaits
 /// (board 2944): the task, which any of its runtime's threads may poll from one await to the next;
-/// or, polled by no tokio task's, the thread, as a store's drop's close waits on it. Under madsim,
+/// or, polled by no tokio task's, the thread, as a cell's drop's close waits on it. Under madsim,
 /// whose tasks name no ids, the simulation's one thread.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Holder {
@@ -71,7 +71,7 @@ impl Holder {
 /// The shared locks awaited, by their holders ([`Awaited`]).
 static AWAITED: std::sync::Mutex<Vec<(Holder, &'static str)>> = std::sync::Mutex::new(Vec::new());
 
-/// cladefs: a holding of a shared lock taken by awaiting it, as a store's commit's and flush's are
+/// cladefs: a holding of a shared lock taken by awaiting it, as a cell's commit's and flush's are
 /// (`AsyncMutex`, board 2944), by its holder: what the panic hook sees held by the task it panics
 /// in, wherever it was polled, from its making to its drop. A thread's [`Holding`] cannot say so,
 /// as the task moves between threads, holding it, at its awaits.
@@ -126,7 +126,7 @@ pub fn abort_on_panics() {
             if !held.is_empty() {
                 let locks = held.join(", ");
                 log::error!(
-                    "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no halt \
+                    "cladefs: {ABORTING} ({locks}), shared beyond one cell: aborting, as no halt \
                      contains it (TASK-149.24)"
                 );
                 // As the log may not reach stderr, nor be flushed before the abort.
@@ -137,7 +137,7 @@ pub fn abort_on_panics() {
     });
 }
 
-/// A lock shared beyond one store (see the module docs): `L`, a mutex, locked only through
+/// A lock shared beyond one cell (see the module docs): `L`, a mutex, locked only through
 /// [`SharedLock::with`].
 pub struct SharedLock<L> {
     /// What the log calls it.
@@ -160,7 +160,7 @@ impl<L> SharedLock<L> {
     pub fn with<'a, G>(&'a self, lock: impl FnOnce(&'a L) -> LockResult<G>) -> Shared<G> {
         let name = self.name;
         let guard = lock(&self.lock).unwrap_or_else(|_| {
-            panic!("the process's {name} lock, shared beyond one store, is poisoned")
+            panic!("the process's {name} lock, shared beyond one cell, is poisoned")
         });
         Shared::new(name, guard)
     }
@@ -183,7 +183,7 @@ impl Holding {
     }
 
     /// The calling thread doing the process's work called `name`, until this drops: work every
-    /// store waits on, as the page cache's flusher's, whose death no store's halt contains, so
+    /// cell waits on, as the page cache's flusher's, whose death no cell's halt contains, so
     /// that a panic doing it aborts the process as one holding a [`SharedLock`] does.
     pub fn work(name: &'static str) -> Self {
         Self::new(name)
@@ -300,8 +300,8 @@ mod tests {
     /// `let-go`, panic having let it go.
     const CHILD: &str = "EXTENT_STORE_SHARED_CHILD";
 
-    /// Run by [`a_panic_holding_a_shared_lock_aborts`], in a process of its own: aborting on panics,
-    /// panics as [`CHILD`] says, and catches the panic, which it says it did.
+    /// Run by [`a_panic_holding_a_shared_lock_aborts`], in a process of its own: aborting on
+    /// panics, panics as [`CHILD`] says, and catches the panic, which it says it did.
     #[test]
     #[ignore = "run by a_panic_holding_a_shared_lock_aborts, in a process of its own"]
     fn child_panics() {

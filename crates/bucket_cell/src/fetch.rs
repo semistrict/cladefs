@@ -14,9 +14,9 @@
 //! read ahead is unpacked once, by the read it was read ahead of, not read back from the cache and
 //! unpacked again (TASK-92.21). What its fetchers keep in memory, those parts and objects' tails,
 //! and the GETs in flight, the host's fetchers share ([`Memory`]), as they share its budget and its
-//! cache: they keep each once, and send one GET of each, however many of the host's stores read
+//! cache: they keep each once, and send one GET of each, however many of the host's cells read
 //! it, as the forks of one base read its parts, and within bounds that hold for the host, however
-//! many stores it serves.
+//! many cells it serves.
 //!
 //! A checkpoint's extents are looked up a block at a time ([`Fetcher::lookup`]): its tail holds its
 //! table, which says where the block that would hold an extent's entry is, read by the parts it is
@@ -31,12 +31,12 @@
 //! the trailer and the table hold, and the parts by theirs, which the table holds.
 //!
 //! cladefs: what a host's fetchers keep, they keep as stored, encrypted, as a reader holding no key
-//! reads it, and open with the keys of every store the host serves ([`Memory::keys`],
+//! reads it, and open with the keys of every cell the host serves ([`Memory::keys`],
 //! `keys::HostRing`, TASK-411.3): an object's tail is opened, its MACs checked, once the host holds
-//! its key, and a part unpacked by the tail so opened; a part encrypted under a key the host doesn't
-//! hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear is corrupt
-//! (TASK-411.28); and an extent's own object whose footer names another extent than its key, or a
-//! moves' that names another object than its key's, is no object of theirs.
+//! its key, and a part unpacked by the tail so opened; a part encrypted under a key the host
+//! doesn't hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear is
+//! corrupt (TASK-411.28); and an extent's own object whose footer names another extent than its
+//! key, or a moves' that names another object than its key's, is no object of theirs.
 
 use crate::Error;
 use crate::bucket::{self, Bucket, ByteRange};
@@ -79,7 +79,7 @@ impl Limits {
 /// read once, by a fetcher of its own that keeps nothing and bounds no GET: a ranged read of its
 /// object's tail, and of each part it is in, checked and decompressed. A host reads through its
 /// [`Fetcher`], which keeps the parts it fetches, under its budget. cladefs: holding `keys`, its
-/// store's ring: every object's data is encrypted (TASK-411.28).
+/// cell's ring: every object's data is encrypted (TASK-411.28).
 pub async fn read<B: Bucket>(
     bucket: &Arc<B>,
     keys: &Arc<keys::Ring>,
@@ -101,9 +101,9 @@ pub struct Budget {
 }
 
 /// cladefs: the budgets a fetcher's GETs go under (TASK-633.4): one for all, or one for each bucket
-/// its keys' cells are of ([`crate::objectid::bucket_of`]), each of the same limits, so that a bucket
-/// slow or failing, another cloud region's, holds up no GET of another bucket's.
-/// Cloned, it is the same budgets, as a host's fetchers share them.
+/// its keys' cells are of ([`crate::objectid::bucket_of`]), each of the same limits, so that a
+/// bucket slow or failing, another cloud region's, holds up no GET of another bucket's. Cloned, it
+/// is the same budgets, as a host's fetchers share them.
 #[derive(Clone)]
 pub enum Budgets {
     One(Arc<Budget>),
@@ -182,8 +182,8 @@ impl Budget {
         self.limits
     }
 
-    /// cladefs: the bytes its requests in flight hold now, and the most they held at once (TASK-317):
-    /// within its limit, but for a request larger than it, which goes alone.
+    /// cladefs: the bytes its requests in flight hold now, and the most they held at once
+    /// (TASK-317): within its limit, but for a request larger than it, which goes alone.
     pub fn held(&self) -> (u64, u64) {
         let queues = self.queues.lock().unwrap();
         (queues.bytes, queues.peak)
@@ -258,10 +258,10 @@ struct Tail {
 
 impl Tail {
     /// The tail of the object at `key`, as read, `tail`: a segment's footer names the extents
-    /// sealed in it, and moves' those the collector moved there; an extent stored on its own is
-    /// its object's whole data, which its key names; a checkpoint's footer is its table. Other
-    /// objects hold no extents. cladefs: an extent's footer names it, and moves' the object they are
-    /// of: one naming another is refused, a whole object copied to another key (TASK-411.3).
+    /// sealed in it, and moves' those the collector moved there; an extent stored on its own is its
+    /// object's whole data, which its key names; a checkpoint's footer is its table. Other objects
+    /// hold no extents. cladefs: an extent's footer names it, and moves' the object they are of:
+    /// one naming another is refused, a whole object copied to another key (TASK-411.3).
     fn of(key: &str, tail: object::Tail) -> Result<Self, Error> {
         let parts = &tail.parts;
         let footer = tail.footer();
@@ -343,7 +343,7 @@ fn part_of(parts: &extent_frame::Parts, key: &str, part: u64) -> Result<extent_f
 
 /// What a host's fetchers keep in memory, which they share, as they share its budget and its
 /// cache: objects' tails, and the parts fetched last, each kept once for the host however many of
-/// its stores read it, within bounds that hold for the host, not for each store (TASK-92.21,
+/// its cells read it, within bounds that hold for the host, not for each cell (TASK-92.21,
 /// TASK-92.22); and the GETs of parts in flight, which the reads of all of them that want a part
 /// while its GET is in flight share (TASK-92.43). The host's fetchers read one bucket, as they
 /// share one cache: what is kept is kept by key, as the cache keeps it, and a part by its object's
@@ -353,7 +353,7 @@ pub struct Memory {
     tails: Mutex<Tails>,
     recent: Mutex<Recent>,
     parts: Mutex<Parts>,
-    /// cladefs: the keys of the stores the host serves, which what it keeps is opened with
+    /// cladefs: the keys of the cells the host serves, which what it keeps is opened with
     /// (TASK-411.3).
     keys: Arc<HostRing>,
 }
@@ -363,16 +363,16 @@ impl Memory {
         Arc::default()
     }
 
-    /// cladefs: the keys of the stores the host serves, which its stores hold theirs in as they open
+    /// cladefs: the keys of the cells the host serves, which its cells hold theirs in as they open
     /// (`local_cell::upload`, TASK-411.3).
     pub fn keys(&self) -> &Arc<HostRing> {
         &self.keys
     }
 
-    /// cladefs: drops what it keeps of the objects of `scope`'s cells, as a host told a tenant's KEK
-    /// is revoked or destroyed, or a cell shredded, does (doc-16, Shredding; TASK-411.7): their
+    /// cladefs: drops what it keeps of the objects of `scope`'s cells, as a host told a tenant's
+    /// KEK is revoked or destroyed, or a cell shredded, does (doc-16, Shredding; TASK-411.7): their
     /// tails, opened under keys it may hold no more, and the parts fetched last, unpacked, in the
-    /// clear. Read again, they are opened under the keys the host holds then: those other stores
+    /// clear. Read again, they are opened under the keys the host holds then: those other cells
     /// hold, as a fork of another tenant's keeps what it inherited, and no others
     /// ([`HostRing::forget`]). GETs in flight finish as they would. Returns how many tails and
     /// parts it dropped.
@@ -592,7 +592,7 @@ impl Fetched {
 
 /// How many bytes of the parts fetched last a host's fetchers keep in memory, for the reads after:
 /// a read ahead's, until the read that wants it, a part a reader reads a little of at a time, and
-/// one a fork's store reads after its base's did.
+/// one a fork's cell reads after its base's did.
 const RECENT: u64 = 64 << 20;
 
 /// The parts fetched last, least recently used first, by their objects' keys and numbers, and the
@@ -720,8 +720,8 @@ struct Fetching<B: Bucket> {
 
 impl<B: Bucket> Fetcher<B> {
     /// Reads `bucket` under `budgets` (a budget for all, or one for each bucket: [`Budgets`]),
-    /// keeping objects' tails in `memory`; and, with a `cache`, the parts it fetches there, those it
-    /// fetched last in `memory` too.
+    /// keeping objects' tails in `memory`; and, with a `cache`, the parts it fetches there, those
+    /// it fetched last in `memory` too.
     pub fn new(
         bucket: Arc<B>,
         budgets: impl Into<Budgets>,
@@ -794,7 +794,8 @@ impl<B: Bucket> Fetcher<B> {
                     continue;
                 }
                 let owner = self.shared.peers.as_ref().and_then(|peers| peers.owner(&key, part));
-                // A flight of its own, which the cache and memory, just looked at, held nothing for.
+                // A flight of its own, which the cache and memory, just looked at, held nothing
+                // for.
                 let (flight, new, _reading) = self.join(&key, part, &tail, ahead, owner)?;
                 match land(flight).await? {
                     FetchedPart::Data(_) => fetched += u64::from(new),
@@ -906,8 +907,9 @@ impl<B: Bucket> Fetcher<B> {
 
     /// Reads ahead of a read of parts `first..=last` of the object at `key`: the part after them,
     /// and twice as many as the time before, up to [`AHEAD`], while reads go on where the last
-    /// stopped, so that a sequential reader finds its parts kept, and a random one their neighbours.
-    /// Parts the cache holds are not read again, from the bucket or the cache (TASK-225).
+    /// stopped, so that a sequential reader finds its parts kept, and a random one their
+    /// neighbours. Parts the cache holds are not read again, from the bucket or the cache
+    /// (TASK-225).
     fn read_ahead(&self, key: &str, first: u64, last: u64) {
         let Some(spawn) = self.spawn.as_ref().filter(|_| self.shared.cache.is_some()) else {
             return;
@@ -1047,7 +1049,7 @@ impl<B: Bucket> Fetcher<B> {
 
 /// Runs `io`, which blocks on files, as a task of a multi-threaded runtime may: in
 /// `block_in_place`, which hands the runtime's other tasks to another of its threads meanwhile, as
-/// those of the runtime a host's stores share need, which their fetches and uploads run on
+/// those of the runtime a host's cells share need, which their fetches and uploads run on
 /// (TASK-92.21). On an executor of another kind, or none, it runs as it is.
 #[allow(clippy::disallowed_methods, reason = "the work waits on files alone")]
 fn blocking<T>(io: impl FnOnce() -> T) -> T {
@@ -2066,9 +2068,9 @@ mod tests {
         reads.result(read)
     }
 
-    /// A read by a fetcher that kept the tail of an object the collector compacted and deleted since
-    /// finds its part gone, and reads the extent where the collector moved it: as the object at a
-    /// key is the one its tail is of, for good (TASK-407), a tail kept is never another's.
+    /// A read by a fetcher that kept the tail of an object the collector compacted and deleted
+    /// since finds its part gone, and reads the extent where the collector moved it: as the object
+    /// at a key is the one its tail is of, for good (TASK-407), a tail kept is never another's.
     #[test]
     fn reads_by_tails_kept_follow_moves_of_objects_gone() {
         let data = noise(3000);
@@ -2487,7 +2489,7 @@ mod tests {
         })
     }
 
-    /// `count` fetchers of one host, as its stores' are, sharing its budget, its memory and
+    /// `count` fetchers of one host, as its cells' are, sharing its budget, its memory and
     /// `cache`.
     fn host(
         bucket: &Arc<SimBucket>,
@@ -2553,7 +2555,7 @@ mod tests {
         assert_eq!(reads.result(second), Some(Ok(data[PART as usize..][..10].to_vec())));
     }
 
-    /// TASK-92.21: a host's fetchers, one for each of its stores, keep no more than [`RECENT`]
+    /// TASK-92.21: a host's fetchers, one for each of its cells, keep no more than [`RECENT`]
     /// bytes of parts in memory in all, however many of them there are: here four, each reading
     /// 24 MiB of an object of its own.
     #[test]
@@ -2604,7 +2606,7 @@ mod tests {
         assert!(tails <= TAILS, "{} MiB of tails held, past {} MiB", tails >> 20, TAILS >> 20);
     }
 
-    /// TASK-92.21, TASK-92.22: a fetcher of another of the host's stores, as a fork's store's of
+    /// TASK-92.21, TASK-92.22: a fetcher of another of the host's cells, as a fork's cell's of
     /// its base's, reads what one read last from the host's memory: the parts, and their object's
     /// tail, the cache's copies of them removed here, so that reading them anew would show as GETs.
     #[test]
@@ -2834,8 +2836,8 @@ mod tests {
         assert_eq!(streams(), 1);
     }
 
-    /// cladefs: a host that owns every part, another's fetcher, which serves them as a peer is served
-    /// ([`Fetcher::stored_part`]); or one that gives wrong bytes, of the right length.
+    /// cladefs: a host that owns every part, another's fetcher, which serves them as a peer is
+    /// served ([`Fetcher::stored_part`]); or one that gives wrong bytes, of the right length.
     struct Owner {
         fetcher: Option<Arc<Fetcher<SimBucket>>>,
         asked: std::sync::atomic::AtomicUsize,
@@ -2970,8 +2972,8 @@ mod tests {
         assert_eq!(owner.counts(), (2, 2));
     }
 
-    /// TASK-406.2, TASK-407: a peer asks for a part by its object's key and its number alone, and is
-    /// given its stored bytes; none of a part the object holds not, past its end.
+    /// TASK-406.2, TASK-407: a peer asks for a part by its object's key and its number alone, and
+    /// is given its stored bytes; none of a part the object holds not, past its end.
     #[test]
     fn peers_are_given_the_parts_they_ask_for() {
         let data = noise(2 * PART);

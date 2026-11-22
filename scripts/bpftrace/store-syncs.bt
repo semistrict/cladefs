@@ -5,16 +5,16 @@
 //
 // What the extent daemon's syncs wait on, by what each syncs (TASK-310): every fsync and
 // fdatasync of cladefsd's on ext4 (ext4_sync_file: the kernel calls a file system's fsync without
-// vfs_fsync_range), by whose file it is (a store's, the file bucket's or the part cache's), the
+// vfs_fsync_range), by whose file it is (a cell's, the file bucket's or the part cache's), the
 // kind of file or directory, its directory's name in the layout (segments, open-segments, logs,
-// extents, the store's own directory), whether a datasync, and the thread's name (the store's own
+// extents, the cell's own directory), whether a datasync, and the thread's name (the cell's own
 // threads are named: store framer, store durable, store opener; a flush's, cladefsd flush); a
 // histogram of each kind's, and each past 100 ms as it ends, with its thread, how many names the
 // file has (2: a segment framed in place, its raw file linked among framed ones) and its size.
 // cladefs: and of each kind's time, how much it waited for ext4's journal to commit
 // (jbd2_log_wait_commit), which a sync of a file or directory with metadata to commit does,
 // behind every other file's data the commit writes first (data=ordered); and the lives of the
-// stores' logs: those made anew, spares taken as logs, logs kept as spares (TASK-369). And ext4's
+// cells' logs: those made anew, spares taken as logs, logs kept as spares (TASK-369). And ext4's
 // journal commits past 50 ms, phase by phase (jbd2_run_stats).
 //
 //   sudo bpftrace -q -o TRACE scripts/bpftrace/store-syncs.bt [CGROUP]
@@ -63,8 +63,8 @@ fexit:vmlinux:ext4_sync_file
 	$inode = $dentry->d_inode;
 	$dir = ($inode->i_mode & 0xf000) == 0x4000;
 	// A directory's kind is its parent's name (segments/<cell>: segments); a file's, its
-	// grandparent's (segments/<cell>/<n>); the store's own files (wal, store), their parent's.
-	// Whose: a store's, the directory above (store-N), or the daemon's file bucket's
+	// grandparent's (segments/<cell>/<n>); the cell's own files (wal, store), their parent's.
+	// Whose: a cell's, the directory above (store-N), or the daemon's file bucket's
 	// (cladefsd.bucket/segments/<cell>/<n>#<writer>) or part cache's (cladefsd-cache).
 	// (An if, not a ternary: bpftrace 0.25 reads a ternary's pointer as 0.)
 	$parent = $dentry->d_parent;
@@ -74,7 +74,7 @@ fexit:vmlinux:ext4_sync_file
 	$kind = str($parent->d_name.name);
 	$above = str($parent->d_parent->d_name.name);
 	$whose = strncmp($above, "cladefsd.bucket", 15) == 0 ? "bucket" :
-		(strncmp($above, "cladefsd-cache", 14) == 0 ? "cache" : "store");
+		(strncmp($above, "cladefsd-cache", 14) == 0 ? "cache" : "cell");
 	@sync_us[$whose, $dir ? "dir" : "file", $kind, args.datasync] = hist($us);
 	@sync_count[$whose, $dir ? "dir" : "file", $kind, comm] = count();
 	@sync_sum_ms[$whose, $dir ? "dir" : "file", $kind, comm] = sum($us / 1000);
@@ -91,7 +91,7 @@ fexit:vmlinux:ext4_sync_file
 	@began[tid] = 0;
 }
 
-// The stores' logs (logs/<cell>/<n>, and spare-<n> beside them), by the extent daemons' own
+// The cells' logs (logs/<cell>/<n>, and spare-<n> beside them), by the extent daemons' own
 // relative paths: made anew; a spare taken as a segment's log; a segment's kept as a spare.
 tracepoint:syscalls:sys_enter_openat
 /strncmp(curtask->group_leader->comm, "cladefsd", 8) == 0 &&

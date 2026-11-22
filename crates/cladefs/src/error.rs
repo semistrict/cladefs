@@ -30,9 +30,9 @@ impl Error {
         Self(self.0.context(context))
     }
 
-    /// The errno that caused the error, if one did: `ENOTSUP` for a store of another format, an
+    /// The errno that caused the error, if one did: `ENOTSUP` for a cell of another format, an
     /// older one included, which is refused (`local_cell::Format`, TASK-165.6); `ENOENT` for one
-    /// its maker never made whole, which is no store (`local_cell::Unmade`, TASK-196); `ENOSPC` for
+    /// its maker never made whole, which is no cell (`local_cell::Unmade`, TASK-196); `ENOSPC` for
     /// one whose making its disk or its tenant's limits refused (`local_cell::footprint::DiskFull`,
     /// doc-22).
     pub fn errno(&self) -> Option<Errno> {
@@ -59,8 +59,8 @@ impl Error {
     }
 
     /// Whether what failed waited for something busy and gave up: another process's lock of a
-    /// store (`local_cell`'s, which an extent daemon serving it holds).
-    #[cfg(target_os = "linux")]
+    /// cell (`local_cell`'s, which an extent daemon serving it holds).
+    #[cfg(any(target_os = "linux", madsim))]
     pub(crate) fn is_busy(&self) -> bool {
         self.0.chain().any(|cause| {
             cause

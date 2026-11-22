@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs-gc, the program: a pass over a bucket, and its usage. cladefs: every store encrypted
+//! cladefs-gc, the program: a pass over a bucket, and its usage. cladefs: every cell encrypted
 //! (TASK-411.28), the program given a master key, its bucket KMS keeping the tests' tenants' KEKs
 //! in the bucket ([`MASTER_KEY`]), as their writers' are ([`host_kms`]).
 
@@ -519,14 +519,14 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert_eq!(after, listed);
 }
 
-/// TASK-411.27: `--rotate-master-key` rewraps every tenant's KEK object under the newest master
-/// key `CLADEFS_MASTER_KEY` gives, the first, saying what it did; a host given the newest alone then
+/// TASK-411.27: `--rotate-master-key` rewraps every tenant's KEK object under the newest master key
+/// `CLADEFS_MASTER_KEY` gives, the first, saying what it did; a host given the newest alone then
 /// unwraps what was wrapped before. Done again, it rewraps nothing. Given keys none of which opens
 /// an object, it leaves it, says so, and fails; given none, it fails naming the variables.
 #[test]
 fn rotates_master_keys_rewrapping_every_tenants_kek() {
     use bucket_cell::bucket_kms::{self, BucketKms};
-    use bucket_cell::object_bucket::ObjectBucket as Store;
+    use bucket_cell::object_bucket::ObjectBucket as Bucket;
     use extent_keys::Secret;
     use extent_keys::kms::Kms as _;
     use extent_keys::kms::master::MasterKeys;
@@ -543,7 +543,7 @@ fn rotates_master_keys_rewrapping_every_tenants_kek() {
     let keys = |given: &[&Secret]| {
         MasterKeys::new(given.iter().map(|key| Secret::from_bytes(key.expose())).collect()).unwrap()
     };
-    let bucket = Arc::new(Store::from_url(&url).unwrap());
+    let bucket = Arc::new(Bucket::from_url(&url).unwrap());
     let before = BucketKms::new(bucket.clone(), keys(&[&old]));
     let key = Secret::random();
     let wrapped: Vec<_> =

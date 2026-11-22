@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what a host does with the read evidence of the versions its stores are forks of
+//! cladefs: what a host does with the read evidence of the versions its cells are forks of
 //! (TASK-702.2, TASK-702.3; `bucket_cell::evidence`, which says what evidence is).
 //!
-//! A store opened for a guest, a fork of a version, has its version's evidence of its tenant's
+//! A cell opened for a guest, a fork of a version, has its version's evidence of its tenant's
 //! ([`Evidence::opened`]). Its prediction, which the host reads once an interval ([`EVERY`]) for
 //! all the forks of the version it opens, not for each, is fetched into the host's cache as soon
 //! as it is read, as read-ahead: behind the guests' reads, from the peers that own its parts
 //! first, many at once ([`prefetch`]). Its guest's boot is what the guest reads of the version in
 //! its first [`RECORDED_FOR`]: every `READ`, `MAP` and fault of the version's extents the daemon
 //! serves it ([`Evidence::read`]), as TASK-702.1 found a warm host's guest faults on none of what
-//! its `MAP`s install. At the window's end, or as the store closes or drops, if that comes first,
+//! its `MAP`s install. At the window's end, or as the cell closes or drops, if that comes first,
 //! which a close waits for, the boot is measured against the prediction (`stats`), and, the first
 //! fork the host opens of the version in an interval, written as a recording: by a task of its own
 //! on the host's bucket runtime, never in the guest's way.
@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long after a fork's store opens what its guest reads is its boot: what a boot reads, as
+/// How long after a fork's cell opens what its guest reads is its boot: what a boot reads, as
 /// TASK-702.1 measured it.
 pub(crate) const RECORDED_FOR: Duration = Duration::from_secs(10);
 
@@ -71,33 +71,33 @@ pub(crate) fn forget() {
     HOST.get().lock().unwrap().clear();
 }
 
-/// How many versions' evidence of a tenant's the host keeps: for tests of which stores read it.
+/// How many versions' evidence of a tenant's the host keeps: for tests of which cells read it.
 #[cfg(test)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn kept() -> usize {
     HOST.get().lock().unwrap().len()
 }
 
-/// What a store opened for a guest, a fork of a version, has of its version's evidence.
+/// What a cell opened for a guest, a fork of a version, has of its version's evidence.
 pub(crate) struct Evidence {
     #[cfg(test)]
     predicted: Predicted,
     boot: Arc<Boot>,
     /// What ends the boot, at the window's end or once told, by the sender's going.
     ending: Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
-    /// What fetches the prediction ahead of the guest, done, and what stops it as the store goes.
+    /// What fetches the prediction ahead of the guest, done, and what stops it as the cell goes.
     prefetching: (Shared<BoxFuture<'static, ()>>, futures::future::AbortHandle),
 }
 
 impl Evidence {
-    /// The evidence of `store`, the store of `own`, `forked`'s fork, its cell kept in `bucket`,
+    /// The evidence of `local`, the cell of `own`, `forked`'s fork, its cell kept in `bucket`,
     /// read through `fetcher`, opened now: its version's prediction, read now if the host read it
     /// not in the interval, and fetched ahead; and its guest's boot, recorded if no fork here began
     /// a recording of the version in the interval.
     pub(crate) fn opened(
         forked: Forked,
         own: CellId,
-        store: Arc<LocalCell<local_cell::HostDir>>,
+        local: Arc<LocalCell<local_cell::HostDir>>,
         bucket: Arc<ObjectBucket>,
         fetcher: Arc<HostFetcher>,
     ) -> Self {
@@ -132,14 +132,14 @@ impl Evidence {
         };
         drop(host);
         let (prefetch, stop_prefetching) =
-            futures::future::abortable(prefetch(predicted.clone(), store, fetcher));
+            futures::future::abortable(prefetch(predicted.clone(), local, fetcher));
         let prefetched = runtime.spawn(prefetch).map(drop).boxed().shared();
         let recorded = recorded.then_some(Recorded { bucket, ring });
         let boot = Arc::new(Boot::new(of, own.id, recorded));
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let (ended, predicting) = (boot.clone(), predicted.clone());
         let ending = runtime.spawn(async move {
-            // The window's end, or the store's close or drop, which lets `stop` go.
+            // The window's end, or the cell's close or drop, which lets `stop` go.
             drop(tokio::time::timeout(RECORDED_FOR, stopped).await);
             ended.end(predicting.peek().cloned().flatten().as_deref()).await;
         });
@@ -184,7 +184,7 @@ impl Evidence {
     }
 
     /// Ends its boot, if it is not over yet, and waits for it to be measured and written: as its
-    /// store closes. Dropped, it has it ended behind it, waiting for nothing.
+    /// cell closes. Dropped, it has it ended behind it, waiting for nothing.
     pub(crate) async fn close(mut self) {
         if let Some((stop, ending)) = self.ending.take() {
             drop(stop);
@@ -216,31 +216,31 @@ fn predict(
     reading.map(|read| read.ok().flatten()).boxed().shared()
 }
 
-/// Fetches what `predicted` predicts the guest of `store`, a fork of its version, reads into the
-/// host's cache, once it is read, through `fetcher`, in its order, [`PREFETCHED_AT_ONCE`] units at once,
-/// behind the guests' reads: the parts of the extents `store` holds whose data is in the bucket,
-/// not kept already.
+/// Fetches what `predicted` predicts the guest of `local`, a fork of its version, reads into the
+/// host's cache, once it is read, through `fetcher`, in its order, [`PREFETCHED_AT_ONCE`] units at
+/// once, behind the guests' reads: the parts of the extents `local` holds whose data is in the
+/// bucket, not kept already.
 async fn prefetch(
     predicted: Predicted,
-    store: Arc<LocalCell<local_cell::HostDir>>,
+    local: Arc<LocalCell<local_cell::HostDir>>,
     fetcher: Arc<HostFetcher>,
 ) {
     let Some(prediction) = predicted.await else { return };
     let units = futures::stream::iter(prediction.units.iter().copied());
-    let fetches = units.map(|unit| fetch_ahead(&store, &fetcher, unit));
+    let fetches = units.map(|unit| fetch_ahead(&local, &fetcher, unit));
     let fetches = fetches.buffer_unordered(PREFETCHED_AT_ONCE);
     let fetched = fetches.fold(0, |all, fetched| std::future::ready(all + fetched)).await;
     log::debug!("cladefs: {fetched} parts of {} predicted fetched ahead", prediction.units.len());
 }
 
 /// Fetches the parts holding `unit` into the host's cache through `fetcher` ahead of the guest of
-/// `store`, if the store holds its extent, its data in the bucket: how many it fetched itself.
+/// `local`, if the cell holds its extent, its data in the bucket: how many it fetched itself.
 async fn fetch_ahead(
-    store: &LocalCell<local_cell::HostDir>,
+    local: &LocalCell<local_cell::HostDir>,
     fetcher: &HostFetcher,
     unit: Unit,
 ) -> u64 {
-    let Ok(Some(Place::Bucket(location))) = store.place(unit.extent) else { return 0 };
+    let Ok(Some(Place::Bucket(location))) = local.place(unit.extent) else { return 0 };
     let offset = unit.mib * UNIT;
     match fetcher.fetch_ahead(unit.extent, &location, offset, UNIT).await {
         Ok(fetched) => {

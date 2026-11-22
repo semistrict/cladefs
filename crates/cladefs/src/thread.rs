@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The threads cladefs starts in a VMM's process, for a VM's store and DAX window, and those the VMM
+//! The threads cladefs starts in a VMM's process, for a VM's cell and DAX window, and those the VMM
 //! starts for its device (TASK-50.1). The VMM starts them through its [`Spawn`], from a thread
 //! confined as it wants them, as one under Firecracker's VMM seccomp filter is, rather than from
 //! whichever thread asks: a vCPU's, activating the device, whose confinement they would inherit

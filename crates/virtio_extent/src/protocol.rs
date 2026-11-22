@@ -10,13 +10,13 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-/// cladefs: the device's protocol version, the configuration's first field (TASK-141.3): a change to
-/// any of its requests, flags, features, configuration or what they mean makes a new one, which
+/// cladefs: the device's protocol version, the configuration's first field (TASK-141.3): a change
+/// to any of its requests, flags, features, configuration or what they mean makes a new one, which
 /// the driver refuses a device of another of at probe, naming both, as AGENTS.md's rule, no
-/// migrations, has every format refuse another. Its features are not a negotiation: they say
-/// what the device is configured as (a follower, a window), and a driver takes every one offered,
-/// or its activation is refused ([`check_acked`]). Where it is, the configuration's first four
-/// bytes, no version moves. Its driver's is `VIRTIO_EXTENT_VERSION`
+/// migrations, has every format refuse another. Its features are not a negotiation: they say what
+/// the device is configured as (a follower, a window), and a driver takes every one offered, or its
+/// activation is refused ([`check_acked`]). Where it is, the configuration's first four bytes, no
+/// version moves. Its driver's is `VIRTIO_EXTENT_VERSION`
 /// (guest/linux/include/linux/virtio_extent.h).
 pub const VIRTIO_EXTENT_VERSION: u32 = 1;
 
@@ -25,23 +25,23 @@ pub const VIRTIO_ID_EXTENT: u32 = 0x4658;
 
 /// Shared memory region 0 is a DAX window, and `MAP`/`UNMAP` work. cladefs: the window maps sealed
 /// extents and zeros alone, read-only (backlog doc-13): a `MAP` of an open extent fails `EPERM`. A
-/// writer's copies on write: a store to a page of it gives the device a private page holding what
+/// writer's copies on write: a write to a page of it gives the device a private page holding what
 /// the page held, mapped writable at the same address, until a `MAP` or `UNMAP` over it; past the
-/// configuration's `private_max` private pages a store is refused, and the VM stops. `MAP_ZEROS`
-/// maps zeros, and `PRIVATE` makes pages private ahead of stores. A follower's (`READ_ONLY`) maps
-/// no zeros, and refuses every store. Bit 1, writable DAX's, is not reused.
+/// configuration's `private_max` private pages a write is refused, and the VM stops. `MAP_ZEROS`
+/// maps zeros, and `PRIVATE` makes pages private ahead of writes. A follower's (`READ_ONLY`) maps
+/// no zeros, and refuses every write. Bit 1, writable DAX's, is not reused.
 pub const VIRTIO_EXTENT_F_DAX: u32 = 0;
 /// `WRITE` takes `WRITE_COMMIT`: a commit follows the write, in one request.
 pub const VIRTIO_EXTENT_F_WRITE_COMMIT: u32 = 2;
-/// cladefs: the configuration holds the store's capacity, which the host changes while the guest
+/// cladefs: the configuration holds the cell's capacity, which the host changes while the guest
 /// runs, telling it with a configuration change; a shrink the guest is asked to take it answers
 /// (`VIRTIO_EXTENT_T_RESIZED`).
 pub const VIRTIO_EXTENT_F_RESIZE: u32 = 3;
-/// cladefs: `VIRTIO_EXTENT_T_FREEZE` tells the device the guest's filesystem is frozen, or thawed: a
-/// snapshot of the VM is taken frozen, and a VM restored from it, with a store of its own, learns
+/// cladefs: `VIRTIO_EXTENT_T_FREEZE` tells the device the guest's filesystem is frozen, or thawed:
+/// a snapshot of the VM is taken frozen, and a VM restored from it, with a cell of its own, learns
 /// its cell, which `INFO` says, as its filesystem thaws (TASK-39.1).
 pub const VIRTIO_EXTENT_F_FREEZE: u32 = 4;
-/// cladefs: the device follows a store another VM writes, read-only (backlog doc-8): `ADVANCE`,
+/// cladefs: the device follows a cell another VM writes, read-only (backlog doc-8): `ADVANCE`,
 /// `LET_GO`, `PIN` and `UNPIN` work, and the configuration's `committed` changes as the writer
 /// commits, telling the guest with a configuration change (TASK-42.3).
 pub const VIRTIO_EXTENT_F_READ_ONLY: u32 = 5;
@@ -90,7 +90,7 @@ pub const VIRTIO_EXTENT_T_PIN: u32 = 13;
 pub const VIRTIO_EXTENT_T_UNPIN: u32 = 14;
 // cladefs: 15 was the guest's answer to an ask to seal, writable DAX's, not reused.
 /// cladefs (`VIRTIO_EXTENT_F_DAX`, a writer's): makes the window's `len` bytes at `window_offset`
-/// private now, as stores would, mapped for the guest ahead of its accesses: `ENOMEM`, none made
+/// private now, as writes would, mapped for the guest ahead of its accesses: `ENOMEM`, none made
 /// private, past `private_max`; `EINVAL` where nothing is mapped, or of a follower's window
 /// (`UnmapArgs` are its arguments).
 pub const VIRTIO_EXTENT_T_PRIVATE: u32 = 16;
@@ -125,8 +125,9 @@ pub const VIRTIO_EXTENT_MAP_PREFAULT: u32 = 1 << 2;
 pub const VIRTIO_EXTENT_MAP_ZEROS: u32 = 1 << 3;
 
 /// The size of each of the device's queues. Its request queues are interchangeable, which a driver
-/// may use one per CPU of (cladefs TASK-26.18.5): a VMM gives the device as many as its VM has vCPUs,
-/// each with an interrupt of its own, so that no two of the guest's CPUs share one (TASK-276).
+/// may use one per CPU of (cladefs TASK-26.18.5): a VMM gives the device as many as its VM has
+/// vCPUs, each with an interrupt of its own, so that no two of the guest's CPUs share one
+/// (TASK-276).
 pub const QUEUE_SIZE: u16 = 256;
 
 /// The ID of the DAX window's shared memory region.
@@ -157,8 +158,8 @@ pub const MAX_STATS: usize = 64 << 10;
 const _: () = assert!(MAX_STATS == cladefs::CellClient::MAX_STATS);
 
 /// cladefs TASK-470: the ranges a request's offsets and lengths keep to (doc-4), as the device's
-/// configuration and window say: a request out of them is refused, `EINVAL`, before its store sees
-/// it, whatever the store would make of it (a fake's arithmetic overflowed, a real store's checks
+/// configuration and window say: a request out of them is refused, `EINVAL`, before its cell sees
+/// it, whatever the cell would make of it (a fake's arithmetic overflowed, a real cell's checks
 /// are its own). An end past the end of a u64 is past every bound, an aligned one wrapping to 0
 /// too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +218,44 @@ fn within(offset: u64, len: u64, alignment: u64, most: u64) -> Result<(), cladef
 
 /// cladefs: a request's `flags`, of type `type_`, as a device whose cache is `Unsafe` serves them
 /// (TASK-363): a `COMMIT` or a `WRITE`'s commit ordered, not uploaded.
+/// cladefs: the flags requests of `type_` may set (doc-4): `None` for a type no request is of. The
+/// device refuses a request setting any other (`EINVAL`) before anything of it is served, in one
+/// place for every type, so that a type added later is checked as the others are (board 2774).
+pub fn known_flags(type_: u32) -> Option<u32> {
+    Some(match type_ {
+        VIRTIO_EXTENT_T_WRITE => {
+            VIRTIO_EXTENT_WRITE_BARRIER
+                | VIRTIO_EXTENT_WRITE_COMMIT
+                | VIRTIO_EXTENT_WRITE_UPLOADED
+                | VIRTIO_EXTENT_WRITE_ROOT
+        }
+        VIRTIO_EXTENT_T_FREE => VIRTIO_EXTENT_FREE_MANY,
+        VIRTIO_EXTENT_T_MAP => {
+            VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_PREFAULT | VIRTIO_EXTENT_MAP_ZEROS
+        }
+        VIRTIO_EXTENT_T_COMMIT => VIRTIO_EXTENT_COMMIT_UPLOADED | VIRTIO_EXTENT_COMMIT_ROOT,
+        VIRTIO_EXTENT_T_RESIZED => VIRTIO_EXTENT_RESIZED_TOOK,
+        VIRTIO_EXTENT_T_FREEZE => VIRTIO_EXTENT_FREEZE_FROZEN,
+        VIRTIO_EXTENT_T_READ
+        | VIRTIO_EXTENT_T_UNMAP
+        | VIRTIO_EXTENT_T_ROOT
+        | VIRTIO_EXTENT_T_INFO
+        | VIRTIO_EXTENT_T_ADVANCE
+        | VIRTIO_EXTENT_T_LET_GO
+        | VIRTIO_EXTENT_T_PIN
+        | VIRTIO_EXTENT_T_UNPIN
+        | VIRTIO_EXTENT_T_PRIVATE
+        | VIRTIO_EXTENT_T_STATS => 0,
+        _ => return None,
+    })
+}
+
+/// cladefs: the most bytes a request's writable buffers hold: the most it returns, a `READ`'s, and
+/// its response (board 2768). The device refuses a request with more, and never writes, nor zeroes,
+/// past it: what a request costs the device is bounded by the protocol, not by the `u32` a chain's
+/// length fits in.
+pub const MAX_WRITABLE: usize = MAX_TRANSFER as usize + size_of::<Response>();
+
 pub fn ordered_only(type_: u32, flags: u32) -> u32 {
     match type_ {
         VIRTIO_EXTENT_T_COMMIT => flags & !VIRTIO_EXTENT_COMMIT_UPLOADED,
@@ -429,8 +468,8 @@ pub struct ResizedArgs {
 #[derive(Copy, Clone, Debug, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct ConfigSpace {
-    /// cladefs: the device's protocol version, [`VIRTIO_EXTENT_VERSION`], first, where every version
-    /// has it (TASK-141.3).
+    /// cladefs: the device's protocol version, [`VIRTIO_EXTENT_VERSION`], first, where every
+    /// version has it (TASK-141.3).
     pub version: u32,
     /// The filesystem's name, NUL-padded: the mount's source.
     pub tag: [u8; MAX_TAG_LEN],
@@ -442,7 +481,7 @@ pub struct ConfigSpace {
     pub max_root: u32,
     pub cell: u64,
     pub max_extent: u64,
-    /// cladefs: the store's capacity, and the shrink the guest is asked to take, if any, 0 if none
+    /// cladefs: the cell's capacity, and the shrink the guest is asked to take, if any, 0 if none
     /// (`VIRTIO_EXTENT_F_RESIZE`).
     pub capacity: u64,
     pub asked: u64,

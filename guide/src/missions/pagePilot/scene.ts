@@ -74,7 +74,7 @@ export const storeScenes: Scene[] = [
     semaphore: "shared",
     request: "PRIVATE",
     caption:
-      "A's store faults. iomap_begin, the file's semaphore held shared, asks the host for a private copy first.",
+      "A's write faults. iomap_begin, the file's semaphore held shared, asks the host for a private copy first.",
     focus: ["a", "semaphore"],
   },
   {
@@ -89,7 +89,7 @@ export const storeScenes: Scene[] = [
     ...sharedScene,
     a: { name: "Fork A", page: { kind: "private", data: "v2" }, pte: "rw", sets: ["dirty"] },
     semaphore: "none",
-    caption: "Mapped writable, A's store lands in its private page. B still maps base·7: v1.",
+    caption: "Mapped writable, A's write lands in its private page. B still maps base·7: v1.",
     focus: ["a", "b", "private"],
   },
 ];
@@ -111,7 +111,7 @@ export const fsyncScenes: Scene[] = [
     a: { ...dirtyA, pte: "ro", sets: ["writeback"] },
     semaphore: "shared",
     caption:
-      "It write-protects the page's PTEs, by the page tables: a later store faults into the new dirty set.",
+      "It write-protects the page's PTEs, by the page tables: a later write faults into the new dirty set.",
     focus: ["a"],
   },
   {

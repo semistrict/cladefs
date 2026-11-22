@@ -8,3 +8,13 @@
 3       TASK-699: the conditional-write probe took a bucket out of reach for one refusing updates
 71      board 2934: a refused hand-over's marker, its removal not durable, back after a crash: the next migration asked as the older, the target left noting the cell
 310     board 2934: the same, the target then refusing every later migration of the cell (ALREADY_EXISTS)
+30      board 5668: a CreateCell whose making's last sync failed left its store looking made, every take after it refused (EEXIST)
+423     board 5890: a log append written back a page at a time wrote again the end of the record synced before it; a crash before its sync made garbage of that record, a commit told durable lost (decision-3)
+107     board 5721: an accepted hand-over's note unlinked, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
+755     board 5721: a refused hand-over's marker unlinked, its directory's sync failing, answered EIO; asking again found no migration under way (ENOENT)
+17      board 5721: an accepted hand-over's note created, its write failing (ENOSPC), left empty: every asking again failed to read it, the host never answering
+265     board 5721: a handed-over cell's journal entry, its removal failing, was said nowhere: the host refused every later migration of the cell to it (ALREADY_EXISTS)
+307     board 5721: a target's acceptance written but not synced, answered yes at once on asking again, then lost with its entry at a crash: the cell noted on no host (macOS)
+725     board 5764: a sync through a connection's open cell dropped its reference unclosed, the connection letting the cell go meanwhile (Linux)
+171     board 5730: a handed-over cell's journal entry, its note now, unlinked as it was let go of, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
+210     board 5734: a target's acceptance released by its source, the cell's noting taken having failed after it: the target started again took its entry for a migration never accepted and removed the cell

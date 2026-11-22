@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Fxfs on an extent-store device (`Filesystem`), and its volumes as the kernel mounts them, the one
-//! cladefs's images keep their files in by default, each served by object ID, which is the kernel's
-//! inode number within the volume, through Fxfs's POSIX layer (crates/fxfs-posix), whose VFS is the
-//! kernel's (`Guest`).
+//! Fxfs on an extent-store device (`Filesystem`), and its volumes as the kernel mounts them, the
+//! one cladefs's images keep their files in by default, each served by object ID, which is the
+//! kernel's inode number within the volume, through Fxfs's POSIX layer (crates/fxfs-posix), whose
+//! VFS is the kernel's (`Guest`).
 //!
 //! cladefs: what only the guest has is here: its device's DAX, uploaded commits, resizes and
-//! freezes, and, on a follower's device, what follows the store's writer (`follow`, backlog doc-8).
+//! freezes, and, on a follower's device, what follows the cell's writer (`follow`, backlog doc-8).
 
 use crate::device::{Dax, DeviceStats, ExtentDevice, Freezer, Resizer, Uploading, UploadingGuard};
 use crate::follow::{Following, GuestFollow};
@@ -33,8 +33,8 @@ use storage_device::DeviceHolder;
 /// A volume of a filesystem, as the kernel mounts it.
 pub type Fxfs = fxfs_posix::Fxfs<Guest>;
 
-/// The volume cladefs's images keep a filesystem's files in (crates/cladefs's `VOLUME_NAME`), which a
-/// mount naming none mounts (fs/cladefs/cladefs.h's CLADEFS_DEFAULT_VOLUME).
+/// The volume cladefs's images keep a filesystem's files in (crates/cladefs's `VOLUME_NAME`), which
+/// a mount naming none mounts (fs/cladefs/cladefs.h's CLADEFS_DEFAULT_VOLUME).
 const VOLUME: &str = "default";
 
 /// When the journal is written, but for syncs: metadata operations stay in memory, as ext4's do
@@ -58,7 +58,7 @@ const CACHED_OBJECT_SIZE: u64 = 256;
 
 /// How long the graveyard gathers the objects the kernel evicts, unlinked, before freeing them:
 /// rather than being scheduled for each. Briefly: Fxfs doesn't free them sooner for want of space,
-/// and a store nearly full after a crash may have too little to compact (fxfs-guest-crash did,
+/// and a cell nearly full after a crash may have too little to compact (fxfs-guest-crash did,
 /// waiting 100 ms).
 const GRAVEYARD_BATCH_DELAY: Duration = Duration::from_millis(5);
 
@@ -80,7 +80,7 @@ pub struct Filesystem {
     device_stats: Arc<DeviceStats>,
     /// cladefs: fsyncs, and those another's sync covered, of all its volumes (`stats`).
     sync_counts: Arc<SyncCounts>,
-    /// cladefs: what resizes the device, as the host resizes its store (`resize`).
+    /// cladefs: what resizes the device, as the host resizes its cell (`resize`).
     resizer: Resizer,
     /// cladefs: what freezes the device with the filesystem (`freeze`).
     freezer: Freezer,
@@ -88,9 +88,9 @@ pub struct Filesystem {
     frozen: Mutex<Option<Frozen>>,
 }
 
-/// cladefs: a frozen filesystem, as far as thawing it has got: each step of `Filesystem::thaw` taken
-/// once, the next thaw resuming at the one a failed thaw stopped at. Until the last is done, the
-/// filesystem is frozen, as the VFS keeps a superblock whose thaw failed (TASK-200).
+/// cladefs: a frozen filesystem, as far as thawing it has got: each step of `Filesystem::thaw`
+/// taken once, the next thaw resuming at the one a failed thaw stopped at. Until the last is done,
+/// the filesystem is frozen, as the VFS keeps a superblock whose thaw failed (TASK-200).
 enum Frozen {
     /// The device closed to writes, frees and commits, and told it is frozen; the filesystem's
     /// commits held by the task, and its journal's compactions paused, unless it writes nothing.
@@ -115,8 +115,8 @@ impl Frozen {
     }
 }
 
-/// cladefs: fault injection (TASK-200): the next thaw fails before its step this names (`Frozen::step`),
-/// which is 0 again then; 0, none.
+/// cladefs: fault injection (TASK-200): the next thaw fails before its step this names
+/// (`Frozen::step`), which is 0 again then; 0, none.
 pub(crate) static FAIL_THAW_AT: AtomicU32 = AtomicU32::new(0);
 
 /// What the guest kernel gives a mounted volume: its filesystem's, and on a follower, what follows
@@ -162,7 +162,7 @@ impl Platform for Guest {
 
 impl Filesystem {
     /// Opens the filesystem on `device`, sizing what it keeps in memory by the kernel's `memory`
-    /// bytes. A device whose store holds nothing yet is formatted, with an empty default volume,
+    /// bytes. A device whose cell holds nothing yet is formatted, with an empty default volume,
     /// first. cladefs: read-only, if `read_only` or the device is a follower's.
     pub async fn open(device: ExtentDevice, memory: u64, read_only: bool) -> Result<Self, Error> {
         let follows = device.follows();
@@ -316,8 +316,8 @@ impl Filesystem {
         frozen
     }
 
-    /// cladefs: thaws the filesystem: tells the device, and takes its cell, which is a store's
-    /// of its own in a VM restored from a snapshot taken frozen: the allocator mints extents of it,
+    /// cladefs: thaws the filesystem: tells the device, and takes its cell, which is its
+    /// own in a VM restored from a snapshot taken frozen: the allocator mints extents of it,
     /// and the journal continues in new ones of it before anything else commits, which a
     /// super-block then records. Then it compacts again. A step that fails leaves it frozen at
     /// that step (`Frozen`), which the next thaw goes on from, never taking one twice: the device
@@ -380,7 +380,7 @@ impl Filesystem {
         }
     }
 
-    /// cladefs: takes the size the host resized the store to, as the device's configuration says,
+    /// cladefs: takes the size the host resized the cell to, as the device's configuration says,
     /// while mounted: grows the device and the allocator; or, asked to shrink, shrinks them if the
     /// allocator holds no more than the smaller size, and answers whether it did.
     pub async fn resize(&self) -> Result<(), Error> {
@@ -421,8 +421,8 @@ impl Filesystem {
         self.dax.device()
     }
 
-    /// cladefs: what the filesystem waited on, and its device's requests took, as lines of a name and
-    /// a number: counts, and their nanoseconds, all told since it opened (TASK-91.7).
+    /// cladefs: what the filesystem waited on, and its device's requests took, as lines of a name
+    /// and a number: counts, and their nanoseconds, all told since it opened (TASK-91.7).
     pub fn stats(&self) -> String {
         use std::fmt::Write as _;
         use std::sync::atomic::Ordering::Relaxed;
@@ -504,18 +504,19 @@ pub(crate) trait GuestFxfs: Sized {
     /// cladefs: lets go of the file `ino`, which the kernel closes.
     fn release(&self, ino: u64);
 
-    /// cladefs: the attributes of `ino` as a follower's batch just left them, or none if it is gone.
+    /// cladefs: the attributes of `ino` as a follower's batch just left them, or none if it is
+    /// gone.
     async fn attr_applied(&self, ino: u64) -> Result<Option<Attr>, Error>;
 
     /// cladefs: what follows its writer, on a follower.
     fn following(&self) -> Option<&Following>;
 
-    /// cladefs: puts all the volume holds in one layer, so that the journal holds nothing of it, but
-    /// for what comes after (backlog doc-10, Publishing).
+    /// cladefs: puts all the volume holds in one layer, so that the journal holds nothing of it,
+    /// but for what comes after (backlog doc-10, Publishing).
     async fn flush_volume(&self) -> Result<(), Error>;
 
-    /// cladefs: the volume's manifest, with its filesystem frozen: no compaction frees what it names
-    /// before a fork of the store holds it. `Unavailable` if the journal holds anything of it.
+    /// cladefs: the volume's manifest, with its filesystem frozen: no compaction frees what it
+    /// names before a fork of the cell holds it. `Unavailable` if the journal holds anything of it.
     async fn manifest(&self) -> Result<Vec<u8>, Error>;
 }
 

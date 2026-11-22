@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The userfaultfd second stage under Shuttle (TASK-44.3): its real code, and the window's, over a model of the host memory it changes, [`ModelMemory`], which a guest's accesses
-//! are made against as KVM makes them. Each of the stage's rules of the order it changes its
-//! memory in, turned off, fails.
+//! The userfaultfd second stage under Shuttle (TASK-44.3): its real code, and the window's, over a
+//! model of the host memory it changes, [`ModelMemory`], which a guest's accesses are made against
+//! as KVM makes them. Each of the stage's rules of the order it changes its memory in, turned off,
+//! fails.
 
 use super::super::shuttle_tests::{
-    ATTEMPTS, Event, Guest, Outcome, RUNS, SEALED, byte, reached, reaching, stores_race_frees,
+    ATTEMPTS, Event, Guest, Outcome, RUNS, SEALED, byte, reached, reaching, writes_race_frees,
 };
 use super::super::tests::TestSource;
 use super::super::{Dax, DaxWindow, Source as _, Window};
@@ -31,14 +32,14 @@ struct Page {
 }
 
 /// The second stage's host memory, as `mmap`, `mprotect` and userfaultfd change it, and what the
-/// window told the stage of each page, by its offset: whether a store may change it, a private
+/// window told the stage of each page, by its offset: whether a write may change it, a private
 /// page, once the last change made to it returned, and what a change being made gives it.
 #[derive(Default)]
 struct Model {
     pages: BTreeMap<usize, Page>,
     told: BTreeMap<u64, (bool, Option<bool>)>,
-    /// cladefs: how many times memory was mapped (`mmap`): each over memory mapped before unmaps it,
-    /// which flushes the host's TLBs and the hypervisor's mappings (TASK-91.16).
+    /// cladefs: how many times memory was mapped (`mmap`): each over memory mapped before unmaps
+    /// it, which flushes the host's TLBs and the hypervisor's mappings (TASK-91.16).
     maps: usize,
     /// cladefs: the private memory of a window that copies on write, if the stage made it, and the
     /// offsets of it filled: a page of it unfilled faults as anonymous memory (backlog doc-13).
@@ -50,7 +51,7 @@ struct Model {
 }
 
 impl Model {
-    /// Whether the window lets a store change the page at `offset`, a private page: as it was told
+    /// Whether the window lets a write change the page at `offset`, a private page: as it was told
     /// it does, or as a change being made to it says.
     fn writable(&self, offset: u64) -> bool {
         self.told.get(&offset).is_some_and(|(made, making)| *made || *making == Some(true))
@@ -160,7 +161,7 @@ struct Telling {
 
 impl Telling {
     /// Tells the model of a change of the `len` bytes at `offset`, made by `make`, which makes
-    /// them private pages, a store's to change, if `writable`.
+    /// them private pages, a write's to change, if `writable`.
     fn change(&self, offset: u64, len: u64, writable: bool, make: impl FnOnce()) {
         let offsets = (offset..offset + len).step_by(page_size() as usize);
         let mut model = self.memory.0.lock().unwrap();
@@ -340,9 +341,9 @@ struct HostGuest {
     base: usize,
 }
 
-/// cladefs: the threads' IDs, as userfaultfd reports them, of a vCPU, the guest's own, which tests of
-/// windows that copy on write say so of ([`guest_thread`]), and of KVM's asynchronous page fault's
-/// worker, not the guest's.
+/// cladefs: the threads' IDs, as userfaultfd reports them, of a vCPU, the guest's own, which tests
+/// of windows that copy on write say so of ([`guest_thread`]), and of KVM's asynchronous page
+/// fault's worker, not the guest's.
 const VCPU: u32 = 1;
 const WORKER: u32 = 2;
 
@@ -354,7 +355,7 @@ impl HostGuest {
     }
 
     /// cladefs: an access as [`Guest::access`] makes it, by thread `thread`: a vCPU's, or KVM's
-    /// worker's for it, which makes a store with no bytes to write (`write` none).
+    /// worker's for it, which makes a write with no bytes to write (`write` none).
     fn access_by(&self, thread: u32, offset: u64, kind: Access, write: Option<u8>) -> Outcome<'_> {
         let addr = self.base + offset as usize;
         let model = self.memory.0.lock().unwrap();
@@ -388,7 +389,7 @@ impl HostGuest {
             Some((fd, at)) => {
                 if kind == Access::Write && !model.writable(offset) {
                     drop(model);
-                    panic!("a store at {offset:#x} went untracked");
+                    panic!("a write at {offset:#x} went untracked");
                 }
                 return Outcome::Made(byte(fd, at, write));
             }
@@ -433,11 +434,11 @@ impl Guest for HostGuest {
     }
 }
 
-/// cladefs: the race of stores and loads with a free ([`stores_race_frees`]) through the stage, over
-/// the model of its memory, of a window of two pages that copies on write, one private page at
+/// cladefs: the race of writes and loads with a free ([`writes_race_frees`]) through the stage,
+/// over the model of its memory, of a window of two pages that copies on write, one private page at
 /// most, which the window's changes reach as the window makes them, or, `at_once`, as the extent
 /// daemon's VM process makes them ([`Remapping`], TASK-91.16). Its vCPUs' threads are the guest's
-/// own, whose stores to pages not here are stores.
+/// own, whose writes to pages not here are the guest's.
 fn frees_through_userfaultfd(at_once: bool) {
     let ps = page_size();
     let memory = ModelMemory::default();
@@ -464,7 +465,7 @@ fn frees_through_userfaultfd(at_once: bool) {
     };
     let (dax, _) = super::super::tests::copying(2, 1, Some(second_stage));
     let window = dax.window.clone();
-    stores_race_frees(dax, Arc::new(HostGuest { memory, stage, window, base }));
+    writes_race_frees(dax, Arc::new(HostGuest { memory, stage, window, base }));
 }
 
 fn frees_in_steps() {
@@ -505,7 +506,7 @@ fn modelled(pages: u64, at_once: bool) -> (ModelMemory, Arc<UffdSecondStage<Mode
 /// (TASK-91.16), with fewer `mmap`s: none for a map of the very pages installed, left in place;
 /// one for a map of other memory over pages installed, left out, and named; and none for a change
 /// of pages never touched since they were named (TASK-276.6: a map names pages, their first touch
-/// installs them). A page a refused store restricted is taken away with its run, which lifts it.
+/// installs them). A page a refused write restricted is taken away with its run, which lifts it.
 fn remaps_end_as_steps_do() {
     let ps = page_size();
     let (steps, steps_stage, mut steps_dax) = modelled(2, false);
@@ -533,7 +534,7 @@ fn remaps_end_as_steps_do() {
     assert_eq!(reads(), [[1, 1]; 2], "sealed");
     change("the same pages", 0, &|dax| dax.map(0, &sealed, 0, 2 * ps));
     assert_eq!(reads(), [[1, 1]; 2], "the same pages");
-    // A store faulted on the second page, which the window refused, as it doesn't copy on write.
+    // A write faulted on the second page, which the window refused, as it doesn't copy on write.
     for stage in [&steps_stage, &at_once_stage] {
         let addr = 64 * ps as usize + ps as usize;
         stage.restrict(addr, stage.seen(addr), libc::PROT_READ);
@@ -547,20 +548,21 @@ fn remaps_end_as_steps_do() {
     change("nothing in memory, never touched", 0, &|dax| dax.map(0, &other, 0, 2 * ps));
 }
 
-/// cladefs: a vCPU's store of [`STORED`] at `offset` through `guest`, retried as each fault is
+/// cladefs: a vCPU's write of [`STORED`] at `offset` through `guest`, retried as each fault is
 /// resolved.
-fn store_byte(guest: &HostGuest, offset: u64) {
+fn write_byte(guest: &HostGuest, offset: u64) {
     for _ in 0..ATTEMPTS {
         match guest.access(offset, Access::Write, Some(STORED)) {
             Outcome::Made(read) => return assert_eq!(read, STORED),
             Outcome::Faulted(fault) => future::block_on(fault).unwrap(),
-            Outcome::Failed => panic!("the vCPU's store at {offset:#x} failed"),
+            Outcome::Failed => panic!("the vCPU's write at {offset:#x} failed"),
         }
     }
-    panic!("the vCPU's store at {offset:#x} never completed");
+    panic!("the vCPU's write at {offset:#x} never completed");
 }
 
-/// cladefs: what a vCPU's load at `offset` through `guest` reads, retried as each fault is resolved.
+/// cladefs: what a vCPU's load at `offset` through `guest` reads, retried as each fault is
+/// resolved.
 fn load_byte(guest: &HostGuest, offset: u64) -> u8 {
     for _ in 0..ATTEMPTS {
         match guest.access(offset, Access::Read, None) {
@@ -580,23 +582,23 @@ fn remaps_end_as_steps_do_once() {
 /// cladefs: the events the race reaches with the window's changes made at once: all but an access
 /// failing for a moment, which the schedules reach no more (TASK-91.16). Made in steps, a free
 /// leaves the pages out, inaccessible until registered, which an access finds; made at once, its
-/// zeros, installed over the extent, refuse a store only until they are registered, a step no
+/// zeros, installed over the extent, refuse a write only until they are registered, a step no
 /// schedule found in thousands.
 const REMAPPED_EVENTS: [Event; 5] =
-    [Event::ReadSealed, Event::ReadZeros, Event::ReadStored, Event::Faulted, Event::StoreRefused];
+    [Event::ReadSealed, Event::ReadZeros, Event::ReadStored, Event::Faulted, Event::WriteRefused];
 
 #[test]
-fn remapped_stores_race_frees_randomly() {
+fn remapped_writes_race_frees_randomly() {
     reaching(|| RandomScheduler::new(runs(RUNS)), frees_remapped, &REMAPPED_EVENTS);
 }
 
 #[test]
-fn remapped_stores_race_frees_by_pct() {
+fn remapped_writes_race_frees_by_pct() {
     reaching(|| PctScheduler::new(3, runs(RUNS)), frees_remapped, &REMAPPED_EVENTS);
 }
 
 /// The window maps zeros over a page it mapped, as a free does a sealed extent, while the fault
-/// thread refuses a store to the page, as `resolve` does of a window that doesn't copy on write,
+/// thread refuses a write to the page, as `resolve` does of a window that doesn't copy on write,
 /// and a vCPU then loads from it:
 /// the window's change unmaps the page here, then maps the zeros. The load finds the page as the
 /// window mapped it, or not yet registered, so inaccessible: never memory not registered.
@@ -619,7 +621,7 @@ fn refusal_races_changes() {
     assert_eq!(load_byte(&guest, 0), SEALED);
 
     let change = thread::spawn(move || dax.map_zeros(0, ps));
-    // A store faulted on the page, which the window refused, as it maps it read-only.
+    // A write faulted on the page, which the window refused, as it maps it read-only.
     let seen = stage.seen(base);
     stage.restrict(base, seen, libc::PROT_READ);
     // The load is made, or faults, or fails, as the page is.
@@ -678,16 +680,16 @@ const EVENTS: [Event; 6] = [
     Event::ReadStored,
     Event::Faulted,
     Event::Failed,
-    Event::StoreRefused,
+    Event::WriteRefused,
 ];
 
 #[test]
-fn stores_race_frees_randomly() {
+fn writes_race_frees_randomly() {
     reaching(|| RandomScheduler::new(runs(RUNS)), frees_in_steps, &EVENTS);
 }
 
 #[test]
-fn stores_race_frees_by_pct() {
+fn writes_race_frees_by_pct() {
     reaching(|| PctScheduler::new(3, runs(RUNS)), frees_in_steps, &EVENTS);
 }
 
@@ -700,7 +702,7 @@ fn fails_without(rules: Rules, expected: &str) {
     });
 }
 
-/// A page mapped writable until it is write-protected: a store meanwhile changes the extent's
+/// A page mapped writable until it is write-protected: a write meanwhile changes the extent's
 /// page, untracked.
 #[test]
 fn needs_maps_with_the_window_protection() {
@@ -723,7 +725,7 @@ fn needs_registers_before_accessible() {
     fails_without(rules, "a page of zeros faulted in");
 }
 
-/// A store the window refuses made read-only whenever its fault is resolved: midway through the
+/// A write the window refuses made read-only whenever its fault is resolved: midway through the
 /// window's unmapping of the page, the memory is left accessible before it is registered, and a
 /// load faults in a page of zeros. A random schedule of the seals and frees found it (seed
 /// 4939094435187741046) once in thousands, before copy on write; the race alone is reached at
@@ -756,11 +758,11 @@ fn needs_mapping_to_give_back_withheld() {
     });
 }
 
-/// A store the window refuses, left write-protected rather than made read-only: it faults again,
+/// A write the window refuses, left write-protected rather than made read-only: it faults again,
 /// for ever.
 #[test]
-fn needs_refused_stores_read_only() {
-    let rules = Rules { refused_store_read_only: false, ..Rules::ALL };
+fn needs_refused_writes_read_only() {
+    let rules = Rules { refused_write_read_only: false, ..Rules::ALL };
     fails_without(rules, "never completed");
 }
 
@@ -776,7 +778,7 @@ enum NotHere {
 
 /// KVM's worker's write of page 0, retried as get_user_pages retries it, until it fails or is
 /// made: it must end, or the worker faults for good. cladefs: on a window that copies on write it
-/// fails, its page restricted to reads, since taken as a load, never a store (TASK-191).
+/// fails, its page restricted to reads, since taken as a load, never a write (TASK-191).
 fn worker_writes(guest: &HostGuest) {
     worker_writes_at(guest, 0);
 }
@@ -805,15 +807,15 @@ fn load(guest: &HostGuest, offset: u64) {
 }
 
 /// cladefs TASK-164.1 (backlog doc-13): on a window that copies on write, KVM's worker's write of a
-/// page not here, as it makes for a vCPU's load and store alike, copies nothing, whether the page
+/// page not here, as it makes for a vCPU's load and write alike, copies nothing, whether the page
 /// was never here or was left out (`not_here`): resolved as a load, the page made read-only here,
 /// the write, retried, fails. The vCPU's own access decides: a load is made, of the extent's page;
-/// a store fails, as `KVM_RUN` does with `EFAULT`, until the VMM, retrying it, says so
-/// (`guest_access_failed`), which lifts the restriction, and the store, retried, faults as one, and
+/// a write fails, as `KVM_RUN` does with `EFAULT`, until the VMM, retrying it, says so
+/// (`guest_access_failed`), which lifts the restriction, and the write, retried, faults as one, and
 /// is made, in a private copy. Red, left out, with the page installed again left writable here:
-/// the worker's write, retried, faulted as a store, and copied the page for a load, uncounted by
-/// the guest (GCE r582's jailed VM, its budget the default's, 21,396 pages so, TASK-170).
-fn worker_writes_copy_nothing(vcpu_stores: bool, not_here: NotHere) {
+/// the worker's write, retried, faulted as the guest's, and copied the page for a load, uncounted
+/// by the guest (GCE r582's jailed VM, its budget the default's, 21,396 pages so, TASK-170).
+fn worker_writes_copy_nothing(vcpu_writes: bool, not_here: NotHere) {
     let ps = page_size();
     let memory = ModelMemory::default();
     let base = 64 * ps as usize;
@@ -855,7 +857,7 @@ fn worker_writes_copy_nothing(vcpu_stores: bool, not_here: NotHere) {
     worker_writes(&guest);
     assert_eq!(window.private_pages(), 0, "a worker's write copied the page");
 
-    let (kind, write) = if vcpu_stores { (Access::Write, Some(7)) } else { (Access::Read, None) };
+    let (kind, write) = if vcpu_writes { (Access::Write, Some(7)) } else { (Access::Read, None) };
     let mut failed = false;
     let read = 'access: {
         for _ in 0..ATTEMPTS {
@@ -871,7 +873,7 @@ fn worker_writes_copy_nothing(vcpu_stores: bool, not_here: NotHere) {
         }
         panic!("the vCPU's {kind:?} never completed");
     };
-    match vcpu_stores {
+    match vcpu_writes {
         true => {
             assert_eq!((read, failed, window.private_pages()), (7, true, 1));
             assert_eq!(guest.writable(), [0], "the private page isn't writable here");
@@ -887,7 +889,7 @@ fn worker_writes_before_loads_copy_nothing() {
 }
 
 #[test]
-fn worker_writes_before_stores_copy_nothing() {
+fn worker_writes_before_guest_writes_copy_nothing() {
     Runner::new(RandomScheduler::new(1), config())
         .run(|| worker_writes_copy_nothing(true, NotHere::Never));
 }
@@ -899,14 +901,14 @@ fn worker_writes_of_pages_left_out_before_loads_copy_nothing() {
 }
 
 #[test]
-fn worker_writes_of_pages_left_out_before_stores_copy_nothing() {
+fn worker_writes_of_pages_left_out_before_guest_writes_copy_nothing() {
     Runner::new(RandomScheduler::new(1), config())
         .run(|| worker_writes_copy_nothing(true, NotHere::LeftOut));
 }
 
-/// cladefs: a worker's write of a page `not_here`, resolved as a load, or installed again, left out,
-/// leaving the page writable here: the write, retried, faults again, as a load, for good. It
-/// faulted as a store and copied the page for a load, before such writes were loads alone
+/// cladefs: a worker's write of a page `not_here`, resolved as a load, or installed again, left
+/// out, leaving the page writable here: the write, retried, faults again, as a load, for good. It
+/// faulted as the guest's and copied the page for a load, before such writes were loads alone
 /// (TASK-191).
 fn needs_worker_writes_restricted(not_here: NotHere) {
     *RULES.lock().unwrap() = Rules { worker_writes_restricted: false, ..Rules::ALL };
@@ -926,8 +928,8 @@ fn needs_worker_writes_restricted_of_pages_left_out() {
     needs_worker_writes_restricted(NotHere::LeftOut);
 }
 
-/// cladefs: a page `not_here` a worker's write restricted, left so as the guest's store fails: the
-/// store fails for ever.
+/// cladefs: a page `not_here` a worker's write restricted, left so as the guest's write fails: the
+/// write fails for ever.
 fn needs_failures_to_lift_worker_restrictions(not_here: NotHere) {
     *RULES.lock().unwrap() = Rules { failures_lift_worker_restrictions: false, ..Rules::ALL };
     fails_with("never completed", || {
@@ -946,12 +948,12 @@ fn needs_failures_to_lift_worker_restrictions_of_pages_left_out() {
     needs_failures_to_lift_worker_restrictions(NotHere::LeftOut);
 }
 
-/// cladefs TASK-164.1: on a window that copies on write, a vCPU's store to a page here, mapped
-/// read-only, write-protected, faults as a store, reported by its own thread: the page is copied,
-/// mapped writable here in its place, and holds the store; the extent's page is as it was. KVM's
-/// worker's write faults so too, for a load as for a store, and copies nothing
+/// cladefs TASK-164.1: on a window that copies on write, a vCPU's write to a page here, mapped
+/// read-only, write-protected, faults as the guest's, reported by its own thread: the page is
+/// copied, mapped writable here in its place, and holds the write; the extent's page is as it was.
+/// KVM's worker's write faults so too, for a load as for a write, and copies nothing
 /// ([`worker_writes_of_pages_here_copy_nothing`], TASK-191).
-fn stores_to_pages_here_copy_them() {
+fn writes_to_pages_here_copy_them() {
     let ps = page_size();
     let memory = ModelMemory::default();
     let base = 64 * ps as usize;
@@ -976,39 +978,39 @@ fn stores_to_pages_here_copy_them() {
     guest_thread(VCPU);
     match guest.access_by(VCPU, 0, Access::Write, Some(7)) {
         Outcome::Faulted(fault) => future::block_on(fault).unwrap(),
-        _ => panic!("a store to a page mapped read-only was made, or failed"),
+        _ => panic!("a write to a page mapped read-only was made, or failed"),
     }
     assert_eq!(window.private_pages(), 1);
     match guest.access(0, Access::Write, Some(7)) {
         Outcome::Made(read) => assert_eq!(read, 7),
-        _ => panic!("a store to a private page faulted, or failed"),
+        _ => panic!("a write to a private page faulted, or failed"),
     }
     let arena = crate::pages::arena_memory(shared.arena).unwrap();
     use std::os::fd::AsRawFd as _;
     assert_eq!(
         byte(arena.as_raw_fd(), shared.offset, None),
         SEALED,
-        "the store reached the extent"
+        "the write reached the extent"
     );
 }
 
 #[test]
-fn stores_to_pages_here_copy_them_once() {
-    Runner::new(RandomScheduler::new(1), config()).run(stores_to_pages_here_copy_them);
+fn writes_to_pages_here_copy_them_once() {
+    Runner::new(RandomScheduler::new(1), config()).run(writes_to_pages_here_copy_them);
 }
 
 /// cladefs TASK-191: on a window that copies on write, KVM's worker's write of a page here, mapped
 /// read-only and write-protected, copies nothing: the worker writes for a vCPU's load as for its
-/// store (`async_pf_execute`'s `FOLL_WRITE`), and a page the vCPU's load found not here may be
+/// write (`async_pf_execute`'s `FOLL_WRITE`), and a page the vCPU's load found not here may be
 /// installed before the worker runs, by another fault, the window's probe of the page after a
 /// worker's write, or the guest's `MAP` of a page in memory. A guest makes a page private before
-/// it stores to it (doc-13, TASK-164.9), so only a load gets here so: resolved as a load, the page
+/// it writes to it (doc-13, TASK-164.9), so only a load gets here so: resolved as a load, the page
 /// restricted to reads, the worker's write, retried, fails. The vCPU's load is made, of the
-/// extent's page; its store, which a guest would have made private first, fails until a failure
-/// lifts the restriction, and is a store then, made in a private copy. Red with the worker's
-/// write taken as a store: a private page the guest never counted, which kept its frozen VM's
+/// extent's page; its write, which a guest would have made private first, fails until a failure
+/// lifts the restriction, and is the guest's then, made in a private copy. Red with the worker's
+/// write taken as the guest's: a private page the guest never counted, which kept its frozen VM's
 /// snapshot refused (GCE r685, r686, r688: 'the window has 2 private pages').
-fn worker_writes_of_pages_here_copy_nothing(vcpu_stores: bool) {
+fn worker_writes_of_pages_here_copy_nothing(vcpu_writes: bool) {
     let ps = page_size();
     let memory = ModelMemory::default();
     let base = 64 * ps as usize;
@@ -1034,7 +1036,7 @@ fn worker_writes_of_pages_here_copy_nothing(vcpu_stores: bool) {
     worker_writes(&guest);
     assert_eq!(window.private_pages(), 0, "a worker's write copied the page");
 
-    let (kind, write) = if vcpu_stores { (Access::Write, Some(7)) } else { (Access::Read, None) };
+    let (kind, write) = if vcpu_writes { (Access::Write, Some(7)) } else { (Access::Read, None) };
     let mut failed = false;
     let read = 'access: {
         for _ in 0..ATTEMPTS {
@@ -1049,7 +1051,7 @@ fn worker_writes_of_pages_here_copy_nothing(vcpu_stores: bool) {
         }
         panic!("the vCPU's {kind:?} never completed");
     };
-    match vcpu_stores {
+    match vcpu_writes {
         true => assert_eq!((read, failed, window.private_pages()), (7, true, 1)),
         false => assert_eq!((read, failed, window.private_pages()), (SEALED, false, 0)),
     }
@@ -1062,7 +1064,7 @@ fn worker_writes_of_pages_here_before_loads_copy_nothing() {
 }
 
 #[test]
-fn worker_writes_of_pages_here_before_stores_copy_nothing() {
+fn worker_writes_of_pages_here_before_guest_writes_copy_nothing() {
     Runner::new(RandomScheduler::new(1), config())
         .run(|| worker_writes_of_pages_here_copy_nothing(true));
 }
@@ -1147,7 +1149,7 @@ fn needs_private_pages_filled_before_mapped() {
 /// run in one `mmap`, where each page took one; a run none of whose pages is installed, a
 /// mapping's whose pages came into memory only for the `PRIVATE`, maps nothing, its memory the
 /// private memory already, which filling it makes the pages'. Each page reads what it copied, and
-/// takes a store without a fault. Red with a map a page (four `mmap`s, then four more).
+/// takes a write without a fault. Red with a map a page (four `mmap`s, then four more).
 fn private_runs_map_at_once() {
     let ps = page_size();
     let (memory, stage, mut dax) = modelled_copying(8);
@@ -1176,7 +1178,7 @@ fn private_runs_map_at_once() {
         }
         match guest.access(page * ps, Access::Write, Some(STORED)) {
             Outcome::Made(read) => assert_eq!(read, STORED, "page {page}"),
-            _ => panic!("a store to private page {page} faulted, or failed"),
+            _ => panic!("a write to private page {page} faulted, or failed"),
         }
     }
 }
@@ -1258,14 +1260,14 @@ fn needs_private_runs_filled_before_mapped() {
     });
 }
 
-/// cladefs: a guest's store to a page not here, on a window that copies on write, installs nothing
+/// cladefs: a guest's write to a page not here, on a window that copies on write, installs nothing
 /// after it: the page is made private, a fault either way, and the pages after it stay as they
 /// were, not here. The probe of the next page, which once came of every write to a page not here,
-/// installed it read-only for a moment, once the faulting thread was woken to store on to it,
+/// installed it read-only for a moment, once the faulting thread was woken to write on to it,
 /// which a thread of the host's died of (SIGSEGV, 3 runs in 500 of
 /// snapshots_after_private_pages_are_rebound_restore_their_bytes). Red with the probe back: page 1
 /// installed. A worker's write still probes, for a run of loads.
-fn stores_to_pages_not_here_install_nothing_after_them() {
+fn writes_to_pages_not_here_install_nothing_after_them() {
     let ps = page_size();
     let (memory, stage, mut dax) = modelled_copying(4);
     guest_thread(VCPU);
@@ -1281,13 +1283,13 @@ fn stores_to_pages_not_here_install_nothing_after_them() {
     };
     match guest.access(0, Access::Write, Some(STORED)) {
         Outcome::Faulted(fault) => future::block_on(fault).unwrap(),
-        _ => panic!("a store to a page not here was made, or failed"),
+        _ => panic!("a write to a page not here was made, or failed"),
     }
     assert_eq!(window.private_pages(), 1);
-    assert!(!installed(1), "the store's fault installed the page after it");
+    assert!(!installed(1), "the write's fault installed the page after it");
     match guest.access(0, Access::Write, Some(STORED)) {
         Outcome::Made(read) => assert_eq!(read, STORED),
-        _ => panic!("a store to a private page faulted, or failed"),
+        _ => panic!("a write to a private page faulted, or failed"),
     }
     // A worker's write, a load's, of page 2, maps page 3 ahead.
     worker_writes_at(&guest, 2 * ps);
@@ -1295,12 +1297,12 @@ fn stores_to_pages_not_here_install_nothing_after_them() {
 }
 
 #[test]
-fn stores_to_pages_not_here_install_nothing_after_them_once() {
+fn writes_to_pages_not_here_install_nothing_after_them_once() {
     Runner::new(RandomScheduler::new(1), config())
-        .run(stores_to_pages_not_here_install_nothing_after_them);
+        .run(writes_to_pages_not_here_install_nothing_after_them);
 }
 
-/// cladefs: what a vCPU stores to a private page in [`private_pages_go_with_their_unmaps`].
+/// cladefs: what a vCPU writes to a private page in [`private_pages_go_with_their_unmaps`].
 const STORED: u8 = 0x5a;
 
 /// cladefs TASK-164.1 (backlog doc-13): the guest's `UNMAP` of a private page ends it: an access to
@@ -1317,7 +1319,7 @@ fn private_pages_go_with_their_unmaps() {
     let guest = HostGuest { memory, stage, window, base: 64 * ps as usize };
     match guest.access(0, Access::Write, Some(STORED)) {
         Outcome::Made(read) => assert_eq!(read, STORED),
-        _ => panic!("a store to a private page faulted, or failed"),
+        _ => panic!("a write to a private page faulted, or failed"),
     }
     dax.unmap(0, ps);
     for _ in 0..ATTEMPTS {
@@ -1344,8 +1346,8 @@ fn needs_private_pages_emptied_as_they_go() {
     });
 }
 
-/// cladefs TASK-276.6: what races a store's first touch of a page the window named and the stage
-/// never installed ([`first_stores_race_changes`]).
+/// cladefs TASK-276.6: what races a write's first touch of a page the window named and the stage
+/// never installed ([`first_writes_race_changes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Racing {
     /// The guest's `MAP` of other bytes over the page, which ends its private page, if it has one.
@@ -1360,17 +1362,17 @@ enum Racing {
 const OTHER: u8 = 0xd;
 
 /// cladefs TASK-276.6 (backlog doc-13: a `MAP` names pages, their first touch installs them): a
-/// vCPU's store is the first touch of a page of a sealed extent's mapping, which the stage never
+/// vCPU's write is the first touch of a page of a sealed extent's mapping, which the stage never
 /// installed, on a window that copies on write, while the page is mapped over, unmapped or
-/// evicted (`racing`): its fault goes to the window as a store, which makes the page private in
+/// evicted (`racing`): its fault goes to the window as a write, which makes the page private in
 /// place of nothing, holding what the window maps there then, or is refused for a page unmapped,
-/// and the store retried. Then a vCPU loads the page, and stores to it again. Checked: the store
+/// and the write retried. Then a vCPU loads the page, and writes to it again. Checked: the write
 /// is made, in a private page, unless the window maps nothing there by then; what a load reads
-/// after both is what the window says the page holds: the store, while the page is private, else
+/// after both is what the window says the page holds: the write, while the page is private, else
 /// the bytes it maps, or nothing, an unmapped page's load failing; a private page is the one page
-/// writable here, and a store to it makes no fault; and nothing of the stage's memory faults in a
-/// page of zeros, or takes a store untracked (`HostGuest::access_by`).
-fn first_stores_race_changes(racing: Racing) {
+/// writable here, and a write to it makes no fault; and nothing of the stage's memory faults in a
+/// page of zeros, or takes a write untracked (`HostGuest::access_by`).
+fn first_writes_race_changes(racing: Racing) {
     let ps = page_size();
     let (memory, stage, mut dax) = modelled_copying(1);
     guest_thread(VCPU);
@@ -1382,19 +1384,19 @@ fn first_stores_race_changes(racing: Racing) {
     let guest =
         Arc::new(HostGuest { memory, stage: stage.clone(), window: dax.window.clone(), base });
     let storing = guest.clone();
-    let store = thread::spawn(move || {
+    let writer = thread::spawn(move || {
         for _ in 0..ATTEMPTS {
             match storing.access(0, Access::Write, Some(STORED)) {
                 Outcome::Made(read) => return Some(read),
                 Outcome::Faulted(fault) => match future::block_on(fault) {
                     Ok(()) => thread::yield_now(),
-                    Err(err) => panic!("a store's fault: {err:?}"),
+                    Err(err) => panic!("a write's fault: {err:?}"),
                 },
                 // Unmapped meanwhile: the fault, withheld, fails, as KVM_RUN does.
                 Outcome::Failed => return None,
             }
         }
-        panic!("the store never completed");
+        panic!("the write never completed");
     });
     let other = TestSource::filled(1, OTHER);
     let change = thread::spawn(move || {
@@ -1408,7 +1410,7 @@ fn first_stores_race_changes(racing: Racing) {
         }
         (dax, other)
     });
-    let stored = store.join().unwrap();
+    let stored = writer.join().unwrap();
     let (_dax, _other) = change.join().unwrap();
     let private = window.private_pages() == 1;
     let mapped = window.is_mapped(0);
@@ -1416,7 +1418,7 @@ fn first_stores_race_changes(racing: Racing) {
         // An eviction leaves the private page, and maps the page as it was.
         Racing::Evict => assert_eq!((stored, private), (Some(STORED), true), "evicted"),
         Racing::Map | Racing::Unmap if private => assert_eq!(stored, Some(STORED), "{racing:?}"),
-        // The store before the change, which ended its private page, or none, unmapped first.
+        // The write before the change, which ended its private page, or none, unmapped first.
         Racing::Map | Racing::Unmap => {}
     }
     let read = (0..ATTEMPTS).find_map(|_| match guest.access(0, Access::Read, None) {
@@ -1440,14 +1442,14 @@ fn first_stores_race_changes(racing: Racing) {
             assert_eq!(guest.writable(), [0], "the private page isn't writable here");
             match guest.access(0, Access::Write, Some(STORED)) {
                 Outcome::Made(read) => assert_eq!(read, STORED),
-                _ => panic!("a store to the private page faulted, or failed"),
+                _ => panic!("a write to the private page faulted, or failed"),
             }
         }
         false => {
             assert_eq!(guest.writable(), Vec::<u64>::new(), "a page writable but private ones");
         }
     }
-    // The store made and the page private still; made, and its copy ended by the change after
+    // The write made and the page private still; made, and its copy ended by the change after
     // it; or refused, the page unmapped first.
     reached(match (stored, private) {
         (Some(_), true) => Event::ReadStored,
@@ -1457,40 +1459,40 @@ fn first_stores_race_changes(racing: Racing) {
 }
 
 #[test]
-fn first_stores_race_maps_by_pct() {
+fn first_writes_race_maps_by_pct() {
     let events = [Event::ReadStored, Event::MapEndedCopy];
     reaching(
         || PctScheduler::new(3, runs(RUNS)),
-        || first_stores_race_changes(Racing::Map),
+        || first_writes_race_changes(Racing::Map),
         &events,
     );
 }
 
 #[test]
-fn first_stores_race_unmaps_by_pct() {
+fn first_writes_race_unmaps_by_pct() {
     let events = [Event::MapEndedCopy, Event::Failed];
     reaching(
         || PctScheduler::new(3, runs(RUNS)),
-        || first_stores_race_changes(Racing::Unmap),
+        || first_writes_race_changes(Racing::Unmap),
         &events,
     );
 }
 
 #[test]
-fn first_stores_race_evictions_by_pct() {
+fn first_writes_race_evictions_by_pct() {
     reaching(
         || PctScheduler::new(3, runs(RUNS)),
-        || first_stores_race_changes(Racing::Evict),
+        || first_writes_race_changes(Racing::Evict),
         &[Event::ReadStored],
     );
 }
 
 #[test]
-fn first_stores_race_maps_randomly() {
+fn first_writes_race_maps_randomly() {
     let events = [Event::ReadStored, Event::MapEndedCopy];
     reaching(
         || RandomScheduler::new(runs(RUNS)),
-        || first_stores_race_changes(Racing::Map),
+        || first_writes_race_changes(Racing::Map),
         &events,
     );
 }
@@ -1557,8 +1559,8 @@ fn first_loads_race_changes_randomly() {
     Runner::new(RandomScheduler::new(runs(RUNS)), config()).run(first_loads_race_changes);
 }
 
-/// cladefs TASK-276.6: a change of pages installed leaving their memory as it was, the window's next
-/// page named alone: the stage reads the bytes the window mapped before.
+/// cladefs TASK-276.6: a change of pages installed leaving their memory as it was, the window's
+/// next page named alone: the stage reads the bytes the window mapped before.
 #[test]
 fn needs_changes_to_take_away_installed() {
     *RULES.lock().unwrap() = Rules { changes_take_away_installed: false, ..Rules::ALL };
@@ -1578,9 +1580,9 @@ fn needs_installs_as_named_now() {
 }
 
 /// cladefs TASK-276.6 (backlog doc-13: a `MAP` names pages, their first touch installs them): pages
-/// the window maps take no `mmap`, nor does a `PRIVATE` of a page never touched, nor a store's
+/// the window maps take no `mmap`, nor does a `PRIVATE` of a page never touched, nor a write's
 /// first touch, each private copy put in place of nothing; a load's first touch installs its run,
-/// one `mmap`; a `PRIVATE` of a page installed, one over it; and the pages read and take stores as
+/// one `mmap`; a `PRIVATE` of a page installed, one over it; and the pages read and take writes as
 /// they should. Red with the window's maps installing: an `mmap` a map, and one over each page
 /// made private, the TLB flush of each.
 fn pages_never_touched_change_with_no_mmap() {
@@ -1599,8 +1601,8 @@ fn pages_never_touched_change_with_no_mmap() {
     future::block_on(window.make_private(0, ps)).unwrap();
     assert_eq!(maps() - before, 0, "a PRIVATE of a page never touched");
     assert!(matches!(guest.access(ps, Access::Write, Some(STORED)), Outcome::Faulted(_)));
-    store_byte(&guest, ps);
-    assert_eq!(maps() - before, 0, "a store's first touch");
+    write_byte(&guest, ps);
+    assert_eq!(maps() - before, 0, "a write's first touch");
     assert_eq!(load_byte(&guest, 2 * ps), SEALED);
     assert_eq!(maps() - before, 1, "a load's first touch");
     future::block_on(window.make_private(3 * ps, ps)).unwrap();

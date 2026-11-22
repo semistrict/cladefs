@@ -10,19 +10,27 @@ mod shuttle;
 #[cfg(feature = "shuttle")]
 pub use self::shuttle::{executor, task, timer};
 
+// cladefs: the runtime tasks and timers are on: tokio's; or, under the madsim simulation, madsim's,
+// so that what spawns them there, Fxfs, runs on the simulated host's one thread, its time the
+// simulation's (doc-24, board 5687). The executors below are tokio's either way: outside the
+// simulation, which runs no threads of its own.
+#[cfg(all(not(feature = "shuttle"), madsim))]
+use madsim as rt;
+#[cfg(all(not(feature = "shuttle"), not(madsim)))]
+use tokio as rt;
+
 #[cfg(not(feature = "shuttle"))]
 pub mod task {
+    use super::rt;
     use core::task::{Context, Poll};
+    pub(crate) use rt::task::AbortHandle;
+    pub use rt::task::yield_now;
     use std::future::Future;
     use std::mem::ManuallyDrop;
     use std::pin::Pin;
-    pub(crate) use tokio::task::AbortHandle;
-    pub use tokio::task::yield_now;
-
-    use futures::FutureExt;
 
     // NOTE: This isn't quite API equivalent to Fuchsia's JoinHandle.
-    pub use tokio::task::{JoinHandle, JoinHandle as CancelableJoinHandle};
+    pub use rt::task::{JoinHandle, JoinHandle as CancelableJoinHandle};
 
     impl<T> From<JoinHandle<T>> for Task<T> {
         fn from(task: JoinHandle<T>) -> Self {
@@ -62,7 +70,7 @@ pub mod task {
         where
             T: Send,
         {
-            let task = tokio::task::spawn(fut);
+            let task = rt::task::spawn(fut);
             Self { task, abort_on_drop: true }
         }
 
@@ -73,7 +81,7 @@ pub mod task {
         /// `local` may panic if not called in the context of a local executor
         /// (e.g. within a call to `run` or `run_singlethreaded`).
         pub fn local(fut: impl Future<Output = T> + 'static) -> Self {
-            let task = tokio::task::spawn_local(fut);
+            let task = rt::task::spawn_local(fut);
             Self { task, abort_on_drop: true }
         }
 
@@ -94,8 +102,7 @@ pub mod task {
                     Ok(value) => Some(value),
                     Err(err) => {
                         if err.is_panic() {
-                            // Propagate panic
-                            std::panic::resume_unwind(err.into_panic());
+                            propagate(err);
                         }
                         None
                     }
@@ -117,8 +124,7 @@ pub mod task {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Err(err)) => {
                     if err.is_panic() {
-                        // Propagate panic
-                        std::panic::resume_unwind(err.into_panic());
+                        propagate(err);
                     } else {
                         // All codepaths for canceling/aborting a task consume said task.
                         // It will not be polled afterwards, and if it is there's something very
@@ -137,6 +143,19 @@ pub mod task {
                 self.task.abort();
             }
         }
+    }
+
+    /// Propagates the panic of a task, which `err` says it ended in.
+    #[cfg(not(madsim))]
+    fn propagate(err: rt::task::JoinError) -> ! {
+        std::panic::resume_unwind(err.into_panic())
+    }
+
+    /// cladefs: madsim's tasks' panics stop the simulation as they happen, or start their node
+    /// again: none ends a task that a handle then finds panicked, nor carries the panic's payload.
+    #[cfg(madsim)]
+    fn propagate(err: rt::task::JoinError) -> ! {
+        panic!("{err}")
     }
 
     /// Offload a blocking function call onto a different thread.
@@ -164,7 +183,14 @@ pub mod task {
     pub fn unblock<T: 'static + Send>(
         f: impl 'static + Send + FnOnce() -> T,
     ) -> impl 'static + Send + Future<Output = T> {
-        tokio::task::spawn_blocking(f).map(|res| res.unwrap())
+        use futures::FutureExt as _;
+        #[cfg(not(madsim))]
+        let task = rt::task::spawn_blocking(f);
+        // cladefs: as a task of its own, on the simulated host's one thread, which the
+        // simulation runs every task on (doc-24).
+        #[cfg(madsim)]
+        let task = rt::task::spawn(async move { f() });
+        task.map(|res| res.unwrap())
     }
 }
 
@@ -425,6 +451,7 @@ pub mod executor {
 
 #[cfg(not(feature = "shuttle"))]
 pub mod timer {
+    use super::rt;
     use crate::WakeupTime;
     use futures::prelude::*;
     use std::pin::Pin;
@@ -434,7 +461,7 @@ pub mod timer {
     #[must_use = "futures do nothing unless polled"]
     /// An asynchronous timer.
     pub struct Timer {
-        inner: Option<Pin<Box<tokio::time::Sleep>>>,
+        inner: Option<Pin<Box<rt::time::Sleep>>>,
         deadline: std::time::Instant,
     }
 
@@ -461,7 +488,11 @@ pub mod timer {
         type Output = ();
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if self.inner.is_none() {
-                self.inner = Some(Box::pin(tokio::time::sleep_until(self.deadline.into())))
+                // cladefs: the deadline as the runtime's sleep takes it: tokio's own Instant, or,
+                // under madsim, std's, the deadline as it is (board 5652).
+                #[allow(clippy::useless_conversion, reason = "madsim's Instant is std's")]
+                let deadline: rt::time::Instant = self.deadline.into();
+                self.inner = Some(Box::pin(rt::time::sleep_until(deadline)))
             }
             self.inner.as_mut().unwrap().poll_unpin(cx).map(drop)
         }

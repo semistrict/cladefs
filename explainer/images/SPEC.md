@@ -44,7 +44,7 @@ SHOTS:   (source of every claim in brackets)
                    ("`import` makes a store at DIR, of CAPACITY bytes, holding an Fxfs filesystem ...
                    Files keep their owners, permissions, times and extended attributes"; `create`,
                    `take` and `import` "work so anywhere, as when building base images where no daemon
-                   runs"); import.rs `fill` (`storage.check()`), `make_store` (a new cell);
+                   runs"); import.rs `fill` (`storage.check()`), `make_base_dir` (a new cell);
                    Importer (hard links, symlinks).]
          S3 22-32  The shell types `cladefsctl fork /tmp/cladefs/base /tmp/cladefs/sandbox1`, which prints the
                    new cell `0/anp7500000`; a ghost hops out of the base on an accent thread. Then

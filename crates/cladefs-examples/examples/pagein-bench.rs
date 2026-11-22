@@ -3,21 +3,21 @@
 // found in the LICENSE file.
 
 //! What paging in a sealed extent costs the extent cache's pager (TASK-92.19), as a fork's cold
-//! boot and its refaults page in its base's extents: extents written to a store in a temporary
-//! directory and sealed by a commit, each of a few parts (`extent_frame::PART`, 1 MiB), mapped
-//! into a DAX window in this process's memory, and read a part at a time, by a fault on each
-//! part's first page, from each extent's end so that nothing is read ahead. Each fault pages its
-//! part in: the part read from the store, unpacked if it is stored compressed, into pages of
-//! physical memory, which go into the cached extent's table, and are mapped. Data of two kinds: half
-//! its bits random, which the store keeps compressed, about half as large; and random, which it
-//! keeps raw, as it does not compress.
+//! boot and its refaults page in its base's extents: extents written to a cell in a temporary
+//! directory and sealed by a commit, each of a few parts (`extent_frame::PART`, 1 MiB), mapped into
+//! a DAX window in this process's memory, and read a part at a time, by a fault on each part's
+//! first page, from each extent's end so that nothing is read ahead. Each fault pages its part in:
+//! the part read from the cell, unpacked if it is stored compressed, into pages of physical memory,
+//! which go into the cached extent's table, and are mapped. Data of two kinds: half its bits
+//! random, which the cell keeps compressed, about half as large; and random, which it keeps raw, as
+//! it does not compress.
 //!
 //! ```sh
 //! cargo run --release -p cladefs-examples --example pagein-bench [MIB [ROUNDS]]
 //! ```
 //!
 //! MIB is how much data of each kind (default 256), ROUNDS how many times it is read, each of a
-//! store of its own (default 3). Prints the time a part's page-in takes, and the CPU time the
+//! cell of its own (default 3). Prints the time a part's page-in takes, and the CPU time the
 //! process spends on it, on every thread, which other work on the host disturbs less: the median of
 //! each kind's over the rounds.
 
@@ -53,24 +53,24 @@ fn cpu_micros() -> f64 {
     micros(usage.ru_utime) + micros(usage.ru_stime)
 }
 
-/// Reads `mib` of data as random as `mask` lets each byte be, a part at a time, from a store of its
+/// Reads `mib` of data as random as `mask` lets each byte be, a part at a time, from a cell of its
 /// own, and returns the time a part took, and the CPU time.
 async fn round(mib: u64, mask: u8) -> (f64, f64) {
     let part = extent_frame::PART;
     let extents = (mib << 20).div_ceil(PARTS * part);
     let len = PARTS * part;
     let dir = tempfile::tempdir().unwrap();
-    let store = OpenCell::create(dir.path().join("store"), 2 * extents * len).await.unwrap();
+    let open = OpenCell::create(dir.path().join("store"), 2 * extents * len).await.unwrap();
     for sequence in 1..=extents {
-        let extent = ExtentId { cell: store.cell().id, sequence };
+        let extent = ExtentId { cell: open.cell().id, sequence };
         let bytes = data(sequence, len as usize, mask);
-        store.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
+        open.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
     }
-    let window = store.create_dax_window(extents * len, None).unwrap();
-    store.commit(None).await.unwrap();
+    let window = open.create_dax_window(extents * len, None).unwrap();
+    open.commit(None).await.unwrap();
     for sequence in 1..=extents {
-        let extent = ExtentId { cell: store.cell().id, sequence };
-        store.map(extent, 0, len, (sequence - 1) * len).await.unwrap();
+        let extent = ExtentId { cell: open.cell().id, sequence };
+        open.map(extent, 0, len, (sequence - 1) * len).await.unwrap();
     }
     let (start, cpu) = (Instant::now(), cpu_micros());
     for at in (0..extents * PARTS).rev() {
@@ -88,14 +88,14 @@ fn median(mut times: Vec<f64>) -> (f64, String) {
 }
 
 fn main() {
-    // cladefs: its stores encrypted, under the tests' KMS unless its environment names a KMS or gives
-    // a master key: a real host's KMS adds its calls (TASK-411.28).
+    // cladefs: its cells encrypted, under the tests' KMS unless its environment names a KMS or
+    // gives a master key: a real host's KMS adds its calls (TASK-411.28).
     cladefs::bucket::testing::encrypted();
     let mut args = std::env::args().skip(1);
     let mib: u64 = args.next().map_or(256, |n| n.parse().unwrap());
     let rounds: usize = args.next().map_or(3, |n| n.parse().unwrap());
     cladefs::pages::configure(cladefs::pages::Config::with_memory((4 * mib) << 20)).unwrap();
-    // The bench's runtime: its stores' uploaders run on it, and its rounds.
+    // The bench's runtime: its cells' uploaders run on it, and its rounds.
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     for (kind, mask) in [("compressed", 0x0f), ("raw", 0xff)] {
         let (times, cpu): (Vec<f64>, Vec<f64>) =

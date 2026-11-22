@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The store's locks, condition variables and threads: std's, or with the `shuttle` feature
+//! The cell's locks, condition variables and threads: std's, or with the `shuttle` feature
 //! Shuttle's (awslabs/shuttle), whose scheduler then chooses every interleaving of the threads
-//! using a store, and replays a failing one from its seed (tests/shuttle/, TASK-44.4). Arcs are
+//! using a cell, and replays a failing one from its seed (tests/shuttle/, TASK-44.4). Arcs are
 //! std's either way.
 //!
-//! And the rules the store's concurrency relies on, which those tests turn off one at a time to
+//! And the rules the cell's concurrency relies on, which those tests turn off one at a time to
 //! see a test fail: a test that never fails proves nothing.
 //!
 //! cladefs: and the salts of its raw files ([`salt`]): the system's, or Shuttle's, seeded.
@@ -15,11 +15,12 @@
 #[cfg(feature = "shuttle")]
 pub(crate) use shuttle::sync::{Condvar, Mutex, MutexGuard};
 
-/// cladefs: the salt of a new raw file (`raw::RawEncryption::new`, TASK-411.5): drawn from the system's
-/// generator; under Shuttle, from its generator, seeded as its schedule is, so that a test's run
-/// is a function of its seed (tests/shuttle/crash.rs). What a crash leaves of a raw file unwritten,
-/// a page the cache held dirty, reads as the decryption of zeros under the file's key, as unlike
-/// from one salt to another as noise: its framed segment, uploaded, holds it, unreferenced.
+/// cladefs: the salt of a new raw file (`raw::RawEncryption::new`, TASK-411.5): drawn from the
+/// system's generator; under Shuttle, from its generator, seeded as its schedule is, so that a
+/// test's run is a function of its seed (tests/shuttle/crash.rs). What a crash leaves of a raw file
+/// unwritten, a page the cache held dirty, reads as the decryption of zeros under the file's key,
+/// as unlike from one salt to another as noise: its framed segment, uploaded, holds it,
+/// unreferenced.
 pub(crate) fn salt() -> extent_keys::Salt {
     #[cfg(feature = "shuttle")]
     {
@@ -42,7 +43,7 @@ use shuttle::sync::atomic::AtomicBool;
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::AtomicBool;
 
-/// cladefs: what the store's waits await, holding no thread (board 2944): said as what they wait
+/// cladefs: what the cell's waits await, holding no thread (board 2944): said as what they wait
 /// for changes. A wait listens, then looks, then, if it is to wait, lets its locks go and awaits
 /// the listener, so that a change after its look, made under the lock it looked under, wakes it.
 /// event_listener's, built normally, under madsim and under Shuttle alike: its listeners' wakers
@@ -50,7 +51,7 @@ use std::sync::atomic::AtomicBool;
 pub(crate) use event_listener::Event;
 
 /// cladefs: runs `future` to its end on the calling thread, which it blocks meanwhile: for an
-/// outermost entry alone, as a store dropped unclosed closes there (board 2944). Shuttle's own
+/// outermost entry alone, as a cell dropped unclosed closes there (board 2944). Shuttle's own
 /// under Shuttle, which schedules the thread's waiting; else [`wait_here`].
 pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     #[cfg(feature = "shuttle")]
@@ -61,8 +62,9 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 /// cladefs: runs `future` to its end on the calling thread, parked while it waits, for what it
 /// waits on to wake it (board 2944): what a drop of what was never closed closes with, within
-/// whatever polls the drop, an executor's task or a test's thread. Not `futures::executor::block_on`,
-/// which refuses to run within another of its executors, as a drop within one does.
+/// whatever polls the drop, an executor's task or a test's thread. Not
+/// `futures::executor::block_on`, which refuses to run within another of its executors, as a drop
+/// within one does.
 pub fn wait_here<F: std::future::Future>(future: F) -> F::Output {
     struct Unpark(std::thread::Thread);
     impl std::task::Wake for Unpark {
@@ -81,9 +83,9 @@ pub fn wait_here<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-/// cladefs: a lock its takers await, holding no thread meanwhile (board 2944): for the store's
+/// cladefs: a lock its takers await, holding no thread meanwhile (board 2944): for the cell's
 /// locks held across work others wait for, its commit's and its flush's. Taken by one at a time;
-/// its guard, dropped, lets the next take it. Shared beyond one store, as its followers share its
+/// its guard, dropped, lets the next take it. Shared beyond one cell, as its followers share its
 /// writer's: a panic holding it aborts the extent daemon, as one holding a `SharedLock` does
 /// ([`crate::shared::Awaited`], board 1228).
 pub(crate) struct AsyncMutex<T> {
@@ -166,7 +168,7 @@ impl<T> Drop for AsyncMutexGuard<'_, T> {
     }
 }
 
-/// std's threads; under madsim, which runs one thread, used for their identities alone: the store's
+/// std's threads; under madsim, which runs one thread, used for their identities alone: the cell's
 /// work runs on the pool's (`crate::pool`), which is simulated tasks there (doc-24).
 #[cfg(not(feature = "shuttle"))]
 pub(crate) use std::thread;
@@ -174,16 +176,17 @@ pub(crate) use std::thread;
 /// Shuttle's threads, refused as a host short of them refuses std's, if a test has it refuse them
 /// (`refuse_threads`): `spawn` panics, and `Builder`'s returns the refusal, so that the pool starts
 /// its threads as on the host, and the Shuttle tests of such a host find any thread started by
-/// `spawn` (TASK-79.80). `Scope::spawn` is Shuttle's, never refused: only tests start scoped threads.
+/// `spawn` (TASK-79.80). `Scope::spawn` is Shuttle's, never refused: only tests start scoped
+/// threads.
 #[cfg(feature = "shuttle")]
 pub(crate) mod thread {
     pub(crate) use shuttle::thread::*;
 
     /// Starts a thread running `f`, as Shuttle's `spawn` does; or panics, as std's does, if the
-    /// host refuses it. The store starts none so, as one refused would panic through whatever
+    /// host refuses it. The cell starts none so, as one refused would panic through whatever
     /// locks its caller holds: this stands for std's, so that the Shuttle tests of a host refusing
     /// threads find any thread started so on the paths they take.
-    #[expect(dead_code, reason = "the store starts no thread by `spawn`")]
+    #[expect(dead_code, reason = "the cell starts no thread by `spawn`")]
     #[track_caller]
     pub(crate) fn spawn<F, T>(f: F) -> JoinHandle<T>
     where
@@ -239,7 +242,7 @@ pub(crate) fn refuse_threads(refusing: bool) {
     REFUSING.store(refusing, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The rules the store's concurrency relies on, each of which its Shuttle tests show to be needed
+/// The rules the cell's concurrency relies on, each of which its Shuttle tests show to be needed
 /// by turning it off.
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
@@ -250,7 +253,7 @@ pub struct Rules {
     /// A commit waits for the writes in progress to finish before it seals the open extents.
     pub commit_waits_for_writes: bool,
     /// A commit, or a closing between commits, that waited for the writes in progress goes on
-    /// only if the store did not fail, nor the cell close, meanwhile (TASK-83).
+    /// only if the cell did not fail, nor the cell close, meanwhile (TASK-83).
     pub recheck_after_waiting: bool,
     /// A write to an extent freed since it began is dropped as it finishes (TASK-79.1).
     pub drop_writes_to_freed_extents: bool,

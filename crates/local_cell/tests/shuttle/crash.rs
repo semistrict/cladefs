@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The crash tests' rounds (tests/crash/), with the store's threads (TASK-79.79): in a directory
-//! whose store frames the segments its commits close on threads of its own, and syncs a flush's
+//! The crash tests' rounds (tests/crash/), with the cell's threads (TASK-79.79): in a directory
+//! whose cell frames the segments its commits close on threads of its own, and syncs a flush's
 //! files at once, as on the host, while the workload goes on, so that the file system fails, and
 //! the crash comes, where their I/O and the workload's interleave: a framing's write failing after
 //! a later commit's record was written, say, which a serial directory never sees. Each round runs
@@ -27,7 +27,7 @@ use shuttle::future::block_on;
 use shuttle::scheduler::RandomScheduler;
 use std::sync::{Arc, Mutex};
 
-/// Round `round` of `run`, in a directory whose store does I/O on threads of its own, under
+/// Round `round` of `run`, in a directory whose cell does I/O on threads of its own, under
 /// Shuttle, on a random schedule seeded by the round: what it returned.
 fn concurrently<T: Send + 'static>(round: u64, run: fn(u64, MemDir) -> T) -> T {
     // std's: the result leaves the run in it.
@@ -56,8 +56,8 @@ fn crashes_recover_prefixes_of_their_commits_concurrently() {
         crashes_mid_commit += mid_commit as u64;
         crashes_elsewhere += elsewhere as u64;
     }
-    // The crashes hit commits as well as what came between them; and the store's own threads'
+    // The crashes hit commits as well as what came between them; and the cell's own threads'
     // I/O, a framing's or a flush's syncs, as well as the workload's.
     assert!(crashes_mid_commit > ROUNDS / 10, "{crashes_mid_commit} crashes in commits");
-    assert!(crashes_elsewhere > ROUNDS / 30, "{crashes_elsewhere} crashes in the store's threads");
+    assert!(crashes_elsewhere > ROUNDS / 30, "{crashes_elsewhere} crashes in the cell's threads");
 }

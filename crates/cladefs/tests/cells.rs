@@ -18,7 +18,7 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| seed ^ (i % 251) as u8).collect()
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the stores', as a host whose placement's
+/// Runs cladefsctl with `args`, the bucket at `url` the cells', as a host whose placement's
 /// token is 1: what it prints.
 fn cell(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
@@ -33,15 +33,15 @@ fn cell(url: &str, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// The store at `path`, which keeps its cell in the bucket its description names, opened as a
+/// The cell at `path`, which keeps its cell in the bucket its description names, opened as a
 /// copy never placed here takes it, as the first placement (TASK-165.9).
 async fn attached(path: &Path) -> OpenCell {
     OpenCell::open(path).await.unwrap()
 }
 
-async fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
+async fn read(open: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
+    open.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
     data
 }
 
@@ -67,9 +67,9 @@ async fn rustfs_forks_and_takes_cells() {
     forks_and_takes_cells_in(&s3_url()).await;
 }
 
-/// A store forked with cladefsctl is a fork of its cell in the bucket at `url`, and a cell taken
-/// with it onto another host's empty store is read there from the bucket; deleted with it, the
-/// fork goes, and then its parent.
+/// A cell forked with cladefsctl is a fork of its cell in the bucket at `url`, and a cell taken
+/// with it onto another host's empty cell directory is read there from the bucket; deleted with it,
+/// the fork goes, and then its parent.
 async fn forks_and_takes_cells_in(url: &str) {
     let url = url.to_owned();
     let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
@@ -104,14 +104,14 @@ async fn forks_and_takes_cells_in(url: &str) {
     assert_eq!(elsewhere.root().unwrap(), b"root");
     assert_eq!(read(&elsewhere, extent, data.len()).await, data);
 
-    // The fork deleted, then its parent's store.
+    // The fork deleted, then its parent.
     cell(&url, &["delete", path("child").to_str().unwrap()]);
     assert!(!path("child").exists());
     cell(&url, &["delete", path("parent").to_str().unwrap()]);
     assert!(!path("parent").exists());
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the stores', expecting it to fail: what it
+/// Runs cladefsctl with `args`, the bucket at `url` the cells', expecting it to fail: what it
 /// says.
 fn cell_fails(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
@@ -126,21 +126,21 @@ fn cell_fails(url: &str, args: &[&str]) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn places_and_syncs_stores() {
+async fn places_and_syncs_cells() {
     let bucket = tempfile::tempdir().unwrap();
-    places_and_syncs_stores_in(&file_bucket(&bucket)).await;
+    places_and_syncs_cells_in(&file_bucket(&bucket)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh"]
-async fn rustfs_places_and_syncs_stores() {
-    places_and_syncs_stores_in(&s3_url()).await;
+async fn rustfs_places_and_syncs_cells() {
+    places_and_syncs_cells_in(&s3_url()).await;
 }
 
-/// TASK-39.7: `cladefsctl sync` returns once a store's commits are in the bucket at `url`; a store's
+/// TASK-39.7: `cladefsctl sync` returns once a cell's commits are in the bucket at `url`; a cell's
 /// copy placed earlier than the placement that took its cell last takes it no more, and placed
 /// later, does.
-async fn places_and_syncs_stores_in(url: &str) {
+async fn places_and_syncs_cells_in(url: &str) {
     let url = url.to_owned();
     let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let dir = tempfile::tempdir().unwrap();
@@ -148,13 +148,13 @@ async fn places_and_syncs_stores_in(url: &str) {
 
     // Made by cladefsctl, naming the bucket at `url`, its cell the bucket's to name (TASK-364).
     let made = cell(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
-    let store = OpenCell::open(path("first")).await.unwrap();
-    let cell_id = store.cell();
+    let open = OpenCell::open(path("first")).await.unwrap();
+    let cell_id = open.cell();
     assert_eq!(made.parse::<cladefs::CellId>(), Ok(cell_id));
     let extent = ExtentId { cell: cell_id.id, sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).await.unwrap();
-    store.commit(Some(b"synced")).await.unwrap();
-    drop(store);
+    open.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).await.unwrap();
+    open.commit(Some(b"synced")).await.unwrap();
+    drop(open);
     cell(&url, &["place", &path("first"), "5"]);
     cell(&url, &["sync", &path("first")]);
     let state = bucket_cell::recover(&*bucket, cell_id, None).await.unwrap().state;

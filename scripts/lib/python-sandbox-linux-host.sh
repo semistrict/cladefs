@@ -47,7 +47,7 @@ CLADEFS_E2E_RESULTS="$results/e2e" CLADEFS_RUSTFS_DATA="$bucket" \
 find "$results/e2e" -name log.txt -path '*fxfs-guest-python-sandbox*' \
     -exec grep -h '^pysandbox: ' {} + | tee "$results/python-sandbox.log" || true
 rm -r -- "$bucket"
-# What the case leaves of its stores, caches, image and root when it fails: not results.
+# What the case leaves of its cells, caches, image and root when it fails: not results.
 find "$results/e2e" -depth -type d \( -name '*.root' -o -name '*.base' -o -name '*-cache' \
     -o -name sandbox-image -o -name rootfs \) -exec rm -r -- {} +
 exit "$status"

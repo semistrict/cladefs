@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! xfstests (GPL-2.0) on cladefs's guest kernel's Fxfs, with a DAX window or without (TASK-44.15): the
-//! kernel's own filesystem suite, its `generic/quick` group unless CLADEFS_XFSTESTS names others.
-//! Fxfs has no block device for it: its devices are extent stores, named by tags, as virtiofs's
-//! are, which xfstests knows, so its image takes fxfs for virtiofs, and a test's scratch filesystem
-//! is emptied rather than made anew. cladefs: but one of a size (`_scratch_mkfs_sized`, the enospc
-//! group's), which is a device of its own, its store as large ([`SIZED`]), empty till its first
-//! mount formats it, as the image's common/rc has it (TASK-149.25).
+//! xfstests (GPL-2.0) on cladefs's guest kernel's Fxfs, with a DAX window or without (TASK-44.15):
+//! the kernel's own filesystem suite, its `generic/quick` group unless CLADEFS_XFSTESTS names
+//! others. Fxfs has no block device for it: its devices are extent stores, named by tags, as
+//! virtiofs's are, which xfstests knows, so its image takes fxfs for virtiofs, and a test's scratch
+//! filesystem is emptied rather than made anew. cladefs: but one of a size (`_scratch_mkfs_sized`,
+//! the enospc group's), which is a device of its own, its cell as large ([`SIZED`]), empty till its
+//! first mount formats it, as the image's common/rc has it (TASK-149.25).
 //!
 //! Some tests run and fail for what Fxfs here doesn't do ([`KNOWN_FAILURES`]), each said why; one
 //! of them that runs and passes fails the case, so that the list keeps no test it no longer needs
@@ -131,8 +131,8 @@ _scratch_unmount()
     /// The bytes of each filesystem, and of its DAX window if it has one.
     const SIZE: u64 = 4 << 30;
 
-    /// cladefs: the sizes of scratch filesystem the tests ask `_scratch_mkfs_sized` for, a device of
-    /// each, tagged `scratch-<bytes>`, its DAX window as large: generic/416's, 619's, 015's (and
+    /// cladefs: the sizes of scratch filesystem the tests ask `_scratch_mkfs_sized` for, a device
+    /// of each, tagged `scratch-<bytes>`, its DAX window as large: generic/416's, 619's, 015's (and
     /// 027, 077, 083, 226, 449), 371's, 269's (and 546), 558's, 274's (and 275) and 312's.
     pub(super) const SIZED: [u64; 8] =
         [128 << 20, 240 << 20, 256 << 20, 330 << 20, 512 << 20, 1 << 30, 2 << 30, 5 << 30];
@@ -363,7 +363,8 @@ mod guest {
             // Locks' tests talk over it, generic/131's.
             let status = Command::new("ip").args(["link", "set", "lo", "up"]).status();
             assert!(status.expect("run ip").success());
-            // The rootfs's files are all the runner's (`--no-same-owner`), but a login needs its home.
+            // The rootfs's files are all the runner's (`--no-same-owner`), but a login needs its
+            // home.
             for user in ["fsgqa", "fsgqa2", "123456-fsgqa"] {
                 let owner = format!("{user}:{user}");
                 let home = format!("/home/{user}");

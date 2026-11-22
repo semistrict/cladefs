@@ -2,35 +2,36 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what a store's files take of the host's disk, counted where the store writes them
-//! (backlog doc-22, TASK-539.4): its **footprint**. Every change a store makes to its directory
-//! goes through one layer ([`crate::Metered`]), which counts it here as the store makes it: a file
+//! cladefs: what a cell's files take of the host's disk, counted where the cell writes them
+//! (backlog doc-22, TASK-539.4): its **footprint**. Every change a cell makes to its directory
+//! goes through one layer ([`crate::Metered`]), which counts it here as the cell makes it: a file
 //! grown by a write, made, linked, renamed, given away or removed; a directory made. Nothing walks
-//! a directory to count it, nor writes back the store page cache to: a write is counted as the
+//! a directory to count it, nor writes back the cell page cache to: a write is counted as the
 //! cache takes it, and a file removed uncounted as it goes, whether or not its pages reached the
 //! disk.
 //!
 //! **What is counted.** Each file's length, rounded up to a granule
 //! ([`bucket_cell::host_disk::counted`]), once however many names it has, and each directory a
 //! granule; cladefs: but for what an ephemeral cell's kept segments gave back of theirs
-//! ([`crate::File::punch`], doc-25, TASK-698.2), which their blocks allocated say; and, of that, its **unframed** bytes: files with a name under `open-segments/` or
-//! `open-extents/`, raw data whose framing, or sealing in place, is still to come, which the
-//! store's own work, never refused, may add to. A footprint charges its disk's counters as its own
-//! ([`HostDisk::stores`], [`HostDisk::unframed`]).
+//! ([`crate::File::punch`], doc-25, TASK-698.2), which their blocks allocated say; and, of that,
+//! its **unframed** bytes: files with a name under `open-segments/` or `open-extents/`, raw data
+//! whose framing, or sealing in place, is still to come, which the cell's own work, never refused,
+//! may add to. A footprint charges its disk's counters as its own ([`HostDisk::cells`],
+//! [`HostDisk::unframed`]).
 //!
-//! **While a store is open, and closed.** The first opening of a store, while no other opening of
+//! **While a cell is open, and closed.** The first opening of a cell, while no other opening of
 //! it is alive, lists its directory once and counts what it finds, against what was counted of
-//! it before; the last lets its names go but keeps its totals, so that a store closed stays
+//! it before; the last lets its names go but keeps its totals, so that a cell closed stays
 //! counted, and one changed while closed, by another process, is counted anew at its next
-//! opening. A store of the host's has one footprint however many times it is opened, by its
-//! directory's device and inode ([`of_host`]); its removal ([`crate::remove_store_dir`]) forgets
+//! opening. A cell of the host's has one footprint however many times it is opened, by its
+//! directory's device and inode ([`of_host`]); its removal ([`crate::remove_cell_dir`]) forgets
 //! it. A directory in memory has one of its own.
 //!
-//! **Allotments.** A directory a tenant is granted is an [`Allotment`]: the footprints of the stores
+//! **Allotments.** A directory a tenant is granted is an [`Allotment`]: the footprints of the cells
 //! in it summed, with the tenant's limit, and every allotment's together ([`total`]) with every
-//! tenant's limit (TASK-539.5). A store's footprint is its allotment's whose directory holds it,
+//! tenant's limit (TASK-539.5). A cell's footprint is its allotment's whose directory holds it,
 //! the nearest; one in no allotment's is no tenant's, counted on its disk alone. An allotment made
-//! counts the stores in its directory not counted yet, closed, by one listing of each.
+//! counts the cells in its directory not counted yet, closed, by one listing of each.
 
 use crate::dir::{Dir, DirFile};
 use crate::layout::{KEPT, OPEN_EXTENTS, OPEN_SEGMENTS};
@@ -42,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// What a store's files take of its disk. See the module docs.
+/// What a cell's files take of its disk. See the module docs.
 pub struct Footprint {
     /// Its directory's path, canonical, if it is the host's.
     path: Option<PathBuf>,
@@ -54,29 +55,29 @@ pub struct Footprint {
     peak: AtomicU64,
     /// The allotment it charges as it is charged, if any's directory holds it.
     allotment: Mutex<Option<Arc<Allotment>>>,
-    /// Its files and directories by name, while its store is open.
+    /// Its files and directories by name, while its cell is open.
     opened: Mutex<Opened>,
 }
 
-/// A footprint's names, while any opening of its store is alive.
+/// A footprint's names, while any opening of its cell is alive.
 #[derive(Default)]
 struct Opened {
     /// The openings alive.
     openings: usize,
-    /// The takings of its store's directory alive in this process ([`Dir::take`]): the first, which
+    /// The takings of its cell directory alive in this process ([`Dir::take`]): the first, which
     /// takes it from other processes, which may have changed it since, lists it anew.
     takings: usize,
     /// Its files, by name: a file at two names is one.
     files: HashMap<String, Arc<FileLen>>,
     /// Its directories, by path.
     dirs: BTreeSet<String>,
-    /// Whether its store's directory went while it was open, which counted it closed.
+    /// Whether its cell directory went while it was open, which counted it closed.
     forgotten: bool,
 }
 
 impl Footprint {
-    /// A footprint charging `disk`, of a store whose directory is at `path`, if it is the host's:
-    /// counting nothing until its store's first opening lists it.
+    /// A footprint charging `disk`, of a cell whose directory is at `path`, if it is the host's:
+    /// counting nothing until its cell's first opening lists it.
     pub(crate) fn new(path: Option<PathBuf>, disk: Option<Arc<HostDisk>>) -> Arc<Self> {
         Arc::new(Self {
             path,
@@ -88,7 +89,7 @@ impl Footprint {
         })
     }
 
-    /// The bytes its store's files take, counted.
+    /// The bytes its cell's files take, counted.
     pub fn bytes(&self) -> u64 {
         self.tally.bytes()
     }
@@ -98,12 +99,12 @@ impl Footprint {
         self.tally.unframed()
     }
 
-    /// The bytes of its store's extents open, each as far as it goes.
+    /// The bytes of its cell's extents open, each as far as it goes.
     pub fn open(&self) -> u64 {
         self.tally.open()
     }
 
-    /// What its store's own work may still add to it, never refused ([`Tally::reserved`]).
+    /// What its cell's own work may still add to it, never refused ([`Tally::reserved`]).
     pub fn reserved(&self) -> u64 {
         self.tally.reserved()
     }
@@ -118,13 +119,13 @@ impl Footprint {
         self.path.as_deref()
     }
 
-    /// The disk its store is on.
+    /// The disk its cell is on.
     pub fn disk(&self) -> Option<&Arc<HostDisk>> {
         self.disk.as_ref()
     }
 
     /// Has `change` count in its tally, its allotment's and every allotment's, if it is in one,
-    /// and its disk's: under its allotment's lock, so that a store moved to another allotment
+    /// and its disk's: under its allotment's lock, so that a cell moved to another allotment
     /// moves what it counted whole.
     fn counting(&self, change: impl Fn(&Tally)) {
         let allotment = self.allotment.lock().unwrap();
@@ -134,7 +135,7 @@ impl Footprint {
             change(&TOTAL.get().tally);
         }
         if let Some(disk) = &self.disk {
-            change(&disk.stores);
+            change(&disk.cells);
         }
     }
 
@@ -144,8 +145,8 @@ impl Footprint {
         self.peak.fetch_max(self.bytes(), Ordering::Relaxed);
     }
 
-    /// The most its store's files took since this was last asked, or it was made: what its
-    /// store's own work, between, took at its peak.
+    /// The most its cell's files took since this was last asked, or it was made: what its
+    /// cell's own work, between, took at its peak.
     pub fn take_peak(&self) -> u64 {
         self.peak.swap(self.bytes(), Ordering::Relaxed).max(self.bytes())
     }
@@ -172,7 +173,7 @@ impl Footprint {
         *allotted = Some(allotment.clone());
     }
 
-    /// cladefs: its store's extents open take `open` bytes, each as far as it goes: what the commit
+    /// cladefs: its cell's extents open take `open` bytes, each as far as it goes: what the commit
     /// sealing them may copy, which its reserve covers ([`host_disk::RESERVE_FACTOR`]).
     pub(crate) fn set_open(&self, open: u64) {
         let was = self.tally.open();
@@ -181,16 +182,16 @@ impl Footprint {
         }
     }
 
-    /// Admits a write of `len` bytes, which grows its extent by `grows`, if the store's disk, its
-    /// allotment, if it is in one, and every allotment have room for them and what its store's own
+    /// Admits a write of `len` bytes, which grows its extent by `grows`, if the cell's disk, its
+    /// allotment, if it is in one, and every allotment have room for them and what its cell's own
     /// work may add for them: held until the returned pledge goes, the write landed, counted as it
     /// lands ([`DiskFull`] otherwise, logged as refusals begin). Every one admitted leaves room for
-    /// every commit, flush and framing of every store, which nothing refuses (doc-22).
+    /// every commit, flush and framing of every cell, which nothing refuses (doc-22).
     pub fn admit(self: &Arc<Self>, len: u64, grows: u64) -> Result<Pledge, DiskFull> {
         self.admit_bytes(len + host_disk::RESERVE_FACTOR * (len + grows))
     }
 
-    /// Admits the making of a store, as [`Footprint::admit`] does a write: what its files take
+    /// Admits the making of a cell, as [`Footprint::admit`] does a write: what its files take
     /// made, [`STORE_MADE`].
     pub fn admit_made(self: &Arc<Self>) -> Result<Pledge, DiskFull> {
         self.admit_bytes(STORE_MADE)
@@ -228,7 +229,7 @@ impl Footprint {
             log::warn!(
                 "extent store: {} refuses writes (ENOSPC): {full}; it takes {} bytes, its \
                  allotment {:?} of {:?}, every allotment {} of {:?}, its disk {:?}",
-                self.path.as_deref().map_or("a store".into(), |path| path.display().to_string()),
+                self.path.as_deref().map_or("a cell".into(), |path| path.display().to_string()),
                 self.bytes(),
                 allotment.as_ref().map(|allotment| allotment.bytes()),
                 allotment.as_ref().and_then(|allotment| allotment.limit()),
@@ -241,9 +242,10 @@ impl Footprint {
         Err(full)
     }
 
-    /// Counts its store opened once more, in `dir`: the first opening while none other is alive
+    /// Counts its cell opened once more, in `dir`: the first opening while none other is alive
     /// lists the directory, and counts what it finds in place of what was counted before, and
-    /// counts the store open, reserving what each store open may add ([`host_disk::RESERVE_PER_STORE`]).
+    /// counts the cell open, reserving what each cell open may add
+    /// ([`host_disk::RESERVE_PER_STORE`]).
     pub(crate) fn attach<D: Dir>(&self, dir: &D) -> io::Result<()> {
         let mut opened = self.opened.lock().unwrap();
         if opened.openings == 0 {
@@ -252,13 +254,13 @@ impl Footprint {
             opened.files = files;
             opened.dirs = dirs;
             opened.forgotten = false;
-            self.counting(|tally| tally.store(true));
+            self.counting(|tally| tally.cell(true));
         }
         opened.openings += 1;
         Ok(())
     }
 
-    /// Counts its store's directory, `dir`, taken once more in this process: the first taking, from
+    /// Counts its cell directory, `dir`, taken once more in this process: the first taking, from
     /// other processes, which may have changed it while they had it, lists it, and counts what it
     /// finds in place of what was counted before; the files counted before, at names it may have
     /// changed, counted no more.
@@ -277,7 +279,7 @@ impl Footprint {
         Ok(())
     }
 
-    /// Counts a taking of its store's directory in this process let go.
+    /// Counts a taking of its cell directory in this process let go.
     pub(crate) fn let_go(&self) {
         self.opened.lock().unwrap().takings -= 1;
     }
@@ -324,7 +326,7 @@ impl Footprint {
         (files, dirs)
     }
 
-    /// Counts an opening of its store gone: the last lets its names go, its totals kept.
+    /// Counts an opening of its cell gone: the last lets its names go, its totals kept.
     pub(crate) fn detach(&self) {
         let mut opened = self.opened.lock().unwrap();
         opened.openings -= 1;
@@ -332,12 +334,12 @@ impl Footprint {
             opened.files.clear();
             opened.dirs.clear();
             if !opened.forgotten {
-                self.counting(|tally| tally.store(false));
+                self.counting(|tally| tally.cell(false));
             }
         }
     }
 
-    /// Counts nothing more of it: its store's directory gone, as a deletion holding it removes it.
+    /// Counts nothing more of it: its cell directory gone, as a deletion holding it removes it.
     fn forget(&self) {
         let mut opened = self.opened.lock().unwrap();
         for file in std::mem::take(&mut opened.files).into_values() {
@@ -348,7 +350,7 @@ impl Footprint {
         self.discharge(self.bytes(), false);
         self.set_open(0);
         if opened.openings > 0 && !opened.forgotten {
-            self.counting(|tally| tally.store(false));
+            self.counting(|tally| tally.cell(false));
         }
         opened.forgotten = true;
         *self.allotment.lock().unwrap() = None;
@@ -362,8 +364,8 @@ impl Footprint {
         file
     }
 
-    /// The file at `path`, opened: as counted, or, if no change through its store made it,
-    /// counted as `len` says, which only a change around its store makes so.
+    /// The file at `path`, opened: as counted, or, if no change through its cell made it,
+    /// counted as `len` says, which only a change around its cell makes so.
     pub(crate) fn opened(
         &self,
         path: &str,
@@ -373,7 +375,7 @@ impl Footprint {
         if let Some(file) = opened.files.get(path) {
             return Ok(file.clone());
         }
-        debug_assert!(false, "{path}: made around its store's directory");
+        debug_assert!(false, "{path}: made around its cell directory");
         let file = Arc::new(FileLen { state: Mutex::new(LenState::default()) });
         self.name(&mut opened, path, &file);
         file.grow(self, len()?);
@@ -446,17 +448,17 @@ impl Footprint {
 /// No limit.
 const NONE: u64 = u64::MAX;
 
-/// What a store made is admitted as ([`Footprint::admit_made`]): a store's files, a fork's made and
-/// an uploaded base's, take 12 to 16 KiB of a filesystem's 4 KiB blocks (cladefs's `tests/disk.rs`),
-/// four times which leaves room for larger blocks.
+/// What a cell made is admitted as ([`Footprint::admit_made`]): a cell's files, a fork's made and
+/// an uploaded base's, take 12 to 16 KiB of a filesystem's 4 KiB blocks (cladefs's
+/// `tests/disk.rs`), four times which leaves room for larger blocks.
 pub const STORE_MADE: u64 = 64 << 10;
 
-/// A directory a tenant is granted, as its stores' files take the host's disk: their footprints
+/// A directory a tenant is granted, as its cells' files take the host's disk: their footprints
 /// summed, and its tenant's limit (TASK-539.5). See the module docs.
 pub struct Allotment {
     /// Its directory, canonical.
     dir: PathBuf,
-    /// Its stores' footprints, summed.
+    /// Its cells' footprints, summed.
     tally: Tally,
     /// Its limit, or [`NONE`].
     limit: AtomicU64,
@@ -486,13 +488,13 @@ node_local::node_local! {
 }
 
 node_local::node_local! {
-    /// Every allotment made: kept for the process's life, as their stores' files are on its disk,
+    /// Every allotment made: kept for the process's life, as their cells' files are on its disk,
     /// granted or not.
     static ALLOTMENTS: std::sync::Mutex<Vec<Arc<Allotment>>> = std::sync::Mutex::new(Vec::new());
 }
 
 /// The allotment of the directory `dir`, a tenant's: the one made already, or one made now,
-/// counting the stores in it as they were counted, and those not counted yet, closed, as one
+/// counting the cells in it as they were counted, and those not counted yet, closed, as one
 /// listing of each finds them.
 pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
     let dir = host_fs::canonicalize(dir)?;
@@ -521,23 +523,23 @@ pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
     for footprint in counted.iter().filter(|footprint| made.holds(footprint)) {
         allot_nearest(footprint);
     }
-    count_stores_in(&made.dir)?;
+    count_cells_in(&made.dir)?;
     Ok(made)
 }
 
-/// Counts the footprint of each store in `dir` not counted yet, at any depth: one listing of each.
-/// A store's directory is one holding its description, or what its deletion or making leaves of it.
-fn count_stores_in(dir: &Path) -> io::Result<()> {
+/// Counts the footprint of each cell in `dir` not counted yet, at any depth: one listing of each.
+/// A cell directory is one holding its description, or what its deletion or making leaves of it.
+fn count_cells_in(dir: &Path) -> io::Result<()> {
     for entry in host_fs::read_dir(dir)? {
         let path = entry?.path();
         if !host_fs::is_dir(&path) {
             continue;
         }
-        let store = [crate::layout::DESCRIPTION, crate::host::DELETED, crate::cell::UNMADE]
+        let cell = [crate::layout::DESCRIPTION, crate::host::DELETED, crate::cell::UNMADE]
             .iter()
             .any(|name| host_fs::exists(path.join(name)));
-        if !store {
-            count_stores_in(&path)?;
+        if !cell {
+            count_cells_in(&path)?;
             continue;
         }
         let id = dir_id(&path)?;
@@ -564,7 +566,7 @@ fn allot_nearest(footprint: &Footprint) {
 }
 
 impl Allotment {
-    /// Whether its directory holds `footprint`'s store.
+    /// Whether its directory holds `footprint`'s cell.
     fn holds(&self, footprint: &Footprint) -> bool {
         footprint.path().is_some_and(|path| path.starts_with(&self.dir) && path != self.dir)
     }
@@ -574,7 +576,7 @@ impl Allotment {
         &self.dir
     }
 
-    /// What its stores' files take, counted.
+    /// What its cells' files take, counted.
     pub fn bytes(&self) -> u64 {
         self.tally.bytes()
     }
@@ -625,12 +627,12 @@ impl Allotment {
         self.share.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
     }
 
-    /// What its stores take, reserve and hold admitted: what its limit and share weigh.
+    /// What its cells take, reserve and hold admitted: what its limit and share weigh.
     pub fn committed(&self) -> u64 {
         self.tally.committed()
     }
 
-    /// What its stores' own work may still add, and its writes admitted hold.
+    /// What its cells' own work may still add, and its writes admitted hold.
     pub fn reserved(&self) -> u64 {
         self.tally.reserved() + self.tally.pledged()
     }
@@ -644,7 +646,7 @@ impl Allotment {
 /// What refused a write ([`Footprint::admit`]): `ENOSPC` to its guest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DiskFull {
-    /// Its store's disk: what the disk governor allows its stores and the part cache.
+    /// Its cell's disk: what the disk governor allows its cells and the part cache.
     #[error("its disk's allowance")]
     Disk,
     /// Its tenant's limit.
@@ -658,11 +660,11 @@ pub enum DiskFull {
     Share,
 }
 
-/// Whether `disk` has no room for what is pledged on it: its stores' bytes, reserves and pledges,
+/// Whether `disk` has no room for what is pledged on it: its cells' bytes, reserves and pledges,
 /// and its part cache past a band of it, which the governor evicts at once, past its allowance.
 fn disk_full(disk: &HostDisk) -> Option<DiskFull> {
     let (allowance, cache) = (disk.allowance(), disk.cache.get());
-    let committed = disk.stores.committed();
+    let committed = disk.cells.committed();
     if committed.saturating_add(cache) > allowance {
         host_disk::wake_governor();
     }
@@ -670,7 +672,7 @@ fn disk_full(disk: &HostDisk) -> Option<DiskFull> {
     (committed.saturating_add(cache.saturating_sub(band)) > allowance).then_some(DiskFull::Disk)
 }
 
-/// A write admitted ([`Footprint::admit`]): what it holds of its store's disk, allotment and every
+/// A write admitted ([`Footprint::admit`]): what it holds of its cell's disk, allotment and every
 /// allotment until it goes.
 pub struct Pledge {
     footprint: Arc<Footprint>,
@@ -695,7 +697,7 @@ pub fn allotments() -> Vec<Arc<Allotment>> {
     ALLOTMENTS.get().lock().unwrap().clone()
 }
 
-/// What every allotment's stores' files take together.
+/// What every allotment's cells' files take together.
 pub fn total() -> &'static Tally {
     &TOTAL.get().tally
 }
@@ -724,7 +726,7 @@ fn moved(own: &Tally, tally: &Tally, more: bool) {
         }
     }
     tally.opened(own.open(), more);
-    (0..own.stores()).for_each(|_| tally.store(more));
+    (0..own.cells()).for_each(|_| tally.cell(more));
     tally.pledge(own.pledged(), more);
 }
 
@@ -740,7 +742,7 @@ fn kept_path(path: &str) -> bool {
     path.split('/').next().unwrap_or_default() == KEPT
 }
 
-/// A file of a store, as its footprint counts it: shared by all its names and openings.
+/// A file of a cell, as its footprint counts it: shared by all its names and openings.
 pub struct FileLen {
     state: Mutex<LenState>,
 }
@@ -798,7 +800,7 @@ impl FileLen {
         }
     }
 
-    /// It is counted no more, whatever writes it, its store's directory gone.
+    /// It is counted no more, whatever writes it, its cell directory gone.
     fn forgotten(&self) {
         let mut state = self.state.lock().unwrap();
         (state.names, state.open_names) = (0, 0);
@@ -825,12 +827,12 @@ impl FileLen {
     }
 }
 
-/// A store directory of the host's, by its device and inode.
+/// A cell directory of the host's, by its device and inode.
 type DirId = (u64, u64);
 
 node_local::node_local! {
-    /// The footprints of the stores of the host's this process has opened, by their directories:
-    /// kept while their stores are closed, until their directories are removed.
+    /// The footprints of the cells of the host's this process has opened, by their directories:
+    /// kept while their cells are closed, until their directories are removed.
     static LEDGER: std::sync::Mutex<Option<HashMap<DirId, Arc<Footprint>>>> =
         std::sync::Mutex::new(None);
 }
@@ -842,7 +844,7 @@ fn dir_id(path: &Path) -> io::Result<DirId> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-/// The footprint of the store whose directory is at `path`, on `disk`: the one counted already,
+/// The footprint of the cell whose directory is at `path`, on `disk`: the one counted already,
 /// if it was opened in this process before.
 pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footprint>> {
     let id = dir_id(path)?;
@@ -858,8 +860,8 @@ pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footp
     Ok(footprint)
 }
 
-/// Forgets the footprint of the store whose directory is at `path`, if it was counted: removed.
-/// `forgotten` runs between, the store's directory removed by it if it is `Ok`.
+/// Forgets the footprint of the cell whose directory is at `path`, if it was counted: removed.
+/// `forgotten` runs between, the cell directory removed by it if it is `Ok`.
 pub(crate) fn removing<T>(
     path: &Path,
     forgotten: impl FnOnce() -> anyhow::Result<T>,
@@ -884,14 +886,14 @@ mod tests {
     use rand::{RngExt as _, SeedableRng as _};
     use std::collections::BTreeMap;
 
-    /// The directories a store keeps its files in, and names in them, some at the top.
+    /// The directories a cell keeps its files in, and names in them, some at the top.
     const DIRS: [&str; 5] = ["open-segments", "segments", "open-extents", "extents", "logs"];
 
     /// What `dir` holds, as its listing says, what its page cache holds dirty written back first:
     /// its files' and directories' bytes, counted, and of them its unframed files'. What a
     /// footprint must say of it after every change. Written back, as the page cache keeps a file's
     /// pages by the name it was opened at, and a file at two names opened at each would hold its
-    /// pages in two places: no store opens one so, but these tests do.
+    /// pages in two places: no cell opens one so, but these tests do.
     fn listed<D: Dir>(dir: &crate::Metered<crate::CachedDir<D>>) -> (u64, u64) {
         dir.cache().write_back_all().unwrap();
         let mut inodes: BTreeMap<u64, (u64, bool)> = BTreeMap::new();
@@ -909,7 +911,7 @@ mod tests {
         (bytes + inodes.values().map(|(len, _)| len).sum::<u64>(), unframed)
     }
 
-    /// Whether the file at `path` holds extents' data, as a store opens it, the same way every
+    /// Whether the file at `path` holds extents' data, as a cell opens it, the same way every
     /// time: a log's, and one at the top, don't.
     fn data(path: &str) -> bool {
         path.contains('/') && !path.starts_with("logs/")
@@ -924,7 +926,7 @@ mod tests {
         }
     }
 
-    /// Changes `dir` at random, a step of `seed`'s, as a store would: files made, written past
+    /// Changes `dir` at random, a step of `seed`'s, as a cell would: files made, written past
     /// their ends and within them, linked, renamed over others and not, removed, replaced, given;
     /// written again after their last name went; its file system failing what it changes, some
     /// steps. Each step's own errors are a file system's, which the footprint counts after as
@@ -981,11 +983,11 @@ mod tests {
         let (bytes, unframed) = listed(dir);
         assert_eq!((footprint.bytes(), footprint.unframed()), (bytes, unframed), "{at}");
         let disk = footprint.disk().unwrap();
-        let counted = (disk.stores.bytes() - before.0, disk.stores.unframed() - before.1);
+        let counted = (disk.cells.bytes() - before.0, disk.cells.unframed() - before.1);
         assert_eq!(counted, (bytes, unframed), "{at}: its disk");
     }
 
-    /// TASK-539.4: a store's footprint is what its directory's listing counts after every change,
+    /// TASK-539.4: a cell's footprint is what its directory's listing counts after every change,
     /// in memory, its file system failing some, crashes listed anew.
     #[test]
     fn footprints_count_what_directories_in_memory_hold() {
@@ -1018,7 +1020,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let dir = HostDir::new(temp.path()).unwrap();
             let disk = dir.footprint().disk().unwrap();
-            let before = (disk.stores.bytes(), disk.stores.unframed());
+            let before = (disk.cells.bytes(), disk.cells.unframed());
             DIRS.iter().for_each(|path| dir.create_dir(path).unwrap());
             let mut rng = StdRng::seed_from_u64(seed);
             let mut open = Vec::new();
@@ -1050,17 +1052,17 @@ mod tests {
         assert_eq!(footprint.bytes(), 0);
     }
 
-    /// TASK-539.4: a store of the host's has one footprint however many times it is opened at
+    /// TASK-539.4: a cell of the host's has one footprint however many times it is opened at
     /// once, which it keeps while closed; a change made while closed, around it, is counted at its
     /// next opening; its removal forgets it, its disk counting nothing of it.
     #[test]
-    fn host_stores_are_counted_once_while_open_and_closed() {
+    fn host_cells_are_counted_once_while_open_and_closed() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("store");
         host_fs::create_dir(&path).unwrap();
         let dir = HostDir::new(&path).unwrap();
         let disk = dir.footprint().disk().unwrap().clone();
-        let before = disk.stores.bytes();
+        let before = disk.cells.bytes();
         dir.create_dir("segments").unwrap();
         dir.create("segments/1", true).unwrap().write_at(&[1; 100], 0).unwrap();
         let other = HostDir::new(&path).unwrap();
@@ -1075,9 +1077,9 @@ mod tests {
         host_fs::remove_file(path.join("segments/1")).unwrap();
         let dir = HostDir::new(&path).unwrap();
         assert_eq!(dir.footprint().bytes(), 3 * GRANULE);
-        assert_eq!(disk.stores.bytes() - before, 3 * GRANULE);
+        assert_eq!(disk.cells.bytes() - before, 3 * GRANULE);
         drop(dir);
-        crate::remove_store_dir(&path).unwrap();
-        assert_eq!((footprint.bytes(), disk.stores.bytes()), (0, before));
+        crate::remove_cell_dir(&path).unwrap();
+        assert_eq!((footprint.bytes(), disk.cells.bytes()), (0, before));
     }
 }

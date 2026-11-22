@@ -63,8 +63,14 @@ if part clippy; then
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
     cargo clippy --manifest-path "$root/Cargo.toml" -p physmem -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
+    # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
+    # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
+    # Linux, went unseen there behind a `cargo check` (board 5652).
+    env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
+        cargo clippy --manifest-path "$root/Cargo.toml" -p node_local -p host_fs -p physmem \
+        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- -A clippy::all -D warnings
 fi
-# The simulation of bucket_cell's protocol over local_cell's stores (TASK-88): its profiles'
+# The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
 # prevents, up to 20,000. Its own part, built with the profile sim, optimized with a debug build's
 # checks: unoptimized, in the suite's build, four searches took 20 to 27 minutes each, which ran
@@ -91,21 +97,16 @@ if part madsim; then
     "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
         -p physmem -p bucket_cell -p local_cell -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
-    # said: each seed a process of its own, as what a simulation's hosts held, leaked as their
-    # node-local values are, stays in its process for the next to find (TASK-685.15).
-    # A rule search, `*_needs_*`, runs its own seeds, once. The regression seeds first, those that
-    # once failed (crates/cladefs/tests/madsim-seeds, TASK-685.8).
-    simulated=(-p node_local -p host_fs -p bucket_cell -p local_cell -p cladefs --test madsim)
-    first=${MADSIM_TEST_SEED:-1}
-    regressions=$(sed -e 's/#.*//' "$root/crates/cladefs/tests/madsim-seeds" | awk 'NF {print $1}')
-    for seed in $regressions $(seq "$first" $((first + ${CLADEFS_MADSIM_SEEDS:-20} - 1))); do
-        "${madsim[@]}" MADSIM_TEST_SEED="$seed" cargo nextest run --manifest-path "$root/Cargo.toml" \
-            "${simulated[@]}" -E 'not test(/_needs_/)' "$@" \
-            || { echo "madsim: seed $seed failed: MADSIM_TEST_SEED=$seed replays it" >&2; exit 1; }
-    done
-    # cladefs's are Linux's alone, as its daemon is: none to run on macOS.
-    "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" "${simulated[@]}" \
-        -E 'test(/_needs_/)' --no-tests=pass "$@"
+    # said, after the regression seeds, those that once failed (crates/cladefs/tests/madsim-seeds,
+    # TASK-685.8): each seed a process of its own, as what a simulation's hosts held, leaked as
+    # their node-local values are, stays in its process for the next to find (TASK-685.15). Every
+    # seed runs; failures of open bugs (crates/cladefs/tests/madsim-known) are said as known, and
+    # any other fails the part (scripts/madsim-seeds.py, board 2912). On macOS as on Linux.
+    "${madsim[@]}" "$root/scripts/madsim-seeds.py" --first "${MADSIM_TEST_SEED:-1}" \
+        --count "${CLADEFS_MADSIM_SEEDS:-20}" "$@"
+    # A rule search, `*_needs_*`, runs its own seeds, once.
+    "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
+        -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' --no-tests=pass "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).
@@ -187,8 +188,8 @@ fi
 # (TASK-79.102), its vCPUs' exits' (TASK-187) and the PCI transport's shared memory BAR's and device
 # IDs' (TASK-267), on Linux alone, which the VMM builds for, with no KVM. With its cladefs feature, as
 # cladefs builds it (scripts/firecracker-cargo.sh), and those its feature gates: the extent
-# device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its store from a daemon in its process, a host's:
-# its stores' cells in a bucket in memory, as of placement 1, which without
+# device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its cell from a daemon in its process, a host's:
+# its cells in a bucket in memory, as of placement 1, which without
 # CLADEFSD_BUCKET and CLADEFSD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
 # bindgen needs libclang to build it.
 if part firecracker; then

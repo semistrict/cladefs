@@ -23,7 +23,7 @@ What went.
 
 ## Why
 
-Since TASK-45 every store has a bucket, yet a host keeps each branch twice:
+Since TASK-45 every cell has a bucket, yet a host keeps each branch twice:
 
 - `crates/extent_store` (9.8k lines of code, 7.8k of tests in `tests/`) is a whole storage engine:
   a lineage of branches with records, layers shared by forks, a ledger of which branch claims which
@@ -31,7 +31,7 @@ Since TASK-45 every store has a bucket, yet a host keeps each branch twice:
 - `crates/extent_remote` (12.3k with its simulation) is doc-7's protocol: records, leases, forks,
   points, checkpoints, recovery, the collector;
 - `crates/cladefs/src/remote.rs` (1.7k of code, 3.8k of tests with `fork_faults.rs` and
-  `restore_faults.rs`) keeps the two agreeing, with three files of its own in each store's
+  `restore_faults.rs`) keeps the two agreeing, with three files of its own in each cell's
   directory (`remote-<branch>`, `fence-<branch>`, `origin-<branch>`).
 
 The seam is where the bugs were: 79.4, 79.5, 79.20, 79.39, 79.71, 79.72, 79.77, 79.78, 79.82,
@@ -41,7 +41,7 @@ rather than tests harder:
 | Class | Bugs | Why it goes |
 |---|---|---|
 | Deciding whose a branch's last commit is from a marker file and a local copy | 79.4, 79.20, 79.39, 79.72, 79.95, 129 | No marker: a WAL segment is the object, stamped, synced before its PUT; footers alone tell what landed |
-| Local lineage, handles and partial deletions | 79.5, 79.71, 79.77 | No local lineage: a fork is a record in the bucket; a store directory holds one branch |
+| Local lineage, handles and partial deletions | 79.5, 79.71, 79.77 | No local lineage: a fork is a record in the bucket; a cell directory holds one branch |
 | Failed forks, claims and unforking | 79.78, 79.82, 79.85 | No claim file: a fork is a commit naming its child; its record follows the acknowledgement, whoever makes it |
 | The local copy holding what the branch doesn't (inherited extents uploaded as own; spent kept locally) | 150.1, 150.6 | No local copy: no diff upload, one state, one spending rule |
 
@@ -55,42 +55,42 @@ what the bucket doesn't have yet and copies of what it does: the **open segment*
 guest writes, raw, and a log of the commits sealed in it, made local by the group flush), the
 **WAL** (closed segments not yet acknowledged, each the very object it will be in the bucket,
 stamped by the writer's chain), and the host's **part cache** (sparse copies of objects' parts,
-which a WAL segment joins whole once acknowledged). Opening a store takes the branch's head, recovers the
+which a WAL segment joins whole once acknowledged). Opening a cell takes the branch's head, recovers the
 branch from the bucket, and puts the WAL after the branch's end; there is no other recovery. Forks,
 points, records, checkpoints, deletion and cleaning are doc-7's alone.
 
 ## What local disk holds afterwards
 
-Per store directory (one branch, `<b>` its ID; `extent_store::layout`):
+Per cell directory (one branch, `<b>` its ID; `extent_store::layout`):
 
 | Path | What | Lives until |
 |---|---|---|
-| `store` | the description (`layout::FORMAT`, local format 12): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a store takes before a commit of its branch sets one, and the vdisk of its cell it is, by name and kind (`vdisk`, `kind`), which its opening adds to the cell | the store is deleted |
-| `unmade` | a marker `Store::make` writes before anything else, which its maker removes once the store is whole; opening refuses a store holding it (TASK-196) | the store is whole |
-| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: encrypted, AES-256-XTS by 4 KiB sector, as every store is encrypted (doc-16, TASK-411.5, TASK-411.28) | it closes and its framed file is synced |
-| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit local, whether the segment is open or being framed; cladefs: its header (`FXLOG\0\0\x03`) names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16; a clear store's `\x02` header is no more, TASK-411.28) | as above |
+| `store` | the description (`layout::FORMAT`, local format 12): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a cell takes before a commit of its branch sets one, and the vdisk of its cell it is, by name and kind (`vdisk`, `kind`), which its opening adds to the cell | the cell is deleted |
+| `unmade` | a marker `Store::make` writes before anything else, which its maker removes once the cell is whole; opening refuses a cell holding it (TASK-196) | the cell is whole |
+| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: encrypted, AES-256-XTS by 4 KiB sector, as every cell is encrypted (doc-16, TASK-411.5, TASK-411.28) | it closes and its framed file is synced |
+| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit local, whether the segment is open or being framed; cladefs: its header (`FXLOG\0\0\x03`) names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16; a clear cell's `\x02` header is no more, TASK-411.28) | as above |
 | `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; cladefs: encrypted as open segments are, its salt in memory alone | sealed |
 | `segments/<b>/<n>` | a closed segment, framed, numbered locally, its footer stamped by the writer's chain as it closed: the object `segments/<branch>/<epoch>.<segment>` byte for byte, but for a rebase's restamping, which is in memory, the upload restamping the bytes (`extent_frame::restamp`) | acknowledged, then moved into the part cache |
 | `extents/<b>/<sequence>` | its extents stored on their own, framed: the objects `extents/<branch>/<epoch>.<segment>.<sequence>` | likewise |
-| `wal` | the WAL's start, the commit its first segment was stamped over: two 4 KiB slots, written and synced before what an acknowledgement let go of leaves (`wal::START`) | the store is deleted |
+| `wal` | the WAL's start, the commit its first segment was stamped over: two 4 KiB slots, written and synced before what an acknowledgement let go of leaves (`wal::START`) | the cell is deleted |
 
-Beside them, cladefs's own records of the store (`cladefs::store_dir`, TASK-160.13): what is attached
+Beside them, cladefs's own records of the cell (`cladefs::store_dir`, TASK-160.13): what is attached
 to it, what it was forked from (`ancestry`), the branches marked public (`public-<b>`) and boot
 profiles, each written whole and synced. An image's own file bucket is beside its directory,
 `<image>.bucket`, which its forks share and which outlives it (Decisions).
 
-Per host (`CLADEFSD_PART_CACHE`), shared by every store: `cladefs-parts/<key>`, the part cache
+Per host (`CLADEFSD_PART_CACHE`), shared by every cell: `cladefs-parts/<key>`, the part cache
 (`bucket_cell::cache`), kept across restarts and taking whole objects in (`Cache::adopt`).
 
-Gone from a store's directory: `branches/`, `segments/`, `extents/`, `index/`, `open-segments/`,
-handles naming another store's directory, `store.new`/`store.deleted`, and remote.rs's
+Gone from a cell's directory: `branches/`, `segments/`, `extents/`, `index/`, `open-segments/`,
+handles naming another cell's directory, `store.new`/`store.deleted`, and remote.rs's
 `remote-*`, `fence-*` and `origin-*` files (the token moves into `store`).
 
 The host's disk is bounded by the lag bound (`Options::max_lag_bytes`, what the WAL holds: commits
-stall there, doc-7 decision 3), the open segment's room (the store's capacity plus what rewrites
+stall there, doc-7 decision 3), the open segment's room (the cell's capacity plus what rewrites
 before a commit waste, the rule `state::Space` keeps), and the cache's capacity; cladefs: and, since
-doc-22, the disk governor, which admits each write with what the store's own work may add for it,
-and sizes the cache to what the stores leave.
+doc-22, the disk governor, which admits each write with what the cell's own work may add for it,
+and sizes the cache to what the cells leave.
 Local dead space no longer exists, so the bound of three times the capacity (TASK-79.89) and local
 cleaning go.
 
@@ -114,7 +114,7 @@ TASK-165.1-165.9 commits alone.
 | `extent_store/src/layers.rs` | 430 | goes | gone | a child recovers its state from the bucket (`extent_remote::recovery::Layers` within one recovery) |
 | `extent_store/src/ledger.rs` | 447 | goes | gone | no file is claimed by several branches |
 | `extent_store/src/index.rs` | 564 | goes | gone | no index: the open segment's log replaces deltas, the bucket's checkpoints local ones |
-| `extent_store/src/host.rs` | 411 | ~100 stay | 237 | making, opening, placing and deleting a store directory, `unmade` (TASK-196) |
+| `extent_store/src/host.rs` | 411 | ~100 stay | 237 | making, opening, placing and deleting a cell directory, `unmade` (TASK-196) |
 | `extent_store/src/uploads.rs` | 141 | goes | 55 | a closed segment for the uploader (`Closed`) |
 | `extent_store/src/kept.rs` | 208 | ~150 go | 219 | stays: frees are kept until acknowledged, so that a view or a rebase reads them (Decisions) |
 | `extent_store/src/layout.rs` | 546 | ~300 go | 381 | 165 went: `BranchRecord`, `Origin`, the local `Checkpoint`, `Change`, `Delta`, the record codec; the commit log's records came |
@@ -124,7 +124,7 @@ TASK-165.1-165.9 commits alone.
 | `extent_store/src/wal.rs`, `upload.rs`, `timings.rs` | 0 | ~1.3k come, with the file bucket and the cache | 469, 1,112, 160 | the WAL's recovery and start; the uploader, moved from remote.rs; flush timings |
 | `cladefs/src/remote.rs` | 1,687 | ~1,300 go, ~400 move | 178 | 1,509 went: `Marker`, `InFlight`, `Claim`/`Forked` and their files, `Plan`, `diff`, `take`, `take_parent`, `record`, `start_point`; the uploader moved to `extent_store::upload` |
 | `cladefs/src/extents.rs` | (part) | ~120 go | | `fork_durable`'s claims, disclaims and unforks went, `fork_durable` now a call of `host_store::fork`; `copy_bases` went too (TASK-165.7): what is attached to a store stays attached to its fork by what the fork's directory inherits (`store_dir::inherit`) |
-| `cladefs/src/host_store.rs` | 191 | | 443 | every store's bucket, forks in the bucket, `unmade` |
+| `cladefs/src/host_store.rs` | 191 | | 443 | every cell's bucket, forks in the bucket, `unmade` |
 | `extent_remote` `local.rs`, `wal.rs`, `cache.rs` | 0, 0, 316 | | 212, 147, 905 | the file bucket; `Wal::rebase`; the part cache kept across restarts and adopting objects |
 
 extent_store's code went from 10,757 lines to 9,580 (1,177 fewer; the design's estimate was 4.1k
@@ -157,7 +157,7 @@ frees, spends, root, next sequence, capacity, forks. Every reader of a branch's 
 - extent_store's live state: a commit applies its contents to the branch's state at the open
   segment's provisional key, so that the state after a segment closes is the replay of its footer
   over the state before it, which the `audit` feature asserts at every close;
-- opening a store: the bucket's recovery, then the WAL's footers, then the open segment's log
+- opening a cell: the bucket's recovery, then the WAL's footers, then the open segment's log
   folded into the contents of its footer.
 
 Each of TASK-160.15's differences gets one rule:
@@ -177,7 +177,7 @@ the footer's contents, which the open segment's `Window` computes in memory as c
 each extent once and free it at most once after, so applying the folded contents equals applying
 the commits in turn.
 
-## Opening a store
+## Opening a cell
 
 1. Read `store`: the branch, the bucket, the token.
 2. **Take the branch's head** with the token (`Writer::open`; its lease, and a fence at its end,
@@ -186,9 +186,9 @@ the commits in turn.
 3. **Close the open segment** if one was left: its data and the whole records of its log (up to the
    first torn one) give its contents; it is framed from its raw file, as `close_left_open` does now,
    and stamped by the new chain. Writes after the last local commit are dropped, as now.
-   *(TASK-411.9)* The WAL's recovery (`Store::recover`) decides this before the store's keys are
+   *(TASK-411.9)* The WAL's recovery (`Store::recover`) decides this before the cell's keys are
    known, and frames nothing: the segment keeps its raw file and log until `Recovering::open`,
-   holding the store's keys (doc-16), frames it first of all, encrypted, as every store is (TASK-411.28).
+   holding the cell's keys (doc-16), frames it first of all, encrypted, as every cell is (TASK-411.28).
 4. **Put the WAL after the branch's end** (`extent_bucket::Wal::rebase`, new), by commits, as the
    head the writer took names it (`TakenBranch`; until TASK-407, as the branch was after the fence,
    `wal_after_fence`, which might have applied the WAL's own segments landed since recovery found
@@ -199,13 +199,13 @@ the commits in turn.
    - if the branch's last commit is that one, or the WAL's start, the rest are restamped on the new
      chain after the head's end (`wal_follows`) (their data parts unchanged; a new tail; their own
      extents at the new writer's keys), and upload as any closed segment;
-   - otherwise another writer's commits moved the branch on: the WAL **diverged**, the store refuses to open
+   - otherwise another writer's commits moved the branch on: the WAL **diverged**, the cell refuses to open
      (`extent_bucket::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops its WAL, losing what
      the guest was never promised (doc-7, Recovery on the same host). An empty WAL never diverges:
-     opening a store directory of an empty WAL is how a branch is taken, here or on any host.
+     opening a cell directory of an empty WAL is how a branch is taken, here or on any host.
    Restamping writes each new file and syncs it before removing the old; a WAL holding both after a
    crash keeps the one stamped last, by their footers' epochs. *Revised 2026-11-15 (TASK-407):* the
-   store restamps its footers in memory alone, as its writer uploads them; the rebase goes by
+   cell restamps its footers in memory alone, as its writer uploads them; the rebase goes by
    commits, and keeps the trailing segments holding only forks the branch holds
    (`TakenBranch::forks`).
 
@@ -230,12 +230,12 @@ the commits in turn.
    did not land, never acknowledged, is lost, rather than made twice). The WAL's base is then the
    branch's last commit after the fence.
 5. The branch's state is the recovery's, the WAL's footers applied over it. The guest mints from the
-   writer's floor (`Uploader::next_sequence`, the writer's epoch's range). The store's next sequence
+   writer's floor (`Uploader::next_sequence`, the writer's epoch's range). The cell's next sequence
    on opening is one past the highest of its own extents it holds, where fxfs looks for orphans
    below (`Allocator::open`), not the footers' stamp, which their writers stamped past their
    floors.
 
-What made a stale store refuse before, the marker naming which commits were its own, is the WAL
+What made a stale cell refuse before, the marker naming which commits were its own, is the WAL
 itself: every segment that may land is a WAL file, stamped and synced before its PUT (TASK-79.72's
 rule), and nothing else can land in the writer's name.
 
@@ -281,13 +281,13 @@ fetcher.
 
 | Operation | Before (went) | Now |
 |---|---|---|
-| Make a store | local lineage + `branch::create` at attach | `branch::create` (a root), then the directory |
-| Open | local index replay, then attach: marker, `Plan`, `diff`, `take` | Opening a store, above |
-| Take elsewhere (`cladefsctl take`) | an empty store adopting every extent, a local checkpoint, a marker | a directory naming the branch; opening it |
+| Make a cell | local lineage + `branch::create` at attach | `branch::create` (a root), then the directory |
+| Open | local index replay, then attach: marker, `Plan`, `diff`, `take` | Opening a cell, above |
+| Take elsewhere (`cladefsctl take`) | an empty cell adopting every extent, a local checkpoint, a marker | a directory naming the branch; opening it |
 | Fork | `Remote::claim` (a GET and a claim file), a local fork (record, layers, handle), then `Remote::forked` waits for the record | a GET of the child's record (taken: `EEXIST`, `Uploader::child_free`), a commit whose segment names the child (`Store::commit_fork`, `Contents::forks`), then waiting for its acknowledgement and the child's record (`Uploader::forked`, the writer's `record_forks`); then the child's directory (`host_store::fork`) |
 | Fork of a point | a claim, a local fork of the point's copy, `branch::fork_point` | `branch::fork_point`, then the child's directory |
 | Point | a fork to a point | a fork to a point (the record says `point`) |
-| Open a child | local layers over the parent's index | opening a store: recovery of the child from the bucket, the parent's state at the fork read from the parent's checkpoint and footers, then flattened into the child's own state, O(extents) (Decisions) |
+| Open a child | local layers over the parent's index | opening a cell: recovery of the child from the bucket, the parent's state at the fork read from the parent's checkpoint and footers, then flattened into the child's own state, O(extents) (Decisions) |
 | A fork failing | disclaim, `fail_fork`, `unfork` (`delete_branch`), handle deletion | `IdTaken`: nothing made, nothing to delete. Failing once its commit was made (its upload or the child's directory failing): `Uploader::unfork`, which stays, deleting the fork's alone, `branch::delete_fork(bucket, child, forked, owner, holder, token)`, so a segment landing late gives the child a deleted record; the directory goes |
 | A host crashing mid-fork | claim files, markers, `take_parent` | the fork is in the WAL; once its segment is named by the branch's head, the next writer records it (the fork stands, as `forks_whose_host_crashed_stand_once_their_heads_swap_lands` expects); a segment that landed and no head named never is the branch's (TASK-407), nor is a fork in it; or the disk is lost and it never was |
 | Delete | `delete_host` (claims, handles, lineage), `branch::delete` | `branch::delete` with the token, then the directory |
@@ -295,15 +295,15 @@ fetcher.
 | Resize | the local record's capacity | a commit setting the capacity (format change) |
 | Clean | `Store::clean_behind` and the collector | the collector |
 
-The child's directory is made once its record exists; opening it is opening a store. Every fork
+The child's directory is made once its record exists; opening it is opening a cell. Every fork
 waited for its record before too (`Remote::forked`), so a fork's latency changes by the child's
 recovery: its state is read from the bucket, the checkpoint the parent's writer wrote as the fork
 was acknowledged and the footers after it, and taken by the child, O(extents) of the parent at the
-fork. *Since TASK-453 (2026-11-15)* what the child inherits is shared in memory: its store's map of
+fork. *Since TASK-453 (2026-11-15)* what the child inherits is shared in memory: its cell's map of
 its extents is two layers, the bucket's, the recovered state's persistent map, which its writer's
-state and every other store that started from the same decoded state share, never changed, and its
+state and every other cell that started from the same decoded state share, never changed, and its
 own over it (what it writes, frees, seals and follows), lookups reading its own first
-(`extent_store::extents`); the host's decoded checkpoints stay found while a store holds one, and
+(`extent_store::extents`); the host's decoded checkpoints stay found while a cell holds one, and
 one decoded anew is made of the most alike held still, sharing what is equal
 (`extent_remote::recovery::Decoded`). An idle fork holds ~32 KB, not 220-470 bytes an extent of its
 base. Measured (TASK-165.10,
@@ -351,11 +351,11 @@ image's own bucket.
 
 - Footers and checkpoints gain the capacity; `layout::FORMAT` becomes 2 (11 now, TASK-407), and a
   reader refuses objects of other formats, older ones too (`Error::Format`).
-- Local stores: a new format, 6 at TASK-165.6, 7 at TASK-165.7 and 8 at TASK-165.9, described
+- Local cell directories: a new format, 6 at TASK-165.6, 7 at TASK-165.7 and 8 at TASK-165.9, described
   above (`extent_store::layout::FORMAT`, "cladefs extent store 12", whose footers and logs'
   records name the runs of a commit spanning segments in each it spans, TASK-92.41, whose
   logs' headers name their segments, TASK-341, and whose description names its branch with its
-  tenant's cell, TASK-364, and the vdisk of its cell it is as `vdisk NAME`, TASK-482). Stores of
+  tenant's cell, TASK-364, and the vdisk of its cell it is as `vdisk NAME`, TASK-482). Cell directories of
   another format are not opened, and nothing converts them.
 
 No migration: nothing uses cladefs yet (AGENTS.md).
@@ -368,7 +368,7 @@ runs against `memory:///`, `file:///`, the simulation's `Direct`, and, ignored w
 servers, RustFS and Azurite.
 
 **The simulation** (`extent_remote/src/sim`, since TASK-88 `extent_store/src/sim`, its hosts'
-stores extent_store's over directories in memory and their uploaders the store's own, run on the
+extent_store's cells over directories in memory and their uploaders the cell's own, run on the
 simulation's clock) is where the protocol's interleavings are searched.
 Its hosts' disks become WALs of stamped segments, and every open on a host with one runs the
 production `wal::rebase`, not the simulation's own re-batching (`World::opened`): the host's side
@@ -383,7 +383,7 @@ applied twice; the rule went with the fence, TASK-407). A crash keeps the WAL or
 rolling over, framing, flushes failing) and gains the WAL's: the uploader acknowledging while
 commits and closes race, a segment closing for room as one acknowledges, a view pinning a WAL file
 being acknowledged. The lineage scenarios go with the lineage. Its uploader drives the WAL's
-interface (`take`, `acknowledged`) directly, so Shuttle schedules the store's threads, and the
+interface (`take`, `acknowledged`) directly, so Shuttle schedules the cell's threads, and the
 protocol's interleavings stay the simulation's.
 
 **Crash rounds** (`tests/crash`, `MemDir`) keep their oracle, a prefix of the commits at least as
@@ -421,7 +421,7 @@ origin), which it models fixed (`deletionsFence`: a deletion fences the end it r
 |---|---|---|
 | remote.rs, uploads (segments are the files, batches, gathers, flipped bytes, lag, stalls) | 17 | extent_store tests over a memory bucket, unchanged in what they assert; `attaches_upload_what_the_branch_lacks_in_batches` becomes a WAL caught up after an outage |
 | remote.rs, markers (`markers_name_*`, `segments_uploading_are_marked_*`, `*_marker_was_lost_*`) | 5 | the WAL's: a segment is a synced WAL file before its PUT; reopening with segments in flight, landed or not, at each point (`wal::rebase` unit tests and the simulation) |
-| remote.rs, fencing, placement, formats, host loss, takes | 14 | kept, through opening a store; TASK-79.4's race becomes "the bucket moved on between recovery and the lease" against `wal_follows` |
+| remote.rs, fencing, placement, formats, host loss, takes | 14 | kept, through opening a cell; TASK-79.4's race becomes "the bucket moved on between recovery and the lease" against `wal_follows` |
 | remote.rs, forks: records lost, segments landing late, parents taken (TASK-79.20, 79.72) | 10 | the fork recorded by the parent's next writer, or never made; in the simulation's `crashes_anywhere`, and two extent_store tests with a crash after the fork's commit |
 | remote.rs, failed forks and claims (TASK-79.78, 79.82) | 12 | `IdTaken` makes nothing; a fenced fork's `delete_fork`; twins (the simulation's `failed_forks_deleted_anywhere`) |
 | `fork_faults.rs` (14), `restore_faults.rs` (8) | 22 | kept: each step of a fork and of a point's fork failing, its host dying, the collector meeting each write; the steps are fewer (no claim, no handle) |
@@ -436,7 +436,7 @@ holds, and each step's notes list what each removed test became.
 
 Each lands green (macOS `scripts/test.sh` with `workspace shuttle`, Linux in Docker or GCE), with
 its own tests. 1 to 5 change nothing a guest sees and don't wait for TASK-164; 6 to 9 do, and touch
-`cladefs/src/extents.rs` and `cladefsd/stores.rs`, so they start after TASK-164 and TASK-160.8 land.
+`cladefs/src/extents.rs` and `cladefsd/cells.rs`, so they start after TASK-164 and TASK-160.8 land.
 
 1. **The local-filesystem bucket** (TASK-165.1): `file://`, the bucket conformance suite.
 2. **TLA+ of doc-7 with the WAL** (TASK-165.2).
@@ -446,10 +446,10 @@ its own tests. 1 to 5 change nothing a guest sees and don't wait for TASK-164; 6
 4. **The part cache kept and adopting objects** (TASK-165.4).
 5. **The WAL's protocol** (TASK-165.5): `wal::rebase`, `Error::Diverged`, the simulation's hosts
    keeping WALs, the two new rules.
-6. **Images over a file bucket** (TASK-165.6): every store has a bucket, images too.
+6. **Images over a file bucket** (TASK-165.6): every cell has a bucket, images too.
 7. **Forks, points and deletion only in the bucket** (TASK-165.7): lineage, layers, ledger, branch
    records, handles, claims go; a child is opened from the bucket.
-8. **Uploaded data leaves the store** (TASK-165.8): acknowledged segments move into the part cache;
+8. **Uploaded data leaves the cell** (TASK-165.8): acknowledged segments move into the part cache;
    local cleaning and the 3x bound go. Lands in one batch with 7, so that main never has forks on
    one host reading their base back from the bucket.
 9. **One recovery** (TASK-165.9): the index goes; the open segment's log; opening by lease, recovery
@@ -465,17 +465,17 @@ Out of scope: the serial commit log over parallel data (a SlateDB-style manifest
 Taken on the way, each in OPEN_QUESTIONS.md under `# Decisions` with what else was possible:
 
 - **A child takes its state in O(extents), not shared in memory** (TASK-165.7): a fork's child's
-  store is made once its record exists, and opening it recovers its state from the bucket and
+  cell is made once its record exists, and opening it recovers its state from the bucket and
   flattens it, rather than sharing the parent's state in memory as layers did. A fork of a base
   with many extents pays for them once, at the child's opening; nothing ties the child's state to
   its parent's after.
-- **`Record::Acknowledged`** (TASK-165.8): acknowledged segments leave the store for the host's part
+- **`Record::Acknowledged`** (TASK-165.8): acknowledged segments leave the cell for the host's part
   cache, which the index recorded (`Record::Acknowledged`) until TASK-165.9 removed the index; the
-  WAL's start (`wal`) records it since, written and synced before an acknowledged file leaves. A store
-  with no uploader kept everything; since TASK-165.9 every store opened has one.
+  WAL's start (`wal`) records it since, written and synced before an acknowledged file leaves. A cell
+  with no uploader kept everything; since TASK-165.9 every cell opened has one.
 - **`<image>.bucket`** (TASK-165.6, 165.7): an image's own file bucket is beside its directory,
   named for it, not inside it, as its forks keep their branches there and outlive it; it is never
-  removed with the image. A directory with no description is no store.
+  removed with the image. A directory with no description is no cell.
 - **`Uploader::unfork` stays:** a fork failing after its commit was made deletes the fork's child in
   the bucket, the fork's alone (`branch::delete_fork`), so that its segment, landing late, makes
   nothing (TASK-79.78).
@@ -497,8 +497,8 @@ Taken on the way, each in OPEN_QUESTIONS.md under `# Decisions` with what else w
 
 ## Where this meets other work
 
-- TASK-160.8 (cladefsd's store table): steps 7 to 9 change how cladefsd makes, takes, places,
-  forks and deletes stores (`cladefsd/stores.rs`); they start once 160.8 has landed.
+- TASK-160.8 (cladefsd's cell table): steps 7 to 9 change how cladefsd makes, takes, places,
+  forks and deletes cells (`cladefsd/cells.rs`); they start once 160.8 has landed.
 - TASK-164 (copy-on-write DAX) and its guest work (160.2, 160.4): `cladefs/src/extents.rs` and
   `crate::cache` change in both; this waits for 164, as the task says.
 - TASK-157 (fork tests failing under load): `fork_faults.rs` and the cladefsd fork tests are
