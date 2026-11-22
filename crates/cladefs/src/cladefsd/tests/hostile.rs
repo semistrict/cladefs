@@ -2475,9 +2475,11 @@ fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
         let mut sent = &stream;
         std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&written)).unwrap();
         std::io::Write::write_all(&mut sent, &[7; 4096]).unwrap();
-        // Admitted, its bytes taken, before the connection goes.
+        // Admitted, its bytes taken, before the connection goes: the payload's, not a reply the
+        // daemon is sending meanwhile, counted until it is sent, as OPEN's header, 72 bytes
+        // (board 6878).
         let deadline = std::time::Instant::now() + WAIT;
-        while mallory.in_flight().held() == 0 && std::time::Instant::now() < deadline {
+        while mallory.in_flight().held() != MAX_PAYLOAD && std::time::Instant::now() < deadline {
             std::thread::park_timeout(Duration::from_millis(10));
         }
         assert_eq!(mallory.in_flight().held(), MAX_PAYLOAD, "admitted");
