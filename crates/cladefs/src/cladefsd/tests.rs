@@ -2036,7 +2036,8 @@ fn followers_pin_only_what_their_views_hold() {
 /// seals the area against writes once it has mapped it, so that no page of it is punched out to be
 /// faulted in again by the daemon, charged to the daemon for as long as the VM process keeps it.
 /// A read into bytes of it the VM process never wrote, which the daemon would fault in itself, is
-/// refused; one into bytes it wrote is served.
+/// refused; one into bytes it wrote is served, and so is one into bytes it wrote that went to swap
+/// since, which a host short of memory refused before (board 6881).
 #[test]
 fn transfer_areas_are_their_vm_processes_memory() {
     use super::wire::*;
@@ -2086,6 +2087,30 @@ fn transfer_areas_are_their_vm_processes_memory() {
     assert_eq!(call(&sender, &mut receiver, read_at(5, 0), &[]).header.status, 0);
     // SAFETY: Within the mapping, which the daemon wrote and replied of.
     let read = unsafe { std::slice::from_raw_parts(addr.cast::<u8>(), BLOCK) };
+    assert_eq!(read, &pattern(2, BLOCK)[..]);
+    // A block of the written half the daemon never touched, so mapped by this mapping alone, which
+    // MADV_PAGEOUT takes out alone: swapped out, in no memory, but written.
+    let swapped = len / 4;
+    // SAFETY: Within the mapping.
+    let at = unsafe { addr.cast::<u8>().add(swapped) };
+    let span = BLOCK.max(crate::pages::page_size() as usize);
+    let mut resident = vec![1u8; span / crate::pages::page_size() as usize];
+    // Reclaim may leave a page in the swap cache a moment, still resident.
+    for _ in 0..100 {
+        // SAFETY: Of the mapping, page-aligned, a page or more of it.
+        assert_eq!(unsafe { libc::madvise(at.cast(), span, libc::MADV_PAGEOUT) }, 0);
+        // SAFETY: As above, a byte a page.
+        assert_eq!(unsafe { libc::mincore(at.cast(), span, resident.as_mut_ptr().cast()) }, 0);
+        if resident.iter().all(|page| page & 1 == 0) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(resident.iter().all(|page| page & 1 == 0), "not paged out: the host has no swap");
+    let swapped_in = call(&sender, &mut receiver, read_at(6, swapped as u64), &[]);
+    assert_eq!(swapped_in.header.status, 0);
+    // SAFETY: Within the mapping, which the daemon wrote and replied of.
+    let read = unsafe { std::slice::from_raw_parts(at, BLOCK) };
     assert_eq!(read, &pattern(2, BLOCK)[..]);
     // Sealed against writes: no page of it punched out.
     let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;

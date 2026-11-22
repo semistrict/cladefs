@@ -1983,6 +1983,9 @@ impl Guest for Connection {
 struct TransferArea {
     addr: std::ptr::NonNull<u8>,
     len: usize,
+    /// cladefs: its memory opened anew, read-only, for [`TransferArea::written`] to seek in with
+    /// an offset of its own, not the VM process's descriptor's.
+    memory: std::os::fd::OwnedFd,
 }
 
 // SAFETY: Shared memory mapped for the area's life, accessed as volatile memory alone.
@@ -2015,6 +2018,10 @@ impl TransferArea {
             return Err(Errno::EINVAL);
         }
         let len = len as usize;
+        let memory = reopen_read_only(fd).map_err(|err| {
+            log::warn!("cladefsd: a transfer area not to be opened anew: {err}");
+            Errno::EINVAL
+        })?;
         // SAFETY: Maps shared memory, as large as it is, sealed against shrinking.
         let addr = unsafe {
             libc::mmap(
@@ -2030,7 +2037,7 @@ impl TransferArea {
             log::warn!("cladefsd: mapping a transfer area: {}", std::io::Error::last_os_error());
             return Err(Errno::ENOMEM);
         }
-        let area = Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len };
+        let area = Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len, memory };
         if let Err(err) = seals::against_writes(fd) {
             log::warn!("cladefsd: a transfer area not to be sealed against writes: {err}");
             return Err(Errno::EINVAL);
@@ -2038,25 +2045,24 @@ impl TransferArea {
         Ok(area)
     }
 
-    /// cladefs: whether each page of the `len` bytes at `offset`, within it, is in memory: its VM
-    /// process's, which wrote it, sealed as the area is against its punching it out again.
-    fn resident(&self, offset: usize, len: usize) -> Result<bool, Errno> {
+    /// cladefs: whether its VM process wrote each page of the `len` bytes at `offset`, within it:
+    /// no hole in its memory there, sealed as the area is against its punching one again. Its
+    /// memory's, not its mapping's: a page written and then swapped out is written still, but in
+    /// no memory, which `mincore` asked before, and refused the reads into it of a host short of
+    /// memory, its guests' reads failing with EIO (board 6881). The daemon faulting such a page
+    /// in charges it to whom it was charged when it went to swap, the VM process.
+    fn written(&self, offset: usize, len: usize) -> Result<bool, Errno> {
+        use std::os::fd::AsRawFd;
         let page = crate::pages::page_size() as usize;
         let (start, end) = (offset / page * page, (offset + len).div_ceil(page) * page);
-        let mut resident = vec![0u8; (end - start) / page];
-        // SAFETY: Of its mapping, page-aligned, a byte for each of its pages.
-        let done = unsafe {
-            libc::mincore(
-                self.addr.as_ptr().add(start).cast(),
-                end - start,
-                resident.as_mut_ptr().cast(),
-            )
-        };
-        if done != 0 {
-            log::warn!("cladefsd: a transfer area's pages: {}", std::io::Error::last_os_error());
+        // SAFETY: Seeks in a descriptor of its own.
+        let hole =
+            unsafe { libc::lseek(self.memory.as_raw_fd(), start as libc::off_t, libc::SEEK_HOLE) };
+        if hole < 0 {
+            log::warn!("cladefsd: a transfer area's holes: {}", std::io::Error::last_os_error());
             return Err(Errno::EINVAL);
         }
-        Ok(resident.iter().all(|page| page & 1 == 1))
+        Ok(hole as usize >= end)
     }
 
     /// The `len` bytes at `offset`, checked: `EINVAL` past its end; cladefs: and where its VM
@@ -2067,7 +2073,7 @@ impl TransferArea {
         if end > self.len as u64 {
             return Err(Errno::EINVAL);
         }
-        if len > 0 && !self.resident(offset as usize, len as usize)? {
+        if len > 0 && !self.written(offset as usize, len as usize)? {
             log::warn!("cladefsd: a transfer area's bytes its VM process never wrote");
             return Err(Errno::EINVAL);
         }
