@@ -1,19 +1,5 @@
 # Open questions
 
-## Delete the tests of what Wave 2 removes? (doc-26, doc-27, board 6124, 6127, 2026-11-21)
-
-Needed: your OK to delete, as each Wave 2 step lands, the tests of code it removes. That means
-`crates/physmem` with its tests (doc-26 step 1); the collector's moves tests
-(`reads_follow_moves` and kin in `fetch.rs`, `…need_moves_taken_first`,
-`passes_creating_moves_late_need_moves_by_pass` in `collector.rs`, the sim's moves toggles; doc-27
-step 2); and the head-slot tests with specs/head-slots, its models and its six mutations (doc-27
-step 4). Why: your instructions reserve deleting tests to you, and the code these test goes.
-Recommend: yes. Each is replaced by a test of the class (doc-26's Shuttle model of slabs and
-eviction, specs/part-slabs; doc-27's relocation sim properties, specs/bucket's
-BucketRelocationsForks, ReachesRelocatedFreed and NoSwapsInPlace). Until answered: those steps'
-tasks land everything else and leave the old tests where they still compile, marked with this
-entry.
-
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
@@ -86,12 +72,6 @@ Decided without you, designing Wave 2's track 2B:
   Uploaded-level sync loop gets about one sync a second, where ten slots gave about ten. fsync is
   Ordered and unaffected. A GCS cell wanting fast durable syncs should be replicated (doc-21):
   recommended. *Undo:* keep `head_slots` for GCS buckets alone (board 6020's state).
-- **Three spec mutations removed** with their rules: NoMovesByPass, NoMovesTakenFirst,
-  NoWaysFromSeals. The protocol no longer has moves. Their ground is still checked by models
-  that hold: KeysWrittenOnce in BucketCompaction (the collector writes nothing), and
-  BucketRelocationsForks (TASK-175's setting, with relocations). Your instructions reserve
-  deleting tests to you: say so, and they come back with the spec before this change.
-  *Undo:* `git revert` of the spec commit.
 
 ## A fork's prefetch reads its prediction into memory, its tenant's arena paying (board 6225, 2026-11-21)
 
