@@ -94,7 +94,7 @@ mod host {
     /// Whether the cell at `path` has the file the guest writes.
     fn has_written(path: &Path) -> anyhow::Result<bool> {
         block_on(async {
-            let fs = Filesystem::mount(Storage::open(path)?).await?;
+            let fs = Filesystem::mount(Storage::open(path).await?).await?;
             let found = match fs.root().lookup(WRITTEN.as_bytes()).await {
                 Ok(_) => true,
                 Err(Errno::ENOENT) => false,

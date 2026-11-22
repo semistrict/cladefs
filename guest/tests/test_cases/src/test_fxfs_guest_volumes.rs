@@ -44,7 +44,7 @@ mod host {
     /// Makes the cell at `path`, with `VOLUMES`, empty.
     fn format(path: &Path) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::create(path, CAPACITY)?).await?;
+            let image = Image::format(Storage::create(path, CAPACITY).await?).await?;
             for volume in VOLUMES {
                 image.create_volume(volume).await?.unmount().await?;
             }
@@ -56,7 +56,7 @@ mod host {
     /// What `volume`'s file holds in the cell at `path`.
     fn read(path: &Path, volume: &str) -> anyhow::Result<Vec<u8>> {
         block_on(async {
-            let image = Image::mount(Storage::open(path)?).await?;
+            let image = Image::mount(Storage::open(path).await?).await?;
             let fs = image.open_volume(volume).await?;
             let (file, attr) = fs.root().lookup(FILE.as_bytes()).await?;
             let mut data = vec![0; attr.size as usize];

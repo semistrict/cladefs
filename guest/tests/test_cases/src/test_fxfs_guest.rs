@@ -410,7 +410,7 @@ mod host {
             let path = test_setup.tmp_dir.join("extents");
             if self.mode == Mode::HostFormats {
                 block_on(async {
-                    let fs = Filesystem::format(Storage::create(&path, CAPACITY)?).await?;
+                    let fs = Filesystem::format(Storage::create(&path, CAPACITY).await?).await?;
                     let owner = Owner { uid: 0, gid: 0 };
                     let (hello, _) = fs.root().create(b"hello", 0o644, owner).await?;
                     hello.write(0, HELLO).await?;
@@ -482,7 +482,8 @@ mod host {
                         "no allocation failed, or no fsync returned: {output:?}"
                     ));
                 }
-                let storage = block_on(Storage::open(&path).unwrap().check()).unwrap();
+                let storage =
+                    block_on(async { Storage::open(&path).await.unwrap().check().await }).unwrap();
                 let fs = block_on(Filesystem::mount(storage)).unwrap();
                 assert_synced(&fs, &synced);
                 block_on(fs.close()).unwrap();
@@ -515,7 +516,8 @@ mod host {
                 // recovers it, and mounting it replays its journal.
                 crate::common::copy_cell_dir(&path, &test_setup.tmp_dir.join("extents-at-crash"))
                     .unwrap();
-                let storage = block_on(Storage::open(&path).unwrap().check()).unwrap();
+                let storage =
+                    block_on(async { Storage::open(&path).await.unwrap().check().await }).unwrap();
                 let fs = block_on(Filesystem::mount(storage)).unwrap();
                 // cladefs: the rest of the test's checks count on what was told of being there.
                 if self.daemon_killed {
@@ -680,7 +682,9 @@ mod host {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
             // What the guest wrote is in the cell, for the host's Fxfs as for the guest's.
-            let fs = block_on(Filesystem::mount(Storage::open(&path).unwrap())).unwrap();
+            let fs =
+                block_on(async { Filesystem::mount(Storage::open(&path).await.unwrap()).await })
+                    .unwrap();
             let lookup = |parent: &cladefs::Node, name: &str| {
                 block_on(parent.lookup(name.as_bytes())).unwrap()
             };

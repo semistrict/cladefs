@@ -113,7 +113,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
     /// Says what the volume of the first VM's cell at `path` takes of its metadata.
     fn measure_metadata(path: &Path) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::mount(Storage::open(path)?).await?;
+            let image = Image::mount(Storage::open(path).await?).await?;
             let fs = image.open_volume("repo").await?;
             let metadata = fs.metadata().await?;
             println!("measure host volume-layers {} bytes", metadata.layer_bytes);

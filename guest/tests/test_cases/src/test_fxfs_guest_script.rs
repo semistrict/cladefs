@@ -72,7 +72,7 @@ mod host {
 
     fn create_image(path: &Path, size: u64) -> anyhow::Result<()> {
         block_on(async {
-            let fs = Filesystem::format(Storage::create(path, size)?).await?;
+            let fs = Filesystem::format(Storage::create(path, size).await?).await?;
             fs.close().await?;
             Ok(())
         })
@@ -101,9 +101,10 @@ mod host {
         let failed = |kind: &str, what: String| {
             Some(Failure { op: Some(kill), kind: kind.to_owned(), what })
         };
-        let fs = Storage::open(dir.join("cladefs.img")).map_err(anyhow::Error::from).and_then(
-            |storage| block_on(async { Ok(Filesystem::mount(storage.check().await?).await?) }),
-        );
+        let fs = block_on(async {
+            let storage = Storage::open(dir.join("cladefs.img")).await?;
+            anyhow::Ok(Filesystem::mount(storage.check().await?).await?)
+        });
         let fs = match fs {
             Ok(fs) => fs,
             Err(err) => return failed(kind::FSCK, format!("{err:#}")),
@@ -168,7 +169,7 @@ mod host {
             std::fs::write(dir.path().join("console.txt"), b"").unwrap();
             let image = dir.path().join("cladefs.img");
             block_on(async {
-                let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE)?).await?;
+                let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE).await?).await?;
                 let owner = Owner { uid: 0, gid: 0 };
                 for (n, data) in files.iter().enumerate() {
                     let (handle, _) = fs.root().create(file(n).as_bytes(), 0o644, owner).await?;

@@ -216,7 +216,7 @@ mod host {
         fn create_images(test_setup: &TestSetup) -> anyhow::Result<()> {
             let image = test_setup.tmp_dir.join("cladefs.img");
             block_on(async {
-                let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE)?).await?;
+                let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE).await?).await?;
                 fs.close().await?;
                 anyhow::Ok(())
             })?;
