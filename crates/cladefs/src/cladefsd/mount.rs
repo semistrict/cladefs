@@ -162,3 +162,9 @@ pub(super) async fn close() -> Result<(), Error> {
     log::info!("cladefsd: the cells mounted at {} closed", mountpoint.display());
     Ok(())
 }
+
+/// cladefs: under madsim, nothing to close: a simulated host mounts no cells ([`start`]).
+#[cfg(madsim)]
+pub(super) async fn close() -> Result<(), Error> {
+    Ok(())
+}
