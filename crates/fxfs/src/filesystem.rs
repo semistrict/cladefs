@@ -17,7 +17,7 @@ use crate::object_handle::LayerObject;
 use crate::object_store::allocator::{Allocator, Hold, Reservation};
 use crate::object_store::directory::Directory;
 use crate::object_store::graveyard::Graveyard;
-use crate::object_store::journal::super_block::{SuperBlockHeader, SuperBlockInstance};
+use crate::object_store::journal::super_block::SuperBlockHeader;
 use crate::object_store::journal::{self, Journal, JournalCheckpoint, JournalOptions};
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::transaction::{
@@ -93,8 +93,8 @@ pub struct Options {
     pub skip_initial_reap: bool,
 
     // If set, journal will not be used for writes. The user must call 'close' when finished.
-    // The provided superblock instance will be written upon close().
-    pub image_builder_mode: Option<SuperBlockInstance>,
+    // The super-block will be written upon close().
+    pub image_builder_mode: bool,
 
     // If true, the filesystem will use the hardware's inline crypto engine to write encrypted
     // data. Requires the block device to support inline encryption and for `barriers_enabled` to
@@ -137,7 +137,7 @@ impl Default for Options {
             hooks: Arc::<HooksHandle>::default(),
             post_commit_hook: None,
             skip_initial_reap: false,
-            image_builder_mode: None,
+            image_builder_mode: false,
             inline_crypto_enabled: false,
             barriers_enabled: false,
             allow_type3_blobs: false,
@@ -291,9 +291,7 @@ impl From<Arc<FxFilesystem>> for OpenFxFilesystem {
 
 impl Drop for OpenFxFilesystem {
     fn drop(&mut self) {
-        if self.options.image_builder_mode.is_some()
-            && self.journal().image_builder_mode().is_some()
-        {
+        if self.options.image_builder_mode && self.journal().image_builder_mode() {
             error!("OpenFxFilesystem in image_builder_mode dropped without calling close().");
         }
         if !self.options.read_only && !self.closed.load(Ordering::SeqCst) {
@@ -380,12 +378,11 @@ impl FxFilesystemBuilder {
 
     /// For image building and in-place migration.
     ///
-    /// This mode avoids the initial write of super blocks and skips the journal for all
+    /// This mode avoids the initial write of the super-block and skips the journal for all
     /// transactions. The user *must* call `close()` before dropping the filesystem to trigger
-    /// a compaction of in-memory data structures, a minimal journal and a write to one
-    /// superblock (as specified).
-    pub fn image_builder_mode(mut self, mode: Option<SuperBlockInstance>) -> Self {
-        self.options.image_builder_mode = mode;
+    /// a compaction of in-memory data structures, a minimal journal, and the super-block write.
+    pub fn image_builder_mode(mut self, enabled: bool) -> Self {
+        self.options.image_builder_mode = enabled;
         self
     }
 
@@ -543,16 +540,12 @@ impl FxFilesystemBuilder {
 
         filesystem.journal.set_trace(self.trace);
         if self.format {
-            // cladefs: offload deep mount/format futures onto fresh task stacks to fit 16 KiB
-            // guest kernel stacks (TASK-26.9).
             let journal = filesystem.journal.clone();
             let fs = filesystem.clone();
             crate::offload(move || async move { journal.init_empty(fs).await }).await?;
-            if image_builder_mode.is_none() {
-                // The filesystem isn't valid until superblocks are written but we want to defer
-                // that until last when migrating filesystems or building system images.
+            if !image_builder_mode {
                 let journal = filesystem.journal.clone();
-                crate::offload(move || async move { journal.init_superblocks().await }).await?;
+                crate::offload(move || async move { journal.init_superblock().await }).await?;
 
                 // Start the graveyard's background reaping task.
                 filesystem.graveyard.clone().reap_async();
@@ -583,8 +576,6 @@ impl FxFilesystemBuilder {
             crate::boxed(|| transaction.commit()).await?;
             objects.set_volume_directory(volume_directory);
         } else {
-            // cladefs: offload deep mount/replay future onto a fresh task stack to fit 16 KiB
-            // guest kernel stacks (TASK-26.9).
             let journal = filesystem.journal.clone();
             let fs = filesystem.clone();
             let on_new_allocator = self.on_new_allocator;
@@ -593,24 +584,12 @@ impl FxFilesystemBuilder {
                 .context("Journal replay failed")?;
             filesystem.root_store().set_trace(self.trace);
 
-            // cladefs: the journal continues in new extents, which a super-block records. No
-            // compaction, which writes a super-block too, runs meanwhile, nor until the initial
-            // reap's done: as below, it may otherwise find what a compaction just put in the
-            // graveyard, tombstoning it twice.
-            let compacts = !read_only && image_builder_mode.is_none();
+            let compacts = !read_only && !image_builder_mode;
             if compacts {
                 filesystem.journal.pause_compactions().await;
             }
             let mounted = async {
                 if compacts {
-                    if crate::boxed(|| filesystem.renew_journal_tail()).await? {
-                        crate::boxed(|| filesystem.record_journal_tail()).await?;
-                    }
-                    // cladefs: the extents a crash orphaned go with a flush, now: they hold room on
-                    // the device Fxfs doesn't count, so that writes would find it full before Fxfs
-                    // did, with no NoSpace to say so. Before any compaction, which records them
-                    // while they die: they may be as many as were sought, of numbers the device
-                    // may never have held, and no journal record pays for that room.
                     if filesystem.allocator().has_dead_extents() {
                         filesystem.maybe_start_flush_task();
                         let journal = &filesystem.journal;
@@ -618,16 +597,11 @@ impl FxFilesystemBuilder {
                             .await
                             .context("freeing what the crash left")?;
                     }
+                    filesystem.compact_spans_if_needed().await?;
                 }
 
                 if !read_only {
-                    // Queue all purged entries for tombstoning.  Don't start the reaper yet because
-                    // that can trigger a flush which can add more entries to the graveyard which
-                    // might get caught in the initial reap and cause objects to be prematurely
-                    // tombstoned.
                     for store in objects.unlocked_stores() {
-                        // cladefs: offload onto a fresh task stack to keep `open`'s future off
-                        // 16 KiB guest kernel stacks (TASK-26.9).
                         let graveyard = filesystem.graveyard.clone();
                         crate::offload(move || async move { graveyard.initial_reap(&store).await })
                             .await?;
@@ -652,7 +626,7 @@ impl FxFilesystemBuilder {
 
         filesystem.closed.store(false, Ordering::SeqCst);
 
-        if !read_only && image_builder_mode.is_none() {
+        if !read_only && !image_builder_mode {
             // Start the background tasks.
             filesystem.graveyard.clone().reap_async();
 
@@ -719,22 +693,20 @@ impl FxFilesystem {
     }
 
     pub async fn close(&self) -> Result<(), Error> {
-        if self.journal().image_builder_mode().is_some() {
-            self.journal().allocate_journal().await?;
-            self.journal().set_image_builder_mode(None);
+        if self.journal().image_builder_mode() {
+            self.journal().allocate_journal(self);
+            self.journal().set_image_builder_mode(false);
             self.journal().force_compact().await?;
         }
         assert_eq!(self.closed.swap(true, Ordering::SeqCst), false);
         debug_assert_not_too_long!(self.graveyard.wait_for_reap());
         debug_assert_not_too_long!(self.background_tasks.clone().cancel());
         // cladefs: what dropped allocations left in shared extents, which the next mount counts.
-        if !self.options().read_only && self.journal().image_builder_mode().is_none() {
+        if !self.options().read_only && !self.journal().image_builder_mode() {
             self.allocator().record_reaches().await?;
         }
         self.journal.stop_compactions().await;
-        let sync_status = if self.journal().image_builder_mode().is_some()
-            || self.options().read_only
-        {
+        let sync_status = if self.journal().image_builder_mode() || self.options().read_only {
             Ok(None)
         } else {
             match self.journal.sync(SyncOptions { flush_device: true, ..Default::default() }).await
@@ -871,27 +843,43 @@ impl FxFilesystem {
         self.commit_mutex.lock().await
     }
 
-    /// cladefs: gives the journal new extents past where it continues, if it can't write those it
-    /// has there, and returns whether it did: after replay, and as the filesystem thaws in a VM
-    /// restored from a snapshot, whose device's cell is new
-    /// ([`Journal::renew_tail`](crate::object_store::journal::Journal::renew_tail)). Nothing may
-    /// commit, nor compact, meanwhile. A super-block must record them next
-    /// ([`FxFilesystem::record_journal_tail`]), which nothing compacting may come before.
-    pub async fn renew_journal_tail(&self) -> Result<bool, Error> {
-        let renewed = self.journal.renew_tail().await?;
-        if renewed {
+    /// cladefs: compacts if accumulated `Root::journal_spans` reached `COMPACT_SPAN_THRESHOLD`,
+    /// starting the flush task if needed (mount / thaw).
+    pub async fn compact_spans_if_needed(&self) -> Result<(), Error> {
+        if self.journal.needs_span_compaction() {
             self.maybe_start_flush_task();
+            crate::boxed(|| self.journal.force_compact())
+                .await
+                .context("compacting accumulated journal spans")?;
         }
-        Ok(renewed)
+        Ok(())
     }
 
-    /// cladefs: writes a super-block recording the journal's new extents
-    /// ([`FxFilesystem::renew_journal_tail`]). It waits for the frees the last flush let die,
-    /// which commit: so commits must go on.
-    pub async fn record_journal_tail(&self) -> Result<(), Error> {
-        // cladefs: box `write_super_block` in a non-inlined frame so mount/replay and thaw paths
-        // fit 16 KiB guest kernel stacks (TASK-26.9).
-        crate::boxed(|| self.journal.write_super_block()).await
+    /// cladefs: rotates the journal to a fresh position-derived span on the current device cell
+    /// when thawing in a VM restored from a snapshot onto a forked cell (board 6923). No-op if the
+    /// cell has not changed. Nothing may commit or compact meanwhile.
+    pub async fn rotate_journal_span(&self) -> Result<(), Error> {
+        crate::boxed(|| self.journal.rotate_journal_span()).await
+    }
+
+    /// cladefs: all extents known to the filesystem (allocator extents + live/unfreed system
+    /// extents: active/retired super-block and unfreed journal blocks), for leak oracles
+    /// (boards 6923, 6926).
+    pub fn known_extents(&self) -> rustc_hash::FxHashMap<storage_device::ExtentId, u64> {
+        let mut known: rustc_hash::FxHashMap<storage_device::ExtentId, u64> =
+            self.allocator().extents().into_iter().map(|(e, (_, len))| (e, len)).collect();
+        for (extent, len) in self.journal.known_extents() {
+            known.entry(extent).and_modify(|v| *v = (*v).max(len)).or_insert(len);
+        }
+        known
+    }
+
+    /// cladefs: bytes counted for `extent` across both the allocator and system extents
+    /// (super-block and journal blocks), for `counts_what_its_device_holds` (boards 6923, 6926).
+    pub fn extent_counted(&self, extent: storage_device::ExtentId) -> u64 {
+        let alloc = self.allocator().extent_counted(extent);
+        let sys = self.journal.known_extents().get(&extent).copied().unwrap_or(0);
+        alloc.max(sys)
     }
 
     #[trace]
@@ -944,7 +932,7 @@ impl FxFilesystem {
         self.hooks().on_before_commit();
 
         let _guard = debug_assert_not_too_long!(self.commit_mutex.lock());
-        let journal_offset = if self.journal().image_builder_mode().is_some() {
+        let journal_offset = if self.journal().image_builder_mode() {
             let journal_checkpoint =
                 JournalCheckpoint { file_offset: 0, checksum: 0, version: LATEST_VERSION };
             let maybe_mutation = self
@@ -1008,7 +996,7 @@ impl FxFilesystem {
     }
 
     fn maybe_start_flush_task(&self) {
-        if self.journal.image_builder_mode().is_some() {
+        if self.journal.image_builder_mode() {
             return;
         }
         let mut flush_task = self.flush_task.lock();
@@ -1045,7 +1033,7 @@ impl FxFilesystem {
         self: &Arc<Self>,
         options: transaction::Options<'a>,
     ) -> Result<(MetadataReservation, Option<&'a Reservation>, Option<Hold<'a>>), Error> {
-        if self.options.image_builder_mode.is_some() {
+        if self.options.image_builder_mode {
             // Image builder mode avoids the journal so reservation tracking for metadata overheads
             // doesn't make sense and so we essentially have 'all or nothing' semantics instead.
             return Ok((MetadataReservation::Borrowed, None, None));
@@ -1321,7 +1309,7 @@ mod tests {
     use crate::object_store::allocator::TEST_EXTENT;
     use crate::object_store::directory::{Directory, replace_child};
     use crate::object_store::journal::JournalOptions;
-    use crate::object_store::journal::super_block::{Root, SuperBlockInstance};
+    use crate::object_store::journal::super_block::Root;
     use crate::object_store::transaction::{LockKey, Options, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
@@ -1426,7 +1414,7 @@ mod tests {
             let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
             let fs = FxFilesystemBuilder::new()
                 .format(true)
-                .image_builder_mode(Some(SuperBlockInstance::A))
+                .image_builder_mode(true)
                 .open(device)
                 .await
                 .expect("open failed");
@@ -1923,7 +1911,7 @@ mod tests {
     /// cladefs: the extents of the device's cell that it holds and Fxfs doesn't know.
     async fn leaked_extents(fs: &FxFilesystem) -> Vec<ExtentId> {
         let device = fs.device();
-        let known = fs.allocator().extents();
+        let known = fs.known_extents();
         let cell = device.cell();
         let held = device.extents().into_iter();
         held.filter(|extent| extent.cell == cell && !known.contains_key(extent)).collect()
@@ -2675,7 +2663,7 @@ mod tests {
         device.reopen(true);
         let fs = FxFilesystemBuilder::new()
             .format(true)
-            .image_builder_mode(Some(SuperBlockInstance::A))
+            .image_builder_mode(true)
             .open(device)
             .await
             .expect("open failed");
@@ -2709,7 +2697,7 @@ mod tests {
         let device = {
             let fs = FxFilesystemBuilder::new()
                 .format(true)
-                .image_builder_mode(Some(SuperBlockInstance::B))
+                .image_builder_mode(true)
                 .open(device)
                 .await
                 .expect("open failed");
@@ -2822,10 +2810,8 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[test_case(SuperBlockInstance::A; "Superblock instance A")]
-    #[test_case(SuperBlockInstance::B; "Superblock instance B")]
     #[fuchsia::test]
-    async fn test_image_builder_mode_flush_on_close_sb_a(target_sb: SuperBlockInstance) {
+    async fn test_image_builder_mode_flush_on_close() {
         const BLOCK_SIZE: u32 = 4096;
         let device = DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE));
 
@@ -2833,7 +2819,7 @@ mod tests {
         device.reopen(true);
         let fs = FxFilesystemBuilder::new()
             .format(true)
-            .image_builder_mode(Some(target_sb))
+            .image_builder_mode(true)
             .open(device)
             .await
             .expect("open failed");
@@ -2873,25 +2859,21 @@ mod tests {
             handle.write_or_append(None, buf.as_ref()).await.expect("write failed");
         }
 
-        // 4. Close. Should flush to `target_sb` only.
+        // 4. Close. Should flush and commit the single super-block in `Root`.
         fs.close().await.expect("close failed");
 
-        let other_sb = target_sb.next();
-
-        // 5. Verify `target_sb` is valid and `other_sb` is empty: cladefs: the root names only
-        // `target_sb`.
+        // 5. Verify `Root::super_block` is valid.
         let device = fs.take_device().await;
-        device.reopen(true); // Read-only is fine for verifying.
+        device.reopen(true);
         let mut buf = device.allocate_buffer(BLOCK_SIZE as usize).await;
 
         let root = Root::read(&**device).await.expect("read root");
-        let first_extent = root.first_extent(target_sb).expect("no target_sb");
+        let sb_extent = root.super_block.as_ref().expect("no super_block");
         device
-            .read(first_extent.extent, first_extent.range.start, buf.as_mut())
+            .read(sb_extent.extent, sb_extent.range.start, buf.as_mut())
             .await
-            .expect("read target_sb");
+            .expect("read super_block");
         let data = buf.to_vec();
-        assert_eq!(&data[..8], b"FxfsSupr", "target_sb should have magic bytes");
-        assert_eq!(root.first_extent(other_sb), None, "other_sb was written");
+        assert_eq!(&data[..8], b"FxfsSupr", "super_block should have magic bytes");
     }
 }

@@ -53,11 +53,12 @@
 //! sub-reservations, each of which may be "reserved" or "forgotten" when it comes time to actually
 //! allocate space.
 //!
-//! ## Fixed locations
+//! ## System extents (super-block and journal)
 //!
-//! The only fixed location files in Fxfs are the first 512kiB extents of the two superblocks, in
-//! extents no allocator mints (`SUPER_BLOCK_A_EXTENT` and `SUPER_BLOCK_B_EXTENT`). The allocator
-//! manages these extents, but does so using a 'mark_allocated' method distinct from all other
+//! cladefs: the super-block extent and position-derived journal span extents are minted from the
+//! allocator's monotonic sequence counter (`mint_system_extent`, `mint_journal_span`) so they
+//! never collide with regular allocations, but are tracked and reclaimed by `Root` and `Journal`
+//! rather than stored in the allocator's LSM tree (boards 6923, 6926).
 //! allocations, whose extents the allocator mints.
 //!
 //! ## Dead extents
@@ -998,7 +999,7 @@ impl Allocator {
                 allocation_size_histogram: [0; 64],
             }),
             counters: Mutex::new(AllocatorCounters::default()),
-            allocations_allowed: AtomicBool::new(filesystem.options().image_builder_mode.is_none()),
+            allocations_allowed: AtomicBool::new(!filesystem.options().image_builder_mode),
             freeing: futures::lock::Mutex::new(None),
         }
     }
@@ -1131,12 +1132,54 @@ impl Allocator {
         Ok(())
     }
 
+    /// cladefs: mints a single extent in the current cell for system metadata (a super-block)
+    /// without touching `AllocatorInfo::next_sequence` (which is the committed allocator-tree
+    /// watermark; `Root::super_block` carries the committed super-block sequence on mount)
+    /// (board 6926).
+    pub fn mint_system_extent(&self) -> ExtentId {
+        let device = self.filesystem.upgrade().unwrap().device();
+        let cell = self.cell();
+        let mut inner = self.inner.lock();
+        inner.extents.mint_system(cell, &*device)
+    }
+
+    /// cladefs: reserves `blocks` contiguous sequence numbers in the current cell for a
+    /// position-derived journal span without touching `AllocatorInfo::next_sequence` (`Root` and
+    /// `JournalRecord::JournalSpan` carry committed span sequences on mount) (board 6923).
+    /// Returns `(cell, base_sequence)`.
+    pub fn mint_journal_span(&self, blocks: u64) -> Result<(u64, u64), Error> {
+        let cell = self.cell();
+        let mut inner = self.inner.lock();
+        let base = inner.extents.mint_span(blocks).ok_or_else(|| {
+            anyhow!(FxfsError::Inconsistent).context("journal span sequence overflow")
+        })?;
+        Ok((cell, base))
+    }
+
+    /// cladefs: ensures minting is past the device's current `next_sequence` and `sequence_floor`,
+    /// used when thawing onto a new cell (snapshot restore).
+    pub async fn advance_sequence_floor(&self) -> Result<(), Error> {
+        let device = self.filesystem.upgrade().unwrap().device();
+        let floor = device.next_sequence().await?.max(device.sequence_floor().await?);
+        let mut inner = self.inner.lock();
+        inner.extents.mint_from(floor);
+        Ok(())
+    }
+
     /// cladefs: `discarded`, the extents named by what replay read of the journal but discarded,
     /// which a replay after may read again, settles when what the mount found dead may be freed
-    /// (`extent_table::ExtentTable::settle_replay`).
+    /// (`extent_table::ExtentTable::settle_replay`). `live_system` protects the live super-block
+    /// and live journal block extents from orphan sweeping; `retired_system` (retired super-blocks
+    /// and superseded journal blocks) and `unused_tail` (unreplayed tail blocks of the last span,
+    /// filtered to `< device_next_sequence`) are freed and sealed before writing past the floor
+    /// (boards 6923, 6926).
     pub async fn on_replay_complete(
         self: &Arc<Self>,
         discarded: &HashSet<ExtentId>,
+        live_system: &HashSet<ExtentId>,
+        retired_system: &[ExtentId],
+        unused_tail: &[ExtentId],
+        min_next_sequence: u64,
     ) -> Result<(), Error> {
         let filesystem = self.filesystem.upgrade().unwrap();
         // Minting resumes past every extent of the cell the device holds, including those a
@@ -1164,19 +1207,38 @@ impl Allocator {
                         .collect::<BTreeMap<_, _>>()
                 ))
             );
-            let next_sequence = inner.info.next_sequence;
+            let cell = self.cell();
+            let next_sequence = inner.info.next_sequence.max(min_next_sequence);
+            inner.info.next_sequence = next_sequence;
             inner.extents.mint_from(next_sequence.max(device_next_sequence).max(floor));
             // Sequence numbers are the store's, and far apart: the search is of those since the
             // last compaction, or since the oldest extent alive if it is older, as a filesystem's
             // first extent may be millions past nothing, and of few of those at most.
-            let lowest = inner.extents.lowest_sequence(self.cell()).unwrap_or(next_sequence);
+            let lowest_system = live_system
+                .iter()
+                .filter(|extent| extent.cell == cell)
+                .map(|extent| extent.sequence)
+                .min();
+            let lowest = match (inner.extents.lowest_sequence(cell), lowest_system) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => next_sequence,
+            };
             let start = inner.next_sequence_opened.max(lowest).min(next_sequence);
             inner.extents.settle_replay(discarded);
             let mut orphans = 0;
             inner.orphans_sought = orphan_windows(start, device_next_sequence);
             for sought in inner.orphans_sought.clone() {
-                orphans += inner.extents.kill_orphans(self.cell(), sought, discarded);
+                orphans += inner.extents.kill_orphans(cell, sought, discarded, live_system);
             }
+            let retired =
+                retired_system.iter().copied().filter(|extent| extent.cell == cell).chain(
+                    unused_tail.iter().copied().filter(|extent| {
+                        extent.cell == cell && extent.sequence < device_next_sequence
+                    }),
+                );
+            orphans += inner.extents.kill_system_extents(retired, live_system);
             if orphans > 0 {
                 info!(count = orphans; "Extents a crash left will be freed");
             }
@@ -1232,11 +1294,22 @@ impl Allocator {
         format!("{:?}", self.inner.lock().owner_bytes)
     }
 
+    /// Physical bytes currently held (or buffered) by system extents (super-block + unfreed
+    /// journal blocks) outside `ExtentTable`. Leaf lock only; call before locking `self.inner`.
+    fn system_bytes(&self) -> u64 {
+        self.filesystem.upgrade().map_or(0, |fs| fs.journal().system_bytes())
+    }
+
     /// Whether allocating `len` bytes needs the device flushed first, so that dead extents can be
-    /// freed to make room.
+    /// freed to make room. Includes physical system bytes plus headroom for upcoming journal and
+    /// super-block writes.
     fn needs_sync(&self, len: u64) -> bool {
+        let system_bytes =
+            self.filesystem.upgrade().map_or(0, |fs| fs.journal().sync_headroom_bytes());
         let inner = self.inner.lock();
-        inner.extents.dead_bytes() > 0 && inner.unavailable_bytes() + len > self.device_size()
+        inner.extents.dead_bytes() > 0
+            && inner.unavailable_bytes().saturating_add(system_bytes).saturating_add(len)
+                > self.device_size()
     }
 
     fn is_system_store(&self, owner_object_id: u64) -> bool {
@@ -1270,14 +1343,15 @@ impl Allocator {
                     let root = inspector.root();
                     root.record_uint("max_extent_size_bytes", this.max_extent_size_bytes);
                     root.record_uint("bytes_total", this.device_size());
+                    let system_bytes = this.system_bytes();
                     let (allocated, reserved, used, unavailable, extents, dead) = {
                         // TODO(https://fxbug.dev/42069513): Push-back or rate-limit to prevent DoS.
                         let inner = this.inner.lock();
                         (
                             inner.allocated_bytes().0,
                             inner.reserved_bytes(),
-                            inner.used_bytes(),
-                            inner.unavailable_bytes(),
+                            inner.used_bytes() + system_bytes,
+                            inner.unavailable_bytes() + system_bytes,
                             inner.extents.alive().count() as u64,
                             inner.extents.dead().len() as u64,
                         )
@@ -1462,10 +1536,11 @@ impl Allocator {
             len = r.amount();
             Left(r)
         } else {
+            let system_bytes = self.system_bytes();
             let mut inner = self.inner.lock();
             assert!(inner.opened);
             // Do not exceed the limit for the owner or the device.
-            let device_used = inner.used_bytes();
+            let device_used = inner.used_bytes() + system_bytes;
             let owner_bytes_left = inner.owner_id_bytes_left(owner_object_id);
             // We must take care not to use up space that might be reserved.
             let limit =
@@ -1486,6 +1561,7 @@ impl Allocator {
                     self.reservation_description(reservation),
                 )));
             } else {
+                let system_bytes = self.system_bytes();
                 let inner = self.inner.lock();
                 bail!(anyhow!(FxfsError::NoSpace).context(format!(
                     "Failed to allocate {} bytes for owner {} (owner_bytes_left: {}, device_used: \
@@ -1493,7 +1569,7 @@ impl Allocator {
                     requested_len,
                     owner_object_id,
                     inner.owner_id_bytes_left(owner_object_id),
-                    inner.used_bytes(),
+                    inner.used_bytes() + system_bytes,
                     self.device_size()
                 )));
             }
@@ -1586,8 +1662,9 @@ impl Allocator {
             // malformed range is, before anything is journaled.
             ensure!(len > 0, FxfsError::InvalidArgs);
 
+            let system_bytes = self.system_bytes();
             let mut inner = self.inner.lock();
-            let device_used = inner.used_bytes();
+            let device_used = inner.used_bytes() + system_bytes;
             let owner_id_bytes_left = inner.owner_id_bytes_left(owner_object_id);
             let data_owner = inner.data_owner(owner_object_id);
             ensure!(
@@ -1991,9 +2068,10 @@ impl Allocator {
         amount: u64,
     ) -> Option<Reservation> {
         {
+            let system_bytes = self.system_bytes();
             let mut inner = self.inner.lock();
 
-            let device_free = self.device_size().saturating_sub(inner.used_bytes());
+            let device_free = self.device_size().saturating_sub(inner.used_bytes() + system_bytes);
 
             let limit = match owner_object_id {
                 Some(id) => std::cmp::min(inner.owner_id_bytes_left(id), device_free),
@@ -2015,9 +2093,10 @@ impl Allocator {
         amount: impl FnOnce(u64) -> u64,
     ) -> Reservation {
         let amount = {
+            let system_bytes = self.system_bytes();
             let mut inner = self.inner.lock();
 
-            let device_free = self.device_size().saturating_sub(inner.used_bytes());
+            let device_free = self.device_size().saturating_sub(inner.used_bytes() + system_bytes);
 
             let amount = amount(match owner_object_id {
                 Some(id) => std::cmp::min(inner.owner_id_bytes_left(id), device_free),
@@ -2071,8 +2150,9 @@ impl Allocator {
     /// allocator's info records no size, so a mount after takes the device's.
     pub fn set_device_size(&self, size: u64) -> Result<(), Error> {
         let size = self.block_size.align_down(size);
+        let system_bytes = self.system_bytes();
         let inner = self.inner.lock();
-        let held = inner.used_bytes().max(inner.unavailable_bytes());
+        let held = inner.used_bytes().max(inner.unavailable_bytes()) + system_bytes;
         ensure!(
             size >= held,
             anyhow!(FxfsError::NoSpace)
@@ -2089,17 +2169,26 @@ impl Allocator {
         self.inner.lock().owner_bytes.iter().map(|(k, v)| (*k, v.allocated_bytes.0)).collect()
     }
 
-    /// Returns the number of bytes the extents alive take, whole, with those reserved and
-    /// allocated but not yet committed.
+    /// Returns the number of bytes the extents alive take, whole, with those reserved,
+    /// allocated but not yet committed, and physical system extents (super-block + journal).
     pub fn get_used_bytes(&self) -> Saturating<u64> {
-        Saturating(self.inner.lock().used_bytes())
+        let system_bytes = self.system_bytes();
+        Saturating(self.inner.lock().used_bytes() + system_bytes)
     }
 
     /// cladefs: what the used bytes (`get_used_bytes`) are made of, at one moment: what the free
     /// space a statfs reports changes by, divided, as a check of it needs (TASK-257).
     pub fn usage(&self) -> Usage {
+        let system_bytes = self.system_bytes();
+        let root_parent_id =
+            self.filesystem.upgrade().map(|fs| fs.object_manager().root_parent_store_object_id());
         let inner = self.inner.lock();
-        let (held, pending) = inner.extents.held();
+        let (mut held, pending) = inner.extents.held();
+        if system_bytes > 0
+            && let Some(owner) = root_parent_id
+        {
+            *held.entry(owner).or_default() += system_bytes;
+        }
         Usage {
             held,
             pending,
@@ -3103,7 +3192,9 @@ mod tests {
             .allocate(&mut transaction, STORE_OBJECT_ID, fs.block_size().get())
             .await
             .expect("allocate failed");
-        assert_eq!(range, ExtentRange::new(extent(1 << 40), 0..4096));
+        // Mount rotates the journal onto a fresh 32-block span starting at the floor (1 << 40),
+        // so the first user allocation starts at (1 << 40) + 32.
+        assert_eq!(range, ExtentRange::new(extent((1 << 40) + 32), 0..4096));
         assert!(held < 1 << 10, "the device held {held} sequence numbers");
         transaction.commit().await.expect("commit failed");
         fs.close().await.expect("close failed");
@@ -3120,16 +3211,11 @@ mod tests {
             .expect("new failed");
         let mut device_ranges = collect_allocations(&allocator).await;
 
-        // Expected extents, in the order they were minted: the journal's blocks are extents of
-        // their own.
+        // Expected extents in the allocator tree: only the root store's info (the journal uses
+        // position-derived spans and the super-block lives in Root, neither in the allocator).
         let first = device_ranges[0].extent.sequence;
         let block = |sequence| ExtentRange::new(extent(first + sequence), 0..4096);
-        let expected: Vec<_> = (0..32) // The initial journal (128k)
-            .chain([32, 33]) // The root store's info, and superblock A
-            .chain(34..130) // The journal's next 384k
-            .chain([130]) // Superblock B
-            .map(block)
-            .collect();
+        let expected: Vec<_> = [0].into_iter().map(block).collect();
         assert_eq!(device_ranges, expected);
         let next_sequence = allocator.inner.lock().extents.next_sequence();
         for i in 0..2 {
@@ -4485,7 +4571,7 @@ mod tests {
         floor.store(1 << 40, Ordering::Relaxed);
         let fs = FxFilesystemBuilder::new().open(device).await.expect("open failed");
         let range = commit_allocation(&fs).await;
-        assert_eq!(range.extent, extent(1 << 40));
+        assert_eq!(range.extent, extent((1 << 40) + 32));
         {
             let device = fs.device();
             let buffer = device.allocate_buffer(device.block_size() as usize).await;

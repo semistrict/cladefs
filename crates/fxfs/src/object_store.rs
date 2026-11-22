@@ -84,7 +84,6 @@ use fxfs_crypto::{
     CipherHolder, Crypt, JournalCipher, JournalXtsCipher, KeyPurpose, ObjectType, UnwrappedKey,
     WrappingKeyId, key_to_cipher,
 };
-use rand::Rng as _;
 use scopeguard::ScopeGuard;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -951,7 +950,7 @@ impl ObjectStore {
             buf
         };
 
-        if self.filesystem().options().image_builder_mode.is_some() {
+        if self.filesystem().options().image_builder_mode {
             // If we're in image builder mode, we want to avoid writing to disk unless explicitly
             // asked to. New object stores will have their StoreInfo written when we compact in
             // FxFilesystem::finalize().
@@ -2734,7 +2733,9 @@ impl ObjectStore {
             let layer_set = self.tree.layer_set();
             let mut key = ObjectKey::object(0);
             loop {
-                let next_id = rand::rng().next_u32() as u64;
+                // cladefs: use `getrandom` directly rather than `rand::rng()` so the guest kernel
+                // needs no thread-local RNG state (board 6929).
+                let next_id = getrandom::u32().expect("getrandom failed") as u64;
                 let Some(next_id) = NonZero::new(next_id) else { continue };
                 if self.last_object_id.lock().is_reserved(next_id.get()) {
                     continue;

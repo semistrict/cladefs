@@ -9,32 +9,24 @@
 // size. Flushing the device frees the extents that died before it (`did_flush_device`), in the
 // background, which the next flush waits for, and which can fail; when some of them need it, the
 // journal first records the flush, and flushes again (`record_device_flush`). Extents are written
-// once: each 4 KiB block of the journal is an extent of its own (`EXTENT_SIZE`), so Fxfs's block
-// size must be 4 KiB, and after replay the journal's tail, past where replay stopped, moves to new
-// extents if a crash left any of it written, or if it is a fork's parent's cell's
-// (`renew_tail`). A read-only mount keeps its reader at the end of the last whole transaction it
-// applied, from which a follower reads on once its device holds more (`read_on`, backlog doc-8).
-// A sync's barrier records how far the journal was written in the store's root it sets
-// (`Root::journal_end`), and a replay that ends before there, at damage, is refused, where upstream
-// takes any checksum that fails for the journal's end (TASK-153.13). So is a journal that starts
-// within a block that doesn't verify, where upstream's reader panics (TASK-149.23). How far the
-// journal is written, flushed, synced and zeroed is one value (`JournalPosition`, position.rs),
-// which checks the orders between them as each changes, where upstream's `Inner` has a field for
-// each (TASK-160.25).
+// once: the journal is no longer an object in `root_parent` or the allocator — its 4 KiB blocks
+// live at position-derived extent IDs in contiguous `JournalSpan`s tracked by `Root` and extended
+// in-stream by `JournalRecord::JournalSpan`, with a single atomic super-block in `Root` (boards
+// 6923, 6926). On writable mount or snapshot thaw onto a new cell, the journal rotates to a fresh
+// span in `Root` without probing or rewriting the super-block, and superseded journal blocks are
+// freed directly after `commit_root`. A read-only mount keeps its reader at the end of the last
+// whole transaction it applied, from which a follower reads on once its device holds more
+// (`read_on`, backlog doc-8). A sync's barrier records how far the journal was written in the
+// store's root it sets (`Root::journal_end`), and a replay that ends before there, at damage, is
+// refused (TASK-153.13). So is a journal that starts within a block that doesn't verify
+// (TASK-149.23). How far the journal is written, flushed and synced is one value
+// (`JournalPosition`, position.rs, TASK-160.25).
 
-//! The journal is implemented as an ever extending file which contains variable length records
-//! that describe mutations to be applied to various objects.  The journal file consists of
-//! blocks, with a checksum at the end of each block, but otherwise it can be considered a
-//! continuous stream.
-//!
-//! The checksum is seeded with the checksum from the previous block.  To free space in the
-//! journal, records are replaced with sparse extents when it is known they are no longer
-//! needed to mount.
-//!
-//! At mount time, the journal is replayed: the mutations are applied into memory.
-//! Eventually, a checksum failure will indicate no more records exist to be replayed,
-//! at which point the mount can continue and the journal will be extended from that point with
-//! further mutations as required.
+//! The journal is an ever-extending stream of variable-length records describing mutations to be
+//! applied to objects, stored in 4 KiB blocks addressed by position-derived extent IDs
+//! (`JournalSpan`). Each block carries a trailing fletcher64 checksum seeded with the previous
+//! block's checksum. Superseded blocks are freed directly after a super-block commits via
+//! `commit_root`.
 
 mod bootstrap_handle;
 mod checksum_list;
@@ -50,31 +42,27 @@ use crate::filesystem::{
 };
 use crate::hooks::HooksHandle;
 use crate::log::*;
-use crate::lsm_tree::types::LayerIterator;
 use crate::object_handle::{ObjectHandle as _, ReadObjectHandle};
 use crate::object_store::allocator::Allocator;
-use crate::object_store::data_object_handle::OverwriteOptions;
-use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::graveyard::Graveyard;
-use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
+use crate::object_store::journal::bootstrap_handle::{
+    JournalExtentHandle, extents_in_spans, prune_spans_before, truncate_spans_at,
+};
 use crate::object_store::journal::checksum_list::ChecksumList;
 use crate::object_store::journal::position::JournalPosition;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::super_block::{
-    Root, SuperBlockHeader, SuperBlockInstance, SuperBlockManager,
+    JournalSpan, Root, SuperBlockHeader, SuperBlockManager,
 };
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::object_manager::ObjectManager;
-use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::transaction::{
-    AllocatorMutation, LockKey, Mutation, MutationV63, ObjectMutationIterator, ObjectStoreMutation,
-    Options, TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
+    AllocatorMutation, Mutation, MutationV63, ObjectMutationIterator, ObjectStoreMutation, Options,
+    TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, HandleOwner, INVALID_OBJECT_ID,
-    Item, ItemRef, NewChildStoreOptions, ObjectStore, ReservedId,
+    AssocObj, DataObjectHandle, HandleOwner, INVALID_OBJECT_ID, NewChildStoreOptions, ObjectStore,
 };
-use crate::range::RangeExt;
 use crate::round::round_div;
 use crate::serialized_types::{LATEST_VERSION, Version, Versioned};
 use anyhow::{Context, Error, anyhow, bail, ensure};
@@ -90,31 +78,24 @@ use serde::{Deserialize, Serialize};
 use static_assertions::const_assert;
 use std::clone::Clone;
 use std::collections::HashSet;
-use std::num::NonZero;
-use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Poll, Waker};
-use storage_device::{Device, ExtentId, ExtentRange, NoExtent};
+use storage_device::{Device, ExtentId, ExtentRange};
 use storage_units::BlockSize;
 
-// The journal file is written to in blocks of this size.
+// The journal stream is written in blocks of this size, each a write-once extent of its own.
 pub const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
 
-// The journal file is extended by this amount when necessary.
-const CHUNK_SIZE: u64 = 131_072;
-
-// cladefs: the size of the journal file's extents, BLOCK_SIZE's. Each block is an extent of its own,
-// which the journal writes once, before it is sealed (backlog doc-4): a journal block is written
-// once. The filesystem's blocks must be no larger (see `check_block_size`).
-const EXTENT_SIZE: u64 = 4096;
-
-// cladefs: how much of the journal's old space a commit zeroes, and how much a transaction extends the
-// file by, at most: the records of a transaction that does both fit in a chunk, which `pre_commit`
-// counts on.
-const MAX_ZEROED_PER_COMMIT: u64 = 512 * EXTENT_SIZE;
-const MAX_EXTENDED_PER_COMMIT: u64 = 256 * EXTENT_SIZE;
+// Default number of 4 KiB blocks reserved per position-derived journal span (128 KiB).
+const DEFAULT_SPAN_BLOCKS: u64 = 32;
+const CHUNK_SIZE: u64 = DEFAULT_SPAN_BLOCKS * 4096;
+const MIN_SPAN_BLOCKS: u64 = 4;
 const_assert!(CHUNK_SIZE > TRANSACTION_MAX_JOURNAL_USAGE);
+
+// Trigger background compaction once this many spans are live in `Root`, keeping `Root` well
+// under `MAX_ROOT_SPANS` across repeated remounts.
+const COMPACT_SPAN_THRESHOLD: usize = 32;
 
 // See the comment for the `reclaim_size` member of Inner.
 pub const DEFAULT_RECLAIM_SIZE: u64 = 524_288;
@@ -161,12 +142,12 @@ pub struct JournalCheckpointV32 {
     pub version: Version,
 }
 
-pub type JournalRecord = JournalRecordV63;
+pub type JournalRecord = JournalRecordV64;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum JournalRecordV63 {
+pub enum JournalRecordV64 {
     EndBlock,
     Mutation {
         object_id: u64,
@@ -177,23 +158,17 @@ pub enum JournalRecordV63 {
     /// Discard all mutations with offsets greater than or equal to the given offset.
     Discard(u64),
     /// Indicates the device was flushed at the given journal offset.
-    /// Note that this really means that at this point in the journal offset, we can be certain that
-    /// there's no remaining buffered data in the block device; the buffers and the disk contents are
-    /// consistent.
-    /// We insert one of these records *after* a flush along with the *next* transaction to go
-    /// through.  If that never comes (either due to graceful or hard shutdown), the journal reset
-    /// on the next mount will serve the same purpose and count as a flush, although it is necessary
-    /// to defensively flush the device before replaying the journal (if possible, i.e. not
-    /// read-only) in case the block device connection was reused.
     DidFlushDevice(u64),
-    /// Checksums for a data range written by this transaction. A transaction is only valid if these
-    /// checksums are right. The range is the extent range the checksums are for.
-    ///
-    /// A boolean indicates whether this range is being written to for the first time. For overwrite
-    /// extents, we only check the checksums for a block if it has been written to for the first
-    /// time since the last flush, because otherwise we can't roll it back anyway so it doesn't
-    /// matter. For copy-on-write extents, the bool is always true.
+    /// Checksums for a data range written by this transaction.
     DataChecksums(ExtentRange, crate::checksum::ChecksumsV38, bool),
+    /// cladefs: extends the journal stream with a new position-derived span (board 6923).
+    /// Replay accepts it only when the handle's current last span matches
+    /// `(prev_cell, prev_end_sequence)` and ends at `span.start_offset`.
+    JournalSpan {
+        span: JournalSpan,
+        prev_cell: u64,
+        prev_end_sequence: u64,
+    },
 }
 
 /// cladefs: `JournalRecord::Mutation`, borrowing its mutation, which serializes as the record does:
@@ -258,10 +233,6 @@ impl SerializedRecords {
     }
 }
 
-pub(super) fn journal_handle_options() -> HandleOptions {
-    HandleOptions { skip_journal_checks: true, ..Default::default() }
-}
-
 /// The journal records a stream of mutations that are to be applied to other objects.  At mount
 /// time, these records can be replayed into memory.  It provides a way to quickly persist changes
 /// without having to make a large number of writes; they can be deferred to a later time (e.g.
@@ -270,13 +241,13 @@ pub(super) fn journal_handle_options() -> HandleOptions {
 pub struct Journal {
     objects: Arc<ObjectManager>,
     hooks: Arc<HooksHandle>,
-    handle: OnceLock<DataObjectHandle<ObjectStore>>,
+    handle: OnceLock<JournalExtentHandle>,
     super_block_manager: SuperBlockManager,
     inner: Mutex<Inner>,
     writer_mutex: Mutex<()>,
     sync_mutex: futures::lock::Mutex<()>,
     trace: AtomicBool,
-    // cladefs: what the journal's file is extended by (`JournalOptions::chunk_size`).
+    // cladefs: bytes per minted position-derived journal span (`JournalOptions::chunk_size`).
     chunk_size: u64,
 
     // This event is used when we are waiting for a compaction to free up journal space.
@@ -289,6 +260,10 @@ pub struct Journal {
 
     // cladefs: what it waited for and did, as `stats` says.
     stats: JournalStats,
+
+    // cladefs: block-aligned high-water mark of journal bytes written or buffered, used without
+    // locking `inner` by `Allocator::needs_sync` to account for physical journal bytes on device.
+    writer_end_block: AtomicU64,
 }
 
 /// cladefs: how often, and how long, transactions waited for the journal's space, which compactions
@@ -305,15 +280,9 @@ pub struct JournalStats {
 struct Inner {
     super_block_header: SuperBlockHeader,
 
-    // cladefs: how far the journal has got, as written, flushed, synced, zeroed: upstream's
-    // `zero_offset`, `device_flushed_offset`, `needs_did_flush_device`, `flushed_offset`,
-    // `valid_to` and `discard_offset`, and cladefs's own, which a method each changes, checking
-    // their orders (`JournalPosition`, TASK-160.25).
+    // cladefs: how far the journal has got, as written, flushed and synced:
+    // `JournalPosition` (TASK-160.25).
     position: JournalPosition,
-
-    // cladefs: the journal goes on in extents only a super-block not yet written records
-    // (`renew_tail`), so that a replay, from the last, finds nothing of what's written there.
-    tail_unrecorded: bool,
 
     // The writer for the journal.
     writer: JournalWriter,
@@ -348,7 +317,7 @@ struct Inner {
     // amount is written to the journal.
     reclaim_size: u64,
 
-    image_builder_mode: Option<SuperBlockInstance>,
+    image_builder_mode: bool,
 
     // If true and `needs_barrier`, issue a pre-barrier on the first device write of each journal
     // write (which happens in multiples of `BLOCK_SIZE`). This ensures that all the corresponding
@@ -482,52 +451,35 @@ fn valid_device_range(device_range: &ExtentRange, block_size: BlockSize) -> bool
     !device_range.is_empty() && block_size.is_aligned(&device_range.range)
 }
 
-/// cladefs: the part of an extent of the store that `extent` of the journal is, `device_offset` on:
-/// what an image says, which may be anything.
-fn journal_extent(
-    extent: &Extent,
-    store_extent: ExtentId,
-    device_offset: u64,
-) -> Result<ExtentRange, Error> {
-    let end = device_offset.checked_add(extent.length().context("Invalid extent")?);
-    let end = end.ok_or(FxfsError::Inconsistent).context("Invalid extent")?;
-    Ok(ExtentRange::new(store_extent, device_offset..end))
-}
-
-/// Handles for journal-like objects have some additional functionality to manage their extents,
-/// since during replay we need to add extents as we find them.
+/// Handles for journal-like streams (the journal itself, super-block extent, and fake objects).
 pub trait JournalHandle: ReadObjectHandle {
-    /// The end offset of the last extent in the JournalHandle.  Used only for validating extents
-    /// (which will be skipped if None is returned).
-    /// Note this is equivalent in value to ReadObjectHandle::get_size, when present.
-    fn end_offset(&self) -> Option<u64>;
-    /// Adds an extent to the current end of the journal stream.
-    /// `added_offset` is the offset into the journal of the transaction which added this extent,
-    /// used for discard_extents.
-    fn push_extent(&mut self, added_offset: u64, device_range: ExtentRange);
-    /// Discards all extents which were added in a transaction at offset >= |discard_offset|.
-    fn discard_extents(&mut self, discard_offset: u64);
-    /// cladefs: drops the extents from `offset` on, which extents pushed next replace (see
-    /// `Journal::renew_tail`).
-    fn truncate_extents(&mut self, offset: u64) -> Result<(), Error>;
+    /// cladefs: appends an in-stream `JournalSpan` if it extends the current last span matching
+    /// `(prev_cell, prev_end_sequence)`, returning the offset from which read-ahead should be
+    /// invalidated (board 6923).
+    fn try_push_stream_span(
+        &mut self,
+        span: JournalSpan,
+        prev_cell: u64,
+        prev_end_sequence: u64,
+    ) -> Result<Option<u64>, Error>;
+
+    /// cladefs: synchronizes the handle's spans from `Root::journal_spans`, returning the earliest
+    /// offset where the mapping changed so read-ahead can be invalidated (board 6923).
+    fn sync_spans(&mut self, spans: Vec<JournalSpan>) -> Result<Option<u64>, Error>;
 }
 
-// Provide a stub implementation for DataObjectHandle so we can use it in
-// Journal::read_transactions.  Manual extent management is a NOP (which is OK since presumably the
-// DataObjectHandle already knows where its extents live).
 impl<S: HandleOwner> JournalHandle for DataObjectHandle<S> {
-    fn end_offset(&self) -> Option<u64> {
-        None
+    fn try_push_stream_span(
+        &mut self,
+        _span: JournalSpan,
+        _prev_cell: u64,
+        _prev_end_sequence: u64,
+    ) -> Result<Option<u64>, Error> {
+        Ok(None)
     }
-    fn push_extent(&mut self, _added_offset: u64, _device_range: ExtentRange) {
-        // NOP
-    }
-    fn discard_extents(&mut self, _discard_offset: u64) {
-        // NOP
-    }
-    fn truncate_extents(&mut self, _offset: u64) -> Result<(), Error> {
-        // NOP
-        Ok(())
+
+    fn sync_spans(&mut self, _spans: Vec<JournalSpan>) -> Result<Option<u64>, Error> {
+        Ok(None)
     }
 }
 
@@ -538,16 +490,22 @@ impl Journal {
         options: JournalOptions,
         hooks: Arc<HooksHandle>,
     ) -> Journal {
-        let starting_checksum = rand::random_range(1..u64::MAX);
+        // cladefs: use `getrandom` directly rather than `rand::random_range` so the guest kernel
+        // needs no thread-local RNG state (board 6929).
+        let starting_checksum = loop {
+            let v = getrandom::u64().expect("getrandom failed");
+            if v != 0 && v != u64::MAX {
+                break v;
+            }
+        };
         Journal {
-            objects: objects,
+            objects,
             hooks,
             handle: OnceLock::new(),
             super_block_manager: SuperBlockManager::new(),
             inner: Mutex::new(Inner {
                 super_block_header: SuperBlockHeader::default(),
                 position: JournalPosition::default(),
-                tail_unrecorded: false,
                 writer: JournalWriter::new(BLOCK_SIZE, starting_checksum),
                 output_reset_version: false,
                 flush_waker: None,
@@ -558,7 +516,7 @@ impl Journal {
                 compaction_running: false,
                 sync_waker: None,
                 reclaim_size: options.reclaim_size,
-                image_builder_mode: None,
+                image_builder_mode: false,
                 barriers_enabled: options.barriers_enabled,
                 needs_barrier: false,
                 forced_compaction: false,
@@ -572,6 +530,7 @@ impl Journal {
             reclaim_event: Event::new(),
             follower: Mutex::new(None),
             stats: JournalStats::default(),
+            writer_end_block: AtomicU64::new(0),
         }
     }
 
@@ -582,25 +541,77 @@ impl Journal {
         }
     }
 
-    pub fn set_image_builder_mode(&self, mode: Option<SuperBlockInstance>) {
-        self.inner.lock().image_builder_mode = mode;
-        if let Some(instance) = mode {
-            *self.super_block_manager.next_instance.lock() = instance;
-        }
+    pub fn set_image_builder_mode(&self, enabled: bool) {
+        self.inner.lock().image_builder_mode = enabled;
     }
 
-    pub fn image_builder_mode(&self) -> Option<SuperBlockInstance> {
+    pub fn image_builder_mode(&self) -> bool {
         self.inner.lock().image_builder_mode
     }
 
     #[cfg(feature = "migration")]
     pub fn set_filesystem_uuid(&self, uuid: &[u8; 16]) -> Result<(), Error> {
         ensure!(
-            self.inner.lock().image_builder_mode.is_some(),
+            self.inner.lock().image_builder_mode,
             "Can only set filesystem uuid in image builder mode."
         );
         self.inner.lock().super_block_header.guid.0 = uuid::Uuid::from_bytes(*uuid);
         Ok(())
+    }
+
+    /// cladefs: live and unfreed system extents (active/retired super-block + unfreed journal
+    /// blocks) with their sizes in bytes, for leak and byte-counting oracles (boards 6923, 6926).
+    pub fn known_extents(&self) -> HashMap<ExtentId, u64> {
+        let (sb_extents, journal_freed_to) = self.super_block_manager.known_system();
+        let mut out: HashMap<ExtentId, u64> = HashMap::default();
+        for (extent, len) in sb_extents {
+            out.entry(extent).and_modify(|v| *v = (*v).max(len)).or_insert(len);
+        }
+        if let Some(handle) = self.handle.get() {
+            let end = handle.end_offset();
+            for extent in handle.extents_in(journal_freed_to..end) {
+                out.entry(extent)
+                    .and_modify(|v| *v = (*v).max(BLOCK_SIZE.get()))
+                    .or_insert(BLOCK_SIZE.get());
+            }
+        }
+        out
+    }
+
+    /// cladefs: physical bytes held (or buffered to be written) by live/unfreed system extents
+    /// (super-block + unfreed journal blocks), for allocator capacity accounting (boards 6923, 6926).
+    pub fn system_bytes(&self) -> u64 {
+        self.super_block_manager.system_bytes(self.writer_end_block.load(Ordering::Relaxed))
+    }
+
+    /// cladefs: physical system bytes plus headroom for upcoming journal blocks and a super-block
+    /// write, so `Allocator::needs_sync` frees dead extents before a commit or compaction fills
+    /// the device (boards 6923, 6926).
+    pub fn sync_headroom_bytes(&self) -> u64 {
+        self.system_bytes()
+            .saturating_add(self.chunk_size)
+            .saturating_add(super_block::MIN_SUPER_BLOCK_SIZE)
+    }
+
+    fn record_writer_end(&self, file_offset: u64) {
+        let aligned = BLOCK_SIZE.align_up(file_offset).unwrap_or(file_offset);
+        self.writer_end_block.fetch_max(aligned, Ordering::Relaxed);
+    }
+
+    /// cladefs: the number of journal spans currently tracked in memory.
+    pub(crate) fn span_count(&self) -> usize {
+        self.handle.get().map_or(0, JournalExtentHandle::span_count)
+    }
+
+    /// cladefs: whether `Root::journal_spans` has reached `COMPACT_SPAN_THRESHOLD` and should be
+    /// compacted right away (after mount or thaw).
+    pub(crate) fn needs_span_compaction(&self) -> bool {
+        self.span_count() >= COMPACT_SPAN_THRESHOLD
+    }
+
+    #[cfg(test)]
+    pub(super) fn handle_for_test(&self) -> &JournalExtentHandle {
+        self.handle.get().expect("No journal handle")
     }
 
     pub(crate) async fn read_superblocks(
@@ -754,71 +765,20 @@ impl Journal {
         }
 
         let device = filesystem.device();
+        let root = self.super_block_manager.root().await;
 
-        let mut handle;
-        {
-            let root_parent_layer = root_parent.tree().mutable_layer();
-            let mut iter = root_parent_layer.seek(Bound::Included(&ObjectKey::attribute(
-                super_block.journal_object_id,
-                AttributeId::DATA,
-                AttributeKey::Extent(Extent::search_key_from_offset(
-                    BLOCK_SIZE.align_down(super_block.journal_checkpoint.file_offset),
-                )),
-            )));
-            let start_offset = if let Some(ItemRef {
-                key:
-                    ObjectKey {
-                        data:
-                            ObjectKeyData::Attribute(AttributeId::DATA, AttributeKey::Extent(extent)),
-                        ..
-                    },
-                ..
-            }) = iter.get()
-            {
-                extent.start
-            } else {
-                0
-            };
-            handle = BootstrapObjectHandle::new_with_start_offset(
-                super_block.journal_object_id,
-                device.clone(),
-                start_offset,
-            );
-            while let Some(item) = iter.get() {
-                if !match item.into() {
-                    Some((
-                        object_id,
-                        AttributeId::DATA,
-                        extent,
-                        ExtentValue::Some {
-                            extent: store_extent,
-                            extent_offset: device_offset,
-                            ..
-                        },
-                    )) if object_id == super_block.journal_object_id => {
-                        if let Some(end_offset) = handle.end_offset() {
-                            if extent.start != end_offset {
-                                bail!(anyhow!(FxfsError::Inconsistent).context(format!(
-                                    "Unexpected journal extent {:?}, expected start: {}",
-                                    item, end_offset
-                                )));
-                            }
-                        }
-                        handle.push_extent(
-                            0, // We never discard extents from the root parent store.
-                            journal_extent(extent, *store_extent, *device_offset)?,
-                        );
-                        true
-                    }
-                    _ => false,
-                } {
-                    break;
-                }
-                iter.advance().await.context("Failed to advance root parent store iterator")?;
-            }
-        }
+        let live_journal_start = BLOCK_SIZE.align_down(super_block.journal_checkpoint.file_offset);
+        ensure!(
+            !root.journal_spans.is_empty()
+                && root.journal_spans[0].start_offset <= live_journal_start
+                && live_journal_start < root.journal_spans.last().unwrap().end_offset(),
+            anyhow!(FxfsError::Inconsistent).context(format!(
+                "Root journal spans do not cover journal checkpoint {live_journal_start}"
+            ))
+        );
 
-        let mut reader = JournalReader::new(handle, &super_block.journal_checkpoint);
+        let handle = JournalExtentHandle::new(device.clone(), root.journal_spans.clone());
+        let mut reader = JournalReader::new(handle.clone(), &super_block.journal_checkpoint);
         // cladefs: box in non-inlined frames to keep `Journal::replay`'s stack small (TASK-26.9).
         let JournaledTransactions { mut transactions, device_flushed_offset, committed, .. } =
             crate::boxed(|| self.read_transactions(&mut reader, None, INVALID_OBJECT_ID))
@@ -927,8 +887,6 @@ impl Journal {
         }
 
         // Now we can open the root store.
-        // cladefs: box deep replay stages in non-inlined frames (already inside top-level
-        // offloaded `replay`) so 16 KiB stacks stay small without extra task yields (TASK-26.9).
         let root_store = crate::boxed(|| {
             ObjectStore::open(&root_parent, super_block.root_store_object_id, None)
         })
@@ -982,10 +940,6 @@ impl Journal {
             .context("Failed to replay mutations")?;
         }
 
-        crate::boxed(|| allocator.on_replay_complete(&discarded))
-            .await
-            .context("Failed to complete replay for allocator")?;
-
         let discarded_to =
             if last_checkpoint.file_offset != reader.journal_file_checkpoint().file_offset {
                 Some(reader.journal_file_checkpoint().file_offset)
@@ -993,51 +947,115 @@ impl Journal {
                 None
             };
 
-        // Configure the journal writer so that we can continue.
-        {
-            if last_checkpoint.file_offset < super_block.super_block_journal_file_offset {
-                return Err(anyhow!(FxfsError::Inconsistent).context(format!(
-                    "journal replay cut short; journal finishes at {}, but super-block was \
-                     written at {}",
-                    last_checkpoint.file_offset, super_block.super_block_journal_file_offset
-                )));
+        // Validate replay bounds BEFORE freeing any orphans or mutating Root on the device.
+        if last_checkpoint.file_offset < super_block.super_block_journal_file_offset {
+            return Err(anyhow!(FxfsError::Inconsistent).context(format!(
+                "journal replay cut short; journal finishes at {}, but super-block was \
+                 written at {}",
+                last_checkpoint.file_offset, super_block.super_block_journal_file_offset
+            )));
+        }
+        // cladefs: which fails if the block the journal ends in wasn't read: one it started in
+        // that didn't verify (TASK-149.23).
+        reader.skip_to_end_of_block()?;
+        let replay_end = reader.journal_file_checkpoint().file_offset;
+        // cladefs: nor may it end before where a barrier last found it written (TASK-153.13,
+        // TASK-182).
+        let ended = match discarded_to {
+            Some(_) => last_checkpoint.file_offset,
+            None => replay_end,
+        };
+        if ended < root.journal_end {
+            return Err(anyhow!(FxfsError::Inconsistent).context(format!(
+                "journal replay cut short; journal finishes at {ended}, but was written to \
+                 {} before a barrier",
+                root.journal_end
+            )));
+        }
+
+        // Classify system extents (super-block + position-derived journal blocks) for orphan
+        // sweep and retired-extent reclamation on mount (boards 6923, 6926).
+        let spans_discovered = handle.spans();
+        let spans_end = spans_discovered.last().map_or(0, JournalSpan::end_offset);
+        let cell = device.cell();
+        let mut live_system = HashSet::new();
+        let mut min_next_sequence = 0u64;
+        if let Some(sb) = &root.super_block {
+            if sb.extent.cell == cell {
+                live_system.insert(sb.extent);
+                min_next_sequence = min_next_sequence.max(sb.extent.sequence.saturating_add(1));
             }
-            // cladefs: which fails if the block the journal ends in wasn't read: one it started in
-            // that didn't verify (TASK-149.23).
-            reader.skip_to_end_of_block()?;
-            // cladefs: nor may it end before where a barrier last found it written: damage, not a
-            // crash, ended it there, and what a sync acknowledged after would be lost unsaid
-            // (TASK-153.13). It ends where replay discarded a transaction, if it did, or else at
-            // the end of the block it read last: a barrier follows a write of whole blocks, whose
-            // last may begin a record that goes on in a block the cut lost, which replay stops
-            // before; the record's transaction wasn't whole at the barrier, which acknowledged
-            // nothing of it, and the block was (TASK-182).
-            let ended = match discarded_to {
-                Some(_) => last_checkpoint.file_offset,
-                None => reader.journal_file_checkpoint().file_offset,
-            };
-            let journal_end = self.super_block_manager.journal_end().await;
-            if ended < journal_end {
-                return Err(anyhow!(FxfsError::Inconsistent).context(format!(
-                    "journal replay cut short; journal finishes at {ended}, but was written to \
-                     {journal_end} before a barrier"
-                )));
+        }
+        for span in &spans_discovered {
+            if span.cell == cell {
+                min_next_sequence = min_next_sequence.max(span.end_sequence());
             }
-            let handle = crate::boxed(|| {
-                ObjectStore::open_object(
-                    &root_parent,
-                    super_block.journal_object_id,
-                    journal_handle_options(),
-                    None,
+        }
+        for extent in extents_in_spans(&spans_discovered, live_journal_start..replay_end) {
+            if extent.cell == cell {
+                live_system.insert(extent);
+            }
+        }
+        let mut retired_system: Vec<ExtentId> =
+            root.retired_super_block.iter().copied().filter(|e| e.cell == cell).collect();
+        if live_journal_start > root.journal_freed_to {
+            retired_system.extend(
+                extents_in_spans(&spans_discovered, root.journal_freed_to..live_journal_start)
+                    .into_iter()
+                    .filter(|e| e.cell == cell),
+            );
+        }
+        let unused_tail: Vec<ExtentId> = if spans_end > replay_end {
+            extents_in_spans(&spans_discovered, replay_end..spans_end)
+                .into_iter()
+                .filter(|e| e.cell == cell)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        crate::boxed(|| {
+            allocator.on_replay_complete(
+                &discarded,
+                &live_system,
+                &retired_system,
+                &unused_tail,
+                min_next_sequence,
+            )
+        })
+        .await
+        .context("Failed to complete replay for allocator")?;
+
+        // On writable mount, truncate spans at `replay_end`, prune freed blocks before
+        // `live_journal_start`, mint a fresh span on `device.cell()`, and commit `Root` once.
+        // This replaces `renew_tail` probing, `reallocate_range`, and `record_journal_tail`
+        // (board 6923).
+        if !filesystem.options().read_only {
+            let mut active_spans = spans_discovered;
+            prune_spans_before(&mut active_spans, live_journal_start);
+            truncate_spans_at(&mut active_spans, replay_end);
+            let blocks = self.span_blocks();
+            let (span_cell, base_sequence) = allocator.mint_journal_span(blocks)?;
+            active_spans.push(JournalSpan {
+                start_offset: replay_end,
+                block_count: blocks,
+                cell: span_cell,
+                base_sequence,
+            });
+            crate::boxed(|| {
+                self.super_block_manager.reset_after_mount_commit(
+                    active_spans.clone(),
+                    live_journal_start,
+                    ended,
+                    &*device,
                 )
             })
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to open journal file (object id: {})",
-                    super_block.journal_object_id
-                )
-            })?;
+            .await?;
+            handle.replace_spans(active_spans);
+        }
+
+        // Configure the journal writer so that we can continue.
+        {
             let _ = self.handle.set(handle);
             let mut inner = self.inner.lock();
             let mut writer_checkpoint = reader.journal_file_checkpoint();
@@ -1054,10 +1072,9 @@ impl Journal {
             // Reset the stream to indicate that we've remounted the journal.
             writer_checkpoint.checksum ^= RESET_XOR;
             writer_checkpoint.version = LATEST_VERSION;
-            // When we open the filesystem as writable, we flush the device. cladefs: what's past the
-            // last valid transaction is discarded by the next (`JournalPosition::replayed`).
             inner.position.replayed(writer_checkpoint.file_offset, last_checkpoint.file_offset);
 
+            self.record_writer_end(writer_checkpoint.file_offset);
             inner.writer.seek(writer_checkpoint);
             inner.output_reset_version = true;
         }
@@ -1227,69 +1244,9 @@ impl Journal {
                             });
                         }
                         JournalRecord::Commit => {
-                            if let Some(&mut JournaledTransaction {
-                                ref checkpoint,
-                                ref root_parent_mutations,
-                                ref mut end_offset,
-                                ..
-                            }) = current_transaction.take()
+                            if let Some(&mut JournaledTransaction { ref mut end_offset, .. }) =
+                                current_transaction.take()
                             {
-                                for mutation in root_parent_mutations {
-                                    // Snoop the mutations for any that might apply to the journal
-                                    // file so that we can pass them to the reader so that it can
-                                    // read the journal file.
-                                    if let Mutation::ObjectStore(ObjectStoreMutation {
-                                        item:
-                                            Item {
-                                                key:
-                                                    ObjectKey {
-                                                        object_id,
-                                                        data:
-                                                            ObjectKeyData::Attribute(
-                                                                AttributeId::DATA,
-                                                                AttributeKey::Extent(extent),
-                                                            ),
-                                                        ..
-                                                    },
-                                                value:
-                                                    ObjectValue::Extent(ExtentValue::Some {
-                                                        extent: store_extent,
-                                                        extent_offset: device_offset,
-                                                        ..
-                                                    }),
-                                                ..
-                                            },
-                                        ..
-                                    }) = mutation
-                                    {
-                                        // Add the journal extents we find on the way to our
-                                        // reader.
-                                        if *object_id != reader.handle().object_id() {
-                                            continue;
-                                        }
-                                        if let Some(end_offset) = reader.handle().end_offset() {
-                                            if extent.start > end_offset {
-                                                bail!(anyhow!(FxfsError::Inconsistent).context(
-                                                    format!(
-                                                        "Unexpected journal extent {:?} -> {}, \
-                                                           expected start: {}",
-                                                        *extent, device_offset, end_offset,
-                                                    )
-                                                ));
-                                            }
-                                            // cladefs: renewed extents replace those from where
-                                            // the journal continued after a replay (see
-                                            // `Journal::renew_tail`).
-                                            if extent.start < end_offset {
-                                                reader.truncate_extents(extent.start)?;
-                                            }
-                                        }
-                                        reader.push_extent(
-                                            checkpoint.file_offset,
-                                            journal_extent(extent, *store_extent, *device_offset)?,
-                                        )?;
-                                    }
-                                }
                                 *end_offset = reader.journal_file_checkpoint().file_offset;
                             }
                             committed = reader.journal_file_checkpoint();
@@ -1314,7 +1271,6 @@ impl Journal {
                                 }
                                 transactions.pop();
                             }
-                            reader.discard_extents(offset);
                             committed = reader.journal_file_checkpoint();
                             discarded = Some(discarded.map_or(offset, |lowest| lowest.min(offset)));
                         }
@@ -1322,6 +1278,9 @@ impl Journal {
                             if offset > device_flushed_offset {
                                 device_flushed_offset = offset;
                             }
+                        }
+                        JournalRecord::JournalSpan { span, prev_cell, prev_end_sequence } => {
+                            reader.try_push_stream_span(span, prev_cell, prev_end_sequence)?;
                         }
                     }
                 }
@@ -1349,11 +1308,42 @@ impl Journal {
                 "The journal can't be followed: not a read-only mount that replayed it all",
             )
         })?;
+        // Sync any rotated/extended spans committed to `Root` since the last read.
+        let root_parent = self.objects.root_parent_store();
+        let root =
+            Root::read(root_parent.device().as_ref()).await.context("Reading root to follow")?;
+        let root_spans = root.journal_spans;
+        reader.sync_spans(root_spans.clone())?;
         let start = reader.journal_file_checkpoint().file_offset;
-        let JournaledTransactions { transactions, committed, discarded, .. } = self
+        let JournaledTransactions { mut transactions, mut committed, mut discarded, .. } = self
             .read_transactions(&mut reader, None, INVALID_OBJECT_ID)
             .await
             .context("Reading transactions to follow")?;
+        // If the writer pruned past our previous span end before rotating in `Root`, discovering
+        // in-stream `JournalSpan` records above can bridge the gap; sync `root_spans` again and
+        // read any rotated tail span before checking `root.journal_end`.
+        if reader.sync_spans(root_spans)? {
+            let more = self
+                .read_transactions(&mut reader, None, INVALID_OBJECT_ID)
+                .await
+                .context("Reading transactions after span sync")?;
+            transactions.extend(more.transactions);
+            committed = more.committed;
+            discarded = match (discarded, more.discarded) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        let reached = BLOCK_SIZE
+            .align_up(reader.journal_file_checkpoint().file_offset)
+            .unwrap_or(reader.journal_file_checkpoint().file_offset);
+        ensure!(
+            reached >= root.journal_end,
+            anyhow!(FxfsError::Inconsistent).context(format!(
+                "Follower stopped at {reached}, short of root journal_end {}",
+                root.journal_end
+            ))
+        );
         if let Some(offset) = discarded {
             ensure!(
                 offset >= start,
@@ -1405,17 +1395,8 @@ impl Journal {
         };
 
         let mut current_generation = 1;
-        if filesystem.options().image_builder_mode.is_some() {
-            // Note that in non-image_builder_mode we write both superblocks when we format
-            // (in FxFilesystemBuilder::open). In image_builder_mode we only write once at the end
-            // as part of finalize(), which is why we must make sure the generation we write is
-            // newer than any existing generation.
-
-            // Note: This should is the *filesystem* block size, not the device block size which
-            // is currently always 4096 (https://fxbug.dev/42063349)
+        if filesystem.options().image_builder_mode {
             let block_size = filesystem.block_size();
-            // cladefs: box `read_superblocks` in a non-inlined frame so `init_empty` stays small
-            // on 16 KiB guest kernel stacks (TASK-26.9).
             match crate::boxed(|| self.read_superblocks(filesystem.device(), block_size)).await {
                 Ok((super_block, _)) => {
                     log::info!(
@@ -1424,11 +1405,7 @@ impl Journal {
                     );
                     current_generation = super_block.generation.wrapping_add(1);
                 }
-                Err(_) => {
-                    // TODO(https://fxbug.dev/463757813): It's not unusual to fail to read
-                    // superblocks when we're formatting a new filesystem but we should probably
-                    // fail the format if we get an IO error.
-                }
+                Err(_) => {}
             }
         }
 
@@ -1444,10 +1421,7 @@ impl Journal {
         self.objects.set_allocator(allocator.clone());
         self.objects.init_metadata_reservation()?;
 
-        let journal_handle;
         let root_store;
-        // cladefs: box init_empty stages in non-inlined frames to fit 16 KiB guest kernel stacks
-        // (TASK-26.9).
         let mut transaction = crate::boxed(|| {
             root_parent.new_transaction(
                 lock_keys![],
@@ -1468,54 +1442,6 @@ impl Journal {
 
         crate::boxed(|| allocator.create(&mut transaction)).await?;
 
-        // Create the super-block objects, which are empty until written (cladefs: to extents the
-        // store's root names)...
-        ObjectStore::create_object_with_id(
-            &root_store,
-            &mut transaction,
-            ReservedId::new(&root_store, NonZero::new(SuperBlockInstance::A.object_id()).unwrap()),
-            HandleOptions::default(),
-            None,
-        )
-        .context("create super block")?;
-        root_store.update_last_object_id(SuperBlockInstance::A.object_id());
-        ObjectStore::create_object_with_id(
-            &root_store,
-            &mut transaction,
-            ReservedId::new(&root_store, NonZero::new(SuperBlockInstance::B.object_id()).unwrap()),
-            HandleOptions::default(),
-            None,
-        )
-        .context("create super block")?;
-        root_store.update_last_object_id(SuperBlockInstance::B.object_id());
-
-        // the journal object...
-        journal_handle = crate::boxed(|| {
-            ObjectStore::create_object(
-                &root_parent,
-                &mut transaction,
-                journal_handle_options(),
-                None,
-            )
-        })
-        .await
-        .context("create journal")?;
-        if self.inner.lock().image_builder_mode.is_none() {
-            let mut file_range = 0..CHUNK_SIZE;
-            crate::boxed(|| {
-                journal_handle.preallocate_range_in_extents_of(
-                    &mut transaction,
-                    &mut file_range,
-                    EXTENT_SIZE,
-                )
-            })
-            .await
-            .context("preallocate journal")?;
-            if file_range.start < file_range.end {
-                bail!("preallocate_range returned too little space");
-            }
-        }
-
         // Write the root store object info.
         crate::boxed(|| root_store.create(&mut transaction)).await?;
 
@@ -1532,45 +1458,38 @@ impl Journal {
             root_parent.graveyard_directory_object_id(),
             root_store.store_object_id(),
             allocator.object_id(),
-            journal_handle.object_id(),
             checkpoint,
             /* earliest_version: */ LATEST_VERSION,
         );
 
-        // Initialize the journal writer.
-        let _ = self.handle.set(journal_handle);
-        Ok(())
-    }
-
-    /// Normally we allocate the journal when creating the filesystem.
-    /// This is used image_builder_mode when journal allocation is done last.
-    pub async fn allocate_journal(&self) -> Result<(), Error> {
-        let handle = self.handle.get().unwrap();
-        let mut transaction = handle
-            .store()
-            .new_transaction(
-                lock_keys![LockKey::object(handle.store().store_object_id(), handle.object_id()),],
-                Options { skip_journal_checks: true, ..Default::default() },
-            )
-            .await?;
-        let mut file_range = 0..CHUNK_SIZE;
-        self.handle
-            .get()
-            .unwrap()
-            .preallocate_range_in_extents_of(&mut transaction, &mut file_range, EXTENT_SIZE)
-            .await
-            .context("preallocate journal")?;
-        if file_range.start < file_range.end {
-            bail!("preallocate_range returned too little space");
+        // Initialize the initial position-derived journal span (deferred in image_builder_mode
+        // until `allocate_journal` runs on close).
+        if !self.inner.lock().image_builder_mode {
+            self.init_journal_handle(&filesystem);
         }
-        transaction.commit().await?;
         Ok(())
     }
 
-    /// cladefs: fails unless the filesystem's blocks are the journal's, so that each journal block can
-    /// be an extent of its own.
+    fn init_journal_handle(&self, filesystem: &FxFilesystem) {
+        let blocks = self.span_blocks();
+        let (cell, base_sequence) = self
+            .objects
+            .allocator()
+            .mint_journal_span(blocks)
+            .expect("initial journal span sequence overflow");
+        let initial = JournalSpan { start_offset: 0, block_count: blocks, cell, base_sequence };
+        let handle = JournalExtentHandle::new(filesystem.device(), vec![initial]);
+        let _ = self.handle.set(handle);
+    }
+
+    /// Initializes the position-derived journal span for `image_builder_mode` on close.
+    pub fn allocate_journal(&self, filesystem: &FxFilesystem) {
+        self.init_journal_handle(filesystem);
+    }
+
+    /// cladefs: fails unless the filesystem's blocks are the journal's, so that each journal block
+    /// is a 4 KiB write-once extent of its own.
     fn check_block_size(filesystem: &FxFilesystem) -> Result<(), Error> {
-        debug_assert_eq!(EXTENT_SIZE, BLOCK_SIZE.get());
         ensure!(
             filesystem.block_size() == BLOCK_SIZE,
             anyhow!(FxfsError::NotSupported)
@@ -1579,86 +1498,59 @@ impl Journal {
         Ok(())
     }
 
-    /// cladefs: after replay, before anything else writes to the journal, gives the journal file new
-    /// extents past where the journal continues, if it can't write those it has there, and returns
-    /// whether it did. Extents are written once, and only by their cell (backlog doc-4): a crash
-    /// may have left some of them written, and a fork, which mounts with a cell of its own, can
-    /// write none of its parent's. The journal can't record its new extents itself, as replay
-    /// reads it through them: a super-block written next must (`write_super_block`).
-    pub async fn renew_tail(&self) -> Result<bool, Error> {
+    /// cladefs: as a frozen filesystem thaws in a VM restored from a snapshot onto a forked cell,
+    /// rotates the journal to a fresh span on the new cell in `Root` without rewriting the
+    /// super-block (board 6923). No-op when the cell has not changed.
+    pub async fn rotate_journal_span(&self) -> Result<(), Error> {
         let handle = self.handle.get().expect("No journal handle");
-        // The writer continues at a block boundary.
-        let offset = self.inner.lock().writer.journal_file_checkpoint().file_offset;
-        let size = handle.get_size();
-        let device = handle.store().device();
-        let device = device.as_ref();
-        let tail: Vec<_> = handle
-            .device_extents()
-            .await?
-            .into_iter()
-            .filter(|extent| extent.logical_range().end > offset)
-            .map(|extent| extent.device_range().clone())
-            .collect();
-        let mut renew = tail.iter().any(|range| range.extent.cell != device.cell());
-        if !renew {
-            // The extents' first blocks, read at once, as each read is a round trip to the device.
-            // Any written is renewed, whatever the others' reads say.
-            let mut buffer = device.allocate_buffer(tail.len() * EXTENT_SIZE as usize).await;
-            let reads = tail.iter().zip(buffer.as_mut().chunks_mut(EXTENT_SIZE as usize)).map(
-                |(range, block)| async move {
-                    match device.read(range.extent, range.range.start, block).await {
-                        Ok(()) => Ok(true),
-                        Err(error) if error.downcast_ref::<NoExtent>().is_some() => Ok(false),
-                        Err(error) => Err(error.context("reading the journal's tail")),
-                    }
-                },
+        let device = handle.device().clone();
+        let cell = device.cell();
+        if handle.last_span().is_some_and(|s| s.cell == cell) {
+            return Ok(());
+        }
+        self.objects.allocator().advance_sequence_floor().await?;
+        let at = {
+            let inner = self.inner.lock();
+            let offset = inner.writer.journal_file_checkpoint().file_offset;
+            debug_assert!(
+                BLOCK_SIZE.is_aligned(offset) && offset == inner.position.flushed_offset(),
+                "thaw rotating journal at {offset}, flushed {}",
+                inner.position.flushed_offset()
             );
-            let reads = futures::future::join_all(reads).await;
-            renew = reads.iter().any(|read| matches!(read, Ok(true)));
-            if !renew {
-                if let Some(Err(error)) = reads.into_iter().find(Result::is_err) {
-                    return Err(error);
-                }
-            }
-        }
-        if renew {
-            info!(offset, size; "Renewing the journal's tail");
-            // What the new tail takes, the old gives back as this commits, so it needs no room of
-            // its own: not of the metadata reservation, which a crash can find too borrowed to hold
-            // the tail, leaving a filesystem that mounts no more, nor of what's free, which a full
-            // filesystem hasn't.
-            let reservation = handle.store().allocator().reserve_with(None, |_| size - offset);
-            let mut transaction = handle
-                .new_transaction_with_options(Options {
-                    skip_journal_checks: true,
-                    borrow_metadata_space: true,
-                    allocator_reservation: Some(&reservation),
-                    ..Default::default()
-                })
-                .await?;
-            handle
-                .reallocate_range(&mut transaction, offset..size, EXTENT_SIZE)
-                .await
-                .with_context(|| format!("reallocating the journal's tail, {offset} to {size}"))?;
-            {
-                let _guard = self.writer_mutex.lock();
-                let mut inner = self.inner.lock();
-                inner.tail_unrecorded = true;
-                Self::write_pending_records(&mut inner)?;
-            }
-            // As in `pre_commit`, the transaction is applied directly. No flush task writes the
-            // journal before it is applied: none runs yet.
-            self.write_and_apply_mutations(&mut transaction)?;
-        }
-        Ok(renew)
+            offset
+        };
+        let mut spans = handle.spans();
+        truncate_spans_at(&mut spans, at);
+        let blocks = self.span_blocks();
+        let (span_cell, base_sequence) = self.objects.allocator().mint_journal_span(blocks)?;
+        spans.push(JournalSpan {
+            start_offset: at,
+            block_count: blocks,
+            cell: span_cell,
+            base_sequence,
+        });
+        let spans_for_root = spans.clone();
+        self.super_block_manager
+            .set_root(
+                |root| {
+                    let mut root_spans = spans_for_root;
+                    prune_spans_before(&mut root_spans, root.journal_freed_to);
+                    root.journal_spans = root_spans;
+                    root.journal_end = root.journal_end.max(at);
+                },
+                async |root| device.commit_root(&root).await.map(|()| true),
+            )
+            .await
+            .context("committing rotated journal span on thaw")?;
+        // Only switch the in-memory handle AFTER `commit_root` succeeds so a failed thaw retry
+        // (`TASK-200`) still sees the old cell and re-commits `Root`.
+        handle.replace_spans(spans);
+        Ok(())
     }
 
-    pub async fn init_superblocks(&self) -> Result<(), Error> {
-        // Overwrite both superblocks.
-        for _ in 0..2 {
-            self.write_super_block().await?;
-        }
-        Ok(())
+    /// Writes the single initial super-block after formatting (board 6926).
+    pub async fn init_superblock(&self) -> Result<(), Error> {
+        self.write_super_block().await
     }
 
     /// Takes a snapshot of all journaled transactions which affect |object_id| since its last
@@ -1670,15 +1562,7 @@ impl Journal {
         &self,
         object_id: u64,
     ) -> Result<Vec<JournaledTransaction>, Error> {
-        let handle = self.handle.get().expect("No journal handle");
-        // Reopen the handle since JournalReader needs an owned handle.
-        let handle = ObjectStore::open_object(
-            handle.owner(),
-            handle.object_id(),
-            journal_handle_options(),
-            None,
-        )
-        .await?;
+        let handle = self.handle.get().expect("No journal handle").clone();
 
         let checkpoint = match self.objects.journal_checkpoint(object_id) {
             Some(checkpoint) => checkpoint,
@@ -1703,139 +1587,90 @@ impl Journal {
         self.write_and_apply_mutations(transaction)
     }
 
-    // Before we commit, we might need to extend the journal or write pending records to the
-    // journal.
-    async fn pre_commit(&self, transaction: &Transaction<'_>) -> Result<(), Error> {
-        // cladefs: room for what `transaction` writes, with the file extended past it if it needs
-        // more than a chunk's: its records past the journal's end, a reflink's or a truncate's of
-        // thousands of extents, the next commit found itself writing beyond it, and panicked
-        // (xfstests generic/161, TASK-139). A chunk each too for the journal's own transaction,
-        // which comes first, and for the next commit's, which has to fit in what this one leaves
-        // of the file: that is what extends it. With no more than `transaction`'s room kept,
-        // zeroing the old space left the next commit less than its own records.
-        let room = self.room_for(transaction) + 2 * self.chunk_size();
-        while self.make_room(room).await? {}
+    /// Ensures the active journal handle has at least `room` bytes of span capacity ahead of the
+    /// current writer offset, minting and emitting an in-stream `JournalRecord::JournalSpan`
+    /// while still inside the current span (board 6923). Caller must hold `writer_mutex`.
+    fn ensure_span_room(&self, inner: &mut Inner, room: u64) -> Result<(), Error> {
+        let Some(handle) = self.handle.get() else {
+            return Ok(());
+        };
+        let file_offset = inner.writer.journal_file_checkpoint().file_offset;
+        let end_offset = handle.end_offset();
+        if file_offset + room <= end_offset {
+            return Ok(());
+        }
+        ensure!(
+            handle.span_count() < super_block::MAX_ROOT_SPANS,
+            anyhow!(FxfsError::NoSpace)
+                .context("Too many live journal spans in root; compaction required")
+        );
+        let needed_bytes = (file_offset + room) - end_offset;
+        let blocks = self.span_blocks().max(needed_bytes.div_ceil(BLOCK_SIZE.get()));
+        ensure!(
+            blocks <= super_block::MAX_SPAN_BLOCKS,
+            anyhow!(FxfsError::NoSpace).context("Journal span exceeds MAX_SPAN_BLOCKS")
+        );
+        let (prev_cell, prev_end_sequence) =
+            handle.last_end_key().expect("journal handle has at least one span");
+        let (cell, base_sequence) = self.objects.allocator().mint_journal_span(blocks)?;
+        let new_span =
+            JournalSpan { start_offset: end_offset, block_count: blocks, cell, base_sequence };
+        // Push span to handle BEFORE writing the record so `flush` always finds it.
+        handle.push_span(new_span.clone());
+        inner.writer.write_record(&JournalRecord::JournalSpan {
+            span: new_span,
+            prev_cell,
+            prev_end_sequence,
+        })?;
+        self.record_writer_end(inner.writer.journal_file_checkpoint().file_offset);
         Ok(())
     }
 
-    /// cladefs: extends the file towards `room` past the journal's end, zeroes a slice of the old
-    /// space, and accounts for padding, in a transaction of the journal's own. Returns whether the
-    /// file has further to go: a transaction extends it by `MAX_EXTENDED_PER_COMMIT` at most, so
-    /// that it fits in the chunk the last commit left, however much a large one wants.
-    async fn make_room(&self, room: u64) -> Result<bool, Error> {
-        let handle;
-
-        let (extension, zeroing, further, unaccounted) = {
+    /// Before committing, extends the journal with a new position-derived `JournalSpan` record
+    /// in-stream if needed (no transaction or allocator LSM mutation!), writes pending framing
+    /// records, and accounts for accumulated sync padding if needed.
+    async fn pre_commit(&self, transaction: &Transaction<'_>) -> Result<(), Error> {
+        let room = self.room_for(transaction);
+        let needs_accounting = {
+            let _guard = self.writer_mutex.lock();
             let mut inner = self.inner.lock();
-
+            self.ensure_span_room(&mut inner, room)?;
             Self::write_pending_records(&mut inner)?;
-
-            handle = match self.handle.get() {
-                None => return Ok(false),
-                Some(x) => x,
-            };
-
+            if self.handle.get().is_none() {
+                return Ok(());
+            }
             let file_offset = inner.writer.journal_file_checkpoint().file_offset;
-
-            let size = handle.get_size();
-            let wanted =
-                (file_offset + room).saturating_sub(size).next_multiple_of(self.chunk_size());
-            let extended = wanted.min(MAX_EXTENDED_PER_COMMIT);
-            let extension = (extended > 0).then_some(size..size + extended);
-
-            // cladefs: a slice of what's left to zero: the journal's file has an extent a block
-            // (EXTENT_SIZE), and zeroing a journal of 16 MiB in one transaction, with a small
-            // commit that happened on it, ran past the journal's end (xfstests generic/161,
-            // TASK-139).
-            let zeroing = inner.position.zeroing(MAX_ZEROED_PER_COMMIT);
-
-            if extension.is_none()
-                && zeroing.is_none()
-                && !self.objects.needs_borrow_for_journal(file_offset)
-            {
-                return Ok(false);
+            if self.objects.needs_borrow_for_journal(file_offset) {
+                Some(self.objects.unaccounted_journal(file_offset))
+            } else {
+                None
             }
-
-            let unaccounted = self.objects.unaccounted_journal(file_offset);
-            (extension, zeroing, wanted > extended, unaccounted)
         };
 
-        let borrowing = Options {
-            skip_journal_checks: true,
-            borrow_metadata_space: true,
-            allocator_reservation: Some(self.objects.metadata_reservation()),
-            ..Default::default()
-        };
-        // cladefs: a transaction only accounting for the padding since the last
-        // (`needs_borrow_for_journal`), which every sync leaves, reserves it with the allocator, as
-        // other transactions pay for theirs, and borrows it only if the filesystem is too full.
-        // Borrowed, the padding of a sync in each of PostgreSQL's initdb's fsyncs drained the
-        // metadata reservation of the guest's large journal, until compacting it found no room
-        // (TASK-26.6.1). What a replay discarded can be more than a transaction reserves, with its
-        // own record to pay for too: that is borrowed, as above.
-        let pays = unaccounted < TRANSACTION_MAX_JOURNAL_USAGE / 2;
-        let mut transaction = if extension.is_none() && zeroing.is_none() && pays {
-            let paying = Options { skip_journal_checks: true, ..Default::default() };
-            match handle.new_transaction_with_options(paying).await {
-                Err(error) if FxfsError::NoSpace.matches(&error) => {
-                    handle.new_transaction_with_options(borrowing).await?
+        if let Some(unaccounted) = needs_accounting {
+            let root_parent = self.objects.root_parent_store();
+            let borrowing = Options {
+                skip_journal_checks: true,
+                borrow_metadata_space: true,
+                allocator_reservation: Some(self.objects.metadata_reservation()),
+                ..Default::default()
+            };
+            let pays = unaccounted < TRANSACTION_MAX_JOURNAL_USAGE / 2;
+            let mut txn = if pays {
+                let paying = Options { skip_journal_checks: true, ..Default::default() };
+                match root_parent.new_transaction(lock_keys![], paying).await {
+                    Err(error) if FxfsError::NoSpace.matches(&error) => {
+                        root_parent.new_transaction(lock_keys![], borrowing).await?
+                    }
+                    txn => txn?,
                 }
-                transaction => transaction?,
-            }
-        } else {
-            handle.new_transaction_with_options(borrowing).await?
-        };
-        // cladefs: made as the commit it makes room for holds the commit lock: an allocation short of
-        // room syncs, which commits nothing then (TASK-233).
-        transaction.holding_commits = true;
-        if let Some(extension) = &extension {
-            handle
-                .preallocate_range_in_extents_of(
-                    &mut transaction,
-                    &mut extension.clone(),
-                    EXTENT_SIZE,
-                )
-                .await?;
+            } else {
+                root_parent.new_transaction(lock_keys![], borrowing).await?
+            };
+            txn.holding_commits = true;
+            self.write_and_apply_mutations(&mut txn)?;
         }
-        if let Some(zeroing) = &zeroing {
-            handle.zero(&mut transaction, zeroing.clone()).await?;
-        }
-
-        let start = self.inner.lock().writer.journal_file_checkpoint().file_offset;
-
-        // We can't use regular transaction commit, because that can cause re-entrancy issues, so
-        // instead we just apply the transaction directly here.
-        self.write_and_apply_mutations(&mut transaction)?;
-
-        let mut inner = self.inner.lock();
-
-        let file_offset = inner.writer.journal_file_checkpoint().file_offset;
-        // Make sure the transaction to extend the journal made it to the journal within the old
-        // size, since otherwise, it won't be possible to replay. cladefs: neither this nor the
-        // transaction's size, past what `pre_commit` keeps for it, is a reason for a guest's kernel
-        // to panic, as upstream's asserts did (TASK-60). The journal stops, as on a transaction
-        // that fails to apply: replay ends before this one, which has no Commit record within the
-        // file it can read.
-        let past = match &extension {
-            _ if file_offset - start > CHUNK_SIZE => {
-                Some(format!("the journal's own transaction took {} bytes", file_offset - start))
-            }
-            Some(extension) if file_offset >= extension.start => {
-                Some(format!("the journal at {file_offset}, past its size, {}", extension.start))
-            }
-            _ => None,
-        };
-        if let Some(past) = past {
-            let reason = anyhow!(FxfsError::Inconsistent).context(past.clone());
-            inner.terminate(Some(reason.context("Failed to make room in the journal")));
-            bail!(anyhow!(FxfsError::Inconsistent).context(past));
-        }
-
-        if let Some(zeroing) = zeroing {
-            inner.position.zeroed(zeroing);
-        }
-
-        Ok(further)
+        Ok(())
     }
 
     /// Writes the records pending before the next transaction's.
@@ -1875,17 +1710,13 @@ impl Journal {
         self.inner.lock().writer.journal_file_checkpoint().file_offset
     }
 
-    /// Flushes previous writes to the device and then writes out a new super-block.
+    /// Flushes previous writes to the device and then atomically writes a new super-block in
+    /// `Root`, freeing the superseded super-block and superseded journal blocks afterwards.
     /// Callers must ensure that we do not make concurrent calls.
     pub(crate) async fn write_super_block(&self) -> Result<(), Error> {
         let root_parent_store = self.objects.root_parent_store();
 
-        // We need to flush previous writes to the device since the new super-block we are writing
-        // relies on written data being observable, and we also need to lock the root parent store
-        // so that no new entries are written to it whilst we are writing the super-block, and for
-        // that we use the write lock.
         let old_layers;
-        let old_super_block_offset;
         let mut new_super_block_header;
         let checkpoint;
         let borrowed;
@@ -1898,23 +1729,14 @@ impl Journal {
                 let _write_guard = self.writer_mutex.lock();
                 (checkpoint, borrowed) = self.pad_to_block()?;
                 old_layers = super_block::compact_root_parent(&*root_parent_store)?;
-                // cladefs: as of `checkpoint`, which is flushed below. Read after that flush, they
-                // said objects were flushed to where the journal wasn't yet, as commits go on
-                // while it runs: a crash then lost what they had given up replaying, a replay
-                // finding nothing where they said, and allocations the journal alone held
-                // (specs/journal, whose NoOffsetsAtPad finds it).
                 (journal_file_offsets, min_checkpoint) = self.objects.journal_file_offsets();
             }
-            // cladefs: box `flush_device` and `save` in non-inlined frames so `write_super_block`
-            // fits in 16 KiB guest kernel stacks (TASK-26.9).
             crate::boxed(|| self.flush_device(checkpoint.file_offset, false))
                 .await
                 .context("flush failed when writing superblock")?;
         }
 
         new_super_block_header = self.inner.lock().super_block_header.clone();
-
-        old_super_block_offset = new_super_block_header.journal_checkpoint.file_offset;
 
         new_super_block_header.generation = new_super_block_header.generation.wrapping_add(1);
         new_super_block_header.super_block_journal_file_offset = checkpoint.file_offset;
@@ -1923,20 +1745,21 @@ impl Journal {
         new_super_block_header.journal_file_offsets = journal_file_offsets;
         new_super_block_header.borrowed_metadata_space = borrowed;
 
+        let handle = self.handle.get().expect("No journal handle");
+        let valid_to = self.inner.lock().position.valid_to();
         crate::boxed(|| {
             self.super_block_manager.save(
                 new_super_block_header.clone(),
                 self.objects.root_parent_store().filesystem(),
                 old_layers,
+                handle,
+                valid_to,
             )
         })
         .await?;
         {
             let mut inner = self.inner.lock();
-            let start = new_super_block_header.journal_checkpoint.file_offset;
             inner.super_block_header = new_super_block_header;
-            inner.position.superseded(old_super_block_offset, start);
-            inner.tail_unrecorded = false;
         }
 
         Ok(())
@@ -2008,6 +1831,7 @@ impl Journal {
         if checkpoint.file_offset % BLOCK_SIZE != 0 {
             JournalRecord::EndBlock.serialize_into(&mut inner.writer)?;
             inner.writer.pad_to_block()?;
+            self.record_writer_end(inner.writer.journal_file_checkpoint().file_offset);
             if let Some(waker) = inner.flush_waker.take() {
                 waker.wake();
             }
@@ -2017,18 +1841,12 @@ impl Journal {
 
     /// Flushes the device, `always`, or if the journal has written more than was flushed.
     async fn flush_device(&self, checkpoint_offset: u64, always: bool) -> Result<(), Error> {
-        assert!(
-            self.inner.lock().image_builder_mode.is_none(),
-            "flush_device called in image builder mode"
-        );
+        assert!(!self.inner.lock().image_builder_mode, "flush_device called in image builder mode");
         self.wait_for_flush(checkpoint_offset).await?;
         // cladefs: the frees the last flush let die are sealed by this one, as they would be if it
         // had waited for them; and a sync for room to allocate in waits for them here.
         self.objects.allocator().freed().await.context("flush: freeing dead extents failed")?;
 
-        // What has been written is durable once the device is flushed: the padding of a sync since
-        // the last flush included, which needs no flush of its own. cladefs: a barrier that followed
-        // the journal's write as far is this sync's flush (`JournalPosition::begin_sync`).
         let flush = self.inner.lock().position.flushing(checkpoint_offset);
         if !flush.durable || always {
             let trace = self.trace.load(Ordering::Relaxed);
@@ -2043,34 +1861,15 @@ impl Journal {
                 }
             }
 
-            // We need to write a DidFlushDevice record at some point, but if we are in the
-            // process of shutting down the filesystem, we want to leave the journal clean to
-            // avoid there being log messages complaining about unwritten journal data, so we
-            // queue it up so that the next transaction will trigger this record to be written.
-            // If we are shutting down, that will never happen but since the DidFlushDevice
-            // message is purely advisory (it reduces the number of checksums we have to verify
-            // during replay), it doesn't matter if it isn't written.
             self.inner.lock().position.device_flushed(checkpoint_offset, flush);
 
             let allocator = self.objects.allocator();
-            if self.inner.lock().tail_unrecorded {
-                // cladefs: no frees until the super-block that records the journal's tail is
-                // written: until then a replay finds neither what discarded an orphan, a write to
-                // which it then verifies, nor the deaths of extents it would refer to.
-                allocator.sealed();
-            } else {
-                // cladefs: the allocator frees some of the extents that died before the flush only
-                // once the record of it is on the device too: replay doesn't verify the checksums
-                // of writes before it, which may be to extents freed, which can't be read.
-                let recorded = allocator.needs_recorded_flush(checkpoint_offset);
-                if recorded {
-                    self.record_device_flush().await.context("recording the device flush")?;
-                }
-
-                // Tell the allocator that we flushed the device so that it can now free the extents
-                // that died.
-                allocator.did_flush_device(checkpoint_offset, recorded).await;
+            let recorded = allocator.needs_recorded_flush(checkpoint_offset);
+            if recorded {
+                self.record_device_flush().await.context("recording the device flush")?;
             }
+
+            allocator.did_flush_device(checkpoint_offset, recorded).await;
             if trace {
                 info!("J: did flush device");
             }
@@ -2079,36 +1878,39 @@ impl Journal {
         Ok(())
     }
 
-    /// cladefs: flushes the device, recording in the root it sets how far the journal is written,
-    /// valid, before it (`Root::journal_end`), unless a super-block yet to be written records the
-    /// journal's tail, which a replay from the last can't read: one request, as a flush. Valid, not
-    /// written: after a replay, the journal goes on at a block past where it ended, which a replay
-    /// reaches only once something is written there.
+    /// cladefs: flushes the device, recording in `Root` how far the journal is written (`journal_end`),
+    /// syncing any newly minted `journal_spans`, and pruning any retired extents sealed by this
+    /// barrier (boards 6923, 6926; TASK-153.13).
     async fn flush_device_recording(&self) -> Result<(), Error> {
         let handle = self.handle.get().unwrap();
-        let (tail_unrecorded, written) = {
-            let inner = self.inner.lock();
-            (inner.tail_unrecorded, inner.position.valid_to())
+        let written = self.inner.lock().position.valid_to();
+        let device = handle.device().clone();
+        let spans = handle.spans();
+        let update = |root: &mut Root| {
+            root.journal_end = root.journal_end.max(written);
+            let mut next_spans = spans;
+            prune_spans_before(&mut next_spans, root.journal_freed_to);
+            root.journal_spans = next_spans;
         };
-        if tail_unrecorded {
-            return handle.flush_device().await;
-        }
-        let device = handle.store().device();
-        let journal_end = |root: &mut Root| root.journal_end = root.journal_end.max(written);
         let barrier = async |root: Vec<u8>| device.commit_root(&root).await.map(|()| true);
-        self.super_block_manager.set_root(journal_end, barrier).await.map(drop)
+        self.super_block_manager.set_root(update, barrier).await.map(drop)
     }
 
     /// cladefs: writes the pending DidFlushDevice record now, and flushes the device again, so that
-    /// the record is on it.
+    /// the record is on it. Ensures span capacity first so repeated recorded flushes can never
+    /// overrun the active journal span (board 6923).
     async fn record_device_flush(&self) -> Result<(), Error> {
         let checkpoint = {
             let _guard = self.writer_mutex.lock();
-            Self::write_pending_records(&mut self.inner.lock())?;
+            {
+                let mut inner = self.inner.lock();
+                self.ensure_span_room(&mut inner, 2 * BLOCK_SIZE.get())?;
+                Self::write_pending_records(&mut inner)?;
+            }
             self.pad_to_block()?.0
         };
         self.wait_for_flush(checkpoint.file_offset).await?;
-        self.handle.get().unwrap().flush_device().await
+        self.handle.get().unwrap().device().flush().await
     }
 
     /// Waits for the journal to be written to the device up to `offset`.
@@ -2166,7 +1968,7 @@ impl Journal {
                 {
                     break Ok(());
                 }
-                if inner.image_builder_mode.is_some() {
+                if inner.image_builder_mode {
                     break Ok(());
                 }
                 if inner.disable_compactions {
@@ -2188,16 +1990,17 @@ impl Journal {
         result
     }
 
-    fn chunk_size(&self) -> u64 {
-        self.chunk_size
+    fn span_blocks(&self) -> u64 {
+        (self.chunk_size / BLOCK_SIZE.get()).max(MIN_SPAN_BLOCKS)
     }
 
-    /// cladefs: how much of the journal to have ahead for `transaction`, a chunk's or the chunks that
-    /// hold its records.
+    /// cladefs: how much journal space to keep ahead of `writer` before committing `transaction`,
+    /// including checksum overhead, a `JournalSpan` record, and any padding-accounting record.
     fn room_for(&self, transaction: &Transaction<'_>) -> u64 {
         let bytes = transaction.journal_bytes();
-        // With the blocks' checksums and a record's padding.
-        (bytes + bytes / 8).next_multiple_of(self.chunk_size()).max(self.chunk_size())
+        // With block checksums, commit/span framing, and a 2-block margin so the next
+        // `JournalRecord::JournalSpan` itself always fits inside the current span.
+        (bytes + bytes / 8 + 2 * BLOCK_SIZE.get()).next_multiple_of(BLOCK_SIZE.get())
     }
 
     /// cladefs: serializes `transaction`'s records, if each object it changes writes its mutations as
@@ -2284,7 +2087,9 @@ impl Journal {
                 }
                 inner.writer.write_record(&JournalRecord::Commit).unwrap();
 
-                inner.writer.journal_file_checkpoint()
+                let after = inner.writer.journal_file_checkpoint();
+                self.record_writer_end(after.file_offset);
+                after
             };
         }
         self.objects.did_commit_transaction(
@@ -2374,7 +2179,7 @@ impl Journal {
                         && !inner.disable_compactions
                         && !inner.compactions_paused
                         && !inner.compaction_running
-                        && inner.image_builder_mode.is_none()
+                        && !inner.image_builder_mode
                         && self.should_compact(&inner, journal_bytes)
                     {
                         compact_fut = Some(crate::boxed(|| self.compact()));
@@ -2460,46 +2265,34 @@ impl Journal {
         };
         let handle = self.handle.get().unwrap();
         if barrier_after_last_write {
-            // The frees issued before the barrier, which it seals (`flush_device`).
             self.objects.allocator().will_flush_device();
-            // cladefs: the barrier records how far the journal is written, in the root it sets
-            // (`Root::journal_end`), unless a super-block yet to be written records the journal's
-            // tail, which a replay from the last can't read.
-            barrier_after_last_write = if self.inner.lock().tail_unrecorded {
-                crate::boxed(|| {
+            let written = range.end;
+            let spans = handle.spans();
+            let manager = &self.super_block_manager;
+            let update = |root: &mut Root| {
+                root.journal_end = root.journal_end.max(written);
+                let mut next_spans = spans;
+                prune_spans_before(&mut next_spans, root.journal_freed_to);
+                root.journal_spans = next_spans;
+            };
+            barrier_after_last_write = crate::boxed(|| {
+                manager.set_root(update, async |root| {
                     Self::flush_with_barrier(
                         handle,
                         range.start,
                         buf.as_mut(),
                         barrier_on_first_write,
-                        None,
+                        Some(&root),
                     )
+                    .await
                 })
-                .await?
-            } else {
-                let written = range.end;
-                let manager = &self.super_block_manager;
-                let journal_end =
-                    |root: &mut Root| root.journal_end = root.journal_end.max(written);
-                crate::boxed(|| {
-                    manager.set_root(journal_end, async |root| {
-                        Self::flush_with_barrier(
-                            handle,
-                            range.start,
-                            buf.as_mut(),
-                            barrier_on_first_write,
-                            Some(&root),
-                        )
-                        .await
-                    })
-                })
-                .await?
-            };
+            })
+            .await?;
         } else {
-            let options = OverwriteOptions { barrier_on_first_write, ..Default::default() };
-            // cladefs: box `overwrite` in a non-inlined frame to keep `Journal::flush` small on
-            // 16 KiB stacks (TASK-26.9).
-            crate::boxed(|| handle.overwrite(range.start, buf.as_mut(), options)).await?;
+            crate::boxed(|| {
+                handle.write_blocks(range.start, buf.as_mut(), barrier_on_first_write, false, None)
+            })
+            .await?;
         }
 
         let mut inner = self.inner.lock();
@@ -2514,29 +2307,19 @@ impl Journal {
     /// retrying without barriers only when `POST_BARRIER` failed after block 0 landed (board 6011,
     /// TASK-26.9).
     async fn flush_with_barrier(
-        handle: &DataObjectHandle<ObjectStore>,
+        handle: &JournalExtentHandle,
         start: u64,
         mut buf: storage_device::buffer::MutableBufferRef<'_>,
         barrier_on_first_write: bool,
         root: Option<&[u8]>,
     ) -> Result<bool, Error> {
-        let options = OverwriteOptions {
-            barrier_on_first_write,
-            barrier_after_last_write: true,
-            root,
-            ..Default::default()
-        };
-        let Err(error) = crate::boxed(|| handle.overwrite(start, buf.reborrow(), options)).await
+        let Err(error) = crate::boxed(|| {
+            handle.write_blocks(start, buf.reborrow(), barrier_on_first_write, true, root)
+        })
+        .await
         else {
             return Ok(true);
         };
-        // cladefs: the barrier failing, as a full store's commit does, fails the sync that wanted
-        // it (its flush of the device, which fails too), not the journal: written again without it.
-        // The blocks are still open: a commit that fails seals nothing. With
-        // `barrier_on_first_write`, never resend `PRE_BARRIER` after block 0 landed (which would
-        // seal block 0 and fail `SealedExtent`), and never clear `PRE_BARRIER` unless block 0 is
-        // already on the device (proving `PRE_BARRIER` succeeded before `POST_BARRIER` failed;
-        // board 6011).
         warn!(error:?; "The barrier after a journal write failed");
         if barrier_on_first_write {
             let first_len = (BLOCK_SIZE.get() as usize).min(buf.len());
@@ -2548,15 +2331,16 @@ impl Journal {
                 return Err(error);
             }
         }
-        let options = OverwriteOptions::default();
-        crate::boxed(|| handle.overwrite(start, buf, options)).await?;
+        crate::boxed(|| handle.write_blocks(start, buf, false, false, None)).await?;
         Ok(false)
     }
 
     /// Whether the journal, holding `journal_bytes` not yet flushed to layer files, should compact:
-    /// once half of `reclaim_size`, or, cladefs, sooner if the metadata reservation runs low.
+    /// once half of `reclaim_size`, sooner if the metadata reservation runs low, or when `Root`
+    /// has accumulated `COMPACT_SPAN_THRESHOLD` spans across remounts (board 6923).
     fn should_compact(&self, inner: &Inner, journal_bytes: u64) -> bool {
         journal_bytes > inner.reclaim_size / 2
+            || self.handle.get().is_some_and(|h| h.span_count() >= COMPACT_SPAN_THRESHOLD)
             || (journal_bytes >= MIN_COMPACTION_BYTES
                 && self.objects.metadata_reservation().amount()
                     <= self.objects.max_store_reservation() + METADATA_LOW_MARGIN)
@@ -2614,10 +2398,7 @@ impl Journal {
 
     #[trace]
     async fn compact(&self) -> Result<(), Error> {
-        assert!(
-            self.inner.lock().image_builder_mode.is_none(),
-            "compact called in image builder mode"
-        );
+        assert!(!self.inner.lock().image_builder_mode, "compact called in image builder mode");
         let bytes_before = self.objects.compaction_bytes_written();
         let _measure = crate::metrics::DurationMeasureScope::new(
             &crate::metrics::lsm_tree_metrics().journal_compaction_time,
@@ -2878,11 +2659,10 @@ pub use yielder::*;
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK_SIZE, EXTENT_SIZE, JournalOptions, SuperBlockInstance};
-    use crate::errors::FxfsError;
+    use super::{BLOCK_SIZE, JournalOptions};
     use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
     use crate::fsck::fsck;
-    use crate::object_handle::{ObjectHandle, ReadObjectHandle, WriteObjectHandle};
+    use crate::object_handle::{ObjectHandle, WriteObjectHandle};
     use crate::object_store::directory::Directory;
     use crate::object_store::object_record::{ObjectKey, ObjectValue};
     use crate::object_store::transaction::{Mutation, Options, TRANSACTION_MAX_JOURNAL_USAGE};
@@ -2943,10 +2723,6 @@ mod tests {
 
     // cladefs: a file for `commit_records` to change, with no compaction: what they borrow is more
     // than flushing them could find.
-    async fn filesystem_for_records(device: DeviceHolder) -> (OpenFxFilesystem, u64) {
-        filesystem_for_records_with(device, journal_for_records()).await
-    }
-
     async fn filesystem_for_records_with(
         device: DeviceHolder,
         options: JournalOptions,
@@ -2983,13 +2759,13 @@ mod tests {
     }
 
     // A commit of about 1500 bytes of records for each of `mutations`, borrowing what more than a
-    // transaction reserves, which leaves the next the chunk it may extend the file in.
+    // transaction reserves, checking that the journal span covers the committed offset.
     async fn commit_records(fs: &OpenFxFilesystem, object_id: u64, round: u32, mutations: usize) {
         try_commit_records(fs, object_id, round, mutations).await.expect("commit failed");
         let journal = fs.journal();
-        let size = journal.handle.get().expect("no handle").get_size();
+        let size = journal.handle.get().expect("no handle").end_offset();
         let file_offset = journal.inner.lock().writer.journal_file_checkpoint().file_offset;
-        assert!(size - file_offset >= CHUNK_SIZE, "at {file_offset} of {size}");
+        assert!(size >= file_offset + BLOCK_SIZE.get(), "at {file_offset} of {size}");
     }
 
     // `commit_records`' commit, which may fail.
@@ -3034,78 +2810,18 @@ mod tests {
         std::mem::forget((fs, replayed));
     }
 
-    // cladefs: transactions of more records than a chunk of the journal holds, as a reflink's or a
-    // truncate's of thousands of extents are: the journal is extended past each, which the next
-    // commit found itself writing beyond, and panicked, and replays them (TASK-139).
+    // cladefs: transactions larger than a journal span mint a span big enough to hold them and
+    // replay cleanly across span boundaries (TASK-139, board 6923).
     #[fuchsia::test]
     async fn test_transactions_larger_than_a_chunk_stay_within_the_journal() {
         let device = DeviceHolder::new(FakeDevice::new(65536, TEST_DEVICE_BLOCK_SIZE));
-        let (fs, object_id) = filesystem_for_records(device).await;
-        // These commits borrow all they take, for what they add, which no filesystem's commits
-        // do, and which leaves a compaction too little of the metadata reservation.
+        let options = JournalOptions { chunk_size: 131_072, ..journal_for_records() };
+        let (fs, object_id) = filesystem_for_records_with(device, options).await;
         fs.journal().pause_compactions().await;
         for round in 0..3 {
             commit_records(&fs, object_id, round, 100).await;
         }
         check_replay(fs).await;
-    }
-
-    // cladefs: commits that nearly fill the room they ask for, with slices of the journal's old
-    // space to zero: those came on top of that room, which left the next commit less of the file
-    // than its own records, and the journal past its size (xfstests generic/161, TASK-139).
-    #[fuchsia::test]
-    async fn test_commits_zeroing_old_space_stay_within_the_journal() {
-        let device = DeviceHolder::new(FakeDevice::new(1 << 19, TEST_DEVICE_BLOCK_SIZE));
-        let (fs, object_id) = filesystem_for_records(device).await;
-        for round in 0..600 {
-            commit_records(&fs, object_id, round, 15).await;
-        }
-        // The first moves the super-block past those commits, the second zeroes up to there.
-        fs.journal().force_compact().await.expect("force_compact failed");
-        fs.journal().force_compact().await.expect("force_compact failed");
-        assert!(
-            fs.journal().inner.lock().position.zero_offset().expect("nothing to zero") > 8 << 20
-        );
-        for round in 600..610 {
-            commit_records(&fs, object_id, round, 76).await;
-        }
-        check_replay(fs).await;
-    }
-
-    // cladefs: the journal's own transaction, extending its file and zeroing a slice of the old
-    // space, past the file's old size, as TASK-139's were: the journal stops on the error, which
-    // the commit returns, and what it holds replays, rather than a guest's kernel panicking
-    // (TASK-60). A chunk of a block, less than the records of a slice zeroed, makes it so.
-    #[fuchsia::test]
-    async fn test_own_transaction_past_the_journal_stops_it() {
-        let device = DeviceHolder::new(FakeDevice::new(1 << 19, TEST_DEVICE_BLOCK_SIZE));
-        let options = JournalOptions { chunk_size: EXTENT_SIZE, ..journal_for_records() };
-        let (fs, object_id) = filesystem_for_records_with(device, options).await;
-        for round in 0..600 {
-            try_commit_records(&fs, object_id, round, 15).await.expect("commit failed");
-        }
-        fs.journal().force_compact().await.expect("force_compact failed");
-        fs.journal().force_compact().await.expect("force_compact failed");
-        let mut commits = 600..610;
-        let error = loop {
-            let round = commits.next().expect("no commit failed");
-            if let Err(error) = try_commit_records(&fs, object_id, round, 1).await {
-                break error;
-            }
-        };
-        assert!(FxfsError::Inconsistent.matches(&error), "{error:#}");
-        assert!(format!("{error:#}").contains("past its size"), "{error:#}");
-        let error = try_commit_records(&fs, object_id, 610, 1).await.expect_err("commit succeeded");
-        assert!(FxfsError::JournalFlushError.matches(&error), "{error:#}");
-
-        let device = fs.device().snapshot().expect("snapshot failed");
-        let replayed = FxFilesystemBuilder::new()
-            .journal_options(journal_for_records())
-            .open(device)
-            .await
-            .expect("open failed");
-        fsck(replayed.clone()).await.expect("fsck failed");
-        std::mem::forget((fs, replayed));
     }
 
     /// cladefs: a mutation of an extent says as much as a record can of what writes it to a layer.
@@ -3144,21 +2860,6 @@ mod tests {
         assert!(allocates(4096..8192));
         assert!(!allocates(1..4096));
         assert!(!allocates(4096..4097));
-    }
-
-    /// cladefs: where a journal's extent ends is what an image says.
-    #[test]
-    fn test_journal_extents_are_checked() {
-        use crate::object_store::Extent;
-        use storage_device::{ExtentId, ExtentRange};
-
-        let store_extent = ExtentId::new(1, 1);
-        let extent = Extent(4096..8192);
-        assert_eq!(
-            super::journal_extent(&extent, store_extent, 8192).expect("a good extent"),
-            ExtentRange::new(store_extent, 8192..12288)
-        );
-        super::journal_extent(&extent, store_extent, u64::MAX).expect_err("past any offset");
     }
 
     /// cladefs: a live transaction that can't be applied, as one freeing what a corrupt allocator
@@ -3558,7 +3259,7 @@ mod tests {
         // First format should be generation 1.
         let fs = FxFilesystemBuilder::new()
             .format(true)
-            .image_builder_mode(Some(SuperBlockInstance::A))
+            .image_builder_mode(true)
             .open(device)
             .await
             .expect("open failed");
@@ -3588,7 +3289,7 @@ mod tests {
         // Format again with image_builder_mode.
         let fs = FxFilesystemBuilder::new()
             .format(true)
-            .image_builder_mode(Some(SuperBlockInstance::A))
+            .image_builder_mode(true)
             .open(device)
             .await
             .expect("open failed");
@@ -3617,7 +3318,7 @@ mod tests {
         // Format again with image_builder_mode (should bump generation)
         let fs = FxFilesystemBuilder::new()
             .format(true)
-            .image_builder_mode(Some(SuperBlockInstance::A))
+            .image_builder_mode(true)
             .open(device)
             .await
             .expect("open failed");
@@ -4281,11 +3982,11 @@ mod tests {
         let (reads, trips) = (trips.reads.count() - reads, trips.reads.trips() - before);
         let blocks = (end - replay_from) / 4096;
         // Replay reads the journal's 256 blocks, to the first not written past them, in 13 windows
-        // (of 1, 2, 4, 8 and 16 blocks, then 32): the rest of the mount (the super-blocks, the tail
-        // it may renew, the layer files) takes 3 round trips more.
+        // (of 1, 2, 4, 8 and 16 blocks, then 32): the rest of the mount (the single super-block and
+        // the layer files, with no renew_tail probe) takes 2 round trips more.
         assert_eq!(
             (blocks, trips),
-            (256, 16),
+            (256, 15),
             "replaying {blocks} blocks, the mount read {reads} times, in {trips} round trips"
         );
         let store = fs.root_store();
@@ -4295,37 +3996,6 @@ mod tests {
             dir.lookup(&format!("file {}", files - 1)).await.expect("lookup failed").is_some(),
             true
         );
-        fs.close().await.expect("close failed");
-    }
-
-    /// cladefs: after replay, a mount reads the first block of each extent of the journal's tail,
-    /// to see whether a crash left it written: all at once, in one round trip to the device
-    /// (TASK-92.18).
-    #[fuchsia::test]
-    async fn test_renew_tail_reads_the_tail_at_once() {
-        use crate::object_handle::ReadObjectHandle as _;
-        use std::sync::Arc;
-        use storage_device::fake_device::RoundTrips;
-
-        let trips = Arc::new(RoundTrips::default());
-        let device = DeviceHolder::new(
-            FakeDevice::new(1 << 16, 4096).calm().with_round_trips(trips.clone()),
-        );
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        fs.sync(SyncOptions { flush_device: true, ..Default::default() })
-            .await
-            .expect("sync failed");
-        let journal = fs.journal();
-        journal.pause_compactions().await;
-        let tail = {
-            let handle = journal.handle.get().expect("No journal handle");
-            let offset = journal.inner.lock().writer.journal_file_checkpoint().file_offset;
-            (handle.get_size() - super::BLOCK_SIZE.align_down(offset)) / super::EXTENT_SIZE
-        };
-        let (reads, before) = (trips.reads.count(), trips.reads.trips());
-        assert_eq!(journal.renew_tail().await.expect("renew_tail failed"), false);
-        assert_eq!((trips.reads.count() - reads, trips.reads.trips() - before), (tail, 1));
-        journal.resume_compactions();
         fs.close().await.expect("close failed");
     }
 
@@ -4559,7 +4229,6 @@ mod tests {
     async fn test_a_journal_ending_before_its_synced_end_is_refused() {
         use super::BLOCK_SIZE;
         use crate::errors::FxfsError;
-        use storage_device::ExtentRange;
         use storage_device::fake_device::Crashes;
 
         let crashes = Crashes::new(0, u32::MAX);
@@ -4591,7 +4260,7 @@ mod tests {
             fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.expect("sync");
         }
         let journal = fs.journal();
-        let synced_end = journal.super_block_manager.journal_end().await;
+        let synced_end = journal.super_block_manager.root().await.journal_end;
         let super_block_offset = journal.super_block_header().super_block_journal_file_offset;
         // Written, with no barrier after.
         for name in &unsynced {
@@ -4602,12 +4271,11 @@ mod tests {
         let written = journal.inner.lock().position.flushed_offset();
         assert!(super_block_offset < synced_end - BLOCK_SIZE, "{super_block_offset} {synced_end}");
         assert!(synced_end < written, "{synced_end} {written}");
-        let extents = journal.handle.get().unwrap().device_extents().await.expect("extents");
+        let journal_handle = journal.handle.get().unwrap().clone();
         let block_at = |offset: u64| {
-            let extent = extents.iter().find(|extent| extent.logical_range().contains(&offset));
-            let ExtentRange { extent, range } = extent.expect("a journal block").device_range();
-            let logical = extents.iter().find(|e| e.device_range().extent == *extent).unwrap();
-            (*extent, (range.start + offset - logical.logical_range().start) as usize)
+            let extents = journal_handle.extents_in(offset..offset + BLOCK_SIZE.get());
+            let extent = *extents.first().expect("a journal block");
+            (extent, 0usize)
         };
         // As a crash leaves it, losing nothing.
         crashes.mark(0);

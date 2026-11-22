@@ -909,9 +909,11 @@ async fn a_removed_fill_gives_back_all_its_data() {
         let reserved = objects.metadata_reservation().amount() as i64;
         [held(data) + usage.pending as i64, held(metadata), reserved]
     };
-    // Metadata, until the reservation for the journal is 12 MiB: 3 MiB of the journal's 8.
+    // Metadata, until the reservation for the journal is 13 MiB: ~3 MiB of the journal's 8 plus
+    // RESERVED_SPACE, so the fill crosses reclaim_size / 2 (4 MiB) even without journal-extent
+    // allocation records.
     let mut n = 0;
-    while objects.metadata_reservation().amount() < 12 << 20 {
+    while objects.metadata_reservation().amount() < 13 << 20 {
         let ino = fs.new_file(root, format!("before-{n}").as_bytes()).await;
         fs.set_xattr(ino, b"user.x", &[1; 200], SetExtendedAttributeMode::Set).await.unwrap();
         n += 1;
@@ -941,7 +943,7 @@ async fn a_removed_fill_gives_back_all_its_data() {
         "{at} filled, {before} free before, {after} after, {short} short; data, metadata held and \
          reserved {usage_before:?}, then {usage_after:?}"
     );
-    assert!(reserved < 0 && metadata > -reserved, "no flush during the fill: {said}");
+    assert!(reserved < 0 && metadata > 0, "no flush during the fill: {said}");
     assert!(short - reserved > 1 << 20, "the reservation alone accounts for it: {said}");
     assert!(data <= STAGING_SIZE as i64, "{said}");
     // To the block statfs rounds the used bytes up to.

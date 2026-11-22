@@ -3,20 +3,20 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/journal/reader.rs`. cladefs: the reader reads the
-// journal ahead of the blocks it verifies (`ReadAhead`), and its handle's extents change only
-// through it, so that it forgets what it read ahead through those replaced (`push_extent`,
-// `truncate_extents`, `discard_extents`). What it reads of an image, which may be anything, is
-// refused, where upstream asserts (`deserialize`, TASK-149.9). Nothing is consumed past the blocks
-// it verified, and each block end crossed takes that block's checksum, however many one record
-// crosses (`consume`, TASK-149.23).
+// journal ahead of the blocks it verifies (`ReadAhead`), and its handle's spans change only
+// through it, so that it forgets what it read ahead across span changes (`try_push_stream_span`,
+// `sync_spans`, board 6923). What it reads of an image, which may be anything, is refused, where
+// upstream asserts (`deserialize`, TASK-149.9). Nothing is consumed past the blocks it verified,
+// and each block end crossed takes that block's checksum, however many one record crosses
+// (`consume`, TASK-149.23).
 
 use crate::checksum::{Checksum, fletcher64};
 use crate::errors::FxfsError;
+use crate::object_store::journal::super_block::JournalSpan;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalHandle, RESET_XOR};
 use crate::serialized_types::{Version, Versioned, VersionedLatest};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use byteorder::{ByteOrder, LittleEndian};
-use storage_device::ExtentRange;
 use storage_device::buffer::BufferRef;
 use storage_units::BlockSize;
 
@@ -195,47 +195,31 @@ impl JournalReader {
         Ok(())
     }
 
-    /// cladefs: the handle, whose extents change only through the reader (`push_extent`,
-    /// `truncate_extents`, `discard_extents`).
-    pub fn handle(&self) -> &dyn JournalHandle {
-        self.handle.as_ref()
-    }
-
-    /// cladefs: adds an extent at the handle's end (`JournalHandle::push_extent`). The extents
-    /// before stay, and what was read ahead through them, unless the extent replaced them, as a
-    /// bootstrap handle's first replaces its initial extent. How far it reaches is what an image
-    /// says.
-    pub fn push_extent(
+    /// cladefs: appends an in-stream `JournalRecord::JournalSpan` if it extends the handle's
+    /// current last span, forgetting any read-ahead from the new span's start onwards (board 6923).
+    pub fn try_push_stream_span(
         &mut self,
-        added_offset: u64,
-        device_range: ExtentRange,
+        span: JournalSpan,
+        prev_cell: u64,
+        prev_end_sequence: u64,
     ) -> Result<(), Error> {
-        let end = self.handle.end_offset();
-        let len = device_range.len();
-        let new_end = end.map(|end| end.checked_add(len).ok_or(FxfsError::Inconsistent));
-        let new_end = new_end.transpose()?;
-        self.handle.push_extent(added_offset, device_range);
-        if self.handle.end_offset() != new_end {
-            self.forget_from(0);
+        if let Some(changed_at) =
+            self.handle.try_push_stream_span(span, prev_cell, prev_end_sequence)?
+        {
+            self.forget_from(changed_at);
         }
         Ok(())
     }
 
-    /// cladefs: drops the handle's extents from `offset` on (`JournalHandle::truncate_extents`), and
-    /// what was read ahead through them.
-    pub fn truncate_extents(&mut self, offset: u64) -> Result<(), Error> {
-        self.handle.truncate_extents(offset)?;
-        self.forget_from(offset);
-        Ok(())
-    }
-
-    /// cladefs: discards the handle's extents added at `discard_offset` or later
-    /// (`JournalHandle::discard_extents`), and what was read ahead through them, past those left.
-    pub fn discard_extents(&mut self, discard_offset: u64) {
-        self.handle.discard_extents(discard_offset);
-        if let Some(end) = self.handle.end_offset() {
-            self.forget_from(end);
+    /// cladefs: synchronizes the handle's spans from `Root::journal_spans` (used by a follower
+    /// before reading on in case the writer remounted/rotated spans), forgetting any read-ahead
+    /// from the earliest changed offset and returning whether any spans changed (board 6923).
+    pub fn sync_spans(&mut self, spans: Vec<JournalSpan>) -> Result<bool, Error> {
+        if let Some(changed_at) = self.handle.sync_spans(spans)? {
+            self.forget_from(changed_at);
+            return Ok(true);
         }
+        Ok(false)
     }
 
     /// Tries to deserialize a record of type T from the journal stream.  It might return
@@ -544,10 +528,10 @@ mod tests {
     /// window, not per block (TASK-92.18).
     #[fuchsia::test]
     async fn test_reads_ahead() {
-        use crate::object_store::journal::JournalHandle as _;
-        use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
+        use crate::object_store::journal::bootstrap_handle::JournalExtentHandle;
+        use crate::object_store::journal::super_block::JournalSpan;
+        use storage_device::ExtentId;
         use storage_device::fake_device::{DEFAULT_CELL, FakeDevice, RoundTrips};
-        use storage_device::{ExtentId, ExtentRange};
 
         // The journal's 100 blocks are written, and 28 more known.
         const WRITTEN: u64 = 100;
@@ -561,10 +545,15 @@ mod tests {
             write_to(&*device, extent(block as u64), data).await;
         }
 
-        let mut handle = BootstrapObjectHandle::new_with_start_offset(1, device.clone(), 0);
-        for block in 0..KNOWN {
-            handle.push_extent(0, ExtentRange::new(extent(block), 0..bs));
-        }
+        let handle = JournalExtentHandle::new(
+            device.clone(),
+            vec![JournalSpan {
+                start_offset: 0,
+                block_count: KNOWN,
+                cell: DEFAULT_CELL,
+                base_sequence: 0,
+            }],
+        );
         let mut reader = JournalReader::new(
             handle,
             &JournalCheckpoint { version: LATEST_VERSION, ..JournalCheckpoint::default() },
@@ -575,75 +564,62 @@ mod tests {
         assert_eq!((trips.reads.count(), trips.reads.trips()), (127, 8));
     }
 
-    /// cladefs: what a reader read ahead through extents its handle replaces is forgotten, and read
-    /// again through those that replace them: extents truncated, extents discarded, and a bootstrap
-    /// handle's initial extent. Each reader below has read the journal's third block ahead,
-    /// through an extent that doesn't hold it, when the one holding it replaces that.
+    /// cladefs: what a reader read ahead through spans that `sync_spans` replaces (e.g. a
+    /// follower after a writer rotation) is forgotten and read again through the replacement spans.
     #[fuchsia::test]
-    async fn test_forgets_what_it_read_ahead_through_extents_replaced() {
-        use crate::object_store::journal::JournalHandle as _;
-        use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
+    async fn test_forgets_what_it_read_ahead_through_spans_replaced() {
+        use crate::object_store::journal::bootstrap_handle::JournalExtentHandle;
+        use crate::object_store::journal::super_block::JournalSpan;
+        use storage_device::ExtentId;
         use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
-        use storage_device::{ExtentId, ExtentRange};
 
         let bs = BLOCK_SIZE.get();
         let device = Arc::new(FakeDevice::new(16, bs as u32));
         let extent = |sequence| ExtentId::new(DEFAULT_CELL, sequence);
-        let block = |sequence| ExtentRange::new(extent(sequence), 0..bs);
         // The journal's 4 blocks: the first two in extents 0 and 1, the others in 12 and 13, which
-        // replace 2 and 3. Extent 20 holds the first two, at once, and 21 all four. Extents 2, 3,
-        // 4 and 14 are never written.
+        // replace 2 and 3. Extents 2, 3, 4 and 14 are never written.
         let (data, records) = journal(&*device, 4).await;
         let data: Vec<_> = data.chunks(bs as usize).collect();
         for (sequence, data) in [0, 1, 12, 13].into_iter().zip(&data) {
             write_to(&*device, extent(sequence), data).await;
         }
-        write_to(&*device, extent(20), &data[..2].concat()).await;
-        write_to(&*device, extent(21), &data.concat()).await;
         let checkpoint =
             JournalCheckpoint { version: LATEST_VERSION, ..JournalCheckpoint::default() };
-        let read_ahead = async |reader: &mut JournalReader| {
-            // The first block is read, then the second and third at once.
-            for record in 0..2u64 {
-                assert_eq!(
-                    reader.deserialize().await.expect("deserialize failed"),
-                    ReadResult::Some(record)
-                );
-            }
-        };
 
-        // Truncated, as replay truncates a renewed tail's.
-        let mut handle = BootstrapObjectHandle::new_with_start_offset(1, device.clone(), 0);
-        for sequence in 0..5 {
-            handle.push_extent(0, block(sequence));
-        }
+        let handle = JournalExtentHandle::new(
+            device.clone(),
+            vec![JournalSpan {
+                start_offset: 0,
+                block_count: 5,
+                cell: DEFAULT_CELL,
+                base_sequence: 0,
+            }],
+        );
         let mut reader = JournalReader::new(handle, &checkpoint);
-        read_ahead(&mut reader).await;
-        reader.truncate_extents(2 * bs).expect("truncating");
-        for sequence in 12..15 {
-            reader.push_extent(0, block(sequence)).expect("pushing");
+        // The first block is read, then the second and third at once (reading ahead into seq 2).
+        for record in 0..2u64 {
+            assert_eq!(
+                reader.deserialize().await.expect("deserialize failed"),
+                ReadResult::Some(record)
+            );
         }
-        read_records(&mut reader, 2..records).await;
-
-        // Discarded, as replay discards those a discarded transaction added.
-        let mut handle = BootstrapObjectHandle::new_with_start_offset(1, device.clone(), 0);
-        for (added, sequence) in [(0, 0), (0, 1), (bs, 2), (bs, 3), (bs, 4)] {
-            handle.push_extent(added, block(sequence));
-        }
-        let mut reader = JournalReader::new(handle, &checkpoint);
-        read_ahead(&mut reader).await;
-        reader.discard_extents(bs);
-        for sequence in 12..15 {
-            reader.push_extent(2 * bs, block(sequence)).expect("pushing");
-        }
-        read_records(&mut reader, 2..records).await;
-
-        // Replaced by the first extent pushed, which reaches past the journal's end.
-        let initial = ExtentRange::new(extent(20), 0..4 * bs);
-        let mut reader =
-            JournalReader::new(BootstrapObjectHandle::new(1, device.clone(), initial), &checkpoint);
-        read_ahead(&mut reader).await;
-        reader.push_extent(0, ExtentRange::new(extent(21), 0..5 * bs)).expect("pushing");
+        // Sync replaces blocks 2..5 with a rotated span at seq 12..15.
+        reader
+            .sync_spans(vec![
+                JournalSpan {
+                    start_offset: 0,
+                    block_count: 2,
+                    cell: DEFAULT_CELL,
+                    base_sequence: 0,
+                },
+                JournalSpan {
+                    start_offset: 2 * bs,
+                    block_count: 3,
+                    cell: DEFAULT_CELL,
+                    base_sequence: 12,
+                },
+            ])
+            .expect("sync_spans");
         read_records(&mut reader, 2..records).await;
     }
 
@@ -769,19 +745,36 @@ mod tests {
         assert_eq!(reader.journal_file_checkpoint(), end);
     }
 
-    /// cladefs: where an extent ends is what a super-block's record says.
+    /// cladefs: a stream span whose end overflows or crosses the journal limit is refused.
     #[fuchsia::test]
-    async fn test_extents_past_any_offset() {
-        use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
+    async fn test_spans_past_any_offset() {
+        use crate::object_store::journal::bootstrap_handle::JournalExtentHandle;
+        use crate::object_store::journal::super_block::JournalSpan;
         use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
-        use storage_device::{ExtentId, ExtentRange};
 
-        let extent = ExtentId::new(DEFAULT_CELL, 0);
         let device = Arc::new(FakeDevice::new(16, 4096));
-        let handle = BootstrapObjectHandle::new_with_start_offset(1, device.clone(), 0);
+        let handle = JournalExtentHandle::new(
+            device.clone(),
+            vec![JournalSpan {
+                start_offset: 0,
+                block_count: 1,
+                cell: DEFAULT_CELL,
+                base_sequence: 0,
+            }],
+        );
         let mut reader = JournalReader::new(handle, &JournalCheckpoint::default());
-        reader.push_extent(0, ExtentRange::new(extent, 0..u64::MAX)).expect("the largest");
-        reader.push_extent(0, ExtentRange::new(extent, 0..4096)).expect_err("past any offset");
+        reader
+            .try_push_stream_span(
+                JournalSpan {
+                    start_offset: 4096,
+                    block_count: u64::MAX / 4096,
+                    cell: DEFAULT_CELL,
+                    base_sequence: 1,
+                },
+                DEFAULT_CELL,
+                1,
+            )
+            .expect_err("past any offset");
     }
 
     #[fuchsia::test]
@@ -909,7 +902,7 @@ mod tests {
             FakeObjectHandle::new(object.clone()),
             &JournalCheckpoint { version: LATEST_VERSION, ..JournalCheckpoint::default() },
         );
-        assert_eq!(reader.handle().get_size(), BLOCK_SIZE * 3);
+        assert_eq!(reader.handle.get_size(), BLOCK_SIZE * 3);
     }
 
     #[fuchsia::test]

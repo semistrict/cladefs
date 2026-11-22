@@ -419,6 +419,25 @@ impl ExtentTable {
         extent
     }
 
+    /// Mints an extent of `cell` for system metadata (a super-block) tracked by `Root` rather than
+    /// the allocator's tree (board 6926).
+    pub(super) fn mint_system(&mut self, cell: u64, device: &dyn Device) -> ExtentId {
+        let extent = ExtentId::new(cell, self.next_sequence);
+        self.next_sequence += 1;
+        device.opened(extent);
+        extent
+    }
+
+    /// Reserves `count` contiguous sequence numbers for a journal span tracked by `Root` and the
+    /// journal stream rather than the allocator's tree (board 6923). Returns `None` if adding
+    /// `count` would overflow `u64`.
+    pub(super) fn mint_span(&mut self, count: u64) -> Option<u64> {
+        let base = self.next_sequence;
+        let next = base.checked_add(count)?;
+        self.next_sequence = next;
+        Some(base)
+    }
+
     /// Mints from `sequence` on.
     pub(super) fn mint_from(&mut self, sequence: u64) {
         self.next_sequence = sequence;
@@ -726,6 +745,7 @@ impl ExtentTable {
         cell: u64,
         sequences: Range<u64>,
         discarded: &HashSet<ExtentId>,
+        live_system: &HashSet<ExtentId>,
     ) -> usize {
         let dying: HashSet<_> = self.dying().into_iter().collect();
         let named = (discarded.iter().copied())
@@ -733,7 +753,9 @@ impl ExtentTable {
         let orphans: Vec<_> = (sequences.clone())
             .map(|sequence| ExtentId::new(cell, sequence))
             .chain(named)
-            .filter(|extent| !self.is_alive(*extent) && !dying.contains(extent))
+            .filter(|extent| {
+                !self.is_alive(*extent) && !live_system.contains(extent) && !dying.contains(extent)
+            })
             .collect();
         for &extent in &orphans {
             let free_after = match discarded.contains(&extent) {
@@ -748,6 +770,31 @@ impl ExtentTable {
             });
         }
         orphans.len()
+    }
+
+    /// Queues retired or unused system extents (old super-blocks, old journal blocks, unused
+    /// journal tail blocks) of `cell` that are neither alive nor in `live_system` nor already
+    /// dying, to be freed immediately on mount (boards 6923, 6926).
+    pub(super) fn kill_system_extents(
+        &mut self,
+        extents: impl IntoIterator<Item = ExtentId>,
+        live_system: &HashSet<ExtentId>,
+    ) -> usize {
+        let mut dying: HashSet<_> = self.dying().into_iter().collect();
+        let mut count = 0;
+        for extent in extents {
+            if self.is_alive(extent) || live_system.contains(&extent) || !dying.insert(extent) {
+                continue;
+            }
+            self.queue_dead(DeadExtent {
+                free_after: FreeAfter::Now,
+                extent,
+                size: 0,
+                owner_object_id: INVALID_OBJECT_ID,
+            });
+            count += 1;
+        }
+        count
     }
 
     /// Kills `extent`, which the table holds, to be freed once `free_after` allows, as large as it
@@ -1476,7 +1523,7 @@ mod tests {
         table.check();
 
         let orphan = ExtentId::new(DEFAULT_CELL, 0);
-        assert_eq!(table.kill_orphans(DEFAULT_CELL, 0..2, &HashSet::new()), 1);
+        assert_eq!(table.kill_orphans(DEFAULT_CELL, 0..2, &HashSet::new(), &HashSet::new()), 1);
         let orphaned = (orphan, FreeAfter::Now, 0, INVALID_OBJECT_ID);
         assert_eq!(table.dead_extents().last(), Some(&orphaned));
         table.mint_from(5);
@@ -1499,7 +1546,7 @@ mod tests {
             ExtentId::new(DEFAULT_CELL + 1, 1 << 40),
         ];
         let discarded = HashSet::from([alive, far, other_cell]);
-        assert_eq!(table.kill_orphans(DEFAULT_CELL, 20..21, &discarded), 2);
+        assert_eq!(table.kill_orphans(DEFAULT_CELL, 20..21, &discarded, &HashSet::new()), 2);
         let mut dead = table.dead_extents();
         dead.sort_by_key(|(extent, ..)| *extent);
         assert_eq!(
@@ -1509,7 +1556,11 @@ mod tests {
                 (far, FreeAfter::RecordedFlush(0), 0, INVALID_OBJECT_ID),
             ]
         );
-        assert_eq!(table.kill_orphans(DEFAULT_CELL, 20..21, &discarded), 0, "killed twice");
+        assert_eq!(
+            table.kill_orphans(DEFAULT_CELL, 20..21, &discarded, &HashSet::new()),
+            0,
+            "killed twice"
+        );
         table.check();
     }
 
@@ -1564,7 +1615,7 @@ mod tests {
             let discarded = if named { HashSet::from(all) } else { HashSet::new() };
             table.settle_replay(&discarded);
             let sought = orphan.sequence..orphan.sequence + 1;
-            assert_eq!(table.kill_orphans(DEFAULT_CELL, sought, &discarded), 1);
+            assert_eq!(table.kill_orphans(DEFAULT_CELL, sought, &discarded, &HashSet::new()), 1);
 
             let recorded = FreeAfter::RecordedFlush(0);
             let mount = if named { recorded } else { FreeAfter::Now };

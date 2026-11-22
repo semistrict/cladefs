@@ -14,7 +14,10 @@
 // space borrowed as the filesystem had it (`Mutation::UpdateBorrowed`, TASK-218). Version 63's
 // ObjectDescriptorV63 says which special file a file is, in the entries of its directories
 // (TASK-236): ObjectValueV63 holds it, and the item, mutation, journal, encrypted transaction and
-// super-block records that hold an ObjectValue are V63.
+// super-block records that hold an ObjectValue are V63. Version 64 replaces the journal file and
+// A/B super-block objects with position-derived journal spans and a single atomic super-block in
+// Root (boards 6923, 6926): SuperBlockHeaderV64 drops journal_object_id, SuperBlockRecordV64 drops
+// Extent, and JournalRecordV64 adds JournalSpan.
 
 use crate::blob_metadata::{BlobMetadata, BlobMetadataV53};
 use crate::lsm_tree::{
@@ -25,9 +28,9 @@ use crate::object_store::allocator::{
     AllocatorValueV32,
 };
 use crate::object_store::journal::super_block::{
-    SuperBlockHeader, SuperBlockHeaderV32, SuperBlockRecord, SuperBlockRecordV63,
+    SuperBlockHeader, SuperBlockHeaderV64, SuperBlockRecord, SuperBlockRecordV64,
 };
-use crate::object_store::journal::{JournalRecord, JournalRecordV63};
+use crate::object_store::journal::{JournalRecord, JournalRecordV64};
 use crate::object_store::object_record::{
     FsverityMetadata, FsverityMetadataV50, ObjectKey, ObjectKeyV54, ObjectValue, ObjectValueV63,
 };
@@ -48,7 +51,7 @@ use std::collections::BTreeMap;
 ///
 /// IMPORTANT: When changing this (major or minor), update the list of possible versions at
 /// https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/cobalt_config/fuchsia/local_storage/versions.txt.
-pub const LATEST_VERSION: Version = Version { major: 63, minor: 0 };
+pub const LATEST_VERSION: Version = Version { major: 64, minor: 0 };
 
 /// The last version of the filesystem where keys in layer files used the old serialization format
 /// (prior to SerializeKey and delta encoding).
@@ -145,7 +148,7 @@ versioned_types! {
         50.. => FsverityMetadataV50,
     }
     JournalRecord {
-        63.. => JournalRecordV63,
+        64.. => JournalRecordV64,
     }
     Mutation {
         63.. => MutationV63,
@@ -166,10 +169,10 @@ versioned_types! {
         61.. => StoreInfoV61,
     }
     SuperBlockHeader {
-        32.. => SuperBlockHeaderV32,
+        64.. => SuperBlockHeaderV64,
     }
     SuperBlockRecord {
-        63.. => SuperBlockRecordV63,
+        64.. => SuperBlockRecordV64,
     }
     BlobMetadata {
         53.. => BlobMetadataV53,

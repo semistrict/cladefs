@@ -2,88 +2,49 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/journal/bootstrap_handle.rs`. cladefs: extents are
-// ranges of extents in the extent store (backlog doc-4), not of the device. An extent never written,
-// which the super-block and journal preallocate ahead of what they write, reads as zeros, as the
-// store doesn't hold it. Replay drops the extents of the journal's tail that a mount moved to new
-// extents (`truncate_extents`, see the journal's `renew_tail`). A read reads its extents' parts at
-// once.
+// Fuchsia's `src/storage/fxfs/src/object_store/journal/bootstrap_handle.rs`. cladefs: replaces
+// `BootstrapObjectHandle` with two direct extent-store handles (boards 6923, 6926):
+// - `ExtentObjectHandle`: reads the single atomic super-block extent named by `Root::super_block`.
+// - `JournalExtentHandle`: maps block-aligned journal stream offsets directly to position-derived
+//   extent IDs (`JournalSpan`) for both reading (parallel per-block reads, unwritten blocks reading
+//   as zeros) and writing (direct `PRE_BARRIER`/`POST_BARRIER` + `root` writes without any
+//   `DataObjectHandle`, `root_parent` extent records, or allocator mutations).
 
 use crate::errors::FxfsError;
 use crate::log::*;
-use crate::object_handle::{ObjectHandle, ReadObjectHandle};
-use crate::object_store::journal::JournalHandle;
-use crate::range::RangeExt;
-use anyhow::{Error, ensure};
+use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle};
+use crate::object_store::journal::super_block::JournalSpan;
+use crate::object_store::journal::{BLOCK_SIZE, JournalHandle};
+use anyhow::{Error, anyhow, bail, ensure};
 use async_trait::async_trait;
+use fuchsia_sync::Mutex;
+use futures::TryStreamExt as _;
 use futures::future::try_join_all;
+use futures::stream::FuturesOrdered;
 use std::cmp::min;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage_device::buffer::{BufferFuture, MutableBufferRef};
-use storage_device::{Device, ExtentRange, NoExtent};
+use storage_device::{Device, ExtentId, ExtentRange, NoExtent, WriteFlags, WriteOptions};
 use storage_units::BlockSize;
 
-// Extents are logically contiguous, so we don't need to store their start offset.
-#[derive(Debug, Clone)]
-struct Extent {
-    // Keep track of the offset of the transaction in which the extent was added, which is necessary
-    // for discard_extents.
-    added_offset: u64,
-    device_range: ExtentRange,
-}
-/// To read the super-block and journal, we use this handle since we cannot use DataObjectHandle
-/// until we've replayed the whole journal.  Clients must supply the extents to be used.
-pub struct BootstrapObjectHandle {
-    object_id: u64,
+/// Reads a single super-block stored in one `ExtentRange` named by `Root::super_block`.
+pub struct ExtentObjectHandle {
     device: Arc<dyn Device>,
-    start_offset: u64,
-    end_offset: u64,
-
-    /// A list of extents we know of for the handle; they are logically contiguous from
-    /// `start_offset`.
-    extents: Vec<Extent>,
-
-    /// An extent that is used to bootstrap reading this handle but will be replaced
-    /// on the first call to 'push_extent'. This lets us bootstrap reading of a superblock that
-    /// self-describes its own extents.
-    initial_extent: Option<Extent>,
+    extent: ExtentRange,
     trace: AtomicBool,
 }
 
-impl BootstrapObjectHandle {
-    pub fn new(object_id: u64, device: Arc<dyn Device>, initial_extent: ExtentRange) -> Self {
-        Self {
-            object_id,
-            device,
-            start_offset: 0,
-            end_offset: initial_extent.len(),
-            extents: Vec::new(),
-            initial_extent: Some(Extent { added_offset: 0, device_range: initial_extent }),
-            trace: AtomicBool::new(false),
-        }
-    }
-
-    pub fn new_with_start_offset(
-        object_id: u64,
-        device: Arc<dyn Device>,
-        start_offset: u64,
-    ) -> Self {
-        Self {
-            object_id,
-            device,
-            start_offset,
-            end_offset: start_offset,
-            extents: Vec::new(),
-            initial_extent: None,
-            trace: AtomicBool::new(false),
-        }
+impl ExtentObjectHandle {
+    pub fn new(device: Arc<dyn Device>, extent: ExtentRange) -> Self {
+        Self { device, extent, trace: AtomicBool::new(false) }
     }
 }
 
-impl ObjectHandle for BootstrapObjectHandle {
+impl ObjectHandle for ExtentObjectHandle {
     fn object_id(&self) -> u64 {
-        self.object_id
+        INVALID_OBJECT_ID
     }
 
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
@@ -91,225 +52,486 @@ impl ObjectHandle for BootstrapObjectHandle {
     }
 
     fn block_size(&self) -> BlockSize {
-        BlockSize::new(self.device.block_size()).unwrap()
+        BLOCK_SIZE
     }
 
     fn set_trace(&self, trace: bool) {
-        let old_value = self.trace.swap(trace, Ordering::Relaxed);
-        if trace != old_value {
-            info!(oid = self.object_id, trace; "JH: trace");
+        let old = self.trace.swap(trace, Ordering::Relaxed);
+        if trace != old {
+            info!(trace; "SBH: trace");
         }
     }
 }
 
 #[async_trait]
-impl ReadObjectHandle for BootstrapObjectHandle {
-    async fn read_aligned(
-        &self,
-        mut offset: u64,
-        buf: MutableBufferRef<'_>,
-    ) -> Result<usize, Error> {
+impl ReadObjectHandle for ExtentObjectHandle {
+    async fn read_aligned(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error> {
         let block_size = self.block_size();
         ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
         ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
-        // cladefs: not an assertion: the offset is a super-block's, and may be anything.
-        ensure!(offset >= self.start_offset, FxfsError::Inconsistent);
+        let size = self.extent.len();
+        if offset >= size || buf.is_empty() {
+            return Ok(0);
+        }
+        let to_read = min(size - offset, buf.len() as u64) as usize;
+        let device_offset =
+            self.extent.range.start.checked_add(offset).ok_or(FxfsError::Inconsistent)?;
+        self.device.read(self.extent.extent, device_offset, buf.subslice_mut(..to_read)).await?;
+        Ok(to_read)
+    }
+
+    fn get_size(&self) -> u64 {
+        self.extent.len()
+    }
+}
+
+impl JournalHandle for ExtentObjectHandle {
+    fn try_push_stream_span(
+        &mut self,
+        _span: JournalSpan,
+        _prev_cell: u64,
+        _prev_end_sequence: u64,
+    ) -> Result<Option<u64>, Error> {
+        bail!(anyhow!(FxfsError::Inconsistent).context("Unexpected span on super-block handle"));
+    }
+
+    fn sync_spans(&mut self, _spans: Vec<JournalSpan>) -> Result<Option<u64>, Error> {
+        Ok(None)
+    }
+}
+
+/// Maps contiguous journal byte offsets directly to position-derived extent IDs via a list of
+/// [`JournalSpan`]s. Shared via `Clone` (`Arc` interior) between `Journal` and readers (e.g.
+/// `read_transactions_for_object`), or owned per-reader during replay / follower `read_on`.
+#[derive(Clone)]
+pub struct JournalExtentHandle {
+    device: Arc<dyn Device>,
+    spans: Arc<Mutex<Vec<JournalSpan>>>,
+    trace: Arc<AtomicBool>,
+}
+
+impl JournalExtentHandle {
+    pub fn new(device: Arc<dyn Device>, spans: Vec<JournalSpan>) -> Self {
+        Self { device, spans: Arc::new(Mutex::new(spans)), trace: Arc::new(AtomicBool::new(false)) }
+    }
+
+    pub fn device(&self) -> &Arc<dyn Device> {
+        &self.device
+    }
+
+    /// Snapshot of the current span list.
+    pub fn spans(&self) -> Vec<JournalSpan> {
+        self.spans.lock().clone()
+    }
+
+    pub fn span_count(&self) -> usize {
+        self.spans.lock().len()
+    }
+
+    pub fn end_offset(&self) -> u64 {
+        self.spans.lock().last().map_or(0, JournalSpan::end_offset)
+    }
+
+    pub fn last_span(&self) -> Option<JournalSpan> {
+        self.spans.lock().last().cloned()
+    }
+
+    /// `(cell, end_sequence)` of the current last span, embedded in `JournalRecord::JournalSpan`
+    /// so replay accepts only spans extending the exact active chain.
+    pub fn last_end_key(&self) -> Option<(u64, u64)> {
+        self.spans.lock().last().map(|s| (s.cell, s.end_sequence()))
+    }
+
+    /// Appends a newly minted span directly (live writer path).
+    pub fn push_span(&self, span: JournalSpan) {
+        let mut spans = self.spans.lock();
+        if let Some(last) = spans.last() {
+            debug_assert_eq!(last.end_offset(), span.start_offset, "non-contiguous journal span");
+        }
+        spans.push(span);
+    }
+
+    /// Replaces the entire span list (after mount rotation, thaw rotation, or compaction pruning).
+    pub fn replace_spans(&self, new_spans: Vec<JournalSpan>) {
+        *self.spans.lock() = new_spans;
+    }
+
+    /// Prunes spans ending at or before `freed_to`, trimming the leading span's front if
+    /// `freed_to` falls inside it.
+    pub fn prune_before(&self, freed_to: u64) {
+        let mut spans = self.spans.lock();
+        prune_spans_before(&mut spans, freed_to);
+    }
+
+    /// Collects all position-derived journal block `ExtentId`s for block offsets in `range`.
+    pub fn extents_in(&self, range: Range<u64>) -> Vec<ExtentId> {
+        let spans = self.spans.lock();
+        extents_in_spans(&spans, range)
+    }
+
+    /// Writes `buf` (block-aligned) starting at journal `start` offset directly to the
+    /// position-derived block extents, optionally with `PRE_BARRIER` on block 0 and `POST_BARRIER`
+    /// + `root` on the final block (matching `DataObjectHandle::overwrite` ordering).
+    pub async fn write_blocks(
+        &self,
+        start: u64,
+        mut buf: MutableBufferRef<'_>,
+        barrier_on_first_write: bool,
+        barrier_after_last_write: bool,
+        root: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        let bs = BLOCK_SIZE.get();
+        ensure!(BLOCK_SIZE.is_aligned(start), FxfsError::InvalidArgs);
+        ensure!(BLOCK_SIZE.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let block_count = (buf.len() as u64) / bs;
+        let extents: Vec<ExtentId> = {
+            let spans = self.spans.lock();
+            let mut out = Vec::with_capacity(block_count as usize);
+            for i in 0..block_count {
+                let offset = start + i * bs;
+                let extent = extent_at_in(&spans, offset).ok_or_else(|| {
+                    anyhow!(FxfsError::Inconsistent)
+                        .context(format!("No journal span covers offset {offset}"))
+                })?;
+                out.push(extent);
+            }
+            out
+        };
+
+        let mut writes = FuturesOrdered::new();
+        let mut last_write = None;
+        let mut first_write = barrier_on_first_write;
+        for extent in extents {
+            let (current_buf, remaining_buf) = buf.split_at_mut(bs as usize);
+            let mut flags = if first_write {
+                first_write = false;
+                WriteFlags::PRE_BARRIER
+            } else {
+                WriteFlags::empty()
+            };
+            let is_last = remaining_buf.is_empty() && barrier_after_last_write;
+            if is_last {
+                flags |= WriteFlags::POST_BARRIER;
+            }
+            let write_root = if is_last { root } else { None };
+            let options = WriteOptions { flags, root: write_root, ..Default::default() };
+            let device = &self.device;
+            let write = crate::boxed(move || async move {
+                device.write_with_opts(extent, 0, current_buf.as_ref(), options).await
+            });
+            if is_last {
+                last_write = Some(write);
+            } else {
+                writes.push_back(write);
+            }
+            buf = remaining_buf;
+        }
+        writes.try_collect::<Vec<()>>().await?;
+        if let Some(last_write) = last_write {
+            last_write.await?;
+        }
+        Ok(())
+    }
+}
+
+/// Resolves a block-aligned `offset` within `spans`.
+pub(super) fn extent_at_in(spans: &[JournalSpan], offset: u64) -> Option<ExtentId> {
+    let idx = spans.partition_point(|s| s.end_offset() <= offset);
+    let span = spans.get(idx)?;
+    span.extent_at(offset)
+}
+
+/// Collects every block `ExtentId` in `spans` whose byte offset falls in `range` (block-aligned).
+pub(super) fn extents_in_spans(spans: &[JournalSpan], range: Range<u64>) -> Vec<ExtentId> {
+    if range.start >= range.end {
+        return Vec::new();
+    }
+    let bs = BLOCK_SIZE.get();
+    let mut out = Vec::new();
+    for span in spans {
+        let s_end = span.end_offset();
+        if s_end <= range.start {
+            continue;
+        }
+        if span.start_offset >= range.end {
+            break;
+        }
+        let from = range.start.max(span.start_offset);
+        let to = range.end.min(s_end);
+        let start_block = (from - span.start_offset) / bs;
+        let end_block = (to - span.start_offset) / bs;
+        for b in start_block..end_block {
+            out.push(ExtentId::new(span.cell, span.base_sequence + b));
+        }
+    }
+    out
+}
+
+/// Drops spans ending `<= freed_to` and trims the front of the first remaining span if `freed_to`
+/// falls strictly inside it. Preserves each span's `end_sequence()`.
+pub(super) fn prune_spans_before(spans: &mut Vec<JournalSpan>, freed_to: u64) {
+    let bs = BLOCK_SIZE.get();
+    spans.retain(|s| s.end_offset() > freed_to);
+    if let Some(first) = spans.first_mut() {
+        if freed_to > first.start_offset {
+            let trimmed_blocks = (freed_to - first.start_offset) / bs;
+            first.start_offset = freed_to;
+            first.base_sequence += trimmed_blocks;
+            first.block_count -= trimmed_blocks;
+        }
+    }
+}
+
+/// Truncates `spans` so nothing extends past `end_offset` (block-aligned), dropping empty spans.
+pub(super) fn truncate_spans_at(spans: &mut Vec<JournalSpan>, end_offset: u64) {
+    let bs = BLOCK_SIZE.get();
+    spans.retain(|s| s.start_offset < end_offset);
+    if let Some(last) = spans.last_mut() {
+        if last.end_offset() > end_offset {
+            last.block_count = (end_offset - last.start_offset) / bs;
+        }
+    }
+}
+
+impl ObjectHandle for JournalExtentHandle {
+    fn object_id(&self) -> u64 {
+        INVALID_OBJECT_ID
+    }
+
+    fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
+        self.device.allocate_buffer(size)
+    }
+
+    fn block_size(&self) -> BlockSize {
+        BLOCK_SIZE
+    }
+
+    fn set_trace(&self, trace: bool) {
+        let old = self.trace.swap(trace, Ordering::Relaxed);
+        if trace != old {
+            info!(trace; "JH: trace");
+        }
+    }
+}
+
+#[async_trait]
+impl ReadObjectHandle for JournalExtentHandle {
+    async fn read_aligned(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+        let block_size = self.block_size();
+        let bs = block_size.get();
+        ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
+        ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
         let trace = self.trace.load(Ordering::Relaxed);
         if trace {
             info!(len = buf.len(), offset; "JH: read");
         }
-        let len = buf.len();
-        let mut rest = buf;
-        let mut file_offset = self.start_offset;
-        let extents = if let Some(initial_extent) = &self.initial_extent {
-            std::slice::from_ref(initial_extent)
-        } else {
-            &self.extents
-        };
-        // cladefs: the extents' parts of the read are read at once: the journal's blocks are each an
-        // extent of their own, and each read of one a round trip to the device.
-        let mut reads = Vec::new();
-        for extent in extents {
-            let store_extent = extent.device_range.extent;
-            let device_range = &extent.device_range.range;
-            let extent_len = device_range.end - device_range.start;
-            if offset < file_offset + extent_len {
-                if trace {
-                    info!(device_range:?; "JH: matching extent");
-                }
-                let device_offset = device_range.start + offset - file_offset;
-                let to_read = min(device_range.end - device_offset, rest.len() as u64) as usize;
-                assert!((len - rest.len()) % self.device.block_size() as usize == 0);
-                let (mut part, tail) = rest.split_at_mut(to_read);
-                rest = tail;
-                reads.push(async move {
-                    match self.device.read(store_extent, device_offset, part.reborrow()).await {
-                        Err(error) if error.downcast_ref::<NoExtent>().is_some() => part.fill(0),
-                        result => result?,
-                    }
-                    Ok::<_, Error>(())
-                });
-                if rest.is_empty() {
-                    break;
-                }
-                offset += to_read as u64;
+        let max_blocks = (buf.len() as u64) / bs;
+        let extents: Vec<ExtentId> = {
+            let spans = self.spans.lock();
+            if let Some(first) = spans.first() {
+                ensure!(offset >= first.start_offset, FxfsError::Inconsistent);
+            } else {
+                return Ok(0);
             }
-            file_offset += extent_len;
+            let mut out = Vec::with_capacity(max_blocks as usize);
+            for i in 0..max_blocks {
+                let Some(block_off) = offset.checked_add(i * bs) else {
+                    break;
+                };
+                match extent_at_in(&spans, block_off) {
+                    Some(extent) => out.push(extent),
+                    None => break,
+                }
+            }
+            out
+        };
+        let to_read = extents.len() * (bs as usize);
+        if to_read == 0 {
+            return Ok(0);
+        }
+        let mut rest = buf;
+        let mut reads = Vec::with_capacity(extents.len());
+        for extent in extents {
+            let (mut part, tail) = rest.split_at_mut(bs as usize);
+            rest = tail;
+            reads.push(async move {
+                match self.device.read(extent, 0, part.reborrow()).await {
+                    Err(error) if error.downcast_ref::<NoExtent>().is_some() => part.fill(0),
+                    result => result?,
+                }
+                Ok::<_, Error>(())
+            });
         }
         try_join_all(reads).await?;
-        Ok(len - rest.len())
+        Ok(to_read)
     }
 
     fn get_size(&self) -> u64 {
-        self.end_offset
+        self.end_offset()
     }
 }
 
-impl JournalHandle for BootstrapObjectHandle {
-    fn end_offset(&self) -> Option<u64> {
-        Some(self.end_offset)
-    }
-
-    fn push_extent(&mut self, added_offset: u64, device_range: ExtentRange) {
-        if self.initial_extent.is_some() {
-            self.initial_extent = None;
-            self.end_offset = 0;
+impl JournalHandle for JournalExtentHandle {
+    fn try_push_stream_span(
+        &mut self,
+        span: JournalSpan,
+        prev_cell: u64,
+        prev_end_sequence: u64,
+    ) -> Result<Option<u64>, Error> {
+        span.validate()?;
+        let mut spans = self.spans.lock();
+        if let Some(last) = spans.last() {
+            if last.cell == prev_cell
+                && last.end_sequence() == prev_end_sequence
+                && last.end_offset() == span.start_offset
+            {
+                let start = span.start_offset;
+                spans.push(span);
+                return Ok(Some(start));
+            }
         }
-        self.end_offset += device_range.range.length().unwrap();
-        debug_assert!(
-            self.extents.last().map_or(true, |e| e.added_offset <= added_offset),
-            "last extent added at {}; this added at {added_offset}",
-            self.extents.last().unwrap().added_offset
-        );
-        self.extents.push(Extent { added_offset, device_range });
+        // Otherwise this span was either already persisted in `Root` or superseded by a later
+        // mount/thaw rotation whose `Root` is authoritative.
+        Ok(None)
     }
 
-    fn truncate_extents(&mut self, offset: u64) -> Result<(), Error> {
-        // cladefs: not an assertion: the offset is a journal record's, and may be anything.
-        ensure!(offset >= self.start_offset && offset <= self.end_offset, FxfsError::Inconsistent);
-        let mut extent_start = self.start_offset;
-        let mut kept = 0;
-        for extent in &mut self.extents {
-            if extent_start >= offset {
+    fn sync_spans(&mut self, root_spans: Vec<JournalSpan>) -> Result<Option<u64>, Error> {
+        let mut spans = self.spans.lock();
+        let Some(root_last_end) = root_spans.last().map(JournalSpan::end_offset) else {
+            return Ok(None);
+        };
+        if spans.is_empty() {
+            *spans = root_spans;
+            return Ok(Some(0));
+        }
+        // Keep any prefix before `root_spans[0].start_offset` (in case a follower hasn't caught up
+        // to the writer's latest compaction prune yet), and replace from `root_spans[0].start_offset`
+        // onwards with `root_spans` if `root_spans` changed or extended the mapping.
+        let root_start = root_spans[0].start_offset;
+        let mut merged = Vec::new();
+        for s in spans.iter() {
+            if s.start_offset >= root_start {
                 break;
             }
-            let len = extent.device_range.len();
-            if extent_start + len > offset {
-                extent.device_range.range.end -= extent_start + len - offset;
+            let mut prefix = s.clone();
+            if prefix.end_offset() > root_start {
+                prefix.block_count = (root_start - prefix.start_offset) / BLOCK_SIZE.get();
             }
-            extent_start += len;
-            kept += 1;
-        }
-        self.extents.truncate(kept);
-        self.end_offset = offset;
-        Ok(())
-    }
-
-    fn discard_extents(&mut self, discard_offset: u64) {
-        let index = self.extents.partition_point(|extent| extent.added_offset < discard_offset);
-        if index == self.extents.len() {
-            return;
-        }
-        let discarded = self.extents.drain(index..);
-        let trace = self.trace.load(Ordering::Relaxed);
-        for extent in discarded {
-            self.end_offset -= extent.device_range.range.length().unwrap();
-            if trace {
-                info!(discard_offset, extent:?; "JH: Discarded extent");
+            if prefix.block_count > 0 {
+                merged.push(prefix);
             }
         }
+        // Check contiguity: if the follower fell behind past a prune gap where we didn't have the
+        // prefix, only update if contiguous.
+        if let Some(last_prefix) = merged.last() {
+            if last_prefix.end_offset() != root_start {
+                return Ok(None);
+            }
+        }
+        // Only replace if `root_spans` actually differs or extends past what we have.
+        let root_tail_key = root_spans.last().map(|s| (s.cell, s.end_sequence()));
+        let old_tail_key = spans
+            .iter()
+            .find(|s| s.end_offset() == root_last_end)
+            .map(|s| (s.cell, s.end_sequence()));
+        let mut candidate = merged;
+        candidate.extend(root_spans);
+        // Preserve in-stream spans we already discovered past `root_last_end` ONLY if the span
+        // ending at `root_last_end` was not rotated to a different `(cell, end_sequence)`.
+        if root_tail_key.is_some() && root_tail_key == old_tail_key {
+            for s in spans.iter() {
+                if s.start_offset >= root_last_end {
+                    if let Some(last) = candidate.last() {
+                        if last.end_offset() == s.start_offset {
+                            candidate.push(s.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if *spans == candidate {
+            return Ok(None);
+        }
+        // Find earliest offset where mapping changed so `JournalReader` forgets stale read-ahead.
+        let mut changed_at = candidate.first().map_or(0, |s| s.start_offset);
+        for (a, b) in spans.iter().zip(candidate.iter()) {
+            if a == b {
+                changed_at = a.end_offset();
+            } else {
+                changed_at = a.start_offset.min(b.start_offset);
+                break;
+            }
+        }
+        *spans = candidate;
+        Ok(Some(changed_at))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BootstrapObjectHandle;
+    use super::{ExtentObjectHandle, JournalExtentHandle, prune_spans_before, truncate_spans_at};
     use crate::errors::FxfsError;
     use crate::object_handle::ReadObjectHandle as _;
-    use crate::object_store::journal::JournalHandle as _;
+    use crate::object_store::journal::super_block::JournalSpan;
+    use crate::object_store::journal::{BLOCK_SIZE, JournalHandle as _};
     use std::sync::Arc;
     use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
     use storage_device::{Device as _, ExtentId, ExtentRange};
 
-    /// The device's one extent.
-    const E: ExtentId = ExtentId::new(DEFAULT_CELL, 0);
-
     #[fuchsia::test]
-    async fn test_initial_extent() {
-        let device = Arc::new(FakeDevice::new(64, 512));
-        let mut buffer = device.allocate_buffer(1024).await;
-        buffer.fill(1);
-        device.write(E, 0, buffer.as_ref()).await.unwrap();
-        buffer.fill(2);
-        device.write(E, 1024, buffer.as_ref()).await.unwrap();
-        buffer.fill(0);
+    async fn test_extent_object_handle_read() {
+        let bs = BLOCK_SIZE.get();
+        let device = Arc::new(FakeDevice::new(16, bs as u32));
+        let extent = ExtentId::new(DEFAULT_CELL, 7);
+        let mut buf = device.allocate_buffer(2 * bs as usize).await;
+        buf.subslice_mut(..bs as usize).fill(1);
+        buf.subslice_mut(bs as usize..).fill(2);
+        device.write(extent, 0, buf.as_ref()).await.unwrap();
 
-        let handle = BootstrapObjectHandle::new(1, device.clone(), ExtentRange::new(E, 0..0));
-        assert_eq!(handle.get_size(), 0);
-        assert_eq!(handle.read_aligned(0, buffer.as_mut()).await.expect("no initial data"), 0);
-
-        let mut handle =
-            BootstrapObjectHandle::new(1, device.clone(), ExtentRange::new(E, 1024..2048));
-        assert_eq!(handle.get_size(), 1024);
-        handle.read_aligned(0, buffer.as_mut()).await.expect("read implicit extent");
-        assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        handle.push_extent(0, ExtentRange::new(E, 0..1024));
-        handle.read_aligned(0, buffer.as_mut()).await.expect("read first explicit extent");
-        assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
-    }
-
-    /// cladefs: where a read starts is a super-block's, and where extents are truncated a journal
-    /// record's: which an image says, and which fail rather than assert.
-    #[fuchsia::test]
-    async fn test_offsets_outside_a_handle() {
-        let device = Arc::new(FakeDevice::new(64, 512));
-        let mut handle = BootstrapObjectHandle::new_with_start_offset(1, device.clone(), 1024);
-        handle.push_extent(0, ExtentRange::new(E, 0..1024));
-        let mut buffer = device.allocate_buffer(512).await;
-        let error = handle.read_aligned(512, buffer.as_mut()).await.expect_err("read");
-        assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
-        for offset in [512, 4096] {
-            let error = handle.truncate_extents(offset).expect_err("truncated");
-            assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
-        }
+        let handle = ExtentObjectHandle::new(device.clone(), ExtentRange::new(extent, 0..2 * bs));
+        assert_eq!(handle.get_size(), 2 * bs);
+        let mut out = device.allocate_buffer(bs as usize).await;
+        assert_eq!(handle.read_aligned(0, out.as_mut()).await.unwrap(), bs as usize);
+        assert_eq!(out.to_vec(), vec![1u8; bs as usize]);
+        assert_eq!(handle.read_aligned(bs, out.as_mut()).await.unwrap(), bs as usize);
+        assert_eq!(out.to_vec(), vec![2u8; bs as usize]);
+        assert_eq!(handle.read_aligned(2 * bs, out.as_mut()).await.unwrap(), 0);
     }
 
     #[fuchsia::test]
-    async fn test_discard_extents() {
-        let device = Arc::new(FakeDevice::new(64, 512));
-        let mut handle = BootstrapObjectHandle::new(1, device.clone(), ExtentRange::new(E, 0..0));
+    async fn test_journal_extent_handle_spans_and_bounds() {
+        let bs = BLOCK_SIZE.get();
+        let device = Arc::new(FakeDevice::new(32, bs as u32));
+        let s1 =
+            JournalSpan { start_offset: bs, block_count: 2, cell: DEFAULT_CELL, base_sequence: 10 };
+        let mut handle = JournalExtentHandle::new(device.clone(), vec![s1.clone()]);
+        let mut out = device.allocate_buffer(bs as usize).await;
+        let err = handle.read_aligned(0, out.as_mut()).await.expect_err("before first span");
+        assert!(FxfsError::Inconsistent.matches(&err), "{err:?}");
 
-        let mut buffer = device.allocate_buffer(1024).await;
-        buffer.fill(1);
-        device.write(E, 0, buffer.as_ref()).await.unwrap();
-        buffer.fill(2);
-        device.write(E, 1024, buffer.as_ref()).await.unwrap();
-        buffer.fill(0);
+        // Stream span with matching prev key is appended; stale prev key is ignored.
+        let s2 = JournalSpan {
+            start_offset: 3 * bs,
+            block_count: 2,
+            cell: DEFAULT_CELL,
+            base_sequence: 20,
+        };
+        assert_eq!(handle.try_push_stream_span(s2.clone(), DEFAULT_CELL, 999).unwrap(), None);
+        assert_eq!(
+            handle.try_push_stream_span(s2.clone(), DEFAULT_CELL, s1.end_sequence()).unwrap(),
+            Some(3 * bs)
+        );
+        assert_eq!(handle.end_offset(), 5 * bs);
 
-        handle.push_extent(0, ExtentRange::new(E, 1024..2048));
-        handle.push_extent(131072, ExtentRange::new(E, 0..1024));
-
-        assert_eq!(handle.get_size(), 2048);
-        handle.read_aligned(0, buffer.as_mut()).await.unwrap();
-        assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        handle.read_aligned(1024, buffer.as_mut()).await.unwrap();
-        assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
-
-        // Discard at an offset greater than any extent was added, which should be a NOP.
-        handle.discard_extents(131073);
-
-        assert_eq!(handle.get_size(), 2048);
-        assert_eq!(handle.read_aligned(0, buffer.as_mut()).await.unwrap(), 1024);
-        assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        assert_eq!(handle.read_aligned(1024, buffer.as_mut()).await.unwrap(), 1024);
-        assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
-
-        // Discard the second extent.
-        handle.discard_extents(131072);
-
-        assert_eq!(handle.get_size(), 1024);
-        assert_eq!(handle.read_aligned(0, buffer.as_mut()).await.unwrap(), 1024);
-        assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        assert_eq!(handle.read_aligned(1024, buffer.as_mut()).await.unwrap(), 0);
+        let mut spans = handle.spans();
+        prune_spans_before(&mut spans, 2 * bs);
+        assert_eq!(spans[0].start_offset, 2 * bs);
+        assert_eq!(spans[0].base_sequence, 11);
+        assert_eq!(spans[0].end_sequence(), 12);
+        truncate_spans_at(&mut spans, 4 * bs);
+        assert_eq!(spans.last().unwrap().end_offset(), 4 * bs);
     }
 }

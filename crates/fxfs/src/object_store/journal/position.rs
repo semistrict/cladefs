@@ -2,45 +2,36 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: how far the journal has got, in each of the senses its writing, syncing and zeroing need,
-//! as one value, changed only by what happens to the journal, a method each, after which the
-//! orders between them are checked (in debug builds). Upstream keeps six of these as fields of the
-//! journal's `Inner`. On a device whose extents are written once, a sync's barrier follows the
-//! journal's write, syncs wait for each other, and the old journal is zeroed a slice a commit,
-//! which took seven more, whose orders, kept by hand, explained a run of bugs (TASK-160.25).
+//! cladefs: how far the journal has got, in each of the senses its writing and syncing need, as
+//! one value, changed only by what happens to the journal, a method each, after which the orders
+//! between them are checked (in debug builds). Upstream keeps these as fields of the journal's
+//! `Inner`. On a device whose extents are written once, a sync's barrier follows the journal's
+//! write and syncs wait for each other, whose orders, kept by hand, explained a run of bugs
+//! (TASK-160.25). Journal space is reclaimed directly by freeing superseded position-derived block
+//! extents after `commit_root`, so slice-wise zeroing is gone (board 6923).
 //!
 //! The orders, offsets in the journal:
 //!
-//! - `zeroed_to < zero_offset <= device_flushed_end`: the old journal is zeroed as far as the first,
-//!   towards the second, the block where the last super-block but one started its replay: no
-//!   further than the last starts it, which a flush of the device made durable.
 //! - `device_flushed_offset <= device_flushed_end <= flushed_offset`: the device was last flushed
 //!   for the journal as far as the first, which a DidFlushDevice record says, and the flushes made
 //!   it durable as far as the second, the padding written after the first too.
 //! - `discard_offset <= valid_to <= flushed_offset`: replay discards from the first; a replay would
 //!   find the journal ending at the second.
 //! - `barrier_written <= valid_to`: a barrier last followed a write that ended there.
-//! - `flushed_offset`: the journal is written to its file as far as here, and each write goes on
+//! - `flushed_offset`: the journal is written to its extents as far as here, and each write goes on
 //!   from it.
 //! - `barrier_wanted` and `flush_wanted` are no further than the journal's writer, whose records
 //!   aren't all written: a sync wants a barrier after its write as far as the first; something
 //!   waits for the journal to be written as far as the second.
 //!
 //! And of syncs flushing the device, `synced <= syncs_begun`, each ending in the order it began.
-//! No offset goes back, nor does where a super-block's replay starts.
+//! No offset goes back.
 
 use crate::object_store::journal::BLOCK_SIZE;
 use std::ops::Range;
 
 #[derive(Debug, Default)]
 pub(super) struct JournalPosition {
-    // The offset that we can zero the journal up to now that it is no longer needed. cladefs: none
-    // once zeroed as far.
-    zero_offset: Option<u64>,
-
-    // cladefs: how far it has zeroed towards it, a slice a commit.
-    zeroed_to: u64,
-
     // The journal offset that we most recently flushed to the device.
     device_flushed_offset: u64,
 
@@ -56,7 +47,7 @@ pub(super) struct JournalPosition {
     // we ignore those mutations and continue with new good mutations.
     discard_offset: Option<u64>,
 
-    // The last offset that should be considered valid in the journal file.  Most of the time, this
+    // The last offset that should be considered valid in the journal.  Most of the time, this
     // will be the same as `flushed_offset` but at mount time, this could be less and will only be
     // up to the end of the last valid transaction; it won't include transactions that follow that
     // have been discarded.
@@ -65,7 +56,7 @@ pub(super) struct JournalPosition {
     // cladefs: how far the journal was written when a barrier last followed its write.
     barrier_written: u64,
 
-    // The last offset we flushed to the journal file.
+    // The last offset we flushed to the journal extents.
     flushed_offset: u64,
 
     // cladefs: where a sync flushing the device padded the journal to: the flush of the journal
@@ -112,7 +103,7 @@ impl JournalPosition {
         self.check();
     }
 
-    /// How far the journal is written to its file.
+    /// How far the journal is written to its extents.
     pub fn flushed_offset(&self) -> u64 {
         self.flushed_offset
     }
@@ -237,64 +228,8 @@ impl JournalPosition {
         offset.then_some(self.device_flushed_offset)
     }
 
-    /// A super-block is written whose replay starts at `start`, the last one's at `old_start`: the
-    /// journal before there, its block, is zeroed.
-    pub fn superseded(&mut self, old_start: u64, start: u64) {
-        debug_assert!(
-            old_start <= start,
-            "a super-block's journal at {start}, the last's at {old_start}"
-        );
-        debug_assert!(
-            start <= self.device_flushed_end,
-            "a super-block's journal at {start}, durable only to {}",
-            self.device_flushed_end
-        );
-        let zero_to = BLOCK_SIZE.align_down(old_start);
-        debug_assert!(
-            zero_to >= self.zero_offset.unwrap_or(self.zeroed_to),
-            "zeroing to {zero_to}, having zeroed to {}, towards {:?}",
-            self.zeroed_to,
-            self.zero_offset
-        );
-        self.zero_offset = (zero_to > self.zeroed_to).then_some(zero_to);
-        self.check();
-    }
-
-    /// Where the old journal is zeroed to next: at most `max` of what's left.
-    pub fn zeroing(&self, max: u64) -> Option<Range<u64>> {
-        self.zero_offset.map(|end| self.zeroed_to..end.min(self.zeroed_to + max))
-    }
-
-    /// `range` of the old journal is zeroed, as `zeroing` said.
-    pub fn zeroed(&mut self, range: Range<u64>) {
-        debug_assert_eq!(range.start, self.zeroed_to, "zeroed {range:?}, not from where it was");
-        debug_assert!(
-            self.zero_offset.is_some_and(|end| range.end <= end),
-            "zeroed {range:?}, past {:?}",
-            self.zero_offset
-        );
-        self.zeroed_to = range.end;
-        if self.zero_offset == Some(range.end) {
-            self.zero_offset = None;
-        }
-        self.check();
-    }
-
-    /// Where the old journal is zeroed to, if anywhere.
-    #[cfg(test)]
-    pub fn zero_offset(&self) -> Option<u64> {
-        self.zero_offset
-    }
-
     /// The orders between them (the module's comment).
     fn check(&self) {
-        if let Some(zero_offset) = self.zero_offset {
-            debug_assert!(self.zeroed_to < zero_offset, "{self:?}: zeroed past where it zeroes to");
-            debug_assert!(
-                zero_offset <= self.device_flushed_end,
-                "{self:?}: zeroes what isn't durable"
-            );
-        }
         debug_assert!(
             self.device_flushed_offset <= self.device_flushed_end,
             "{self:?}: the device flushed for more than it made durable"
@@ -366,26 +301,6 @@ mod tests {
         assert_eq!((flush.durable, flush.barriered, flush.end), (false, false, 5 * B));
     }
 
-    #[test]
-    fn test_the_old_journal_is_zeroed_in_slices() {
-        let mut position = replayed_to(8 * B);
-        assert_eq!(position.zeroing(B), None);
-        position.superseded(3 * B + 100, 5 * B);
-        assert_eq!(position.zero_offset(), Some(3 * B));
-        assert_eq!(position.zeroing(2 * B), Some(0..2 * B));
-        position.zeroed(0..2 * B);
-        // A super-block written meanwhile zeroes further.
-        position.superseded(5 * B, 6 * B);
-        assert_eq!(position.zeroing(2 * B), Some(2 * B..4 * B));
-        position.zeroed(2 * B..4 * B);
-        assert_eq!(position.zeroing(2 * B), Some(4 * B..5 * B));
-        position.zeroed(4 * B..5 * B);
-        assert_eq!(position.zeroing(2 * B), None);
-        // One whose last started in the block zeroed to has nothing to zero.
-        position.superseded(6 * B - 1, 6 * B);
-        assert_eq!(position.zeroing(2 * B), None);
-    }
-
     // Each order broken panics in a debug build, where the module's comment says it can't be.
 
     #[cfg(debug_assertions)]
@@ -451,46 +366,5 @@ mod tests {
     #[should_panic(expected = "more syncs done than begun")]
     fn test_a_sync_done_never_begun_panics() {
         JournalPosition::default().end_sync(1);
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "a super-block's journal at 4096, the last's at 8192")]
-    fn test_a_super_block_starting_before_the_last_panics() {
-        JournalPosition::default().superseded(2 * B, B);
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "a super-block's journal at 4096, durable only to 0")]
-    fn test_a_super_block_starting_past_what_is_durable_panics() {
-        JournalPosition::default().superseded(0, B);
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "zeroing to 4096, having zeroed to 0, towards Some(8192)")]
-    fn test_zeroing_less_than_before_panics() {
-        let mut position = replayed_to(2 * B);
-        position.superseded(2 * B, 2 * B);
-        position.superseded(B, 2 * B);
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "zeroed 0..12288, past Some(8192)")]
-    fn test_zeroing_past_where_it_zeroes_to_panics() {
-        let mut position = replayed_to(2 * B);
-        position.superseded(2 * B, 2 * B);
-        position.zeroed(0..3 * B);
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "zeroed 4096..8192, not from where it was")]
-    fn test_zeroing_not_from_where_it_was_panics() {
-        let mut position = replayed_to(2 * B);
-        position.superseded(2 * B, 2 * B);
-        position.zeroed(B..2 * B);
     }
 }

@@ -22,7 +22,6 @@ use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::allocator::{
     self, Allocator, AllocatorKey, AllocatorValue, CoalescingIterator, RangeCounts,
 };
-use crate::object_store::journal::super_block::SuperBlockInstance;
 use crate::object_store::volume::root_volume;
 use crate::object_store::{ObjectStore, load_store_info};
 use anyhow::{Context, Error, anyhow};
@@ -139,8 +138,7 @@ pub async fn fsck_with_options(
     journal_checkpoint_ids.insert(super_block_header.root_store_object_id);
 
     // Scan the root parent object store.
-    let mut root_objects =
-        vec![super_block_header.root_store_object_id, super_block_header.journal_object_id];
+    let mut root_objects = vec![super_block_header.root_store_object_id];
     root_objects.append(&mut object_manager.root_store().parent_objects());
     fsck.verbose("Scanning root parent store...");
     store_scanner::scan_store(
@@ -153,12 +151,7 @@ pub async fn fsck_with_options(
     fsck.verbose("Scanning root parent store done");
 
     let root_store = &object_manager.root_store();
-    let mut root_store_root_objects = Vec::new();
-    root_store_root_objects.append(&mut vec![
-        super_block_header.allocator_object_id,
-        SuperBlockInstance::A.object_id(),
-        SuperBlockInstance::B.object_id(),
-    ]);
+    let mut root_store_root_objects = vec![super_block_header.allocator_object_id];
     root_store_root_objects.append(&mut root_store.root_objects());
 
     let root_volume = root_volume(filesystem.clone()).await?;

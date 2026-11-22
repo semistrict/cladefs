@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/testing/fake_object.rs`. cladefs: JournalHandle gains
-// `truncate_extents` (see the journal's `renew_tail`), which a fake object, holding no extents,
-// ignores.
+// Fuchsia's `src/storage/fxfs/src/testing/fake_object.rs`. cladefs: JournalHandle manages
+// position-derived journal spans (`try_push_stream_span`, `sync_spans`, board 6923), which a fake
+// object, holding no extents, ignores.
 
 use crate::errors::FxfsError;
 use crate::object_handle::{LayerObject, ObjectHandle, ReadObjectHandle, WriteObjectHandle};
@@ -124,17 +124,18 @@ impl WriteObjectHandle for FakeObjectHandle {
 }
 
 impl JournalHandle for FakeObjectHandle {
-    fn end_offset(&self) -> Option<u64> {
-        None
+    fn try_push_stream_span(
+        &mut self,
+        _span: crate::object_store::journal::super_block::JournalSpan,
+        _prev_cell: u64,
+        _prev_end_sequence: u64,
+    ) -> Result<Option<u64>, Error> {
+        Ok(None)
     }
-    fn push_extent(&mut self, _added_offset: u64, _device_range: storage_device::ExtentRange) {
-        // NOP
-    }
-    fn discard_extents(&mut self, _discard_offset: u64) {
-        // NOP
-    }
-    fn truncate_extents(&mut self, _offset: u64) -> Result<(), Error> {
-        // NOP
-        Ok(())
+    fn sync_spans(
+        &mut self,
+        _spans: Vec<crate::object_store::journal::super_block::JournalSpan>,
+    ) -> Result<Option<u64>, Error> {
+        Ok(None)
     }
 }

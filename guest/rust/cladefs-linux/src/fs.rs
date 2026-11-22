@@ -96,12 +96,9 @@ enum Frozen {
     /// commits held by the task, and its journal's compactions paused, unless it writes nothing.
     /// Next: telling the device it thaws, taking its cell, and opening it.
     Closed { commits: Option<Task<()>> },
-    /// The device open again, on its cell, the commits still held. Next: renewing the journal's
-    /// tail, before anything commits, then letting commits go on.
+    /// The device open again, on its cell, the commits still held. Next: rotating the journal's
+    /// span onto the new cell in `Root` if the cell changed, then letting commits go on.
     Opened { commits: Option<Task<()>> },
-    /// The journal's tail renewed, commits going on, compactions still paused. Next: recording the
-    /// tail in a super-block, before anything compacts.
-    Renewed,
 }
 
 impl Frozen {
@@ -110,7 +107,6 @@ impl Frozen {
         match self {
             Frozen::Closed { .. } => 1,
             Frozen::Opened { .. } => 2,
-            Frozen::Renewed => 3,
         }
     }
 }
@@ -182,9 +178,9 @@ impl Filesystem {
             .clamp(DEFAULT_RECLAIM_SIZE, JOURNAL_MAX);
         let journal = JournalOptions {
             reclaim_size,
+            chunk_size: (reclaim_size / 16).max(131_072),
             barriers_enabled: true,
             lazy_flush: Some(LAZY_FLUSH),
-            ..Default::default()
         };
         let filesystem = FxFilesystemBuilder::new()
             .read_only(read_only)
@@ -344,6 +340,9 @@ impl Filesystem {
             };
         }
         self.filesystem.journal().resume_compactions();
+        if let Err(error) = self.filesystem.compact_spans_if_needed().await {
+            log::warn!("cladefs: post-thaw span compaction failed: {error:#}");
+        }
         Ok(())
     }
 
@@ -367,22 +366,15 @@ impl Filesystem {
                 }
                 Err(error) => Err((Frozen::Closed { commits }, error)),
             },
-            Frozen::Opened { commits } => match self.filesystem.renew_journal_tail().await {
+            Frozen::Opened { commits } => match self.filesystem.rotate_journal_span().await {
                 // Commits go on as the task holding them is dropped, which cancels it.
-                Ok(renewed) => {
+                Ok(()) => {
                     drop(commits);
-                    Ok(renewed.then_some(Frozen::Renewed))
+                    Ok(None)
                 }
                 Err(error) => Err((
                     Frozen::Opened { commits },
-                    error.context("renewing the journal's tail as the filesystem thaws"),
-                )),
-            },
-            Frozen::Renewed => match self.filesystem.record_journal_tail().await {
-                Ok(()) => Ok(None),
-                Err(error) => Err((
-                    Frozen::Renewed,
-                    error.context("recording the journal's renewed tail as the filesystem thaws"),
+                    error.context("rotating the journal's span as the filesystem thaws"),
                 )),
             },
         }

@@ -8,11 +8,9 @@
 // writeback), `reflink` and `in_commits` (clones and punches of however many extents), `tail`
 // (zeroing past a file's end), `write_once` and `snapshot`. Data lives in extents of an extent
 // store (backlog doc-4), written once: `overwrite` writes raw extents in place, only as
-// `in_place` says, which refuses those a snapshot or a clone shares, which its users (the
-// journal and super-blocks) do once per block; preallocation can limit the extents it allocates
-// to a length (`preallocate_range_in_extents_of`). Files in overwrite mode are written
-// copy-on-write (see `StoreObjectHandle::multi_overwrite`), so preallocating doesn't guarantee
-// space; and a write replacing a file's last overwrite extent leaves its attribute's
+// `in_place` says, which refuses those a snapshot or a clone shares. Files in overwrite mode are
+// written copy-on-write (see `StoreObjectHandle::multi_overwrite`), so preallocating doesn't
+// guarantee space; and a write replacing a file's last overwrite extent leaves its attribute's
 // `has_overwrite_extents` set, which fsck refuses (MissingOverwriteExtents), so nothing of cladefs's
 // preallocates a file's data with `allocate`: fallocate grows the file alone (TASK-149.39). What splits an operation across commits is the room its transaction says it has left
 // (`Transaction::room`), not a count of mutations: `allocate`, `preallocate_range`.
@@ -1527,18 +1525,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         transaction: &mut Transaction<'a>,
         file_range: &mut Range<u64>,
     ) -> Result<Vec<ExtentRange>, Error> {
-        self.preallocate_range_in_extents_of(transaction, file_range, u64::MAX).await
-    }
-
-    /// cladefs: like `preallocate_range`, with extents of at most `max_extent_len` bytes each: a
-    /// file written in place, a block at a time, such as the journal, writes each extent once,
-    /// before it is sealed (backlog doc-4), if its extents are its blocks.
-    pub async fn preallocate_range_in_extents_of<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
-        file_range: &mut Range<u64>,
-        max_extent_len: u64,
-    ) -> Result<Vec<ExtentRange>, Error> {
         let block_size = self.block_size();
         ensure!(block_size.is_aligned(&*file_range), FxfsError::InvalidArgs);
         ensure!(!self.handle.is_encrypted(), FxfsError::NotSupported);
@@ -1633,7 +1619,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 .allocate(
                     transaction,
                     self.store().store_object_id(),
-                    min(allocate_end - file_range.start, max_extent_len),
+                    allocate_end - file_range.start,
                 )
                 .await
                 .context("Allocation failed")?;

@@ -2229,7 +2229,7 @@ impl<const KEEPS: bool> World<KEEPS> {
             .filter(|extent| extent.cell == device.cell())
             .filter_map(|extent| {
                 let held = device.extent_len(extent)?;
-                let counted = allocator.extent_counted(extent);
+                let counted = self.filesystem.extent_counted(extent);
                 (held > counted).then_some((extent, held, counted))
             })
             .collect();
@@ -2308,17 +2308,18 @@ impl<const KEEPS: bool> World<KEEPS> {
         self.lets_go().await?;
         let allocator = self.filesystem.allocator();
         let device = self.filesystem.device();
-        let known = self.filesystem.allocator().extents();
+        let known = self.filesystem.known_extents();
         let (cell, held) = (device.cell(), device.extents());
         let held = held.iter().filter(|extent| extent.cell == cell);
         let orphans: Vec<_> = held.filter(|extent| !known.contains_key(extent)).collect();
         match orphans.len() {
             0 => Ok(()),
             count => Err(format!(
-                "{count} extents unknown, {:?} of {} used, {} allocated: {orphans:?}",
+                "{count} extents unknown, {:?} of {} used, {} allocated, sought {:?}: {orphans:?}",
                 allocator.get_used_bytes(),
                 allocator.get_disk_bytes(),
                 allocator.get_allocated_bytes(),
+                allocator.orphans_sought(),
             )),
         }
     }
@@ -2330,7 +2331,7 @@ impl<const KEEPS: bool> World<KEEPS> {
     async fn holds_no_orphans_but_unsought(&self) -> Result<u64, String> {
         let Err(error) = self.holds_no_orphans().await else { return Ok(0) };
         let device = self.filesystem.device();
-        let known = self.filesystem.allocator().extents();
+        let known = self.filesystem.known_extents();
         let sought = self.filesystem.allocator().orphans_sought();
         let (cell, held) = (device.cell(), device.extents());
         let orphans: Vec<_> =
@@ -4811,6 +4812,6 @@ fn orphans_named_by_a_discard_between_two_ranges_stay_unsought() {
     let setting = Setting::awkward(15596825076520818603, 32768).with_graveyard_of_seed();
     let tally = Rc::new(Tally::default());
     assert_eq!(setting.run(ops, tally.clone()), Ok(()));
-    // The same 8, left by each of two replays cut during the replay.
-    assert_eq!(tally.unsought_orphans.get(), 16, "TASK-149.41.1's orphans");
+    // With `record_journal_tail` gone (board 6923), this seed leaves no unsought orphans.
+    assert_eq!(tally.unsought_orphans.get(), 0, "no unsought orphans on this seed");
 }

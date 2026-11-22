@@ -46,7 +46,7 @@ use fxfs::lsm_tree::{LockedLayer, Query};
 use fxfs::object_handle::WriteBytes;
 use fxfs::object_store::allocator::{AllocatorKey, AllocatorValue};
 use fxfs::object_store::journal::RESET_XOR;
-use fxfs::object_store::journal::super_block::SuperBlockInstance;
+use fxfs::object_store::journal::super_block::Root;
 use fxfs::object_store::object_record::{ObjectKey, ObjectKeyData};
 use fxfs::object_store::volume::root_volume;
 use fxfs::object_store::{ExtentMode, ExtentValue, NewChildStoreOptions, StoreOptions};
@@ -59,6 +59,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
+use storage_device::Device as _;
 use storage_device::fake_device::{Crashes, FakeDevice};
 use storage_device::{DeviceHolder, ExtentId};
 use storage_units::BlockSize;
@@ -527,40 +528,48 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
 
     let mut regions = Vec::new();
     let mut in_journal = Vec::new();
-    let mut in_super_blocks = BTreeMap::<u64, Vec<(ExtentId, usize)>>::new();
+    let mut in_super_blocks = Vec::new();
     let blocks = |bytes: &std::ops::Range<usize>| bytes.clone().step_by(CHECKSUMMED_BLOCK);
 
     let checkpoint = header.journal_checkpoint.clone();
-    let root_parent = filesystem.root_parent_store();
+    let root = Root::read(&*filesystem.device()).await.expect("reading root");
     let mut region = |part, extent, bytes| regions.push(Region { part, extent, bytes });
-    extents_of(&root_parent, |object, range, extent, bytes| {
-        let part = if object == header.journal_object_id {
-            let first = PAGE * (checkpoint.file_offset / PAGE);
-            let live = (range.start..range.end).step_by(CHECKSUMMED_BLOCK).zip(blocks(&bytes));
-            let live = live.filter(|(offset, _)| *offset >= first);
-            in_journal.extend(live.map(|(_, at)| (extent, at)));
-            Part::Journal
-        } else if object == root_id {
-            Part::StoreInfo
-        } else {
-            Part::RootLayer
-        };
+
+    // Locate the single super-block extent and live journal blocks directly from `Root`.
+    if let Some(sb) = &root.super_block {
+        let bytes = sb.range.start as usize..sb.range.end as usize;
+        in_super_blocks.extend(blocks(&bytes).map(|at| (sb.extent, at)));
+        region(Part::SuperBlock, sb.extent, bytes);
+    }
+    let live_extents: std::collections::HashSet<_> = device.extents().into_iter().collect();
+    let first = PAGE * (checkpoint.file_offset / PAGE);
+    for span in &root.journal_spans {
+        let end = span.end_offset();
+        let mut off = span.start_offset.max(first);
+        while off < end {
+            if let Some(extent) = span.extent_at(off) {
+                if live_extents.contains(&extent) {
+                    let bytes = 0..CHECKSUMMED_BLOCK;
+                    in_journal.push((extent, 0));
+                    region(Part::Journal, extent, bytes);
+                }
+            }
+            off += PAGE;
+        }
+    }
+
+    let root_parent = filesystem.root_parent_store();
+    extents_of(&root_parent, |object, _range, extent, bytes| {
+        let part = if object == root_id { Part::StoreInfo } else { Part::RootLayer };
         region(part, extent, bytes);
     })
     .await;
     let root_layers = root_store.parent_objects();
     let allocator_layers = allocator.parent_objects();
-    let super_blocks = [SuperBlockInstance::A.object_id(), SuperBlockInstance::B.object_id()];
     let mut parts = HashMap::<u64, Vec<_>>::new();
     extents_of(&root_store, |object, range, extent, bytes| {
         parts.entry(object).or_default().push((range, extent, bytes.clone()));
-        let part = if super_blocks.contains(&object) {
-            in_super_blocks
-                .entry(object)
-                .or_default()
-                .extend(blocks(&bytes).map(|at| (extent, at)));
-            Part::SuperBlock
-        } else if object == header.allocator_object_id {
+        let part = if object == header.allocator_object_id {
             Part::AllocatorInfo
         } else if allocator_layers.contains(&object) {
             Part::AllocatorLayer
@@ -582,8 +591,10 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
         allocator: layer_files(&allocator.tree().layer_set().layers, &parts).await,
     };
 
-    let mut chains = vec![Chain::of(device, checkpoint.checksum, in_journal)];
-    chains.extend(in_super_blocks.into_values().map(|blocks| Chain::of(device, 0, blocks)));
+    let chains = vec![
+        Chain::of(device, checkpoint.checksum, in_journal),
+        Chain::of(device, 0, in_super_blocks),
+    ];
     for chain in &chains {
         assert!(!chain.blocks.is_empty(), "{chain:?} holds nothing checksummed");
     }
@@ -1225,14 +1236,14 @@ fn a_closed_image_has_next_to_nothing_to_replay() {
     assert!(blocks(&closed) * 4 < blocks(&crashed), "{} {}", blocks(&closed), blocks(&crashed));
 }
 
-/// The checksums of the super-blocks prove this much, whatever else does: changing a byte of each
-/// that is read refuses the image.
+/// The checksums of the single super-block prove this much, whatever else does: changing a byte of
+/// it refuses the image (board 6926).
 #[test]
-fn a_flip_in_both_super_blocks_is_refused() {
+fn a_flip_in_the_super_block_is_refused() {
     run_case(async {
         let image = Image::new(false, Ending::Closed).await;
         let super_blocks: Vec<_> = (image.chains.iter()).filter(|chain| chain.seed == 0).collect();
-        assert_eq!(super_blocks.len(), 2);
+        assert_eq!(super_blocks.len(), 1);
         let mut rng = StdRng::seed_from_u64(0);
         let longest = super_blocks.iter().map(|chain| chain.blocks.len()).max().unwrap();
         for block in 0..longest {

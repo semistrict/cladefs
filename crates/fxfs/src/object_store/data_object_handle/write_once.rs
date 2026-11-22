@@ -4,19 +4,12 @@
 
 //! cladefs's own, a child of data_object_handle.rs: data lives in extents of an extent store, written
 //! once (backlog doc-4). `overwrite` writes blocks in place only as `in_place` says, which refuses
-//! those a snapshot or a clone shares; `reallocate_range` moves a range written in place already,
-//! the journal's, to new extents.
+//! those a snapshot or a clone shares.
 
 use super::DataObjectHandle;
-use crate::errors::FxfsError;
-use crate::object_handle::ObjectHandle;
 use crate::object_store::HandleOwner;
-use crate::object_store::extent_record::{ExtentMode, ExtentValue};
-use crate::object_store::object_record::{ObjectKey, ObjectValue};
-use crate::object_store::transaction::{Mutation, Transaction};
-use anyhow::{Context, Error, ensure};
-use std::cmp::min;
-use std::ops::Range;
+use crate::object_store::extent_record::ExtentMode;
+use anyhow::Error;
 use storage_device::ExtentRange;
 
 /// cladefs: whether a file's blocks may be written in place, and if not, why: the rule
@@ -52,60 +45,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         } else {
             InPlace::Writable
         })
-    }
-
-    /// cladefs: replaces the extents in `file_range` with new ones, preallocated, of at most
-    /// `max_extent_len` bytes each, freeing those it had: for a file written in place, such as
-    /// the journal, whose extents there may have been written already, and can't be again (backlog
-    /// doc-4). The range must be within the file.
-    pub async fn reallocate_range<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
-        file_range: Range<u64>,
-        max_extent_len: u64,
-    ) -> Result<Vec<ExtentRange>, Error> {
-        ensure!(self.block_size().is_aligned(&file_range), FxfsError::InvalidArgs);
-        ensure!(!self.handle.is_encrypted(), FxfsError::NotSupported);
-        let deallocated = self
-            .handle
-            .deallocate_old_extents(transaction, self.attribute_id(), file_range.clone())
-            .await?;
-        let key_id = self.get_key(None).await?.0;
-        let mut ranges = Vec::new();
-        let mut allocated = 0;
-        let mut offset = file_range.start;
-        while offset < file_range.end {
-            let device_range = self
-                .store()
-                .allocator()
-                .allocate(
-                    transaction,
-                    self.store().store_object_id(),
-                    min(file_range.end - offset, max_extent_len),
-                )
-                .await
-                .context("Allocation failed")?;
-            allocated += device_range.len();
-            transaction.add(
-                self.store().store_object_id,
-                Mutation::merge_object(
-                    ObjectKey::extent(
-                        self.object_id(),
-                        self.attribute_id(),
-                        offset..offset + device_range.len(),
-                    ),
-                    ObjectValue::Extent(ExtentValue::new_raw(
-                        device_range.extent,
-                        device_range.range.start,
-                        key_id,
-                    )),
-                ),
-            );
-            offset += device_range.len();
-            ranges.push(device_range);
-        }
-        self.update_allocated_size(transaction, allocated, deallocated).await?;
-        Ok(ranges)
     }
 }
 

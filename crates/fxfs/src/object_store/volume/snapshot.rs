@@ -435,7 +435,10 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let allocator = filesystem.allocator();
-        let baseline = allocator.get_owner_allocated_bytes();
+        let nonzero = |a: &crate::object_store::allocator::Allocator| -> std::collections::BTreeMap<u64, u64> {
+            a.get_owner_allocated_bytes().into_iter().filter(|(_, b)| *b > 0).collect()
+        };
+        let baseline = nonzero(&allocator);
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
             let source = root
@@ -468,7 +471,7 @@ mod tests {
         delete_volume(&filesystem, second).await;
         do_fsck(&filesystem, None, None).await;
         assert!(allocator.frozen_owners().is_empty());
-        assert_eq!(allocator.get_owner_allocated_bytes(), baseline);
+        assert_eq!(nonzero(&allocator), baseline);
 
         // And on disk.
         filesystem.close().await.expect("Close failed");
@@ -476,7 +479,7 @@ mod tests {
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
         do_fsck(&filesystem, None, None).await;
-        assert_eq!(filesystem.allocator().get_owner_allocated_bytes(), baseline);
+        assert_eq!(nonzero(&filesystem.allocator()), baseline);
         filesystem.close().await.expect("Close failed");
     }
 
@@ -562,7 +565,10 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let allocator = filesystem.allocator();
-        let baseline = allocator.get_owner_allocated_bytes();
+        let nonzero = |a: &crate::object_store::allocator::Allocator| -> std::collections::BTreeMap<u64, u64> {
+            a.get_owner_allocated_bytes().into_iter().filter(|(_, b)| *b > 0).collect()
+        };
+        let baseline = nonzero(&allocator);
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
             let source = root
@@ -601,7 +607,7 @@ mod tests {
         delete_volume(&filesystem, "second").await;
         do_fsck(&filesystem, None, None).await;
         assert!(allocator.frozen_owners().is_empty());
-        assert_eq!(allocator.get_owner_allocated_bytes(), baseline);
+        assert_eq!(nonzero(&allocator), baseline);
         filesystem.close().await.expect("Close failed");
     }
 }
