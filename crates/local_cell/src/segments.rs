@@ -25,8 +25,8 @@ use crate::timings::{self, Timing, durable, framing as framing_phase};
 use crate::wal::{LogHeader, log_header, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use bucket_cell::keys::Ring;
-use extent_frame::{Keys as _, PART};
 use extent_frame::segment::{Chain, Contents, Continued, Footer, NewVersion, epoch_of};
+use extent_frame::{Keys as _, PART};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -1293,11 +1293,7 @@ impl<F: File> Segments<F> {
 
     /// cladefs: the underlying file of closed segment `number`, if it is tracked and closed: what
     /// an ephemeral cell punches freed runs out of (board 6905).
-    pub fn closed_file<D: Dir<File = F>>(
-        &mut self,
-        dir: &D,
-        number: SegmentId,
-    ) -> Option<Arc<F>> {
+    pub fn closed_file<D: Dir<File = F>>(&mut self, dir: &D, number: SegmentId) -> Option<Arc<F>> {
         if !matches!(self.tracked.get(&number).map(|s| &s.phase), Some(Phase::Closed)) {
             return None;
         }

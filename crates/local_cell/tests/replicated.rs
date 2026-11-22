@@ -630,7 +630,8 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     // Its members down: degraded, its waiters woken by the bucket.
     drop(replicator);
     let links: Vec<Arc<dyn MemberLink>> = vec![Arc::new(Down), Arc::new(Down)];
-    let down = Replicator::start(1, epoch, Some(open_cell.replica_source()), links, uploader.waker());
+    let down =
+        Replicator::start(1, epoch, Some(open_cell.replica_source()), links, uploader.waker());
     open_cell.replicate_to(down.clone()).await;
     open_cell.close_segment().unwrap();
     open_cell

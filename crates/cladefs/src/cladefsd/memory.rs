@@ -553,7 +553,9 @@ mod tests {
     /// take-time seeds) and `govern()` evicts persisted hot buffers under pressure.
     #[tokio::test(flavor = "multi_thread")]
     async fn govern_counts_and_reclaims_replication_hot_buffers() {
-        use local_cell::replicate::{Flushed, LinkError, LogSource, MemberLink, Replicator, log_of};
+        use local_cell::replicate::{
+            Flushed, LinkError, LogSource, MemberLink, Replicator, log_of,
+        };
         use std::sync::Arc;
 
         struct Stalled;
@@ -584,7 +586,10 @@ mod tests {
         let rep = Replicator::idle(1, 0, Some(Arc::new(EmptySource)), links, || {});
         let bytes = vec![0x33u8; 2 << 20];
         let before = super::governed_bytes();
-        rep.flushed(Flushed { epoch: 1, appends: vec![(log_of(1), 0, Arc::from(bytes.as_slice()))] });
+        rep.flushed(Flushed {
+            epoch: 1,
+            appends: vec![(log_of(1), 0, Arc::from(bytes.as_slice()))],
+        });
         rep.persisted();
         assert!(super::governed_bytes() >= before + bytes.len() as u64);
         super::govern(0).await;

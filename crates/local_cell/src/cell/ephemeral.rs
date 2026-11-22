@@ -134,9 +134,7 @@ impl LocalCheckpoint {
             through: self.through,
             keys: self.keys.clone(),
         };
-        let entries = own
-            .iter()
-            .map(|(id, at)| (*id, at.key.as_str(), at.offset, at.len));
+        let entries = own.iter().map(|(id, at)| (*id, at.key.as_str(), at.offset, at.len));
         extent_frame::table::encode(entries, bucket_cell::layout::encode(&rest), encrypting)
     }
 
@@ -592,9 +590,8 @@ impl<D: Dir> LocalCell<D> {
         let covered = {
             let state = self.state()?;
             let mut covered = state.wal.covering(durable);
-            if let Some(at) = covered
-                .iter()
-                .position(|(number, _)| state.segments.is_framing(segment(*number)))
+            if let Some(at) =
+                covered.iter().position(|(number, _)| state.segments.is_framing(segment(*number)))
             {
                 covered.truncate(at);
                 while covered.last().is_some_and(|(_, footer)| footer.contents.continued.is_some())

@@ -1418,7 +1418,8 @@ pub(super) mod target {
         fn streaming_crc_and_direct_target_write() {
             let dir = tempfile::tempdir().unwrap();
             for len in [0usize, 13, 4096, 4097, CRC_CHUNK, CRC_CHUNK * 2 + 123] {
-                let data: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 5)) as u8).collect();
+                let data: Vec<u8> =
+                    (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 5)) as u8).collect();
                 let name = format!("f-{len}");
                 let request = MigrateFileRequest {
                     migration: 1,

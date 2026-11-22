@@ -502,7 +502,12 @@ impl<F: File> SegmentLog<F> {
 
 /// `record` as a log holds it at `at`: encoded, MACed at `at` by `encryption` (TASK-411.5), and
 /// framed, salted with `salt` ([`LOG_MAGIC`]).
-pub(crate) fn framed(record: &LogRecord, at: u64, salt: u64, encryption: &RawEncryption) -> Vec<u8> {
+pub(crate) fn framed(
+    record: &LogRecord,
+    at: u64,
+    salt: u64,
+    encryption: &RawEncryption,
+) -> Vec<u8> {
     let mut payload = bincode::serialize(record).expect("records serialize");
     let mac = encryption.mac(at, &payload);
     payload.extend_from_slice(&mac);
@@ -527,9 +532,8 @@ pub(crate) fn replica_valid_end(log: &[u8], segment: SegmentId) -> u64 {
     let Some(header) = LogHeader::of(log, segment) else {
         return 0;
     };
-    let (_, end) = crate::layout::decode_with(&log[LOG_RECORDS as usize..], header.salt, |_, _| {
-        Some(())
-    });
+    let (_, end) =
+        crate::layout::decode_with(&log[LOG_RECORDS as usize..], header.salt, |_, _| Some(()));
     LOG_RECORDS + end as u64
 }
 
@@ -684,10 +688,8 @@ impl Recovered {
             let file = dir.create(&path, true)?;
             if sectors {
                 let mut packer = extent_frame::Packer::in_place(encryption.sectors().clone());
-                let raw_parts = data
-                    .chunks(extent_frame::PART as usize)
-                    .enumerate()
-                    .map(|(index, chunk)| {
+                let raw_parts =
+                    data.chunks(extent_frame::PART as usize).enumerate().map(|(index, chunk)| {
                         extent_frame::RawPart::of(index as u64, chunk, encryption.sectors())
                     });
                 packer.push_raw_parts(raw_parts);

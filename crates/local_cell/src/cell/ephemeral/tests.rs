@@ -127,7 +127,11 @@ async fn an_ephemeral_cell_frames_segments_in_place_and_checkpoints_them() {
     cell.wait_framed().await.unwrap();
     assert_eq!(numbers(&dir, SEGMENTS), (0..7).collect::<Vec<_>>(), "framed in place");
     assert!(dir.list("kept").is_err(), "no kept/ directory");
-    assert_eq!(LocalCheckpoint::read(&dir).unwrap().through, None, "seven closed: no checkpoint yet");
+    assert_eq!(
+        LocalCheckpoint::read(&dir).unwrap().through,
+        None,
+        "seven closed: no checkpoint yet"
+    );
     commit(&cell, 7, 8).await;
     assert_eq!(numbers(&dir, SEGMENTS), (0..8).collect::<Vec<_>>(), "eight closed: covered");
     for kind in [LOGS, OPEN_SEGMENTS] {

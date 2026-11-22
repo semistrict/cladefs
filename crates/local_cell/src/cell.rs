@@ -1696,11 +1696,8 @@ impl<D: Dir> LocalCell<D> {
             CellFile::parse(&text)?
         };
         // cladefs: an ephemeral cell's checkpoint cut short finished first (TASK-698.2, board 6905).
-        let ephemeral = if file.ephemeral {
-            Some(ephemeral::settle(&*dir, file.cell)?)
-        } else {
-            None
-        };
+        let ephemeral =
+            if file.ephemeral { Some(ephemeral::settle(&*dir, file.cell)?) } else { None };
         let wal = crate::wal::recover(&*dir, file.cell, ephemeral)?;
         Ok(Recovering { dir, taken, claim, file, wal })
     }
@@ -3736,11 +3733,7 @@ impl<D: Dir> LocalCell<D> {
     /// `logs/`, `open-segments/` or `segments/`, and `extents/` for lagging/replacement peer
     /// catch-up when bytes are evicted from the replicator's hot window (board 6902).
     pub fn replica_source(&self) -> Arc<dyn crate::replicate::LogSource> {
-        Arc::new(CellLogSource {
-            dir: self.dir.clone(),
-            cell: self.cell,
-            keys: self.keys.clone(),
-        })
+        Arc::new(CellLogSource { dir: self.dir.clone(), cell: self.cell, keys: self.keys.clone() })
     }
 
     /// cladefs: its write-ahead log's start: the commit before its first segment, the last its

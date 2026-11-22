@@ -126,10 +126,9 @@ fn logs_end_at_their_last_whole_frame_after_corrupting_crashes() {
     let odd_a = own_frame(1, &[5; 600]);
     let odd_b = own_frame(2, &[6; 1500]);
     let next_odd = own_frame(3, b"next");
-    for (log, a, b, next) in [
-        (own_of(0), odd_a, odd_b, next_odd),
-        (log_of(2), even_a, even_b.clone(), Vec::new()),
-    ] {
+    for (log, a, b, next) in
+        [(own_of(0), odd_a, odd_b, next_odd), (log_of(2), even_a, even_b.clone(), Vec::new())]
+    {
         let a_len = a.len() as u64;
         let ab_len = a_len + b.len() as u64;
         for seed in 0..32 {
@@ -285,8 +284,16 @@ fn open_file_descriptors_stay_bounded_across_many_logs() {
         replicas.append(me, own_of(seg), 0, &frame).unwrap();
         assert!(replicas.open_files() <= OPEN_FILES);
     }
-    assert!(open.load(Ordering::Relaxed) <= OPEN_FILES, "live handles {}", open.load(Ordering::Relaxed));
-    assert!(peak.load(Ordering::Relaxed) <= OPEN_FILES + 1, "peak handles {}", peak.load(Ordering::Relaxed));
+    assert!(
+        open.load(Ordering::Relaxed) <= OPEN_FILES,
+        "live handles {}",
+        open.load(Ordering::Relaxed)
+    );
+    assert!(
+        peak.load(Ordering::Relaxed) <= OPEN_FILES + 1,
+        "peak handles {}",
+        peak.load(Ordering::Relaxed)
+    );
     drop(replicas);
     assert_eq!(open.load(Ordering::Relaxed), 0);
 

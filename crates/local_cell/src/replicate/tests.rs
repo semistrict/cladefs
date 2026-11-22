@@ -108,10 +108,8 @@ fn a_failing_source_breaks_the_replicator() {
     let big = vec![b'a'; (HOT_BYTES as usize / 2) + 4096];
     for i in 0..3u64 {
         let log = log_of(i + 1);
-        replicator.flushed(Flushed {
-            epoch: i + 1,
-            appends: vec![(log, 0, Arc::from(big.as_slice()))],
-        });
+        replicator
+            .flushed(Flushed { epoch: i + 1, appends: vec![(log, 0, Arc::from(big.as_slice()))] });
         replicator.persisted();
     }
     assert!(replicator.hot_bytes() <= HOT_BYTES);

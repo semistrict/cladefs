@@ -188,7 +188,8 @@ pub(crate) fn own_frames_end(bytes: &[u8]) -> usize {
         if own_frame_hash(sequence, file) != expected {
             break;
         }
-        let Some(next) = end.checked_add(OWN_FRAME_HEADER as usize).and_then(|n| n.checked_add(len))
+        let Some(next) =
+            end.checked_add(OWN_FRAME_HEADER as usize).and_then(|n| n.checked_add(len))
         else {
             break;
         };
@@ -1202,13 +1203,7 @@ async fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
                 Ok(bytes) if !bytes.is_empty() => link.append(log, offset, bytes).await.map(Some),
                 // Dropped since it was chosen, the head naming its segment (Codex's review of
                 // TASK-537.3.3): nothing to send, nothing broken.
-                _ if shared
-                    .state
-                    .lock()
-                    .unwrap()
-                    .dropped
-                    .is_some_and(|dropped| log <= dropped) =>
-                {
+                _ if shared.state.lock().unwrap().dropped.is_some_and(|dropped| log <= dropped) => {
                     return Turn::Again;
                 }
                 // The replicator stopped meanwhile: nothing broken.
