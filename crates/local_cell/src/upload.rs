@@ -541,13 +541,24 @@ pub async fn open_with_head<D: Dir>(
     UPLOADERS.get().send_modify(|running| *running += 1);
     // A task, not a thread of its own (TASK-34).
     runtime.handle.spawn(async move {
-        // Its conditional writes checked before any is relied on (doc-7, The head).
-        match uploads.probed(holder).await {
-            Ok(()) => {
-                uploader.run(recovering, cell_options, uploads, holder, started, initial_head).await
+        let ran = std::panic::AssertUnwindSafe(async {
+            // Its conditional writes checked before any is relied on (doc-7, The head).
+            match uploads.probed(holder).await {
+                Ok(()) => {
+                    let (options, head) = (cell_options, initial_head);
+                    uploader.run(recovering, options, uploads, holder, started, head).await
+                }
+                // Its opener gone or not, it says why it stopped to whoever listens.
+                Err(err) => drop(started.send(Err(Failure::msg(err)))),
             }
-            // Its opener gone or not, it says why it stopped to whoever listens.
-            Err(err) => drop(started.send(Err(Failure::msg(err)))),
+        })
+        .catch_unwind()
+        .await;
+        // cladefs: panicked, it fails, and stops, as it does failing (board 8507): before, what
+        // waited for its uploads waited for ever, and its stop, and it counted among the running.
+        if let Err(panic) = ran {
+            uploader.panicked("its uploader", &*panic);
+            uploader.wind_up().await;
         }
         // The cell let go of before the uploader says it stopped: so that dropping this returns
         // with nothing of the uploader's holding the cell open, which the process may open again
@@ -1517,18 +1528,48 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         initial_head: Option<head::Read>,
     ) {
         self.upload(recovering, options, bucket, holder, started, initial_head).await;
-        // cladefs: a relocation round under way ends with it, its cell let go (TASK-685.3).
-        self.abort_round();
-        let round = self.relocation.lock().unwrap().take();
-        if let Some((_, gone)) = round {
+        self.wind_up().await;
+    }
+
+    /// cladefs: what an uploader waits for as it stops, however it stopped, returning or panicking
+    /// (board 8507): a relocation round under way ends with it, its cell let go (TASK-685.3); and
+    /// its keeper (TASK-701). Its locks taken as a panic holding one left them, poisoned or not:
+    /// what it takes of them is all it changes.
+    async fn wind_up(&self) {
+        let relocation = self.relocation.lock();
+        let round = relocation.unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some((abort, gone)) = round {
+            abort.abort();
             // Sent or dropped as the round's task ends: either is what is waited for.
             let _ = gone.await;
         }
-        let kept = self.kept.lock().unwrap().take();
+        let kept = self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(kept) = kept {
             // Said as the keeper's task ends, or goes, its sender with it.
             let _ = kept.await;
         }
+    }
+
+    /// cladefs: stops uploading, `what` having panicked, its task or its keeper's, with `panic`
+    /// (board 8507): commits waiting for uploads, and forks, fail, naming it, as at
+    /// [`Shared::fail`], unless it failed already; and the uploader stops, woken (its keeper's
+    /// panic) or not (its own). Its progress taken as a panic holding it left it, poisoned or not:
+    /// its failure is all it changes of it.
+    fn panicked(&self, what: &str, panic: &(dyn std::any::Any + Send)) {
+        let message = (panic.downcast_ref::<&str>().copied())
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("of no message");
+        let failure = format!("{what} panicked: {message}");
+        let writer = self.writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        match writer {
+            Some(writer) => log::error!("cladefs: uploading cell {}: {failure}", writer.cell()),
+            None => log::error!("cladefs: opening a cell to upload it: {failure}"),
+        }
+        let mut progress = self.progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        progress.failed.get_or_insert(Failure::msg(failure));
+        drop(progress);
+        self.changed.notify(usize::MAX);
+        self.wake.notify_one();
     }
 
     /// Runs the uploader, as [`Shared::run`] does, but for waiting for its keeper.
@@ -1573,10 +1614,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let (done, kept) = futures::channel::oneshot::channel::<()>();
             *self.kept.lock().unwrap() = Some(kept);
             let keeper = self.clone().keep(writer.clone(), wish, (configuration, stale));
+            let shared = self.clone();
             (self.spawn)(
                 async move {
-                    keeper.await;
+                    // cladefs: its panic the uploader's, which fails and stops, rather than go on
+                    // with its configuration kept no more (board 8507).
+                    if let Err(panic) = std::panic::AssertUnwindSafe(keeper).catch_unwind().await {
+                        shared.panicked("its keeper", &*panic);
+                    }
                     // Said once the keeper, and what it held, went.
+                    drop(shared);
                     drop(done);
                 }
                 .boxed(),
@@ -1605,6 +1652,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // whatever it holds, not only once the guest is filling it no more (TASK-92.41).
         let (mut close, mut more, mut urgent) = (false, false, false);
         loop {
+            // cladefs: a test's uploader panicking (board 8507).
+            fail::fail_point!("upload::turn");
             if let Err(err) = self.observe() {
                 return self.fail(&writer, err);
             }
@@ -1614,12 +1663,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             {
                 return self.fail(&writer, err);
             }
-            let (stop, cut) = {
+            let (stop, cut, failed) = {
                 let mut progress = self.progress.lock().unwrap();
                 urgent |= std::mem::take(&mut progress.wanted);
                 close |= urgent;
-                (progress.stop, progress.cut)
+                (progress.stop, progress.cut, progress.failed.is_some())
             };
+            // cladefs: failed beside it, its keeper having panicked (board 8507): it stops, as cut
+            // short, what it has in flight left to the cell's log.
+            if failed {
+                return;
+            }
             // cladefs: stopping relocates nothing more, which keeps a drain short (doc-27): what a
             // round under way committed, the write-ahead log keeps.
             if stop {
@@ -3397,6 +3451,46 @@ mod tests {
         assert!(failure.contains("writing the WAL's start"), "{failure}");
         assert_eq!(uploader.failed().map(|failed| format!("{failed:#}")), Some(failure));
         fail::remove("wal::start");
+        scenario.teardown();
+    }
+
+    /// board 8507: an uploader whose task panics fails what waits for it, naming the panic, and
+    /// stops, as one failing does: a commit waiting for its upload fails, its close returns, and
+    /// it counts among the process's running uploaders no more. Before, nothing set its failure,
+    /// nor said it stopped: the commit waited for ever, as did its close, and a drain counted it
+    /// running until its bound.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploaders_that_panic_fail_their_waiters_and_stop() {
+        let scenario = fail::FailScenario::setup();
+        let host = Runtime {
+            handle: tokio::runtime::Handle::current(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
+        let dir = MemDir::new();
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///panicking"), None).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+        let options = Options { interval: Duration::from_millis(20), ..Options::default() };
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let (cell, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .await
+                .unwrap();
+        cell.made().unwrap();
+        assert_eq!(*uploaders().borrow(), 1);
+        fail::cfg("upload::turn", "panic").unwrap();
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let waited = uploader.uploaded(cell.last_commit().unwrap()).await;
+        fail::remove("upload::turn");
+        let failure = format!("{:#}", waited.unwrap_err());
+        assert_eq!(failure, "its uploader panicked: failpoint upload::turn panic");
+        uploader.close().await;
+        assert_eq!(*uploaders().borrow(), 0);
         scenario.teardown();
     }
 
