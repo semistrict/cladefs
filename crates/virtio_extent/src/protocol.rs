@@ -498,7 +498,7 @@ mod tests {
     fn the_configuration_says_its_version_first() {
         assert_eq!(std::mem::offset_of!(ConfigSpace, version), 0);
         assert_eq!(std::mem::offset_of!(ConfigSpace, tag), 4);
-        assert_eq!(std::mem::size_of::<ConfigSpace>(), 120);
+        assert_eq!(std::mem::size_of::<ConfigSpace>(), 112);
     }
 
     /// The wire structures' sizes, as the driver's header has them.

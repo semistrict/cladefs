@@ -15,8 +15,11 @@
 //! while it forks, syncs or resizes a cell no connection writes. A connection whose VM process is
 //! gone, still holding its cell, lets it go to the next that asks, as a VM restored from a
 //! snapshot at once opens its VM's cell (TASK-39.1). What is open of a cell outlives its holder:
-//! a cell others share, as long as one has it, which no writer, nor the mount, holds meanwhile
-//! (`EBUSY`), as one cell is open once at a time, and writes go to no cell others read; a kept
+//! a cell others share, the bases attached to cells, as long as one has it, which no writer, nor
+//! the mount, holds meanwhile (`EBUSY`), as one cell is open once at a time, and writes go to no
+//! cell others read; a writer's that went, which the daemon's work through it has still, closing,
+//! which writers and the mount wait for to close ([`CellTable::closed`]), the daemon working
+//! through it meanwhile; a kept
 //! cell kept open for forks, until a writer holds the cell, which closes it first (TASK-92.5). A
 //! connection holds no kept cell: its entry ([`Entry::Writer`]) has no room for one.
 //!
@@ -50,6 +53,8 @@ pub(crate) struct Rules {
     pub open_outlives_holders: bool,
     /// A writer holds no cell others have open: it fails with `EBUSY` while they do.
     pub writers_refuse_shared: bool,
+    /// A writer waits for the cell a writer that went left open, closing, to close.
+    pub writers_wait_for_closing: bool,
 }
 
 impl Rules {
@@ -58,6 +63,7 @@ impl Rules {
         release_wakes: true,
         open_outlives_holders: true,
         writers_refuse_shared: true,
+        writers_wait_for_closing: true,
     };
 }
 
@@ -159,9 +165,12 @@ enum Entry<C, S, P> {
 /// What is open of a cell, for others than its holder.
 enum Open<S, P> {
     Nothing,
-    /// The cell others have open: the cells it is attached to as a base (backlog doc-10), or the
-    /// daemon's work through its writer, gone; while one has it.
+    /// The cell others have open, while one has it: the cells it is attached to as a base (backlog
+    /// doc-10), which no writer holds meanwhile (`EBUSY`).
     Shared(Weak<S>),
+    /// A writer's cell its connection let go of, which the daemon's work through it, a fork's or
+    /// a sync's, has still: closing, which writers wait for to close ([`CellTable::closed`]).
+    Closing(Weak<S>),
     /// A cell kept open for forks (TASK-92.5).
     Kept(P),
 }
@@ -228,7 +237,7 @@ impl<S, P> Open<S, P> {
     /// As it is, but a cell none has open any more, which is nothing.
     fn live(self) -> Self {
         match self {
-            Open::Shared(cell) if cell.strong_count() == 0 => Open::Nothing,
+            Open::Shared(cell) | Open::Closing(cell) if cell.strong_count() == 0 => Open::Nothing,
             open => open,
         }
     }
@@ -241,14 +250,17 @@ impl<S, P> Open<S, P> {
     fn is_closed(&self) -> bool {
         match self {
             Open::Nothing => true,
-            Open::Shared(cell) => cell.strong_count() == 0,
+            Open::Shared(cell) | Open::Closing(cell) => cell.strong_count() == 0,
             Open::Kept(_) => false,
         }
     }
 
-    /// Whether others have the cell open.
-    fn is_shared(&self) -> bool {
-        matches!(self, Open::Shared(_)) && !self.is_closed()
+    /// The cell open, others' or closing, if one is or was.
+    fn cell(&self) -> Option<&Weak<S>> {
+        match self {
+            Open::Shared(cell) | Open::Closing(cell) => Some(cell),
+            Open::Nothing | Open::Kept(_) => None,
+        }
     }
 }
 
@@ -269,10 +281,10 @@ impl<C: Writer, S, P> Entry<C, S, P> {
 }
 
 impl<C, S, P> Entry<C, S, P> {
-    /// What is open of the cell, its holder gone: the cell a writer had open, others' now.
+    /// What is open of the cell, its holder gone: the cell a writer had open, closing now.
     fn into_open(self) -> Open<S, P> {
         match self {
-            Entry::Writer { cell, .. } => Open::Shared(cell).live(),
+            Entry::Writer { cell, .. } => Open::Closing(cell).live(),
             Entry::Daemon(open) | Entry::Unheld(open) => open.live(),
             Entry::Mounted => Open::Nothing,
         }
@@ -281,10 +293,9 @@ impl<C, S, P> Entry<C, S, P> {
     /// The cell open of it, its writer's or others', if one is.
     fn instance(&self) -> Option<&Weak<S>> {
         match self {
-            Entry::Writer { cell, .. }
-            | Entry::Daemon(Open::Shared(cell))
-            | Entry::Unheld(Open::Shared(cell)) => Some(cell),
-            _ => None,
+            Entry::Writer { cell, .. } => Some(cell),
+            Entry::Daemon(open) | Entry::Unheld(open) => open.cell(),
+            Entry::Mounted => None,
         }
     }
 
@@ -298,15 +309,15 @@ impl<C, S, P> Entry<C, S, P> {
 
     /// Whether it is others' cell, none having it any more: a stale entry.
     fn is_stale(&self) -> bool {
-        matches!(self, Entry::Unheld(Open::Shared(cell)) if cell.strong_count() == 0)
+        matches!(self, Entry::Unheld(open) if open.cell().is_some() && open.is_closed())
     }
 }
 
 impl<C: Writer, S, P> Inner<C, S, P> {
     /// Holds the cell `key` names for `claim`, if it may now: unless a connection not going
     /// writes it, which fails, or a connection going holds it, or the daemon, which is waited for;
-    /// or, to a writer or the mount, others have it open, which fails. A writer takes the cell kept
-    /// open, to close.
+    /// or, to a writer or the mount, others have it open, which fails, or it is closing, which is
+    /// waited for. A writer takes the cell kept open, to close.
     fn claim(&mut self, key: &Path, claim: &Claim<C>) -> Result<Claimed<C, P>, Refused<C>> {
         let passed = match (self.entries.get(key).and_then(Entry::holder), claim) {
             (Some(Refused::Busy(writer)), Claim::DaemonOrWriter) => {
@@ -317,25 +328,28 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             (Some(refused), _) => return Err(refused),
             (None, _) => None,
         };
-        // A writer, and the mount, open a cell of their own, where others have none open.
-        let refuses_shared = match claim {
-            Claim::Writer(_) => rules().writers_refuse_shared,
-            Claim::Mount => true,
-            Claim::Daemon | Claim::DaemonOrWriter => false,
+        // A writer, and the mount, open a cell of their own, where others have none open, nor a
+        // writer's closing.
+        let (refuses_shared, waits_for_closing) = match claim {
+            Claim::Writer(_) => (rules().writers_refuse_shared, rules().writers_wait_for_closing),
+            Claim::Mount => (true, true),
+            Claim::Daemon | Claim::DaemonOrWriter => (false, false),
         };
-        let shared = |entry: &Entry<C, S, P>| match entry {
-            Entry::Daemon(open) | Entry::Unheld(open) => open.is_shared(),
-            _ => false,
+        let open = match self.entries.get(key) {
+            Some(Entry::Daemon(open) | Entry::Unheld(open)) if !open.is_closed() => Some(open),
+            _ => None,
         };
-        if refuses_shared && self.entries.get(key).is_some_and(shared) {
-            return Err(Refused::Now);
+        match open {
+            Some(Open::Shared(_)) if refuses_shared => return Err(Refused::Now),
+            Some(Open::Closing(_)) if waits_for_closing => return Err(Refused::Wait(None, None)),
+            _ => {}
         }
         let open = self.entries.remove(key).map_or(Open::Nothing, Entry::into_open);
         let (entry, evicted) = match claim {
             Claim::Writer(connection) => {
                 let (cell, evicted) = match open {
-                    // Past the rule alone: a cell others have open.
-                    Open::Shared(cell) => (cell, None),
+                    // Past the rules alone: a cell others have open, or closing.
+                    Open::Shared(cell) | Open::Closing(cell) => (cell, None),
                     Open::Kept(kept) => (Weak::new(), Some(kept)),
                     Open::Nothing => (Weak::new(), None),
                 };
@@ -344,7 +358,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             Claim::Daemon | Claim::DaemonOrWriter => (Entry::Daemon(open), None),
             Claim::Mount => match open {
                 Open::Kept(kept) => (Entry::Mounted, Some(kept)),
-                Open::Nothing | Open::Shared(_) => (Entry::Mounted, None),
+                Open::Nothing | Open::Shared(_) | Open::Closing(_) => (Entry::Mounted, None),
             },
         };
         self.entries.insert(key.to_owned(), entry);
@@ -410,6 +424,17 @@ impl<C, S, P> CellTable<C, S, P> {
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.entries.values().all(Entry::is_stale)
+    }
+
+    /// cladefs: the cell at `key`, a writer's that went, closing, is closed: those waiting for it may
+    /// claim it ([`Open::Closing`]). Called as its last reference goes, its writer's connection
+    /// having said so (`OpenCell::keep_until_closed`).
+    pub fn closed(&self, key: &Path) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.retain(|_, entry| !entry.is_stale());
+        if let Some(released) = inner.waiting.remove(key) {
+            released.notify(usize::MAX);
+        }
     }
 
     /// Lets the cell `key` names go, its hold dropped: what is open of it stays, but a cell none
@@ -729,6 +754,10 @@ mod shuttle_tests {
         fn drop(&mut self) {
             let writing = self.writing.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(Writing { cell, hold }) = writing.take() else { return };
+            // Closing, as its connection's is (`OpenCell::keep_until_closed`): those waiting for
+            // it told once its last reference goes, a base's that shares it perhaps.
+            let table = hold.hold().table;
+            *cell.on_close.lock().unwrap() = Some(Box::new(move || table.closed(Path::new(KEY))));
             drop(cell);
             // Gone, its hold not let go yet: what claims the cell meets a writer whose
             // connection is gone, and waits.
@@ -756,11 +785,12 @@ mod shuttle_tests {
         wrote_shared: std::sync::atomic::AtomicBool,
     }
 
-    /// The cell, opened: counted open until it is dropped, closed. A kept cell's says it is closed,
-    /// dropping what does.
+    /// The cell, opened: counted open until it is dropped, closed, which it then says, if told to.
+    /// A kept cell's says it is closed, dropping what does.
     struct ModelCell {
         counts: Arc<Counts>,
         _closing: Option<mpsc::Sender<()>>,
+        on_close: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ModelCell {
@@ -771,13 +801,17 @@ mod shuttle_tests {
         fn opened(counts: &Arc<Counts>, closing: Option<mpsc::Sender<()>>) -> Arc<Self> {
             let others = counts.open.fetch_add(1, Ordering::SeqCst);
             counts.most_open.fetch_max(others + 1, Ordering::SeqCst);
-            Arc::new(ModelCell { counts: counts.clone(), _closing: closing })
+            let on_close = std::sync::Mutex::new(None);
+            Arc::new(ModelCell { counts: counts.clone(), _closing: closing, on_close })
         }
     }
 
     impl Drop for ModelCell {
         fn drop(&mut self) {
             self.counts.open.fetch_sub(1, Ordering::SeqCst);
+            if let Some(closed) = self.on_close.get_mut().unwrap().take() {
+                closed();
+            }
         }
     }
 
@@ -1090,6 +1124,14 @@ mod shuttle_tests {
         let rules = Rules { writers_refuse_shared: false, ..Rules::ALL };
         fails_without(rules, "a writer wrote a cell others have open");
     }
+
+    /// A writer that holds the cell its writer that went left to a base sharing it writes what
+    /// the base reads.
+    #[test]
+    fn needs_writers_to_wait_for_cells_closing() {
+        let rules = Rules { writers_wait_for_closing: false, ..Rules::ALL };
+        fails_without(rules, "a writer wrote a cell others have open");
+    }
 }
 
 #[cfg(all(test, not(feature = "shuttle")))]
@@ -1208,32 +1250,63 @@ mod tests {
         assert_eq!(table.writers(), 1);
     }
 
-    /// A writer's cell outlives its writer while others have it, as a base attached shares it:
-    /// the next writer is refused it, at once; gone once none has it, it is nothing, and the next
-    /// opens its own.
+    /// A writer's cell outlives its writer while the daemon's work has it: closing, which the
+    /// daemon works through, and which the next writer, and the mount, wait for, woken as it
+    /// closes ([`CellTable::closed`]); gone, it is nothing, and the next opens its own.
     #[test]
-    fn cells_others_have_outlive_their_writers_who_refuse_them() {
+    fn cells_closing_are_waited_for_by_writers() {
         let table = Table::new();
         let key = Path::new("cell");
         let (writer, next) = (connection(false), connection(false));
         let (held, _) = write(&table, key, &writer).unwrap();
         let cell = Arc::new("writer's");
         held.open(&cell).unwrap();
-        let shared = table.instance(key).unwrap();
+        let working = table.instance(key).unwrap();
         writer.0.store(true, Ordering::Relaxed);
         drop((held, cell));
-        assert_eq!(table.instance(key).map(|cell| *cell), Some("writer's"));
+        let held = table.hold(key, None).unwrap();
+        assert_eq!(held.instance().map(|cell| *cell), Some("writer's"));
+        drop(held);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let short = Duration::from_millis(10);
+        let refused = runtime.block_on(table.hold_to_write(key, Arc::downgrade(&next), short));
+        assert_eq!(refused.err(), Some(Errno::EBUSY));
+        assert_eq!(runtime.block_on(table.hold_mounted(key, short)).err(), Some(Errno::EBUSY));
+        let held = runtime.block_on(async {
+            let wait = Duration::from_secs(60);
+            let mut holding = std::pin::pin!(table.hold_to_write(key, Arc::downgrade(&next), wait));
+            assert!(futures::poll!(&mut holding).is_pending());
+            drop(working);
+            table.closed(key);
+            holding.await.unwrap()
+        });
+        assert_eq!(held.0.instance(), None);
+        drop(held);
+        assert!(table.is_empty());
+    }
+
+    /// A cell the daemon opened for others to share, a base attached to cells, outlives its hold
+    /// while one has it, which writers and the mount are refused at once (`EBUSY`); gone, the next
+    /// writer opens its own.
+    #[test]
+    fn cells_shared_are_refused_to_writers() {
+        let table = Table::new();
+        let key = Path::new("base");
+        let held = table.hold(key, None).unwrap();
+        let cell = Arc::new("base");
+        held.open(&cell).unwrap();
+        drop(held);
+        let writer = connection(false);
         let wait = Duration::from_secs(60);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let started = Instant::now();
-        let refused = runtime.block_on(table.hold_to_write(key, Arc::downgrade(&next), wait));
+        let refused = runtime.block_on(table.hold_to_write(key, Arc::downgrade(&writer), wait));
         assert_eq!(refused.err(), Some(Errno::EBUSY));
-        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
         assert_eq!(runtime.block_on(table.hold_mounted(key, wait)).err(), Some(Errno::EBUSY));
-        drop(shared);
-        assert_eq!(table.instance(key), None);
+        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
+        drop(cell);
         assert!(table.is_empty());
-        let (held, _) = write(&table, key, &next).unwrap();
+        let (held, _) = write(&table, key, &writer).unwrap();
         assert_eq!(held.instance(), None);
     }
 

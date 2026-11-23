@@ -1172,10 +1172,12 @@ impl Drop for Opening<'_> {
 impl Drop for Connection {
     /// Its cell goes, then its window, as they did before (TASK-79.34), and only then its hold of
     /// its cell's path, which those waiting to open it may then (TASK-54): all it has open is
-    /// closed by then, but for what others have of it. Then what says it is gone. cladefs: in a
-    /// task of its own, its cell let go awaited, closed if this was its last
-    /// (`open_cell::release`): whatever drops the connection last, a request, its receiving or the
-    /// control API, closes no cell in its drop, which blocks (doc-24, step 9).
+    /// closed by then. Then what says it is gone. cladefs: in a task of its own, its cell let go
+    /// awaited, closed if this was its last (`open_cell::release`): whatever drops the connection
+    /// last, a request, its receiving or the control API, closes no cell in its drop, which blocks
+    /// (doc-24, step 9). Should the daemon's work through it, a fork's or a sync's, have the cell
+    /// still, the cell is closing (`cell_table::Open::Closing`), which the next writer waits for,
+    /// told as it closes (`cells::Closed`, board 8237).
     ///
     /// A lock a panic poisoned is taken all the same: what it guards is whole, each changed at
     /// once, and what it holds must go, in this order, whatever panicked.
@@ -1185,8 +1187,15 @@ impl Drop for Connection {
         let phase = self.phase.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner);
         let phase = std::mem::replace(phase, Phase::Unopened);
         let alive = self.alive.take();
+        let closed = match &phase {
+            Phase::Writing(hold) => Some(cells::Closed(hold.key().to_owned())),
+            Phase::Unopened | Phase::Opening => None,
+        };
         drop(io().spawn(async move {
             if let Some(open_cell) = open_cell {
+                if let Some(closed) = closed {
+                    open_cell.keep_until_closed(Box::new(closed));
+                }
                 crate::open_cell::release(open_cell).await;
             }
             drop(window);

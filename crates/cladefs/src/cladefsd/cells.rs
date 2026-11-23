@@ -67,6 +67,18 @@ fn in_arena(open_cell: &OpenCell, arena: Option<&Arc<Arena>>) -> Result<(), Errn
     if open_cell.arena() == own { Ok(()) } else { Err(Errno::EBUSY) }
 }
 
+/// cladefs: what tells those waiting for the cell at its key, a writer's that went, closing, that it
+/// is closed: kept with the open cell by its writer's connection as it goes, and dropped as the cell
+/// closes, whoever lets it go last (`OpenCell::keep_until_closed`,
+/// `crate::cell_table::CellTable::closed`, board 8237).
+pub(super) struct Closed(pub(super) PathBuf);
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        table().closed(&self.0);
+    }
+}
+
 /// How long holding a cell waits for a connection whose VM process is gone to let it go: as a VM
 /// restored from a snapshot at once opens the cell its VM had (TASK-39.1).
 pub(super) const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);

@@ -229,6 +229,9 @@ pub struct OpenCell {
     /// cladefs: what reads its extents whose data is in the bucket: of the bucket its uploader
     /// keeps the cell in, keeping what it fetches in the host's cache, if it has one.
     fetcher: Arc<crate::bucket::HostFetcher>,
+    /// cladefs: what goes once it is closed, after all of it, and not before
+    /// ([`OpenCell::keep_until_closed`]): last, so that its drop drops it last.
+    kept_until_closed: std::sync::Mutex<Vec<Box<dyn std::any::Any + Send>>>,
 }
 
 /// cladefs: a version of a cell, as a VM snapshot holds it and its restores fork it
@@ -898,7 +901,18 @@ impl OpenCell {
             halt: Halt::new(path, cell),
             fetcher,
             closed: false,
+            kept_until_closed: Default::default(),
         })
+    }
+
+    /// cladefs: keeps `kept` until the open cell is closed, dropping it then, after all of the
+    /// open cell, whoever lets it go last: what says to the next writer of a writer's connection
+    /// gone that its cell is closed, should the daemon's work have had it still (cladefsd's
+    /// `cells::Closed`, board 8237).
+    // The extent daemon's (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn keep_until_closed(&self, kept: Box<dyn std::any::Any + Send>) {
+        self.kept_until_closed.lock().unwrap_or_else(PoisonError::into_inner).push(kept);
     }
 
     /// cladefs: what it is, which says what may be done to it ([`CellAccess`]).

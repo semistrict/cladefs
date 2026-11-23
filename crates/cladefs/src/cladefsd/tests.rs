@@ -3517,6 +3517,42 @@ fn forks_of_a_version_right_after_its_writer_went_sync_the_cell_still_closing() 
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
 }
 
+/// board 8237: a writer's connection gone while the daemon's work through its cell, a fork's or a
+/// sync's, has the cell still, the next writer waits for the cell to close, then opens it, rather
+/// than fail at once (`EBUSY`) meeting a cell open beside it: told as it closes (`cells::Closed`).
+/// Here the daemon's work is a reference the test keeps.
+#[test]
+fn writers_wait_for_a_cell_its_writer_left_to_the_daemons_work() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let cell_dir = dir.path().join("store");
+    let made = CellClient::connect(&socket, &cell_dir, 1 << 24).unwrap();
+    let extent = minted(&made);
+    write(&made, extent, 0, &pattern(6, BLOCK)).unwrap();
+    made.commit(Some(b"root")).unwrap();
+    let key = super::cells::cell_dir_key(&cell_dir);
+    let lingering = super::cells::table().instance(&key);
+    assert!(lingering.is_some(), "the cell is not open");
+    drop(made);
+    let opening = {
+        let (socket, cell_dir) = (socket.clone(), cell_dir.clone());
+        std::thread::spawn(move || CellClient::connect(&socket, &cell_dir, 1 << 24))
+    };
+    // The next writer waits for the cell, or, refused, is done.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !super::cells::table().is_waited_for(&key) && !opening.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "the next writer neither waits nor opens");
+        std::thread::yield_now();
+    }
+    drop(lingering);
+    let again = opening.join().unwrap().map_err(|error| error.errno());
+    let again = again.expect("the next writer was refused the cell its writer left");
+    assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
+}
+
 /// TASK-644: a fork of a version made right after its writer's connection went, its cell closing
 /// on a blocking thread, its uploader uploading its last commits, the version's among them, waits
 /// for the close before it reads the bucket for the version. Before, it found no open cell

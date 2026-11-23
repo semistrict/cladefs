@@ -39,10 +39,6 @@
 	{ VIRTIO_EXTENT_T_INFO, "info" },				\
 	{ VIRTIO_EXTENT_T_RESIZED, "resized" },				\
 	{ VIRTIO_EXTENT_T_FREEZE, "freeze" },				\
-	{ VIRTIO_EXTENT_T_ADVANCE, "advance" },				\
-	{ VIRTIO_EXTENT_T_LET_GO, "let_go" },				\
-	{ VIRTIO_EXTENT_T_PIN, "pin" },					\
-	{ VIRTIO_EXTENT_T_UNPIN, "unpin" },				\
 	{ VIRTIO_EXTENT_T_PRIVATE, "private" },				\
 	{ VIRTIO_EXTENT_T_STATS, "stats" }
 

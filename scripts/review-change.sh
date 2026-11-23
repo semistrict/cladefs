@@ -74,11 +74,11 @@ print(d)' "$@"
 if ((use_hotbed)); then
     # The caller's session, else one started for this review and ended after it.
     session=${HOTBED_SESSION:-}
-    if [[ -z $session ]] && current=$(hotbed session current 2> /dev/null); then
+    if [[ -z $session ]] && current=$(hotbed session current --json 2> /dev/null); then
         session=$(json_field data id <<< "$current")
     fi
     if [[ -z $session ]]; then
-        session=$(hotbed session start | json_field data id)
+        session=$(hotbed session start --json | json_field data id)
         trap 'hotbed session end -s "$session" > /dev/null || true' EXIT
     fi
     if [[ -z $review_id ]]; then
@@ -89,9 +89,12 @@ if ((use_hotbed)); then
             base) request+=(--base "$name" --head HEAD) ;;
             uncommitted) ;;  # hotbed snapshots the uncommitted changes itself
         esac
-        review_id=$(hotbed "${request[@]}" | json_field data id)
+        review_id=$(hotbed "${request[@]}" --json | json_field data id)
     fi
-    hotbed review start -s "$session" "$review_id" > /dev/null
+    # The exact model Codex runs, as its configuration names it, which hotbed records the review by.
+    model=${CLADEFS_CODEX_MODEL:-$(sed -n 's/^model = "\(.*\)"$/\1/p' "${CODEX_HOME:-$HOME/.codex}/config.toml" 2> /dev/null)}
+    [[ -n $model ]] || { echo "review-change.sh: no Codex model: set CLADEFS_CODEX_MODEL" >&2; exit 2; }
+    hotbed review start -s "$session" "$review_id" --model "$model" > /dev/null
     instructions+=$'\n\n'"This is hotbed review $review_id. Your sandbox can't reach hotbed: end your report with the \`\`\`json hotbed-findings block (\`{\"findings\": []}\` if none survive)."
 fi
 
@@ -117,5 +120,5 @@ if ((use_hotbed)); then
         hotbed review findings -s "$session" "$review_id" --file "$out.findings.json" > /dev/null
     fi
     hotbed review finish -s "$session" "$review_id" --summary "$summary" > /dev/null
-    echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" | json_field data url)" >&2
+    echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" --json | json_field data url)" >&2
 fi
