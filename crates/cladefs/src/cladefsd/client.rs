@@ -51,8 +51,9 @@ pub struct CellClient {
     /// cladefs: whether its window copies on write (backlog doc-13), once created so.
     copying: std::sync::atomic::AtomicBool,
     /// cladefs: how many mappings the host lets a process make, if it limits them, as the daemon
-    /// says ([`Opened`]), which its window budgets its own by: this process, in a jail without
-    /// /proc, can't read it (TASK-172).
+    /// says ([`Opened`]), which its window budgets its own by, sharing them with this process's
+    /// other windows, its other cells' (`dax::uffd::Mappings`, board 8493): this process, in a jail
+    /// without /proc, can't read it (TASK-172).
     max_map_count: Option<u64>,
 }
 
@@ -723,7 +724,8 @@ impl CellClient {
         // cladefs: one of an attempt that failed before holds it: refused, never served stale.
         self.client.stage.set(stage.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
-        // (TASK-111.5).
+        // (TASK-111.5): its share of this process's windows' as it is made, which another window
+        // made later lowers (board 8493).
         let budget = stage.budget() as u64;
         self.client.request_blocking(&Request::Window { size, copying, budget })?;
         self.copying.store(copying, Ordering::Release);

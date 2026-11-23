@@ -406,7 +406,7 @@ fn frees_through_userfaultfd(at_once: bool) {
             memory.clone(),
             Memories::InProcess,
             None,
-            usize::MAX,
+            Mappings::new(usize::MAX),
         )
     }
     .unwrap();
@@ -443,7 +443,7 @@ fn modelled(pages: u64, at_once: bool) -> (ModelMemory, Arc<UffdSecondStage<Mode
             memory.clone(),
             Memories::InProcess,
             None,
-            usize::MAX,
+            Mappings::new(usize::MAX),
         )
     }
     .unwrap();
@@ -562,7 +562,14 @@ fn refusal_races_changes() {
     let base = 64 * ps as usize;
     // SAFETY: The model changes no memory.
     let stage = unsafe {
-        UffdSecondStage::with_host(base, ps, memory.clone(), Memories::InProcess, None, usize::MAX)
+        UffdSecondStage::with_host(
+            base,
+            ps,
+            memory.clone(),
+            Memories::InProcess,
+            None,
+            Mappings::new(usize::MAX),
+        )
     }
     .unwrap();
     let telling = Arc::new(Telling { stage: stage.clone() });
@@ -588,6 +595,62 @@ fn refusal_races_changes_by_pct() {
     Runner::new(PctScheduler::new(3, runs(RUNS)), config()).run(refusal_races_changes);
 }
 
+/// cladefs board 8493: a window's share full, of two runs and restrictions, the restriction of a
+/// write it refused is lifted as loads install runs elsewhere, racing the guest's writes, retried
+/// as a vCPU's are: no write is ever made, each faulting to the window again, which refuses it
+/// again; every load reads the sealed page.
+fn refusals_lifted_still_refuse() {
+    let ps = page_size();
+    let memory = ModelMemory::default();
+    let base = 64 * ps as usize;
+    // Five pages: the first written, the third and the last loaded, runs of their own.
+    // SAFETY: The model changes no memory.
+    let stage = unsafe {
+        UffdSecondStage::with_host(
+            base,
+            5 * ps,
+            memory.clone(),
+            Memories::InProcess,
+            None,
+            Mappings::new(2),
+        )
+    }
+    .unwrap();
+    let telling = Arc::new(Telling { stage: stage.clone() });
+    let (mut dax, _) = Dax::new(5 * ps, Some(telling)).unwrap();
+    let window = dax.window.clone();
+    let sealed = TestSource::filled(5, SEALED).source();
+    dax.map(0, &sealed, 0, 5 * ps);
+    let guest = Arc::new(HostGuest { memory, stage: stage.clone(), window, base });
+    let writer = {
+        let guest = guest.clone();
+        thread::spawn(move || {
+            for _ in 0..2 {
+                'write: {
+                    for _ in 0..ATTEMPTS {
+                        match guest.access(0, Access::Write, Some(STORED)) {
+                            Outcome::Made(_) => panic!("a write the window refuses was made"),
+                            Outcome::Faulted(fault) => future::block_on(fault).unwrap(),
+                            Outcome::Failed => break 'write,
+                        }
+                    }
+                    panic!("the write never ended");
+                }
+            }
+        })
+    };
+    for offset in [2 * ps, 4 * ps, 2 * ps] {
+        assert_eq!(load_byte(&guest, offset), SEALED);
+    }
+    writer.join().unwrap();
+    assert_eq!(load_byte(&guest, 0), SEALED);
+}
+
+#[test]
+fn refusals_lifted_still_refuse_by_pct() {
+    Runner::new(PctScheduler::new(3, runs(RUNS)), config()).run(refusals_lifted_still_refuse);
+}
+
 /// The window maps a page while a fault on it finds nothing mapped, as KVM's may once the guest
 /// has unmapped the page, and withholds the page, as `resolve` does. The page mapped has nothing in
 /// memory yet, as a file's page before the pager supplies it, which the kernel maps here only as a
@@ -599,7 +662,14 @@ fn withholding_races_maps() {
     let base = 64 * ps as usize;
     // SAFETY: The model changes no memory.
     let stage = unsafe {
-        UffdSecondStage::with_host(base, ps, memory.clone(), Memories::InProcess, None, usize::MAX)
+        UffdSecondStage::with_host(
+            base,
+            ps,
+            memory.clone(),
+            Memories::InProcess,
+            None,
+            Mappings::new(usize::MAX),
+        )
     }
     .unwrap();
     let telling = Arc::new(Telling { stage: stage.clone() });
@@ -773,11 +843,11 @@ fn worker_writes_copy_nothing(vcpu_writes: bool, not_here: NotHere) {
     let ps = page_size();
     let memory = ModelMemory::default();
     let base = 64 * ps as usize;
-    // Three pages, the first and the last runs of their own, of which one alone stays installed
-    // if left out at all.
+    // Five pages, the first, the third and the last runs of their own, of which two alone stay
+    // installed if any is left out: a window's share is two runs at least (board 8493).
     let (pages, budget) = match not_here {
         NotHere::Never => (1, usize::MAX),
-        NotHere::LeftOut => (3, 1),
+        NotHere::LeftOut => (5, 2),
     };
     // SAFETY: The model changes no memory.
     let stage = unsafe {
@@ -787,7 +857,7 @@ fn worker_writes_copy_nothing(vcpu_writes: bool, not_here: NotHere) {
             memory.clone(),
             Memories::InProcess,
             None,
-            budget,
+            Mappings::new(budget),
         )
     }
     .unwrap();
@@ -803,6 +873,7 @@ fn worker_writes_copy_nothing(vcpu_writes: bool, not_here: NotHere) {
     if not_here == NotHere::LeftOut {
         load(&guest, 0);
         load(&guest, 2 * ps);
+        load(&guest, 4 * ps);
         let mapped = stage.pages.lock().unwrap().pages[0].mapped;
         assert!(mapped.is_some_and(|mapped| !mapped.installed()), "the first page wasn't left out");
     }
@@ -913,7 +984,14 @@ fn writes_to_pages_here_copy_them() {
     let base = 64 * ps as usize;
     // SAFETY: The model changes no memory.
     let stage = unsafe {
-        UffdSecondStage::with_host(base, ps, memory.clone(), Memories::InProcess, None, usize::MAX)
+        UffdSecondStage::with_host(
+            base,
+            ps,
+            memory.clone(),
+            Memories::InProcess,
+            None,
+            Mappings::new(usize::MAX),
+        )
     }
     .unwrap();
     stage.copy_on_write(1).unwrap();
@@ -970,7 +1048,14 @@ fn worker_writes_of_pages_here_copy_nothing(vcpu_writes: bool) {
     let base = 64 * ps as usize;
     // SAFETY: The model changes no memory.
     let stage = unsafe {
-        UffdSecondStage::with_host(base, ps, memory.clone(), Memories::InProcess, None, usize::MAX)
+        UffdSecondStage::with_host(
+            base,
+            ps,
+            memory.clone(),
+            Memories::InProcess,
+            None,
+            Mappings::new(usize::MAX),
+        )
     }
     .unwrap();
     stage.copy_on_write(1).unwrap();
@@ -1045,7 +1130,7 @@ fn modelled_copying_at_most(
             memory.clone(),
             Memories::InProcess,
             None,
-            usize::MAX,
+            Mappings::new(usize::MAX),
         )
     }
     .unwrap();
@@ -1169,7 +1254,7 @@ fn private_runs_race_loads() {
             memory.clone(),
             Memories::InProcess,
             None,
-            usize::MAX,
+            Mappings::new(usize::MAX),
         )
     }
     .unwrap();

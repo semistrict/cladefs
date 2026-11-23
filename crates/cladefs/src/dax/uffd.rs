@@ -78,11 +78,19 @@
 //!
 //! Each run of pages mapped here, consecutive pages of one arena's memory, is a mapping of the
 //! process's own, of which Linux allows `vm.max_map_count` (65,530 by default); a window's pages
-//! scattered over its arenas would take one each (TASK-12). The stage keeps a budget of runs
-//! installed, half of what the process may map beyond what it keeps for itself: past it, it leaves
-//! out the runs installed or faulted on longest ago, memory registered for missing faults again,
-//! whose pages it remembers, and installs one again, as it was, when the guest faults on it,
-//! without the window. The window's mappings are unchanged.
+//! scattered over its arenas would take one each (TASK-12). The process's windows share a budget
+//! of runs installed, half of what the process may map beyond what it keeps for itself
+//! ([`Mappings`]), each an equal share of it; a page a fault restricts, read-only or withheld,
+//! splitting the mapping it is in as a run does, counts as one. Before a change that may take
+//! more, the stage makes room in its share: it leaves out the runs installed or faulted on longest
+//! ago, memory registered for missing faults again, whose pages it remembers, and installs one
+//! again, as it was, when the guest faults on it, without the window; and then, if it must, lifts
+//! the restrictions made longest ago, which a fault on the page makes again. The window's mappings
+//! are unchanged. cladefs: each window's budget the whole process's once, a VM process with two,
+//! its memory's and an extent device's, could take twice what it may map, and restrictions and
+//! the runs a `MAP_PREFAULT` installs counted only after the fact, if at all, a guest's accesses
+//! could take its VM process past it, which the kernel refuses with `ENOMEM`, and the stage
+//! panics for (board 8493).
 //!
 //! cladefs: the private pages of a window that copies on write (backlog doc-13) are none of those
 //! runs. Its memory where nothing is installed is not anonymous but its private memory
@@ -110,13 +118,13 @@ use crate::error::{Errno, Error, Result};
 use crate::pages::page_size;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -204,8 +212,12 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     /// restricts, as a write the window refuses makes it read-only, waits for a change being made,
     /// and is restricted only if it hasn't changed since the fault.
     pages: Mutex<Pages>,
-    /// The runs of pages it keeps installed at most (see the module docs).
-    budget: usize,
+    /// cladefs: the mappings its process's windows share (see the module docs, board 8493).
+    mappings: Arc<Mappings>,
+    /// The runs of pages, and the pages a fault restricted, it keeps at most: its share of the
+    /// mappings, which it is told as windows come and go, under its pages' lock
+    /// ([`Mappings::share`]).
+    share: AtomicUsize,
     /// cladefs: the changes that took access away from pages it had installed (TASK-91.16).
     taken: Taken,
     /// cladefs: its window's private memory, if the window copies on write (backlog doc-13): a
@@ -421,17 +433,95 @@ pub(crate) type TakenCounts = [u64; 2];
 /// libraries', guest memory's, its threads' stacks'.
 const MAPPINGS_RESERVED: usize = 4096;
 
-/// The runs of pages a second stage keeps installed at most, in a process the host lets make
-/// `max_map_count` mappings, if it limits them (`pages::max_map_count`): half of those beyond
-/// [`MAPPINGS_RESERVED`], as each run, a mapping of its own, splits the memory around it, a mapping
-/// too. cladefs: told the limit, as a VM process in a jail without /proc can't read it, which once
-/// had it budget by Linux's default, a seventeenth of the hosts' (TASK-172).
+/// The runs of pages a process's second stages keep installed at most, all of them together, in a
+/// process the host lets make `max_map_count` mappings, if it limits them
+/// (`pages::max_map_count`): half of those beyond [`MAPPINGS_RESERVED`], counted once, as each
+/// run, a mapping of its own, splits the memory around it, a mapping too ([`Mappings`]). cladefs:
+/// told the limit, as a VM process in a jail without /proc can't read it, which once had it budget
+/// by Linux's default, a seventeenth of the hosts' (TASK-172).
 pub(crate) fn budget(max_map_count: Option<u64>) -> usize {
     let Some(max) = max_map_count else {
         return usize::MAX / 2;
     };
     let max = usize::try_from(max).unwrap_or(usize::MAX);
     (max.saturating_sub(MAPPINGS_RESERVED) / 2).max(1)
+}
+
+/// cladefs: the mappings a process's DAX windows share (board 8493): a budget of runs of pages
+/// installed, and of pages a fault restricted, each splitting the mapping it is in as a run does
+/// ([`budget`]), of which each window keeps an equal share at most, two at least: the run a fault
+/// installs, and the restriction it makes of its page, which a window keeps however small its
+/// share, as its fault waits on them. Each window's budget the process's whole once, a VM
+/// process's memory's window beside its extent device's could take twice what the process may
+/// map. An equal share, not a pool: a guest's accesses through one window can't leave out what
+/// another keeps installed (hotbed question 485).
+pub(crate) struct Mappings {
+    /// The runs, and restrictions, its windows keep at most, all of them together.
+    total: AtomicUsize,
+    /// Its windows, each told its share as one comes or goes.
+    windows: std::sync::Mutex<Vec<Weak<dyn Share>>>,
+}
+
+/// cladefs: a window's second stage, as the mappings its process's windows share tell it of its
+/// share of them ([`Mappings`]).
+trait Share: Send + Sync {
+    /// Its share is `share` from now on: if it keeps more, it leaves out runs, and lifts
+    /// restrictions, down to it.
+    fn shared(&self, share: usize);
+}
+
+impl Mappings {
+    /// Mappings of `total` runs and restrictions at most, which no window shares yet.
+    pub(crate) fn new(total: usize) -> Arc<Self> {
+        let total = AtomicUsize::new(total);
+        Arc::new(Self { total, windows: std::sync::Mutex::new(Vec::new()) })
+    }
+
+    /// This process's, which every window of a VM process shares
+    /// ([`UffdSecondStage::new`]): of the smallest budget its windows were told of, by the
+    /// `max_map_count` their daemons said ([`budget`]).
+    fn process(max_map_count: Option<u64>) -> Arc<Self> {
+        // Outside the simulation: userfaultfd serves VMs, which no simulated host runs; and the
+        // process's, as what it shares is the process's mappings.
+        static PROCESS: OnceLock<Arc<Mappings>> = OnceLock::new();
+        let mappings = PROCESS.get_or_init(|| Self::new(budget(None))).clone();
+        mappings.total.fetch_min(budget(max_map_count), Ordering::Relaxed);
+        mappings
+    }
+
+    /// Each window's share, of `windows` windows: an equal part of the total, two at least.
+    fn share(&self, windows: usize) -> usize {
+        (self.total.load(Ordering::Relaxed) / windows.max(1)).max(2)
+    }
+
+    /// `window` shares them from now on: each window, it too, told its share anew.
+    fn join(&self, window: Weak<dyn Share>) {
+        self.reshare(Some(window));
+    }
+
+    /// A window went: each left told its share anew.
+    fn leave(&self) {
+        self.reshare(None);
+    }
+
+    /// Tells each window its share, `joining` one of them: holding the windows' lock, so that
+    /// two windows coming at once tell each the share of both. The windows told are let go of
+    /// only once the lock is, as the last of one would take it again, leaving.
+    fn reshare(&self, joining: Option<Weak<dyn Share>>) {
+        let live: Vec<Arc<dyn Share>>;
+        {
+            let mut windows =
+                self.windows.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            windows.retain(|window| window.strong_count() > 0);
+            windows.extend(joining);
+            live = windows.iter().filter_map(Weak::upgrade).collect();
+            let share = self.share(live.len());
+            for window in &live {
+                window.shared(share);
+            }
+        }
+        drop(live);
+    }
 }
 
 /// Logs a fault the window refused, `what` at window offset `offset`, of `thread`: each of the
@@ -509,6 +599,12 @@ struct PageChanges {
 }
 
 impl PageChanges {
+    /// cladefs: whether a fault restricted it, withheld or read-only, so that it splits the
+    /// mapping it is in, as a run does (board 8493).
+    fn restricts(&self) -> bool {
+        self.withheld || self.restricted
+    }
+
     /// cladefs: when it was installed or faulted on last, if it is installed.
     fn used_installed(&self) -> Option<u64> {
         self.mapped.filter(Mapped::installed).map(|mapped| mapped.used.get())
@@ -610,6 +706,12 @@ struct Pages {
     /// looks at the runs alone, where it walked every page of the window, 16.7M of a 64 GiB
     /// window's, holding the lock every fault takes (board 8495).
     runs: BTreeMap<usize, Run>,
+    /// cladefs: how many of its pages a fault restricted, withheld or read-only, each splitting
+    /// the mapping it is in as a run does ([`PageChanges::restricts`], board 8493).
+    restrictions: usize,
+    /// cladefs: the pages a fault restricted, the first restricted first, some unrestricted
+    /// since: what a trim lifts, as it must, the oldest first ([`UffdSecondStage::trim`]).
+    restricted_order: VecDeque<usize>,
     /// Counts installations and faults, the ones longest ago left out first.
     clock: u64,
     /// cladefs: whether the memory was let go of ([`UffdSecondStage::release`]): nothing changes
@@ -651,8 +753,20 @@ impl Pages {
         self.pages[at].mapped.is_some_and(|mapped| mapped.installed()) && !self.starts_run(at)
     }
 
-    /// Changes the pages of `range` with `change`, keeping the runs installed as they are after
-    /// it. cladefs: a page starts a run, or follows on in one,
+    /// cladefs: the first page of the run page `at` is in, if it is installed.
+    fn run_of(&self, at: usize) -> Option<usize> {
+        let (&start, run) = self.runs.range(..=at).next_back()?;
+        (run.end > at).then_some(start)
+    }
+
+    /// cladefs: the runs installed and the pages restricted, what its mappings take of its share
+    /// (board 8493).
+    fn held(&self) -> usize {
+        self.runs.len() + self.restrictions
+    }
+
+    /// Changes the pages of `range` with `change`, keeping the runs installed, and the count of
+    /// pages restricted, as they are after it. cladefs: a page starts a run, or follows on in one,
     /// by itself and its predecessor alone, so only at the pages of `range` and the one after it
     /// can a run start or end anew: the runs there, and the one before it reaching them, are
     /// taken out, and made again from what those pages are now, as far as the run the page after
@@ -664,6 +778,8 @@ impl Pages {
         if first == end {
             return change(&mut self.pages[range]);
         }
+        let count = |pages: &[PageChanges]| pages.iter().filter(|page| page.restricts()).count();
+        let restricted = count(&self.pages[range.clone()]);
         let mut old: Vec<(usize, Run)> = Vec::new();
         if let Some((&start, &run)) = self.runs.range(..first).next_back()
             && run.end >= first
@@ -674,7 +790,8 @@ impl Pages {
         for (start, _) in &old {
             self.runs.remove(start);
         }
-        change(&mut self.pages[range]);
+        change(&mut self.pages[range.clone()]);
+        self.restrictions = self.restrictions - restricted + count(&self.pages[range]);
         // The run reaching the range from before it, if it still does.
         let mut open =
             old.first().filter(|(start, _)| *start < first).map(|&(start, run)| (start, run.used));
@@ -805,7 +922,7 @@ pub(crate) enum Memory {
 
 /// What a second stage changes its host memory with: system calls ([`Syscalls`]), or, in its
 /// Shuttle tests, a model of what they do, against which a guest's accesses are made.
-pub(crate) trait HostMemory: Send + Sync {
+pub(crate) trait HostMemory: Send + Sync + 'static {
     /// Maps `len` bytes of `memory` at `addr` with protection `prot`, replacing what was mapped
     /// there, and its registration with userfaultfd (`mmap` with `MAP_FIXED`).
     fn map(&self, addr: usize, len: usize, prot: libc::c_int, memory: Memory);
@@ -897,6 +1014,19 @@ impl HostMemory for Syscalls {
 }
 
 impl Syscalls {
+    /// A new userfaultfd's system calls, which handles faults taken in the kernel too.
+    fn open() -> Result<Self, Error> {
+        let uffd = open_userfaultfd()?;
+        let mut api = UffdioApi {
+            api: UFFD_API,
+            features: UFFD_FEATURE_WP_HUGETLBFS_SHMEM | UFFD_FEATURE_THREAD_ID,
+            ioctls: 0,
+        };
+        ioctl(&uffd, UFFDIO_API, &mut api)
+            .map_err(|err| Error::new(anyhow::Error::new(err).context("UFFDIO_API")))?;
+        Ok(Self { uffd })
+    }
+
     /// cladefs: a new memory object of `len` bytes, none of them filled
     /// ([`HostMemory::private_memory`]).
     fn private_memory_fd(len: usize) -> std::io::Result<OwnedFd> {
@@ -1064,8 +1194,8 @@ impl UffdSecondStage {
     /// Takes over the `size` bytes of host memory at `base`, replacing them with memory whose
     /// faults userfaultfd reports, as nothing is mapped yet: the window's pages are mapped there
     /// from `phys`, physical memory. `prefault`, if any, is told of the pages mapped
-    /// there. It keeps as many runs of pages installed as a process the host lets make
-    /// `max_map_count` mappings may ([`budget`]).
+    /// there. It keeps as many runs of pages installed as its share of what a process the host
+    /// lets make `max_map_count` mappings may keep, with its other windows ([`Mappings`]).
     ///
     /// # Safety
     ///
@@ -1077,38 +1207,33 @@ impl UffdSecondStage {
         prefault: Option<Arc<dyn Prefault>>,
         max_map_count: Option<u64>,
     ) -> Result<Arc<Self>, Error> {
-        let budget = budget(max_map_count);
+        let mappings = Mappings::process(max_map_count);
+        // SAFETY: As the caller promises.
+        let stage = unsafe { Self::with_mappings(base, size, memories, prefault, mappings) }?;
         log::info!(
-            "cladefs: a DAX window of {size} bytes keeps at most {budget} runs of pages installed, \
-             the host letting a process make {} mappings",
+            "cladefs: a DAX window of {size} bytes keeps at most {} runs of pages installed, its \
+             share of its process's windows', the host letting a process make {} mappings",
+            stage.budget(),
             max_map_count.map_or_else(|| "any number of".to_owned(), |max| max.to_string())
         );
-        // SAFETY: As the caller promises.
-        unsafe { Self::with_budget(base, size, memories, prefault, budget) }
+        Ok(stage)
     }
 
-    /// As [`new`](Self::new), keeping at most `budget` runs of pages installed.
+    /// As [`new`](Self::new), keeping its share of `mappings`.
     ///
     /// # Safety
     ///
     /// As [`new`](Self::new).
-    pub(crate) unsafe fn with_budget(
+    pub(crate) unsafe fn with_mappings(
         base: usize,
         size: u64,
         memories: Memories,
         prefault: Option<Arc<dyn Prefault>>,
-        budget: usize,
+        mappings: Arc<Mappings>,
     ) -> Result<Arc<Self>, Error> {
-        let uffd = open_userfaultfd()?;
-        let mut api = UffdioApi {
-            api: UFFD_API,
-            features: UFFD_FEATURE_WP_HUGETLBFS_SHMEM | UFFD_FEATURE_THREAD_ID,
-            ioctls: 0,
-        };
-        ioctl(&uffd, UFFDIO_API, &mut api)
-            .map_err(|err| Error::new(anyhow::Error::new(err).context("UFFDIO_API")))?;
+        let host = Syscalls::open()?;
         // SAFETY: As the caller promises.
-        unsafe { Self::with_host(base, size, Syscalls { uffd }, memories, prefault, budget) }
+        unsafe { Self::with_host(base, size, host, memories, prefault, mappings) }
     }
 
     /// As [`new`](Self::new), for a window of this process's kernel, as tests have it.
@@ -1124,12 +1249,6 @@ impl UffdSecondStage {
     ) -> Result<Arc<Self>, Error> {
         // SAFETY: As the caller promises.
         unsafe { Self::new(base, size, Memories::InProcess, prefault, host_max_map_count()) }
-    }
-
-    /// The runs of pages it keeps installed at most: cladefs: which its VM process tells the
-    /// daemon of (TASK-111.5).
-    pub(crate) fn budget(&self) -> usize {
-        self.budget
     }
 
     /// cladefs: the runs of its window's private pages, by their offsets in the window, in order:
@@ -1264,7 +1383,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         host: H,
         memories: Memories,
         prefault: Option<Arc<dyn Prefault>>,
-        budget: usize,
+        mappings: Arc<Mappings>,
     ) -> Result<Arc<Self>, Error> {
         let size = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
         let page_size = page_size() as usize;
@@ -1276,12 +1395,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let pages = Mutex::new(Pages {
             pages,
             runs: BTreeMap::new(),
+            restrictions: 0,
+            restricted_order: VecDeque::new(),
             clock: 0,
             released: false,
             for_workers,
             private: 0,
         });
-        let budget = budget.max(1);
         let taken = Taken::default();
         let stage = Arc::new(Self {
             base,
@@ -1290,7 +1410,9 @@ impl<H: HostMemory> UffdSecondStage<H> {
             memories,
             prefault,
             pages,
-            budget,
+            mappings: mappings.clone(),
+            // Told its share as it joins, below.
+            share: AtomicUsize::new(2),
             taken,
             private: OnceLock::new(),
             copies: Default::default(),
@@ -1299,6 +1421,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
             busy: Busy::default(),
         });
         stage.leave_out_untouched();
+        let shares: Weak<dyn Share> = Arc::downgrade(&stage) as Weak<dyn Share>;
+        mappings.join(shares);
         Ok(stage)
     }
 
@@ -1330,6 +1454,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
         self.leave_out_untouched();
         Ok(())
+    }
+
+    /// The runs of pages it keeps installed at most, with the pages a fault restricted: its share
+    /// of its process's windows' ([`Mappings`]). cladefs: which its VM process tells the daemon of
+    /// (TASK-111.5), as it is when the window is made.
+    pub(crate) fn budget(&self) -> usize {
+        self.share.load(Ordering::Relaxed)
     }
 
     /// cladefs: the runs of pages it has installed now, each a mapping of the process's, which
@@ -1446,10 +1577,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// makes it to the memory with `change`, given what `record` returns, holding the pages' lock,
     /// and counts it for each page, which is withheld no more: the change replaces its memory.
     /// cladefs: returns whether it did: not once the memory was let go of ([`Self::release`]).
+    /// First makes room in its share for `room` runs more, as many as the change may split
+    /// (board 8493): one each of the ranges it takes away, a run reaching past both its ends.
     fn change<T>(
         &self,
         addr: usize,
         len: usize,
+        room: usize,
         record: impl FnOnce(&mut Pages) -> T,
         change: impl FnOnce(T),
     ) -> bool {
@@ -1457,6 +1591,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         if pages.released {
             return false;
         }
+        self.trim(&mut pages, room, None);
         let now = self.now();
         let recorded = record(&mut pages);
         for page in &mut pages.pages[self.page_range(addr, len)] {
@@ -1482,10 +1617,12 @@ impl<H: HostMemory> UffdSecondStage<H> {
         now: u64,
         change: impl FnOnce(),
     ) {
-        for page in &mut pages.pages[self.page_range(addr, len)] {
-            page.made = page.made.wrapping_add(1);
-            page.withheld = false;
-        }
+        pages.update(self.page_range(addr, len), |pages| {
+            for page in pages {
+                page.made = page.made.wrapping_add(1);
+                page.withheld = false;
+            }
+        });
         let _busy = self.busy.doing(Doing::Change, now);
         change();
     }
@@ -1504,9 +1641,10 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let len = pages.pages.len();
         match WindowPages::new(len) {
             Ok(fresh) => {
-                (pages.pages, pages.private) = (fresh, 0);
+                (pages.pages, pages.private, pages.restrictions) = (fresh, 0, 0);
                 pages.runs.clear();
                 pages.for_workers.clear();
+                pages.restricted_order.clear();
             }
             Err(err) => {
                 log::warn!("cladefs: a released DAX window's pages, anew: {err}: each changed");
@@ -1531,7 +1669,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// Restricts the page at `addr` to `prot`, for a fault the window did not resolve, and so
     /// withholds it if it is made inaccessible: unless the window changed it since it had made
     /// `seen` changes to it, whose new memory the access finds when it retries. Without `seen`, at
-    /// once.
+    /// once. cladefs: in room made for it in its share, as it splits the mapping it is in
+    /// (board 8493).
     fn restrict(&self, addr: usize, seen: Option<u32>, prot: libc::c_int) {
         let page_size = page_size() as usize;
         let page = self.page_range(addr, 1).start;
@@ -1542,12 +1681,36 @@ impl<H: HostMemory> UffdSecondStage<H> {
         if pages.released || seen.is_some_and(|seen| made != seen) {
             return;
         }
+        self.trim(&mut pages, 1, Some(page));
         self.host.protect(addr, page_size, prot);
-        pages.pages[page].withheld = withheld;
-        pages.pages[page].restricted = prot == libc::PROT_READ;
-        pages.pages[page].for_worker = false;
+        Self::restricted(&mut pages, page, |page| {
+            page.withheld = withheld;
+            page.restricted = prot == libc::PROT_READ;
+            page.for_worker = false;
+        });
         let what = if withheld { "withheld" } else { "restricted to reads" };
         changed_protection(what, offset, made, seen);
+    }
+
+    /// cladefs: restricts page `at` with `restrict`, which a fault's restriction of it makes: listed
+    /// to be lifted, oldest first, if it restricted nothing before ([`Self::trim`]). The list keeps
+    /// pages lifted since until it is twice as long as there are restricted, and each but once.
+    fn restricted(pages: &mut Pages, at: usize, restrict: impl FnOnce(&mut PageChanges)) {
+        let before = pages.pages[at].restricts();
+        pages.update(at..at + 1, |page| restrict(&mut page[0]));
+        if before || !pages.pages[at].restricts() {
+            return;
+        }
+        pages.restricted_order.push_back(at);
+        if pages.restricted_order.len() > 2 * pages.restrictions + 64 {
+            let (mut listed, mut order) = (BTreeSet::new(), VecDeque::new());
+            for &at in pages.restricted_order.iter().rev() {
+                if pages.pages[at].restricts() && listed.insert(at) {
+                    order.push_front(at);
+                }
+            }
+            pages.restricted_order = order;
+        }
     }
 
     /// cladefs: restricts the page at `addr` to reads for a worker's write, resolved as a load, on
@@ -1565,6 +1728,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
         if pages.released || !installed {
             return;
         }
+        // cladefs: in room made for it in its share, its page's run kept (board 8493).
+        self.trim(&mut pages, 1, Some(at));
         self.host.protect(addr, page_size, libc::PROT_READ);
         let Pages { pages: all, for_workers, .. } = &mut *pages;
         // Pages unrestricted since stay listed till a lift, of which a VM may take none: dropped
@@ -1575,10 +1740,9 @@ impl<H: HostMemory> UffdSecondStage<H> {
         if !(all[at].restricted && all[at].for_worker) {
             for_workers.push(at);
         }
-        let page = &mut pages.pages[at];
-        (page.restricted, page.for_worker) = (true, true);
-        let offset = (addr - self.base) as u64;
-        changed_protection("restricted to reads for a worker's write", offset, page.made, None);
+        Self::restricted(&mut pages, at, |page| (page.restricted, page.for_worker) = (true, true));
+        let (offset, made) = ((addr - self.base) as u64, pages.pages[at].made);
+        changed_protection("restricted to reads for a worker's write", offset, made, None);
     }
 
     /// cladefs: lifts the restrictions made for workers' writes ([`Self::restrict_for_worker`]), as
@@ -1594,11 +1758,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
             return;
         }
         for at in std::mem::take(&mut pages.for_workers) {
-            let page = &mut pages.pages[at];
+            let page = pages.pages[at];
             if !(page.restricted && page.for_worker) {
                 continue;
             }
-            (page.restricted, page.for_worker) = (false, false);
+            pages.update(at..at + 1, |page| {
+                (page[0].restricted, page[0].for_worker) = (false, false)
+            });
             let writable = libc::PROT_READ | libc::PROT_WRITE;
             self.host.protect(self.base + at * page_size, page_size, writable);
             let offset = (at * page_size) as u64;
@@ -1886,6 +2052,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// reads it is such a run: no `mmap`, and no TLB flush (TASK-276.6).
     fn privatize(&self, pages: &mut Pages, first: usize, bytes: &[u8]) {
         let start = std::time::Instant::now();
+        // cladefs: room for the run it may split (board 8493).
+        self.trim(pages, 1, None);
         let page_size = page_size() as usize;
         let range = first..first + bytes.len() / page_size;
         let (addr, len) = (self.base + first * page_size, bytes.len());
@@ -2078,11 +2246,19 @@ impl<H: HostMemory> UffdSecondStage<H> {
                     _ => installs.push(at..at + 1),
                 }
             }
+            // cladefs: each in room made for it in its share, and no more of them than seven eighths
+            // of it, the rest left to the guest's faults: installed all, then trimmed, a call over
+            // a guest's pages named scattered, the range and the names its own, took the process
+            // past the mappings it may make, and on, installing what it then left out (board
+            // 8493).
+            let share = self.share.load(Ordering::Relaxed);
+            installs.truncate(share - share / 8);
             if !installs.is_empty() {
-                let now = self.now();
                 let used = pages.tick();
-                let _busy = self.busy.doing(Doing::Reinstall, now);
                 for run in installs {
+                    self.trim(&mut pages, 1, Some(run.start));
+                    let now = self.now();
+                    let _busy = self.busy.doing(Doing::Reinstall, now);
                     let phys = pages.pages[run.start].mapped.expect("a page named").phys;
                     pages.update(run.clone(), |pages| {
                         for page in pages {
@@ -2111,7 +2287,6 @@ impl<H: HostMemory> UffdSecondStage<H> {
             }
             runs
         };
-        self.trim();
         let Some(prefault) = &self.prefault else { return };
         for run in runs {
             let (offset, len) = ((run.start * page_size) as u64, (run.len() * page_size) as u64);
@@ -2163,7 +2338,7 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
             });
             taking
         };
-        self.change(addr, len, name, |taking| self.take_away(addr, len, taking));
+        self.change(addr, len, 1, name, |taking| self.take_away(addr, len, taking));
     }
 
     fn unmap(&self, offset: u64, len: u64, private: Private) {
@@ -2177,7 +2352,7 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
             });
             taking
         };
-        self.change(addr, len, forget, |taking| self.take_away(addr, len, taking));
+        self.change(addr, len, 1, forget, |taking| self.take_away(addr, len, taking));
     }
 
     /// cladefs: the window's change of a range it mapped, made at once (TASK-91.16): each map of
@@ -2255,7 +2430,9 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
             }
             taken
         };
-        self.change(addr, len, record, |taken| {
+        // The ranges it takes away: between the maps it leaves in place, one more than they.
+        let room = maps.len() + 1;
+        self.change(addr, len, room, record, |taken| {
             for (run, taking) in taken {
                 let addr = self.base + run.start * page_size;
                 self.take_away(addr, run.len() * page_size, taking);
@@ -2272,7 +2449,6 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         let (addr, len) = self.addr(offset, len);
         let page_size = page_size() as usize;
         let range = self.page_range(addr, len);
-        let first = range.start;
         let mut pages = self.pages.lock().unwrap();
         if pages.released {
             return;
@@ -2280,13 +2456,18 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         // Each page counts the mapping as a change, so that a fault that found nothing there
         // before withholds nothing now. A page withheld is unmapped memory, registered for
         // missing faults, made accessible again.
-        for (at, page) in pages.pages[range].iter_mut().enumerate() {
-            page.made = page.made.wrapping_add(1);
-            if page.withheld && rules().mapping_gives_back_withheld {
-                page.withheld = false;
-                let addr = self.base + (first + at) * page_size;
-                self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
+        let gives_back = rules().mapping_gives_back_withheld;
+        let withheld: Vec<usize> =
+            range.clone().filter(|&at| gives_back && pages.pages[at].withheld).collect();
+        pages.update(range, |pages| {
+            for page in pages {
+                page.made = page.made.wrapping_add(1);
+                page.withheld &= !gives_back;
             }
+        });
+        for at in withheld {
+            let addr = self.base + at * page_size;
+            self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
         }
     }
 }
@@ -2369,24 +2550,32 @@ impl<H: HostMemory> UffdSecondStage<H> {
         self.host.protect(addr, len, writable);
     }
 
-    /// While more runs than the budget are installed, leaves out those installed or faulted on
-    /// longest ago, down to seven eighths of it, so that it is not done at each mapping. cladefs:
-    /// looking at the runs alone, where it walked every page of the window to find them, 16.7M of
-    /// a 64 GiB window's, holding the lock every fault takes (board 8495).
-    fn trim(&self) {
-        let mut pages = self.pages.lock().unwrap();
-        if pages.released || pages.runs.len() <= self.budget {
+    /// Makes room in its share for `room` more runs or restrictions, with its pages' lock held
+    /// (`pages`): while what it holds and they are more than its share, leaves out the runs
+    /// installed or faulted on longest ago, then lifts the restrictions made longest ago, down to
+    /// seven eighths of its share less `room`, so that it is not done at each change. Never page
+    /// `keep`'s run, nor its restriction, which a fault waits on: left out, or lifted, the fault's
+    /// access, retried, would fault again, for good. cladefs: a restriction lifted, the page
+    /// faults to the window once more, which restricts it again (board 8493); a trim looks at the
+    /// runs alone, where it walked every page of the window to find them, 16.7M of a 64 GiB
+    /// window's, holding the lock every fault takes (board 8495).
+    fn trim(&self, pages: &mut Pages, room: usize, keep: Option<usize>) {
+        let share = self.share.load(Ordering::Relaxed);
+        if pages.released || pages.held().saturating_add(room) <= share {
             return;
         }
-        let page_size = page_size() as usize;
-        let mut runs: Vec<(u64, usize)> =
-            pages.runs.iter().map(|(&start, run)| (run.used, start)).collect();
-        runs.sort_unstable();
-        let low = self.budget - self.budget / 8;
+        let low = (share - share / 8).saturating_sub(room);
         let now = self.now();
         let _busy = self.busy.doing(Doing::Trim, now);
+        let page_size = page_size() as usize;
+        let kept = keep.and_then(|keep| pages.run_of(keep));
+        let mut runs: Vec<(u64, usize)> = (pages.runs.iter())
+            .filter(|&(&start, _)| Some(start) != kept)
+            .map(|(&start, run)| (run.used, start))
+            .collect();
+        runs.sort_unstable();
         for (_, start) in runs {
-            if pages.runs.len() <= low {
+            if pages.held() <= low {
                 break;
             }
             // Leaving out another run leaves this one as it was.
@@ -2403,6 +2592,28 @@ impl<H: HostMemory> UffdSecondStage<H> {
             });
             Self::took(&self.taken.left_out, true);
             self.leave_out(self.base + start * page_size, (end - start) * page_size);
+        }
+        let mut kept_restricted = false;
+        while pages.held() > low {
+            let Some(at) = pages.restricted_order.pop_front() else { break };
+            if Some(at) == keep {
+                kept_restricted = true;
+                continue;
+            }
+            let page = pages.pages[at];
+            if !page.restricts() {
+                continue;
+            }
+            pages.update(at..at + 1, |page| {
+                (page[0].withheld, page[0].restricted, page[0].for_worker) = (false, false, false)
+            });
+            let writable = libc::PROT_READ | libc::PROT_WRITE;
+            self.host.protect(self.base + at * page_size, page_size, writable);
+            let offset = (at * page_size) as u64;
+            changed_protection("lifted, its window's share full", offset, page.made, None);
+        }
+        if kept_restricted && let Some(keep) = keep {
+            pages.restricted_order.push_front(keep);
         }
     }
 
@@ -2430,6 +2641,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
             });
             return false;
         }
+        // cladefs: in room made for it in its share, as it may install a run more (board 8493).
+        self.trim(&mut pages, 1, Some(at));
         let phys = mapped.phys;
         // The pages around it left out with it, of memory following on, as far as a chunk's.
         let left_out_with = |page: &PageChanges, distance: i64| {
@@ -2476,11 +2689,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
             }
         });
         let len = (end - start) * page_size;
-        let busy = self.busy.doing(Doing::Reinstall, now);
+        let _busy = self.busy.doing(Doing::Reinstall, now);
         self.install(self.base + start * page_size, len, self.memory(first));
-        drop(busy);
-        drop(pages);
-        self.trim();
         true
     }
 
@@ -2524,7 +2734,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             "; {} runs installed of a budget of {}, {} pages installed, {} left out, {} private, \
              {} withheld, {} restricted ({} for workers' writes)",
             pages.runs.len(),
-            self.budget,
+            self.budget(),
             count(installed),
             count(left_out),
             count(|page| page.private),
@@ -2554,6 +2764,21 @@ impl<H: HostMemory> UffdSecondStage<H> {
             ));
         }
         said
+    }
+}
+
+impl<H: HostMemory> Share for UffdSecondStage<H> {
+    fn shared(&self, share: usize) {
+        let mut pages = self.pages.lock().unwrap();
+        self.share.store(share, Ordering::Relaxed);
+        self.trim(&mut pages, 0, None);
+    }
+}
+
+impl<H: HostMemory> Drop for UffdSecondStage<H> {
+    /// cladefs: its share goes to the windows left (board 8493).
+    fn drop(&mut self) {
+        self.mappings.leave();
     }
 }
 
@@ -2909,12 +3134,12 @@ mod tests {
         let file = TestSource::scattered(PAGES as u64, |page| page as u8 + 1).source();
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe {
-            UffdSecondStage::with_budget(
+            UffdSecondStage::with_mappings(
                 base,
                 (PAGES * ps) as u64,
                 Memories::InProcess,
                 None,
-                BUDGET,
+                Mappings::new(BUDGET),
             )
         }
         .unwrap();
@@ -3000,12 +3225,12 @@ mod tests {
         let file = TestSource::scattered(pages as u64, |page| tag(page as usize)).source();
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe {
-            UffdSecondStage::with_budget(
+            UffdSecondStage::with_mappings(
                 base,
                 (pages * ps) as u64,
                 Memories::InProcess,
                 None,
-                budget,
+                Mappings::new(budget),
             )
         }
         .unwrap();
@@ -3376,12 +3601,12 @@ mod tests {
         let before = rss();
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe {
-            UffdSecondStage::with_budget(
+            UffdSecondStage::with_mappings(
                 memory as usize,
                 SIZE as u64,
                 Memories::InProcess,
                 None,
-                64,
+                Mappings::new(64),
             )
         }
         .unwrap();
@@ -3478,9 +3703,16 @@ mod tests {
         let base = window_memory(PAGES);
         let size = (PAGES * ps) as u64;
         // SAFETY: Only the test uses the memory, which outlives the window.
-        let stage =
-            unsafe { UffdSecondStage::with_budget(base, size, Memories::InProcess, None, BUDGET) }
-                .unwrap();
+        let stage = unsafe {
+            UffdSecondStage::with_mappings(
+                base,
+                size,
+                Memories::InProcess,
+                None,
+                Mappings::new(BUDGET),
+            )
+        }
+        .unwrap();
         let (mut dax, _window) =
             Dax::in_host_memory_copying(stage.clone(), Some(PAGES as u64)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
@@ -3530,6 +3762,320 @@ mod tests {
         }
     }
 
+    /// A test's host memory: system calls, after each change of which the mappings in its windows'
+    /// memory, as /proc/self/maps lists them, are counted, the most of them kept: what the process
+    /// takes of the mappings the host lets it make (`vm.max_map_count`), which a test can't lower.
+    struct Counted {
+        syscalls: Syscalls,
+        windows: Arc<CountedWindows>,
+    }
+
+    /// The memory of the windows a [`Counted`] host's mappings are counted in, and the most found.
+    #[derive(Default)]
+    struct CountedWindows {
+        memory: std::sync::Mutex<Vec<std::ops::Range<usize>>>,
+        most: AtomicUsize,
+    }
+
+    impl CountedWindows {
+        /// The mappings in the windows' memory now.
+        fn now(&self) -> usize {
+            let memory = self.memory.lock().unwrap().clone();
+            let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+            (maps.lines())
+                .filter(|line| {
+                    let range = line.split_whitespace().next().unwrap();
+                    let (start, end) = range.split_once('-').unwrap();
+                    let start = usize::from_str_radix(start, 16).unwrap();
+                    let end = usize::from_str_radix(end, 16).unwrap();
+                    memory.iter().any(|window| start < window.end && end > window.start)
+                })
+                .count()
+        }
+
+        fn count(&self) {
+            self.most.fetch_max(self.now(), Ordering::Relaxed);
+        }
+    }
+
+    impl HostMemory for Counted {
+        fn map(&self, addr: usize, len: usize, prot: libc::c_int, memory: Memory) {
+            self.syscalls.map(addr, len, prot, memory);
+            self.windows.count();
+        }
+        fn protect(&self, addr: usize, len: usize, prot: libc::c_int) {
+            self.syscalls.protect(addr, len, prot);
+            self.windows.count();
+        }
+        fn register(&self, addr: usize, len: usize, mode: u64) {
+            self.syscalls.register(addr, len, mode);
+            self.windows.count();
+        }
+        fn write_protect(&self, addr: usize, len: usize) {
+            self.syscalls.write_protect(addr, len);
+            self.windows.count();
+        }
+        fn wake(&self, addr: usize, len: usize) {
+            self.syscalls.wake(addr, len);
+        }
+        fn private_memory(&self, len: usize) -> std::io::Result<OwnedFd> {
+            self.syscalls.private_memory(len)
+        }
+        fn fill(&self, fd: RawFd, offset: u64, bytes: &[u8]) {
+            self.syscalls.fill(fd, offset, bytes);
+        }
+        fn punch(&self, fd: RawFd, offset: u64, len: usize) {
+            self.syscalls.punch(fd, offset, len);
+        }
+    }
+
+    /// The pages of each window of [`windows_keep_their_process_within_its_mappings`].
+    const HOSTILE_PAGES: usize = 40;
+
+    /// What a guest, its VM process's daemon and its faults do to one of the process's windows, of
+    /// [`windows_keep_their_process_within_its_mappings`], of [`HOSTILE_PAGES`] pages, named at
+    /// first of memory following on, so that a fault installs them all, one run, and named anew,
+    /// scattered, a run each when installed, or following on.
+    #[derive(Clone, Debug)]
+    enum HostileOp {
+        /// The guest's `MAP` of `len` pages from the page on: scattered, or following on.
+        Name { window: usize, page: usize, len: usize, scattered: bool },
+        /// A fault on the page, which installs it if it is named and left out.
+        Fault { window: usize, page: usize },
+        /// A `MAP_PREFAULT` of `len` pages from the page on.
+        Prefault { window: usize, page: usize, len: usize },
+        /// A fault the window refused, which withholds the page or restricts it to reads.
+        Refused { window: usize, page: usize, withhold: bool },
+        /// A worker's write, resolved as a load, which restricts the page to reads if installed.
+        Worker { window: usize, page: usize },
+        /// The guest's `UNMAP` of `len` pages from the page on.
+        Unmap { window: usize, page: usize, len: usize },
+        /// The window's change of `len` pages from the page on, each mapped anew, scattered.
+        Remap { window: usize, page: usize, len: usize },
+    }
+
+    fn hostile_op() -> impl proptest::strategy::Strategy<Value = HostileOp> {
+        use proptest::prelude::*;
+        const LAST: usize = HOSTILE_PAGES - 1;
+        let window = || 0usize..3;
+        let page = || {
+            prop_oneof![
+                Just(0),
+                Just(1),
+                Just(HOSTILE_PAGES / 2),
+                Just(LAST - 1),
+                Just(LAST),
+                0..=LAST
+            ]
+        };
+        let len = || prop_oneof![Just(1), Just(2), Just(HOSTILE_PAGES), 1..=HOSTILE_PAGES];
+        prop_oneof![
+            2 => (window(), page(), len(), any::<bool>()).prop_map(|(window, page, len, scattered)| {
+                HostileOp::Name { window, page, len, scattered }
+            }),
+            4 => (window(), page()).prop_map(|(window, page)| HostileOp::Fault { window, page }),
+            2 => (window(), page(), len())
+                .prop_map(|(window, page, len)| HostileOp::Prefault { window, page, len }),
+            3 => (window(), page(), any::<bool>())
+                .prop_map(|(window, page, withhold)| HostileOp::Refused { window, page, withhold }),
+            2 => (window(), page()).prop_map(|(window, page)| HostileOp::Worker { window, page }),
+            1 => (window(), page(), len())
+                .prop_map(|(window, page, len)| HostileOp::Unmap { window, page, len }),
+            1 => (window(), page(), len())
+                .prop_map(|(window, page, len)| HostileOp::Remap { window, page, len }),
+        ]
+    }
+
+    /// The runs a stage's pages hold, found by walking them all, as its trims once did.
+    fn runs_walked(pages: &Pages) -> Vec<(usize, usize)> {
+        let installed = |at: usize| pages.pages[at].mapped.is_some_and(|mapped| mapped.installed());
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for at in 0..pages.pages.len() {
+            if pages.starts_run(at) {
+                runs.push((at, at + 1));
+            } else if installed(at) {
+                runs.last_mut().expect("a page following on starts no run").1 = at + 1;
+            }
+        }
+        runs
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// cladefs board 8493: a VM process's windows, one to three, share the mappings the host
+        /// lets it make (`vm.max_map_count`, drawn at 0, 1, the reserve and its neighbours, the
+        /// windows' pages' worth and theirs, `u64::MAX`, and between), whatever a hostile guest's
+        /// accesses, maps and `MAP_PREFAULT`s, and its faults' restrictions, do to them: after
+        /// every system call, the mappings in their memory are no more than their runs' and
+        /// restrictions' shares take, two each and one, within what the host lets the process
+        /// make beyond its reserve, counted once, or two runs a window if that is less; each
+        /// window holds no more than its share; and its runs are what a walk of its pages finds.
+        /// Red with each window budgeting the process's whole, with restrictions uncounted, and
+        /// with a prefault trimming once it has installed all its runs; and with a run reaching
+        /// past a change taken to end at it.
+        #[test]
+        fn windows_keep_their_process_within_its_mappings(
+            max_map_count in proptest::prop_oneof![
+                proptest::strategy::Just(0u64),
+                proptest::strategy::Just(1),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 - 1),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 + 1),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 + 4),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 + 5),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 + 2 * HOSTILE_PAGES as u64 - 1),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 + 2 * HOSTILE_PAGES as u64),
+                proptest::strategy::Just(MAPPINGS_RESERVED as u64 + 2 * HOSTILE_PAGES as u64 + 1),
+                proptest::strategy::Just(u64::MAX),
+                MAPPINGS_RESERVED as u64..MAPPINGS_RESERVED as u64 + 8 * HOSTILE_PAGES as u64,
+            ],
+            windows in 1usize..=3,
+            ops in proptest::collection::vec(hostile_op(), 0..160),
+        ) {
+            let ps = page_size() as usize;
+            // Each window's memory, a page apart, which no window registers.
+            let stride = HOSTILE_PAGES + 1;
+            let memory = window_memory(windows * stride);
+            let counted = Arc::new(CountedWindows::default());
+            let total = budget(Some(max_map_count));
+            let mappings = Mappings::new(total);
+            let source = TestSource::scattered(HOSTILE_PAGES as u64, |page| page as u8 + 1);
+            let following = crate::slabs::alloc(
+                crate::slabs::ArenaId::DEFAULT,
+                HOSTILE_PAGES as u64,
+                crate::slabs::Wait::No,
+            )
+            .unwrap();
+            let following_at = |page: usize| crate::pages::PhysLocation {
+                offset: following.location().offset + (page * ps) as u64,
+                ..following.location()
+            };
+            let stages: Vec<Arc<UffdSecondStage<Counted>>> = (0..windows)
+                .map(|window| {
+                    let base = memory + window * stride * ps;
+                    counted.memory.lock().unwrap().push(base..base + HOSTILE_PAGES * ps);
+                    let host = Counted { syscalls: Syscalls::open().unwrap(), windows: counted.clone() };
+                    let size = (HOSTILE_PAGES * ps) as u64;
+                    // SAFETY: Only the test uses the memory, which outlives the stage.
+                    unsafe {
+                        UffdSecondStage::with_host(base, size, host, Memories::InProcess, None, mappings.clone())
+                    }
+                    .unwrap()
+                })
+                .collect();
+            let shares: Vec<usize> = stages.iter().map(|stage| stage.budget()).collect();
+            proptest::prop_assert!(
+                shares.iter().fold(0, |sum, &share| usize::saturating_add(sum, share))
+                    <= total.max(2 * windows),
+                "shares {shares:?} of {total}"
+            );
+            let most = 2 * total.max(2 * windows) + windows;
+            // Every page named, of memory following on.
+            for stage in &stages {
+                stage.map(0, following_at(0), (HOSTILE_PAGES * ps) as u64);
+            }
+            for op in &ops {
+                let window = match *op {
+                    HostileOp::Name { window, .. }
+                    | HostileOp::Fault { window, .. } | HostileOp::Prefault { window, .. }
+                    | HostileOp::Refused { window, .. } | HostileOp::Worker { window, .. }
+                    | HostileOp::Unmap { window, .. } | HostileOp::Remap { window, .. } => window,
+                };
+                let Some(stage) = stages.get(window) else { continue };
+                let at = |page: usize| stage.base + page * ps;
+                let span = |page: usize, len: usize| ((page * ps) as u64, (len.min(HOSTILE_PAGES - page) * ps) as u64);
+                match *op {
+                    HostileOp::Name { page, len, scattered: false, .. } => {
+                        let (offset, len) = span(page, len);
+                        stage.map(offset, following_at(page), len);
+                    }
+                    HostileOp::Name { page, len, scattered: true, .. } => {
+                        for at in page..(page + len).min(HOSTILE_PAGES) {
+                            stage.map((at * ps) as u64, source.location(at as u64), ps as u64);
+                        }
+                    }
+                    HostileOp::Fault { page, .. } => {
+                        stage.reinstall(at(page));
+                    }
+                    HostileOp::Prefault { page, len, .. } => {
+                        let (offset, len) = span(page, len);
+                        stage.prefault(offset, len);
+                    }
+                    HostileOp::Refused { page, withhold, .. } => {
+                        let prot = if withhold { libc::PROT_NONE } else { libc::PROT_READ };
+                        stage.restrict(at(page), None, prot);
+                    }
+                    HostileOp::Worker { page, .. } => stage.restrict_for_worker(at(page)),
+                    HostileOp::Unmap { page, len, .. } => {
+                        let (offset, len) = span(page, len);
+                        stage.unmap(offset, len, Private::End);
+                    }
+                    HostileOp::Remap { page, len, .. } => {
+                        let (offset, len) = span(page, len);
+                        let anew: Vec<Anew> = (0..len / ps as u64)
+                            .map(|at| {
+                                let page = offset / ps as u64 + at;
+                                let phys = source.location((page * 7 + 3) % HOSTILE_PAGES as u64);
+                                Anew::Map { offset: page * ps as u64, phys, len: ps as u64 }
+                            })
+                            .collect();
+                        stage.remap(offset, len, Private::End, &anew);
+                    }
+                }
+                let found = counted.most.load(Ordering::Relaxed);
+                proptest::prop_assert!(found <= most, "{op:?}: {found} mappings, of {most} at most");
+                let pages = stage.pages.lock().unwrap();
+                let runs: Vec<(usize, usize)> = pages.runs.iter().map(|(&start, run)| (start, run.end)).collect();
+                proptest::prop_assert_eq!(&runs, &runs_walked(&pages), "{:?}", op);
+                let restricted = pages.pages.iter().filter(|page| page.restricts()).count();
+                proptest::prop_assert_eq!(pages.restrictions, restricted, "{:?}", op);
+                proptest::prop_assert!(
+                    pages.held() <= stage.budget(),
+                    "{op:?}: {} runs, {restricted} restricted, of a share of {}",
+                    pages.runs.len(),
+                    stage.budget()
+                );
+            }
+            drop(stages);
+            drop(following);
+            // SAFETY: Unmaps the memory, which nothing uses any more.
+            proptest::prop_assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, windows * stride * ps) }, 0);
+        }
+    }
+
+    /// cladefs board 8493: a window's share grows back as another window of its process goes.
+    #[test]
+    fn windows_gone_give_back_their_share() {
+        let ps = page_size() as usize;
+        let mappings = Mappings::new(100);
+        let stage = |memory: usize| {
+            // SAFETY: Only the test uses the memory, which outlives the stage.
+            unsafe {
+                UffdSecondStage::with_mappings(
+                    memory,
+                    ps as u64,
+                    Memories::InProcess,
+                    None,
+                    mappings.clone(),
+                )
+            }
+            .unwrap()
+        };
+        let (first, second) = (window_memory(1), window_memory(1));
+        let kept = stage(first);
+        assert_eq!(kept.budget(), 100);
+        let gone = stage(second);
+        assert_eq!((kept.budget(), gone.budget()), (50, 50));
+        drop(gone);
+        assert_eq!(kept.budget(), 100);
+        drop(kept);
+        for memory in [first, second] {
+            // SAFETY: Unmaps the memory, which nothing uses any more.
+            assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, ps) }, 0);
+        }
+    }
+
     /// A host memory that changes nothing: what a test of it measures is the stage's own work.
     struct Unchanged;
 
@@ -3564,7 +4110,14 @@ mod tests {
         let arena = TestSource::filled(1, 0).location(0).arena;
         // SAFETY: The host changes no memory.
         let stage = unsafe {
-            UffdSecondStage::with_host(64 * ps, SIZE, Unchanged, Memories::InProcess, None, BUDGET)
+            UffdSecondStage::with_host(
+                64 * ps,
+                SIZE,
+                Unchanged,
+                Memories::InProcess,
+                None,
+                Mappings::new(BUDGET),
+            )
         }
         .unwrap();
         // Every page named, of memory following on: each fault installs a run of 512 pages.
