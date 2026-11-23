@@ -21,8 +21,9 @@ fail = "0.5.1"
 futures.workspace = true
 humantime = "2.4.0"
 hyper = { version = "1.12.0", default-features = false }
+# cladefs: the dates of a backend's responses, its clock (`clock`, board 8467).
+chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"] }
 # cladefs: the S3 server in memory, for other crates' tests too (`testing`, TASK-449).
-chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"], optional = true }
 http-body-util = { version = "0.1.5", optional = true }
 hyper-util = { version = "0.1.21", features = ["tokio"], optional = true }
 imbl = { version = "7.0.2", features = ["serde"] }
@@ -40,9 +41,10 @@ storage_device.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
+# cladefs: the paths of a conditional delete's requests, decoded (`client::conditioned`, board 9229).
+percent-encoding = "2.3.2"
 
 [dev-dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"] }
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
@@ -66,7 +68,6 @@ workspace = true
 # TASK-411.28: every cell encrypted, every test too).
 testing = [
     "extent_keys/testing",
-    "dep:chrono",
     "dep:http-body-util",
     "dep:hyper-util",
     "hyper/server",

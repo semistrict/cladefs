@@ -412,9 +412,6 @@ pub trait Layer<K, V>: Send + Sync {
 
     /// Returns the version number used by structs in this layer
     fn get_version(&self) -> Version;
-
-    /// Records inspect data for the layer into `node`.  Called lazily when inspect is queried.
-    fn record_inspect_data(self: Arc<Self>, _node: &fuchsia_inspect::Node) {}
 }
 
 /// Something that implements LayerIterator is returned by the seek function.

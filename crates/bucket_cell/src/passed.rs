@@ -15,8 +15,8 @@
 //! fenced deletes nothing, and writes nothing to the lease.
 //!
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
-//! records, as it lets the lease go, the digest of its listing of the cell, but the collector's own
-//! objects (`<C>gc/`); the options it decided by; what it found no live cell needs but for the
+//! records, as it lets the lease go, the digest of its listing of the cell, but the collector's
+//! lease (`<C>gc/lease`); the options it decided by; what it found no live cell needs but for the
 //! time since an object was written, each with when it may go ([`Deferred`]); the cell's objects
 //! and bytes, by kind, as of its listing ([`Usage`]); and how many objects encrypted it left
 //! uncompacted, its cell's KEK not to be had ([`Passed::uncompacted`]).
@@ -27,8 +27,10 @@
 //! ([`Passed::listing`]). It deletes what was deferred once due, and nothing else (doc-7 has why
 //! that is as safe as a pass in full). cladefs: one recorded leaving objects encrypted uncompacted
 //! holds only while their cell's tenant's KEK is still not to be had (TASK-411.13). Who recorded
-//! it, of what process, is of no matter: the lease's holders and times are under `<C>gc/`, outside
-//! the digest, and a pass of other options decides anew.
+//! it, of what process, is of no matter: the lease's holders and times are in the lease, outside
+//! the digest, and a pass of other options decides anew. cladefs: the marks of mark-only passes
+//! (`<C>gc/marks/`) are in it (board 8515): they keep a dead cell from being removed whole, and a
+//! pass skipping by a digest without them never removed one whose marks an operator cleared.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::collector::{Holding, Options};
@@ -43,8 +45,12 @@ use std::collections::BTreeMap;
 /// head does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go
 /// through ended; and what the last pass over the cell that ran to its end recorded, carried from
 /// each taking to the next ([`Passed`]). Time is the backend's clock as each pass read it
-/// ([`Bucket::now`]), in milliseconds: a pass's clock ahead takes a cell early, fencing the pass
-/// holding it, which then deletes nothing; never wrong, only late.
+/// ([`Bucket::now`]), in milliseconds, never a host's own (board 8471): every host's reading of it
+/// is at most behind the backend's, never ahead, so that a lease ends, and a pass's end orders
+/// against a sweep's start, by one clock for all of them, a host whose own clock runs fast
+/// starving no other's sweeps nor holding its cells past their time. A pass taking a cell early,
+/// as one whose clock is ahead would, fences the pass holding it, which then deletes nothing:
+/// never wrong, only late.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectorLease {
     pub format: u32,
@@ -103,8 +109,8 @@ const GC_LEASE: &str = "gc-lease";
 /// What a pass over a cell that ran to its end recorded ([`CollectorLease::passed`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Passed {
-    /// The digest of the listing of the cell it decided by, but the collector's own objects under
-    /// it ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
+    /// The digest of the listing of the cell it decided by, but the collector's lease
+    /// ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
     /// by more than the cell holds, which may change with no object of the cell's changing: a
     /// version of another cell's record, read for a clone of it being made; an origin found lost; a
     /// cell's recovery that found what it needs lost, and then nothing lost. Or if it deleted only
@@ -264,13 +270,15 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Result<Listed, b
 }
 
 /// The digest of a listing of `cell`, `listed`, in the order of their keys ([`Listed::digest`]):
-/// of every object but the collector's own (`<C>gc/`) and the read evidence of the cell's versions
-/// (`<C>reads/`, TASK-702.2), which forks' hosts write as often as they open them, and every pass
-/// trims, skipping the cell or not ([`crate::evidence::doomed`]).
+/// of every object but the collector's lease (`<C>gc/lease`), which every pass writes, and the read
+/// evidence of the cell's versions (`<C>reads/`, TASK-702.2), which forks' hosts write as often as
+/// they open them, and every pass trims, skipping the cell or not ([`crate::evidence::doomed`]).
+/// cladefs: mark-only passes' marks in it, as passes decide by them: they keep a dead cell
+/// (`collector::Pass::removal`, board 8515).
 pub(crate) fn digest<'a>(cell: CellId, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
-    let (own, evidence) = (layout::collectors(cell), layout::evidence_of_cell(cell));
+    let (lease, evidence) = (layout::collector_lease(cell), layout::evidence_of_cell(cell));
     let mut digest = Sha256::new();
-    let decided = |meta: &&Meta| !meta.key.starts_with(&own) && !meta.key.starts_with(&evidence);
+    let decided = |meta: &&Meta| meta.key != lease && !meta.key.starts_with(&evidence);
     for meta in listed.into_iter().filter(decided) {
         digest_of(&mut digest, meta);
     }
@@ -386,6 +394,92 @@ mod tests {
     use super::*;
     use crate::bucket::Version;
     use crate::layout::TEST_CELL;
+
+    /// Board 8467's review: a lease of a cell of another bucket, taken through a host's routed
+    /// bucket, whose home bucket's backend is an hour ahead of that bucket's, ends by that bucket's
+    /// clock, as its own hosts read it: taken by them once its backend's clock passed the lease's
+    /// length, not an hour after. Its time is the least of the clocks of the buckets it reached.
+    #[test]
+    fn routed_leases_end_by_their_buckets_clock() {
+        use crate::client::Client;
+        use crate::object_bucket::ObjectBucket;
+        use crate::object_bucket::tests::{runtime, s3};
+        use crate::routed::{Resolve, RoutedBucket};
+        use crate::s3_server::S3Server;
+        use std::sync::Arc;
+        struct Other(Arc<ObjectBucket>);
+        impl Resolve for Other {
+            fn open<'a>(
+                &'a self,
+                _: &'a ObjectBucket,
+                _: u16,
+            ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, Error>> {
+                Box::pin(std::future::ready(Ok(self.0.clone())))
+            }
+        }
+        let serving = runtime();
+        let (ahead, behind) =
+            serving.block_on(async { (S3Server::start(None), S3Server::start(None)) });
+        ahead.clock_ahead(3_600_000);
+        let home = s3(&ahead, "home", &Client::DEFAULT);
+        let other = s3(&behind, "other", &Client::DEFAULT);
+        let details = crate::identity::Details::default();
+        let asked = crate::identity::Asked::default();
+        serving.block_on(crate::identity::format(&*home, &details, asked)).unwrap();
+        let routed = RoutedBucket::new(home, Arc::new(Other(other.clone())));
+        let cell = layout::test_cell(2 << 48 | 1);
+        serving.block_on(lifecycle::create(&*other, cell, 0)).unwrap();
+        let holding = Holding { lease: 60_000, since: None };
+        let through = |holder| {
+            serving.block_on(async {
+                let lease = super::found(&routed, cell).await.unwrap();
+                super::take(&routed, cell, lease, holder, holding).await.map(|taken| taken.epoch)
+            })
+        };
+        let direct = |holder| {
+            serving.block_on(async {
+                let lease = super::found(&*other, cell).await.unwrap();
+                super::take(&*other, cell, lease, holder, holding).await.map(|taken| taken.epoch)
+            })
+        };
+        assert_eq!(through(1).unwrap(), 1);
+        assert!(matches!(direct(2), Err(Error::Left(Left::Held))));
+        behind.clock_ahead(62_000);
+        assert_eq!(direct(2).unwrap(), 2);
+    }
+
+    /// Board 8471's AC #2: a lease whose holder's host is gone, its own clock an hour ahead of its
+    /// bucket's backend, another host takes once the backend's clock passed the lease's length since
+    /// its taking, and not before: as every host reads the backend's clock, not its own. By the
+    /// hosts' clocks, which the backend's going on moves not, it stood held.
+    #[test]
+    fn leases_end_by_the_backends_clock() {
+        use crate::client::Client;
+        use crate::object_bucket::tests::{runtime, s3};
+        use crate::s3_server::S3Server;
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let behind = -3_600_000;
+        server.clock_ahead(behind);
+        let (gone, other) =
+            (s3(&server, "leases", &Client::DEFAULT), s3(&server, "leases", &Client::DEFAULT));
+        let cell = layout::test_cell(1);
+        serving.block_on(lifecycle::create(&*gone, cell, 0)).unwrap();
+        let holding = Holding { lease: 60_000, since: None };
+        // The epoch a taking by `holder` through `bucket` takes.
+        let taking = |bucket: &crate::object_bucket::ObjectBucket, holder| {
+            serving.block_on(async {
+                let lease = super::found(bucket, cell).await.unwrap();
+                super::take(bucket, cell, lease, holder, holding).await.map(|taken| taken.epoch)
+            })
+        };
+        assert_eq!(taking(&gone, 1).unwrap(), 1);
+        assert!(matches!(taking(&other, 2), Err(Error::Left(Left::Held))));
+        server.clock_ahead(behind + 58_000);
+        assert!(matches!(taking(&other, 2), Err(Error::Left(Left::Held))));
+        server.clock_ahead(behind + 62_000);
+        assert_eq!(taking(&other, 2).unwrap(), 2);
+    }
 
     fn meta(key: &str, size: u64, modified: u64, e_tag: &str) -> Meta {
         let version = Version { e_tag: Some(e_tag.to_owned()), version: None };

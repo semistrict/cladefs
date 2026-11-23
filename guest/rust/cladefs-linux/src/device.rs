@@ -40,8 +40,7 @@ use std::time::Instant;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
 use storage_device::{
-    Device, ExtentId, NoExtent, OpenExtents, OtherCell, ReadOptions, SealedExtent, WriteFlags,
-    WriteOptions,
+    Device, ExtentId, NoExtent, OpenExtents, OtherCell, SealedExtent, WriteFlags, WriteOptions,
 };
 
 mod ffi {
@@ -921,12 +920,11 @@ impl Device for ExtentDevice {
         self.capacity() / self.info.block_size as u64
     }
 
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
-        _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let (addr, len) = (buffer.as_mut_ptr(), buffer.len());
         let began = Instant::now();

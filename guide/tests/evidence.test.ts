@@ -42,9 +42,11 @@ describe("the repo's evidence", () => {
       ["NoChangesTakeAway", ["changesTakeAway"], "NoStaleLoad"],
       ["NoCountPrivate", ["countPrivate"], "NoRefusal"],
       ["NoInstallAsNamed", ["installAsNamed"], "NoStaleLoad"],
+      ["NoKeepPinned", ["keepPinned"], "CleanInFxfs"],
       ["NoKeepUntilSealed", ["keepUntilSealed"], "NoOpenMap"],
       ["NoPrivateAtIomap", ["privateAtIomap"], "NoLostStore"],
       ["NoProtectByPageTables", ["protectByPageTables"], "CleanInFxfs"],
+      ["NoProtectCleans", ["protectCleans"], "CleanInFxfs"],
       ["NoRebindAfterSeal", ["rebindAfterSeal"], "NoOpenMap"],
       ["NoRebindExclusive", ["rebindExclusive"], "NoLostStore"],
       ["NoSwapExclusive", ["swapExclusive"], "FsyncKeepsStores"],
@@ -60,7 +62,7 @@ describe("the repo's evidence", () => {
   test("dax-cow's spec gives every rule its description, and its invariants their bodies", () => {
     const spec = evidence.specs.find((s) => s.spec === "dax-cow");
     expect(Object.keys(spec?.rules ?? {}).sort()).toEqual(
-      ["bytesFirst", "changesTakeAway", "countPrivate", "installAsNamed", "keepUntilSealed", "privateAtIomap", "protectByPageTables", "rebindAfterSeal", "rebindExclusive", "swapExclusive", "swapFirst"],
+      ["bytesFirst", "changesTakeAway", "countPrivate", "installAsNamed", "keepPinned", "keepUntilSealed", "privateAtIomap", "protectByPageTables", "protectCleans", "rebindAfterSeal", "rebindExclusive", "swapExclusive", "swapFirst"],
     );
     expect(spec?.invariants.NoLostStore).toBe("NoLostStore == \\A p \\in Pages : win[p].data = latest[p]");
     expect(spec?.definitions.WSwap).toBe("The dirty set swapped out for an empty one; the semaphore downgraded, held shared to the commit.");

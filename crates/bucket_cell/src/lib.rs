@@ -59,6 +59,7 @@ pub mod cache;
 pub mod cell;
 pub mod checkpoint;
 pub mod client;
+pub mod clock;
 pub mod collector;
 pub mod direct;
 pub mod evidence;
@@ -188,6 +189,12 @@ pub enum Error {
     /// tenant's ([`layout::DEFAULT_TENANT`]).
     #[error("cell {0}'s version is another tenant's, not shared")]
     NotShared(layout::CellId),
+    /// cladefs: a reference of an ephemeral cell of a host whose incarnation, this one, was
+    /// decommissioned (board 8519, [`layout::decommissioned`]): taken back, refused. The host's
+    /// ephemeral cells' references are retired; it must stop forking them, and its operator
+    /// start it again of a new incarnation.
+    #[error("incarnation {} was decommissioned", base32_id::Short(*.0))]
+    Decommissioned(u64),
     /// cladefs: a version's read evidence of another format than this one's, newer or older
     /// ([`evidence::FORMAT`], TASK-702.2): its reader skips it.
     #[error(

@@ -5,23 +5,18 @@
 use crate::errors::FxfsError;
 use crate::filesystem::{ApplyContext, ApplyMode, FlushReason, ForceMajor, JournalingObject};
 use crate::log::*;
-use crate::metrics;
 use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::allocator::{Allocator, Reservation};
 use crate::object_store::directory::Directory;
 use crate::object_store::journal::{self, JournalCheckpoint};
 use crate::object_store::transaction::{
-    AssocObj, AssociatedObject, MetadataReservation, Mutation, ObjectMutationIterator, Transaction,
-    TxnMutation, lock_keys,
+    AssocObj, AssociatedObject, MetadataReservation, Mutation, Transaction, TxnMutation, lock_keys,
 };
 use crate::object_store::volume::{VOLUMES_DIRECTORY, list_volumes};
 use crate::object_store::{LockKey, ObjectDescriptor, ObjectStore};
-use crate::round::round_div;
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Context, Error, anyhow, bail, ensure};
-use fuchsia_inspect::{Property as _, UintProperty};
 use fuchsia_sync::RwLock;
-use futures::FutureExt as _;
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::hash_map::Entry;
 use std::num::Saturating;
@@ -102,9 +97,6 @@ struct Inner {
     // the filesystem had borrowed when it stopped, if nothing was lost (TASK-218).
     borrowed_as_replayed: u64,
 
-    // The maximum transaction size that has been encountered so far.
-    max_transaction_size: (u64, UintProperty),
-
     // Extra temporary space that might be tied up in the journal that hasn't yet been deallocated.
     reserved_space: u64,
 }
@@ -156,7 +148,6 @@ impl ObjectManager {
                 last_journal_usage: 0,
                 borrowed_metadata_space: 0,
                 borrowed_as_replayed: 0,
-                max_transaction_size: (0, metrics::detail().create_uint("max_transaction_size", 0)),
                 reserved_space: journal::RESERVED_SPACE,
             }),
             metadata_reservation: OnceLock::new(),
@@ -242,7 +233,7 @@ impl ObjectManager {
 
         match root_directory.lookup(VOLUMES_DIRECTORY).await? {
             None => bail!("Root directory not found"),
-            Some((object_id, ObjectDescriptor::Directory, _)) => {
+            Some((object_id, ObjectDescriptor::Directory)) => {
                 let volume_directory = Directory::open(&root_store, object_id)
                     .await
                     .context("Unable to open volumes directory")?;
@@ -607,11 +598,6 @@ impl ObjectManager {
         let journal_usage = end_offset - std::mem::replace(&mut inner.last_end_offset, end_offset);
         inner.last_journal_usage = journal_usage;
 
-        if journal_usage > inner.max_transaction_size.0 {
-            inner.max_transaction_size.0 = journal_usage;
-            inner.max_transaction_size.1.set(journal_usage);
-        }
-
         let txn_space = reserved_space_from_journal_usage(journal_usage);
         match &mut transaction.metadata_reservation {
             MetadataReservation::None => unreachable!(),
@@ -787,13 +773,6 @@ impl ObjectManager {
         self.inner.read().journaling_object(object_id)
     }
 
-    /// cladefs: whether the object `object_id` writes its mutations as they are
-    /// (`JournalingObject::writes_mutations_as_they_are`).
-    pub fn writes_mutations_as_they_are(&self, object_id: u64) -> bool {
-        self.journaling_object(object_id)
-            .is_some_and(|object| object.writes_mutations_as_they_are())
-    }
-
     pub fn init_metadata_reservation(&self) -> Result<(), Error> {
         if self.root_parent_store().filesystem().options().read_only {
             // We don't need metadata reservations in read-only mode.
@@ -877,63 +856,9 @@ impl ObjectManager {
         self.inner.write().borrowed_metadata_space = v;
     }
 
-    pub fn write_mutations(
-        &self,
-        object_id: u64,
-        mutations: ObjectMutationIterator<'_, '_>,
-        writer: journal::Writer<'_>,
-    ) {
-        self.journaling_object(object_id).unwrap().write_mutations(mutations, writer);
-    }
-
-    pub fn unlocked_stores(&self) -> Vec<Arc<ObjectStore>> {
-        let inner = self.inner.read();
-        let mut stores = Vec::new();
-        for store in inner.stores.values() {
-            if !store.is_locked() {
-                stores.push(store.clone());
-            }
-        }
-        stores
-    }
-
-    /// Creates a lazy inspect node named `str` under `parent` which will yield statistics for the
-    /// object manager when queried.
-    pub fn track_statistics(self: &Arc<Self>, parent: &fuchsia_inspect::Node, name: &str) {
-        let this = Arc::downgrade(self);
-        parent.record_lazy_child(name, move || {
-            let this_clone = this.clone();
-            async move {
-                let inspector = fuchsia_inspect::Inspector::default();
-                if let Some(this) = this_clone.upgrade() {
-                    let (required, borrowed, earliest_checkpoint) = {
-                        // TODO(https://fxbug.dev/42069513): Push-back or rate-limit to prevent DoS.
-                        let inner = this.inner.read();
-                        (
-                            inner.required_reservation(),
-                            inner.borrowed_metadata_space,
-                            inner.earliest_journal_offset(),
-                        )
-                    };
-                    let root = inspector.root();
-                    if let Some(reservation) = this.metadata_reservation.get() {
-                        root.record_uint("metadata_reservation", reservation.amount());
-                    }
-                    root.record_uint("required_reservation", required);
-                    root.record_uint("borrowed_reservation", borrowed);
-                    if let Some(earliest_checkpoint) = earliest_checkpoint {
-                        root.record_uint("earliest_checkpoint", earliest_checkpoint);
-                    }
-
-                    // TODO(https://fxbug.dev/42068224): Post-compute rather than manually computing metrics.
-                    if let Some(x) = round_div(100 * borrowed, required) {
-                        root.record_uint("borrowed_to_required_reservation_percent", x);
-                    }
-                }
-                Ok(inspector)
-            }
-            .boxed()
-        });
+    /// The stores the filesystem has open.
+    pub fn stores(&self) -> Vec<Arc<ObjectStore>> {
+        self.inner.read().stores.values().cloned().collect()
     }
 
     /// Normally, we make new transactions pay for overheads incurred by the journal, such as

@@ -23,6 +23,12 @@
 //! `<tenant>.<cell>.promise.<epoch>`, and its logs `<tenant>.<cell>.<number>.<epoch>.<log>`, keyed by the
 //! configuration's number and the epoch of the writer that made it: two takers racing may both
 //! make the configuration after the active one, each its own.
+//!
+//! Formats (board 8457): what it holds is of its build's formats alone, as nothing migrates. Its
+//! `incarnation` file names the formats of the logs it holds ([`magic`]), so that a build of other
+//! log formats refuses the directory as it opens it rather than read its logs as empty, which
+//! forgot appends it had acked; a writer's segment log whose first bytes are not this build's
+//! `wal::LOG_MAGIC` is refused as it is appended, before any ack, and as it is read back.
 
 use crate::dir::{Dir, File};
 use anyhow::{Context as _, anyhow};
@@ -33,8 +39,27 @@ use std::sync::{Arc, Mutex};
 
 /// The directory's incarnation file.
 const INCARNATION: &str = "incarnation";
-/// Its first line (format 2: direct ReplicaLog / own_frame storage without outer framing, board 6902).
-const MAGIC: &str = "cladefs replicas 2";
+
+/// The incarnation file's first line: the directory's format (3: the formats of the logs it holds
+/// named, board 8457; 2: logs held as their writers send them, no outer framing, board 6902), and
+/// the formats of the logs it holds, a segment's log's first bytes (`wal::LOG_MAGIC`) and the seed
+/// of its own extents' frames' hashes (`replicate::OWN_FRAME_SEED`), so that a change of either is
+/// a change of the directory's format, refused as it opens (no migrations, ever): a log of another
+/// format reads as holding nothing, which forgot what its member had acked.
+pub(crate) fn magic() -> String {
+    format!(
+        "cladefs replicas 3, logs {}, own frames {:#x}",
+        crate::wal::LOG_MAGIC.escape_ascii(),
+        crate::replicate::OWN_FRAME_SEED
+    )
+}
+
+/// The most logs a member holds of one configuration (board 8453): a writer sends a segment's two
+/// logs ([`crate::replicate::log_of`], [`crate::replicate::own_of`]), each segment holding a commit
+/// at least, and its lag lets at most `upload::Options::max_lag` commits (4096) wait for the
+/// bucket, whose segments' logs are dropped as it holds them: twice that, doubled again. A take
+/// refuses a fence answer naming more, as a member answering so is no member of this build.
+pub const LOGS_MOST: usize = 16 << 10;
 /// Maximum open replica log file handles cached across all cells (board 6902): keeps sequential
 /// append handles (`DiskFile` direct-I/O tail) warm without allowing tiny logs to exhaust
 /// `RLIMIT_NOFILE`.
@@ -62,6 +87,23 @@ pub enum Refused {
     /// The configuration's logs would hold more than the member holds for a configuration.
     #[error("the configuration's logs would hold {would} bytes, past {most}")]
     Full { would: u64, most: u64 },
+    /// The configuration would have more logs than a member holds of one ([`LOGS_MOST`]).
+    #[error("the configuration would have more than {most} logs")]
+    Logs { most: usize },
+    /// A segment's log, as its writer sent it or as the directory holds it, is of another format
+    /// than this build's (board 8457): its first bytes are not `wal::LOG_MAGIC`.
+    #[error(
+        "{log}: {found}, where {expected} begins a log of this build's format: refused",
+        expected = crate::wal::LOG_MAGIC.escape_ascii()
+    )]
+    Format { log: String, found: String },
+}
+
+impl Refused {
+    /// The refusal of `log`, holding `found` where this build's format's magic is due.
+    fn format(log: String, found: &[u8]) -> Self {
+        Self::Format { log, found: found.escape_ascii().to_string() }
+    }
 }
 
 /// What a member did not do: refused, or failed.
@@ -90,6 +132,8 @@ pub struct Replicas<D: Dir> {
     /// bounds what is not in the bucket yet (doc-21, Commit). Per configuration, as a take installs
     /// its own while the one before, holding the same commits, is still here until it activates.
     most: u64,
+    /// The most logs a configuration has here: [`LOGS_MOST`], or fewer in a test.
+    logs_most: usize,
     cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
     /// Bounded LRU of open log file handles across all cells (board 6902).
     files: Mutex<FileCache<D::File>>,
@@ -113,6 +157,11 @@ impl Held {
     fn bytes(&self, key: Key) -> u64 {
         self.logs.range((key, 0)..=(key, u64::MAX)).map(|(_, log)| log.end).sum()
     }
+
+    /// How many logs of configuration `key` it holds.
+    fn logs_of(&self, key: Key) -> usize {
+        self.logs.range((key, 0)..=(key, u64::MAX)).count()
+    }
 }
 
 /// A log a member holds (board 6902): raw `ReplicaLog` bytes (even log) or `own_frame` bytes (odd
@@ -126,11 +175,17 @@ struct Log {
 }
 
 impl Log {
-    /// Recovers the log in `file` for `(cell, log)` up to the last intact record or own-frame.
-    fn read(cell: CellId, log: u64, file: &impl File) -> io::Result<Self> {
-        let bytes = crate::dir::read_file(file)?;
+    /// Recovers the log in `file`, at `path`, for `(cell, log)` up to the last intact record or
+    /// own-frame. A segment's log of another format than this build's is refused (board 8457),
+    /// never read as holding nothing: its member acked what it holds. One whose header is torn, a
+    /// crash's, holds nothing, as nothing of it was acked.
+    fn read(cell: CellId, log: u64, file: &impl File, path: &str) -> Result<Self, Error> {
+        let bytes = crate::dir::read_file(file).with_context(|| format!("reading {path}"))?;
         let end = match log & 1 {
             0 => {
+                if let Some(found) = crate::wal::unsupported_log_magic(&bytes) {
+                    return Err(Refused::format(path.to_owned(), &found).into());
+                }
                 let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
                 crate::wal::replica_valid_end(&bytes, segment)
             }
@@ -165,8 +220,9 @@ impl<D: Dir> Replicas<D> {
         let incarnation = if names.iter().any(|name| name == INCARNATION) {
             let text = read_text(&dir, INCARNATION)?;
             let mut lines = text.lines();
-            if lines.next() != Some(MAGIC) {
-                return Err(anyhow!("{INCARNATION}: not {MAGIC:?}").into());
+            let magic = magic();
+            if lines.next() != Some(magic.as_str()) {
+                return Err(anyhow!("{INCARNATION}: not {magic:?}").into());
             }
             let line = lines.next().unwrap_or_default();
             let number = line.strip_prefix("incarnation ").unwrap_or_default();
@@ -185,13 +241,14 @@ impl<D: Dir> Replicas<D> {
             }
             let incarnation = new();
             assert_ne!(incarnation, 0, "a replica directory's incarnation is never 0");
-            write_text(&dir, INCARNATION, &format!("{MAGIC}\nincarnation {incarnation}\n"))?;
+            write_text(&dir, INCARNATION, &format!("{}\nincarnation {incarnation}\n", magic()))?;
             incarnation
         };
         Ok(Self {
             dir,
             incarnation,
             most,
+            logs_most: LOGS_MOST,
             cells: Mutex::default(),
             files: Mutex::new(bucket_cell::lru::LruMap::new()),
         })
@@ -219,6 +276,13 @@ impl<D: Dir> Replicas<D> {
         self.files.lock().unwrap().remove(id);
     }
 
+    /// This, holding at most `logs` logs of a configuration, fewer than [`LOGS_MOST`], as a test
+    /// reaches the bound without making as many.
+    #[cfg(test)]
+    fn holding_at_most(self, logs: usize) -> Self {
+        Self { logs_most: logs, ..self }
+    }
+
     #[cfg(test)]
     fn open_files(&self) -> usize {
         self.files.lock().unwrap().len()
@@ -233,7 +297,9 @@ impl<D: Dir> Replicas<D> {
     /// epoch is `key.epoch`, to this member named in `incarnation`, and syncs it: the log's end,
     /// synced. Bytes before the end again are not written again, as a writer catching a member up
     /// sends what it may have had: the same, as a configuration's log is written once. An append
-    /// past the end writes nothing, and answers the end, from which the writer sends again.
+    /// past the end writes nothing, and answers the end, from which the writer sends again. A
+    /// segment's log not begun with this build's `wal::LOG_MAGIC` is refused, written not, so that
+    /// a writer of another format gets no ack of this member's (board 8457).
     pub fn append(
         &self,
         (cell, key, incarnation): (CellId, Key, u64),
@@ -259,9 +325,25 @@ impl<D: Dir> Replicas<D> {
         if offset > end || offset + bytes.len() as u64 <= end {
             return Ok(end);
         }
+        // A segment's log's first bytes, this append's of them: this build's format's, or refused
+        // (board 8457). Its own extents' frames name no format: the writer's formats, as its
+        // stream of appends names them, are checked where it enters (`cladefsd::peers`).
+        if log & 1 == 0 {
+            // An offset past what this host addresses is past the magic's bytes: none to check.
+            let magic = usize::try_from(offset).ok().and_then(|at| crate::wal::LOG_MAGIC.get(at..));
+            let magic = magic.unwrap_or_default();
+            let given = &bytes[..magic.len().min(bytes.len())];
+            if given != &magic[..given.len()] {
+                let at = format!("log {log} of {cell} at {offset}");
+                return Err(Refused::format(at, given).into());
+            }
+        }
         let would = held.bytes(key) + (offset + bytes.len() as u64 - end);
         if would > self.most {
             return Err(Refused::Full { would, most: self.most }.into());
+        }
+        if !held.logs.contains_key(&(key, log)) && held.logs_of(key) >= self.logs_most {
+            return Err(Refused::Logs { most: self.logs_most }.into());
         }
         let mut created_file = None;
         if !held.logs.contains_key(&(key, log)) {
@@ -280,8 +362,7 @@ impl<D: Dir> Replicas<D> {
                     // it was written, read as a reopening would.
                     let file =
                         self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-                    let found =
-                        Log::read(cell, log, &file).with_context(|| format!("reading {path}"))?;
+                    let found = Log::read(cell, log, &file, &path)?;
                     let found_end = found.end;
                     held.logs.insert((key, log), found);
                     if found_end != 0 {
@@ -343,7 +424,7 @@ impl<D: Dir> Replicas<D> {
             // Made: the promise, from here on, whatever of the rest fails. The files before it
             // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
             held.promise = epoch;
-            if let Err(err) = self.remove_promises_before(cell, &mut held, epoch) {
+            if let Err(err) = self.remove_promises(cell, &mut held, ..epoch) {
                 log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
             }
         }
@@ -428,22 +509,26 @@ impl<D: Dir> Replicas<D> {
             Swept::Gone => held.logs.keys().copied().collect(),
         };
         self.remove(cell, &mut held, &gone)?;
-        if swept == Swept::Gone && held.promise > 0 {
-            self.remove_promises_before(cell, &mut held, u64::MAX)?;
+        if swept == Swept::Gone {
+            // Every promise, of `u64::MAX` too (board 8449: removing those before `u64::MAX` kept
+            // its file, while the promise held went to 0, accepting appends it promised to refuse):
+            // the promise held 0 only once all are gone, durably.
+            self.remove_promises(cell, &mut held, ..)?;
             held.promise = 0;
         }
         Ok(())
     }
 
-    /// Removes the files of `held`'s promises before `epoch`, durably: those a removal failed
-    /// before (board 5420) too, each gone from `promises` once it went, and found gone as gone.
-    fn remove_promises_before(
+    /// Removes the files of `held`'s promises of epochs in `epochs`, durably: those a removal
+    /// failed before (board 5420) too, each gone from `promises` once it went, and found gone as
+    /// gone.
+    fn remove_promises(
         &self,
         cell: CellId,
         held: &mut Held,
-        epoch: u64,
+        epochs: impl std::ops::RangeBounds<u64>,
     ) -> Result<(), Error> {
-        let before: Vec<u64> = held.promises.range(..epoch).copied().collect();
+        let before: Vec<u64> = held.promises.range(epochs).copied().collect();
         if before.is_empty() {
             return Ok(());
         }
@@ -502,10 +587,7 @@ impl<D: Dir> Replicas<D> {
                     let log = log.ok_or_else(|| anyhow!("bad log name {name:?}"))?;
                     let file =
                         self.dir.open(&name, false).with_context(|| format!("opening {name}"))?;
-                    held.logs.insert(
-                        (key, log),
-                        Log::read(cell, log, &file).with_context(|| format!("reading {name}"))?,
-                    );
+                    held.logs.insert((key, log), Log::read(cell, log, &file, &name)?);
                 }
                 _ => {}
             }

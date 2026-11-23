@@ -35,6 +35,9 @@ bytes = "1.12.1"
 # reqwest, serde_json, base64, url and tokio, its tokens fetched from Azure's authority or the
 # instance metadata service by hand.
 crc-fast.workspace = true
+# cladefs: one fetch of an Azure token shared by every call waiting for it (`Shared`, board 8475):
+# futures (MIT OR Apache-2.0), in the build already.
+futures.workspace = true
 object_store.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 serde.workspace = true
@@ -53,8 +56,10 @@ zeroize = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 assert_matches.workspace = true
 aws-lc-sys.workspace = true
-futures.workspace = true
 tempfile.workspace = true
+# The fake HTTP services of the HTTP backends' tests (kms/fake_http.rs) read and write their
+# sockets.
+tokio = { version = "=1.53.1", default-features = false, features = ["io-util"] }
 
 [lints]
 workspace = true

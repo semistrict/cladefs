@@ -140,7 +140,7 @@ source "$root/scripts/lib/pjdfstest.sh"
 if [[ -n $prebuilt ]]; then
     runner="$harness_artifacts/runner"
 else
-    (cd "$harness" && cargo build -q -p runner)
+    (cd "$harness" && cargo build -q --locked -p runner)
     harness_target=$(target_dir "$harness")
     runner="$harness_target/debug/runner"
 fi
@@ -184,7 +184,7 @@ fi
 # (fxfs-guest-soak).
 export CLADEFS_E2E_RUN="$results"
 if [[ -z $prebuilt ]]; then
-(cd "$root" && cargo build --profile "$cladefsd_profile" -p cladefs --bin cladefsd \
+(cd "$root" && cargo build --locked --profile "$cladefsd_profile" -p cladefs --bin cladefsd \
     --bin cladefsctl ${cladefsd_features[@]+"${cladefsd_features[@]}"})
 root_target=$(target_dir "$root")
 cladefsd_bin="$root_target/$cladefsd_profile/cladefsd"
@@ -192,7 +192,7 @@ cladefsd_bin="$root_target/$cladefsd_profile/cladefsd"
 # TASK-111.4); and the bucket's collector, cladefs-gc, for those that collect their bucket
 # (fxfs-guest-soak).
 export CLADEFSCTL_BIN="$root_target/$cladefsd_profile/cladefsctl"
-(cd "$root" && cargo build --release -p bucket_cell --bin cladefs-gc)
+(cd "$root" && cargo build --locked --release -p bucket_cell --bin cladefs-gc)
 export CLADEFS_GC_BIN="$root_target/release/cladefs-gc"
 # As cladefs builds it, with its cladefs feature (scripts/firecracker-cargo.sh), in the copy of
 # vendor/firecracker that builds in, whose .cargo/config.toml sets its target directory, unless
@@ -343,7 +343,7 @@ if [[ -z $build_only$prebuilt ]]; then
     CLADEFS_TEST_PARTS="guest firecracker" "$root/scripts/test.sh"
 fi
 if [[ -z $prebuilt ]]; then
-    (cd "$harness" && cargo build -q --target "$guest_target" -p guest-agent)
+    (cd "$harness" && cargo build -q --locked --target "$guest_target" -p guest-agent)
     export CLADEFS_GUEST_AGENT="$harness_target/$guest_target/debug/guest-agent"
 fi
 # cladefs: the artifacts, copied for runs to take as they are (CLADEFS_E2E_PREBUILT), and what they

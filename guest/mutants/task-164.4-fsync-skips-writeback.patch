@@ -11,9 +11,9 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2326,17 +2326,9 @@
- 	bool traced = false;
+@@ -2433,17 +2433,9 @@
  	int err = 0;
+ 	cladefs_nofs_scope();
  
 -	if (!IS_DAX(inode) || !file)
 +	if (!IS_DAX(inode) || !file || !atomic_long_read(&file->dirty_pages))
@@ -24,7 +24,7 @@
 -	 * them, and an fsync returns only once they are durable. Returning at once, as no page was
 -	 * dirty, an fsync met by the worker's writeback sealed none of its pages (guest/sim, seed 962).
 -	 */
- 	mutex_lock(&file->wb_lock);
+ 	cladefs_nofs_mutex_lock(&file->wb_lock);
 -	if (!atomic_long_read(&file->dirty_pages))
 -		goto out;
  	traced = true;

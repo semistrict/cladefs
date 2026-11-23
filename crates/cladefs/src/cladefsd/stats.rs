@@ -156,8 +156,12 @@ impl GuestStats {
 static ASKS: AtomicU64 = AtomicU64::new(0);
 
 /// What the daemon and its VM processes counted, as of now: the VM processes asked first, and
-/// waited for, for `wait` at most ([`MOST_WAIT`] at most).
-pub(crate) async fn take(wait: Duration) -> HostStats {
+/// waited for, for `wait` at most ([`MOST_WAIT`] at most); or, unless `vms`, the daemon alone, no
+/// VM process asked (board 8581).
+pub(crate) async fn take(wait: Duration, vms: bool) -> HostStats {
+    if !vms {
+        return of_daemon(Vec::new());
+    }
     let ask = ASKS.fetch_add(1, Ordering::Relaxed) + 1;
     let deadline = tokio::time::Instant::now() + wait.min(MOST_WAIT);
     let asked: Vec<_> = (reports().into_iter())

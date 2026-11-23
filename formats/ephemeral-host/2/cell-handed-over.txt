@@ -1,0 +1,23 @@
+Entry {
+    child: CellId {
+        tenant: 47,
+        id: 4294967297,
+    },
+    origin: Origin {
+        parent: CellId {
+            tenant: 47,
+            id: 7,
+        },
+        at: 12,
+        epoch: 3,
+    },
+    path: "/var/lib/cladefs/cells/c1",
+    bucket: "gs://cladefs-golden/cells",
+    epoch: 5,
+    migrating: Some(
+        HandedOver {
+            id: 82,
+            peer: "10.0.0.7:7777",
+        },
+    ),
+}

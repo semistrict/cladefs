@@ -18,16 +18,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aead"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
-dependencies = [
- "crypto-common 0.2.2",
- "inout",
-]
-
-[[package]]
 name = "aes"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -37,20 +27,6 @@ dependencies = [
  "cpubits",
  "cpufeatures 0.3.1",
  "zeroize",
-]
-
-[[package]]
-name = "aes-gcm-siv"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
-dependencies = [
- "aead",
- "aes",
- "cipher",
- "ctr",
- "ctutils",
- "polyval",
 ]
 
 [[package]]
@@ -172,37 +148,6 @@ name = "archery"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
-
-[[package]]
-name = "argh"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211818e820cda9ca6f167a64a5c808837366a6dfd807157c64c1304c486cd033"
-dependencies = [
- "argh_derive",
- "argh_shared",
-]
-
-[[package]]
-name = "argh_derive"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c442a9d18cef5dde467405d27d461d080d68972d6d0dfd0408265b6749ec427d"
-dependencies = [
- "argh_shared",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "argh_shared"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5ade012bac4db278517a0132c8c10c6427025868dca16c801087c28d5a411f1"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "arrayvec"
@@ -886,18 +831,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blob_metadata"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fprint",
- "fuchsia_merkle",
- "serde",
- "static_assertions",
- "zerocopy",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -916,15 +849,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-padding"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "710f1dd022ef4e93f8a438b4ba958de7f64308434fa6a87104481645cc30068b"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "block_device"
 version = "0.1.0"
 dependencies = [
@@ -935,14 +859,6 @@ dependencies = [
  "rand 0.10.3",
  "storage_device",
  "thiserror",
-]
-
-[[package]]
-name = "block_protocol"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "zerocopy",
 ]
 
 [[package]]
@@ -967,23 +883,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "bssl-crypto"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "bstr"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
-dependencies = [
- "memchr",
- "serde_core",
 ]
 
 [[package]]
@@ -1013,6 +912,7 @@ dependencies = [
  "node_local",
  "object_store",
  "opentelemetry",
+ "percent-encoding",
  "rand 0.10.3",
  "reqwest",
  "rustc-hash",
@@ -1057,15 +957,6 @@ checksum = "7dafe3a8757b027e2be6e4e5601ed563c55989fcf1546e933c66c8eb3a058d35"
 dependencies = [
  "bytes",
  "either",
-]
-
-[[package]]
-name = "cbc"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2dc9ee5f88d11e0beb842c88b33c8a5cf0d1329c4b19494af42b07dbfe8896"
-dependencies = [
- "cipher",
 ]
 
 [[package]]
@@ -1121,7 +1012,6 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
- "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout",
 ]
@@ -1145,6 +1035,7 @@ dependencies = [
  "extent_keys",
  "fail",
  "flate2",
+ "formats",
  "fuchsia-async",
  "futures",
  "fxfs",
@@ -1201,7 +1092,6 @@ dependencies = [
  "cladefs",
  "extent_frame",
  "extent_keys",
- "fidl-fuchsia-io",
  "fuchsia-async",
  "futures",
  "fxfs",
@@ -1450,18 +1340,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
- "getrandom 0.4.3",
  "hybrid-array",
- "rand_core 0.10.1",
-]
-
-[[package]]
-name = "ctr"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
-dependencies = [
- "cipher",
 ]
 
 [[package]]
@@ -1532,14 +1411,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "diagnostics-log"
-version = "0.1.0"
-dependencies = [
- "fidl-fuchsia-diagnostics-types",
- "log",
 ]
 
 [[package]]
@@ -1723,34 +1594,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fidl"
-version = "0.1.0"
-dependencies = [
- "futures",
- "zx",
- "zx-status",
-]
-
-[[package]]
-name = "fidl-fuchsia-diagnostics-types"
-version = "0.1.0"
-
-[[package]]
-name = "fidl-fuchsia-fxfs"
-version = "0.1.0"
-
-[[package]]
-name = "fidl-fuchsia-io"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "fidl",
- "futures",
- "tokio",
- "zx",
-]
-
-[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1828,6 +1671,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "formats"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "fprint"
 version = "0.1.0"
 dependencies = [
@@ -1854,53 +1705,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
-name = "fscrypt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "fxfs-unicode",
- "hex",
- "hmac",
- "sha2 0.11.0",
- "siphasher",
- "zerocopy",
-]
-
-[[package]]
-name = "fsverity_merkle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fidl-fuchsia-io",
- "hex",
- "mundane",
- "storage_ptr_slice",
- "test-case",
- "zerocopy",
- "zx-status",
-]
-
-[[package]]
-name = "fuchsia"
-version = "0.1.0"
-dependencies = [
- "argh",
- "diagnostics-log",
- "fidl-fuchsia-diagnostics-types",
- "fuchsia-async",
- "fuchsia-macro",
- "libc",
- "log",
-]
-
-[[package]]
 name = "fuchsia-async"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
  "fuchsia-async-macro",
- "fuchsia-emulated-handle",
  "fuchsia-sync",
  "futures",
  "futures-lite",
@@ -1923,55 +1732,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fuchsia-emulated-handle"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "fuchsia-sync",
- "futures",
- "futures-test",
- "tokio",
- "zx-status",
- "zx-status-ext",
- "zx-types",
-]
-
-[[package]]
-name = "fuchsia-hash"
-version = "0.1.0"
-dependencies = [
- "hex",
- "proptest",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "fuchsia-inspect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
-]
-
-[[package]]
-name = "fuchsia-macro"
-version = "0.1.0"
-dependencies = [
- "fuchsia-macro-transformer",
-]
-
-[[package]]
-name = "fuchsia-macro-transformer"
-version = "0.1.0"
-dependencies = [
- "fidl-fuchsia-diagnostics-types",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "fuchsia-sync"
 version = "0.1.0"
 dependencies = [
@@ -1979,19 +1739,6 @@ dependencies = [
  "lock_api",
  "parking_lot",
  "parking_lot_core",
-]
-
-[[package]]
-name = "fuchsia_merkle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_matches",
- "bssl-crypto",
- "fuchsia-hash",
- "storage_ptr_slice",
- "test-case",
- "zx-status",
 ]
 
 [[package]]
@@ -2127,30 +1874,19 @@ dependencies = [
  "async-trait",
  "bincode",
  "bit-vec 0.10.1",
- "blob_metadata",
  "byteorder",
  "either",
  "event-listener",
- "fidl-fuchsia-io",
  "fprint",
- "fscrypt",
- "fsverity_merkle",
- "fuchsia",
  "fuchsia-async",
- "fuchsia-inspect",
  "fuchsia-sync",
- "fuchsia_merkle",
  "futures",
- "fxfs-crypto",
- "fxfs-insecure-crypto",
  "fxfs-unicode",
- "fxfs_crypt_common",
  "fxfs_macros",
  "fxfs_trace",
  "getrandom 0.4.3",
  "linked-hash-map",
  "log",
- "mundane",
  "num-traits",
  "pin-project",
  "rand 0.10.3",
@@ -2166,8 +1902,6 @@ dependencies = [
  "thiserror",
  "uuid",
  "zerocopy",
- "zx",
- "zx-status",
 ]
 
 [[package]]
@@ -2180,47 +1914,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxfs-crypto"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "arbitrary",
- "async-trait",
- "byteorder",
- "cbc",
- "fidl-fuchsia-fxfs",
- "fprint",
- "fscrypt",
- "futures",
- "fxfs_trace",
- "hex",
- "log",
- "rand 0.10.3",
- "serde",
- "siphasher",
- "storage_ptr_slice",
- "storage_xts",
- "zerocopy",
- "zx-status",
-]
-
-[[package]]
-name = "fxfs-insecure-crypto"
-version = "0.1.0"
-dependencies = [
- "fxfs-crypto",
- "fxfs_crypt_common",
-]
-
-[[package]]
 name = "fxfs-posix"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "event-listener",
- "fidl-fuchsia-io",
- "fuchsia",
  "fuchsia-async",
  "futures",
  "fxfs",
@@ -2280,21 +1978,6 @@ dependencies = [
 [[package]]
 name = "fxfs-unicode-types"
 version = "0.1.0"
-
-[[package]]
-name = "fxfs_crypt_common"
-version = "0.1.0"
-dependencies = [
- "aes-gcm-siv",
- "async-trait",
- "fidl-fuchsia-fxfs",
- "fscrypt",
- "fuchsia",
- "fuchsia-sync",
- "fxfs-crypto",
- "rand 0.10.3",
- "zx-status",
-]
 
 [[package]]
 name = "fxfs_macros"
@@ -2460,9 +2143,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "hmac"
@@ -2809,7 +2489,6 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
- "block-padding",
  "hybrid-array",
 ]
 
@@ -3266,29 +2945,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
-name = "mundane"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "naive-timer"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "034a0ad7deebf0c2abcf2435950a6666c3c15ea9d8fad0c0f48efa8a7f843fed"
-
-[[package]]
-name = "name"
-version = "0.1.0"
-dependencies = [
- "assert_matches",
- "fidl-fuchsia-io",
- "memchr",
- "static_assertions",
- "thiserror",
- "zx-status",
-]
 
 [[package]]
 name = "nix"
@@ -3665,17 +3325,6 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
-
-[[package]]
-name = "polyval"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
-dependencies = [
- "cpubits",
- "cpufeatures 0.3.1",
- "universal-hash",
-]
 
 [[package]]
 name = "portable-atomic"
@@ -4837,10 +4486,9 @@ dependencies = [
  "anyhow",
  "arbitrary",
  "async-trait",
- "block_protocol",
+ "bitflags 2.13.2",
  "event-listener",
  "fprint",
- "fuchsia",
  "fuchsia-async",
  "fuchsia-sync",
  "futures",
@@ -4851,7 +4499,6 @@ dependencies = [
  "serde",
  "storage_ptr_slice",
  "thiserror",
- "zx",
 ]
 
 [[package]]
@@ -4865,16 +4512,12 @@ dependencies = [
 name = "storage_trace"
 version = "0.1.0"
 dependencies = [
- "fuchsia",
+ "fuchsia-async",
 ]
 
 [[package]]
 name = "storage_units"
 version = "0.1.0"
-dependencies = [
- "fuchsia",
- "zx",
-]
 
 [[package]]
 name = "storage_xts"
@@ -5482,16 +5125,6 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
-
-[[package]]
-name = "universal-hash"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
-dependencies = [
- "crypto-common 0.2.2",
- "ctutils",
-]
 
 [[package]]
 name = "untrusted"
@@ -6181,46 +5814,4 @@ checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",
-]
-
-[[package]]
-name = "zx"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "bstr",
- "libc",
- "static_assertions",
- "zerocopy",
- "zx-status",
- "zx-status-ext",
- "zx-sys",
-]
-
-[[package]]
-name = "zx-status"
-version = "0.1.0"
-dependencies = [
- "zx-types",
-]
-
-[[package]]
-name = "zx-status-ext"
-version = "0.1.0"
-dependencies = [
- "zx-status",
-]
-
-[[package]]
-name = "zx-sys"
-version = "0.1.0"
-dependencies = [
- "zx-types",
-]
-
-[[package]]
-name = "zx-types"
-version = "0.1.0"
-dependencies = [
- "zerocopy",
 ]

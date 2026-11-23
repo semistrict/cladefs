@@ -554,6 +554,7 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/clade
             "crates/cladefs/lib.rs": "vmm\n",
             "scripts/build-guest-kernel.sh": self.BUILD,
             "scripts/build-guest-sysroot.sh": "",
+            "scripts/lib/guest-kernel-release.sh": "",
         }.items():
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)

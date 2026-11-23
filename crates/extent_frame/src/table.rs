@@ -23,6 +23,12 @@ pub const TABLE_BLOCK: usize = 64 * 1024;
 /// length there.
 const ENTRY: usize = 8 + 8 + 4 + 8 + 8;
 
+/// cladefs: the longest key a table's footer names (board 8545): an object's, which S3 and GCS
+/// take of 1,024 bytes at most. A footer, from a bucket, is untrusted until its MAC is checked,
+/// which the keyless collector checks none of: a key longer, which front-coding would let it grow
+/// by what each shares with the one before, is refused.
+pub const MAX_KEY: usize = 1024;
+
 /// Where an extent is: in the object at `key`, `len` bytes at `offset`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -140,16 +146,25 @@ mod front_coded {
         coded.serialize(serializer)
     }
 
+    /// cladefs: each key at most [`super::MAX_KEY`] long (board 8545), so that the keys decoded
+    /// are no more than that many bytes for each of the 12 or more each takes coded.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<String>, D::Error> {
+        use serde::de::Error as _;
         let coded = Vec::<(u32, String)>::deserialize(deserializer)?;
         let mut keys: Vec<String> = Vec::with_capacity(coded.len());
         for (shared, rest) in coded {
             let before = keys.last().map_or("", String::as_str);
-            let Some(shared) = before.get(..shared as usize) else {
-                return Err(serde::de::Error::custom("a key sharing more than the one before it"));
+            // Past what this host addresses: more than the key before has, refused below.
+            let shared = usize::try_from(shared).ok().and_then(|shared| before.get(..shared));
+            let Some(shared) = shared else {
+                return Err(D::Error::custom("a key sharing more than the one before it"));
             };
+            if shared.len().checked_add(rest.len()).is_none_or(|len| len > super::MAX_KEY) {
+                return Err(D::Error::custom(format!("a key past {} bytes", super::MAX_KEY)));
+            }
             keys.push(format!("{shared}{rest}"));
         }
         Ok(keys)
@@ -167,35 +182,64 @@ fn corrupt(what: &str) -> Corrupt {
 }
 
 impl TableFooter {
-    /// The footer whose bytes are `bytes`.
+    /// The footer whose bytes are `bytes`. cladefs: refused unless its blocks are as its encoder
+    /// lays them (board 8545): one after another from the data's start, none overlapping another,
+    /// none past [`TABLE_BLOCK`], their first extents ascending, its appendix right after them; so
+    /// that a table decodes each byte of its data at most once, and a forged footer can't have
+    /// many blocks name one, each entry of it decoded, its key cloned, as many times.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(bytes: &[u8]) -> Result<Self, Corrupt> {
-        bincode::deserialize(bytes).map_err(|err| corrupt(&format!("footer: {err}")))
+        let footer: Self =
+            bincode::deserialize(bytes).map_err(|err| corrupt(&format!("footer: {err}")))?;
+        let mut end = 0u64;
+        let mut first = None;
+        for block in &footer.blocks {
+            // Past what this host addresses: not sized, refused below.
+            let len = usize::try_from(block.len).ok();
+            let sized = len.is_some_and(|len| len > 0 && len <= TABLE_BLOCK);
+            if block.offset != end || !sized || first.is_some_and(|first| first >= block.first) {
+                return Err(corrupt("blocks, not one after another"));
+            }
+            end = end.checked_add(u64::from(block.len)).ok_or_else(|| corrupt("blocks"))?;
+            first = Some(block.first);
+        }
+        if footer.appendix.offset != end {
+            return Err(corrupt("appendix, not after its blocks"));
+        }
+        Ok(footer)
     }
 
     /// The block that holds `id`, if any does.
     pub fn block(&self, id: ExtentId) -> Option<&Block> {
         let at = self.blocks.partition_point(|block| block.first <= id).checked_sub(1)?;
-        Some(&self.blocks[at])
+        self.blocks.get(at)
     }
 
     /// The entries of the block `index` describes, whose bytes are `bytes`, checked against its
     /// CRC.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn entries(&self, bytes: &[u8], index: &Block) -> Result<Vec<Entry>, Corrupt> {
-        if bytes.len() != index.len as usize
+        // Past what this host addresses: not the block's length, refused.
+        if usize::try_from(index.len).ok() != Some(bytes.len())
             || !bytes.len().is_multiple_of(ENTRY)
             || crc(bytes) != index.crc
         {
             return Err(corrupt("block"));
         }
         let entry = |entry: &[u8; ENTRY]| {
-            let u64_at = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().unwrap());
-            let key = u32::from_le_bytes(entry[16..20].try_into().unwrap()) as usize;
-            let key = self.keys.get(key).ok_or_else(|| corrupt("key"))?.clone();
+            let (cell, rest) = entry.split_first_chunk::<8>().ok_or_else(|| corrupt("entry"))?;
+            let (sequence, rest) = rest.split_first_chunk::<8>().ok_or_else(|| corrupt("entry"))?;
+            let (key, rest) = rest.split_first_chunk::<4>().ok_or_else(|| corrupt("entry"))?;
+            let (offset, rest) = rest.split_first_chunk::<8>().ok_or_else(|| corrupt("entry"))?;
+            let (len, _) = rest.split_first_chunk::<8>().ok_or_else(|| corrupt("entry"))?;
+            // Past what this host addresses: no key of its, refused below.
+            let key = usize::try_from(u32::from_le_bytes(*key)).ok();
+            let key = key.and_then(|key| self.keys.get(key)).ok_or_else(|| corrupt("key"))?;
             Ok(Entry {
-                id: ExtentId::new(u64_at(0), u64_at(8)),
-                key,
-                offset: u64_at(20),
-                len: u64_at(28),
+                id: ExtentId::new(u64::from_le_bytes(*cell), u64::from_le_bytes(*sequence)),
+                key: key.clone(),
+                offset: u64::from_le_bytes(*offset),
+                len: u64::from_le_bytes(*len),
             })
         };
         bytes.as_chunks::<ENTRY>().0.iter().map(entry).collect()
@@ -204,13 +248,17 @@ impl TableFooter {
 
 /// The table whose bytes are `bytes` whole: its footer, its entries and its appendix, read by a
 /// reader holding `keys`.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn decode(bytes: &[u8], keys: &dyn Keys) -> Result<Decoded, Error> {
     let footer = TableFooter::decode(crate::footer(bytes, keys)?)?;
     let data = crate::data(bytes, keys)?;
     let mut entries = Vec::new();
     for index in &footer.blocks {
-        let range = index.offset as usize..index.offset as usize + index.len as usize;
-        let block = data.get(range).ok_or_else(|| corrupt("block's place"))?;
+        // cladefs: checked, a forged offset refused (board 7011), as the appendix's is below.
+        let range = usize::try_from(index.offset).ok().zip(usize::try_from(index.len).ok());
+        let range = range.and_then(|(offset, len)| Some(offset..offset.checked_add(len)?));
+        let block =
+            range.and_then(|range| data.get(range)).ok_or_else(|| corrupt("block's place"))?;
         entries.extend(footer.entries(block, index)?);
     }
     let Appendix { offset, len, crc: expected } = footer.appendix;
@@ -382,5 +430,75 @@ mod tests {
         assert_eq!(footer.entries(part, &partial), block);
         let other = Block { crc: index.crc ^ 1, ..index.clone() };
         assert_eq!(footer.entries(data, &other), block);
+    }
+
+    /// board 8545: a footer's keys, forged, are refused past [`MAX_KEY`] bytes each, whatever they
+    /// share: one key of 256 KiB, then 20,000 sharing all of it, which decoded would take 5 GB
+    /// from 500 KB, is refused before any of the 20,000; a key of exactly the most is read, one
+    /// past it not, nor one sharing `u32::MAX` bytes.
+    #[test]
+    fn footers_keys_past_the_longest_are_refused() {
+        let footer = |coded: Vec<(u32, String)>| {
+            let footer = (Vec::<u8>::new(), coded, Vec::<Block>::new(), Appendix::default());
+            TableFooter::decode(&bincode::serialize(&footer).unwrap())
+        };
+        let long = "k".repeat(256 << 10);
+        let mut amplifying = vec![(0, long)];
+        amplifying.extend((0..20_000).map(|_| (256 << 10, String::new())));
+        let past = format!("a table's footer: a key past {MAX_KEY} bytes");
+        assert_eq!(footer(amplifying), Err(Corrupt(past.clone())));
+        let most = "k".repeat(MAX_KEY);
+        let read = footer(vec![(0, most.clone()), (MAX_KEY as u32, String::new())]);
+        assert_eq!(read.map(|footer| footer.keys), Ok(vec![most.clone(), most.clone()]));
+        assert_eq!(
+            footer(vec![(0, most.clone()), (MAX_KEY as u32, "k".into())]),
+            Err(Corrupt(past))
+        );
+        let sharing = "a table's footer: a key sharing more than the one before it";
+        assert_eq!(
+            footer(vec![(0, most), (u32::MAX, String::new())]),
+            Err(Corrupt(sharing.into()))
+        );
+    }
+
+    /// board 8545, board 7011: a footer's blocks, forged, are refused unless they lie as its
+    /// encoder lays them, one after another from the data's start, their first extents ascending,
+    /// the appendix right after: many naming one block, which decoded each entry of it, its key
+    /// cloned, as many times; one out of order; one past the data, or at an offset whose range
+    /// overflows; one empty or longer than a block; its appendix elsewhere.
+    #[test]
+    fn footers_whose_blocks_overlap_are_refused() {
+        let bytes = encoded(&entries(3000));
+        let footer = TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap()).unwrap();
+        assert_eq!(footer.blocks.len(), 2);
+        let (one, two) = (footer.blocks[0].clone(), footer.blocks[1].clone());
+        let forged = |blocks: Vec<Block>, appendix: u64| {
+            let forged = TableFooter {
+                blocks,
+                appendix: Appendix { offset: appendix, ..footer.appendix.clone() },
+                ..footer.clone()
+            };
+            TableFooter::decode(&bincode::serialize(&forged).unwrap())
+        };
+        let end = u64::from(one.len) + u64::from(two.len);
+        assert_eq!(forged(vec![one.clone(), two.clone()], end), Ok(footer.clone()));
+        let blocks = Err(Corrupt("a table's blocks, not one after another".into()));
+        let many = vec![one.clone(); 20_000];
+        assert_eq!(forged(many, u64::from(one.len)), blocks);
+        assert_eq!(forged(vec![two.clone(), one.clone()], end), blocks);
+        let after = Block { first: one.first, ..two.clone() };
+        assert_eq!(forged(vec![one.clone(), after], end), blocks);
+        for offset in [1, u64::from(one.len) - 1, u64::MAX - 1, u64::MAX] {
+            let moved = Block { offset, ..two.clone() };
+            assert_eq!(forged(vec![one.clone(), moved], end), blocks, "{offset}");
+        }
+        for len in [0, TABLE_BLOCK as u32 + 1, u32::MAX] {
+            let sized = Block { len, ..one.clone() };
+            assert_eq!(forged(vec![sized], u64::from(len)), blocks, "{len}");
+        }
+        let appendix = Err(Corrupt("a table's appendix, not after its blocks".into()));
+        for offset in [0, end - 1, end + 1, u64::MAX] {
+            assert_eq!(forged(vec![one.clone(), two.clone()], offset), appendix, "{offset}");
+        }
     }
 }

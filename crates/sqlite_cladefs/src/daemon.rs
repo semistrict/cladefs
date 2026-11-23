@@ -41,13 +41,18 @@ pub fn open(
         format!("opening {} on the daemon at {}", cell_dir.display(), socket.display())
     })?;
     let cell = Arc::new(cell);
-    let device = DeviceHolder::new(DaemonDevice::new(cell.clone())?);
-    let block = device.block_size() as u64;
+    let block = u64::from(cladefs::Storage::BLOCK_SIZE);
     if let Err(error) = cladefs::pages::window_fits_host(block, cladefs::pages::page_size()) {
         log::info!("sqlite_cladefs: a database with no window, reading from the daemon: {error:#}");
-        return Database::open(device, options);
+        return Database::open(DeviceHolder::new(DaemonDevice::new(cell)?), options);
     }
+    // The window first, holding the cell alone: one whose making fails lets the cell go, then
+    // its memory (`Drop`). The device after it, which a block device drops before its window,
+    // opened or not (block_device's `Window`): so that a failed opening unmaps the window too,
+    // which the device's hold on the cell kept mapped for the process's life (board 8551).
     let window = DaemonWindow::new(cell, window)?;
+    let device = DeviceHolder::new(DaemonDevice::new(window.cell.clone().expect("a cell"))?);
+    assert_eq!(device.block_size() as u64, block, "a daemon cell's blocks");
     Database::open_mapped(device, Box::new(window), options)
 }
 
@@ -129,12 +134,13 @@ impl Window for DaemonWindow {
 impl Drop for DaemonWindow {
     fn drop(&mut self) {
         // The memory goes once the cell, whose fault thread serves it, has: unless something
-        // holds the cell still, when the memory stays, as the cell may yet map it.
+        // holds the cell still, when the memory stays, as the cell may yet map it. Nothing does
+        // where its holders go before it, as `open`'s do, and a block device's.
         match Arc::try_unwrap(self.cell.take().expect("a cell")) {
             Ok(cell) => drop(cell),
-            // Held still: said; its memory stays mapped for it.
+            // Held still: a bug of its holders'; its memory stays mapped for the cell.
             Err(_) => {
-                log::warn!("sqlite_cladefs: a window's cell outlives it: its memory stays mapped");
+                log::error!("sqlite_cladefs: a window's cell outlives it: its memory stays mapped");
                 return;
             }
         }

@@ -893,7 +893,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// its own, which they answer meanwhile (TASK-111.4).
 fn take_stats(wait: std::time::Duration) -> JoinHandle<super::stats::HostStats> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    std::thread::spawn(move || runtime.block_on(super::stats::take(wait)))
+    std::thread::spawn(move || runtime.block_on(super::stats::take(wait, true)))
 }
 
 /// The environment a child process of [`two_processes_map_the_same_pages`] is told what to map in;
@@ -1135,14 +1135,18 @@ async fn frozen_vm_processes_hold_nothing_up() {
     frozen_vm_processes_are_killed().await;
 }
 
-/// TASK-79.9: as [`frozen_vm_processes_hold_nothing_up`], on a kernel without `SO_PEERPIDFD`
-/// (Linux 6.1 to 6.4), as the system call is refused here: the daemon kills the frozen VM process,
-/// which it knows by the process that connected, and keeps the page it maps until it has exited.
-#[tokio::test(flavor = "multi_thread")]
-async fn frozen_vm_processes_are_killed_without_peer_pidfds() {
+/// board 8533: on a kernel without `SO_PEERPIDFD` (before Linux 6.5), as the system call is refused
+/// here, the daemon's start refuses, naming the version: it opened a VM process by the pid that
+/// connected, which another process may have taken by then, the one it would kill (TASK-79.9).
+#[test]
+fn kernels_without_peer_pidfds_are_refused() {
+    super::server::require_peer_pidfds().unwrap();
     let (level, option) = (libc::SOL_SOCKET as u32, libc::SO_PEERPIDFD as u32);
     refuse_system_call(libc::SYS_getsockopt, &[(1, level), (2, option)], libc::ENOPROTOOPT as u16);
-    frozen_vm_processes_are_killed().await;
+    let refused = super::server::require_peer_pidfds().unwrap_err();
+    let said = refused.to_string();
+    assert!(said.contains("the extent daemon needs Linux 6.5 or later"), "{said}");
+    assert!(said.contains("Protocol not available"), "{said}");
 }
 
 /// A cell of a tenant's, whose extent's page a VM process, a child, and this one map, and what
@@ -2365,7 +2369,11 @@ async fn requests_attach_nothing() {
     {
         for (cell, sequence) in [(extent.cell, 1), (0, 0)] {
             let header = Header::new(kind, 0).with_body(&[cell, sequence, 0u64, 4096]);
-            let _ = vm.call(header, base.as_os_str().as_bytes(), &[]);
+            // cladefs: named in a payload where its kind has one: past what a kind holds, the
+            // daemon refuses it at its header, ending the connection (board 8459).
+            let path = base.as_os_str().as_bytes();
+            let fits = path.len() as u64 <= super::codec::most_payload(&header);
+            let _ = vm.call(header, if fits { path } else { &[] }, &[]);
         }
     }
     let mut data = vec![0; 4096];
@@ -4395,8 +4403,9 @@ impl HandVm {
     }
 
     /// Maps `extent` again over its window's first `len` bytes, as its guest rebinding it does,
-    /// acknowledging nothing it is sent: then frozen, an unmap unacknowledged.
-    fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) {
+    /// acknowledging nothing it is sent: then frozen, an unmap unacknowledged. The last stage
+    /// operation it was sent.
+    fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) -> u64 {
         use super::wire::*;
         let (cell, sequence) = (extent.cell, extent.sequence);
         let (_, staged) = self.call(
@@ -4406,7 +4415,98 @@ impl HandVm {
             false,
         );
         assert!(staged.iter().any(|header| header.kind == STAGE_UNMAP), "{staged:?}");
+        staged.iter().map(|header| header.id).max().unwrap()
     }
+}
+
+/// Board 8535: a VM process that never exits once killed, as one in uninterruptible sleep or a
+/// frozen cgroup, holds up no shrink, nor the governor's next look: frozen with an unmap
+/// unacknowledged, then let go and killed, its pages wait for it still; but a shrink of its
+/// tenant's memory returns within [`super::memory::PARKED_WAIT`], counting them held, and the next
+/// at once. And once it has not exited [`super::server::KILLED_EXITING`] after it was killed, it
+/// is counted wedged, with the memory held for it, which relief no longer waits for. Before, the
+/// shrink waited for it for good, and with it every later look of the governor, every tenant's.
+#[tokio::test(flavor = "multi_thread")]
+async fn vm_processes_that_never_exit_hold_up_no_shrink() {
+    use std::sync::atomic::Ordering;
+    const EXTENT: u64 = 2 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = serve_tenant_at(dir.path(), 1);
+    super::server::UNKILLABLE.store(true, Ordering::Relaxed);
+    let mut frozen = HandVm::open(&socket, &dir.path().join("1").join("store"));
+    super::server::UNKILLABLE.store(false, Ordering::Relaxed);
+    let its = frozen.write_an_extent(EXTENT);
+    frozen.map_an_extent(its, EXTENT);
+    frozen.freeze_with_an_unmap(its, EXTENT);
+
+    let (bound, slack) = (super::memory::PARKED_WAIT, std::time::Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let shrunk = tokio::time::timeout(bound + slack, super::memory::shrink(Some(1), 0)).await;
+    let took = started.elapsed();
+    // Held still, as the VM process may map them: the extent's pages, quarantined.
+    assert_eq!(shrunk, Ok(Ok(EXTENT)), "the shrink, after {took:?}");
+    let next = tokio::time::timeout(slack, super::memory::shrink(Some(1), 0)).await;
+    assert_eq!(next, Ok(Ok(EXTENT)), "the next shrink");
+    // Let go as silent, killed, and not exited: wedged.
+    let wedged = super::server::UNRESPONSIVE + super::server::KILLED_EXITING + slack;
+    let deadline = std::time::Instant::now() + wedged;
+    while super::server::wedged() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let gauge = |name: &str| {
+        let gauges = super::metrics::gauges();
+        gauges.into_iter().find(|(gauge, _, _)| *gauge == name).map(|(_, _, value)| value)
+    };
+    assert_eq!(
+        (gauge("vm_processes_wedged"), gauge("memory_wedged_bytes")),
+        (Some(1), Some(EXTENT)),
+        "the wedged VM process, and what is held for it"
+    );
+    assert_eq!(crate::slabs::quarantined_bytes(), EXTENT, "held for it still");
+}
+
+/// Board 8491: an arena whose memory object can't be made, as with as many files open as the
+/// daemon may (the `slabs::memory_object` failpoint: `EMFILE`), fails its tenant's grant with that
+/// error, and panics nothing: before, it panicked holding the arenas' lock, at which every later
+/// allocation, of every tenant's, panicked. Another tenant's VM process is served meanwhile, its
+/// writes allocating in its arena; and once memory objects can be made again, the grant
+/// succeeds, and its VM process is served.
+#[test]
+fn arenas_failing_to_be_made_fail_their_grant_alone() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let alice = serve_tenant_at(dir.path(), 1);
+    let (sender, mut receiver, _stream, cell) =
+        raw_connection(&alice, &dir.path().join("1").join("store"), 1 << 24);
+    let mut written = |id: u64, sequence: u64| {
+        let header = Header::new(WRITE, id).with_body(&WriteBody {
+            cell,
+            sequence,
+            data_len: 1 << 20,
+            ..Default::default()
+        });
+        call(&sender, &mut receiver, header, &pattern(sequence as u8, 1 << 20)).header.status
+    };
+    fail::cfg("slabs::memory_object", "return").unwrap();
+    let cells = dir.path().join("2");
+    std::fs::create_dir_all(&cells).unwrap();
+    let refused = super::server::Tenant::new(2, &cells).err().map(|err| err.raw_os_error());
+    assert_eq!(refused, Some(Some(libc::EMFILE)), "the grant, its arena unmade");
+    assert_eq!(written(2, 1), 0, "another tenant's write, meanwhile");
+    fail::remove("slabs::memory_object");
+    let bob = serve_tenant_at(dir.path(), 2);
+    let (bob_sender, mut bob_receiver, _bob_stream, bob_cell) =
+        raw_connection(&bob, &cells.join("store"), 1 << 24);
+    let header = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell: bob_cell,
+        sequence: 1,
+        data_len: 1 << 20,
+        ..Default::default()
+    });
+    let status = call(&bob_sender, &mut bob_receiver, header, &pattern(3, 1 << 20)).header.status;
+    assert_eq!((status, written(3, 2)), (0, 0), "the grant's write, and the other's, after");
 }
 
 /// The socket of a daemon serving tenant `id`, whose cells are in `dir`'s directory `id`.
@@ -4973,8 +5073,11 @@ fn whatever_a_vm_process_says_harms_no_other() {
         other_path.clone(),
         std::path::PathBuf::from("relative"),
     ];
+    // cladefs: none as often as some, as most kinds carry none, and a payload past what its kind
+    // holds ends the connection at its header (board 8459): every case ended at its first.
     let payload = prop_oneof![
-        4 => proptest::collection::vec(any::<u8>(), 0..64),
+        8 => Just(Vec::new()),
+        3 => proptest::collection::vec(any::<u8>(), 0..64),
         1 => (0..paths.len()).prop_map(move |path| {
             std::os::unix::ffi::OsStrExt::as_bytes(paths[path].as_os_str()).to_vec()
         }),
@@ -5682,9 +5785,13 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     parent.commit(Some(b"root")).unwrap();
     let version = parent.make_version().unwrap();
     let bucket = super::cells::daemon_bucket().unwrap();
+    let buckets = control(bucket.ephemeral_buckets()).unwrap();
     let references = || {
-        let listing =
-            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        let listing = bucket_cell::lifecycle::ephemeral_references(
+            &*bucket,
+            &buckets,
+            ephemeral.incarnation(),
+        );
         let mut children: Vec<_> =
             control(listing).unwrap().into_iter().map(|(_, child)| child).collect();
         children.sort();
@@ -5730,9 +5837,114 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(control(ephemeral.retire_stale()).unwrap(), 1);
     assert_eq!(references(), vec![kept]);
     assert!(ephemeral.entry(gone).unwrap().is_none());
-    let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
-    assert_eq!(retired, Ok(1));
+    let decommissioning =
+        bucket_cell::lifecycle::decommission(&*bucket, &buckets, ephemeral.incarnation(), 10);
+    let retired = control(decommissioning);
+    assert_eq!(retired, Ok(bucket_cell::lifecycle::Decommissioned { retired: 1, left: 0 }));
     assert_eq!(references(), vec![]);
+}
+
+/// Boards 8519, 8521, 8523: hosts decommissioned through the control API, as cladefsctl calls it.
+/// The serving daemon's own incarnation, or one no host makes (an even one), is refused, nothing
+/// retired. Another's, given as the daemon's log printed it, is listed with its references until
+/// then, and has them retired, `most` at a time, the rest left to a call again; listed after as
+/// decommissioned, with none. And a host decommissioned while alive, by mistake, finds out: its
+/// next ephemeral fork is refused (`ESTALE`), leaving no reference nor index entry, and it refuses
+/// to start again, rather than serve its cells over references retired. GetStats says the
+/// serving daemon's incarnation.
+#[test]
+fn hosts_are_decommissioned_through_the_control_api() {
+    use super::control::proto::EphemeralHost;
+    use bucket_cell::layout::{self, Kind};
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (lost_dir, serving_dir) = (dir.path().join("lost"), dir.path().join("serving"));
+    let lost = crate::ephemeral_host::open(&lost_dir).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let control_socket = dir.path().join("control.sock");
+    let listener = UnixListener::bind(&control_socket).unwrap();
+    let tenants = dir.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || super::control::serve_control(listener, tenants));
+    let api = super::control::Client::connect(&control_socket).unwrap();
+    let parent = CellClient::connect(&socket, dir.path().join("parent"), 1 << 24).unwrap();
+    write(&parent, ExtentId { cell: parent.cell(), sequence: 1 }, 0, &pattern(1, ps)).unwrap();
+    parent.commit(Some(b"root")).unwrap();
+    let version = parent.make_version().unwrap();
+    drop(parent);
+    let fork = |name: &str| {
+        let at = dir.path().join(name);
+        let cell = version_cell(version);
+        control(super::cells::fork_ephemeral_of_version(cell, version.version, at, None))
+    };
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let buckets = control(bucket.ephemeral_buckets()).unwrap();
+    let incarnation = lost.incarnation();
+    let references = || {
+        let listing = bucket_cell::lifecycle::ephemeral_references(&*bucket, &buckets, incarnation);
+        control(listing).unwrap().len()
+    };
+    let errno = |refused: crate::Error| refused.errno();
+    for name in ["one", "two", "three"] {
+        fork(name).unwrap();
+    }
+    assert_eq!(references(), 3);
+    assert_eq!(api.stats(None).unwrap().incarnation, incarnation);
+
+    // Its own, or an even one, which no host makes: refused, nothing retired.
+    assert_eq!(api.decommission_host(incarnation, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    let even = incarnation ^ 1;
+    assert_eq!(api.decommission_host(even, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    assert_eq!(api.decommission_host(0, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    assert_eq!(references(), 3);
+    let listed = EphemeralHost { incarnation, references: 3, decommissioned: false };
+    assert_eq!(api.ephemeral_hosts().unwrap(), vec![listed]);
+
+    // The daemon serving of another incarnation now, the lost host's, as its log printed it,
+    // decommissioned: two at a time, then the rest, then none.
+    let serving = crate::ephemeral_host::open(&serving_dir).unwrap();
+    assert_eq!(api.stats(None).unwrap().incarnation, serving.incarnation());
+    let printed = crate::ephemeral_host::opened(&lost_dir, incarnation);
+    let given = printed.rsplit(' ').next().unwrap();
+    let parsed = base32_id::parse(given).unwrap();
+    assert_eq!(parsed, incarnation, "{printed}");
+    let done = |response: super::control::proto::DecommissionHostResponse| {
+        (response.retired, response.left)
+    };
+    assert_eq!(api.decommission_host(parsed, 2).map(done).unwrap(), (2, 1));
+    assert_eq!(references(), 1);
+    assert_eq!(api.decommission_host(parsed, 0).map(done).unwrap(), (1, 0));
+    assert_eq!(references(), 0);
+    assert_eq!(api.decommission_host(parsed, 0).map(done).unwrap(), (0, 0));
+    let listed = EphemeralHost { incarnation, references: 0, decommissioned: true };
+    assert_eq!(api.ephemeral_hosts().unwrap(), vec![listed]);
+
+    // The lost host alive after all: its next fork refused, leaving nothing in the bucket; its
+    // start refused.
+    let lost = crate::ephemeral_host::open(&lost_dir).unwrap();
+    assert_eq!(lost.incarnation(), incarnation);
+    assert_eq!(fork("four"), Err(Errno::ESTALE));
+    assert_eq!(references(), 0);
+    let parent_cell = version_cell(version);
+    let listed = control(bucket_cell::Bucket::list(&*bucket, &layout::references(parent_cell)));
+    let theirs = listed.unwrap().into_iter().filter(|meta| {
+        matches!(layout::kind(&meta.key), Kind::Ephemeral { incarnation: of, .. } if of == incarnation)
+    });
+    assert_eq!(theirs.count(), 0, "no reference of the incarnation decommissioned");
+    let refused = control(lost.retire_stale()).map_err(|err| format!("{err:#}"));
+    assert_eq!(
+        refused,
+        Err(format!(
+            "incarnation {} of {} was decommissioned (DecommissionHost): its ephemeral cells' \
+             references are retired, and what they read may be collected; move the directory \
+             aside, its cells with it, for the daemon to start of a new incarnation",
+            base32_id::Short(incarnation),
+            lost_dir.display()
+        ))
+    );
 }
 
 /// Boards 5732 and 5734: a target takes a cell's migrations by the cell's epoch, one request at a
@@ -5748,8 +5960,11 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
     use tonic::Code;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let ephemeral = crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
-    let path = dir.path().join("cell");
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    // SAFETY: as `host`'s: no other thread of this test's process reads the environment yet.
+    unsafe { std::env::set_var("CLADEFSD_EPHEMERAL_CELLS", &root) };
+    let ephemeral = crate::ephemeral_host::open(&root.join("ephemeral")).unwrap();
+    let path = root.join("cell");
     let staged = |migration| crate::ephemeral_host::staging(&path, migration);
     let (parent, child) = (crate::CellId { tenant: 1, id: 2 }, crate::CellId { tenant: 1, id: 7 });
     let prepare = |migration, epoch| MigratePrepareRequest {
@@ -5763,11 +5978,16 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         bucket: "memory:///cells".into(),
         to: path.display().to_string(),
         epoch,
+        formats: super::peers::formats(),
     };
     let bucket = super::cells::daemon_bucket().unwrap();
+    let buckets = control(bucket.ephemeral_buckets()).unwrap();
     let references = || {
-        let listing =
-            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        let listing = bucket_cell::lifecycle::ephemeral_references(
+            &*bucket,
+            &buckets,
+            ephemeral.incarnation(),
+        );
         control(listing).unwrap().into_iter().map(|(_, child)| child).collect::<Vec<_>>()
     };
 

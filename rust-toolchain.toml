@@ -1,0 +1,15 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# The Rust every build of this workspace uses, CI's and the test hosts' alike (board 8603): one
+# version, so that a new rustc or clippy changes nothing until a commit bumps this, fixing in the
+# same commit what its new lints find (scripts/test.sh runs clippy with -D warnings). CI installs
+# it with `rustup toolchain install`, which reads this file; scripts/lib/linux-host-setup.sh's
+# pinned_version reads its channel. guest/rust and vendor/firecracker pin their own.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+# The guest tests' agent, and Firecracker under its seccomp filter, are built for musl.
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+profile = "minimal"

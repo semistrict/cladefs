@@ -61,6 +61,7 @@ event-listener.workspace = true
 bucket_cell.workspace = true
 extent_frame.workspace = true
 base32_id.workspace = true
+formats.workspace = true
 extent_keys.workspace = true
 local_cell.workspace = true
 tokio.workspace = true

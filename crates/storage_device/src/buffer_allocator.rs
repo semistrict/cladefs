@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/lib/storage_device/src/buffer_allocator.rs`. Buffer sources are VMOs the
-// in-process kernel maps, as on Fuchsia, rather than heap memory, and the tests of VMOs and their
-// rights, which upstream runs only on Fuchsia, run too.
+// Fuchsia's `src/storage/lib/storage_device/src/buffer_allocator.rs`, with buffer sources in plain
+// memory rather than VMOs, which only Fuchsia has.
 
 use crate::buffer::{
     Buffer, BufferAllocator as BufferAllocatorTrait, OwnedBuffer, round_down, round_up,
@@ -19,164 +18,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // cladefs: Fuchsia's alone; cladefs's buffers, the host's and the guest kernel's, are plain memory.
-#[cfg(target_os = "fuchsia")]
-mod buffer_source {
-    use crate::buffer::{round_down, round_up};
-    use fuchsia_runtime::vmar_root_self;
-    use std::ops::Range;
-    use std::sync::Arc;
-    use storage_ptr_slice::MutPtrByteSlice;
-
-    /// A buffer source backed by a VMO.
-    #[derive(Debug)]
-    pub struct BufferSource {
-        base: *mut u8,
-        size: usize,
-        vmo: Arc<zx::Vmo>,
-        trusted: bool,
-    }
-
-    // SAFETY: This is required for the *mut u8 which is just the base address of the VMO mapping
-    // and doesn't stop us making BufferSource Send and Sync.
-    unsafe impl Send for BufferSource {}
-    unsafe impl Sync for BufferSource {}
-
-    impl BufferSource {
-        pub fn new(size: usize) -> Self {
-            Self::new_internal(size, false).unwrap()
-        }
-
-        pub fn new_trusted(size: usize) -> Self {
-            Self::new_internal(size, true).unwrap()
-        }
-
-        /// cladefs: a trusted source, or why its VMO couldn't be made or mapped, as when the kernel's
-        /// handles run out (TASK-105), which `new_trusted` panics on.
-        pub fn try_new_trusted(size: usize) -> Result<Self, zx::Status> {
-            Self::new_internal(size, true)
-        }
-
-        fn new_internal(size: usize, trusted: bool) -> Result<Self, zx::Status> {
-            let mut vmo = zx::Vmo::create(size as u64)?;
-            if trusted {
-                // We strip the TRANSFER right to prevent the VMO handle from being transferred
-                // or duplicated to another process (such as a block device driver). Because the
-                // VMO cannot be shared remotely, we guarantee that this memory is strictly
-                // private and cannot be accessed or modified concurrently by hardware or
-                // drivers. This allows us to safely hand out standard Rust references (&[u8]
-                // and &mut [u8]) without risking undefined behavior from aliasing or concurrent
-                // mutation.
-                let rights = zx::Rights::VMO_DEFAULT & !zx::Rights::TRANSFER;
-                vmo = vmo.replace_handle(rights)?;
-            }
-            let vmo = Arc::new(vmo);
-            let name = zx::Name::new("transfer-buf").unwrap();
-            vmo.set_name(&name)?;
-            let flags = zx::VmarFlags::PERM_READ
-                | zx::VmarFlags::PERM_WRITE
-                | zx::VmarFlags::MAP_RANGE
-                | zx::VmarFlags::REQUIRE_NON_RESIZABLE;
-            let base = vmar_root_self().map(0, &vmo, 0, size, flags)? as *mut u8;
-            Ok(Self { base, size, vmo, trusted })
-        }
-
-        pub fn is_trusted(&self) -> bool {
-            self.trusted
-        }
-
-        pub fn slice(&self) -> *mut [u8] {
-            std::ptr::slice_from_raw_parts_mut(self.base, self.size)
-        }
-
-        pub fn size(&self) -> usize {
-            self.size
-        }
-
-        pub fn vmo(&self) -> &Arc<zx::Vmo> {
-            &self.vmo
-        }
-
-        /// Returns a mutable pointer slice for the given range.
-        ///
-        /// # Safety
-        ///
-        /// The caller must ensure that no other active references or pointer slices overlap with
-        /// this range.
-        pub(crate) unsafe fn subslice_ptr(&self, range: &Range<usize>) -> MutPtrByteSlice<'_> {
-            assert!(range.start < self.size && range.end <= self.size);
-            // SAFETY: The base pointer is valid for `size` bytes, and `range` is within bounds.
-            // The caller guarantees exclusivity.
-            unsafe {
-                MutPtrByteSlice::new(std::ptr::slice_from_raw_parts_mut(
-                    self.base.add(range.start),
-                    range.len(),
-                ))
-            }
-        }
-
-        /// Returns a mutable pointer slice with an arbitrary lifetime `'a` for the given range.
-        ///
-        /// # Safety
-        ///
-        /// The caller must ensure that no other active references or pointer slices overlap with
-        /// this range, and that `self` remains valid and mapped in memory for the entire lifetime
-        /// `'a`.
-        pub(crate) unsafe fn subslice_ptr_unbounded<'a>(
-            &self,
-            range: &Range<usize>,
-        ) -> MutPtrByteSlice<'a> {
-            assert!(range.start < self.size && range.end <= self.size);
-            // SAFETY: The base pointer is valid for `size` bytes, and `range` is within bounds.
-            // The caller guarantees exclusivity and memory liveness for `'a`.
-            unsafe {
-                MutPtrByteSlice::new(std::ptr::slice_from_raw_parts_mut(
-                    self.base.add(range.start),
-                    range.len(),
-                ))
-            }
-        }
-
-        /// Commits the range in memory to avoid future page faults.
-        ///
-        /// cladefs: the pages the range is in, through the source's mapping, which maps them too, as
-        /// upstream's commit of the VMO alone does not (TASK-92.19): writing them would fault each
-        /// few in, each fault the host's signal and system call (`zircon::arch::host`).
-        pub fn commit_range(&self, range: Range<usize>) -> Result<(), zx::Status> {
-            let page_size = zx::system_get_page_size() as usize;
-            let start = round_down(range.start, page_size);
-            let len = round_up(range.end, page_size) - start;
-            vmar_root_self().op_range(zx::VmarOp::COMMIT, self.base as usize + start, len)
-        }
-
-        /// cladefs: nothing: a VMO reads as zeros until written.
-        pub(crate) fn touch(&self, _range: &Range<usize>) {}
-
-        /// Zeroes out the range so the kerne can reclaim the pages.
-        ///
-        /// # Safety
-        ///
-        /// The range must not be allocated.
-        pub(crate) unsafe fn clean_range(&self, range: Range<usize>) {
-            let _ = self.vmo.op_range(zx::VmoOp::ZERO, range.start as u64, range.len() as u64);
-        }
-    }
-
-    impl Drop for BufferSource {
-        fn drop(&mut self) {
-            // SAFETY: This balances the `map` in `new` above.
-            unsafe {
-                let _ = vmar_root_self().unmap(self.base as usize, self.size);
-            }
-        }
-    }
-}
 
 /// cladefs: where Fxfs has no VMOs, in the guest kernel (TASK-26.6) and on the host (TASK-96.1),
 /// buffers are plain memory, which only Fxfs and its device use, so they are all trusted.
-#[cfg(not(target_os = "fuchsia"))]
 mod buffer_source {
     use std::ops::Range;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use storage_ptr_slice::MutPtrByteSlice;
 
@@ -255,11 +101,6 @@ mod buffer_source {
             self.size
         }
 
-        /// Never called: trusted sources have no VMO to give.
-        pub fn vmo(&self) -> &Arc<zx::Vmo> {
-            unreachable!("plain memory's buffers have no VMO")
-        }
-
         /// As on other targets.
         ///
         /// # Safety
@@ -290,11 +131,6 @@ mod buffer_source {
                     range.len(),
                 ))
             }
-        }
-
-        /// Plain memory, which the host commits as it is touched.
-        pub fn commit_range(&self, _range: Range<usize>) -> Result<(), zx::Status> {
-            Ok(())
         }
 
         /// Zeroes the range, as on other targets.
@@ -533,14 +369,6 @@ impl BufferAllocator {
         }
     }
 
-    /// Returns the underlying VMO if the allocator is untrusted.
-    ///
-    /// Returns `None` if `is_trusted()` is true, because exposing the VMO would allow
-    /// external modification of memory that is assumed to be unshared.
-    pub fn vmo(&self) -> Option<Arc<zx::Vmo>> {
-        if self.is_trusted() { None } else { Some(self.source.vmo().clone()) }
-    }
-
     pub fn is_trusted(&self) -> bool {
         self.source.is_trusted()
     }
@@ -674,10 +502,6 @@ impl BufferAllocatorTrait for BufferAllocator {
     fn is_trusted(&self) -> bool {
         self.is_trusted()
     }
-
-    fn vmo(&self) -> Option<Arc<zx::Vmo>> {
-        self.vmo()
-    }
 }
 
 impl<'a> TryAllocateBuffer<'a> for BufferAllocator {
@@ -749,15 +573,8 @@ impl BufferAllocator {
     }
 }
 
-#[cfg(target_os = "fuchsia")]
-pub use crate::pinned_buffer_allocator::{
-    DEFAULT_PIN_CHUNK_SIZE, PinnedBuffer, PinnedBufferAllocator, PinnedBufferFuture,
-};
-
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "fuchsia")]
-    use crate::buffer::BufferAllocator as BufferAllocatorTrait;
     use crate::buffer_allocator::{BufferAllocator, BufferSource, order};
     use fuchsia_async as fasync;
     use futures::future::join_all;
@@ -767,7 +584,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_odd_sized_buffer_source() {
         let source = BufferSource::new(123);
         let allocator = BufferAllocator::new(2, source);
@@ -784,7 +601,7 @@ mod tests {
         assert!(allocator.try_allocate_buffer(2).is_err());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_buffer_read_write() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -796,7 +613,7 @@ mod tests {
         assert_eq!(vec, vec![0xaa as u8; 8192]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_buffer_consecutive_calls_do_not_overlap() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -806,7 +623,7 @@ mod tests {
         assert!(buf1.range().end <= buf2.range().start || buf2.range().end <= buf1.range().start);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_many_buffers() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -816,7 +633,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_small_buffers_dont_overlap() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -826,7 +643,7 @@ mod tests {
         assert!(buf1.range().end <= buf2.range().start || buf2.range().end <= buf1.range().start);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_large_buffer() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -839,7 +656,7 @@ mod tests {
         assert_eq!(vec, vec![0xaa as u8; 1024 * 1024]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_large_buffer_after_smaller_buffers() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -854,7 +671,7 @@ mod tests {
         assert_eq!(buf.len(), 1024 * 1024);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_at_limits() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(8192, source);
@@ -869,7 +686,7 @@ mod tests {
         assert_eq!(buf.len(), 8192);
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_random_allocs_deallocs() {
         let source = BufferSource::new(16 * 1024 * 1024);
         let bs = 512;
@@ -919,7 +736,7 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_buffer_refs() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(512, source);
@@ -983,7 +800,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_buffer_split() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(512, source);
@@ -1031,7 +848,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_blocking_allocation() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = Arc::new(BufferAllocator::new(512, source));
@@ -1076,23 +893,8 @@ mod tests {
     /// system call of; and maps those alone. The host holds a page of the mapping only once the
     /// in-process kernel has mapped it there.
     // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
-    #[cfg(target_os = "fuchsia")]
-    #[fuchsia::test]
-    async fn committed_ranges_are_mapped() {
-        let page_size = zx::system_get_page_size() as usize;
-        let source = BufferSource::new(4 * page_size);
-        source.commit_range(page_size + 512..3 * page_size - 512).unwrap();
-        let mut held = [0u8; 4];
-        // SAFETY: Asks the host which pages of the source's mapping it holds, into `held`, a byte
-        // a page.
-        let status = unsafe {
-            libc::mincore(source.slice().cast(), 4 * page_size, held.as_mut_ptr().cast())
-        };
-        assert_eq!(status, 0, "mincore: {}", std::io::Error::last_os_error());
-        assert_eq!(held.map(|page| page & 1), [0, 1, 1, 0]);
-    }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clean_entire_transfer_buffer() {
         const BUFFER_SIZE: usize = 4096;
         let source = BufferSource::new(BUFFER_SIZE);
@@ -1109,7 +911,7 @@ mod tests {
         assert_eq!(data, vec![0; BUFFER_SIZE]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clean_transfer_buffer_around_allocation() {
         let source = BufferSource::new(4096);
         let allocator = Arc::new(BufferAllocator::new(512, source));
@@ -1144,8 +946,7 @@ mod tests {
     /// cladefs: a source of memory that doesn't read as zeros, as the guest kernel's, hands out
     /// buffers of zeros, each zeroed as it is first handed out, and touches no byte past the
     /// furthest a buffer reached: the rest of the source stays as it was (board 5649).
-    #[cfg(not(target_os = "fuchsia"))]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dirty_source_is_zeroed_only_as_far_as_buffers_reach() {
         let allocator = Arc::new(BufferAllocator::new(512, BufferSource::dirty(8192)));
         let read = |buffer: &crate::buffer::Buffer<'_>| {
@@ -1182,7 +983,7 @@ mod tests {
         assert_eq!(allocator.buffer_source().byte(4096), 0xa5);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_safe_buffer_apis() {
         let source = BufferSource::new(4096);
         let allocator = BufferAllocator::new(512, source);
@@ -1238,7 +1039,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_owned_buffer() {
         let source = BufferSource::new(4096);
         let allocator = Arc::new(BufferAllocator::new(512, source));
@@ -1264,7 +1065,7 @@ mod tests {
         assert_eq!(owned_buf3.as_ptr_slice().to_vec(), vec![0xdd; 2048]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_buffer_sync() {
         let source = BufferSource::new(4096);
         let allocator = BufferAllocator::new(512, source);
@@ -1282,18 +1083,10 @@ mod tests {
         assert_eq!(buf2.as_ptr_slice().to_vec(), vec![0xff; 4096]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_trusted_buffer_apis() {
         // Untrusted allocator (only relevant/testable on Fuchsia)
         // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
-        #[cfg(target_os = "fuchsia")]
-        {
-            let source = BufferSource::new(4096);
-            let allocator = BufferAllocator::new(512, source);
-            let mut buf = allocator.allocate_buffer(4096).await;
-            assert!(buf.try_as_slice().is_none());
-            assert!(buf.as_mut().try_as_mut_slice().is_none());
-        }
 
         // Trusted allocator (with trusted source)
         {
@@ -1318,17 +1111,8 @@ mod tests {
     }
 
     // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
-    #[cfg(target_os = "fuchsia")]
-    #[fuchsia::test]
-    async fn test_trusted_buffer_rights() {
-        use zx;
-        let source = BufferSource::new_trusted(4096);
-        let vmo = source.vmo();
-        let info = vmo.basic_info().expect("failed to get basic info");
-        assert!(!info.rights.contains(zx::Rights::TRANSFER));
-    }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocator_lowest_offset_first() {
         let source = BufferSource::new(8192);
         let allocator = BufferAllocator::new(512, source);
@@ -1345,35 +1129,5 @@ mod tests {
         // Next allocation should prioritize the lowest available offset (0), not 2048.
         let buf0_again = allocator.allocate_buffer(1024).await;
         assert_eq!(buf0_again.range(), 0..1024);
-    }
-
-    #[fuchsia::test]
-    async fn test_unpinned_buffer() {
-        let source = BufferSource::new(4096);
-        let standard_allocator = BufferAllocator::new(512, source);
-        let unpinned = standard_allocator.allocate_buffer(512).await;
-        assert_eq!(unpinned.paddrs(), None);
-        assert_eq!(unpinned.contiguity(), None);
-    }
-
-    // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
-    #[cfg(target_os = "fuchsia")]
-    #[fuchsia::test]
-    async fn test_vmo_trusted_vs_untrusted() {
-        let untrusted_source = BufferSource::new(4096);
-        let untrusted_alloc = BufferAllocator::new(512, untrusted_source);
-        assert!(!untrusted_alloc.is_trusted());
-        assert!(untrusted_alloc.vmo().is_some());
-        assert!(BufferAllocatorTrait::vmo(&untrusted_alloc).is_some());
-        let untrusted_buf = untrusted_alloc.allocate_buffer(512).await;
-        assert!(untrusted_buf.vmo().is_some());
-
-        let trusted_source = BufferSource::new_trusted(4096);
-        let trusted_alloc = BufferAllocator::new(512, trusted_source);
-        assert!(trusted_alloc.is_trusted());
-        assert!(trusted_alloc.vmo().is_none());
-        assert!(BufferAllocatorTrait::vmo(&trusted_alloc).is_none());
-        let trusted_buf = trusted_alloc.allocate_buffer(512).await;
-        assert!(trusted_buf.vmo().is_none());
     }
 }

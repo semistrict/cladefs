@@ -236,10 +236,9 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let file =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed");
+        let file = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
         file
     }
@@ -286,14 +285,14 @@ mod tests {
     }
 
     /// A writeback of the most writes a transaction holds at a time.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dirty_data_reserved_is_written_however_full() {
         fill_and_write_back(128).await;
     }
 
     /// A writeback of a block at a time, whose transactions take more metadata space than their
     /// share, and their file's spare once: the rest they borrow.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dirty_data_reserved_is_written_a_block_at_a_time_however_full() {
         fill_and_write_back(1).await;
     }
@@ -301,7 +300,7 @@ mod tests {
     /// What files' dirty data reserves, its blocks, their share of metadata space and a spare
     /// for each file, is released as the data is dropped, or written back, and a file's spare,
     /// lent to its writeback, held again while it has dirty data.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dirty_data_releases_what_it_reserved() {
         let fs = filesystem().await;
         let allocator = fs.allocator();
@@ -338,7 +337,7 @@ mod tests {
     /// Dirty data the filesystem had no room for is owed: its writeback is paid for from the
     /// room of other dirty data, and the owed settled as that is released, nothing left reserved
     /// or owed.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dirty_data_with_no_room_is_owed() {
         let fs = filesystem().await;
         let dirty = DirtyReservation::new(&fs.root_store());

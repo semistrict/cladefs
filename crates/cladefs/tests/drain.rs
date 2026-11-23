@@ -96,3 +96,58 @@ async fn sigterm_closes_every_cell_durable_and_uploaded() {
     assert_eq!(taken.root().unwrap(), b"drained");
     assert_eq!(read(&taken, extent), [7; BLOCK]);
 }
+
+/// board 8503: its health reporter gone once it reported SERVING, a drain waits for the health
+/// service to report NOT_SERVING no longer than `drain::REPORTING`: it drains all the same, and
+/// exits 1, saying why, within its bound. Before, it waited for ever, outside its bound, the
+/// daemon neither drained nor exited.
+#[tokio::test(flavor = "multi_thread")]
+async fn drains_whose_health_reporter_went_fail_within_their_bound() {
+    use tonic_health::pb::HealthCheckRequest;
+    use tonic_health::pb::health_check_response::ServingStatus;
+    use tonic_health::pb::health_client::HealthClient;
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    std::fs::create_dir(&bucket).unwrap();
+    let (socket, control) = (dir.path().join("cladefsd.sock"), dir.path().join("control.sock"));
+    let log = dir.path().join("log");
+    let bound = Duration::from_secs(10);
+    let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+        .arg(&socket)
+        .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
+        .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_GRPC", &control)
+        .env("CLADEFSD_DRAIN", bound.as_secs().to_string())
+        .env("FAILPOINTS", "cladefsd::health_reporter_gone=return")
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let mut daemon = KillOnDrop(daemon);
+    let said = || std::fs::read_to_string(&log).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline, "the daemon never served: {}", said());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The control API's status SERVING, reported last, after which its reporter goes.
+    let mut health =
+        HealthClient::new(cladefs::cladefsd::control::channel(&control).await.unwrap());
+    let api = HealthCheckRequest { service: "cladefs.cladefsd.v1.Cladefsd".into() };
+    while health.check(api.clone()).await.unwrap().into_inner().status() != ServingStatus::Serving {
+        assert!(Instant::now() < deadline, "never SERVING: {}", said());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // SAFETY: Signals the daemon this test started.
+    assert_eq!(unsafe { libc::kill(daemon.0.id() as i32, libc::SIGTERM) }, 0);
+    let signalled = Instant::now();
+    let status = loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(signalled.elapsed() < bound, "not exited within the drain's bound: {}", said());
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1), "{}", said());
+    assert!(said().contains("the health service never reported NOT_SERVING"), "{}", said());
+}

@@ -420,6 +420,46 @@ pub async fn add(
     }
 }
 
+/// cladefs: records `master_key_id` as the ID of the master key wrapping the tenants' KEKs of bucket
+/// `number` in the root's registry, `root`'s, by a conditional update, unless its entry records
+/// none: a bucket under a KMS its entry names, or added naming no master key, records none still
+/// (board 8483). The registry as it is then, to [`spread`] to every bucket, if the entry records
+/// the ID: so that recording again finishes a spread a failure cut short. Refused if `root` is
+/// another bucket ([`Error::NotRoot`]), keeps no registry ([`Error::Lost`]), or records no bucket
+/// `number` ([`Error::NoBucket`]).
+pub async fn record_master_key(
+    root: &impl Bucket,
+    number: u16,
+    master_key_id: &str,
+) -> Result<Option<Registry>, Error> {
+    match get(root).await? {
+        Some(ours) if ours.number != ROOT => return Err(Error::NotRoot(ours.number)),
+        _ => {}
+    }
+    loop {
+        let (registry, version) = registry_versioned(root)
+            .await?
+            .ok_or_else(|| Error::Lost(layout::BUCKETS.to_owned()))?;
+        let entry = registry.bucket(number).ok_or(Error::NoBucket(number))?;
+        match entry.details.master_key_id.as_deref() {
+            None => return Ok(None),
+            Some(recorded) if recorded == master_key_id => return Ok(Some(registry)),
+            Some(_) => {}
+        }
+        let mut changed = registry.clone();
+        changed.version += 1;
+        for entry in changed.buckets.iter_mut().filter(|entry| entry.number == number) {
+            entry.details.master_key_id = Some(master_key_id.to_owned());
+        }
+        let bytes = layout::encode(&changed);
+        match bucket::update(root, layout::BUCKETS, bytes, &version).await? {
+            Updated::Updated(_) => return Ok(Some(changed)),
+            // Another's change, first: read again, and recorded on it.
+            Updated::Changed => {}
+        }
+    }
+}
+
 /// `found`, the identity of the bucket the registry records as `entry`, if it is that bucket: of
 /// its number and its identity's random ID (TASK-633.3). Otherwise another bucket's, or no
 /// bucket's, which a host refuses to use as it.
@@ -649,6 +689,14 @@ mod tests {
 
         async fn delete(&self, key: &str) -> Result<(), bucket::Error> {
             self.bucket.delete(key).await
+        }
+
+        async fn delete_if(
+            &self,
+            key: &str,
+            version: &bucket::Version,
+        ) -> Result<(), bucket::Error> {
+            self.bucket.delete_if(key, version).await
         }
 
         fn now(&self) -> u64 {

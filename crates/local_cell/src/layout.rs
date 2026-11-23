@@ -33,7 +33,7 @@ use storage_device::ExtentId;
 /// hash (`FXLOG\0\0\x04`, board 6902) and ephemeral cells store closed segments in `segments/`
 /// with an authenticated `extent_frame::table` `local-checkpoint` (board 6905). A cell of another
 /// format is refused ([`Format`]): nothing reads, converts or upgrades it.
-pub(crate) const FORMAT: &str = "cladefs extent store 16";
+pub const FORMAT: &str = "cladefs extent store 16";
 
 /// cladefs: the error of a cell whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
@@ -196,7 +196,7 @@ impl CellFile {
 }
 
 /// The description's file.
-pub(crate) const DESCRIPTION: &str = "store";
+pub const DESCRIPTION: &str = "store";
 /// The directory of segments, a directory for each cell's.
 pub(crate) const SEGMENTS: &str = "segments";
 /// The directory of extents stored on their own, a directory for each cell's.

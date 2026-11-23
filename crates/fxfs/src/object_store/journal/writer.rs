@@ -4,12 +4,10 @@
 
 use crate::checksum::{Checksum, fletcher64};
 use crate::log::*;
-use crate::metrics;
 use crate::object_store::journal::JournalCheckpoint;
 use crate::serialized_types::{LATEST_VERSION, Versioned};
 use anyhow::{Error, anyhow};
 use byteorder::{LittleEndian, WriteBytesExt};
-use fuchsia_inspect::{Property as _, UintProperty};
 use std::cmp::min;
 use std::io::Write;
 use storage_device::buffer::MutableBufferRef;
@@ -34,9 +32,6 @@ pub struct JournalWriter {
     // cladefs: where a record is serialized before it is written to `buf` whole: serializing
     // writes each of its fields on its own, which `write` would checksum blocks around one by one.
     record: Vec<u8>,
-
-    // Current journal offset based on the checkpoint of the last write
-    journal_checkpoint_offset: UintProperty,
 }
 
 impl JournalWriter {
@@ -45,15 +40,7 @@ impl JournalWriter {
         // formatting as part of creating the allocator and must be ready to go.
         let checkpoint =
             JournalCheckpoint { version: LATEST_VERSION, ..JournalCheckpoint::default() };
-        JournalWriter {
-            block_size,
-            checkpoint,
-            last_checksum,
-            buf: Vec::new(),
-            record: Vec::new(),
-            journal_checkpoint_offset: metrics::detail()
-                .create_uint("journal_checkpoint_offset", 0),
-        }
+        JournalWriter { block_size, checkpoint, last_checksum, buf: Vec::new(), record: Vec::new() }
     }
 
     /// Serializes a new journal record to the journal stream.
@@ -135,7 +122,6 @@ impl JournalWriter {
         debug_assert!(self.block_size.is_aligned(len as u64));
         buf.copy_from_slice(&self.buf[..len]);
         let offset = self.checkpoint.file_offset;
-        self.journal_checkpoint_offset.set(offset);
         self.buf.drain(..len);
         self.checkpoint.file_offset += len as u64;
         self.checkpoint.checksum = self.last_checksum;
@@ -156,7 +142,6 @@ impl JournalWriter {
         assert!(self.block_size.is_aligned(checkpoint.file_offset));
         self.checkpoint = checkpoint;
         self.last_checksum = self.checkpoint.checksum;
-        self.journal_checkpoint_offset.set(self.checkpoint.file_offset);
     }
 }
 
@@ -212,7 +197,7 @@ mod tests {
 
     const TEST_BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_single_record_and_pad() {
         let object = Arc::new(FakeObject::new());
         let mut writer = JournalWriter::new(TEST_BLOCK_SIZE, 0);
@@ -245,7 +230,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_journal_file_checkpoint() {
         let object = Arc::new(FakeObject::new());
         let mut writer = JournalWriter::new(TEST_BLOCK_SIZE, 0);

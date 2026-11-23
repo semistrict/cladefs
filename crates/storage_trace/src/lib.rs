@@ -21,7 +21,7 @@ pub use crate::noop::{Id, Scope, TraceFutureExt};
 mod tests {
     use crate::*;
 
-    #[fuchsia::test]
+    #[test]
     fn test_duration() {
         let trace_only_var = 6;
         duration!("category", "name");
@@ -29,7 +29,7 @@ mod tests {
         duration!("category", "name", "arg" => 5, "arg2" => trace_only_var);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_instant() {
         let trace_only_var = 6;
         instant!("category", "name", Scope::Thread);
@@ -37,7 +37,7 @@ mod tests {
         instant!("category", "name", Scope::Thread, "arg" => 5, "arg2" => trace_only_var);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_flow_begin() {
         let trace_only_var = 6;
         let flow_id: Id = 5u64.into();
@@ -46,7 +46,7 @@ mod tests {
         flow_begin!("category", "name", flow_id, "arg" => 5, "arg2" => trace_only_var);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_flow_step() {
         let trace_only_var = 6;
         let flow_id: Id = 5u64.into();
@@ -55,7 +55,7 @@ mod tests {
         flow_step!("category", "name", flow_id, "arg" => 5, "arg2" => trace_only_var);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_flow_end() {
         let trace_only_var = 6;
         let flow_id: Id = 5u64.into();
@@ -64,7 +64,7 @@ mod tests {
         flow_end!("category", "name", flow_id, "arg" => 5, "arg2" => trace_only_var);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_trace_future() {
         let value = async move { 5 }.trace(trace_future_args!("category", "name")).await;
         assert_eq!(value, 5);
@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(value, 5);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_arg_types() {
         duration!("category", "name", "bool" => true);
         duration!("category", "name", "i32" => 5i32, "u32" => 5u32);
@@ -96,7 +96,7 @@ mod tests {
         duration!("category", "name", "mut-ptr" => &mut value as *mut u64);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_counter() {
         counter!("category", "name", 1, "a" => 10);
         counter!("category", "name", 1, "a" => 10, "b" => 20);

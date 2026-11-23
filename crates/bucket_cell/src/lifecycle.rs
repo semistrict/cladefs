@@ -308,23 +308,47 @@ pub async fn fork_ephemeral(
 
 /// cladefs: writes the reference of `child`, an ephemeral cell of the host of incarnation
 /// `incarnation`, to `origin` ([`layout::ephemeral_reference`]), its index entry first
-/// ([`layout::ephemeral_index`]), so that decommissioning the incarnation finds every reference
-/// of its.
+/// ([`layout::ephemeral_index`]), both in the bucket of `origin`'s parent, so that decommissioning
+/// the incarnation finds every reference of its; then reads the incarnation's tombstone there
+/// ([`decommissioned`], board 8519): found, the incarnation decommissioned, both are deleted again
+/// and the reference refused ([`Error::Decommissioned`]), so that no reference stands of an
+/// incarnation decommissioned, which nothing would retire. A decommissioning writes the tombstone
+/// before it lists the entries: a reference whose reading misses it was written before that
+/// listing, which finds it.
 pub async fn refer_ephemeral(
     bucket: &impl Bucket,
     origin: Origin,
     incarnation: u64,
     child: CellId,
-) -> Result<(), bucket::Refused> {
+) -> Result<(), Error> {
     let index = layout::ephemeral_index(incarnation, origin.parent, origin.at, child);
     bucket::create(bucket, &index, Vec::new()).await?;
     let reference = layout::ephemeral_reference(origin.parent, origin.at, incarnation, child);
-    bucket::create(bucket, &reference, Vec::new()).await.map(drop)
+    bucket::create(bucket, &reference, Vec::new()).await?;
+    if decommissioned(bucket, incarnation, origin.parent).await? {
+        unrefer_ephemeral(bucket, origin, incarnation, child).await?;
+        return Err(Error::Decommissioned(incarnation));
+    }
+    Ok(())
+}
+
+/// cladefs: whether the host of incarnation `incarnation` was decommissioned, as the bucket of
+/// `parent`, where its ephemeral cells forked from `parent` have their references, says: its
+/// tombstone there ([`layout::decommissioned`], board 8519). Its decommissioning writes one in
+/// every bucket before it retires anything.
+pub async fn decommissioned(
+    bucket: &impl Bucket,
+    incarnation: u64,
+    parent: CellId,
+) -> Result<bool, bucket::Refused> {
+    let tombstone = layout::decommissioned(layout::ephemeral_bucket(parent), incarnation);
+    Ok(bucket::head(bucket, &tombstone).await?.is_some())
 }
 
 /// cladefs: deletes the reference of `child`, an ephemeral cell of the host of incarnation
 /// `incarnation`, to `origin`, then its index entry: its cell gone, or never made, or its host
-/// gone for good ([`decommission`]).
+/// gone for good ([`decommission`]). Both in the bucket of `origin`'s parent, as
+/// [`refer_ephemeral`] wrote them, whichever bucket `bucket` is the home of.
 pub async fn unrefer_ephemeral(
     bucket: &impl Bucket,
     origin: Origin,
@@ -337,19 +361,69 @@ pub async fn unrefer_ephemeral(
     bucket::delete(bucket, &index).await
 }
 
+/// cladefs: the numbers of the buckets an ephemeral cell's reference may be in, as `bucket`'s
+/// root says (board 8517): every bucket its copy of the registry records, its own, and
+/// [`crate::identity::NAMED`], the number of the cells tests name, which stay in the bucket asked.
+/// `crate::routed::RoutedBucket::ephemeral_buckets` adds those the root's registry records.
+pub async fn ephemeral_buckets(bucket: &impl Bucket) -> Result<BTreeSet<u16>, Error> {
+    let mut numbers = BTreeSet::from([crate::identity::NAMED]);
+    numbers.extend(crate::identity::get(bucket).await?.map(|identity| identity.number));
+    let registry = crate::identity::registry(bucket).await?;
+    numbers
+        .extend(registry.iter().flat_map(|registry| &registry.buckets).map(|entry| entry.number));
+    Ok(numbers)
+}
+
 /// cladefs: the references of the ephemeral cells of the host of incarnation `incarnation`, by
-/// their index (doc-25): each child, with its origin.
+/// their index in each of the buckets numbered `buckets` (doc-25, board 8517): each child, with
+/// its origin. One listing a bucket.
 /// cladefs: refused, [`bucket::Refused`] (board 5861).
 pub async fn ephemeral_references(
     bucket: &impl Bucket,
+    buckets: &BTreeSet<u16>,
     incarnation: u64,
 ) -> Result<Vec<(Origin, CellId)>, bucket::Refused> {
-    let listed = bucket::list(bucket, &layout::ephemeral_indexes(incarnation)).await?;
-    Ok((listed.iter())
-        .filter_map(|meta| layout::ephemeral_indexed(&meta.key))
-        .filter(|&(of, ..)| of == incarnation)
-        .map(|(_, parent, at, child)| (Origin { parent, at, epoch: 0 }, child))
-        .collect())
+    let mut references = Vec::new();
+    for &number in buckets {
+        let listed = bucket::list(bucket, &layout::ephemeral_indexes(number, incarnation)).await?;
+        references.extend(
+            (listed.iter())
+                .filter_map(|meta| layout::ephemeral_indexed(&meta.key))
+                .filter(|&(of, ..)| of == incarnation)
+                .map(|(_, parent, at, child)| (Origin { parent, at, epoch: 0 }, child)),
+        );
+    }
+    Ok(references)
+}
+
+/// cladefs: what the buckets numbered `buckets` hold of a host's ephemeral cells (board 8521).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EphemeralHost {
+    /// How many references of its ephemeral cells their index names.
+    pub references: usize,
+    /// Whether it was decommissioned, as any of those buckets' tombstones says.
+    pub decommissioned: bool,
+}
+
+/// cladefs: every incarnation of a host whose ephemeral cells have references in the buckets
+/// numbered `buckets`, or that was decommissioned there, by their index and tombstones (board
+/// 8521): for its operator, without the host's disk or log, to find the incarnation of a host lost
+/// and decommission it. One listing a bucket.
+pub async fn ephemeral_hosts(
+    bucket: &impl Bucket,
+    buckets: &BTreeSet<u16>,
+) -> Result<std::collections::BTreeMap<u64, EphemeralHost>, bucket::Refused> {
+    let mut hosts = std::collections::BTreeMap::<u64, EphemeralHost>::new();
+    for &number in buckets {
+        for meta in bucket::list(bucket, &layout::ephemeral_hosts(number)).await? {
+            if let Some((incarnation, ..)) = layout::ephemeral_indexed(&meta.key) {
+                hosts.entry(incarnation).or_default().references += 1;
+            } else if let Some((_, incarnation)) = layout::decommissioned_of(&meta.key) {
+                hosts.entry(incarnation).or_default().decommissioned = true;
+            }
+        }
+    }
+    Ok(hosts)
 }
 
 /// cladefs: the segments of `cell` that what refers to it under its prefix refers to
@@ -377,20 +451,53 @@ pub async fn referenced_at(
         .collect())
 }
 
+/// cladefs: what a call of [`decommission`] did, and left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decommissioned {
+    /// The references it retired, each with its index entry.
+    pub retired: usize,
+    /// The references it found and left, past the most it was asked to retire: a call again
+    /// retires them.
+    pub left: usize,
+}
+
 /// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost
-/// (doc-25, TASK-698.3; specs/ephemeral): the references of its ephemeral cells, which no host
-/// holds any more, deleted, each with its index entry. Returns how many. Its operator's to call,
-/// for an incarnation no host has: a host of it still holding its cells would read what it no
-/// longer keeps.
+/// (doc-25, TASK-698.3; specs/ephemeral), in the buckets numbered `buckets`, every bucket a
+/// reference of its may be in ([`ephemeral_buckets`], board 8517): its tombstone written in each
+/// first ([`layout::decommissioned`], board 8519), so that no host of it refers to anything there
+/// from then on; then the references of its ephemeral cells, which no host holds any more, `most`
+/// of them at most, deleted in batches ([`bucket::delete_all`], board 8523), then their index
+/// entries: stopped between, the entries left find the references a call again deletes, as
+/// deleting what is gone is no error. Returns how many it retired, and left. Its operator's to
+/// call, for an incarnation no host has: a host of it still holding its cells would read what it
+/// no longer keeps, and refuses to start, or fork, once it reads the tombstone. A bucket added
+/// after it holds no tombstone of it (board 9966); a reference whose write lands after its entry
+/// was deleted here stands unfound (board 9968).
 pub async fn decommission(
     bucket: &impl Bucket,
+    buckets: &BTreeSet<u16>,
     incarnation: u64,
-) -> Result<usize, bucket::Refused> {
-    let references = ephemeral_references(bucket, incarnation).await?;
-    for &(origin, child) in &references {
-        unrefer_ephemeral(bucket, origin, incarnation, child).await?;
+    most: usize,
+) -> Result<Decommissioned, Error> {
+    for &number in buckets {
+        bucket::create(bucket, &layout::decommissioned(number, incarnation), Vec::new()).await?;
     }
-    Ok(references.len())
+    let references = ephemeral_references(bucket, buckets, incarnation).await?;
+    let (retiring, left) = references.split_at(most.min(references.len()));
+    let referred: Vec<String> = (retiring.iter())
+        .map(|(origin, child)| {
+            layout::ephemeral_reference(origin.parent, origin.at, incarnation, *child)
+        })
+        .collect();
+    bucket::delete_all(bucket, &referred.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+    failpoint!("ephemeral::decommission_unreferred");
+    let indexed: Vec<String> = (retiring.iter())
+        .map(|(origin, child)| {
+            layout::ephemeral_index(incarnation, origin.parent, origin.at, *child)
+        })
+        .collect();
+    bucket::delete_all(bucket, &indexed.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+    Ok(Decommissioned { retired: retiring.len(), left: left.len() })
 }
 
 /// cladefs: a restore of the version `version` of the cell `origin` names, at the segment it
@@ -846,5 +953,98 @@ mod tests {
         .unwrap();
         assert_eq!(block_on(delete(&bucket, test_cell(5), 6, 6)), Err(Error::Stale));
         assert_eq!(block_on(delete(&bucket, test_cell(5), 6, 7)), Ok(()));
+    }
+
+    /// The counts of the ephemeral cells' references, index entries and tombstones `bucket` holds.
+    fn ephemeral_kinds(bucket: &impl Bucket) -> (usize, usize, usize) {
+        let listed = block_on(bucket::list(bucket, "")).unwrap();
+        let count = |of: fn(&layout::Kind) -> bool| {
+            listed.iter().filter(|meta| of(&layout::kind(&meta.key))).count()
+        };
+        (
+            count(|kind| matches!(kind, layout::Kind::Ephemeral { .. })),
+            count(|kind| matches!(kind, layout::Kind::EphemeralIndex { .. })),
+            count(|kind| matches!(kind, layout::Kind::Decommissioned { .. })),
+        )
+    }
+
+    /// Board 8523: a decommissioning retires its `most` references in batches, references first,
+    /// then their index entries: stopped between (its failpoint), it leaves the entries, which a
+    /// call again finds and finishes, deleting what is gone being no error; each call retires its
+    /// most, the rest left and said. Board 8519: its tombstone, written first, stays, and a host
+    /// of the incarnation refers to nothing from then on: its reference taken back, refused.
+    #[test]
+    fn decommissionings_stopped_part_way_are_finished_again() {
+        let scenario = fail::FailScenario::setup();
+        let bucket = Direct(SimBucket::new());
+        let buckets = block_on(ephemeral_buckets(&bucket)).unwrap();
+        assert_eq!(buckets, BTreeSet::from([crate::identity::NAMED]));
+        let (origin, incarnation) = (Origin { parent: test_cell(1), at: 7, epoch: 1 }, 0x2b);
+        for child in 10..15 {
+            block_on(refer_ephemeral(&bucket, origin, incarnation, test_cell(child))).unwrap();
+        }
+        assert_eq!(ephemeral_kinds(&bucket), (5, 5, 0));
+
+        fail::cfg("ephemeral::decommission_unreferred", "return").unwrap();
+        let stopped = block_on(decommission(&bucket, &buckets, incarnation, 3));
+        let failpoint = "failpoint ephemeral::decommission_unreferred".to_owned();
+        assert_eq!(stopped, Err(Error::Read(failpoint)));
+        assert_eq!(ephemeral_kinds(&bucket), (2, 5, 1), "its references gone, their entries left");
+        fail::remove("ephemeral::decommission_unreferred");
+        let again = block_on(decommission(&bucket, &buckets, incarnation, 3));
+        assert_eq!(again, Ok(Decommissioned { retired: 3, left: 2 }));
+        assert_eq!(ephemeral_kinds(&bucket), (2, 2, 1));
+        let rest = block_on(decommission(&bucket, &buckets, incarnation, 3));
+        assert_eq!(rest, Ok(Decommissioned { retired: 2, left: 0 }));
+        assert_eq!(ephemeral_kinds(&bucket), (0, 0, 1));
+
+        let late = block_on(refer_ephemeral(&bucket, origin, incarnation, test_cell(20)));
+        assert_eq!(late, Err(Error::Decommissioned(incarnation)));
+        assert_eq!(ephemeral_kinds(&bucket), (0, 0, 1), "taken back");
+        let other = block_on(refer_ephemeral(&bucket, origin, incarnation + 2, test_cell(20)));
+        assert_eq!(other, Ok(()), "another incarnation's refers on");
+        scenario.teardown();
+    }
+
+    /// Board 8523's measurement: 2,000 ephemeral references of a host decommissioned against a
+    /// bucket whose every request waits 25 ms (its faults' latency), on tokio's paused clock, so
+    /// that what is measured is the requests' latency alone: deleted a request pair a reference,
+    /// in series, as decommissioning did, and batched, as it does. Printed for the task's reply,
+    /// and the batched at least twenty times the faster.
+    #[tokio::test(start_paused = true)]
+    async fn decommissionings_delete_in_batches() {
+        use crate::faults::{Faults, Faulty};
+        use futures::StreamExt as _;
+        const REFERENCES: u64 = 2_000;
+        let faults = Faults::new(std::time::Duration::from_millis(25), None);
+        let objects = std::sync::Arc::new(object_store::memory::InMemory::new());
+        let faulty = std::sync::Arc::new(Faulty::new(objects, faults));
+        let bucket = crate::object_bucket::ObjectBucket::new(faulty, "");
+        let buckets = BTreeSet::from([crate::identity::NAMED]);
+        let origin = Origin { parent: test_cell(1), at: 7, epoch: 1 };
+        let (serial, batched) = (0x2b, 0x2d);
+        for incarnation in [serial, batched] {
+            let referring = (0..REFERENCES)
+                .map(|child| refer_ephemeral(&bucket, origin, incarnation, test_cell(100 + child)));
+            let referred: Vec<Result<(), Error>> =
+                futures::stream::iter(referring).buffer_unordered(64).collect().await;
+            referred.into_iter().collect::<Result<Vec<()>, Error>>().unwrap();
+        }
+
+        let start = tokio::time::Instant::now();
+        let references = ephemeral_references(&bucket, &buckets, serial).await.unwrap();
+        for (origin, child) in references {
+            unrefer_ephemeral(&bucket, origin, serial, child).await.unwrap();
+        }
+        let one_by_one = start.elapsed();
+        let start = tokio::time::Instant::now();
+        let decommissioned = decommission(&bucket, &buckets, batched, usize::MAX).await;
+        let in_batches = start.elapsed();
+        assert_eq!(decommissioned, Ok(Decommissioned { retired: REFERENCES as usize, left: 0 }));
+        println!(
+            "{REFERENCES} references at 25 ms a request: one by one {one_by_one:?}, in batches \
+             {in_batches:?}"
+        );
+        assert!(in_batches * 20 < one_by_one, "{in_batches:?} against {one_by_one:?}");
     }
 }

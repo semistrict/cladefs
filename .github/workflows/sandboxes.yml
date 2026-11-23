@@ -21,6 +21,12 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# cladefs: the token reads the repository and nothing more (board 8603), as no job writes to it;
+# actions are pinned by commit, their release in a comment, and Rust by rust-toolchain.toml, so
+# that what CI runs changes by a commit alone (scripts/tests/test_workflows.py).
+permissions:
+  contents: read
+
 jobs:
   sandboxes:
     name: sandboxes (short)
@@ -28,7 +34,7 @@ jobs:
     timeout-minutes: 120
     steps:
       # With vendor/firecracker, the VMM the guests boot in.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - uses: ./.github/actions/guest-host
@@ -38,7 +44,7 @@ jobs:
       # dependencies, built whole 10 minutes of the job, 6 with these (1.5 GB). cladefs's own
       # crates, new in a checkout, build each time, twice: for the daemon, and in the VMM's copy,
       # which builds in target/firecracker (run 43718512917: the job 10.5 minutes, the run 3.3).
-      - uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cargo-cache
         with:
           path: |
@@ -57,7 +63,7 @@ jobs:
           CARGO_INCREMENTAL: 0
       # Kept once built, whatever the run says after: a run that fails its checks would build it
       # all again.
-      - uses: actions/cache/save@v6
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.cargo-cache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -82,7 +88,7 @@ jobs:
       - name: Give the results to the runner's user
         if: always()
         run: sudo chown -R "$USER" ~/sandboxes
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: sandboxes-short

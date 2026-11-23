@@ -238,7 +238,10 @@ mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs a
 errors name it only by its ID, a short hash. To rotate it, give every host
 `CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest first: it
 wraps, any unwraps), run `cladefs-gc URL --rotate-master-key`, which rewraps every
-tenant's KEK under NEW, then give the hosts NEW alone. To shred a tenant, run
+tenant's KEK under NEW and records NEW in the bucket's entry of the registry of
+buckets, every copy of it (run it again until it fails no copy: hosts of other
+buckets choose its KMS by that entry), then give the hosts NEW alone, those of
+other buckets too (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`). To shred a tenant, run
 `cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's daemon: it
 replaces the tenant's KEK object by a tombstone, so that nothing of the tenant's
 unwraps anywhere and no KEK is made for it again, and has each host forget its
@@ -333,3 +336,90 @@ What a host can tell from a VM process's status (TASK-70):
 | 158 | `CladefsdLost` | Storage: its extent daemon went, and the VM can't go on. What it was told stays as doc-12 says. |
 | 159 | `AccessRefused` | The guest: an access stayed refused, of a part of its DAX window nothing maps, or a write past its private pages' bound (`private_max`, backlog doc-13). That VM alone stops (TASK-77). |
 | Killed by SIGABRT | A panic | A VMM bug: Firecracker panics abort, and an unresolved DAX window fault does. |
+
+## Building a release daemon
+
+A host runs a release build of one commit, of the Rust `rust-toolchain.toml` pins (board 8603):
+
+```sh
+git submodule update --init
+cargo build --release --locked -p cladefs --bins
+```
+
+- `-p cladefs` alone, never across the workspace: other crates' dev-dependencies turn on
+  `testing` and `tests-kms`, which a release build refuses to compile (TASK-320, TASK-411.28),
+  and never `--features failpoints`, a test build's (`scripts/test-e2e.sh` builds one in the
+  `sim` profile).
+- `--locked`: Cargo.lock as committed, never re-resolved.
+- No `RUSTFLAGS`: it replaces `.cargo/config.toml`'s `-Cforce-frame-pointers=yes`, which perf and
+  `/z/pprof` unwind the daemon's stacks by, and the build refuses a release without them
+  (`crates/cladefs/build/stamp.rs`, board 8597). A build that needs flags of its own adds that one.
+- The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof` and `/z/tracez`
+  name each frame's file and line (the binary 281 MB, 41 MB stripped), unwinds panics, as a
+  cell's halt needs, and checks arithmetic for overflow, as every test's build does.
+
+Telling it is right: `cladefsctl --version`, and `cladefsd_build_info{commit}` once it runs, name
+the commit it was built of, with no `-dirty` (the stamp follows every crate's files and the lock,
+board 8599); `readelf -S target/release/cladefsd` lists `.debug_line`; and it built at all, which
+it doesn't without frame pointers or with a test feature.
+
+## Running under systemd
+
+The daemon expects a supervisor: a panic under a lock shared beyond one cell aborts it, and its
+VMs' cells open anew once it runs again. `docs/examples/cladefsd.service` is a reference unit.
+What it sets, and why:
+
+- `Restart=always`, 2 s apart. A restart takes every VM on the host with it: they exited 158
+  (`CladefsdLost`) as the daemon went, whether it crashed or exited.
+- `RuntimeDirectory=cladefsd` for its sockets (VM, control, tenants'), which systemd removes as the
+  daemon stops, a crash included: a daemon started over a dead one's sockets refuses them (board
+  5227).
+- `LimitNOFILE=1048576`: the daemon raises its soft limit to this hard one and serves at most
+  three quarters of it over 4 files a connection; it refuses to start under 35,840 (board 8595).
+- `TimeoutStopSec=90` above `CLADEFSD_DRAIN=60`: SIGTERM drains (`docs/upgrading-a-host.md`), and
+  systemd's SIGKILL at the stop timeout would cut a longer drain short, its cells not uploaded.
+- `MEMORY_BYTES` fixed (64 GiB in the example) and `MemoryMax` above it by the daemon's own heap,
+  which `cladefsd_process_anon_budget_bytes` reports: the cgroup is charged for every VM's cached
+  file pages (above, The daemon's memory), and the governor, which reads the host's free memory
+  and not the cgroup's, would take what the cgroup's OOM killer then stops it for.
+- `OOMScoreAdjust=-900`: the kernel's OOM killer takes VMs before the daemon, whose death takes
+  them all.
+- `CAP_CHOWN`, `CAP_FOWNER` and `CAP_KILL`, and no other capability: jails run as other users than
+  the daemon's, a grant gives each tenant's socket to its jails' user (chown, then its mode and
+  link), and the daemon serves only a VM process it may kill, which another user's is only with
+  `CAP_KILL`. Without them, `Grant` fails `EPERM` and jailed VMs' connections are refused.
+- The `kvm` group, for `/dev/userfaultfd` by the udev rule above; the master key as a systemd
+  credential (`LoadCredential`, `CLADEFS_MASTER_KEY_FILE=%d/master-key`), the bucket and token in
+  an environment file only root reads.
+- systemd's sandboxing (`NoNewPrivileges`, `ProtectSystem=strict` with its state and runtime
+  directories writable, `ProtectHome`, `PrivateTmp`, `RestrictAddressFamilies`, ...), and no
+  system call filter or AppArmor profile: one missing a call the daemon makes on a rare path kills
+  it, and every VM with it (hotbed question 510). A host whose daemon mounts FUSE
+  (`CLADEFSD_MOUNT`) as a user other than root drops `NoNewPrivileges`, which takes away
+  fusermount3's setuid.
+
+## Alerts
+
+`docs/examples/cladefsd-alerts.yml` holds Prometheus alerting rules for the daemons, scraped as
+the job `cladefsd`. `scripts/check-alerts.sh` checks them with promtool (CI's `ops-examples` job),
+and `scripts/tests/test_ops_examples.py` that every metric they name is one the daemon serves.
+
+| Alert | Severity | When |
+|---|---|---|
+| `CladefsdDown` | critical | Its scrape fails for a minute: the host's VMs have exited 158. |
+| `CladefsdRestarted` | warning | `cladefsd_process_cpu_seconds_total` started again: it restarted, its VMs with it. |
+| `CladefsdCommitsStalled` | critical | A cell's commits waited at the upload lag bound (`cladefsd_upload_stalls_total`): its guest's syncs stall behind the bucket. |
+| `CladefsdUploadsBehind` | warning | A cell's oldest commit not uploaded for a minute, for 5 minutes. |
+| `CladefsdBucketFailing` | warning | Requests to the bucket failing (`cladefsd_object_storage_failures_total`) for 10 minutes. |
+| `CladefsdMemoryExhausted` | critical | Arenas whose relief found nothing to free (`cladefsd_memory_exhausted_arenas`): reads fail `ENOMEM`. |
+| `CladefsdMemoryLeaked` | warning | `cladefsd_memory_leaked_bytes` above 0: a bug. |
+| `CladefsdHeapOverBudget` | warning | The daemon's anonymous memory past its budget (`cladefsd_process_anon_over_budget_total`), which a `MemoryMax` sized by it meets with the OOM killer. |
+| `CladefsdVmProcessesWedged` | warning | VM processes it killed that have not gone, for 15 minutes. |
+| `CladefsdDiskPressure` | warning | A disk under pressure for 10 minutes: uploads urged, tenants held to their shares. |
+| `CladefsdDiskFull` | critical | A disk's free space under its headroom for 5 minutes: another writer (`cladefsd_host_disk_other_bytes`), and guests' writes refused `ENOSPC` soon. |
+| `CladefsdReplicationDegraded` | warning | A replicated cell degraded for 5 minutes. |
+| `CladefsdUnqualifiedBuild` | warning | `cladefsd_build_info` names a `-dirty` or `unknown` build. |
+| `CladefsdBuildsDiffer` | warning | The hosts run more than one build for a day: an upgrade left part way. |
+
+The VM manager alerts on its VMs' exit statuses (above): 158 on many VMs of a host at once is the
+daemon's going; 159 is one guest's.

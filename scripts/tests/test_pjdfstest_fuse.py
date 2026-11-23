@@ -64,7 +64,7 @@ class PjdfstestFuseTest(unittest.TestCase):
         # of the scripts that run test-e2e.sh pins it.
         e2e = (SCRIPTS / "test-e2e.sh").read_text()
         self.assertIn('source "$root/scripts/lib/pjdfstest.sh"', e2e)
-        self.assertLess(e2e.index("pjdfstest.sh"), e2e.index("cargo build -q -p runner"))
+        self.assertLess(e2e.index("pjdfstest.sh"), e2e.index("cargo build -q --locked -p runner"))
         for script in ["test-e2e.sh", "test-guest-kernel.sh", "lib/test-linux-host.sh"]:
             self.assertNotIn("85a8aea9", (SCRIPTS / script).read_text(), script)
 

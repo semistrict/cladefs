@@ -90,19 +90,19 @@ impl Secret {
         Wrapped(wrapped.to_vec())
     }
 
-    /// The key `wrapped` holds, if this one wrapped it.
+    /// The key `wrapped` holds, if this one wrapped it. What was unwrapped into is a [`Secret`]
+    /// from the start, zeroed however it is refused (board 8589).
     pub fn unwrap(&self, wrapped: &Wrapped) -> Result<Secret, Unauthentic> {
-        let mut key = Box::new([0; KEY_LEN]);
+        let mut key = Self(Box::new([0; KEY_LEN]));
         let kek = KeyEncryptionKey::new(&AES_256, &self.0[..]).expect("a 256-bit AES-KW key");
         let len = kek
-            .unwrap(&wrapped.0, &mut key[..])
+            .unwrap(&wrapped.0, &mut key.0[..])
             .map_err(|_| Unauthentic("a wrapped key, by its integrity check"))?
             .len();
         if len != KEY_LEN {
-            key.zeroize();
             return Err(Unauthentic("a wrapped key, of the wrong length"));
         }
-        Ok(Self(key))
+        Ok(key)
     }
 
     /// The HMAC-SHA256 of `bytes` under it.

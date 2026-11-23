@@ -8,14 +8,16 @@
 //!
 //! It serves what cells ask of S3 ([`crate::bucket::conformance`] checks it does), path-style
 //! and unsigned: objects' PUTs, conditional on `If-None-Match: *` or `If-Match`, their GETs, whole
-//! or of a range, HEADs, DELETEs and DeleteObjects, and ListObjectsV2 by prefix, by delimiter `/`
+//! or of a range, HEADs, DELETEs, conditional on `If-Match` or not, and DeleteObjects, and ListObjectsV2 by prefix, by delimiter `/`
 //! too (TASK-395.5), in pages of `max-keys` (1,000 by default) objects and prefixes together, each
 //! going on from its `continuation-token`: the last key or prefix of the page before, which it
 //! names as `NextContinuationToken`. An update of no object is a failed precondition, as RustFS and
 //! Azure have it. It counts the requests it serves by kind ([`S3Server::requests`]). A key longer
 //! than S3's 1,024 bytes it refuses, `400 Bad Request`, as S3 does (`KeyTooLongError`); and told to,
 //! it refuses every request so, as a bucket refuses credentials it no longer takes, `403
-//! Forbidden` (board 5861, [`S3Server::answering`]).
+//! Forbidden` (board 5861, [`S3Server::answering`]). It dates its responses (`Date`) and its
+//! objects by a clock of its own, the host's or as far off it as told, or dates no response
+//! (board 8467, [`S3Server::clock_ahead`], [`S3Server::dating`]).
 
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -40,6 +42,52 @@ pub struct S3Server {
     objects: Option<Arc<Mutex<Objects>>>,
     /// How many connections it accepted (TASK-449).
     connections: Arc<std::sync::atomic::AtomicU64>,
+    /// cladefs: its clock (board 8467).
+    clock: Arc<Clock>,
+}
+
+/// cladefs: a kind of request the server may be told to answer the next of alone
+/// ([`S3Server::answering_next`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// A DELETE conditional on `If-Match`.
+    ConditionalDelete,
+    Head,
+}
+
+impl Objects {
+    /// What it answers this request, of kind `kind`, if told to answer the next of its kind so.
+    fn next(&mut self, kind: Next) -> Option<Answer> {
+        match self.next {
+            Some((next, answer)) if next == kind => {
+                self.next = None;
+                Some(status(answer))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// cladefs: a server's clock (board 8467): so many milliseconds ahead of the host's, and whether
+/// its responses carry its date.
+#[derive(Debug)]
+struct Clock {
+    ahead: std::sync::atomic::AtomicI64,
+    dated: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self { ahead: Default::default(), dated: std::sync::atomic::AtomicBool::new(true) }
+    }
+}
+
+impl Clock {
+    fn now(&self) -> SystemTime {
+        let ahead = self.ahead.load(std::sync::atomic::Ordering::Relaxed);
+        let by = Duration::from_millis(ahead.unsigned_abs());
+        if ahead >= 0 { SystemTime::now() + by } else { SystemTime::now() - by }
+    }
 }
 
 #[derive(Clone)]
@@ -58,6 +106,9 @@ struct Objects {
     requests: BTreeMap<&'static str, u64>,
     /// What it answers every request, if it is told to answer them all so (board 5861).
     answer: Option<StatusCode>,
+    /// cladefs: what it answers the next request of a kind alone, if told to (board 9229): a
+    /// conditional DELETE's, or a HEAD's.
+    next: Option<(Next, StatusCode)>,
 }
 
 impl Objects {
@@ -82,30 +133,52 @@ impl S3Server {
         let served = objects.clone();
         let connections = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let accepted = connections.clone();
+        let clock = Arc::new(Clock::default());
+        let dating = clock.clone();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let stream = Throttled { stream, link: link.clone(), waiting: None };
-                let objects = objects.clone();
+                let (objects, clock) = (objects.clone(), dating.clone());
                 let serve = hyper::service::service_fn(move |request| {
-                    let objects = objects.clone();
-                    async move { Ok::<_, std::convert::Infallible>(serve(&objects, request).await) }
+                    let (objects, clock) = (objects.clone(), clock.clone());
+                    async move {
+                        let mut answer = serve(&objects, &clock, request).await;
+                        if clock.dated.load(std::sync::atomic::Ordering::Relaxed) {
+                            let date = http_date(clock.now()).parse().unwrap();
+                            answer.headers_mut().insert(hyper::header::DATE, date);
+                        }
+                        Ok::<_, std::convert::Infallible>(answer)
+                    }
                 });
                 tokio::spawn(async move {
                     // A client that gave up on a request hangs up on it: no error of the server's.
+                    // Its responses dated by its own clock, if at all, not hyper's.
                     let connection = hyper::server::conn::http1::Builder::new()
+                        .auto_date_header(false)
                         .serve_connection(hyper_util::rt::TokioIo::new(stream), serve);
                     let _ = connection.await;
                 });
             }
         });
-        Self { address, objects: Some(served), connections }
+        Self { address, objects: Some(served), connections, clock }
     }
 
     /// One that something else serves at `address`.
     pub fn at(address: SocketAddr) -> Self {
-        Self { address, objects: None, connections: Default::default() }
+        Self { address, objects: None, connections: Default::default(), clock: Default::default() }
+    }
+
+    /// cladefs: sets its clock `ahead` milliseconds ahead of the host's, or behind, negative
+    /// (board 8467): the dates of its responses, and of the objects it stores from now on.
+    pub fn clock_ahead(&self, ahead: i64) {
+        self.clock.ahead.store(ahead, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// cladefs: has its responses carry its date, or none (board 8467).
+    pub fn dating(&self, dated: bool) {
+        self.clock.dated.store(dated, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// How many connections it accepted so far: each a TCP handshake, and on a real bucket a TLS
@@ -127,6 +200,13 @@ impl S3Server {
         let answer = answer.map(|answer| StatusCode::from_u16(answer).unwrap());
         let objects = self.objects.as_ref().expect("a server of its own");
         objects.lock().unwrap().answer = answer;
+    }
+
+    /// cladefs: has it answer the next request of kind `next` alone with HTTP status `answer`,
+    /// then serve them again (board 9229).
+    pub fn answering_next(&self, next: Next, answer: u16) {
+        let objects = self.objects.as_ref().expect("a server of its own");
+        objects.lock().unwrap().next = Some((next, StatusCode::from_u16(answer).unwrap()));
     }
 
     /// Its bucket's objects, through cladefs's client, as a host reaches S3: for other crates'
@@ -252,7 +332,11 @@ fn escaped(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-async fn serve(objects: &Mutex<Objects>, request: Request<hyper::body::Incoming>) -> Answer {
+async fn serve(
+    objects: &Mutex<Objects>,
+    clock: &Clock,
+    request: Request<hyper::body::Incoming>,
+) -> Answer {
     let (parts, body) = request.into_parts();
     let header =
         |name: &str| parts.headers.get(name).map(|value| value.to_str().unwrap().to_owned());
@@ -358,12 +442,17 @@ async fn serve(objects: &Mutex<Objects>, request: Request<hyper::body::Incoming>
             }
             objects.versions += 1;
             let e_tag = format!("\"{}\"", objects.versions);
-            let stored = Stored { bytes: body, e_tag: e_tag.clone(), modified: SystemTime::now() };
+            let stored = Stored { bytes: body, e_tag: e_tag.clone(), modified: clock.now() };
             objects.objects.insert(key.to_owned(), stored);
             Response::builder().header("etag", e_tag).body(Full::default()).unwrap()
         }
         (&Method::GET | &Method::HEAD, key) => {
             objects.count(if parts.method == Method::HEAD { "head" } else { "get" });
+            if parts.method == Method::HEAD
+                && let Some(answer) = objects.next(Next::Head)
+            {
+                return answer;
+            }
             let Some(stored) = objects.objects.get(key) else {
                 return status(StatusCode::NOT_FOUND);
             };
@@ -418,6 +507,18 @@ async fn serve(objects: &Mutex<Objects>, request: Request<hyper::body::Incoming>
         }
         (&Method::DELETE, key) => {
             objects.count("delete");
+            // cladefs: conditional on `If-Match` (board 9229), as S3's DeleteObject is: of no
+            // object, a failed precondition, as an update of none is.
+            if header("if-match").is_some()
+                && let Some(answer) = objects.next(Next::ConditionalDelete)
+            {
+                return answer;
+            }
+            if let Some(e_tag) = header("if-match")
+                && objects.objects.get(key).is_none_or(|stored| stored.e_tag != e_tag)
+            {
+                return status(StatusCode::PRECONDITION_FAILED);
+            }
             objects.objects.remove(key);
             status(StatusCode::NO_CONTENT)
         }

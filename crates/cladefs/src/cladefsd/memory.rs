@@ -185,6 +185,10 @@ pub fn governed_bytes() -> u64 {
 /// holding no thread ([`shrink`], board 2946).
 pub async fn govern(allowance: u64) {
     GOVERNED.get().store(allowance, Ordering::Relaxed);
+    // cladefs: every tenant's bytes in flight within a share of what it allows (board 8465).
+    total_in_flight().govern(allowance / GOVERNED_IN_FLIGHT_SHARE);
+    // cladefs: its shrinks wait for what they evict this long at most, together (board 8535).
+    let deadline = std::time::Instant::now() + PARKED_WAIT;
     let parts = held_parts();
     let room = allowance.saturating_sub(crate::slabs::arenas_bytes());
     if parts.bytes() > room {
@@ -232,18 +236,27 @@ pub async fn govern(allowance: u64) {
     };
     for (id, share) in super::governor::shares(allowance, &weighted) {
         if held_by(id) > share
-            && let Err(err) = shrink(Some(id), share).await
+            && let Err(err) = shrink_by(Some(id), share, deadline).await
             && err != Errno::ENOENT
         {
             log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
         }
     }
     if crate::slabs::arenas_bytes() > allowance
-        && let Err(err) = shrink(None, allowance).await
+        && let Err(err) = shrink_by(None, allowance, deadline).await
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
     }
 }
+
+/// cladefs: how long a shrink waits at most for the pages it evicted that are quarantined, a
+/// governor's look's shrinks together (board 8535): twice [`super::server::UNRESPONSIVE`], by when
+/// a VM process that stopped answering was let go, found within a look of the watchdog's, and
+/// killed has exited, its pages back. Past it, what is quarantined still is held still, which the
+/// shrink evicts other extents' pages for, rather than wait: one VM process that never exits, in
+/// uninterruptible sleep or a frozen cgroup, ended every later look of the governor, every tenant's
+/// memory ungoverned until the daemon restarted (hotbed question 484).
+pub(super) const PARKED_WAIT: std::time::Duration = super::server::UNRESPONSIVE.saturating_mul(2);
 
 /// What the tenants alive of the ID `id` hold.
 fn held_by(id: u64) -> u64 {
@@ -262,11 +275,19 @@ fn held_by(id: u64) -> u64 {
 /// evicted, is free once the VM process has unmapped it, or the daemon let it go (TASK-79.9): each
 /// extent's pages free before what is held is looked at again ([`Parking`]), so that it evicts no
 /// more than it must, and returns what is held once they are, not before; waiting for them holding
-/// no thread (board 2946).
+/// no thread (board 2946). cladefs: for [`PARKED_WAIT`] at most (board 8535).
 pub async fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
-    let parking = Parking::new();
+    shrink_by(tenant, target, std::time::Instant::now() + PARKED_WAIT).await
+}
+
+/// cladefs: [`shrink`], waiting for the pages it evicts until `deadline` at most (board 8535).
+async fn shrink_by(
+    tenant: Option<u64>,
+    target: u64,
+    deadline: std::time::Instant,
+) -> Result<u64, Errno> {
     let Some(id) = tenant else {
-        evict_until(&parking, None, || crate::slabs::arenas_bytes_in_use() <= target).await;
+        evict_until(None, || crate::slabs::arenas_bytes_in_use() <= target, deadline).await;
         // Then the spare slabs, which its evictions' frees may have kept.
         crate::slabs::release_spares(None);
         return Ok(crate::slabs::arenas_bytes());
@@ -282,7 +303,7 @@ pub async fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
     let in_use =
         || arenas.iter().map(|arena| crate::slabs::arena_bytes_in_use(*arena)).sum::<u64>();
     for arena in &arenas {
-        evict_until(&parking, Some(*arena), || in_use() <= target).await;
+        evict_until(Some(*arena), || in_use() <= target, deadline).await;
         crate::slabs::release_spares(Some(*arena));
     }
     Ok(held())
@@ -293,19 +314,25 @@ pub async fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
 /// evicted so far are free, or none is left to evict; and returns once those it evicted are free
 /// ([`Parking`]). Each pass of the cache's is synchronous, and ends at the first extent whose
 /// pages it left quarantined, a window's, which it waits for between passes, holding no thread
-/// (board 2946); the next pass orders what is left anew.
+/// (board 2946); the next pass orders what is left anew. cladefs: waiting until `deadline` at most
+/// (board 8535): past it, what a pass left quarantined is held still, counted in what `enough`
+/// looks at, as no page freed; and the next pass, which counts what it frees anew, evicts other
+/// extents' for it, waiting for none.
 async fn evict_until(
-    parking: &Parking,
     arena: Option<crate::slabs::ArenaId>,
     enough: impl Fn() -> bool,
+    deadline: std::time::Instant,
 ) {
     loop {
+        let parking = Parking::new();
         let stop = |_: u64| parking.parked() || enough();
         parking.counting(|| crate::cache::evict_least_used(arena, stop));
         if !parking.parked() {
             return;
         }
-        parking.wait().await;
+        // Past it, at once: what is quarantined still, held, the next pass evicts others' for.
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        drop(tokio::time::timeout(left, parking.wait()).await);
     }
 }
 
@@ -338,13 +365,21 @@ pub fn tenants() -> Vec<TenantMemory> {
 }
 
 /// cladefs: what every tenant's connections have the daemon hold of their VM processes' requests
-/// now, together ([`InFlight`]): the default tenant's, if made, and each granted one's alive.
+/// now, together ([`InFlight`]): the default tenant's, if made, and each granted one's alive,
+/// within every tenant's bytes in flight ([`total_in_flight`], board 8465).
 pub(super) fn in_flight_held() -> u64 {
+    total_in_flight().held()
+}
+
+/// cladefs: of `reserved` connections each tenant alive keeps, whatever the others have, those its
+/// VM processes don't have, every tenant's together: the default tenant's, if made, and each
+/// granted one's (`server::Counted`, board 8465).
+pub(super) fn reserved_connections_left(reserved: usize) -> usize {
     let registry = REGISTRY.get().lock().unwrap();
-    let granted: u64 = registry.alive().map(|tenant| tenant.in_flight().held()).sum();
-    let default =
-        super::server::default_tenant_made().map_or(0, |tenant| tenant.in_flight().held());
-    granted + default
+    let default = super::server::default_tenant_made();
+    (registry.alive().chain(default))
+        .map(|tenant| reserved.saturating_sub(tenant.connections()))
+        .sum()
 }
 
 /// cladefs: the size from which the C library's allocator maps each allocation on its own, and
@@ -374,9 +409,9 @@ pub fn return_large_allocations() {
 /// cladefs: the bytes in flight a tenant's connections share, unless they are set for it
 /// ([`set_in_flight`]): what of its VM processes' requests the daemon holds at once, their stream
 /// data and what it has queued for them, together (TASK-149.35). Each connection has a credit of
-/// its own too (`server::Peer::credit`, 272 MiB without a window), and a tenant as many as 1,024
-/// connections: some 272 GiB of one tenant's, held within the protocol, every tenant's daemon with
-/// it. A VM process moves the data of its requests through its transfer area, up to 256 KiB each, 8
+/// its own too (`server::Peer::credit`, 272 MiB without a window), and a tenant as many as
+/// `server::MAX_CONNECTIONS` connections: some 1.1 TiB of one tenant's, held within the protocol;
+/// every tenant's together within [`total_in_flight`]'s (board 8465). A VM process moves the data of its requests through its transfer area, up to 256 KiB each, 8
 /// at once, which no room counts; past that, through the stream. 8 GiB is 30 VM processes at once
 /// keeping their rooms full, which none does but writing 64 MiB extents back to back, where a
 /// host's density case, 300 forks reading their base, held 16 MiB of the tenant's at most.
@@ -385,6 +420,41 @@ pub const DEFAULT_TENANT_IN_FLIGHT: u64 = 8 << 30;
 node_local::node_local! {
     /// cladefs: the bytes in flight of every tenant whose own aren't set ([`set_in_flight`]).
     static TENANT_IN_FLIGHT: AtomicU64 = AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT);
+}
+
+/// cladefs: the bytes in flight every tenant's connections share together, unless set otherwise
+/// ([`set_total_in_flight`]), and the governor allows fewer (board 8465): two tenants' at their
+/// default's most (hotbed question 482). Each tenant's room is its own ([`DEFAULT_TENANT_IN_FLIGHT`]), and a host has as
+/// many tenants as it was granted: each at its room held their sum, past a host's memory, uncounted
+/// by the governor, which evicted the cache for it in vain.
+pub const DEFAULT_TOTAL_IN_FLIGHT: u64 = 2 * DEFAULT_TENANT_IN_FLIGHT;
+
+/// cladefs: what of the memory the governor allows the daemon every tenant's bytes in flight may
+/// hold together, in parts of it (board 8465): a quarter, the rest the cache's. The buffers its
+/// VM processes' requests are held in, which the host's memory falling as they fill has the
+/// governor allow the cache less of.
+const GOVERNED_IN_FLIGHT_SHARE: u64 = 4;
+
+/// cladefs: what every tenant's connections have the daemon hold together (board 8465), which each
+/// tenant's holds within ([`InFlight::of_a_tenant`]).
+pub(super) fn total_in_flight() -> &'static InFlight {
+    node_local::node_local! {
+        /// cladefs: its bytes, as [`DEFAULT_TOTAL_IN_FLIGHT`], [`set_total_in_flight`] and the
+        /// governor say.
+        static TOTAL: InFlight = InFlight::total();
+    }
+    TOTAL.get()
+}
+
+/// cladefs: sets the bytes in flight every tenant's connections share together to `bytes`, or,
+/// without, [`DEFAULT_TOTAL_IN_FLIGHT`] (board 8465): fewer if the governor allows fewer. `EINVAL`
+/// for fewer than a payload's most, which a request couldn't be held in.
+pub fn set_total_in_flight(bytes: Option<u64>) -> Result<(), Errno> {
+    if bytes.is_some_and(|bytes| bytes < super::wire::MAX_PAYLOAD) {
+        return Err(Errno::EINVAL);
+    }
+    total_in_flight().set_budget(bytes);
+    Ok(())
 }
 
 /// cladefs: sets the bytes in flight the connections of the tenant `tenant` share to `bytes`, or,
@@ -426,18 +496,56 @@ pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errn
 /// is read, until what is held leaves it enough; or, with nothing held, goes on, so that one as
 /// large as the budget is served. Not let go, as a connection past its own room is: it keeps
 /// within its own, and the tenant's other VM processes, a healthy tenant's busy ones, take theirs.
-#[derive(Default)]
 pub struct InFlight {
     held: AtomicU64,
-    /// Its budget, or 0, every tenant's ([`TENANT_IN_FLIGHT`]).
+    /// Its budget, or 0, its default's ([`InFlight::default`]).
     budget: AtomicU64,
+    /// cladefs: the most the governor allows it, every tenant's ([`total_in_flight`]), or
+    /// `u64::MAX`.
+    governed: AtomicU64,
     /// The most it held, which the tests measure.
     peak: AtomicU64,
     /// What says it held less, or its budget grew.
     less: event_listener::Event,
+    /// cladefs: its budget unless set: a tenant's, every tenant's whose own aren't set
+    /// ([`TENANT_IN_FLIGHT`]); every tenant's together, [`DEFAULT_TOTAL_IN_FLIGHT`].
+    default: fn() -> u64,
+    /// cladefs: a tenant's, what every tenant's together hold within too ([`total_in_flight`]).
+    within: Option<&'static InFlight>,
 }
 
 impl InFlight {
+    fn made(default: fn() -> u64, within: Option<&'static InFlight>) -> Self {
+        Self {
+            held: AtomicU64::new(0),
+            budget: AtomicU64::new(0),
+            governed: AtomicU64::new(u64::MAX),
+            peak: AtomicU64::new(0),
+            less: event_listener::Event::new(),
+            default,
+            within,
+        }
+    }
+
+    /// cladefs: a tenant's, within every tenant's together (board 8465).
+    pub(super) fn of_a_tenant() -> Self {
+        Self::made(|| TENANT_IN_FLIGHT.get().load(Ordering::Relaxed), Some(total_in_flight()))
+    }
+
+    /// cladefs: every tenant's together ([`total_in_flight`]).
+    fn total() -> Self {
+        Self::made(|| DEFAULT_TOTAL_IN_FLIGHT, None)
+    }
+
+    /// cladefs: the governor allows it `bytes` at most, a payload's at least (board 8465).
+    fn govern(&self, bytes: u64) {
+        let bytes = bytes.max(super::wire::MAX_PAYLOAD);
+        if self.governed.swap(bytes, Ordering::Relaxed) < bytes {
+            // Larger, it lets those waiting go on.
+            self.changed();
+        }
+    }
+
     /// What it holds.
     pub fn held(&self) -> u64 {
         self.held.load(Ordering::Relaxed)
@@ -448,12 +556,13 @@ impl InFlight {
         self.peak.load(Ordering::Relaxed)
     }
 
-    /// Its budget: its own, or every tenant's.
+    /// Its budget: its own, or its default; no more than the governor allows.
     pub fn budget(&self) -> u64 {
-        match self.budget.load(Ordering::Relaxed) {
-            0 => TENANT_IN_FLIGHT.get().load(Ordering::Relaxed),
+        let budget = match self.budget.load(Ordering::Relaxed) {
+            0 => (self.default)(),
             budget => budget,
-        }
+        };
+        budget.min(self.governed.load(Ordering::Relaxed))
     }
 
     fn set_budget(&self, bytes: Option<u64>) {
@@ -467,17 +576,23 @@ impl InFlight {
     }
 
     /// Holds `bytes` more, within its budget or not: what the daemon queued for a VM process, which
-    /// it holds whatever.
+    /// it holds whatever. cladefs: and every tenant's, a tenant's.
     pub fn add(&self, bytes: u64) {
         let held = self.held.fetch_add(bytes, Ordering::Relaxed) + bytes;
         self.peak.fetch_max(held, Ordering::Relaxed);
+        if let Some(within) = self.within {
+            within.add(bytes);
+        }
     }
 
-    /// Holds `bytes` fewer.
+    /// Holds `bytes` fewer. cladefs: and every tenant's, a tenant's.
     pub fn sub(&self, bytes: u64) {
         if bytes > 0 {
             self.held.fetch_sub(bytes, Ordering::Relaxed);
             self.changed();
+            if let Some(within) = self.within {
+                within.sub(bytes);
+            }
         }
     }
 
@@ -494,8 +609,26 @@ impl InFlight {
     }
 
     /// Holds `bytes` more, once they are within its budget, or it holds nothing: waiting, holding
-    /// no thread, until then.
+    /// no thread, until then. cladefs: a tenant's, then within every tenant's, as it is (board
+    /// 8465): what it took of its own given back if it is dropped waiting for that.
     pub async fn take(&self, bytes: u64) {
+        self.take_own(bytes).await;
+        let Some(within) = self.within else { return };
+        /// What a tenant took of its own, given back unless every tenant's is taken too.
+        struct Taken<'a>(&'a InFlight, u64);
+        impl Drop for Taken<'_> {
+            fn drop(&mut self) {
+                self.0.held.fetch_sub(self.1, Ordering::Relaxed);
+                self.0.changed();
+            }
+        }
+        let taken = Taken(self, bytes);
+        within.take_own(bytes).await;
+        std::mem::forget(taken);
+    }
+
+    /// Holds `bytes` more of its own, as [`InFlight::take`] does, its budget alone looked at.
+    async fn take_own(&self, bytes: u64) {
         loop {
             if self.try_take(bytes) {
                 return;

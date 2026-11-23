@@ -730,6 +730,28 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
             "Arenas whose relief found nothing to free: their allocations fail.",
             crate::slabs::exhausted_arenas(),
         ),
+        // cladefs: board 8535.
+        (
+            "vm_processes_wedged",
+            "VM processes the daemon killed that have not exited, as in uninterruptible sleep.",
+            super::server::wedged(),
+        ),
+        (
+            "memory_wedged_bytes",
+            "Memory quarantined for wedged VM processes, which comes back only once they exit.",
+            crate::slabs::wedged_bytes(),
+        ),
+        // cladefs: board 8465.
+        (
+            "in_flight_bytes",
+            "What every tenant's VM processes' requests have the daemon hold: stream data, replies.",
+            super::memory::in_flight_held(),
+        ),
+        (
+            "in_flight_limit_bytes",
+            "The most of that the daemon holds before requests wait for it.",
+            super::memory::total_in_flight().budget(),
+        ),
     ];
     if let Some(limit) = crate::slabs::total_cap() {
         gauges.push(("memory_limit_bytes", "The limit of every tenant's memory.", limit));

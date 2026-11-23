@@ -10,7 +10,9 @@
 //! What replaces or removes an object, an update, an overwrite, a delete, a copy or a rename, holds
 //! the lock of the object's directory, an exclusive `flock` of one of [`LOCKS`] files in the
 //! bucket's directory, [`lock_of`] the directory names: across processes, and within one, each
-//! holding opening the file anew. An update compares the object's e-tag with the one it names
+//! holding opening the file anew; the thread that takes it does the work and lets it go, so that
+//! no caller giving up, nor a runtime shutting down, lets it go while a write goes on (hotbed
+//! reviews 49, 51). An update compares the object's e-tag with the one it names
 //! under the lock, then writes as an overwrite does, a new file renamed over the object. Creates
 //! need no lock: `LocalFileSystem` creates by a hard link, which fails where an object is, and
 //! replaces nothing. E-tags are `LocalFileSystem`'s: the file's inode, modification time in
@@ -87,31 +89,43 @@ impl Local {
         Ok(Self { files: Arc::new(files), dir: Arc::from(dir) })
     }
 
-    /// The lock `lock` ([`lock_of`]), held until what it returns is dropped: taken on a thread
-    /// that may block, if a Tokio runtime has one to give, as `LocalFileSystem` does its I/O.
-    async fn lock(&self, lock: String) -> Result<std::fs::File> {
-        let path = self.dir.join(lock);
-        let shown = path.display().to_string();
-        let lock = move || -> std::io::Result<std::fs::File> {
-            let file =
-                std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
-            file.lock()?;
-            Ok(file)
+    /// Runs `write`, a write under the locks `locks` ([`lock_of`]), taken in their names' order,
+    /// as every holding of several takes them, and held by the thread that runs it to its end, one
+    /// that may block, if a Tokio runtime has one to give:
+    /// so that neither a caller giving up on it nor its runtime shutting down, which drops its
+    /// tasks but waits for such threads, lets the lock go while `LocalFileSystem`'s blocking write
+    /// goes on, which would then publish after another process's update under the lock and undo
+    /// it, a registry of buckets rolled back by a copy's spread that timed out (hotbed reviews 49,
+    /// 51). A write whose caller gave up may so take effect, as a request of any bucket whose
+    /// answer was lost may. Without a runtime, the caller's thread runs it, its I/O done there.
+    async fn locked_write<T, F>(
+        &self,
+        mut locks: Vec<String>,
+        write: impl FnOnce(Local) -> F + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
+        locks.sort();
+        locks.dedup();
+        let paths: Vec<std::path::PathBuf> = locks.iter().map(|lock| self.dir.join(lock)).collect();
+        let this = self.clone();
+        let take = move || paths.iter().map(|path| take_lock(path)).collect::<Result<Vec<_>>>();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            let _locked = take()?;
+            return write(this).await;
         };
-        let locked = match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => runtime.spawn_blocking(lock).await.map_err(std::io::Error::other),
-            // No runtime: the thread is the caller's to block.
-            Err(_) => Ok(lock()),
+        let run = move || {
+            let _locked = take()?;
+            futures::executor::block_on(write(this))
         };
-        locked.and_then(|locked| locked).map_err(|source| object_store::Error::Generic {
-            store: "Local",
-            source: format!("locking {shown}: {source}").into(),
-        })
-    }
-
-    /// The lock of the object at `location`, held as [`Local::lock`] says.
-    async fn lock_for(&self, location: &Path) -> Result<std::fs::File> {
-        self.lock(lock_of(location.as_ref())).await
+        match runtime.spawn_blocking(run).await {
+            Ok(done) => done,
+            // madsim's `JoinError` gives no panic back to resume: said, as a panic here.
+            Err(err) if err.is_panic() => panic!("a write under its lock panicked: {err}"),
+            Err(err) => Err(generic(format!("a write under its lock, cancelled: {err}"))),
+        }
     }
 
     /// Whether `meta` is an object's, not a lock's.
@@ -120,25 +134,23 @@ impl Local {
         name.contains('/') || !name.starts_with(LOCK)
     }
 
-    /// Deletes `paths`, whose objects' lock is `lock`, under it, held until every delete is
-    /// answered: what each came to, each failing as taking the lock did, if it did.
+    /// Deletes `paths`, whose objects' lock is `lock`, under it ([`Local::locked_write`]), held
+    /// until every delete is answered: what each came to, each failing as taking the lock did, if
+    /// it did.
     async fn delete_locked(self, lock: String, paths: Vec<Path>) -> Vec<Result<Path>> {
-        match self.lock(lock).await {
-            Ok(_locked) => {
-                let paths = futures::stream::iter(paths.into_iter().map(Ok)).boxed();
-                self.files.delete_stream(paths).collect().await
-            }
-            Err(failed) => (paths.iter())
-                .map(|_| {
-                    let source = failed.to_string().into();
-                    Err(object_store::Error::Generic { store: "Local", source })
-                })
-                .collect(),
+        let count = paths.len();
+        let deleting = self.locked_write(vec![lock], move |this| async move {
+            let paths = futures::stream::iter(paths.into_iter().map(Ok)).boxed();
+            Ok(this.files.delete_stream(paths).collect::<Vec<_>>().await)
+        });
+        match deleting.await {
+            Ok(deleted) => deleted,
+            Err(failed) => (0..count).map(|_| Err(generic(failed.to_string()))).collect(),
         }
     }
 
-    /// Writes `payload` at `location` as `opts` say, the lock held: an update only if the object
-    /// there is of `version`, then as an overwrite.
+    /// Writes `payload` at `location` as `opts` say, the lock held ([`Local::locked_write`]): an
+    /// update only if the object there is of `version`, then as an overwrite.
     async fn update(
         &self,
         location: &Path,
@@ -146,7 +158,22 @@ impl Local {
         opts: PutOptions,
         version: UpdateVersion,
     ) -> Result<PutResult> {
-        let _locked = self.lock_for(location).await?;
+        let location = location.clone();
+        let lock = lock_of(location.as_ref());
+        self.locked_write(vec![lock], move |this| async move {
+            this.update_locked(&location, payload, opts, version).await
+        })
+        .await
+    }
+
+    /// [`Local::update`], its lock held.
+    async fn update_locked(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+        version: UpdateVersion,
+    ) -> Result<PutResult> {
         let found = match self.files.head(location).await {
             Ok(meta) => meta.e_tag,
             Err(object_store::Error::NotFound { .. }) => None,
@@ -161,6 +188,47 @@ impl Local {
         let opts = PutOptions { mode: PutMode::Overwrite, ..opts };
         self.files.put_opts(location, payload, opts).await
     }
+
+    /// cladefs: deletes the object at `location` only if it is of `version` (board 9229), the
+    /// lock held ([`Local::locked_write`]), as an update compares its version: a precondition
+    /// failed if another, or none, is there. What `object_store` has no request for, which
+    /// [`crate::object_bucket`] asks of a file bucket directly.
+    pub async fn delete_if(&self, location: &Path, version: &UpdateVersion) -> Result<()> {
+        let (location, version) = (location.clone(), version.clone());
+        let lock = lock_of(location.as_ref());
+        self.locked_write(vec![lock], move |this| async move {
+            let found = match this.files.head(&location).await {
+                Ok(meta) => meta.e_tag,
+                Err(object_store::Error::NotFound { .. }) => None,
+                Err(other) => return Err(other),
+            };
+            if found.is_none() || found != version.e_tag {
+                return Err(object_store::Error::Precondition {
+                    path: location.to_string(),
+                    source: format!("{found:?} is not {:?}", version.e_tag).into(),
+                });
+            }
+            // Under the lock every replacement and removal of it takes: there still, of `version`.
+            this.files.delete(&location).await
+        })
+        .await
+    }
+}
+
+/// The lock file `path`, locked, by blocking the calling thread: held until it is dropped.
+fn take_lock(path: &std::path::Path) -> Result<std::fs::File> {
+    let take = || -> std::io::Result<std::fs::File> {
+        let file =
+            std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+        file.lock()?;
+        Ok(file)
+    };
+    take().map_err(|source| generic(format!("locking {}: {source}", path.display())))
+}
+
+/// The bucket's failure, saying `why`.
+fn generic(why: String) -> object_store::Error {
+    object_store::Error::Generic { store: "Local", source: why.into() }
 }
 
 impl fmt::Display for Local {
@@ -187,8 +255,12 @@ impl ObjectStore for Local {
         match opts.mode.clone() {
             PutMode::Create => self.files.put_opts(location, payload, opts).await,
             PutMode::Overwrite => {
-                let _locked = self.lock_for(location).await?;
-                self.files.put_opts(location, payload, opts).await
+                let location = location.clone();
+                let lock = lock_of(location.as_ref());
+                self.locked_write(vec![lock], move |this| async move {
+                    this.files.put_opts(&location, payload, opts).await
+                })
+                .await
             }
             PutMode::Update(version) => self.update(location, payload, opts, version).await,
         }
@@ -266,21 +338,21 @@ impl ObjectStore for Local {
     }
 
     async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
-        let _locked = self.lock_for(to).await?;
-        self.files.copy_opts(from, to, options).await
+        let (from, to) = (from.clone(), to.clone());
+        self.locked_write(vec![lock_of(to.as_ref())], move |this| async move {
+            this.files.copy_opts(&from, &to, options).await
+        })
+        .await
     }
 
-    /// Under the locks of both, the first by their names taken first, as every holding of both
-    /// takes them.
+    /// Under the locks of both ([`Local::locked_write`]).
     async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> Result<()> {
-        let mut locks = [lock_of(from.as_ref()), lock_of(to.as_ref())];
-        locks.sort();
-        let _first = self.lock(locks[0].clone()).await?;
-        let _second = match locks[0] == locks[1] {
-            true => None,
-            false => Some(self.lock(locks[1].clone()).await?),
-        };
-        self.files.rename_opts(from, to, options).await
+        let locks = vec![lock_of(from.as_ref()), lock_of(to.as_ref())];
+        let (from, to) = (from.clone(), to.clone());
+        self.locked_write(locks, move |this| async move {
+            this.files.rename_opts(&from, &to, options).await
+        })
+        .await
     }
 }
 
@@ -289,6 +361,23 @@ mod tests {
     use super::{LOCK, LOCKS, lock_of};
     use crate::bucket::{Bucket as _, Error, PutMode};
     use crate::object_bucket::tests::file;
+
+    /// Board 10060, doc-28: every build locks an object's directory by the same file, as builds
+    /// of a rolling upgrade share a bucket's directory: one hashing otherwise would lock another
+    /// file for the same object, and two updates of it both win. The names of fixed keys' locks,
+    /// as FNV-1a gives them, pinned.
+    #[test]
+    fn every_build_locks_a_directory_by_the_same_file() {
+        for (location, lock) in [
+            ("identity", ".cladefs-lock.25"),
+            ("tenants/0000000000001/cells/0000000000002/head/00", ".cladefs-lock.05"),
+            ("tenants/0000000000001/cells/0000000000002/head/01", ".cladefs-lock.05"),
+            ("tenants/0000000000001/cells/0000000000002/gc/lease", ".cladefs-lock.35"),
+            ("ephemeral/0001/abc.decommissioned", ".cladefs-lock.1b"),
+        ] {
+            assert_eq!(lock_of(location), lock, "{location}");
+        }
+    }
 
     /// Updates of one version, many at once through two buckets of one directory, as two
     /// processes' would be: one wins, whose bytes the object holds, and the others find it changed.
@@ -411,6 +500,46 @@ mod tests {
             lock.unlock().unwrap();
             waiting.await.unwrap().unwrap();
             assert_eq!(bucket.get(held).await.unwrap().bytes, [2]);
+        });
+    }
+
+    /// hotbed review 49: an update whose caller gave up on it, waiting for its lock, runs to its
+    /// end once the lock is let go: never dropped half-way, which let the lock go while the write
+    /// it started went on, undoing an update made after it under the lock.
+    #[test]
+    fn updates_given_up_on_run_to_their_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let key = "held/object";
+        runtime.block_on(async {
+            let bucket = file(dir.path());
+            let version = bucket.put(key, vec![1].into(), PutMode::Create).await.unwrap();
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.path().join(lock_of(key)))
+                .unwrap();
+            lock.lock().unwrap();
+            let giving_up = tokio::spawn({
+                let bucket = bucket.clone();
+                async move { bucket.put(key, vec![2].into(), PutMode::Update(version)).await }
+            });
+            // Long enough for it to begin and wait for the lock, which nothing else shows: an update
+            // aborted before it began does nothing, rightly, and fails this test.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            giving_up.abort();
+            assert!(giving_up.await.unwrap_err().is_cancelled());
+            lock.unlock().unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while bucket.get(key).await.unwrap().bytes != [2] {
+                assert!(tokio::time::Instant::now() < deadline, "the update was dropped");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         });
     }
 }

@@ -13,12 +13,12 @@ const MIB: u64 = 1024 * 1024;
 fn configure_before_physical_memory_is_used() {
     pages::configure(pages::Config::with_memory(256 * MIB)).expect("configure failed");
     assert_eq!(cladefs::slabs::memory_bytes(), 256 * MIB);
-    drop(pages::Arena::new());
+    drop(pages::Arena::new().unwrap());
 }
 
 #[test]
 fn configure_once_physical_memory_is_used_fails() {
-    drop(pages::Arena::new());
+    drop(pages::Arena::new().unwrap());
     let error = pages::configure(pages::Config::default()).expect_err("configured");
     assert_eq!(error.to_string(), "physical memory has already been configured or used");
     assert_eq!(error.errno(), Some(Errno::EBUSY));

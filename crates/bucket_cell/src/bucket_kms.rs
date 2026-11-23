@@ -40,21 +40,20 @@ use crate::bucket::{self, Bucket, Created, Updated};
 use crate::identity::{self, NAMED};
 use crate::keys::{KmsKey, Kmses};
 use crate::layout;
-use crate::object_bucket::{ObjectBucket, Registered, RoutedBucket, numbered_options};
+use crate::object_bucket::{ObjectBucket, RoutedBucket};
 use extent_keys::kms::bucket::{self as formats, KekObject, TenantKek};
 use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
-use extent_keys::kms::{self, Error, Kms};
+use extent_keys::kms::{self, Error, Kms, Origin, Trust, Vars};
 use extent_keys::{Secret, Unauthentic, Wrapped};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The variable naming a host's KMS by its URL (`extent_keys::kms::from_url`), which [`from_env`]
 /// takes over a master key.
-pub const KMS_VAR: &str = "CLADEFS_KMS";
+pub use extent_keys::kms::KMS_VAR;
 
 /// How long a host uses a tenant's KEK as it last read it before reading its object again: so
 /// that a tenant shredded elsewhere is refused here within it, told or not, and the bucket is
@@ -296,7 +295,9 @@ pub struct Rotated {
 /// Rewraps every tenant's KEK object in `bucket` under the newest of `keys` (doc-16, The bucket
 /// KMS): each one under an older key, one of `keys`, by a conditional update, read again and done
 /// again if another changed it meanwhile. The KEKs stay as they are. Once done, refusing none,
-/// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`. Tenants
+/// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`, once the
+/// registry of buckets records it too ([`rotate_recorded`], which hosts of other buckets go by,
+/// board 8483). Tenants
 /// are listed a page at a time; done again, it rewraps nothing more. cladefs: refused by the bucket,
 /// [`bucket::Refused`] (board 5861), what it rewrapped before rewrapped.
 pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Result<Rotated, bucket::Refused> {
@@ -325,6 +326,89 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Result<Rotated,
         }
     }
     Ok(rotated)
+}
+
+/// cladefs: what [`rotate_recorded`] made of the registry of buckets (board 8483).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recorded {
+    /// The rotation refused a KEK object: nothing recorded, the older master keys still needed.
+    Refused,
+    /// The bucket is in no registry, never formatted, or its entry records no master key: none to
+    /// record.
+    Unrecorded,
+    /// Its entry records the newest master key, in the root's registry and in every bucket's copy
+    /// but those that failed, by number, and why: recording again, a rotation run again, finishes
+    /// them.
+    Recorded { failed: Vec<(u16, String)> },
+}
+
+/// cladefs: [`rotate`] of `home`'s own bucket under `keys`; then, refusing none, the newest of
+/// `keys` recorded as the master key of its tenants' KEKs in the registry of buckets (board 8483):
+/// its entry in the root's registry, by a conditional update ([`identity::record_master_key`]),
+/// then every bucket's copy ([`identity::spread`]), the root's first, each reached by `home`'s
+/// routes, as its own hosts reach it. Hosts for which the bucket is another than their own choose
+/// its bucket KMS by that entry, refusing it unless they hold the key it names ([`ByBucket`]),
+/// and read it from their own bucket's copy first: left naming a key dropped from their
+/// `CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY` since, they would refuse every cell of the bucket. An
+/// entry recording no master key records none still (hotbed question 460). Refused by the bucket, or
+/// the registry not to be read or written, says why.
+pub async fn rotate_recorded<B: Bucket>(
+    home: &RoutedBucket<B>,
+    keys: &MasterKeys,
+) -> Result<(Rotated, Recorded), String> {
+    rotate_recorded_within(home, keys, SPREAD_WITHIN).await
+}
+
+/// cladefs: how long [`rotate_recorded`] waits for each bucket's copy of the registry to be
+/// written before it says it failed, the bucket out of reach, as [`ByBucket::shred`] waits: the
+/// bucket's requests are asked again until it answers, and one out of reach would hold the rest
+/// (hotbed review 47). Recording again finishes it.
+pub const SPREAD_WITHIN: Duration = Duration::from_secs(30);
+
+/// [`rotate_recorded`], waiting `within` for each copy.
+async fn rotate_recorded_within<B: Bucket>(
+    home: &RoutedBucket<B>,
+    keys: &MasterKeys,
+    within: Duration,
+) -> Result<(Rotated, Recorded), String> {
+    let own = home.own();
+    let rotated = rotate(&*own, keys).await.map_err(|err| err.to_string())?;
+    if !rotated.refused.is_empty() {
+        return Ok((rotated, Recorded::Refused));
+    }
+    let registry = |err: crate::Error| format!("the registry of buckets: {err}");
+    let Some(ours) = identity::get(&*own).await.map_err(registry)? else {
+        return Ok((rotated, Recorded::Unrecorded));
+    };
+    let root = match ours.number {
+        identity::ROOT => own.clone(),
+        _ => home.numbered(identity::ROOT).await.map_err(registry)?,
+    };
+    let newest = keys.newest().id().to_string();
+    let recorded = identity::record_master_key(&*root, ours.number, &newest).await;
+    let Some(recorded) = recorded.map_err(registry)? else {
+        return Ok((rotated, Recorded::Unrecorded));
+    };
+    // Every copy at once, each within `within`.
+    let (recorded, own, root) = (&recorded, &own, &root);
+    let spreads = recorded.buckets.iter().map(|entry| async move {
+        let spread = async {
+            let bucket = match entry.number {
+                number if number == ours.number => own.clone(),
+                identity::ROOT => root.clone(),
+                number => home.numbered(number).await?,
+            };
+            identity::spread(recorded, &*bucket).await
+        };
+        let spread = match tokio::time::timeout(within, spread).await {
+            Ok(spread) => spread.map_err(|err| err.to_string()),
+            Err(_) => Err(format!("no answer within {within:?}")),
+        };
+        (entry.number, spread)
+    });
+    let spread = futures::future::join_all(spreads).await;
+    let failed = spread.into_iter().filter_map(|(number, spread)| Some((number, spread.err()?)));
+    Ok((rotated, Recorded::Recorded { failed: failed.collect() }))
 }
 
 /// A host's KMS, as [`from_env`] chose it.
@@ -373,49 +457,53 @@ pub fn no_kms() -> String {
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
-    choose(&|name| std::env::var_os(name), None, bucket)
+    from_vars(&Vars::from_env()?, bucket)
 }
 
-/// cladefs: the KMS the variables `var` gives by name choose, as [`from_env`] does, unless
-/// `recorded`, a registry's, names one (TASK-633.6): that one then.
-fn choose<B: Bucket>(
-    var: &dyn Fn(&str) -> Option<OsString>,
-    recorded: Option<&str>,
+/// cladefs: the same, of `vars`, the host's environment as it read it once ([`Vars::from_env`],
+/// board 8593), which its [`ByBucket`] keeps.
+pub fn from_vars<B: Bucket>(
+    vars: &Vars,
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
-    match named(var, recorded)? {
+    match named(vars, None)? {
         Some(named) => Ok(named),
-        None => over_bucket(var, bucket),
+        None => over_bucket(vars, bucket),
     }
 }
 
-/// cladefs: the KMS [`choose`] chooses by name, if it names one: `recorded`'s, else
-/// [`KMS_VAR`]'s; its bucket never asked (board 5528).
-fn named<B: Bucket>(
-    var: &dyn Fn(&str) -> Option<OsString>,
-    recorded: Option<&str>,
-) -> Result<Option<HostKms<B>>, String> {
-    let set = |name: &str| var(name).filter(|value| !value.is_empty());
-    let named = match recorded {
-        Some(url) => Some((url.to_owned(), "the registry of buckets".to_owned())),
-        None => set(KMS_VAR).map(|url| (url.to_string_lossy().into_owned(), KMS_VAR.to_owned())),
+/// cladefs: the KMS chosen by name, if one is: `recorded`'s, a registry's, else [`KMS_VAR`]'s; its
+/// bucket never asked (board 5528). Its credentials are those `vars` give, a bucket's own over the
+/// host's (board 8485). A URL the registry records reaches what `vars` allow alone ([`Trust`],
+/// board 8525): the registry is an object anyone who can write it chooses.
+fn named<B: Bucket>(vars: &Vars, recorded: Option<&str>) -> Result<Option<HostKms<B>>, String> {
+    let trust;
+    let (url, source, origin) = match recorded {
+        Some(url) => {
+            trust = Trust::of(vars)?;
+            (url, "the registry of buckets", Origin::Recorded(&trust))
+        }
+        None => match vars.get(KMS_VAR) {
+            Some(url) => (url, KMS_VAR, Origin::Host),
+            None => return Ok(None),
+        },
     };
-    let Some((url, source)) = named else { return Ok(None) };
-    let given = [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR].into_iter().find(|name| set(name).is_some());
+    let given =
+        [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR].into_iter().find(|name| vars.get(name).is_some());
     if let Some(name) = given {
         log::warn!("cladefs: {name} is set, and unused: {source} names the KMS");
     }
-    let kms = kms::from_url(&url).map_err(|why| format!("{source}: {why}"))?;
-    Ok(Some(HostKms::Named(url, kms)))
+    let kms = kms::from_url_with(url, vars, origin).map_err(|why| format!("{source}: {why}"))?;
+    Ok(Some(HostKms::Named(url.to_owned(), kms)))
 }
 
-/// cladefs: the bucket KMS over `bucket()`, given master keys, as [`choose`] chooses it when no
+/// cladefs: the bucket KMS over `bucket()`, given master keys, as [`from_vars`] chooses it when no
 /// KMS is named; else refused ([`no_kms`]).
 fn over_bucket<B: Bucket>(
-    var: &dyn Fn(&str) -> Option<OsString>,
+    vars: &Vars,
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
-    let keys = MasterKeys::from_vars(var)?.ok_or_else(no_kms)?;
+    let keys = MasterKeys::from_vars(vars)?.ok_or_else(no_kms)?;
     let bucket = bucket().map_err(|why| {
         format!("{MASTER_KEY_VAR}: the bucket KMS keeps tenants' KEKs in the host's bucket: {why}")
     })?;
@@ -429,24 +517,28 @@ fn over_bucket<B: Bucket>(
 ///   environment chose it ([`from_env`]);
 /// - another bucket's: the KMS its entry in the registry of buckets names (`kms`, as `cladefsctl
 ///   add-bucket --kms` records it); else the one its variables name (`CLADEFS_KMS`, as
-///   `CLADEFSD_BUCKET_<N>_CLADEFS_KMS` overrides it: `object_bucket::numbered_options`); else,
+///   `CLADEFSD_BUCKET_<N>_CLADEFS_KMS` overrides it: [`Vars::numbered`]); else,
 ///   given master keys there (`CLADEFS_MASTER_KEY`, or `CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`),
 ///   the bucket KMS over that bucket itself, its tenants' KEKs kept in it, refused unless the
 ///   master key its entry records (`master_key_id`), if any, is among them; else none, refusing
 ///   every call for its cells, never as a revocation.
 ///
-/// A KMS is named by its URL, one for every bucket naming it, so that its refusal of a tenant
-/// refuses the tenant in all of them and no other ([`keys::CachingKms`]); a bucket KMS by its
-/// bucket.
+/// Each reads its credentials from the variables of its bucket's own over the host's, a group at a
+/// time ([`Vars::numbered`], board 8485). A KMS is named by its URL and whose credentials it calls
+/// with, one for every bucket naming it with the host's, so that its refusal of a tenant refuses
+/// the tenant in all of them and no other ([`keys::CachingKms`]), one of its own for a bucket with
+/// credentials of its own; a bucket KMS by its bucket. A KMS URL its registry entry records reaches
+/// what the host allows alone ([`Trust`], board 8525).
 pub struct ByBucket {
     home: Arc<RoutedBucket>,
     own: HostKms<ObjectBucket>,
-    registered: Registered,
-    vars: Vec<(String, String)>,
+    /// The host's environment, as it read it once: the variables its KMSes read alone, zeroed when
+    /// dropped (board 8593).
+    vars: Arc<Vars>,
     /// The home bucket's number, cached once it has an identity (board 6400).
     own_number: Mutex<Option<u16>>,
     chosen: Mutex<HashMap<u16, (KmsKey, kms::Shared)>>,
-    named: Mutex<HashMap<String, kms::Shared>>,
+    named: Mutex<HashMap<KmsKey, kms::Shared>>,
     buckets: Mutex<BTreeMap<u16, Arc<BucketKms<ObjectBucket>>>>,
     /// How long [`ByBucket::shred`] waits for each other bucket: [`SHRED_WITHIN`], but in tests.
     shred_within: std::time::Duration,
@@ -454,21 +546,15 @@ pub struct ByBucket {
 
 impl ByBucket {
     /// The KMSes of the buckets `home`, the host's routed bucket, reaches, its own `own`, the
-    /// others' chosen from the registry and `vars`, the host's environment.
-    pub fn new(
-        home: Arc<RoutedBucket>,
-        own: HostKms<ObjectBucket>,
-        vars: impl IntoIterator<Item = (String, String)>,
-    ) -> Self {
-        let vars: Vec<(String, String)> = vars.into_iter().collect();
+    /// others' chosen from the registry and `vars`, the host's environment ([`Vars::from_env`]).
+    pub fn new(home: Arc<RoutedBucket>, own: HostKms<ObjectBucket>, vars: Arc<Vars>) -> Self {
         let named = match &own {
-            HostKms::Named(url, kms) => HashMap::from([(url.clone(), kms.clone())]),
+            HostKms::Named(url, kms) => HashMap::from([(KmsKey(url.as_str().into()), kms.clone())]),
             HostKms::Bucket(_) => HashMap::new(),
         };
         Self {
             home,
             own,
-            registered: Registered::new(vars.clone()),
             vars,
             own_number: Mutex::default(),
             chosen: Mutex::default(),
@@ -580,27 +666,52 @@ impl ByBucket {
         }
     }
 
+    /// What the registry records of the bucket numbered `number`: its copy in the home bucket's
+    /// root, or, for a number that copy lacks, the root bucket's registry, the authority, the root
+    /// reached by the home bucket's routes, as its requests of the root's cells are. `NoBucket` for
+    /// a number neither records. Each read asked once (board 5528).
+    async fn entry(&self, number: u16) -> Result<identity::Entry, crate::Error> {
+        let copy = identity::registry_once(&*self.home).await?;
+        if let Some(entry) = copy.as_ref().and_then(|copy| copy.bucket(number)) {
+            return Ok(entry.clone());
+        }
+        let ours = identity::get_once(&*self.home).await?.ok_or(crate::Error::NoBucket(number))?;
+        let root = copy.as_ref().and_then(|copy| copy.bucket(identity::ROOT));
+        if ours.number == identity::ROOT || root.is_none() {
+            return Err(crate::Error::NoBucket(number));
+        }
+        let root = self.home.numbered(identity::ROOT).await?;
+        let registry = identity::registry_once(&*root).await?;
+        let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
+        entry.cloned().ok_or(crate::Error::NoBucket(number))
+    }
+
     /// The KMS of the bucket numbered `number`, another than the host's, chosen (see the type).
     /// Its bucket KMS too, if it is that.
     async fn other(&self, number: u16) -> Result<Chosen, String> {
-        let entry = self.registered.entry(&*self.home, number).await;
+        let entry = self.entry(number).await;
         let entry = entry.map_err(|err| format!("its entry in the registry: {err}"))?;
-        let vars = kms_vars(&self.vars, number);
-        let var = |name: &str| {
-            vars.iter().rev().find(|(of, _)| of == name).map(|(_, value)| OsString::from(value))
-        };
+        let vars = self.vars.numbered(number);
         // cladefs: the bucket opened only for its bucket KMS, none named (board 5528).
-        let chosen = match named(&var, entry.details.kms.as_deref())? {
+        let chosen = match named(&vars, entry.details.kms.as_deref())? {
             Some(named) => named,
             None => {
                 let member = self.home.numbered(number).await;
-                over_bucket(&var, || member.map_err(|err| format!("the bucket: {err}")))?
+                over_bucket(&vars, || member.map_err(|err| format!("the bucket: {err}")))?
             }
         };
         match chosen {
             HostKms::Named(url, kms) => {
-                let kms = self.named.lock().unwrap().entry(url.clone()).or_insert(kms).clone();
-                Ok(((KmsKey(url.into()), kms), None))
+                // The host's credentials' instance, the host's own KMS's if it names the same, is
+                // every such bucket's; one with credentials of its own has its own (board 8485),
+                // named before its URL, as no URL a KMS takes begins, so that no URL's name is
+                // another's with credentials of its own (hotbed review 58).
+                let key = match self.vars.own_credentials(number, &url) {
+                    true => KmsKey(format!("bucket {number}'s credentials: {url}").into()),
+                    false => KmsKey(url.into()),
+                };
+                let kms = self.named.lock().unwrap().entry(key.clone()).or_insert(kms).clone();
+                Ok(((key, kms), None))
             }
             HostKms::Bucket(kms) => {
                 if let Some(id) = &entry.details.master_key_id
@@ -634,21 +745,6 @@ enum Shred {
 
 /// What [`ByBucket::other`] chose: the KMS and its name, and the bucket KMS it is, if it is one.
 type Chosen = ((KmsKey, kms::Shared), Option<Arc<BucketKms<ObjectBucket>>>);
-
-/// cladefs: the variables bucket `number`'s KMS is chosen by, of `vars`: its own
-/// (`CLADEFSD_BUCKET_<N>_...`) over the host's, as for its options
-/// (`object_bucket::numbered_options`); the KMS's ([`KMS_VAR`], [`MASTER_KEY_VAR`],
-/// [`MASTER_KEY_FILE_VAR`]) as one, so that a bucket given any of them as its own takes none of the
-/// host's: its own master key and the host's master key file are not both given, nor is the
-/// host's KMS chosen over its own master key.
-fn kms_vars(vars: &[(String, String)], number: u16) -> Vec<(String, String)> {
-    let prefix = format!("CLADEFSD_BUCKET_{number}_");
-    let kms = [KMS_VAR, MASTER_KEY_VAR, MASTER_KEY_FILE_VAR];
-    let own = (vars.iter())
-        .any(|(name, _)| name.strip_prefix(&prefix).is_some_and(|name| kms.contains(&name)));
-    let shared = vars.iter().filter(|(name, _)| !(own && kms.contains(&name.as_str())));
-    numbered_options(shared.cloned(), number)
-}
 
 /// What [`ByBucket::shred`] did, bucket by bucket, each by its number (0: the host's own bucket,
 /// numbered none).
@@ -702,8 +798,15 @@ impl Kmses for ByBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_bucket::Registered;
     use crate::testing::{Direct, SimBucket};
+    use extent_keys::kms::trust::LOCAL_VAR;
     use futures::executor::block_on;
+
+    /// The host's variables `pairs` name, as [`ByBucket`] keeps them.
+    fn vars_of(pairs: &[(String, String)]) -> Arc<Vars> {
+        Vars::new(pairs.iter().cloned()).shared()
+    }
 
     /// Master keys, these, the newest first, copied.
     fn keys_of(keys: &[&Secret]) -> MasterKeys {
@@ -1031,12 +1134,14 @@ mod tests {
             .await
             .unwrap();
             let by_bucket = |key: &str| {
-                let vars =
-                    vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned())];
+                let vars = vec![
+                    ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned()),
+                    (LOCAL_VAR.to_owned(), "1".to_owned()),
+                ];
                 let home = ObjectBucket::from_url(&urls[0]).unwrap();
                 let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
                 let own = HostKms::Bucket(Arc::new(BucketKms::new(home.own(), parsed(&ours))));
-                Arc::new(ByBucket::new(home, own, vars))
+                Arc::new(ByBucket::new(home, own, vars_of(&vars)))
             };
             let host = |key: &str| CachingKms::over(by_bucket(key), None);
             let cells = [1u64, 2, 3].map(|number| CellId { tenant: 7, id: number << 48 | 1 });
@@ -1105,6 +1210,259 @@ mod tests {
             }
         });
     }
+    /// board 8483: a rotation of a bucket's master key, run as `cladefs-gc --rotate-master-key` runs
+    /// it on that bucket, records the newest key in its entry of the registry, the root's and
+    /// every copy: a host of another bucket given the new key alone for it, restarted, opens its
+    /// cells, which it refused when the entry named the key dropped. A bucket recorded with no
+    /// master key records none; a rotation refusing a KEK object records nothing. No test combined
+    /// a rotation with a host of another bucket after the old key was gone.
+    #[test]
+    fn rotations_record_the_newest_master_key_for_hosts_of_other_buckets() {
+        use crate::identity::{Asked, Details};
+        use crate::keys::CachingKms;
+        use crate::layout::CellId;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let urls = [url("home"), url("other"), url("plain")];
+            let [home, other, plain] =
+                urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
+            let (ours, old, new) = ("11".repeat(32), "22".repeat(32), "33".repeat(32));
+            let parsed = |hex: &str| MasterKeys::parse(hex, "a test's").unwrap();
+            let id = |hex: &str| parsed(hex).newest().id().to_string();
+            let at = |url: &str, key: Option<String>| Details {
+                url: Some(url.to_owned()),
+                master_key_id: key,
+                ..Details::default()
+            };
+            identity::format(&home, &at(&urls[0], None), Asked::default()).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &other,
+                at(&urls[1], Some(id(&old))),
+                Asked::default(),
+            )
+            .await
+            .unwrap();
+            let (_, registry) = identity::add(
+                &home,
+                &Details::default(),
+                &plain,
+                at(&urls[2], None),
+                Asked::default(),
+            )
+            .await
+            .unwrap();
+            for bucket in [&home, &other, &plain] {
+                identity::spread(&registry, bucket).await.unwrap();
+            }
+            // A host of bucket 1, given bucket 2's master keys as `keys`, as it restarts.
+            let host = |keys: &str| {
+                let vars =
+                    vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), keys.to_owned())];
+                let home = ObjectBucket::from_url(&urls[0]).unwrap();
+                let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
+                let own = HostKms::Bucket(Arc::new(BucketKms::new(home.own(), parsed(&ours))));
+                Arc::new(ByBucket::new(home, own, vars_of(&vars)))
+            };
+            let cell = CellId { tenant: 7, id: 2 << 48 | 1 };
+            let (secret, wrapped) = CachingKms::over(host(&old), None).new_kek(cell).await.unwrap();
+
+            // Rotated where bucket 2 is the home bucket, as cladefs-gc runs.
+            let gc = |url: &str| {
+                ObjectBucket::from_url(url).unwrap().routed(Arc::new(Registered::new(Vec::new())))
+            };
+            let both = parsed(&format!("{new},{old}"));
+            let (rotated, recorded) = rotate_recorded(&gc(&urls[1]), &both).await.unwrap();
+            assert_eq!((rotated.rewrapped, rotated.refused.len()), (1, 0));
+            assert_eq!(recorded, Recorded::Recorded { failed: vec![] });
+            for bucket in [&home, &other, &plain] {
+                let copy = identity::registry(bucket).await.unwrap().unwrap();
+                let entry = copy.bucket(2).unwrap();
+                assert_eq!(entry.details.master_key_id, Some(id(&new)));
+                assert_eq!(copy.version, registry.version + 1);
+            }
+            let (_, second) = host(&new).of(2).await.unwrap();
+            assert_eq!(second.unwrap_dyn(7, &wrapped).await.unwrap().expose(), secret.expose());
+
+            // A bucket recorded with no master key records none.
+            let (_, recorded) = rotate_recorded(&gc(&urls[2]), &both).await.unwrap();
+            assert_eq!(recorded, Recorded::Unrecorded);
+            let copy = identity::registry(&home).await.unwrap().unwrap();
+            assert_eq!(copy.bucket(3).unwrap().details.master_key_id, None);
+            // A rotation refusing a KEK object records nothing.
+            let wrong = parsed(&"44".repeat(32));
+            let (rotated, recorded) = rotate_recorded(&gc(&urls[1]), &wrong).await.unwrap();
+            assert_eq!((rotated.refused.len(), recorded), (1, Recorded::Refused));
+            let copy = identity::registry(&home).await.unwrap().unwrap();
+            assert_eq!(copy.bucket(2).unwrap().details.master_key_id, Some(id(&new)));
+
+            // hotbed review 47: a bucket out of reach once opened, whose requests are asked
+            // again until it answers, is said failed within the wait; the other copies record
+            // the rotation all the same.
+            let newer = "55".repeat(32);
+            let rotating = gc(&urls[1]);
+            rotating.numbered(3).await.unwrap();
+            let plain_dir = dir.path().join("plain");
+            std::fs::rename(&plain_dir, dir.path().join("gone")).unwrap();
+            std::fs::write(&plain_dir, b"").unwrap();
+            let keys = parsed(&format!("{newer},{new}"));
+            let within = Duration::from_secs(1);
+            let (rotated, recorded) =
+                rotate_recorded_within(&rotating, &keys, within).await.unwrap();
+            assert_eq!(rotated.rewrapped, 1);
+            let failed = vec![(3, "no answer within 1s".to_owned())];
+            assert_eq!(recorded, Recorded::Recorded { failed });
+            for bucket in [&home, &other] {
+                let copy = identity::registry(bucket).await.unwrap().unwrap();
+                assert_eq!(copy.bucket(2).unwrap().details.master_key_id, Some(id(&newer)));
+            }
+        });
+    }
+
+    /// board 8485 AC #3: buckets naming OpenBaos of their own each call theirs with their own
+    /// token, never the host's: bucket 2 under a dev server whose token is A, bucket 3 under another
+    /// whose token is B, the host's variables naming a token C neither knows; the cells of both
+    /// make and unwrap their KEKs. AC #2: bucket 4, naming bucket 2's URL with the host's token, has
+    /// a KMS of its own, which OpenBao refuses as C, bucket 2's untouched. Before, every bucket's
+    /// KMS read the process's environment, which named no token at all.
+    #[test]
+    fn buckets_call_their_own_openbao_with_their_own_tokens() {
+        use crate::identity::{Asked, Details};
+        use crate::keys::CachingKms;
+        use crate::layout::CellId;
+        use extent_keys::kms::openbao::TOKEN_ENV;
+        use extent_keys::kms::trust::HOSTS_VAR;
+        use extent_keys::testing::openbao::DevServer;
+        let (Some(a), Some(b)) = (DevServer::start(), DevServer::start()) else { return };
+        let token = |server: &DevServer| {
+            server.transit("transit");
+            server.bao(&["write", "-f", "transit/keys/cladefs-tenant-7"]);
+            server.policy("cladefs", &DevServer::cladefs_policy("transit", "cladefs-tenant-*"));
+            server.token("cladefs")
+        };
+        let (token_a, token_b) = (token(&a), token(&b));
+        let query = "key=cladefs-tenant-{tenant}";
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let urls = ["home", "two", "three", "four"].map(url);
+            let buckets = urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
+            identity::format(&buckets[0], &Details::default(), Asked::default()).await.unwrap();
+            let kmses = [a.url("transit", query), b.url("transit", query), a.url("transit", query)];
+            for (at, kms) in (1..).zip(kmses) {
+                let details =
+                    Details { url: Some(urls[at].clone()), kms: Some(kms), ..Details::default() };
+                identity::add(
+                    &buckets[0],
+                    &Details::default(),
+                    &buckets[at],
+                    details,
+                    Asked::default(),
+                )
+                .await
+                .unwrap();
+            }
+            let ours = "11".repeat(32);
+            let vars: Vec<(String, String)> = [
+                (MASTER_KEY_VAR.to_owned(), ours.clone()),
+                (TOKEN_ENV.to_owned(), "s.the-hosts-own".to_owned()),
+                (format!("CLADEFSD_BUCKET_2_{TOKEN_ENV}"), token_a.clone()),
+                (format!("CLADEFSD_BUCKET_3_{TOKEN_ENV}"), token_b.clone()),
+                (HOSTS_VAR.to_owned(), format!("127.0.0.1:{} 127.0.0.1:{}", a.port(), b.port())),
+            ]
+            .into();
+            let home = ObjectBucket::from_url(&urls[0]).unwrap();
+            let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
+            let keys = MasterKeys::parse(&ours, "a test's").unwrap();
+            let own = HostKms::Bucket(Arc::new(BucketKms::new(home.own(), keys)));
+            let by_bucket = Arc::new(ByBucket::new(home, own, vars_of(&vars)));
+            let kms = CachingKms::over(by_bucket.clone(), None);
+            for number in [2u16, 3] {
+                let cell = CellId { tenant: 7, id: u64::from(number) << 48 | 1 };
+                let (secret, wrapped) = kms.new_kek(cell).await.unwrap();
+                let (_, theirs) = by_bucket.of(number).await.unwrap();
+                assert_eq!(theirs.unwrap_dyn(7, &wrapped).await.unwrap().expose(), secret.expose());
+            }
+            let ((two, _), (four, hosts)) =
+                (by_bucket.of(2).await.unwrap(), by_bucket.of(4).await.unwrap());
+            assert_eq!(four.0.as_ref(), a.url("transit", query));
+            assert_eq!(two.0.as_ref(), format!("bucket 2's credentials: {}", four.0));
+            // No URL a KMS takes is named so: one beginning as a bucket's credentials do is none.
+            let theirs = format!("bucket 2's credentials: {}", a.url("transit", query));
+            let refused = kms::from_url_with(&theirs, &by_bucket.vars, Origin::Host).err();
+            assert!(refused.is_some_and(|why| why.contains("names no KMS")), "{theirs}");
+            let refused = hosts.wrap_dyn(7, &Secret::random()).await.map(drop).unwrap_err();
+            assert!(refused.to_string().contains("OpenBao refuses cladefs's token"), "{refused}");
+        });
+    }
+
+    /// board 8525: a KMS URL a bucket's entry in the registry records reaches what the host allows
+    /// alone: `local://`, the host allowing no fake, refuses the bucket's cells, its directory never
+    /// made; OpenBao in the clear, at a host none names, too, before the host's token goes there.
+    #[test]
+    fn registries_naming_kmses_the_host_allows_not_are_refused() {
+        use crate::identity::{Asked, Details};
+        use extent_keys::kms::openbao::TOKEN_ENV;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let urls = ["home", "two", "three"].map(url);
+            let buckets = urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
+            let local = dir.path().join("kms");
+            identity::format(&buckets[0], &Details::default(), Asked::default()).await.unwrap();
+            let kmses = [
+                format!("local://{}", local.display()),
+                "openbao://10.9.9.9:8200/transit?key=k{tenant}".to_owned(),
+            ];
+            for (at, kms) in (1..).zip(kmses) {
+                let details =
+                    Details { url: Some(urls[at].clone()), kms: Some(kms), ..Details::default() };
+                identity::add(
+                    &buckets[0],
+                    &Details::default(),
+                    &buckets[at],
+                    details,
+                    Asked::default(),
+                )
+                .await
+                .unwrap();
+            }
+            let vars = vec![(TOKEN_ENV.to_owned(), "s.the-hosts-own".to_owned())];
+            let home = ObjectBucket::from_url(&urls[0]).unwrap();
+            let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
+            let own = HostKms::Bucket(Arc::new(BucketKms::new(
+                home.own(),
+                MasterKeys::parse(&"11".repeat(32), "a test's").unwrap(),
+            )));
+            let by_bucket = ByBucket::new(home, own, vars_of(&vars));
+            let refused = by_bucket.of(2).await.map(drop).unwrap_err();
+            assert!(refused.starts_with("the registry of buckets: \"local://"), "{refused}");
+            assert!(refused.ends_with("only if CLADEFSD_KMS_LOCAL is 1"), "{refused}");
+            assert!(!local.exists(), "local:// made its directory");
+            let refused = by_bucket.of(3).await.map(drop).unwrap_err();
+            assert!(
+                refused.ends_with(
+                    "10.9.9.9:8200: a KMS URL the registry of buckets records reaches only the \
+                     hosts CLADEFSD_KMS_HOSTS names, or the host's own CLADEFS_KMS's"
+                ),
+                "{refused}"
+            );
+        });
+    }
+
     /// board 6400: an unformatted home bucket serves bucket 1 (ROOT) with its own KMS while
     /// refusing other bucket numbers, and does not cache `None` so formatting it later (e.g. as
     /// bucket 2 via `identity::add`) takes effect on subsequent lookups.
@@ -1134,7 +1492,7 @@ mod tests {
             let kmses = ByBucket::new(
                 home_routed,
                 HostKms::Named(home_kms_url.clone(), home_kms),
-                Vec::new(),
+                vars_of(&[(LOCAL_VAR.to_owned(), "1".to_owned())]),
             );
             // Before `home` is formatted: bucket 1 resolves to `own`, bucket 2 is refused.
             let (key, _) = kmses.of(identity::ROOT).await.unwrap();
@@ -1206,12 +1564,15 @@ mod tests {
                     .unwrap();
             }
             let master = "11".repeat(32);
-            let vars = vec![(MASTER_KEY_VAR.to_owned(), master.clone())];
+            let vars = vec![
+                (MASTER_KEY_VAR.to_owned(), master.clone()),
+                (LOCAL_VAR.to_owned(), "1".to_owned()),
+            ];
             let home = ObjectBucket::from_url(&url(1)).unwrap();
             let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
             let keys = MasterKeys::parse(&master, "a test's").unwrap();
             let own = HostKms::Bucket(Arc::new(BucketKms::new(home.own().clone(), keys)));
-            let mut by_bucket = ByBucket::new(home, own, vars);
+            let mut by_bucket = ByBucket::new(home, own, vars_of(&vars));
             by_bucket.shred_within = std::time::Duration::from_secs(1);
             by_bucket.of(2).await.unwrap();
             // 2 and 4 out of reach: their directories files.

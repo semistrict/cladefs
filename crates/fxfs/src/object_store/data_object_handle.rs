@@ -25,8 +25,8 @@ use crate::object_handle::{
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
-    AttributeKey, DirType, FsverityMetadata, ObjectAttributes, ObjectItem, ObjectKey,
-    ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
+    AttributeKey, DirType, ObjectAttributes, ObjectItem, ObjectKey, ObjectKeyData, ObjectKind,
+    ObjectValue, Timestamp,
 };
 use crate::object_store::store_object_handle::{MaybeChecksums, NeedsTrim};
 use crate::object_store::transaction::{
@@ -34,31 +34,23 @@ use crate::object_store::transaction::{
     ReadGuard, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AttributeId, Extent, HandleOptions, HandleOwner, RootDigest, StoreObjectHandle, TrimMode,
-    TrimResult,
+    AttributeId, Extent, HandleOptions, HandleOwner, MutableNodeAttributes, StoreObjectHandle,
+    TrimMode, TrimResult,
 };
 use crate::range::RangeExt;
 use anyhow::{Context, Error, anyhow, bail, ensure};
-use fidl_fuchsia_io as fio;
-use fsverity_merkle::{
-    FsVerityDescriptor, FsVerityDescriptorRaw, FsVerityHash, FsVerityHasher, FsVerityHasherOptions,
-    MerkleTree, MerkleTreeBuilder, Sha256Hash, Sha512Hash,
-};
 use fuchsia_sync::Mutex;
 use futures::TryStreamExt;
 use futures::stream::FuturesOrdered;
-use fxfs_trace::trace;
 use std::cmp::min;
 use std::future::Future;
 use std::ops::{Deref, Range};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{self, AtomicU64, Ordering};
+use std::sync::atomic::{self, AtomicU64};
 use storage_device::buffer::{Buffer, BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::{ExtentId, ExtentRange, WriteFlags, WriteOptions};
-use storage_ptr_slice::PtrByteSlice;
 use storage_units::BlockSize;
-use zerocopy::FromBytes;
 
 mod allocated_ranges;
 pub use allocated_ranges::{AllocatedRanges, RangeType};
@@ -93,7 +85,8 @@ pub struct DataObjectHandle<S: HandleOwner> {
     handle: StoreObjectHandle<S>,
     attribute_id: AttributeId,
     content_size: AtomicU64,
-    state: Mutex<DataObjectState>,
+    /// The ranges of the attribute's overwrite extents.
+    overwrite_ranges: Mutex<AllocatedRanges>,
 }
 
 /// Represents the mapping of a file's contents to the physical storage backing it.
@@ -133,23 +126,6 @@ impl FileExtent {
     }
 }
 
-#[derive(Debug)]
-pub enum DataObjectState {
-    Standard(AllocatedRanges),
-    VerityStarted,
-    VerityPending(FsverityStateInner),
-    Verity(FsverityStateInner),
-}
-
-#[derive(Debug)]
-pub struct FsverityStateInner {
-    root_digest: RootDigest,
-    salt: Vec<u8>,
-    // TODO(b/309656632): This should store the entire merkle tree and not just the leaf nodes.
-    // Potentially store a pager-backed vmo instead of passing around a boxed array.
-    merkle_tree: Box<[u8]>,
-}
-
 #[derive(Debug, Default)]
 pub struct OverwriteOptions<'a> {
     // If false, then all the extents for the overwrite range must have been preallocated using
@@ -160,46 +136,6 @@ pub struct OverwriteOptions<'a> {
     pub barrier_after_last_write: bool,
     /// cladefs: the root that barrier sets, if any (`WriteOptions::root`).
     pub root: Option<&'a [u8]>,
-}
-
-impl FsverityStateInner {
-    pub fn new(root_digest: RootDigest, salt: Vec<u8>, merkle_tree: Box<[u8]>) -> Self {
-        FsverityStateInner { root_digest, salt, merkle_tree }
-    }
-
-    fn get_hasher_for_block_size(&self, block_size: BlockSize) -> FsVerityHasher {
-        match self.root_digest {
-            RootDigest::Sha256(_) => FsVerityHasher::Sha256(FsVerityHasherOptions::new(
-                self.salt.clone(),
-                block_size.get() as usize,
-            )),
-            RootDigest::Sha512(_) => FsVerityHasher::Sha512(FsVerityHasherOptions::new(
-                self.salt.clone(),
-                block_size.get() as usize,
-            )),
-        }
-    }
-
-    fn from_ptr_slice(
-        data: PtrByteSlice<'_>,
-        block_size: BlockSize,
-    ) -> Result<(Self, FsVerityHasher), Error> {
-        let descriptor = FsVerityDescriptor::new(data, block_size.get() as usize)
-            .map_err(|e| anyhow!(FxfsError::IntegrityError).context(e))?;
-
-        let root_digest = match descriptor.digest_algorithm() {
-            fio::HashAlgorithm::Sha256 => {
-                RootDigest::Sha256(descriptor.root_digest().try_into().unwrap())
-            }
-            fio::HashAlgorithm::Sha512 => RootDigest::Sha512(descriptor.root_digest().to_vec()),
-            _ => return Err(anyhow!(FxfsError::NotSupported).context("Unsupported hash algorithm")),
-        };
-        let hasher = descriptor.hasher();
-        let leaves =
-            descriptor.leaf_digests().map_err(|e| anyhow!(FxfsError::IntegrityError).context(e))?;
-
-        Ok((Self::new(root_digest, descriptor.salt().to_vec(), leaves.into_boxed_slice()), hasher))
-    }
 }
 
 impl<S: HandleOwner> Deref for DataObjectHandle<S> {
@@ -213,7 +149,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     pub fn new(
         owner: Arc<S>,
         object_id: u64,
-        permanent_keys: bool,
         attribute_id: AttributeId,
         size: u64,
         options: HandleOptions,
@@ -221,10 +156,10 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         overwrite_ranges: &[Range<u64>],
     ) -> Self {
         Self {
-            handle: StoreObjectHandle::new(owner, object_id, permanent_keys, options, trace),
+            handle: StoreObjectHandle::new(owner, object_id, options, trace),
             attribute_id,
             content_size: AtomicU64::new(size),
-            state: Mutex::new(DataObjectState::Standard(AllocatedRanges::new(overwrite_ranges))),
+            overwrite_ranges: Mutex::new(AllocatedRanges::new(overwrite_ranges)),
         }
     }
 
@@ -238,194 +173,15 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     }
 
     pub fn overwrite_ranges_is_empty(&self) -> bool {
-        match &*self.state.lock() {
-            DataObjectState::Standard(ranges) => ranges.is_empty(),
-            _ => true,
-        }
+        self.overwrite_ranges.lock().is_empty()
     }
 
-    pub fn with_overwrite_ranges<R>(&self, f: impl FnOnce(Option<&AllocatedRanges>) -> R) -> R {
-        let state = self.state.lock();
-        match &*state {
-            DataObjectState::Standard(ranges) => f(Some(ranges)),
-            _ => f(None),
-        }
+    pub fn with_overwrite_ranges<R>(&self, f: impl FnOnce(&AllocatedRanges) -> R) -> R {
+        f(&self.overwrite_ranges.lock())
     }
 
-    pub fn with_overwrite_ranges_mut<R>(
-        &self,
-        f: impl FnOnce(Option<&mut AllocatedRanges>) -> R,
-    ) -> R {
-        let mut state = self.state.lock();
-        match &mut *state {
-            DataObjectState::Standard(ranges) => f(Some(ranges)),
-            _ => f(None),
-        }
-    }
-
-    pub fn is_verified_file(&self) -> bool {
-        matches!(*self.state.lock(), DataObjectState::Verity(_))
-    }
-
-    /// Sets `self.state` to DataObjectState::VerityStarted. Called at the top of `enable_verity`.
-    /// If another caller has already started but not completed `enable_verity`, returns
-    /// FxfsError::AlreadyBound. If another caller has already completed `enable_verity`, returns
-    /// FxfsError::AlreadyExists.
-    ///
-    /// Note: This is called before `enable_verity` acquires its object transaction lock. Any
-    /// ongoing transaction holding the object lock (such as `allocate`) will proceed to commit
-    /// its mutations to disk while `enable_verity` waits for the lock, and `will_apply_mutation`
-    /// will gracefully discard in-memory range updates for the discarded `AllocatedRanges`.
-    pub fn set_fsverity_state_started(&self) -> Result<(), Error> {
-        let mut state = self.state.lock();
-        match *state {
-            DataObjectState::Standard(_) => {
-                *state = DataObjectState::VerityStarted;
-                Ok(())
-            }
-            DataObjectState::VerityStarted | DataObjectState::VerityPending(_) => {
-                Err(anyhow!(FxfsError::Unavailable))
-            }
-            DataObjectState::Verity(_) => Err(anyhow!(FxfsError::AlreadyExists)),
-        }
-    }
-
-    /// Sets `self.state` to VerityPending. Must be called before `finalize_fsverity_state()`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the prior state was not `DataObjectState::VerityStarted`.
-    pub fn set_fsverity_state_pending(&self, descriptor: FsverityStateInner) {
-        let mut state = self.state.lock();
-        assert!(matches!(*state, DataObjectState::VerityStarted));
-        *state = DataObjectState::VerityPending(descriptor);
-    }
-
-    /// Sets `self.state` to Verity.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the prior state was not `DataObjectState::VerityPending(_)`.
-    pub fn finalize_fsverity_state(&self) {
-        let mut state = self.state.lock();
-        let old_state =
-            std::mem::replace(&mut *state, DataObjectState::Standard(AllocatedRanges::empty()));
-        match old_state {
-            DataObjectState::VerityPending(inner) => *state = DataObjectState::Verity(inner),
-            _ => panic!("Cannot finalize verity state from {old_state:?}"),
-        }
-    }
-
-    /// Sets `self.state` directly to Verity without going through the entire state machine.
-    /// Used to set `self.state` on open of a verified file. The merkle tree data is
-    /// verified against the root digest here, and will return an error if the tree is not correct.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the prior state was not `DataObjectState::Standard(_)`.
-    pub async fn set_fsverity_state_some(&self, descriptor: FsverityMetadata) -> Result<(), Error> {
-        let (metadata, hasher) = match descriptor {
-            FsverityMetadata::Internal(root_digest, salt) => {
-                let merkle_tree = self
-                    .read_attr(AttributeId::FSVERITY_MERKLE)
-                    .await?
-                    .ok_or_else(|| anyhow!(FxfsError::Inconsistent))?;
-                let metadata = FsverityStateInner { root_digest, salt, merkle_tree };
-                let hasher = metadata.get_hasher_for_block_size(self.block_size());
-                (metadata, hasher)
-            }
-            FsverityMetadata::F2fs(verity_range) => {
-                let expected_length = verity_range.length()? as usize;
-                let mut buffer = self
-                    .allocate_buffer(
-                        self.block_size().align_up(expected_length as u64).unwrap() as usize
-                    )
-                    .await;
-                let read = self
-                    .handle
-                    .read_aligned(AttributeId::FSVERITY_MERKLE, verity_range.start, buffer.as_mut())
-                    .await?;
-                ensure!(expected_length == read, FxfsError::Inconsistent);
-                let data = buffer.as_ptr_slice().subslice(0..expected_length);
-                FsverityStateInner::from_ptr_slice(data, self.block_size())?
-            }
-        };
-        // Validate the merkle tree data against the root before applying it.
-        ensure!(metadata.merkle_tree.len() % hasher.hash_size() == 0, FxfsError::Inconsistent);
-        let leaf_chunks = metadata.merkle_tree.chunks_exact(hasher.hash_size());
-
-        let root_hash = match &metadata.root_digest {
-            RootDigest::Sha256(root_hash) => root_hash.as_slice(),
-            RootDigest::Sha512(root_hash) => root_hash.as_slice(),
-        };
-
-        let tree = match hasher {
-            FsVerityHasher::Sha256(_) => {
-                let mut builder = MerkleTreeBuilder::<Sha256Hash>::new(hasher);
-                for leaf in leaf_chunks {
-                    let hash = Sha256Hash::read_from_bytes(leaf).unwrap();
-                    builder.push_data_hash(hash);
-                }
-                builder.finish()
-            }
-            FsVerityHasher::Sha512(_) => {
-                let mut builder = MerkleTreeBuilder::<Sha512Hash>::new(hasher);
-                for leaf in leaf_chunks {
-                    let hash = Sha512Hash::read_from_bytes(leaf).unwrap();
-                    builder.push_data_hash(hash);
-                }
-                builder.finish()
-            }
-        };
-
-        ensure!(root_hash == tree.root(), FxfsError::IntegrityError);
-
-        let mut state = self.state.lock();
-        assert!(matches!(*state, DataObjectState::Standard(_)));
-        *state = DataObjectState::Verity(metadata);
-
-        Ok(())
-    }
-
-    /// Verifies contents of `buffer` against the corresponding hashes in the stored merkle tree.
-    /// `offset` is the logical offset in the file that `buffer` starts at. Fails on non
-    /// fsverity-enabled files.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `offset` is not block-aligned.
-    fn verify_data(&self, mut offset: usize, buffer: PtrByteSlice<'_>) -> Result<(), Error> {
-        let block_size = self.block_size();
-        assert!(block_size.is_aligned(offset as u64));
-        let state = self.state.lock();
-        match &*state {
-            DataObjectState::Standard(_) => {
-                Err(anyhow!("Tried to verify read on a non verity-enabled file"))
-            }
-            DataObjectState::VerityStarted | DataObjectState::VerityPending(_) => {
-                Err(anyhow!("Enable verity has not yet completed, state: {state:?}"))
-            }
-            DataObjectState::Verity(metadata) => {
-                let hasher = metadata.get_hasher_for_block_size(block_size);
-                let leaf_nodes: Vec<&[u8]> =
-                    metadata.merkle_tree.chunks(hasher.hash_size()).collect();
-                fxfs_trace::duration!("fsverity-verify", "len" => buffer.len());
-                // TODO(b/318880297): Consider parallelizing computation.
-                for chunk in buffer.chunks(block_size.get() as usize) {
-                    // SAFETY: Ideally we wouldn't be creating references here as technically this is
-                    // Rust undefined behaviour, but it's difficult for us to fix and mitigated
-                    // because these pointers end up being passed directly to non-Rust code (Mundane).
-                    let b = unsafe { &*chunk.as_raw_slice_ptr() };
-
-                    ensure!(
-                        hasher.hash_block(b) == leaf_nodes[((offset as u64) / block_size) as usize],
-                        anyhow!(FxfsError::Inconsistent).context("Hash mismatch")
-                    );
-                    offset += block_size.get() as usize;
-                }
-                Ok(())
-            }
-        }
+    pub fn with_overwrite_ranges_mut<R>(&self, f: impl FnOnce(&mut AllocatedRanges) -> R) -> R {
+        f(&mut self.overwrite_ranges.lock())
     }
 
     /// Extend the file with the given extent.  The only use case for this right now is for files
@@ -444,7 +200,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             device_range.clone(),
         )?;
         self.txn_update_size(transaction, new_size, None).await?;
-        let key_id = self.get_key(None).await?.0;
         transaction.add(
             self.store().store_object_id,
             Mutation::merge_object(
@@ -452,7 +207,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 ObjectValue::Extent(ExtentValue::new_raw(
                     device_range.extent,
                     device_range.range.start,
-                    key_id,
                 )),
             ),
         );
@@ -470,10 +224,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     }
 
     // Writes potentially unaligned data at `extent_offset` in `extent` and returns checksums if
-    // requested. The data will be encrypted if necessary.
-    // `buf` is mutable as an optimization, since the write may require encryption, we can encrypt
-    // the buffer in-place rather than copying to another buffer if the write is already aligned.
-    // `options` are forwarded to the underlying device write.
+    // requested. `options` are forwarded to the underlying device write.
     async fn write_at(
         &self,
         offset: u64,
@@ -483,15 +234,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         options: WriteOptions<'_>,
     ) -> Result<MaybeChecksums, Error> {
         self.handle
-            .write_at_with_options(
-                self.attribute_id(),
-                offset,
-                buf,
-                None,
-                extent,
-                extent_offset,
-                options,
-            )
+            .write_at_with_options(self.attribute_id(), offset, buf, extent, extent_offset, options)
             .await
     }
 
@@ -555,211 +298,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.handle.zero(transaction, self.attribute_id(), range).await
     }
 
-    /// The cached value for `self.fsverity_state` is set either in `open_object` or on
-    /// `enable_verity`. If set, translates `self.fsverity_state.descriptor` into an
-    /// fio::VerificationOptions instance and a root hash. Otherwise, returns None.
-    pub fn get_descriptor(&self) -> Option<(fio::VerificationOptions, Vec<u8>)> {
-        let state = self.state.lock();
-        match &*state {
-            DataObjectState::Verity(metadata) => {
-                let (options, root_hash) = match &metadata.root_digest {
-                    RootDigest::Sha256(root_hash) => (
-                        fio::VerificationOptions {
-                            hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                            salt: Some(metadata.salt.clone()),
-                            ..Default::default()
-                        },
-                        root_hash.to_vec(),
-                    ),
-                    RootDigest::Sha512(root_hash) => (
-                        fio::VerificationOptions {
-                            hash_algorithm: Some(fio::HashAlgorithm::Sha512),
-                            salt: Some(metadata.salt.clone()),
-                            ..Default::default()
-                        },
-                        root_hash.clone(),
-                    ),
-                };
-                Some((options, root_hash))
-            }
-            _ => None,
-        }
-    }
-
-    async fn build_verity_tree(
-        &self,
-        hasher: FsVerityHasher,
-        hash_alg: fio::HashAlgorithm,
-        salt: &[u8],
-    ) -> Result<(MerkleTree, Vec<u8>), Error> {
-        match hasher {
-            FsVerityHasher::Sha256(_) => {
-                self.build_verity_tree_impl::<Sha256Hash>(hasher, hash_alg, salt).await
-            }
-            FsVerityHasher::Sha512(_) => {
-                self.build_verity_tree_impl::<Sha512Hash>(hasher, hash_alg, salt).await
-            }
-        }
-    }
-
-    async fn build_verity_tree_impl<D: FsVerityHash>(
-        &self,
-        hasher: FsVerityHasher,
-        hash_alg: fio::HashAlgorithm,
-        salt: &[u8],
-    ) -> Result<(MerkleTree, Vec<u8>), Error> {
-        let hash_len = hasher.hash_size();
-        let mut builder = MerkleTreeBuilder::<D>::new(hasher);
-        let mut offset = 0;
-        let size = self.get_size();
-        // TODO(b/314836822): Consider further tuning the buffer size to optimize
-        // performance. Experimentally, most verity-enabled files are <256K.
-        let mut buf = self.allocate_buffer(64 * self.block_size().get() as usize).await;
-        while offset < size {
-            // TODO(b/314842875): Consider optimizations for sparse files.
-            let read = self.read_aligned(offset, buf.as_mut()).await? as u64;
-            assert!(offset + read <= size);
-            let slice = buf.as_ptr_slice().subslice(0..read as usize);
-
-            // SAFETY: Ideally we wouldn't be creating references here as technically this is
-            // Rust undefined behaviour, but it's difficult for us to fix and mitigated
-            // because these pointers end up being passed directly to non-Rust code (Mundane).
-            let chunk = unsafe { &*slice.as_raw_slice_ptr() };
-
-            builder.write(chunk);
-            offset += read;
-        }
-        let tree = builder.finish();
-        // This will include a block for the root layer, which will be used to house the descriptor.
-        let tree_data_len = tree
-            .levels()
-            .iter()
-            .map(|layer| self.block_size().align_up(layer.len() as u64).unwrap() as usize)
-            .sum();
-        let mut merkle_tree_data = Vec::<u8>::with_capacity(tree_data_len);
-        // Iterating from the top layers down to the leaves.
-        for layer in tree.levels().iter().rev() {
-            // Skip the root layer.
-            if layer.len() <= hash_len {
-                continue;
-            }
-            merkle_tree_data.extend_from_slice(layer);
-            // Pad to the end of the block.
-            let padded_size =
-                self.block_size().align_up(merkle_tree_data.len() as u64).unwrap() as usize;
-            merkle_tree_data.resize(padded_size, 0);
-        }
-
-        // Zero the last block, then write the descriptor to the start of it.
-        let descriptor_offset = merkle_tree_data.len();
-        merkle_tree_data.resize(descriptor_offset + self.block_size().get() as usize, 0);
-        let descriptor = FsVerityDescriptorRaw::new(
-            hash_alg,
-            self.block_size().get(),
-            self.get_size(),
-            tree.root(),
-            salt,
-        )?;
-        descriptor.write_to_slice(&mut merkle_tree_data[descriptor_offset..])?;
-
-        Ok((tree, merkle_tree_data))
-    }
-
-    /// Reads the data attribute and computes a merkle tree from the data. The values of the
-    /// parameters required to build the merkle tree are supplied by `descriptor` (i.e. salt,
-    /// hash_algorithm, etc.) Writes the leaf nodes of the merkle tree to an attribute with id
-    /// `AttributeId::FSVERITY_MERKLE`. Updates the root_hash of the `descriptor` according to the
-    /// computed merkle tree and then replaces the ObjectValue of the data attribute with
-    /// ObjectValue::VerifiedAttribute, which stores the `descriptor` inline.
-    #[trace]
-    pub async fn enable_verity(&self, options: fio::VerificationOptions) -> Result<(), Error> {
-        self.set_fsverity_state_started()?;
-        // If the merkle attribute was tombstoned in the last attempt of `enable_verity`, flushing
-        // the graveyard should process the tombstone before we start rewriting the attribute.
-        if self
-            .store()
-            .tree()
-            .exists(&ObjectKey::graveyard_attribute_entry(
-                self.store().graveyard_directory_object_id(),
-                self.object_id(),
-                AttributeId::FSVERITY_MERKLE,
-            ))
-            .await?
-        {
-            self.store().filesystem().graveyard().flush().await;
-        }
-        let mut transaction = self.new_transaction().await?;
-        let hash_alg =
-            options.hash_algorithm.ok_or_else(|| anyhow!("No hash algorithm provided"))?;
-        let salt = options.salt.ok_or_else(|| anyhow!("No salt provided"))?;
-        let (root_digest, merkle_tree) = match hash_alg {
-            fio::HashAlgorithm::Sha256 => {
-                let hasher = FsVerityHasher::Sha256(FsVerityHasherOptions::new(
-                    salt.clone(),
-                    self.block_size().get() as usize,
-                ));
-                let (tree, merkle_tree_data) =
-                    self.build_verity_tree(hasher, hash_alg, &salt).await?;
-                let root: [u8; 32] = tree.root().try_into().unwrap();
-                (RootDigest::Sha256(root), merkle_tree_data)
-            }
-            fio::HashAlgorithm::Sha512 => {
-                let hasher = FsVerityHasher::Sha512(FsVerityHasherOptions::new(
-                    salt.clone(),
-                    self.block_size().get() as usize,
-                ));
-                let (tree, merkle_tree_data) =
-                    self.build_verity_tree(hasher, hash_alg, &salt).await?;
-                (RootDigest::Sha512(tree.root().to_vec()), merkle_tree_data)
-            }
-            _ => {
-                bail!(
-                    anyhow!(FxfsError::NotSupported)
-                        .context(format!("hash algorithm not supported"))
-                );
-            }
-        };
-        // TODO(b/314194485): Eventually want streaming writes.
-        // The merkle tree attribute should not require trimming because it should not
-        // exist.
-        self.handle
-            .write_new_attr_in_batches(
-                &mut transaction,
-                AttributeId::FSVERITY_MERKLE,
-                &merkle_tree,
-                WRITE_ATTR_BATCH_SIZE,
-            )
-            .await?;
-        if merkle_tree.len() > WRITE_ATTR_BATCH_SIZE {
-            self.store().remove_attribute_from_graveyard(
-                &mut transaction,
-                self.object_id(),
-                AttributeId::FSVERITY_MERKLE,
-            );
-        };
-        let descriptor_decoded =
-            FsVerityDescriptor::new(&merkle_tree[..], self.block_size().get() as usize)?;
-        let descriptor = FsverityStateInner {
-            root_digest,
-            salt,
-            merkle_tree: descriptor_decoded.leaf_digests()?.into(),
-        };
-        self.set_fsverity_state_pending(descriptor);
-        transaction.add_with_object(
-            self.store().store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(self.object_id(), AttributeId::DATA, AttributeKey::Attribute),
-                ObjectValue::verified_attribute(
-                    self.get_size(),
-                    FsverityMetadata::F2fs(0..merkle_tree.len() as u64),
-                ),
-            ),
-            AssocObj::Borrowed(self),
-        );
-        transaction.commit().await?;
-        Ok(())
-    }
-
     /// Pre-allocate disk space for the given logical file range. If any part of the allocation
     /// range is beyond the end of the file, the file size is updated.
     pub async fn allocate(&self, range: Range<u64>) -> Result<(), Error> {
@@ -774,27 +312,11 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             self.block_size().align_range_outwards(&range).ok_or(FxfsError::TooBig)?;
 
         let mut transaction = self.new_transaction().await?;
-        // It's safe to check state after acquiring the transaction lock. Note that `enable_verity`
-        // calls `set_fsverity_state_started` before creating its own transaction, which could
-        // transition `self.state` to `VerityStarted` concurrently while this transaction is held.
-        // If that happens, `enable_verity`'s subsequent `new_transaction` call will block until
-        // this allocation transaction finishes, and `will_apply_mutation` will gracefully discard
-        // updates to the in-memory allocated ranges.
-        {
-            let state = self.state.lock();
-            match &*state {
-                DataObjectState::Standard(_) => {}
-                _ => bail!(
-                    anyhow!(FxfsError::AccessDenied).context("Cannot allocate on verity file")
-                ),
-            }
-        }
         // cladefs: growing, what the last block holds past the end is zeroed first: allocated, the
         // block would be switched to an overwrite extent keeping it (TASK-153.4).
         self.zero_tail_before_growth(&mut transaction, range.end, None).await?;
         let mut to_allocate = Vec::new();
         let mut to_switch = Vec::new();
-        let key_id = self.get_key(None).await?.0;
 
         {
             let tree = &self.store().tree;
@@ -923,7 +445,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     ObjectValue::Extent(ExtentValue::initialized_overwrite_extent(
                         extent,
                         extent_offset,
-                        key_id,
                     )),
                 ),
                 AssocObj::Borrowed(self),
@@ -959,7 +480,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                             device_range.extent,
                             device_range.range.start,
                             (device_range_len / self.block_size()) as usize,
-                            key_id,
                         )),
                     ),
                     AssocObj::Borrowed(self),
@@ -1111,9 +631,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.txn_grow_size(transaction, offset + buf.len() as u64, &[aligned]).await
     }
 
-    // Writes to multiple ranges with data provided in `buf`.  The buffer can be modified in place
-    // if encryption takes place.  The ranges must all be aligned and no change to content size is
-    // applied; the caller is responsible for updating size if required.
+    // Writes to multiple ranges with data provided in `buf`.  The ranges must all be aligned and no
+    // change to content size is applied; the caller is responsible for updating size if required.
     pub async fn multi_write<'a>(
         &'a self,
         transaction: &mut Transaction<'a>,
@@ -1123,16 +642,12 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     ) -> Result<(), Error> {
         // cladefs: box `multi_write` in a non-inlined frame so compaction and write paths stay
         // small on 16 KiB guest kernel stacks (TASK-26.9).
-        crate::boxed(|| self.handle.multi_write(transaction, attribute_id, None, ranges, buf)).await
+        crate::boxed(|| self.handle.multi_write(transaction, attribute_id, ranges, buf)).await
     }
 
-    // `buf` is mutable as an optimization, since the write may require encryption, we can
-    // encrypt the buffer in-place rather than copying to another buffer if the write is
-    // already aligned.
-    //
     // Note: in the event of power failure during an overwrite() call, it is possible that
     // old data (which hasn't been overwritten with new bytes yet) may be exposed to the user.
-    // Since the old data should be encrypted, it is probably safe to expose, although not ideal.
+    // The old data is the file's own, so it is probably safe to expose, although not ideal.
     pub async fn overwrite(
         &self,
         mut offset: u64,
@@ -1141,8 +656,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     ) -> Result<(), Error> {
         ensure!((buf.len() as u32) % self.store().device.block_size() == 0, FxfsError::InvalidArgs);
         let end = offset + buf.len() as u64;
-
-        let key_id = self.get_key(None).await?.0;
 
         // The transaction only ends up being used if allow_allocations is true
         // cladefs: box large sub-futures in non-inlined frames to fit 16 KiB stacks (TASK-26.9).
@@ -1313,7 +826,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                                     ObjectValue::Extent(ExtentValue::new_raw(
                                         device_range.extent,
                                         device_range.range.start,
-                                        key_id,
                                     )),
                                 ),
                             );
@@ -1372,7 +884,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             }
         }
 
-        self.store().logical_write_ops.fetch_add(1, Ordering::Relaxed);
         // The checksums are being ignored here, but we don't need to know them
         writes.try_collect::<Vec<MaybeChecksums>>().await?;
         if let Some(last_write) = last_write {
@@ -1461,7 +972,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 
     pub fn truncate_overwrite_ranges(&self, size: u64) -> Result<Option<bool>, Error> {
         let cutoff = self.block_size().align_up(size).ok_or(FxfsError::TooBig)?;
-        if self.with_overwrite_ranges_mut(|ranges| ranges.map_or(false, |r| r.truncate(cutoff))) {
+        if self.with_overwrite_ranges_mut(|ranges| ranges.truncate(cutoff)) {
             // This returns true if there were ranges, but this truncate removed them all, which
             // indicates that we need to flip the has_overwrite_extents metadata flag to false.
             Ok(Some(false))
@@ -1527,7 +1038,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     ) -> Result<Vec<ExtentRange>, Error> {
         let block_size = self.block_size();
         ensure!(block_size.is_aligned(&*file_range), FxfsError::InvalidArgs);
-        ensure!(!self.handle.is_encrypted(), FxfsError::NotSupported);
         let mut ranges = Vec::new();
         let tree = &self.store().tree;
         let layer_set = tree.layer_set();
@@ -1540,7 +1050,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             )))
             .await?;
         let mut allocated = 0;
-        let key_id = self.get_key(None).await?.0;
         'outer: while file_range.start < file_range.end {
             let allocate_end = loop {
                 match iter.get() {
@@ -1633,7 +1142,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     ObjectValue::Extent(ExtentValue::new_raw(
                         device_range.extent,
                         device_range.range.start,
-                        key_id,
                     )),
                 ),
             );
@@ -1656,18 +1164,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     pub async fn update_attributes<'a>(
         &self,
         transaction: &mut Transaction<'a>,
-        node_attributes: Option<&fio::MutableNodeAttributes>,
+        node_attributes: Option<&MutableNodeAttributes>,
         change_time: Option<Timestamp>,
     ) -> Result<(), Error> {
-        // This codepath is only called by files, whose wrapping key id users cannot directly set
-        // as per fscrypt.
-        ensure!(
-            !matches!(
-                node_attributes,
-                Some(fio::MutableNodeAttributes { wrapping_key_id: Some(_), .. })
-            ),
-            FxfsError::BadPath
-        );
         self.handle.update_attributes(transaction, node_attributes, change_time).await
     }
 
@@ -1734,13 +1233,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         size: u64,
     ) -> Result<(), Error> {
         let mut transaction = self.new_transaction_with_options(options).await?;
-        {
-            let state = self.state.lock();
-            match &*state {
-                DataObjectState::Standard(_) => {}
-                _ => bail!(anyhow!(FxfsError::AccessDenied).context("Cannot truncate verity file")),
-            }
-        }
         let old_size = self.get_size();
         if size == old_size {
             return Ok(());
@@ -1899,8 +1391,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     ///
     /// Returns the number of bytes read up to the object's size (or 0 if `offset >= size`). Holes/
     /// sparse extents within the read range are zero-filled. Callers should not make any
-    /// assumptions about the contents of the buffer past the returned read amount. If this is a
-    /// verified file (fs-verity), the data is validated against the Merkle tree before returning.
+    /// assumptions about the contents of the buffer past the returned read amount.
     async fn read_aligned_locked(
         &self,
         offset: u64,
@@ -1923,9 +1414,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.handle
             .read_aligned_unchecked(self.attribute_id(), offset, buf.reborrow(), guard)
             .await?;
-        if self.is_verified_file() {
-            self.verify_data(offset as usize, buf.subslice(0..length).as_ptr_slice())?;
-        }
         Ok(length)
     }
 
@@ -1936,9 +1424,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     /// Returns the number of bytes read. If `offset >= size`, returns 0. Holes/sparse extents
     /// within the read range are zero-filled. Callers should not make any assumptions about the
     /// contents of the buffer past the returned read amount.
-    ///
-    /// If the object is a verified file (fs-verity), the read data is validated against the Merkle
-    /// tree before returning.
     ///
     /// This is an inherent version of the `ReadObjectHandle::read_aligned` trait method which
     /// avoids boxing the returned `Future`.
@@ -1971,17 +1456,6 @@ impl<S: HandleOwner> AssociatedObject for DataObjectHandle<S> {
                 ..
             }) => self.content_size.store(*size, atomic::Ordering::Relaxed),
             Mutation::ObjectStore(ObjectStoreMutation {
-                item: ObjectItem { value: ObjectValue::VerifiedAttribute { size, .. }, .. },
-                ..
-            }) => {
-                debug_assert_eq!(
-                    self.get_size(),
-                    *size,
-                    "size should be set when verity is enabled and must not change"
-                );
-                self.finalize_fsverity_state()
-            }
-            Mutation::ObjectStore(ObjectStoreMutation {
                 item:
                     ObjectItem {
                         key:
@@ -1996,14 +1470,8 @@ impl<S: HandleOwner> AssociatedObject for DataObjectHandle<S> {
                 ..
             }) if self.object_id() == *object_id && self.attribute_id() == *attr_id => match mode {
                 ExtentMode::Overwrite | ExtentMode::OverwritePartial(_) => {
-                    // If `enable_verity` transitioned state to `VerityStarted` concurrently while a
-                    // transaction was in progress, `with_overwrite_ranges_mut` will return `None`
-                    // and safely discard in-memory range updates, since verity files do not track
-                    // overwrite ranges.
                     self.with_overwrite_ranges_mut(|ranges| {
-                        if let Some(ranges) = ranges {
-                            ranges.apply_range(extent.clone().into());
-                        }
+                        ranges.apply_range(extent.clone().into())
                     });
                 }
                 ExtentMode::Raw | ExtentMode::Cow(_) => (),
@@ -2166,38 +1634,32 @@ impl<'a, S: HandleOwner> WriteBytes for DirectWriter<'a, S> {
 mod tests {
     use crate::errors::FxfsError;
     use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
-    use crate::fsck::{
-        FsckOptions, fsck, fsck_volume, fsck_volume_with_options, fsck_with_options,
-    };
+    use crate::fsck::{FsckOptions, fsck_volume, fsck_volume_with_options, fsck_with_options};
     use crate::lsm_tree::Query;
     use crate::lsm_tree::types::{ItemRef, LayerIterator};
     use crate::object_handle::{
         ObjectHandle, ObjectProperties, ReadObjectHandle, WriteObjectHandle,
     };
     use crate::object_store::allocator::TEST_EXTENT;
-    use crate::object_store::data_object_handle::{OverwriteOptions, WRITE_ATTR_BATCH_SIZE};
+    use crate::object_store::data_object_handle::OverwriteOptions;
     use crate::object_store::directory::replace_child;
-    use crate::object_store::object_record::{FsverityMetadata, ObjectKey, ObjectValue, Timestamp};
+    use crate::object_store::object_record::{ObjectKey, ObjectValue, Timestamp};
     use crate::object_store::transaction::{Mutation, Options, TRANSACTION_ROOM, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
         AttributeId, AttributeKey, DataObjectHandle, DirType, Directory, Extent, ExtentMode,
-        ExtentValue, HandleOptions, LockKey, NewChildStoreOptions, ObjectKeyData, ObjectStore,
-        PosixAttributes, StoreOptions,
+        ExtentValue, HandleOptions, LockKey, MutableNodeAttributes, NewChildStoreOptions,
+        ObjectKeyData, ObjectStore, PosixAttributes,
     };
     use crate::range::RangeExt;
     use crate::round::{round_down, round_up};
     use assert_matches::assert_matches;
     use bit_vec::BitVec;
-    use fidl_fuchsia_io as fio;
-    use fsverity_merkle::{FsVerityDescriptor, FsVerityDescriptorRaw};
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::FutureExt;
     use futures::channel::oneshot::channel;
     use futures::stream::{FuturesUnordered, StreamExt};
-    use fxfs_crypto::{Crypt, EncryptionKey, KeyPurpose};
-    use fxfs_insecure_crypto::new_insecure_crypt;
     use std::ops::Range;
     use std::sync::Arc;
     use std::time::Duration;
@@ -2220,14 +1682,12 @@ mod tests {
         FxFilesystem::new_empty(device).await.expect("new_empty failed")
     }
 
-    pub(super) async fn create_object_with_key(
+    pub(super) async fn create_test_object(
         fs: Arc<FxFilesystem>,
-        crypt: Option<&dyn Crypt>,
         write_object_test_data: bool,
     ) -> DataObjectHandle<ObjectStore> {
         let store = fs.root_store();
         let object;
-
         let mut transaction = fs
             .root_store()
             .new_transaction(
@@ -2239,26 +1699,9 @@ mod tests {
             )
             .await
             .expect("new_transaction failed");
-
-        object = if let Some(crypt) = crypt {
-            let object_id = store.get_next_object_id().await.unwrap();
-            let (key, unwrapped_key) =
-                crypt.create_key(object_id.get(), KeyPurpose::Data).await.unwrap();
-            ObjectStore::create_object_with_key(
-                &store,
-                &mut transaction,
-                object_id,
-                HandleOptions::default(),
-                EncryptionKey::Fxfs(key),
-                unwrapped_key,
-            )
+        object = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
             .await
-            .expect("create_object failed")
-        } else {
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed")
-        };
+            .expect("create_object failed");
 
         let root_directory =
             Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
@@ -2281,25 +1724,24 @@ mod tests {
         object
     }
 
-    pub(super) async fn test_filesystem_and_object_with_key(
-        crypt: Option<&dyn Crypt>,
+    pub(super) async fn test_filesystem_and_object_with(
         write_object_test_data: bool,
     ) -> (OpenFxFilesystem, DataObjectHandle<ObjectStore>) {
         let fs = test_filesystem().await;
-        let object = create_object_with_key(fs.clone(), crypt, write_object_test_data).await;
+        let object = create_test_object(fs.clone(), write_object_test_data).await;
         (fs, object)
     }
 
     async fn test_filesystem_and_object() -> (OpenFxFilesystem, DataObjectHandle<ObjectStore>) {
-        test_filesystem_and_object_with_key(Some(&new_insecure_crypt()), true).await
+        test_filesystem_and_object_with(true).await
     }
 
     async fn test_filesystem_and_empty_object() -> (OpenFxFilesystem, DataObjectHandle<ObjectStore>)
     {
-        test_filesystem_and_object_with_key(Some(&new_insecure_crypt()), false).await
+        test_filesystem_and_object_with(false).await
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_zero_buf_len_read() {
         let (fs, object) = test_filesystem_and_object().await;
         let mut buf = object.allocate_buffer(0).await;
@@ -2307,7 +1749,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_beyond_eof_read() {
         let (fs, object) = test_filesystem_and_object().await;
         let offset = TEST_OBJECT_SIZE as usize - 2;
@@ -2350,7 +1792,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_beyond_eof_read_from() {
         let (fs, object) = test_filesystem_and_object().await;
         let handle = &*object;
@@ -2400,7 +1842,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_beyond_eof_read_aligned_unchecked() {
         let (fs, object) = test_filesystem_and_object().await;
         let offset = TEST_OBJECT_SIZE as usize - 2;
@@ -2441,7 +1883,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_sparse() {
         let (fs, object) = test_filesystem_and_object().await;
         // Deliberately read not right to eof.
@@ -2468,7 +1910,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_after_writes_interspersed_with_flush() {
         let (fs, object) = test_filesystem_and_object().await;
 
@@ -2490,7 +1932,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_after_truncate_and_extend() {
         let (fs, object) = test_filesystem_and_object().await;
 
@@ -2526,7 +1968,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_whole_blocks_with_multiple_objects() {
         let (fs, object) = test_filesystem_and_object().await;
         let block_size = object.block_size().get() as usize;
@@ -2541,7 +1983,7 @@ mod tests {
             .await
             .expect("new_transaction failed");
         let object2 =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
+            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
                 .await
                 .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
@@ -2586,7 +2028,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_alignment() {
         let (fs, object) = test_filesystem_and_object().await;
 
@@ -2649,12 +2091,12 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_bytes_chunked() {
         // 16MiB device size.
         let device = DeviceHolder::new(FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object = create_object_with_key(fs.clone(), Some(&new_insecure_crypt()), false).await;
+        let object = create_test_object(fs.clone(), false).await;
 
         const FILE_SIZE: usize = 5 * 1024 * 1024;
         let mut data = vec![0u8; FILE_SIZE];
@@ -2769,7 +2211,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_unaligned_overwrite_returns_error() {
         let (fs, object) = test_filesystem_and_object().await;
         let mut buf = object.allocate_buffer(100).await;
@@ -2778,7 +2220,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_unaligned_preallocate_returns_error() {
         let (fs, object) = test_filesystem_and_object().await;
         let mut transaction = fs
@@ -2791,40 +2233,26 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
-    async fn test_encrypted_preallocate_returns_error() {
-        let (fs, object) = test_filesystem_and_object().await;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new failed");
-        let bs = fs.block_size();
-        let res = object.preallocate_range(&mut transaction, &mut (0..bs.get())).await;
-        assert!(matches!(res, Err(e) if FxfsError::NotSupported.matches(&e)));
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_preallocate_range() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, true).await;
+        let (fs, object) = test_filesystem_and_object_with(true).await;
         test_preallocate_common(&fs, object).await;
         fs.close().await.expect("Close failed");
     }
 
     // This is identical to the previous test except that we flush so that extents end up in
     // different layers.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_preallocate_succeeds_when_extents_are_in_different_layers() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, true).await;
+        let (fs, object) = test_filesystem_and_object_with(true).await;
         object.owner().flush().await.expect("flush failed");
         test_preallocate_common(&fs, object).await;
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_already_preallocated() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, true).await;
+        let (fs, object) = test_filesystem_and_object_with(true).await;
         let allocator = fs.allocator();
         let allocated_before = allocator.get_allocated_bytes();
         let mut transaction = object.new_transaction().await.expect("new_transaction failed");
@@ -2839,20 +2267,16 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overwrite_when_preallocated_at_start_of_file() {
         // The standard test data we put in the test object would cause an extent with checksums
         // to be created, which overwrite() doesn't support. So we create an empty object instead.
         let (fs, object) = test_filesystem_and_empty_object().await;
 
-        let object = ObjectStore::open_object(
-            object.owner(),
-            object.object_id(),
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("open_object failed");
+        let object =
+            ObjectStore::open_object(object.owner(), object.object_id(), HandleOptions::default())
+                .await
+                .expect("open_object failed");
 
         assert_eq!(fs.block_size(), 4096);
 
@@ -2927,20 +2351,16 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overwrite_large_buffer_and_file_with_many_holes() {
         // The standard test data we put in the test object would cause an extent with checksums
         // to be created, which overwrite() doesn't support. So we create an empty object instead.
         let (fs, object) = test_filesystem_and_empty_object().await;
 
-        let object = ObjectStore::open_object(
-            object.owner(),
-            object.object_id(),
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("open_object failed");
+        let object =
+            ObjectStore::open_object(object.owner(), object.object_id(), HandleOptions::default())
+                .await
+                .expect("open_object failed");
 
         assert_eq!(fs.block_size(), 4096);
         assert_eq!(object.get_size(), TEST_OBJECT_SIZE);
@@ -3083,20 +2503,16 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overwrite_when_unallocated_at_start_of_file() {
         // The standard test data we put in the test object would cause an extent with checksums
         // to be created, which overwrite() doesn't support. So we create an empty object instead.
         let (fs, object) = test_filesystem_and_empty_object().await;
 
-        let object = ObjectStore::open_object(
-            object.owner(),
-            object.object_id(),
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("open_object failed");
+        let object =
+            ObjectStore::open_object(object.owner(), object.object_id(), HandleOptions::default())
+                .await
+                .expect("open_object failed");
 
         assert_eq!(fs.block_size(), 4096);
 
@@ -3159,20 +2575,16 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overwrite_can_extend_a_file() {
         // The standard test data we put in the test object would cause an extent with checksums
         // to be created, which overwrite() doesn't support. So we create an empty object instead.
         let (fs, object) = test_filesystem_and_empty_object().await;
 
-        let object = ObjectStore::open_object(
-            object.owner(),
-            object.object_id(),
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("open_object failed");
+        let object =
+            ObjectStore::open_object(object.owner(), object.object_id(), HandleOptions::default())
+                .await
+                .expect("open_object failed");
 
         assert_eq!(fs.block_size(), 4096);
         assert_eq!(object.get_size(), TEST_OBJECT_SIZE);
@@ -3243,466 +2655,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
-    async fn test_enable_verity() {
-        let fs: OpenFxFilesystem = test_filesystem().await;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        let store = fs.root_store();
-        let object = Arc::new(
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed"),
-        );
-
-        transaction.commit().await.unwrap();
-
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-
-        let handle =
-            ObjectStore::open_object(&store, object.object_id(), HandleOptions::default(), None)
-                .await
-                .expect("open_object failed");
-
-        assert!(handle.is_verified_file());
-
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_enable_verity_large_file() {
-        // Need to make a large FakeDevice to create space for a 67 MB file.
-        let device = DeviceHolder::new(FakeDevice::new(262144, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_store = fs.root_store();
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-
-        let handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("failed to create object");
-        transaction.commit().await.expect("commit failed");
-        let mut offset = 0;
-
-        // Write a file big enough to trigger multiple transactions on enable_verity().
-        let mut buf = handle.allocate_buffer(WRITE_ATTR_BATCH_SIZE).await;
-        buf.fill(1);
-        for _ in 0..130 {
-            handle.write_or_append(Some(offset), buf.as_ref()).await.expect("write failed");
-            offset += WRITE_ATTR_BATCH_SIZE as u64;
-        }
-
-        handle
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-
-        let mut buf = handle.allocate_buffer(WRITE_ATTR_BATCH_SIZE).await;
-        offset = 0;
-        for _ in 0..130 {
-            handle
-                .read_aligned(offset, buf.as_mut())
-                .await
-                .expect("verification during read should fail");
-            assert_eq!(buf.to_vec(), &[1; WRITE_ATTR_BATCH_SIZE]);
-            offset += WRITE_ATTR_BATCH_SIZE as u64;
-        }
-
-        fsck(fs.clone()).await.expect("fsck failed");
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_retry_enable_verity_on_reboot() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_store = fs.root_store();
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-
-        let handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("failed to create object");
-        transaction.commit().await.expect("commit failed");
-
-        let object_id = {
-            let mut transaction = handle.new_transaction().await.expect("new_transaction failed");
-            transaction.add(
-                root_store.store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::graveyard_attribute_entry(
-                        root_store.graveyard_directory_object_id(),
-                        handle.object_id(),
-                        AttributeId::FSVERITY_MERKLE,
-                    ),
-                    ObjectValue::Some,
-                ),
-            );
-
-            // This write should span three transactions. This test mimics the behavior when the
-            // last transaction gets interrupted by a filesystem.close().
-            handle
-                .write_new_attr_in_batches(
-                    &mut transaction,
-                    AttributeId::FSVERITY_MERKLE,
-                    &vec![0; 2 * WRITE_ATTR_BATCH_SIZE],
-                    WRITE_ATTR_BATCH_SIZE,
-                )
-                .await
-                .expect("failed to write merkle attribute");
-
-            handle.object_id()
-            // Drop the transaction to simulate interrupting the merkle tree creation as well as to
-            // release the transaction locks.
-        };
-
-        fs.close().await.expect("failed to close filesystem");
-        let device = fs.take_device().await;
-        device.reopen(false);
-
-        let fs =
-            FxFilesystemBuilder::new().read_only(true).open(device).await.expect("open failed");
-        fsck(fs.clone()).await.expect("fsck failed");
-        fs.close().await.expect("failed to close filesystem");
-        let device = fs.take_device().await;
-        device.reopen(false);
-
-        // On open, the filesystem will call initial_reap which will call queue_tombstone().
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        let root_store = fs.root_store();
-        let handle =
-            ObjectStore::open_object(&root_store, object_id, HandleOptions::default(), None)
-                .await
-                .expect("open_object failed");
-        handle
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-
-        // `flush` will ensure that initial reap fully processes all the graveyard entries. This
-        // isn't strictly necessary for the test to pass (the graveyard marker was already
-        // processed during `enable_verity`), but it does help catch bugs, such as the attribute
-        // graveyard entry not being removed upon processing.
-        fs.graveyard().flush().await;
-        let merkle_data = handle
-            .read_attr(AttributeId::FSVERITY_MERKLE)
-            .await
-            .expect("read_attr failed")
-            .expect("No attr found");
-        assert!(
-            FsVerityDescriptor::new(&merkle_data[..], handle.block_size().get() as usize).is_ok()
-        );
-        fsck(fs.clone()).await.expect("fsck failed");
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_verify_data_corrupt_file() {
-        let fs: OpenFxFilesystem = test_filesystem().await;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        let store = fs.root_store();
-        let object = Arc::new(
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed"),
-        );
-
-        transaction.commit().await.unwrap();
-
-        let mut buf = object.allocate_buffer(5 * fs.block_size().get() as usize).await;
-        buf.fill(123);
-        object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-
-        // Change file contents and ensure verification fails
-        buf.fill(234);
-        object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-        object
-            .read_aligned(0, buf.as_mut())
-            .await
-            .expect_err("verification during read should fail");
-        object
-            .read_bytes(0..buf.len() as u64)
-            .await
-            .expect_err("verification during read_bytes should fail");
-
-        fs.close().await.expect("Close failed");
-    }
-
-    // TODO(https://fxbug.dev/450398331): More tests to be added when this can support writing the
-    // f2fs format natively. For now, relying on tests inside of the f2fs_reader to exercise more
-    // paths.
-    #[fuchsia::test]
-    async fn test_parse_f2fs_verity() {
-        let fs: OpenFxFilesystem = test_filesystem().await;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        let store = fs.root_store();
-        let object = Arc::new(
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed"),
-        );
-
-        transaction.commit().await.unwrap();
-        let file_size = fs.block_size() * 2;
-        // Write over one block to make there be leaf hashes.
-        {
-            let mut buf = object.allocate_buffer(file_size as usize).await;
-            buf.fill(64);
-            assert_eq!(
-                object.write_or_append(None, buf.as_ref()).await.expect("Writing to file."),
-                file_size
-            );
-        }
-
-        // Enable verity normally, then shift the type.
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-        let (verity_info, root_hash) = object.get_descriptor().unwrap();
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::Object {
-                    store_object_id: store.store_object_id(),
-                    object_id: object.object_id()
-                }],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    object.object_id(),
-                    AttributeId::DATA,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::verified_attribute(
-                    file_size,
-                    FsverityMetadata::F2fs(0..(fs.block_size() * 2)),
-                ),
-            ),
-        );
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    object.object_id(),
-                    AttributeId::FSVERITY_MERKLE,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::attribute(fs.block_size() * 2, false),
-            ),
-        );
-        {
-            let descriptor = FsVerityDescriptorRaw::new(
-                fio::HashAlgorithm::Sha256,
-                fs.block_size().get(),
-                file_size,
-                root_hash.as_slice(),
-                match &verity_info.salt {
-                    Some(salt) => salt.as_slice(),
-                    None => [0u8; 0].as_slice(),
-                },
-            )
-            .expect("Creating descriptor");
-            let mut buf = object.allocate_buffer(fs.block_size().get() as usize).await;
-            let mut temp = vec![0u8; fs.block_size().get() as usize];
-            descriptor.write_to_slice(&mut temp).expect("Writing descriptor to buf");
-            buf.copy_from_slice(&temp);
-            object
-                .multi_write(
-                    &mut transaction,
-                    AttributeId::FSVERITY_MERKLE,
-                    &[fs.block_size().get()..(fs.block_size() * 2)],
-                    buf.as_mut(),
-                )
-                .await
-                .expect("Writing descriptor");
-        }
-        transaction.commit().await.unwrap();
-
-        let handle =
-            ObjectStore::open_object(&store, object.object_id(), HandleOptions::default(), None)
-                .await
-                .expect("open_object failed");
-
-        assert!(handle.is_verified_file());
-
-        let mut buf = object.allocate_buffer(file_size as usize).await;
-        assert_eq!(
-            handle.read_aligned(0, buf.as_mut()).await.expect("Read whole file."),
-            file_size as usize
-        );
-
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_verify_data_corrupt_tree() {
-        let fs: OpenFxFilesystem = test_filesystem().await;
-        let object_id = {
-            let store = fs.root_store();
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(lock_keys![], Options::default())
-                .await
-                .expect("new_transaction failed");
-            let object = Arc::new(
-                ObjectStore::create_object(
-                    &store,
-                    &mut transaction,
-                    HandleOptions::default(),
-                    None,
-                )
-                .await
-                .expect("create_object failed"),
-            );
-            let object_id = object.object_id();
-
-            transaction.commit().await.unwrap();
-
-            let mut buf = object.allocate_buffer(5 * fs.block_size().get() as usize).await;
-            buf.fill(123);
-            object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-
-            object
-                .enable_verity(fio::VerificationOptions {
-                    hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                    salt: Some(vec![]),
-                    ..Default::default()
-                })
-                .await
-                .expect("set verified file metadata failed");
-            object.read_aligned(0, buf.as_mut()).await.expect("verified read");
-
-            // Corrupt the merkle tree before closing.
-            let mut merkle = object
-                .read_attr(AttributeId::FSVERITY_MERKLE)
-                .await
-                .unwrap()
-                .expect("Reading merkle tree");
-            merkle[0] = merkle[0].wrapping_add(1);
-            object
-                .write_attr(AttributeId::FSVERITY_MERKLE, &*merkle)
-                .await
-                .expect("Overwriting merkle");
-
-            object_id
-        }; // Close object.
-
-        // Reopening the object should complain about the corrupted merkle tree.
-        assert!(
-            ObjectStore::open_object(&fs.root_store(), object_id, HandleOptions::default(), None)
-                .await
-                .is_err()
-        );
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_allocate_verity_file() {
-        let fs: OpenFxFilesystem = test_filesystem().await;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        let store = fs.root_store();
-        let object = Arc::new(
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed"),
-        );
-        transaction.commit().await.unwrap();
-
-        let mut buf = object.allocate_buffer(8192).await;
-        buf.fill(0xAA);
-        object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("enable_verity failed");
-
-        assert!(object.is_verified_file());
-
-        // Calling allocate on a verity-enabled file should return an error.
-        assert!(object.allocate(0..8192).await.is_err());
-
-        // Even after opening the object again (simulating cache eviction), it must remain verified.
-        let reopened =
-            ObjectStore::open_object(&store, object.object_id(), HandleOptions::default(), None)
-                .await
-                .expect("open_object failed");
-        assert!(reopened.is_verified_file());
-
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extend() {
         let fs = test_filesystem().await;
         let handle;
@@ -3712,10 +2665,9 @@ mod tests {
             .await
             .expect("new_transaction failed");
         let store = fs.root_store();
-        handle =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed");
+        handle = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create_object failed");
 
         // cladefs: an extent no allocator mints, which upstream's 'magic' starting point on the
         // device was the equivalent of.
@@ -3733,7 +2685,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_truncate_deallocates_old_extents() {
         let (fs, object) = test_filesystem_and_object().await;
         let mut buf = object.allocate_buffer(5 * fs.block_size().get() as usize).await;
@@ -3753,7 +2705,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_truncate_zeroes_tail_block() {
         let (fs, object) = test_filesystem_and_object().await;
 
@@ -3777,7 +2729,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_trim() {
         // Format a new filesystem. cladefs: of 16 MiB, not 8: the object below, of more extents than
         // a transaction can free, left the second pass's truncate, which reserves room for its
@@ -3829,8 +2781,8 @@ mod tests {
                 .await
                 .expect("open failed");
             let oid = root_directory.lookup("foo").await.expect("lookup failed");
-            if let Some((oid, _, _)) = oid {
-                let object = ObjectStore::open_object(store, oid, HandleOptions::default(), None)
+            if let Some((oid, _)) = oid {
+                let object = ObjectStore::open_object(store, oid, HandleOptions::default())
                     .await
                     .expect("open_object failed");
                 let props = object.get_properties().await.expect("get_properties failed");
@@ -3865,7 +2817,7 @@ mod tests {
                 let fs = store.filesystem();
 
                 fsck_with_options(fs.clone(), &unlocked).await.expect("fsck_with_options failed");
-                fsck_volume_with_options(fs.as_ref(), &unlocked, store.store_object_id(), None)
+                fsck_volume_with_options(fs.as_ref(), &unlocked, store.store_object_id())
                     .await
                     .expect("fsck_volume_with_options failed");
 
@@ -3885,8 +2837,7 @@ mod tests {
 
                 // If the "foo" file exists check that allocated size matches content size.
                 let root_vol = root_volume(fs2.clone()).await.expect("root_volume failed");
-                let store =
-                    root_vol.volume("test", StoreOptions::default()).await.expect("volume failed");
+                let store = root_vol.volume("test").await.expect("volume failed");
 
                 if let Some(oid) = object_id {
                     // For the second pass, the object should get tombstoned.
@@ -3907,10 +2858,7 @@ mod tests {
                         .await
                         .expect("open failed");
                     let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-                    let store = root_vol
-                        .volume("test", StoreOptions::default())
-                        .await
-                        .expect("volume failed");
+                    let store = root_vol.volume("test").await.expect("volume failed");
                     while needs_trim(&store).await.is_some() {
                         // The object has been truncated, but still has some data allocated to
                         // it.  The graveyard should trim the object eventually.
@@ -3919,7 +2867,7 @@ mod tests {
 
                     // Run fsck.
                     fsck_with_options(fs.clone(), &locked).await.expect("fsck_with_options failed");
-                    fsck_volume_with_options(fs.as_ref(), &locked, store.store_object_id(), None)
+                    fsck_volume_with_options(fs.as_ref(), &locked, store.store_object_id())
                         .await
                         .expect("fsck_volume_with_options failed");
                     fs.close().await.expect("close failed");
@@ -3927,7 +2875,7 @@ mod tests {
 
                 // Run fsck on fs2.
                 fsck_with_options(fs2.clone(), &locked).await.expect("fsck_with_options failed");
-                fsck_volume_with_options(fs2.as_ref(), &locked, store.store_object_id(), None)
+                fsck_volume_with_options(fs2.as_ref(), &locked, store.store_object_id())
                     .await
                     .expect("fsck_volume_with_options failed");
                 fs2.close().await.expect("close failed");
@@ -3942,7 +2890,7 @@ mod tests {
             .expect("open failed");
 
         let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-        let store = root_vol.volume("test", StoreOptions::default()).await.expect("volume failed");
+        let store = root_vol.volume("test").await.expect("volume failed");
 
         shared_context.lock().store = Some(store.clone());
 
@@ -4030,7 +2978,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_adjust_refs() {
         let (fs, object) = test_filesystem_and_object().await;
         let store = object.owner();
@@ -4123,7 +3071,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_locks() {
         let (fs, object) = test_filesystem_and_object().await;
         let (send1, recv1) = channel();
@@ -4175,7 +3123,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_racy_reads() {
         let fs = test_filesystem().await;
         let object;
@@ -4186,7 +3134,7 @@ mod tests {
             .expect("new_transaction failed");
         let store = fs.root_store();
         object = Arc::new(
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
+            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
                 .await
                 .expect("create_object failed"),
         );
@@ -4223,9 +3171,9 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocated_size() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, true).await;
+        let (fs, object) = test_filesystem_and_object_with(true).await;
 
         let before = object.get_properties().await.expect("get_properties failed").allocated_size;
         let mut buf = object.allocate_buffer(5).await;
@@ -4271,7 +3219,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_zero() {
         let (fs, object) = test_filesystem_and_object().await;
         let expected_size = object.get_size();
@@ -4291,7 +3239,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_properties() {
         let (fs, object) = test_filesystem_and_object().await;
         const CRTIME: Timestamp = Timestamp::from_nanos(1234);
@@ -4304,7 +3252,7 @@ mod tests {
         object
             .update_attributes(
                 &mut transaction,
-                Some(&fio::MutableNodeAttributes {
+                Some(&MutableNodeAttributes {
                     creation_time: Some(CRTIME.as_nanos()),
                     modification_time: Some(MTIME.as_nanos()),
                     mode: Some(111),
@@ -4319,7 +3267,7 @@ mod tests {
         object
             .update_attributes(
                 &mut transaction,
-                Some(&fio::MutableNodeAttributes {
+                Some(&MutableNodeAttributes {
                     modification_time: Some(MTIME_NEW.as_nanos()),
                     gid: Some(333),
                     rdev: Some(444),
@@ -4348,7 +3296,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_is_allocated() {
         let (fs, object) = test_filesystem_and_object().await;
 
@@ -4465,7 +3413,7 @@ mod tests {
             .await
             .expect("new_transaction failed");
         let object2 =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
+            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
                 .await
                 .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
@@ -4483,7 +3431,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_read_write_attr() {
         let (_fs, object) = test_filesystem_and_object().await;
         let data = [0xffu8; 16_384];
@@ -4498,7 +3446,7 @@ mod tests {
         assert_eq!(object.read_attr(AttributeId(21)).await.expect("read_attr failed"), None);
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_read_write_attr_unaligned() {
         let (_fs, object) = test_filesystem_and_object().await;
         let data_unaligned = [0x55u8; 5000];
@@ -4511,7 +3459,7 @@ mod tests {
         assert_eq!(&data_unaligned[..], &rdata[..]);
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_read_write_attr_empty() {
         let (_fs, object) = test_filesystem_and_object().await;
         object.write_attr(AttributeId(23), &[]).await.expect("write_attr failed");
@@ -4523,7 +3471,7 @@ mod tests {
         assert!(rdata.is_empty());
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_allocate_basic() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let block_size = fs.block_size();
@@ -4571,7 +3519,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_allocate_extends_file() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let block_size = fs.block_size();
@@ -4594,7 +3542,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_allocate_past_end() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let block_size = fs.block_size();
@@ -4617,7 +3565,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_allocate_read_attr() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let block_size = fs.block_size();
@@ -4643,7 +3591,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_allocate_existing_data() {
         struct Case {
             written_ranges: Vec<Range<usize>>,
@@ -4779,7 +3727,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_multi_overwrite() {
         #[derive(Debug)]
         struct Case {
@@ -5017,12 +3965,12 @@ mod tests {
                 assert_eq!(buf.to_vec(), expected_buf.to_vec(), "failed on case {}", i);
             }
 
-            fsck_volume(&fs, object.store().store_object_id(), None).await.expect("fsck failed");
+            fsck_volume(&fs, object.store().store_object_id()).await.expect("fsck failed");
             fs.close().await.expect("close failed");
         }
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_multi_overwrite_mode_updates() {
         // cladefs: overwrites go to new blocks, as extents are write-once (backlog doc-4), so each
         // range written becomes an `Overwrite` extent of its own, and what is left of the
@@ -5122,11 +4070,11 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_check_unwritten_zero() {
         let device = DeviceHolder::new(FakeDevice::new(256 * 1024, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object = create_object_with_key(fs.clone(), Some(&new_insecure_crypt()), false).await;
+        let object = create_test_object(fs.clone(), false).await;
         let block_size = fs.block_size();
 
         // Set up a file with eight blocks to look like this:

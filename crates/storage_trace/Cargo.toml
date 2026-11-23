@@ -11,7 +11,7 @@ license.workspace = true
 tracing = []
 
 [dev-dependencies]
-fuchsia.workspace = true
+fuchsia-async.workspace = true
 
 [lints]
 workspace = true

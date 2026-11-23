@@ -184,6 +184,9 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
+        // cladefs: an ephemeral fork of a host decommissioned, its incarnation's references
+        // retired, which forks no more until started of a new one (board 8519).
+        Failure::Bucket(Error::Decommissioned(_)) => Some(Errno::ESTALE),
         // cladefs: a bucket refusing the host's credentials, for good, or a request of its own, or
         // answering what this build can't read: never retried (boards 5861, 5534).
         Failure::Bucket(Error::Refused(refused)) => Some(match refused.refusal {
@@ -294,8 +297,17 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
     KMS.get().get_or_init(|| {
-        match bucket_cell::bucket_kms::from_env(|| host_bucket().map(|bucket| bucket.own().clone()))
-        {
+        // cladefs: the environment read once, the variables KMSes read alone, which the host's
+        // KMSes keep (board 8593).
+        let vars = match extent_keys::kms::Vars::from_env() {
+            Ok(vars) => vars.shared(),
+            Err(why) => {
+                log::error!("cladefs: the host's KMS: {why}");
+                return Err(why);
+            }
+        };
+        let own = || host_bucket().map(|bucket| bucket.own().clone());
+        match bucket_cell::bucket_kms::from_vars(&vars, own) {
             Ok(chosen) => {
                 let bucket = chosen.bucket().cloned();
                 // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
@@ -308,7 +320,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
                 };
                 let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match home {
                     Some(home) => {
-                        let by_bucket = Arc::new(ByBucket::new(home, chosen, std::env::vars()));
+                        let by_bucket = Arc::new(ByBucket::new(home, chosen, vars));
                         (by_bucket.clone(), Some(by_bucket))
                     }
                     None => (one(chosen.shared()), None),

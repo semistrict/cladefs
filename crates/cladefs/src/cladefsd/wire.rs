@@ -554,9 +554,14 @@ const _: () = {
 /// private pages; a [`STAGE_UNMAP`] keeps the private pages there with [`STAGE_KEEP_PRIVATE`];
 /// [`STAGE_COUNTS`] says the private pages. Version 14: typed `#[repr(C)]` `zerocopy` inline
 /// message bodies replace positional `args: [u64; 5]`, refusing non-zero trailing/reserved bytes
-/// (board 6917). Version 15: no followers (board 8237): no `OPEN_READ_ONLY`, `ADVANCE`, `LET_GO`,
-/// `PIN`, `UNPIN` nor `COMMITTED`, and an [`OPEN`]'s reply says no commit.
-pub(crate) const VERSION: u64 = 15;
+/// (board 6917). Version 15: a payload past what its kind holds ends its connection at its header,
+/// as one on an `ACK` did (`codec::most_payload`), and so does a payload, or what the daemon queued
+/// for a VM process, that moves no byte for [`STALL`] (board 8459); an `ACK` of a stage operation
+/// never sent lets its VM process go (board 8463); a `ROOT`'s reply is counted in its stream bytes
+/// as it is admitted (board 8465).
+/// Version 16: no followers (board 8237): no `OPEN_READ_ONLY`, `ADVANCE`, `LET_GO`, `PIN`, `UNPIN`
+/// nor `COMMITTED`, and an [`OPEN`]'s reply says no commit.
+pub(crate) const VERSION: u64 = 16;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -822,6 +827,15 @@ pub(crate) const MAX_STREAM_BYTES: u64 = 4 * MAX_PAYLOAD;
 /// The most file descriptors a message carries.
 pub(crate) const MAX_FDS: usize = 2;
 
+/// cladefs: how long a VM process may leave a message half moved, no byte of it moving, before the
+/// daemon ends its connection (board 8459): a payload it admitted none of which comes
+/// ([`AsyncReceiver::receive`]), or what is queued for it that its socket takes none of
+/// ([`AsyncSender::stalled`]). Either holds its tenant's bytes in flight, which an idle connection
+/// held for good, every other VM process of the tenant's requests waiting for them. As long as a VM
+/// process may leave a stage operation unacknowledged (`server::UNRESPONSIVE`): a VM process moves
+/// a message whole, at once, as it sends and reads on threads of its own (hotbed question 481).
+pub(crate) const STALL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A message received.
 pub(crate) struct Message {
     pub header: Header,
@@ -954,6 +968,9 @@ struct Queue {
     draining: bool,
     /// Why the socket takes no more, once it doesn't.
     failed: Option<io::ErrorKind>,
+    /// cladefs: when the socket last took any of them, or, if it took none since, the first came:
+    /// how long the VM process has read none of what waits for it ([`AsyncSender::stalled`]).
+    moved: Option<std::time::Instant>,
 }
 
 /// A message, as much of it as the socket has not taken.
@@ -1099,8 +1116,21 @@ impl AsyncSender {
             return Err(failed.into());
         }
         self.queue_more(message.left());
+        if queue.messages.is_empty() {
+            queue.moved = Some(std::time::Instant::now());
+        }
         queue.messages.push_back((message, fds));
         Ok(())
+    }
+
+    /// cladefs: how long, as of `now`, its socket has taken none of what is queued: none with
+    /// nothing queued (board 8459). A VM process past [`STALL`] the daemon lets go.
+    pub fn stalled(&self, now: std::time::Instant) -> std::time::Duration {
+        let queue = self.queue.lock().unwrap();
+        match (queue.messages.is_empty(), queue.moved) {
+            (false, Some(moved)) => now.saturating_duration_since(moved),
+            _ => std::time::Duration::ZERO,
+        }
     }
 
     /// Writes what `queue` holds, unless the task draining it does: fails once the socket failed.
@@ -1156,6 +1186,7 @@ impl AsyncSender {
             drop(parts);
             drop(fds);
             self.queue_less(Some(sent as u64));
+            queue.moved = Some(std::time::Instant::now());
             let mut left = sent;
             while left > 0 {
                 let (message, _) = queue.messages.front_mut().expect("bytes sent of a message");
@@ -1502,7 +1533,9 @@ impl AsyncReceiver {
     /// [`Receiver::receive`] gives it, a payload of [`MAX_PAYLOAD`] at most: if `admit`, given its
     /// header, admits it, before its payload is read (TASK-79.16), with what admitting it gave, as
     /// what the daemon holds for it counted: which, its payload never read whole, is dropped
-    /// with it (TASK-548).
+    /// with it (TASK-548). cladefs: `TimedOut` once no byte of a payload it admitted has come for
+    /// [`STALL`], as a VM process sending a header and nothing more held what it was admitted
+    /// with for good (board 8459).
     pub async fn receive<A, F: std::future::Future<Output = io::Result<A>>>(
         &mut self,
         admit: impl FnOnce(&Header) -> F,
@@ -1532,7 +1565,15 @@ impl AsyncReceiver {
         let mut payload = vec![0; header.len as usize];
         let mut at = 0;
         while at < payload.len() {
-            match self.read(&mut payload[at..], false).await? {
+            let Ok(read) = tokio::time::timeout(STALL, self.read(&mut payload[at..], false)).await
+            else {
+                let what = format!(
+                    "a payload stalled, {at} of its {} bytes received and none for {STALL:?}",
+                    payload.len()
+                );
+                return Err(io::Error::new(io::ErrorKind::TimedOut, what));
+            };
+            match read? {
                 (0, _) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 (received, _) => at += received,
             }

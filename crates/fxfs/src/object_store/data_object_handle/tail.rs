@@ -128,14 +128,14 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 #[cfg(test)]
 mod tests {
     use crate::object_handle::WriteObjectHandle;
-    use crate::object_store::data_object_handle::tests::test_filesystem_and_object_with_key;
+    use crate::object_store::data_object_handle::tests::test_filesystem_and_object_with;
 
     /// cladefs: a file allocated part of a block grows: the block, which nothing wrote, isn't on the
     /// device, and reads as zeros, so the growth has nothing to zero. Read from its extent, the
     /// growth failed, "no extent" (TASK-149.36).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_file_allocated_part_of_a_block_grows() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, false).await;
+        let (fs, object) = test_filesystem_and_object_with(false).await;
         // Past what small files share of an extent (the staging extent), so that the allocation
         // takes extents of its own, which nothing wrote.
         let end = (1 << 20) + 1;

@@ -1675,8 +1675,8 @@ static STATS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 /// environment says: the directory `CLADEFSD_PART_CACHE` names, if it names one (empty, it names
 /// none); the bytes of objects `CLADEFSD_PART_CACHE_BYTES` gives, a budget, as a host whose cache
 /// shares its disk with its cells needs (TASK-406.1), or, unset, none: as many as the disk governor
-/// leaves it (doc-22). Read at the daemon's start, to refuse what it can't use, and again by its
-/// first cell to open.
+/// leaves it (doc-22). Read at the daemon's start, which opens the cache then ([`open_part_cache`],
+/// board 8595), to refuse what it can't use.
 pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
     let set = |var| node_local::env::var_os(var).filter(|value| !value.is_empty());
     let dir = set("CLADEFSD_PART_CACHE");
@@ -1707,26 +1707,31 @@ node_local::node_local! {
 }
 
 /// cladefs: the cache the environment configures ([`cache_config`]), if it does, where what the
-/// cells opened read from their bucket is kept. Opened once, by the first cell to open, those
+/// cells opened read from their bucket is kept. Opened once, by the daemon's boot
+/// ([`open_part_cache`]), or by the first cell to open in a daemon served without one booted, those
 /// opening meanwhile waiting for it: a cache holds its directory locked, and two opened at once, as
 /// a daemon's VMs booting at once open their cells, failed the second (TASK-67). A failure is the
 /// caller's, and the next tries again.
 pub(super) fn part_cache() -> Result<Option<Arc<Cache>>, Errno> {
+    open_part_cache().map_err(|err| {
+        log::error!("cladefsd: {err}");
+        Errno::EIO
+    })
+}
+
+/// cladefs: the part cache, as [`part_cache`] opens it, or why it can't be, naming the variable
+/// that configures it and the cause: as the daemon's boot opens it, whether or not it has peers, so
+/// that a cache missing, locked, or on a filesystem that can't bypass the page cache stops the
+/// daemon at its start, where each cell's opening failed `EIO` while it served (board 8595).
+pub(super) fn open_part_cache() -> Result<Option<Arc<Cache>>, String> {
     let mut opened = CACHE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cache) = &*opened {
         return Ok(cache.clone());
     }
-    let config = cache_config().map_err(|err| {
-        log::error!("cladefsd: {err}");
-        Errno::EINVAL
-    })?;
-    let cache = match config {
+    let cache = match cache_config()? {
         Some((dir, capacity)) => match Cache::open(&dir, capacity) {
             Ok(cache) => Some(Arc::new(cache)),
-            Err(err) => {
-                log::error!("cladefsd: CLADEFSD_PART_CACHE: {err}");
-                return Err(Errno::EIO);
-            }
+            Err(err) => return Err(format!("CLADEFSD_PART_CACHE: {}: {err}", dir.display())),
         },
         None => None,
     };

@@ -21,7 +21,7 @@ fn held(arena: ArenaId) -> u64 {
 #[test]
 fn arenas_count_the_memory_their_objects_hold() {
     let ps = page_size();
-    let arena = create_arena();
+    let arena = create_arena().unwrap();
     let check = |when: &str| assert_eq!(arena_bytes(arena), held(arena), "{when}");
     let written = |pages: u64, byte: u8| {
         let run = alloc(arena, pages, Wait::No).unwrap();
@@ -56,7 +56,7 @@ fn arenas_count_the_memory_their_objects_hold() {
 /// A whole slab takes a spare, within the cap.
 #[test]
 fn capped_arenas_give_their_spares_back_for_shorter_runs() {
-    let arena = create_arena();
+    let arena = create_arena().unwrap();
     set_arena_cap(arena, Some(SLAB));
     drop(alloc(arena, SLAB / page_size(), Wait::No).unwrap());
     assert_eq!(arena_bytes(arena), SLAB, "a spare kept");

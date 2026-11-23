@@ -31,8 +31,16 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     // cladefs: its KMS, which every cell is encrypted under: none chosen, it refuses to start,
     // naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
     crate::bucket::require_kms().map_err(anyhow::Error::msg)?;
-    // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
-    super::cache_config().map_err(anyhow::Error::msg)?;
+    // cladefs: what only failed once it served refused now (board 8595): too few open files for
+    // its cells, outside the simulation, whose hosts share its process's; a kernel that can't say
+    // which process to kill of a VM process's socket (board 8533); roots it can't resolve; a part
+    // cache it can't open, missing, locked, or unable to bypass the page cache, whether or not it
+    // has peers (TASK-406.1).
+    #[cfg(not(madsim))]
+    super::require_open_files()?;
+    super::server::require_peer_pidfds()?;
+    super::server::resolve_roots().map_err(anyhow::Error::msg)?;
+    super::cells::open_part_cache().map_err(anyhow::Error::msg)?;
     // cladefs: where traces of what VMs read go, if anywhere (TASK-702.1).
     super::reads::configure().map_err(anyhow::Error::msg)?;
     // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
@@ -49,6 +57,12 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         let let_go = super::migration::let_go_handed_over(&ephemeral).await?;
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
         super::migration::idle().map_err(anyhow::Error::msg)?;
+        // cladefs: where ephemeral cells migrated to it go (board 8447): none named, it takes no
+        // migrations; one named but not there, it refuses to start.
+        if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
+            let root = super::migration::target::cells_root().map_err(anyhow::Error::msg)?;
+            log::info!("cladefsd: ephemeral cells migrated here go in {}", root.display());
+        }
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
     }
@@ -104,7 +118,7 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         let metrics = std::net::TcpListener::bind(address)
             .with_context(|| format!("serving metrics and z-pages at {address}"))?;
         // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
-        std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
+        super::run::thread("cladefsd http", move || {
             if let Err(err) = super::serve_http(metrics) {
                 log::error!("cladefsd: serving HTTP: {err}");
             }
@@ -121,9 +135,7 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     // cladefs: outside the simulation: the VM socket, the simulation's guests calling the
     // requests' handling in the process (doc-24).
     #[cfg(not(madsim))]
-    std::thread::Builder::new()
-        .name("cladefsd vms".into())
-        .spawn(move || super::serve(listener))?;
+    super::run::thread("cladefsd vms", move || super::serve(listener))?;
     #[cfg(madsim)]
     super::SERVING.get().send_replace(true);
     Ok(())
@@ -148,7 +160,7 @@ fn serve_control(control: &std::ffi::OsStr, tenants: std::path::PathBuf) -> anyh
         let control = super::bind_owner_only(control)
             .with_context(|| format!("listening at {}", control.display()))?;
         // cladefs: outside the simulation: the control API on its Unix socket; a task under madsim.
-        std::thread::Builder::new().name("cladefsd ctl".into()).spawn(move || {
+        super::run::thread("cladefsd ctl", move || {
             if let Err(err) = super::serve_control(control, tenants) {
                 log::error!("cladefsd: serving the control API: {err}");
                 std::process::exit(1);

@@ -64,6 +64,7 @@ fn daemon_with(dir: &Path, bucket: &Path, peers: &[String], env: &[(&str, &str)]
         .env("CLADEFSD_PART_CACHE", dir.join("cache"))
         .env("CLADEFSD_GRPC", &control)
         .env("CLADEFSD_EPHEMERAL", &ephemeral)
+        .env("CLADEFSD_EPHEMERAL_CELLS", dir)
         .env("CLADEFSD_PEER_ADDRESS", &peers[0])
         .env("CLADEFSD_PEERS", peers.join(","))
         .envs(env.iter().copied())
@@ -184,6 +185,9 @@ fn ephemeral_cells_migrate_live_between_hosts() {
     source.control.hand_over_cell(&here).unwrap();
     assert!(!here.exists(), "the source's cell directory goes once handed over");
     let incarnation = std::fs::read_to_string(target.ephemeral.join("incarnation")).unwrap();
+    // Its version's line (`cladefs ephemeral host 2`, board 8461, doc-28), then the number.
+    let (format, incarnation) = incarnation.split_once('\n').unwrap();
+    assert_eq!(format, "cladefs ephemeral host 2");
     let incarnation: u64 = incarnation.trim().parse().unwrap();
     let named = referring(&bucket);
     assert_eq!(named.len(), 1, "one reference: {named:?}");
@@ -396,6 +400,34 @@ fn hand_overs_naming_files_the_target_lacks_are_refused() {
     assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
     assert!(!staged.exists(), "the target dropped what it took");
     forked.assert_served_again(&there, BEFORE);
+}
+
+/// Board 8455: a target of another build's cell directories (here a failpoint naming another
+/// `local_cell` format among its formats) refuses a migration at its prepare, noting, referring
+/// to and staging nothing; the source, which gave nothing up, serves the cell on, and migrates it
+/// once the target is of its formats again.
+#[test]
+fn targets_of_another_format_refuse_migrations_at_their_prepare() {
+    let mut forked = forked(4);
+    let other = [("FAILPOINTS", "peers::formats=return(cladefs extent store 15)")];
+    forked.restart_with(1, &other);
+    let there = forked.host(1).join("ephemeral-cell");
+    let control = &forked.source.control;
+    let refused = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::ENOTSUP), "{refused}");
+    let staged: Vec<String> = std::fs::read_dir(forked.host(1))
+        .unwrap()
+        .map(|found| found.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".migrating-"))
+        .collect();
+    assert_eq!(staged, Vec::<String>::new(), "staged at the target");
+    forked.assert_served_again(&there, 4);
+
+    forked.restart(1);
+    let control = &forked.source.control;
+    control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 4);
 }
 
 /// board 2934: a source restarted between a migration's prepare and its hand-over, which pursues

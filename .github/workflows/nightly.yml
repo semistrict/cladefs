@@ -19,7 +19,47 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+# cladefs: the token reads the repository and nothing more (board 8603), as no job writes to it;
+# actions are pinned by commit, their release in a comment, and Rust by rust-toolchain.toml, so
+# that what CI runs changes by a commit alone (scripts/tests/test_workflows.py).
+permissions:
+  contents: read
+
 jobs:
+  # board 8605: RustSec's advisories against every lock (scripts/audit.sh advisories, deny.toml,
+  # which allows the known ones by ID, each with its reason and task): nightly, not on each push, so
+  # that one published overnight fails no unrelated push and none lands unseen. What it found is
+  # in the run's summary, as Hunt's.
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # With vendor/firecracker, whose lock is audited too, and a path dependency of the workspace's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      # Each audited workspace's Rust, as its rust-toolchain.toml pins it, as its builds have it.
+      - name: Rust, as each workspace's rust-toolchain.toml pins it
+        run: |
+          rustup toolchain install
+          (cd guest/rust && rustup toolchain install)
+          (cd vendor/firecracker && rustup toolchain install)
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-deny@0.22.0
+      - name: Advisories against every lock
+        run: |
+          status=0
+          scripts/audit.sh advisories > audit.log 2>&1 || status=$?
+          cat audit.log
+          {
+            echo '### cargo deny check advisories'
+            echo '```'
+            grep -E '^(error|warning)\[|ID: |scripts/audit.sh: ' audit.log || echo 'nothing found'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
   # What the suite boots and serves its guests with, built once for its parts: the guest tests'
   # own tests are CI's guest part's, which scripts/test-e2e.sh runs first unless its artifacts are
   # prebuilt. Firecracker for musl under its real seccomp filter, and its jailer.
@@ -28,7 +68,7 @@ jobs:
     timeout-minutes: 120
     steps:
       # With vendor/firecracker, the VMM the guests boot in.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - uses: ./.github/actions/guest-host
@@ -42,7 +82,7 @@ jobs:
           tar -C ~/guest -cf ~/guest.tar .
         env:
           VMLINUX: ${{ steps.kernel.outputs.vmlinux }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: guest-artifacts
           path: ~/guest.tar
@@ -65,9 +105,9 @@ jobs:
       SHARD: ${{ matrix.part }}/${{ strategy.job-total }}
       WORK: /mnt/nightly
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/guest-host
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest-artifacts
       # In /mnt, which the jailed VMs' user reaches, unlike the runner's home, its user's alone:
@@ -97,7 +137,7 @@ jobs:
       - name: Give the results to the runner's user
         if: always()
         run: sudo chown -R "$USER" "$WORK"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: guest-suites-${{ matrix.part }}
@@ -114,16 +154,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
           packages: clang elfutils sqlite3 fuse3 libseccomp-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -145,16 +186,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
           packages: clang elfutils sqlite3 fuse3 libseccomp-dev
-      # Branch coverage is nightly's (-Z coverage-options=branch).
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: llvm-tools
-      - uses: taiki-e/install-action@v2
+      # Branch coverage is nightly's (-Z coverage-options=branch): guest/rust's dated nightly, the
+      # one nightly the repository pins, which scripts/sim-coverage.sh runs, with llvm-tools (board
+      # 8603).
+      - name: Rust, guest/rust's nightly
+        run: |
+          nightly=$(sed -n 's/^channel = "\(.*\)"$/\1/p' guest/rust/rust-toolchain.toml)
+          rustup toolchain install "$nightly" --profile minimal -c llvm-tools
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest,cargo-llvm-cov
       - name: The full-stack simulation's coverage, 50 seeds
@@ -163,7 +207,7 @@ jobs:
           MADSIM_TEST_SEED=$base CLADEFS_MADSIM_SEEDS=50 scripts/sim-coverage.sh madsim
       - name: local_cell::sim's coverage
         run: scripts/sim-coverage.sh local
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: sim-coverage
@@ -177,22 +221,22 @@ jobs:
       KERNEL: ${{ github.workspace }}/target/sim-kernel
       BUILD: ${{ github.workspace }}/target/sim
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
           packages: clang lld llvm
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/sim-kernel
-          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
+          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'scripts/lib/guest-kernel-release.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
       - name: Fetch the kernel's sources
         run: guest/sim/kernel-tree.sh "$KERNEL"
       - name: The mutants apply
         run: guest/sim/mutants.sh --check
       - name: Run 3,000 seeds of each
         run: guest/sim/zloop.sh -s 3000 -d "$BUILD/logs"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: guest-sim-logs
@@ -206,20 +250,20 @@ jobs:
       KERNEL: ${{ github.workspace }}/target/sim-kernel
       BUILD: ${{ github.workspace }}/target/sim
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
           packages: clang lld llvm
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/sim-kernel
-          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
+          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'scripts/lib/guest-kernel-release.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
       - name: Fetch the kernel's sources
         run: guest/sim/kernel-tree.sh "$KERNEL"
       - name: Fail each call of every run of one in turn
         run: guest/sim/sweep.sh -d "$BUILD/sweep"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: guest-sim-sweep-logs

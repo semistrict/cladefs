@@ -41,7 +41,7 @@ rm -f "$lib"/*.rlib "$lib"/*.rmeta
 # kernel has, and with the compiler's intrinsics an object apiece, as Rust's own builds have them,
 # so that the kernel links only those it calls.
 (cd "$root/guest/rust" && RUSTFLAGS="$flags" CARGO_TARGET_DIR="$work/std-target" \
-    cargo build -q -Zbuild-std=core,alloc -p linux-std --release --target "$target" \
+    cargo build -q --locked -Zbuild-std=core,alloc -p linux-std --release --target "$target" \
     --config 'profile.release.package.compiler_builtins.codegen-units=10000' \
     --message-format=json > "$work/std.json")
 jq -r 'select(.reason == "compiler-message") | .message.rendered' "$work/std.json" >&2

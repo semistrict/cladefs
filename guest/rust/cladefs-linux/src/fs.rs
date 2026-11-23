@@ -18,7 +18,7 @@ use fxfs::filesystem::{
 };
 use fxfs::object_store::journal::{DEFAULT_RECLAIM_SIZE, JournalOptions, LazyFlush};
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{NewChildStoreOptions, StoreOptions};
+use fxfs::object_store::{NewChildStoreOptions};
 pub use fxfs_posix::{Attr, DaxExtent, ReaddirStart, SetAttr, StatFs};
 use fxfs_posix::{Platform, SyncCounts};
 use linux_rt::Task;
@@ -201,7 +201,7 @@ impl Filesystem {
     pub async fn mount(self: &Arc<Self>, name: &str, read_only: bool) -> Result<Fxfs, Error> {
         let filesystem = (*self.filesystem).clone();
         let root_volume = root_volume(filesystem.clone()).await?;
-        let volume = root_volume.volume(name, StoreOptions::default()).await?;
+        let volume = root_volume.volume(name).await?;
         let guest = Guest { filesystem: self.clone() };
         Ok(Fxfs::new(filesystem, volume, read_only, guest))
     }

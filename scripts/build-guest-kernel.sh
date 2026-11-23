@@ -4,8 +4,9 @@
 # found in the LICENSE file.
 
 # Build the guest kernel with Fxfs in it (doc-2, TASK-26.1): Amazon Linux's 6.18 kernel, the
-# release below, configured as Firecracker's CI configures the 6.18 guests it supports (its
-# configurations, in guest/linux/configs, and its docs/kernel-policy.md), with cladefs's series of
+# release scripts/lib/guest-kernel-release.sh names by its tag and the commit the tag must name,
+# configured as Firecracker's CI configures the 6.18 guests it supports (its configurations, in
+# guest/linux/configs, and its docs/kernel-policy.md), with cladefs's series of
 # patches (guest/linux/patches) adding fs/cladefs and drivers/virtio_extent from guest/linux, and the
 # filesystem's Rust, which cargo builds from guest/rust, linked into fs/cladefs (TASK-39.6).
 #
@@ -26,9 +27,8 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=${CLADEFS_GUEST_KERNEL_WORK:-$HOME/cladefs-guest-kernel}
-# The newest of Amazon Linux's 6.18 releases, as Firecracker's resources/rebuild.sh picks them.
-kernel_tag=kernel6.18-6.18.54-121.166.amzn2023
-kernel_series=6.18
+# The release, its tag and the commit it must name, and the date the build is stamped with.
+source "$root/scripts/lib/guest-kernel-release.sh"
 configs="$root/guest/linux/configs"
 
 arch=${1:-$(uname -m)}
@@ -47,11 +47,13 @@ if [[ $guestarch != $(uname -m) ]]; then
     make_args+=(CROSS_COMPILE="$guestarch-linux-gnu-")
 fi
 
-# The kernel's sources, once.
+# The kernel's sources, once, and the release's commit, whether cloned now or before: a tag that
+# moved, or a tree left otherwise, is refused (board 8601).
 src="$work/$kernel_tag-$arch"
 if [[ ! -d $src ]]; then
     git clone -q --depth 1 --branch "$kernel_tag" https://github.com/amazonlinux/linux "$src"
 fi
+kernel_release_check "$src"
 out="$work/out/$arch"
 mkdir -p "$out"
 
@@ -64,9 +66,9 @@ kgit() { git -C "$src" "$@"; }
 export GIT_AUTHOR_NAME="The cladefs Authors" GIT_AUTHOR_EMAIL="cladefs@echophase.com"
 export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 # The same series, the same commits.
-export GIT_AUTHOR_DATE="2026-10-17T00:00:00Z" GIT_COMMITTER_DATE="2026-10-17T00:00:00Z"
+export GIT_AUTHOR_DATE=$kernel_build_date GIT_COMMITTER_DATE=$kernel_build_date
 index="$work/series-index-$arch"
-series=$(kgit rev-parse "$kernel_tag^{commit}")
+series=$kernel_commit
 GIT_INDEX_FILE=$index kgit read-tree "$series"
 # commit PATCH [PATH...]: the next commit of the series, PATCH's change and guest/linux's PATHs
 # (files, or directories, without what builds leave there), its message PATCH's header.
@@ -95,7 +97,7 @@ commit 0013-mprotect-writable-batches-alike-in-dirtiness.patch
 rm -f "$index"
 kgit reset -q --hard "$series"
 rm -f "$out"/patches/*.patch
-kgit format-patch -q --zero-commit --no-signature -o "$out/patches" "$kernel_tag..$series"
+kgit format-patch -q --zero-commit --no-signature -o "$out/patches" "$kernel_commit..$series"
 
 # Firecracker's configuration of its 6.18 guests, its guests' and its CI's, as its
 # resources/rebuild.sh has them, and cladefs's options, the later overriding the earlier. cladefs.config
@@ -191,7 +193,7 @@ rustflags=$("$root/scripts/build-guest-sysroot.sh" "$target" "$work/rust-$arch")
 (cd "$root/guest/rust" && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=$rust_checks \
     CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=$rust_checks RUSTFLAGS="$rustflags" \
     CARGO_TARGET_DIR="$work/rust-$arch/target" \
-    cargo build --release -p cladefs-linux --target "$target")
+    cargo build --locked --release -p cladefs-linux --target "$target")
 cp "$work/rust-$arch/target/$target/release/libcladefs_linux.a" "$src/fs/cladefs/"
 # The kernel's memcpy and friends for Rust too, not compiler_builtins' generic ones: those are in
 # members of their own, which would otherwise define them for the whole kernel (arm64's own are
@@ -204,10 +206,11 @@ nm -A --defined-only "$archive" 2>/dev/null |
 cp "$archive" "$out/"
 
 # cladefs: the commit the build is of, which the filesystem shows in /proc/fs/cladefs/build
-# (scripts/build-commit.sh, TASK-111.7).
+# (scripts/build-commit.sh, TASK-111.7). The build's user, host and time the release's, not this
+# build's, so that the same sources build the same kernel (board 8601).
 commit=$("$root/scripts/build-commit.sh")
 make -C "$src" "${make_args[@]}" -j"${CLADEFS_GUEST_KERNEL_JOBS:-$(nproc)}" KBUILD_BUILD_USER=root KBUILD_BUILD_HOST=cladefs \
-    CLADEFS_BUILD_COMMIT="$commit" "$make_target"
+    KBUILD_BUILD_TIMESTAMP="$kernel_build_date" CLADEFS_BUILD_COMMIT="$commit" "$make_target"
 # The kernel's own memcpy, which Rust calls, is in the kernel: not Rust's. nm's listing whole,
 # before grep reads it: errexit stops at nm failing, and nothing stops nm part way.
 rust_symbols=$(nm "$src/fs/cladefs/cladefs_rust.o")

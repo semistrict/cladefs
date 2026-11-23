@@ -290,3 +290,56 @@ fn a_cell_holds_one_database_by_any_name() {
     assert_eq!(v, 7);
     connection.execute("UPDATE t SET v = v + 1", []).unwrap();
 }
+
+/// Board 8551: an opening that fails once its window is made, the cell's root no block device's,
+/// unmaps the window, however many times it fails: the opening's device held the cell, which the
+/// window's memory must outlive, as the window went, and each failed opening left its window's
+/// address space mapped for the process's life.
+#[test]
+fn failed_openings_unmap_their_windows() {
+    /// Far larger than what else the process maps and unmaps meanwhile (some 100 MB): address
+    /// space alone.
+    const WINDOW: u64 = 4 << 30;
+    /// The bytes of the process's address space: a window left mapped may merge with mappings
+    /// beside it, so is found by what it adds, not as a mapping of its size.
+    fn address_space() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
+        let pages: u64 = statm.split_whitespace().next().unwrap().parse().unwrap();
+        pages * cladefs::pages::page_size()
+    }
+    // A window where the host's pages fit the cell's blocks: none on a host of larger pages
+    // (sqlite_cladefs::daemon, board 5232).
+    let windowed = cladefs::pages::page_size() <= 4096;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (_sockets, socket) = serve();
+    let cell_dir = dir.path().join("store");
+    let database = daemon::open(&socket, &cell_dir, 1 << 30, WINDOW, Options::default()).unwrap();
+    let open = address_space();
+    database.close().unwrap();
+    drop(database);
+    let closed = address_space();
+    assert_eq!(
+        open.saturating_sub(closed) > WINDOW / 2,
+        windowed,
+        "{open} bytes open, {closed} closed"
+    );
+    {
+        let opened = cladefs::DaemonConnection::connect(&socket)
+            .and_then(|daemon| daemon.open_sqlite(&cell_dir, 1 << 30))
+            .unwrap();
+        let device = cladefs::DaemonDevice::new(Arc::new(opened)).unwrap();
+        block_on(storage_device::Device::commit_root(&device, b"no block device")).unwrap();
+        block_on(storage_device::Device::close(&device)).unwrap();
+    }
+    let before = address_space();
+    for _ in 0..8 {
+        let opened = daemon::open(&socket, &cell_dir, 1 << 30, WINDOW, Options::default());
+        let error = format!("{:#}", opened.err().expect("opened a cell of no block device"));
+        assert_eq!(error, "the device holds no block device");
+    }
+    let grown = address_space().saturating_sub(before);
+    assert!(
+        grown < WINDOW / 2,
+        "{grown} bytes more address space: windows of failed openings left mapped"
+    );
+}

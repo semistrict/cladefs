@@ -196,7 +196,7 @@ impl Pool {
     /// A thread of the pool's: takes the jobs queued, one after another, waiting for one while none
     /// is; under Shuttle, ending then.
     fn take_jobs(&'static self) {
-        let _panicking = Panicking(self);
+        let panicking = Panicking(self);
         let mut state = self.state.lock().unwrap();
         loop {
             if let Some(job) = state.queue.pop_front() {
@@ -209,6 +209,9 @@ impl Pool {
             // counts on the others alone.
             if cfg!(feature = "shuttle") {
                 state.threads -= 1;
+                // Counted out: Shuttle's teardown may unwind the thread from the unlock, as it
+                // yields, which `Panicking` would count out again (board 9543).
+                std::mem::forget(panicking);
                 return;
             }
             state.idle += 1;

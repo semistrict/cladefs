@@ -34,45 +34,75 @@ impl<F: File> File for WriteFault<F> {
     }
 }
 
+/// Board 8553: a write-back failing on one disk fails that disk's files' writers held at the
+/// cache's bound, and no other's: a file on a healthy disk, the cache past its bound with the
+/// failing file's pages, writes on, held only until its own pages are written back. The cache is
+/// the process's, every tenant's cells' files in it, and the failure of the file that failed last
+/// in the flusher's pass was every writer's held at the bound, as `EIO` from a cell's write. Its
+/// disk's other files' writers fail with it too, as they would add to what is stuck without bound,
+/// a file at a time (hotbed review 57).
 #[test]
-fn a_write_back_error_reaches_a_writer_held_at_the_shared_bound() {
-    let disk = MemDisk::new();
+fn a_write_back_failing_on_one_disk_fails_no_writer_of_another() {
+    use bucket_cell::host_disk::{HostDisk, Sample};
+    let (failing_disk, healthy_disk) = (MemDisk::new(), MemDisk::new());
+    let sample = || Sample { size: 1 << 30, free: 1 << 29, used: 1 << 29 };
+    let (disk_a, disk_b) = (HostDisk::in_memory(sample), HostDisk::in_memory(sample));
     let cache = cache(Options { background: PAGE, hard: 2 * PAGE, ..Options::default() });
-    let broken = Cached::new(
-        WriteFault { file: disk.create("broken", true).unwrap(), failing: AtomicBool::new(true) },
+    let broken = Cached::on_disk(
+        WriteFault {
+            file: failing_disk.create("broken", true).unwrap(),
+            failing: AtomicBool::new(true),
+        },
         &cache,
+        Some(disk_a.clone()),
     )
     .unwrap();
-    let healthy = Cached::new(disk.create("healthy", true).unwrap(), &cache).unwrap();
+    let beside = failing_disk.create("beside", true).unwrap();
+    let beside = Cached::on_disk(beside, &cache, Some(disk_a)).unwrap();
+    let healthy = healthy_disk.create("healthy", true).unwrap();
+    let healthy = Cached::on_disk(healthy, &cache, Some(disk_b)).unwrap();
     let data = pattern(7, 4 * PAGE as usize);
     broken.write_at(&data, 0).unwrap();
+    assert_eq!(cache.usage().dirty, 4 * PAGE, "past the bound, with the failing file's pages");
+
+    // The healthy file's writes go on, its own pages past the bound too, which they wait for the
+    // flusher to write back, while the other disk fails still.
     let (send, recv) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
-        let wrote = healthy.write_at(&[9], 0);
+        let wrote: io::Result<()> = (0..8u64).try_for_each(|page| {
+            healthy.write_at(&pattern(page as u8, PAGE as usize), page * PAGE)
+        });
         send.send(wrote).unwrap();
         healthy
     });
-    let result = recv.recv_timeout(Duration::from_secs(2));
-    let dirty = cache.usage().dirty;
-    broken.file().failing.store(false, Ordering::SeqCst);
-    cache.wake();
+    let wrote = recv.recv_timeout(Duration::from_secs(10));
+    assert_eq!(
+        wrote.expect("the healthy file's writer held").map_err(|err| err.to_string()),
+        Ok(())
+    );
     let healthy = writer.join().unwrap();
-    assert_eq!(dirty, 4 * PAGE, "failed pages are preserved without exceeding the bound further");
-    match result.expect("the writer was held throughout the failure") {
-        Ok(()) => {
-            let mut byte = [0];
-            healthy.read_at(&mut byte, 0).unwrap();
-            assert_eq!(byte, [9]);
-        }
-        Err(err) => assert!(err.to_string().contains("injected write-back failure"), "{err}"),
-    }
-    // A sync can also report the earlier error. Once reported, the original data is durable.
-    if broken.sync().is_err() {
-        broken.sync().unwrap();
-    }
+    let mut read = vec![0; PAGE as usize];
+    healthy.read_at(&mut read, 7 * PAGE).unwrap();
+    assert_eq!(read, pattern(7, PAGE as usize));
+
+    // The failing file's own writer, held at the bound, gets its failure, and its disk's other
+    // file's, none of whose write-backs failed.
+    let refused = broken.write_at(&[1], 0).unwrap_err();
+    assert_eq!(refused.to_string(), "injected write-back failure");
+    let refused = beside.write_at(&[1], 0).unwrap_err();
+    assert_eq!(refused.to_string(), "injected write-back failure");
+
+    // Its disk taking writes again, its sync writes its pages back, and nothing is stuck.
+    broken.file().failing.store(false, Ordering::SeqCst);
+    broken.sync().unwrap();
+    healthy.sync().unwrap();
     let mut bytes = vec![0; data.len()];
     broken.file().read_at(&mut bytes, 0).unwrap();
     assert_eq!(bytes, data);
+    let usage = cache.usage();
+    assert_eq!((usage.dirty, cache.stuck.load(Ordering::Relaxed)), (0, 0));
+    assert!(cache.failing_disks.lock().unwrap().is_empty(), "a disk failing still");
+    beside.write_at(&[1], 0).unwrap();
 }
 
 /// TASK-539.12: a write-back that failed, as a full disk fails it, then succeeds, fails nothing:

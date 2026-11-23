@@ -176,6 +176,9 @@ Eviction of cached pages for an arena starved at its cap.
 **Quarantine**:
 Where a freed page waits until no VM process may still map it: since doc-26, a slab, until each VM process it was staged to acknowledged what took it away, or died.
 
+**Wedged** (a VM process):
+One the daemon killed that has not exited `KILLED_EXITING` after, as in uninterruptible sleep or a frozen cgroup (board 8535): what the quarantine holds for it comes back only once it exits, if ever, so shrinks and relief count it held, not on its way.
+
 **Governor**:
 What bounds the daemon's one memory budget, which every cache of its holds under; and, the disk
 governor, what bounds each host disk's: the open cells first, the part cache what they leave.
@@ -239,6 +242,10 @@ Making a bucket never formatted the root of buckets of its own, number 1 (`clade
 **Adding** (a bucket):
 Giving a bucket never formatted the next number, by a conditional write of the root bucket's registry, then copying the registry to every bucket (`cladefsctl add-bucket`).
 
+**Bucket's clock**:
+The time by the bucket's backend, which dates its objects, as a host reads it: from the dates of the backend's responses, never the host's own clock (a bucket of files or memory dates by the host's, its own). Never ahead of the backend's, so that a window measured from an object's date closes late, never early; every collector lease and grace period is by it.
+_Avoid_: now, wall clock, host time (the host's own)
+
 **Bucket settings**:
 What a bucket is formatted or added with, fixed for good in its identity: each per bucket (a bucket added takes the root's unless asked otherwise) or clade-wide (every bucket the root's). The head slots are one.
 _Avoid_: config, options (a process's), parameters
@@ -287,7 +294,7 @@ Moving an ephemeral cell's writing from one host to another in a live migration:
 _Avoid_: take (a bucket cell's, by its head), failover
 
 **Decommission** (a host):
-The VM manager's saying a host is gone for good, which retires every reference naming its incarnation.
+The VM manager's saying a host is gone for good, which retires every reference naming its incarnation, in every bucket, and leaves its tombstone there, which refuses that incarnation's references from then on.
 _Avoid_: forget (a shredded tenant's or cell's keys), evict
 
 **Origin**:
@@ -458,7 +465,10 @@ How much of what was ordered a crash may lose: at most a second's worth.
 What a daemon does on SIGTERM: every open cell closed and its commits uploaded before it exits.
 
 **Format**:
-The version an on-disk, bucket or wire format names; a reader refuses every other, and nothing migrates.
+The version an on-disk, bucket or wire format names. A **frozen** family's (doc-28) every later build reads from its oldest on, converting on read; one not frozen yet, its reader refuses every other.
+
+**Frozen** (a format family):
+One whose golden corpus is under `formats/` (doc-28): every later build reads every version of it from its oldest on, and a change is a new version, never an edit of an old one.
 
 ### Encryption
 

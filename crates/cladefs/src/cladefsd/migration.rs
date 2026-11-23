@@ -10,8 +10,11 @@
 //!
 //! 1. **Prepare** (`MigrateCell`): the source notes the cell's next epoch, durably, then asks the
 //!    target, again with the same migration while its answer is lost (board 5734). The target
-//!    notes the cell in its journal and writes its own reference to the cell's origin before it
-//!    takes anything (`targetRefersFirst`), and answers its incarnation and a token new to this
+//!    checks what the prepare names, untrusted, once, before anything ([`target::Prepare`]): the
+//!    source's formats its own (board 8455), the bucket its own (board 8443), and the cell's path a
+//!    new name in its directory of migrated cells (board 8447). It notes the cell in its journal
+//!    and writes its own reference to the cell's origin before it takes anything
+//!    (`targetRefersFirst`), and answers its incarnation and a token new to this
 //!    take of the migration. Taking an older migration of the cell, by its epoch, never accepted,
 //!    it gives that one up first (`supersedes`): the cell's writer, preparing this one, pursues it
 //!    no more; a prepare older than the migration it takes, arriving late, it refuses (board
@@ -26,7 +29,8 @@
 //!    since they were sent among it; then it asks the target to take the cell over, naming the
 //!    incarnation and token its prepare's answer gave (`boundToPrepare`), and every file and its
 //!    length, and the CRC of each but the kept segments'. The target takes it only holding them
-//!    all so (`openAtNamed`), remembering the migration accepted (`remembersAccepted`); refusing,
+//!    all so (`openAtNamed`), and the cell they make opening as the one prepared, of its own
+//!    format (board 8455), remembering the migration accepted (`remembersAccepted`); refusing,
 //!    it drops what it took and its reference, and never takes that migration after
 //!    (`refuseFinal`). Another incarnation of the target's, which knows nothing of it, answers
 //!    neither.
@@ -252,6 +256,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         bucket: entry.bucket.clone(),
         to,
         epoch: entry.epoch,
+        formats: super::peers::formats(),
     };
     let MigratePrepareResponse { incarnation, token } =
         match prepare_retrying(&mut client, prepare).await {
@@ -266,7 +271,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
                 if let Err(err) = client.migrate_abort(abort).await {
                     log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
                 }
-                return Err(Errno::ENOTCONN);
+                return Err(refusal(&refused));
             }
         };
     let marker = Marker { migration, peer, incarnation, token };
@@ -312,6 +317,19 @@ async fn prepare_retrying(
             }
             Err(failed) => return Err(failed),
         }
+    }
+}
+
+/// The errno `MigrateCell` answers for its prepare's failure, `status`: `ENOTSUP` if the target
+/// takes no such migration (`FAILED_PRECONDITION`: its formats, its bucket, or no directory of
+/// migrated cells, board 8455), `EINVAL` if the prepare named what means nothing there
+/// (`INVALID_ARGUMENT`: a path not in that directory, board 8447); `ENOTCONN` else, unanswered or
+/// refused for now, worth asking again.
+fn refusal(status: &Status) -> Errno {
+    match status.code() {
+        tonic::Code::FailedPrecondition => Errno::ENOTSUP,
+        tonic::Code::InvalidArgument => Errno::EINVAL,
+        _ => Errno::ENOTCONN,
     }
 }
 
@@ -934,6 +952,103 @@ pub(super) mod target {
         done.unwrap_or_else(|err| Err(status("serving it", err)))
     }
 
+    /// The directory ephemeral cells migrated to this host go in (`CLADEFSD_EPHEMERAL_CELLS`),
+    /// as its path resolves, each a new name in it (board 8447): the only place a peer's prepare
+    /// makes anything. `Err` saying why if it names none, or no directory: a host of no such
+    /// directory takes no migrations, and its daemon refuses to start naming one not there.
+    pub(crate) fn cells_root() -> Result<PathBuf, String> {
+        let set = node_local::env::var_os("CLADEFSD_EPHEMERAL_CELLS");
+        let Some(set) = set.filter(|set| !set.is_empty()) else {
+            return Err("CLADEFSD_EPHEMERAL_CELLS names no directory for migrated cells".into());
+        };
+        let root = host_fs::canonicalize(&set);
+        let root = root.map_err(|err| format!("CLADEFSD_EPHEMERAL_CELLS {set:?}: {err}"))?;
+        if !host_fs::is_dir(&root) {
+            return Err(format!("CLADEFSD_EPHEMERAL_CELLS {set:?} is no directory"));
+        }
+        Ok(root)
+    }
+
+    /// The longest name of a migrated cell's directory, `NAME_MAX` less what its staging adds:
+    /// `.`, `.migrating-` and a migration's ID in hexadecimal.
+    const NAME_MOST: usize = 255 - 1 - ".migrating-".len() - 16;
+
+    /// The path in `root`, the directory of migrated cells, a peer's `to` names, if it names one:
+    /// a name directly in `root`, `root` as it resolves, then `/` and a name neither empty, nor
+    /// beginning with `.` (as `.`, `..` and every staging do), nor holding a `/` or a NUL, nor
+    /// longer than [`NAME_MOST`] (board 8447). A peer's paths are untrusted (AGENTS.md, Trust
+    /// boundaries): one relative, through `..`, deeper, of `root` by another path (a link to it),
+    /// or `root` itself, names none, which every use of `to` checks here, never by itself.
+    fn cell_path(root: &Path, to: &str) -> Option<PathBuf> {
+        let name = to.strip_prefix(root.to_str()?)?.strip_prefix('/')?;
+        let normal = !name.is_empty()
+            && !name.starts_with('.')
+            && !name.contains(['/', '\0'])
+            && name.len() <= NAME_MOST;
+        normal.then(|| root.join(name))
+    }
+
+    /// A migration's prepare, decoded, its request checked once, where it enters (AGENTS.md, Trust
+    /// boundaries), before anything is noted, made or opened: the source's formats this host's
+    /// (board 8455), its bucket this host's (board 8443), and where its cell goes a new name in the
+    /// directory of migrated cells (board 8447).
+    pub(crate) struct Prepare {
+        migration: u64,
+        child: CellId,
+        origin: Origin,
+        bucket: String,
+        path: PathBuf,
+        epoch: u64,
+    }
+
+    impl Prepare {
+        /// `request` decoded: `FAILED_PRECONDITION` if its formats are not this host's, an older
+        /// source's naming none among them, or its bucket is not this host's, or this host takes
+        /// no migrations; `INVALID_ARGUMENT` if its `to` names no new name in the directory of
+        /// migrated cells ([`cell_path`]).
+        pub(crate) fn decode(request: MigratePrepareRequest) -> Result<Self, Status> {
+            let MigratePrepareRequest {
+                migration,
+                tenant,
+                cell,
+                parent_tenant,
+                parent_cell,
+                at,
+                parent_epoch,
+                bucket,
+                to,
+                epoch,
+                formats,
+            } = request;
+            let ours = crate::cladefsd::peers::formats();
+            if formats != ours {
+                // Its own words, of any length: said in part, as what differs is near their start.
+                let theirs: String = formats.chars().take(256).collect();
+                return Err(Status::failed_precondition(format!(
+                    "migration {migration:x}: the source's formats ({theirs:?}) are not this \
+                     host's ({ours:?}): refused, as nothing of another build's is taken"
+                )));
+            }
+            // Never echoed: the host's bucket's URL is no peer's to learn (board 8437).
+            if crate::host_cell::host_bucket_url().as_deref() != Some(bucket.as_str()) {
+                return Err(Status::failed_precondition(format!(
+                    "migration {migration:x}: its bucket is not this host's"
+                )));
+            }
+            let root = cells_root().map_err(Status::failed_precondition)?;
+            let path = cell_path(&root, &to).ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "migration {migration:x}: {to:?} is no new name in {}",
+                    root.display()
+                ))
+            })?;
+            let child = CellId { tenant, id: cell };
+            let parent = CellId { tenant: parent_tenant, id: parent_cell };
+            let origin = Origin { parent, at, epoch: parent_epoch };
+            Ok(Prepare { migration, child, origin, bucket, path, epoch })
+        }
+    }
+
     /// Prepares the migration `request` names: the cell noted, then its reference written here
     /// before anything is taken, then its staging directory made. Returns this host's incarnation
     /// and the token of its take of it. Asked again, it prepares again, each step as it did,
@@ -942,40 +1057,48 @@ pub(super) mod target {
     /// answer lost or its daemon restarted since (specs/ephemeral, `supersedes`); a migration older
     /// than the one it takes, by the cell's epoch, it refuses (`ABORTED`, board 5732).
     pub(crate) async fn prepare(request: MigratePrepareRequest) -> Result<(u64, u64), Status> {
-        to_the_end(take(request)).await
+        let prepare = Prepare::decode(request)?;
+        to_the_end(take(prepare)).await
     }
 
-    async fn take(request: MigratePrepareRequest) -> Result<(u64, u64), Status> {
+    async fn take(prepare: Prepare) -> Result<(u64, u64), Status> {
         let host = host()?;
-        let MigratePrepareRequest {
-            migration,
-            tenant,
-            cell,
-            parent_tenant,
-            parent_cell,
-            at,
-            parent_epoch,
-            bucket,
-            to,
-            epoch,
-        } = request;
-        let child = CellId { tenant, id: cell };
-        let origin = Origin {
-            parent: CellId { tenant: parent_tenant, id: parent_cell },
-            at,
-            epoch: parent_epoch,
-        };
+        let Prepare { migration, child, origin, bucket, path, epoch } = prepare;
+        // The bucket its reference goes in, this host's, opened before anything is noted: a
+        // failure after the note left an entry (board 8443).
+        let opened = crate::host_cell::bucket(&bucket).map_err(|err| status("its bucket", err))?;
         let _taking = taking(child).await;
         // Its source has its answer: asked again, late.
         if host.accepted(migration) {
             return Err(Status::already_exists(format!("migration {migration:x} accepted")));
         }
-        let path = PathBuf::from(to);
-        let found = host.entry(child).map_err(journal)?;
+        // Another cell's migration going to the same path: the later rename would fail, or find
+        // the other cell there.
+        let entries = host.entries().map_err(journal)?;
+        if let Some(other) = entries
+            .iter()
+            .find(|other| other.path == path && other.child != child && other.receiving().is_some())
+        {
+            return Err(Status::already_exists(format!(
+                "{} is where a migration of cell {} goes",
+                path.display(),
+                other.child
+            )));
+        }
+        let found = entries.into_iter().find(|found| found.child == child);
         let prepared = |id: &u64| PREPARED.get().lock().unwrap().contains(id);
         let mut superseded = None;
         let token = match found.as_ref().map(|found| (found, &found.migrating)) {
             None => None,
+            // Asked again, its path another: no retry of it, which names what it named.
+            Some((found, Some(Migrating::Receiving { id, .. })))
+                if *id == migration && found.path != path =>
+            {
+                return Err(Status::failed_precondition(format!(
+                    "migration {migration:x} goes to {}",
+                    found.path.display()
+                )));
+            }
             Some((_, Some(Migrating::Receiving { id, token })))
                 if *id == migration && prepared(id) =>
             {
@@ -1015,7 +1138,8 @@ pub(super) mod target {
             }
             Some((_, None)) => return Err(Status::already_exists(format!("cell {child} is here"))),
         };
-        if token.is_none() && host_fs::exists(&path) {
+        // Anything there, a link to nowhere among them, which the rename would replace.
+        if token.is_none() && host_fs::symlink_metadata(&path).is_ok() {
             return Err(Status::already_exists(format!("{} is there", path.display())));
         }
         let token = token.unwrap_or_else(|| rand::random::<u64>() | 1);
@@ -1030,11 +1154,9 @@ pub(super) mod target {
         {
             log::warn!("cladefsd: dropping {}, superseded: {err}", older.display());
         }
-        let bucket =
-            crate::host_cell::bucket(&entry.bucket).map_err(|err| status("its bucket", err))?;
         let incarnation = host.incarnation();
         let referring =
-            bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, incarnation, child);
+            bucket_cell::lifecycle::refer_ephemeral(&*opened, origin, incarnation, child);
         let failed = match tokio::time::timeout(BUCKET_BOUND, referring).await {
             Ok(Ok(())) => None,
             Ok(Err(err)) => Some(status("its reference", err)),
@@ -1049,11 +1171,23 @@ pub(super) mod target {
         }
         // Staged afresh but by this daemon: what a daemon before it staged, it may have lost part
         // of, unsynced, at its host's restart (board 5721).
+        // Failing, given up, its entry and reference with it: kept, the migration waited for its
+        // reaping (board 8443).
         let staged = staging(&entry.path, migration);
-        if !prepared(&migration) {
-            drop_staged(&staged).map_err(|err| status("dropping a staging of before", err))?;
+        let staging = (|| {
+            if !prepared(&migration) {
+                drop_staged(&staged)?;
+            }
+            // In the directory of migrated cells, there already: no directory above it made.
+            host_fs::create_dir(&staged).or_else(|err| match err.kind() {
+                std::io::ErrorKind::AlreadyExists if host_fs::is_dir(&staged) => Ok(()),
+                _ => Err(err),
+            })
+        })();
+        if let Err(err) = staging {
+            refuse(&host, &entry).await?;
+            return Err(status("staging", err));
         }
-        host_fs::create_dir_all(&staged).map_err(|err| status("staging", err))?;
         PREPARED.get().lock().unwrap().insert(migration);
         log::info!(
             "cladefsd: migration {migration:x} of {child} prepared, to {}",
@@ -1199,7 +1333,15 @@ pub(super) mod target {
                         Some(format!("it names token {token:x}, of another take of it"))
                     }
                     _ if moved_before => None,
-                    _ => lacking(&staged, &files),
+                    _ => match lacking(&staged, &files) {
+                        Some(lacking) => Some(lacking),
+                        // Whole as named, it must open as the cell prepared, as its opening here
+                        // will, before it goes into place (board 8455): of another format
+                        // (`ENOTSUP` at its first opening), or not opening at all, it is refused,
+                        // its source serving the cell again, whose only copy it is.
+                        None => ephemeral_host::not_its(&staged, &entry)
+                            .unwrap_or_else(|err| Some(format!("it does not open: {err:#}"))),
+                    },
                 };
                 Ok((moved_before, lacking))
             })
@@ -1419,6 +1561,222 @@ pub(super) mod target {
             assert_eq!(within(staged, "segments/a.0"), Some(staged.join("segments/a.0")));
             for path in ["", "/etc/passwd", "../x", "a/../../x", "a//b", "./a", "a/.", "a/"] {
                 assert_eq!(within(staged, path), None, "{path:?}");
+            }
+        }
+
+        /// Board 8447: a peer's `to` names a cell's path only as a name directly in the directory
+        /// of migrated cells, as its path resolves: an absolute path elsewhere, a relative one, one
+        /// through `.` or `..`, deeper, of a name a staging's, or too long, the directory itself, a
+        /// path of another directory sharing its name's start, none.
+        #[test]
+        fn peers_cell_paths_are_new_names_in_the_directory_of_migrated_cells() {
+            let root = Path::new("/cells/migrated");
+            let longest = "n".repeat(NAME_MOST);
+            for name in ["vm1", "a.b", "-x", longest.as_str()] {
+                let to = format!("/cells/migrated/{name}");
+                assert_eq!(cell_path(root, &to), Some(root.join(name)), "{to:?}");
+            }
+            let too_long = format!("/cells/migrated/{longest}n");
+            for to in [
+                "",
+                "vm1",
+                "cells/migrated/vm1",
+                "/cells/migrated",
+                "/cells/migrated/",
+                "/cells/migrated/.",
+                "/cells/migrated/..",
+                "/cells/migrated/../x",
+                "/cells/migrated/./x",
+                "/cells/migrated/a/b",
+                "/cells/migrated/a/",
+                "/cells/migrated//a",
+                "/cells/migrated/.a.migrating-1",
+                "/cells/migrated/a\0b",
+                "/cells/migratedx",
+                "/cells/migrated-other/a",
+                "/etc/systemd/system/cladefsd.service.d",
+                "//cells/migrated/a",
+                too_long.as_str(),
+            ] {
+                assert_eq!(cell_path(root, to), None, "{to:?}");
+            }
+        }
+
+        /// The daemon's environment of a test of a target's prepares, in `dir`: its bucket in
+        /// memory, its ephemeral cells' directory, and `dir`, as it resolves, its directory of
+        /// migrated cells, which it answers.
+        fn target_host(dir: &Path) -> (Arc<ephemeral_host::Host>, PathBuf) {
+            let root = host_fs::canonicalize(dir).unwrap();
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment yet.
+            unsafe {
+                std::env::set_var("CLADEFSD_BUCKET", "memory:///cells");
+                std::env::set_var("CLADEFSD_TOKEN", "1");
+                std::env::set_var("CLADEFSD_EPHEMERAL_CELLS", &root);
+            }
+            (ephemeral_host::open(&root.join("ephemeral")).unwrap(), root)
+        }
+
+        /// A prepare of migration `migration` of cell 1/7, of 1/2's segment 3, to `to`, as a
+        /// source of this build in this host's bucket asks it.
+        fn prepare_of(migration: u64, to: &Path) -> MigratePrepareRequest {
+            MigratePrepareRequest {
+                migration,
+                tenant: 1,
+                cell: 7,
+                parent_tenant: 1,
+                parent_cell: 2,
+                at: 3,
+                parent_epoch: 1,
+                bucket: "memory:///cells".into(),
+                to: to.display().to_string(),
+                epoch: 1,
+                formats: crate::cladefsd::peers::formats(),
+            }
+        }
+
+        /// Boards 8443, 8447 and 8455: a prepare naming what this host is not is refused before
+        /// anything is noted, made or opened: formats not its own, an older build's naming none
+        /// among them (`FAILED_PRECONDITION`); a bucket not its own, a `file://` directory not
+        /// made by it, nor any of 10,000 others opened (`FAILED_PRECONDITION`); a `to` not a new
+        /// name in its directory of migrated cells, a link in it to elsewhere and a path through
+        /// a link to it among them (`INVALID_ARGUMENT`), or a name there already, the link to
+        /// nowhere among them (`ALREADY_EXISTS`).
+        #[test]
+        fn prepares_naming_what_this_host_is_not_are_refused_first() {
+            use tonic::Code;
+            let dir = tempfile::tempdir().unwrap();
+            let (host, root) = target_host(dir.path());
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+            std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).unwrap();
+            let alias = outside.path().join("alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            let listed = |dir: &Path| -> Vec<String> {
+                let mut names: Vec<String> = host_fs::read_dir(dir)
+                    .unwrap()
+                    .map(|found| found.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            };
+            let (before, opened) = (listed(&root), crate::host_cell::buckets_opened());
+            let refused = |request: MigratePrepareRequest| {
+                let prepared = futures::executor::block_on(prepare(request));
+                prepared.map_err(|status| (status.code(), status.message().to_owned()))
+            };
+            let cell = root.join("vm");
+            let other = |formats: &str| MigratePrepareRequest {
+                formats: formats.to_owned(),
+                ..prepare_of(0x11, &cell)
+            };
+            let ours = crate::cladefsd::peers::formats();
+            for formats in ["", "cell directories \"cladefs extent store 15\""] {
+                let theirs = formats.to_owned();
+                assert_eq!(
+                    refused(other(formats)),
+                    Err((
+                        Code::FailedPrecondition,
+                        format!(
+                            "migration 11: the source's formats ({theirs:?}) are not this \
+                             host's ({ours:?}): refused, as nothing of another build's is taken"
+                        )
+                    ))
+                );
+            }
+            let made = outside.path().join("made");
+            let file = format!("file://{}/", made.display());
+            let buckets = (0..10_000).map(|bucket| format!("memory:///other{bucket}"));
+            for bucket in [file, "memory:///cells/".to_owned()].into_iter().chain(buckets) {
+                let request = MigratePrepareRequest { bucket, ..prepare_of(0x13, &cell) };
+                assert_eq!(
+                    refused(request),
+                    Err((
+                        Code::FailedPrecondition,
+                        "migration 13: its bucket is not this host's".to_owned()
+                    ))
+                );
+            }
+            assert!(!made.exists(), "the file bucket's directory made");
+            assert_eq!(crate::host_cell::buckets_opened(), opened, "buckets opened");
+            let out = outside.path().join("x");
+            for to in [
+                out.clone(),
+                root.clone(),
+                root.join("link").join("x"),
+                alias.join("x"),
+                root.join("a/b"),
+                root.join(".vm.migrating-1"),
+                root.join("ephemeral").join("cells"),
+            ] {
+                let message = format!(
+                    "migration 15: {:?} is no new name in {}",
+                    to.display().to_string(),
+                    root.display()
+                );
+                assert_eq!(
+                    refused(prepare_of(0x15, &to)),
+                    Err((Code::InvalidArgument, message)),
+                    "{}",
+                    to.display()
+                );
+            }
+            for name in ["link", "dangling", "ephemeral"] {
+                let to = root.join(name);
+                assert_eq!(
+                    refused(prepare_of(0x17, &to)),
+                    Err((Code::AlreadyExists, format!("{} is there", to.display()))),
+                    "{name}"
+                );
+            }
+            assert_eq!(host.entries().unwrap(), vec![], "nothing noted");
+            assert_eq!(listed(&root), before, "nothing made");
+            assert_eq!(listed(outside.path()), vec!["alias".to_owned()], "nothing made");
+        }
+
+        /// Board 8455: a hand-over naming every file it staged whole is refused if the cell they
+        /// make does not open as the cell prepared: a cell directory of another build's format,
+        /// its description's first line another, which its first opening would refuse (`ENOTSUP`)
+        /// once its source let go of it; and one whose description, of the cell prepared and this
+        /// format, is longer than a description is, which the check reads not (board 8455's
+        /// review: a staged file's length is the peer's to name). Nothing goes into place, and
+        /// what it took goes, its reference and entry with it.
+        #[test]
+        fn hand_overs_of_cells_that_do_not_open_are_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            let (host, root) = target_host(dir.path());
+            // Its writes of a file's pieces run off a runtime's workers.
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            let runtime = runtime.unwrap();
+            let other = b"cladefs extent store 15\nblock_size 4096\ncell 1/7\n".to_vec();
+            let child = CellId { tenant: 1, id: 7 };
+            let long = format!(
+                "{}\nblock_size 4096\ncell {child}\ncapacity 4096\nbucket memory:///cells\n\
+                 ephemeral yes\npadding {}\n",
+                local_cell::FORMAT,
+                "x".repeat(64 << 10)
+            );
+            for (migration, bytes) in [(0x21, other), (0x23, long.into_bytes())] {
+                let len = bytes.len() as u64;
+                let cell = root.join("vm");
+                let prepared = runtime.block_on(prepare(prepare_of(migration, &cell)));
+                let (incarnation, token) = prepared.unwrap();
+                let staged = staging(&cell, migration);
+                assert!(staged.is_dir());
+                let crc = Some(extent_frame::crc(&bytes));
+                let path = local_cell::DESCRIPTION.to_owned();
+                let holes = Vec::new();
+                let piece = MigrateFileRequest { migration, path, offset: 0, bytes, len, holes };
+                runtime.block_on(file(piece)).unwrap();
+                let path = local_cell::DESCRIPTION.to_owned();
+                let files = vec![FileDigest { path, len, crc }];
+                let request = MigrateHandOverRequest { migration, incarnation, files, token };
+                let answered = runtime.block_on(hand_over(request)).map_err(|s| s.code());
+                assert_eq!(answered, Ok(false), "{migration:x}");
+                assert!(!cell.exists(), "taken into place");
+                assert!(!staged.exists(), "what it took kept");
+                assert_eq!(host.entries().unwrap(), vec![], "its entry kept");
+                assert!(!host.accepted(migration));
             }
         }
 

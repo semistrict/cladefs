@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-block_protocol.workspace = true
+bitflags.workspace = true
 event-listener.workspace = true
 fprint.workspace = true
 fuchsia-sync.workspace = true
@@ -21,7 +21,6 @@ serde.workspace = true
 storage_ptr_slice.workspace = true
 # cladefs: the errors of extent.rs.
 thiserror.workspace = true
-zx.workspace = true
 
 # cladefs: a host's buffers, anonymous memory (buffer_allocator.rs).
 [target.'cfg(unix)'.dependencies]
@@ -32,7 +31,6 @@ libc.workspace = true
 arbitrary.workspace = true
 
 [dev-dependencies]
-fuchsia.workspace = true
 fuchsia-async.workspace = true
 # cladefs: what a buffer source's mapping maps, for its tests.
 libc.workspace = true
@@ -41,9 +39,6 @@ libc.workspace = true
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(detect_lock_cycles)',
-    'cfg(fuchsia_api_level_at_least, values(any()))',
-    'cfg(fuchsia_api_level_less_than, values(any()))',
     'cfg(fuzz)',
     'cfg(fuzzing)',
-    'cfg(vdso_next)',
 ] }

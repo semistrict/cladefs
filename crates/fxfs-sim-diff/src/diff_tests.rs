@@ -28,9 +28,9 @@
 use crate::model::{self, Errno, Model};
 use fuchsia_async as fasync;
 use fxfs::filesystem::{FxFilesystem, OpenFxFilesystem};
+use fxfs::object_store::NewChildStoreOptions;
 use fxfs::object_store::data_object_handle::{ExtentAccess, FAIL_COMMITS};
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{NewChildStoreOptions, StoreOptions};
 use fxfs_posix::{Fxfs, Platform, SET_KEEP_TAIL, SET_SIZE, SetAttr};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -424,7 +424,7 @@ impl Real {
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.expect("opening");
         let volumes = root_volume((*filesystem).clone()).await.expect("the root volume");
-        let volume = volumes.volume("test", StoreOptions::default()).await.expect("the volume");
+        let volume = volumes.volume("test").await.expect("the volume");
         let fs = Fxfs::new((*filesystem).clone(), volume, false, Plain);
         Self { filesystem, fs }
     }

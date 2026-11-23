@@ -29,6 +29,6 @@ runs:
         packages: >-
           clang libclang-dev llvm pkg-config musl-tools e2fsprogs podman libseccomp-dev
           busybox-static flex bison bc cpio libelf-dev libssl-dev
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-unknown-linux-musl
+    - name: Rust, as rust-toolchain.toml pins it
+      shell: bash
+      run: rustup toolchain install

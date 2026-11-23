@@ -30,6 +30,7 @@ class ScopeTest(unittest.TestCase):
             "guest/sim/kernel/mm.c",
             "guest/sim/zloop.sh",
             "scripts/build-guest-kernel.sh",
+            "scripts/lib/guest-kernel-release.sh",
         ):
             self.assertEqual(scope.scope(["README.md", path]), "full", path)
 

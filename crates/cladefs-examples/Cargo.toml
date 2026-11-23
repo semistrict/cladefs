@@ -21,7 +21,6 @@ bucket_cell.workspace = true
 # cell-bench's cells kept in no bucket, encrypted under the tests' DEK (TASK-411.28).
 local_cell = { workspace = true, features = ["unkept"] }
 # fxfs-metabench's attributes, as Fxfs's API takes them.
-fidl-fuchsia-io.workspace = true
 fuchsia-async.workspace = true
 futures.workspace = true
 cladefs = { path = "../cladefs", features = ["testing"] }

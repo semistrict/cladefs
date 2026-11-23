@@ -9,6 +9,17 @@ use sha2::{Digest as _, Sha256};
 use std::io::{self, Write as _};
 use std::path::Path;
 
+/// Imports `image` as [`super::OciImage::import`] does, `hashed` called with each layer's blob's
+/// path once it is hashed, before it is applied: to change the layout between the two, as one
+/// that can write it as it is imported may (board 8541).
+pub async fn import_hashed(
+    image: &super::OciImage,
+    importer: &mut super::Importer,
+    hashed: impl FnMut(&Path),
+) -> Result<(), crate::Error> {
+    image.import_hashed(importer, hashed).await
+}
+
 /// The time entries are made at, unless they say otherwise: 2020-09-13.
 pub const MTIME: u64 = 1_600_000_000;
 

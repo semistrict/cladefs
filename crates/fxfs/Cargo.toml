@@ -7,8 +7,6 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Hooks for migrating file formats.
-migration = []
 # Hooks for benchmarks.
 benchmark = []
 
@@ -19,20 +17,13 @@ assert_matches.workspace = true
 async-trait.workspace = true
 bincode.workspace = true
 bit-vec.workspace = true
-blob_metadata.workspace = true
 byteorder.workspace = true
 either.workspace = true
 event-listener.workspace = true
-fidl-fuchsia-io.workspace = true
 fprint.workspace = true
-fscrypt.workspace = true
-fsverity_merkle.workspace = true
 fuchsia-async.workspace = true
-fuchsia-inspect.workspace = true
-fuchsia_merkle.workspace = true
 fuchsia-sync.workspace = true
 futures.workspace = true
-fxfs-crypto.workspace = true
 fxfs_macros.workspace = true
 fxfs_trace.workspace = true
 fxfs-unicode.workspace = true
@@ -52,14 +43,8 @@ storage_units.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 zerocopy.workspace = true
-zx.workspace = true
-zx-status.workspace = true
 
 [dev-dependencies]
-fuchsia.workspace = true
-fxfs_crypt_common.workspace = true
-fxfs-insecure-crypto.workspace = true
-mundane.workspace = true
 rand.workspace = true
 test-case.workspace = true
 

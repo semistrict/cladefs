@@ -16,7 +16,7 @@ use crate::filesystem::{FlushReason, FxFilesystem};
 use crate::object_store::directory::Directory;
 use crate::object_store::transaction::{LockKeys, Options, Transaction, lock_keys};
 use crate::object_store::{
-    INVALID_OBJECT_ID, LockKey, NewChildStoreOptions, ObjectDescriptor, ObjectStore, StoreOptions,
+    INVALID_OBJECT_ID, LockKey, NewChildStoreOptions, ObjectDescriptor, ObjectStore,
     load_store_info,
 };
 use crate::serialized_types::LATEST_VERSION;
@@ -109,13 +109,9 @@ impl RootVolume {
     }
 
     /// Returns the volume with the given name.  This is not thread-safe.
-    pub async fn volume(
-        &self,
-        volume_name: &str,
-        options: StoreOptions,
-    ) -> Result<Arc<ObjectStore>, Error> {
+    pub async fn volume(&self, volume_name: &str) -> Result<Arc<ObjectStore>, Error> {
         // Lookup the volume object in the volume directory.
-        let (store_object_id, descriptor, _) = self
+        let (store_object_id, descriptor) = self
             .volume_directory()
             .lookup(volume_name)
             .await
@@ -137,13 +133,6 @@ impl RootVolume {
             .ok_or(FxfsError::NotFound)
             .context("Missing volume store")?;
         store.set_trace(self.filesystem.trace());
-        // Unlock the volume if required.
-        if let Some(crypt) = options.crypt {
-            let read_only = self.filesystem.options().read_only;
-            store.unlock_inner(crypt, read_only).await.context("Failed to unlock volume")?;
-        } else if store.is_locked() {
-            bail!(FxfsError::AccessDenied);
-        }
         // If the layer files are out of date, kick off a full compaction in the background.
         if let Some(scope_guard) = self.filesystem.scope().active_guard()
             && !self.filesystem.options().read_only
@@ -158,15 +147,10 @@ impl RootVolume {
                 .into_owned(self.filesystem.clone());
             let store = store.clone();
             self.filesystem.scope().spawn(async move {
-                // This needs to be taken outside the task and passed in. The volume cannot be
-                // re-locked until the guard is dropped so this prevents a race where the flush
-                // starts after locking by taking it synchronously.
+                // Taken outside the task and passed in, so that the flush starts holding it.
                 let _guard = guard;
-                // Takes a scope guard so that unencrypted stores will finish their flush before
-                // allowing the filesystem to close as well. Journal flushes are normally run on
-                // the filesystem's scope, and just like that case it is safe since encrypted
-                // volumes can't be locked without taking the flush lock so it will be forced to
-                // wait for this completion.
+                // Takes a scope guard so that the store finishes its flush before the filesystem
+                // closes. Journal flushes are normally run on the filesystem's scope.
                 let _scope_guard = scope_guard;
                 if let Err(error) =
                     store.flush_guarded_with_reason(FlushReason::UpgradeVersion).await
@@ -203,12 +187,12 @@ impl RootVolume {
     ) -> Result<Vec<u64>, Error> {
         let object_id =
             match self.volume_directory().lookup(volume_name).await?.ok_or(FxfsError::NotFound)? {
-                (object_id, ObjectDescriptor::Volume, _) => object_id,
+                (object_id, ObjectDescriptor::Volume) => object_id,
                 _ => bail!(anyhow!(FxfsError::Inconsistent).context("Expected volume")),
             };
         let root_store = self.filesystem.root_store();
 
-        // Delete all the layers and encrypted mutations stored in root_store for this volume.
+        // Delete all the layers stored in root_store for this volume.
         // This includes the StoreInfo itself. cladefs: layers are deleted only once no other volume
         // shares them (see `snapshot_volume`).
         let mut parent_objects = load_store_info(&root_store, object_id).await?.parent_objects();
@@ -249,7 +233,7 @@ impl RootVolume {
         loop {
             lock_keys.truncate(orig_len);
             let object_id = match volume_dir.lookup(name).await? {
-                Some((object_id, ObjectDescriptor::Volume, _)) => {
+                Some((object_id, ObjectDescriptor::Volume)) => {
                     // We have to ensure that the store isn't flushed while we delete it, because
                     // deleting the store will remove references to it from ObjectManager which are
                     // then updated by flushing.
@@ -318,28 +302,15 @@ mod tests {
     use super::root_volume;
     use crate::filesystem::{FxFilesystem, SyncOptions};
     use crate::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
-    use crate::lsm_tree::persistent_layer::PersistentLayerWriter;
-    use crate::lsm_tree::types::LayerWriter as _;
     use crate::object_handle::{ObjectHandle, WriteObjectHandle};
     use crate::object_store::directory::Directory;
     use crate::object_store::transaction::{Options, lock_keys};
-    use crate::object_store::{
-        DirectWriter, HandleOptions, LockKey, NewChildStoreOptions, ObjectKey, ObjectStore,
-        ObjectValue, StoreOptions,
-    };
-    use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, LATEST_VERSION};
-    use fxfs_crypto::{Crypt, EncryptionKey, KeyPurpose};
-    use fxfs_insecure_crypto::new_insecure_crypt;
+    use crate::object_store::{LockKey, NewChildStoreOptions};
     use std::sync::Arc;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-    use test_case::test_case;
 
-    pub(super) async fn do_fsck(
-        fs: &Arc<FxFilesystem>,
-        volume_name: Option<&str>,
-        crypt: Option<Arc<dyn Crypt>>,
-    ) {
+    pub(super) async fn do_fsck(fs: &Arc<FxFilesystem>, volume_name: Option<&str>) {
         let fsck_options = FsckOptions {
             fail_on_warning: true,
             on_error: Box::new(|err| eprintln!("fsck error: {:?}", err)),
@@ -348,56 +319,30 @@ mod tests {
         fsck_with_options(fs.clone(), &fsck_options).await.expect("fsck filesystem");
         if let Some(volume_name) = volume_name {
             let root = root_volume(fs.clone()).await.unwrap();
-            let vol = root
-                .volume(
-                    volume_name,
-                    StoreOptions { crypt: crypt.clone(), ..StoreOptions::default() },
-                )
-                .await
-                .expect("could not open volume");
-            fsck_volume_with_options(&fs, &fsck_options, vol.store_object_id(), crypt)
+            let vol = root.volume(volume_name).await.expect("could not open volume");
+            fsck_volume_with_options(&fs, &fsck_options, vol.store_object_id())
                 .await
                 .expect("fsck volume");
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_lookup_nonexistent_volume() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
-        root_volume
-            .volume(
-                "vol",
-                StoreOptions {
-                    crypt: Some(Arc::new(new_insecure_crypt())),
-                    ..StoreOptions::default()
-                },
-            )
-            .await
-            .err()
-            .expect("Volume shouldn't exist");
+        root_volume.volume("vol").await.err().expect("Volume shouldn't exist");
         filesystem.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_add_volume() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
         {
             let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
             let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
+                .new_volume("vol", NewChildStoreOptions::default())
                 .await
                 .expect("new_volume failed");
             let mut transaction = filesystem
@@ -426,13 +371,9 @@ mod tests {
             let device = filesystem.take_device().await;
             device.reopen(false);
             let filesystem = FxFilesystem::open(device).await.expect("open failed");
-            do_fsck(&filesystem, Some("vol"), Some(crypt)).await;
+            do_fsck(&filesystem, Some("vol")).await;
             let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            // NOTE: The volume should have been unlocked by `do_fsck` so we omit `crypt` here.
-            let volume = root_volume
-                .volume("vol", StoreOptions { crypt: None, ..StoreOptions::default() })
-                .await
-                .expect("volume failed");
+            let volume = root_volume.volume("vol").await.expect("volume failed");
             let root_directory = Directory::open(&volume, volume.root_directory_object_id())
                 .await
                 .expect("open failed");
@@ -441,27 +382,17 @@ mod tests {
         };
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_delete_volume() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
         let store_object_id;
         let parent_objects;
         // Add volume and a file (some data).
         let store_id = {
             let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
             let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
+                .new_volume("vol", NewChildStoreOptions::default())
                 .await
                 .expect("new_volume failed");
             store_object_id = store.store_object_id();
@@ -502,7 +433,7 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
-        do_fsck(&filesystem, Some("vol"), Some(crypt.clone())).await;
+        do_fsck(&filesystem, Some("vol")).await;
         {
             // Expect 8kiB accounted to the new volume.
             assert_eq!(
@@ -535,20 +466,14 @@ mod tests {
                 &0,
             );
             // Confirm volume entry is gone.
-            root.volume(
-                "vol",
-                StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-            )
-            .await
-            .err()
-            .expect("volume shouldn't exist anymore.");
+            root.volume("vol").await.err().expect("volume shouldn't exist anymore.");
         }
         filesystem.close().await.expect("Close failed");
         let device = filesystem.take_device().await;
         device.reopen(false);
         // All artifacts of the original volume should be gone.
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
-        do_fsck(&filesystem, None, None).await;
+        do_fsck(&filesystem, None).await;
         for object_id in &parent_objects {
             let _ = filesystem
                 .root_store()
@@ -559,7 +484,7 @@ mod tests {
         }
         filesystem.close().await.expect("Close failed");
     }
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_create_volume_with_guid() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -570,7 +495,7 @@ mod tests {
                 .new_volume("vol", NewChildStoreOptions { guid: Some(guid), ..Default::default() })
                 .await
                 .unwrap();
-            assert_eq!(store.store_info().unwrap().guid, guid);
+            assert_eq!(store.store_info().guid, guid);
         }
         fs.close().await.expect("Close failed");
         let device = fs.take_device().await;
@@ -578,138 +503,9 @@ mod tests {
         let fs = FxFilesystem::open(device).await.unwrap();
         {
             let root = root_volume(fs.clone()).await.unwrap();
-            let vol = root.volume("vol", StoreOptions::default()).await.unwrap();
+            let vol = root.volume("vol").await.unwrap();
             assert_eq!(vol.guid(), guid);
         }
         fs.close().await.unwrap();
-    }
-
-    #[test_case(false; "unencrypted")]
-    #[test_case(true; "encrypted")]
-    #[fuchsia::test]
-    async fn test_flush_on_open_to_update_version(encrypted: bool) {
-        // Can't test it if we don't have any versions that we can migrate between.
-        if LATEST_VERSION == EARLIEST_SUPPORTED_VERSION {
-            return;
-        }
-
-        let device = DeviceHolder::new(FakeDevice::new(8192, 1024));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt: Option<Arc<dyn Crypt>> =
-            if encrypted { Some(Arc::new(new_insecure_crypt())) } else { None };
-        {
-            let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_vol
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions { crypt: crypt.clone(), ..StoreOptions::default() },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("new_volume failed");
-
-            let parent_store = store.parent_store().unwrap();
-            let txn_options = Options {
-                skip_journal_checks: true,
-                borrow_metadata_space: true,
-                allocator_reservation: Some(fs.object_manager().metadata_reservation()),
-                ..Default::default()
-            };
-            let mut transaction = parent_store
-                .new_transaction(lock_keys![], txn_options)
-                .await
-                .expect("new_transaction failed");
-            let new_layer_object = if let Some(crypt) = &crypt {
-                let raw_id = parent_store.get_next_object_id().await.unwrap();
-                let (fxfs_key, unwrapped_key) =
-                    crypt.create_key(raw_id.get(), KeyPurpose::Data).await.unwrap();
-                ObjectStore::create_object_with_key(
-                    &parent_store,
-                    &mut transaction,
-                    raw_id,
-                    HandleOptions { skip_journal_checks: true, ..Default::default() },
-                    EncryptionKey::Fxfs(fxfs_key),
-                    unwrapped_key,
-                )
-                .await
-                .expect("create_object_with_key failed")
-            } else {
-                ObjectStore::create_object(
-                    &parent_store,
-                    &mut transaction,
-                    HandleOptions { skip_journal_checks: true, ..Default::default() },
-                    None,
-                )
-                .await
-                .expect("create_object failed")
-            };
-            transaction.commit().await.expect("commit failed");
-
-            // Add an empty layer to the set with the old version.
-            {
-                let layer_writer = DirectWriter::new(&new_layer_object, txn_options).await;
-                let writer = PersistentLayerWriter::<_, ObjectKey, ObjectValue>::new_with_version(
-                    layer_writer,
-                    0,
-                    fs.block_size(),
-                    EARLIEST_SUPPORTED_VERSION,
-                )
-                .await
-                .expect("writer failed");
-                writer.complete().await.expect("writer complete failed");
-            }
-
-            let mut store_info = store.load_store_info().await.unwrap();
-            store_info.layers = vec![new_layer_object.object_id()];
-            let mut end_transaction = parent_store
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        parent_store.store_object_id(),
-                        store.store_info_handle_object_id().unwrap()
-                    )],
-                    txn_options,
-                )
-                .await
-                .expect("new_transaction failed");
-            store
-                .write_store_info(&mut end_transaction, &store_info)
-                .await
-                .expect("write_store_info failed");
-            end_transaction.commit().await.expect("commit failed");
-        }
-        fs.close().await.expect("close failed");
-
-        // Re-open filesystem.
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-            let _store = root_vol
-                .volume("test", StoreOptions { crypt: crypt.clone(), ..StoreOptions::default() })
-                .await
-                .expect("volume failed");
-        }
-
-        // Closing the filesystem should force the background flush to complete.
-        fs.close().await.expect("close failed");
-
-        // Re-open filesystem again to ensure the layer file version has been updated.
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_vol
-                .volume("test", StoreOptions { crypt: crypt.clone(), ..StoreOptions::default() })
-                .await
-                .expect("volume failed");
-
-            assert_eq!(store.tree.get_earliest_version(), LATEST_VERSION);
-        }
-
-        fs.close().await.expect("close failed");
     }
 }

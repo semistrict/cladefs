@@ -36,10 +36,16 @@
 //! vault's ciphertext. The service's documentation names no status for each refusal: they are
 //! mapped as its error codes say ([`refusal`]), not yet checked against the service itself.
 
-use super::{Error, KeyNames, Kms, real};
+use super::background::Background;
+use super::http::{self, Unread};
+use super::retry::{self, Failed};
+use super::{Error, KeyNames, Kms, Origin, Vars, real};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use bytes::Bytes;
+use futures::FutureExt as _;
+use futures::future::{BoxFuture, Shared};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::future::Future;
@@ -58,6 +64,17 @@ const API_VERSION: &str = "7.4";
 /// For development: an access token to call the vault with, in place of the identity's.
 pub const TOKEN_VAR: &str = "CLADEFS_KMS_AZURE_TOKEN";
 
+/// The variables its credentials are read from ([`source`]): a bucket's own replace the host's as
+/// one (board 8485, `super::vars`).
+pub(super) const CREDENTIAL_VARS: &[&str] = &[
+    TOKEN_VAR,
+    "AZURE_AUTHORITY_HOST",
+    "AZURE_TENANT_ID",
+    "AZURE_CLIENT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_CLIENT_SECRET",
+];
+
 /// The authority, unless `AZURE_AUTHORITY_HOST` names another.
 const AUTHORITY: &str = "https://login.microsoftonline.com/";
 
@@ -68,11 +85,8 @@ const IMDS: &str = "http://169.254.169.254/metadata/identity/oauth2/token";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What each call is tried as at most, waiting before each retry, as Azure's libraries retry
-/// throttling and the service's failures.
-const BACKOFF: [Duration; 2] = [Duration::from_millis(200), Duration::from_secs(1)];
-
-/// A token is fetched again once it has less than this left.
+/// A token is fetched again once it has less than this left, or half its lifetime if shorter
+/// ([`Held::refresh_at`]).
 const REFRESH_BEFORE: Duration = Duration::from_secs(300);
 
 /// The wrapping algorithms it takes: Key Vault's names.
@@ -81,13 +95,11 @@ const ALGORITHMS: [&str; 3] = ["RSA-OAEP-256", "A256KW", "CKM_AES_KEY_WRAP"];
 /// What the query of an `azure-kv://` URL may name.
 const QUERY: [&str; 4] = ["key", "keys", "alg", "endpoint"];
 
-/// The KMS `url` names ([`super::from_url`]).
-pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
-    let parsed = parse(url)?;
-    // Unset, or not UTF-8, which no value it takes is: none.
-    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let source = source(&var);
-    Ok(Arc::new(AzureKms::new(parsed, source).map_err(|why| format!("{url}: {why}"))?))
+/// The KMS `url` names ([`super::from_url_with`]), of `origin`, its credentials as `vars` give
+/// them.
+pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
+    let parsed = parse(url, origin)?;
+    Ok(Arc::new(AzureKms::new(parsed, source(vars)).map_err(|why| format!("{url}: {why}"))?))
 }
 
 /// What an `azure-kv://` URL says.
@@ -102,12 +114,15 @@ struct Parsed {
     alg: &'static str,
 }
 
-/// What `url` says, each name checked.
-fn parse(url: &str) -> Result<Parsed, String> {
+/// What `url` says, each name checked; of `origin` the registry of buckets, each host it names (its
+/// vault's, its endpoint's, its template's) one the host allows, and no file of the host's (board
+/// 8525), before any is opened.
+fn parse(url: &str, origin: Origin) -> Result<Parsed, String> {
     let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
     let rest = url.strip_prefix("azure-kv://").expect("an azure-kv:// URL");
     let (host, query) = rest.split_once('?').unwrap_or((rest, ""));
     check_vault(host).map_err(|why| format!("{url:?} names no vault: {why}: {usage}"))?;
+    origin.host(host, None).map_err(|why| format!("{url:?}: {why}"))?;
     let query: Vec<(String, String)> =
         url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
     if let Some((name, _)) = query.iter().find(|(name, _)| !QUERY.contains(&&name[..])) {
@@ -123,14 +138,22 @@ fn parse(url: &str) -> Result<Parsed, String> {
     };
     let vault = match value("endpoint") {
         Some(endpoint) => {
-            check_endpoint(endpoint).map_err(|why| format!("{url:?}: the endpoint, {why}"))?;
+            let (host, port) =
+                check_endpoint(endpoint).map_err(|why| format!("{url:?}: the endpoint, {why}"))?;
+            origin.host(host, port).map_err(|why| format!("{url:?}: the endpoint, {why}"))?;
             endpoint.trim_end_matches('/').to_owned()
         }
         None => format!("https://{host}"),
     };
-    let names = KeyNames::of_query(query.iter().map(|(name, value)| (&name[..], &value[..])))
-        .map_err(|why| format!("{url:?}: {why}"))?;
+    let query_pairs = query.iter().map(|(name, value)| (&name[..], &value[..]));
+    let names = KeyNames::of_query(query_pairs, origin).map_err(|why| format!("{url:?}: {why}"))?;
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
+    // A template naming keys whole names their vault: one the host allows, as the template has it,
+    // so that a vault a tenant's ID makes (`https://t{tenant}.vault.azure.net/...`) is none.
+    if let Some(rest) = names.template().strip_prefix("https://") {
+        let vault = rest.split('/').next().unwrap_or_default();
+        origin.host(vault, None).map_err(|why| format!("{url:?}: the key template, {why}"))?;
+    }
     for (tenant, name) in names.overridden() {
         check_key(name)
             .map_err(|why| format!("{url:?}: tenant {}'s key, {why}", base32_id::Short(tenant)))?;
@@ -177,16 +200,18 @@ fn audience_of(host: &str) -> Option<&'static str> {
 
 /// Checks `endpoint` is a vault's (`https://VAULT_HOST`, a private endpoint resolving a vault's
 /// name), or an emulator's on this host (`http://127.0.0.1:PORT`, `http://localhost:PORT`):
-/// nowhere else is a token sent, nor in the clear but to this host.
-fn check_endpoint(endpoint: &str) -> Result<(), String> {
+/// nowhere else is a token sent, nor in the clear but to this host. Its host, and its port if it
+/// names one.
+fn check_endpoint(endpoint: &str) -> Result<(&str, Option<u16>), String> {
     let endpoint = endpoint.trim_end_matches('/');
     if let Some(host) = endpoint.strip_prefix("https://") {
-        return check_vault(host);
+        return check_vault(host).map(|()| (host, None));
     }
     let local = endpoint.strip_prefix("http://").and_then(|rest| {
         let (host, port) = rest.rsplit_once(':').unwrap_or((rest, "80"));
         let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
-        (loopback && port.parse::<u16>().is_ok()).then_some(())
+        // A port that is none: no endpoint, refused below.
+        loopback.then_some((host, Some(port.parse::<u16>().ok()?)))
     });
     local.ok_or_else(|| {
         format!("{endpoint:?} is neither a vault's (https://VAULT_HOST) nor this host's (http://127.0.0.1:PORT)")
@@ -249,29 +274,30 @@ fn decode(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
 
 /// Where its tokens come from (see the module).
 enum Source {
-    Static(String),
+    Static(Zeroizing<String>),
     Federated { url: String, client_id: String, file: PathBuf },
     Secret { url: String, client_id: String, secret: Zeroizing<String> },
     ManagedIdentity { url: String, client_id: Option<String> },
 }
 
-/// Where its tokens come from, as the variables `var` gives by name say.
-fn source(var: &dyn Fn(&str) -> Option<String>) -> Source {
-    if let Some(token) = var(TOKEN_VAR) {
-        return Source::Static(token);
+/// Where its tokens come from, as `vars` say ([`CREDENTIAL_VARS`]).
+fn source(vars: &Vars) -> Source {
+    if let Some(token) = vars.get(TOKEN_VAR) {
+        return Source::Static(Zeroizing::new(token.to_owned()));
     }
-    let authority = var("AZURE_AUTHORITY_HOST").unwrap_or_else(|| AUTHORITY.to_owned());
+    let authority = vars.get("AZURE_AUTHORITY_HOST").unwrap_or(AUTHORITY);
     let authority = authority.trim_end_matches('/');
-    if let (Some(tenant), Some(client_id)) = (var("AZURE_TENANT_ID"), var("AZURE_CLIENT_ID")) {
+    let client_id = vars.get("AZURE_CLIENT_ID").map(str::to_owned);
+    if let (Some(tenant), Some(client_id)) = (vars.get("AZURE_TENANT_ID"), client_id.clone()) {
         let url = format!("{authority}/{tenant}/oauth2/v2.0/token");
-        if let Some(file) = var("AZURE_FEDERATED_TOKEN_FILE") {
+        if let Some(file) = vars.get("AZURE_FEDERATED_TOKEN_FILE") {
             return Source::Federated { url, client_id, file: file.into() };
         }
-        if let Some(secret) = var("AZURE_CLIENT_SECRET") {
-            return Source::Secret { url, client_id, secret: Zeroizing::new(secret) };
+        if let Some(secret) = vars.get("AZURE_CLIENT_SECRET") {
+            return Source::Secret { url, client_id, secret: Zeroizing::new(secret.to_owned()) };
         }
     }
-    Source::ManagedIdentity { url: IMDS.to_owned(), client_id: var("AZURE_CLIENT_ID") }
+    Source::ManagedIdentity { url: IMDS.to_owned(), client_id }
 }
 
 /// A token the authority, or the metadata service, answered with, what of it is read: its
@@ -289,16 +315,64 @@ enum Seconds {
     String(String),
 }
 
-/// Azure Key Vault, its tenants' keys in a vault, or named whole ([`self`]).
+/// Azure Key Vault, its tenants' keys in a vault, or named whole ([`self`]). Its calls run on a
+/// runtime of its own (board 8477, [`Background`]).
 struct AzureKms {
+    inner: Arc<Inner>,
+    runtime: Background,
+}
+
+/// What [`AzureKms`]'s calls share, on its runtime.
+struct Inner {
     vault: String,
     audience: &'static str,
     names: KeyNames,
     alg: &'static str,
     http: reqwest::Client,
+    tokens: Tokens,
+}
+
+/// Its tokens, each audience's ([`Tokens::token`]), and where they come from.
+struct Tokens {
+    fetcher: Arc<Fetcher>,
+    /// Each audience's token: the one held, and the fetch of the next, if one goes.
+    slots: Mutex<HashMap<&'static str, Slot>>,
+}
+
+/// What fetches a token: a [`Slot`] holds a fetch while it goes, which holds this alone, never
+/// [`Tokens`] or [`Inner`], so that a fetch whose callers all gave up on it is no cycle keeping the
+/// KMS alive once dropped (hotbed review 47).
+struct Fetcher {
+    http: reqwest::Client,
     source: Source,
-    /// The token last fetched for each audience, and when it expires.
-    held: Mutex<HashMap<&'static str, (Zeroizing<String>, Instant)>>,
+}
+
+/// An audience's tokens ([`Tokens::token`]).
+#[derive(Default)]
+struct Slot {
+    held: Option<Held>,
+    /// The fetch going, which every call wanting a token for the audience meanwhile waits for:
+    /// one request of the authority however many ask (board 8475).
+    fetching: Option<Fetch>,
+}
+
+/// A fetch of a token, shared by those waiting for it.
+type Fetch = Shared<BoxFuture<'static, Result<Held, String>>>;
+
+/// A token fetched, and when to fetch the next.
+#[derive(Clone)]
+struct Held {
+    token: Zeroizing<String>,
+    refresh_at: Instant,
+}
+
+impl Held {
+    /// `token`, asked for at `asked` and good for `lifetime`: fetched again [`REFRESH_BEFORE`] it
+    /// expires, or, if it lives less than twice that, half its lifetime in, so that a short-lived
+    /// one is used, not fetched at every call (board 8475).
+    fn new(token: Zeroizing<String>, asked: Instant, lifetime: Duration) -> Self {
+        Self { token, refresh_at: asked + lifetime - REFRESH_BEFORE.min(lifetime / 2) }
+    }
 }
 
 /// What a call asks of the vault.
@@ -333,25 +407,35 @@ struct KeyOperationResult {
     value: String,
 }
 
-/// A call's failure: what it means, and whether trying it again may do better.
+/// A call's failure: what it means, whether trying it again may do better and after how long the
+/// vault said, and whether the vault refused the token it was made with.
 struct Failure {
-    error: Error,
-    transient: bool,
+    failed: Failed<Error>,
     /// The vault refused the token: fetch another, then try again.
     unauthorized: bool,
 }
 
 impl AzureKms {
     fn new(parsed: Parsed, source: Source) -> Result<Self, String> {
+        // No redirect followed (board 8527): one would take a request's body, a wrapped key or a
+        // client's secret, elsewhere.
         let http = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|err| format!("an HTTP client: {err}"))?;
+        let runtime =
+            Background::new("cladefs-azure-kv").map_err(|err| format!("its runtime: {err}"))?;
         let Parsed { vault, audience, names, alg } = parsed;
-        Ok(Self { vault, audience, names, alg, http, source, held: Mutex::default() })
+        let fetcher = Arc::new(Fetcher { http: http.clone(), source });
+        let tokens = Tokens { fetcher, slots: Mutex::default() };
+        let inner = Inner { vault, audience, names, alg, http, tokens };
+        Ok(Self { inner: Arc::new(inner), runtime })
     }
+}
 
+impl Inner {
     /// The audience of the tokens for the key `id`: its vault's; the URL's vault's for a key of an
     /// endpoint on this host, an emulator.
     fn audience(&self, id: &str) -> &'static str {
@@ -359,12 +443,11 @@ impl AzureKms {
         host.and_then(audience_of).unwrap_or(self.audience)
     }
 
-    async fn wrap_now(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
+    async fn wrap_now(self: &Arc<Self>, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
         let id = identifier(&self.vault, &self.names.of(tenant));
         let value = Zeroizing::new(BASE64URL.encode(bound(tenant, key)));
-        let body = KeyOperation { alg: self.alg, value: &value };
-        let body = Zeroizing::new(serde_json::to_vec(&body).expect("a request serializes"));
-        let answer = self.call(tenant, &id, &format!("{id}/wrapkey"), Op::Wrap, &body).await?;
+        let body = http::json(&KeyOperation { alg: self.alg, value: &value });
+        let answer = self.call(tenant, &id, &format!("{id}/wrapkey"), Op::Wrap, body).await?;
         let corrupt = |why: &str| io_error(tenant, &id, Op::Wrap, format!("its answer {why}"));
         let response: KeyOperationResult = serde_json::from_slice(&answer)
             .map_err(|err| corrupt(&format!("is not a KeyOperationResult: {err}")))?;
@@ -385,7 +468,7 @@ impl AzureKms {
         Ok(real::wrapped(SCHEME, &id, &kept))
     }
 
-    async fn unwrap_now(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
+    async fn unwrap_now(self: &Arc<Self>, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
         let id = identifier(&self.vault, &self.names.of(tenant));
         let unauthentic = |source| Error::Unauthentic { tenant, source };
         let kept = real::ciphertext(wrapped, SCHEME, &id).map_err(unauthentic)?;
@@ -398,13 +481,12 @@ impl AzureKms {
             return Err(unauthentic(header));
         }
         let value = BASE64URL.encode(ciphertext);
-        let body = serde_json::to_vec(&KeyOperation { alg: self.alg, value: &value })
-            .expect("a request serializes");
+        let body = http::json(&KeyOperation { alg: self.alg, value: &value });
         let url = format!("{id}/{version}/unwrapkey");
-        let mut answer = self.call(tenant, &id, &url, Op::Unwrap, &body).await?;
+        let answer = self.call(tenant, &id, &url, Op::Unwrap, body).await?;
         let corrupt = |why: &str| io_error(tenant, &id, Op::Unwrap, format!("its answer {why}"));
         let parsed = serde_json::from_slice::<KeyOperationResult>(&answer);
-        answer.zeroize();
+        drop(answer);
         let mut response =
             parsed.map_err(|err| corrupt(&format!("is not a KeyOperationResult: {err}")))?;
         let decoded = decode(&response.value);
@@ -423,32 +505,39 @@ impl AzureKms {
     }
 
     /// The body of the vault's answer to `op` at `url`, with the key `id` for `tenant`, of
-    /// request `body`: tried again, after [`BACKOFF`], while it fails as it may not again; and
-    /// at once with a new token, once, if the vault refuses the one it was given.
+    /// request `body`: tried again while it fails as it may not next time ([`retry`]); and at
+    /// once with a new token, once, if the vault refuses the one it was given.
     async fn call(
-        &self,
+        self: &Arc<Self>,
         tenant: u64,
         id: &str,
         url: &str,
         op: Op,
-        body: &[u8],
-    ) -> Result<Vec<u8>, Error> {
-        let mut waits = BACKOFF.iter();
-        let mut refreshed = false;
+        body: Bytes,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let audience = self.audience(id);
+        let (mut retries, mut refreshed) = (0, false);
         loop {
-            let failure = match self.attempt(tenant, id, url, op, body).await {
-                Ok(answer) => return Ok(answer),
-                Err(failure) => failure,
-            };
-            if failure.unauthorized && !refreshed && !matches!(self.source, Source::Static(_)) {
+            let token = (self.tokens.token(audience).await)
+                .map_err(|why| io_error(tenant, id, op, format!("credentials: {why}")))?;
+            let Failure { failed, unauthorized } =
+                match self.attempt(tenant, id, url, op, body.clone(), &token).await {
+                    Ok(answer) => return Ok(answer),
+                    Err(failure) => failure,
+                };
+            if unauthorized
+                && !refreshed
+                && !matches!(self.tokens.fetcher.source, Source::Static(_))
+            {
                 refreshed = true;
-                self.held.lock().unwrap().remove(self.audience(id));
+                self.tokens.evict(audience, &token);
                 continue;
             }
-            match (failure.transient, waits.next()) {
-                (true, Some(&wait)) => tokio::time::sleep(wait).await,
-                _ => return Err(failure.error),
+            match failed.transient.then(|| retry::wait(retries, failed.after)).flatten() {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => return Err(failed.error),
             }
+            retries += 1;
         }
     }
 
@@ -458,60 +547,108 @@ impl AzureKms {
         id: &str,
         url: &str,
         op: Op,
-        body: &[u8],
-    ) -> Result<Vec<u8>, Failure> {
-        let failed = |why: String, transient| Failure {
-            error: io_error(tenant, id, op, why),
-            transient,
-            unauthorized: false,
+        body: Bytes,
+        token: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, Failure> {
+        let unread = |unread: Unread| {
+            let error = io_error(tenant, id, op, unread.why());
+            let failed = match unread.transient() {
+                true => Failed::transient(error, None),
+                false => Failed::refused(error),
+            };
+            Failure { failed, unauthorized: false }
         };
-        let token = self
-            .token(self.audience(id))
-            .await
-            .map_err(|why| failed(format!("credentials: {why}"), false))?;
+        // board 8589: the bearer's header, and the copies reqwest makes of it and of the body, are
+        // its own, which nothing here zeroes.
         let response = self
             .http
             .post(format!("{url}?api-version={API_VERSION}"))
-            .bearer_auth(&*token)
+            .bearer_auth(token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
-            .body(body.to_vec())
+            .body(body)
             .send()
             .await
-            .map_err(|err| failed(chain(&err), true))?;
+            .map_err(|err| unread(Unread::Transport(err)))?;
         let status = response.status();
-        let answer = response.bytes().await.map_err(|err| failed(chain(&err), true))?;
-        let mut owned = answer.to_vec();
-        if let Ok(mut unique) = answer.try_into_mut() {
-            unique[..].zeroize();
-        }
+        let after = retry::retry_after(response.headers());
+        let answer = http::body(response, http::MAX).await.map_err(unread)?;
         if status.is_success() {
-            return Ok(owned);
+            return Ok(answer);
         }
-        let refused = refusal(tenant, id, op, status.as_u16(), &owned);
-        owned.zeroize();
+        let mut refused = refusal(tenant, id, op, status.as_u16(), &answer);
+        refused.failed.after = after;
         Err(refused)
     }
+}
 
-    /// A token for `audience`, a vault's: the one held, while it has [`REFRESH_BEFORE`] left, else
-    /// fetched.
+impl Tokens {
+    /// A token for `audience`, a vault's: the one held, until its [`Held::refresh_at`]; else the
+    /// one the fetch going gets, or a fetch started now, which those asking meanwhile share
+    /// (board 8475).
     async fn token(&self, audience: &'static str) -> Result<Zeroizing<String>, String> {
-        if let Source::Static(token) = &self.source {
-            return Ok(Zeroizing::new(token.clone()));
-        }
-        if let Some((token, expires)) = self.held.lock().unwrap().get(audience)
-            && Instant::now() + REFRESH_BEFORE < *expires
-        {
+        if let Source::Static(token) = &self.fetcher.source {
             return Ok(token.clone());
         }
+        let fetch = {
+            let mut slots = self.slots.lock().unwrap();
+            let slot = slots.entry(audience).or_default();
+            if let Some(held) = &slot.held
+                && Instant::now() < held.refresh_at
+            {
+                return Ok(held.token.clone());
+            }
+            let fetcher = self.fetcher.clone();
+            let start = move || async move { fetcher.fetch(audience).await }.boxed().shared();
+            slot.fetching.get_or_insert_with(start).clone()
+        };
+        let fetched = fetch.clone().await;
+        // The first to see its fetch end keeps what it got, and ends it: a failure is not kept,
+        // the next call fetching anew.
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.entry(audience).or_default();
+        if slot.fetching.as_ref().is_some_and(|going| going.ptr_eq(&fetch)) {
+            slot.fetching = None;
+            if let Ok(held) = &fetched {
+                slot.held = Some(held.clone());
+            }
+        }
+        fetched.map(|held| held.token)
+    }
+
+    /// Drops `audience`'s token if it is still `used`, which the vault refused: not one fetched
+    /// since by another call, which the vault has yet to refuse (board 8475).
+    fn evict(&self, audience: &'static str, used: &str) {
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.entry(audience).or_default();
+        if slot.held.as_ref().is_some_and(|held| *held.token == *used) {
+            slot.held = None;
+        }
+    }
+}
+
+impl Fetcher {
+    /// A token for `audience`, fetched from the source: tried again while it fails as the network
+    /// does, or as the authority or the metadata service throttling or failing, which says nothing
+    /// of the credentials ([`Fetcher::fetch_once`]).
+    async fn fetch(&self, audience: &'static str) -> Result<Held, String> {
+        retry::retried(|| self.fetch_once(audience)).await
+    }
+
+    /// A token for `audience`, asked for once.
+    async fn fetch_once(&self, audience: &'static str) -> Result<Held, Failed<String>> {
         let scope = format!("{audience}/.default");
         let asked = Instant::now();
         let request = match &self.source {
-            Source::Static(_) => unreachable!("answered above"),
+            Source::Static(_) => unreachable!("never fetched"),
             Source::Federated { url, client_id, file } => {
-                let assertion = std::fs::read_to_string(file).map_err(|err| {
-                    format!("AZURE_FEDERATED_TOKEN_FILE {}: {err}", file.display())
-                })?;
+                let assertion =
+                    std::fs::read_to_string(file).map(Zeroizing::new).map_err(|err| {
+                        Failed::refused(format!(
+                            "AZURE_FEDERATED_TOKEN_FILE {}: {err}",
+                            file.display()
+                        ))
+                    })?;
                 let form = Zeroizing::new(
                     url::form_urlencoded::Serializer::new(String::new())
                         .append_pair("grant_type", "client_credentials")
@@ -527,7 +664,7 @@ impl AzureKms {
                 self.http
                     .post(url)
                     .header(reqwest::header::CONTENT_TYPE, FORM)
-                    .body(form.to_string())
+                    .body(http::zeroed(form))
             }
             Source::Secret { url, client_id, secret } => {
                 let form = Zeroizing::new(
@@ -541,7 +678,7 @@ impl AzureKms {
                 self.http
                     .post(url)
                     .header(reqwest::header::CONTENT_TYPE, FORM)
-                    .body(form.to_string())
+                    .body(http::zeroed(form))
             }
             Source::ManagedIdentity { url, client_id } => {
                 let mut query = url::form_urlencoded::Serializer::new(String::new());
@@ -552,27 +689,44 @@ impl AzureKms {
                 self.http.get(format!("{url}?{}", query.finish())).header("Metadata", "true")
             }
         };
-        let response = request.send().await.map_err(|err| chain(&err))?;
+        let unread = |unread: Unread| match unread.transient() {
+            true => Failed::transient(unread.why(), None),
+            false => Failed::refused(unread.why()),
+        };
+        let response = request.send().await.map_err(|err| unread(Unread::Transport(err)))?;
         let status = response.status();
-        let mut answer = response.bytes().await.map_err(|err| chain(&err))?.to_vec();
+        let after = retry::retry_after(response.headers());
+        let answer = http::body(response, http::TOKEN_MAX).await.map_err(unread)?;
         if !status.is_success() {
             // The authority's refusals name no secret: its error and description.
             let why = String::from_utf8_lossy(&answer).chars().take(300).collect::<String>();
-            answer.zeroize();
-            return Err(format!("the authority answered HTTP {}: {why}", status.as_u16()));
+            let code = status.as_u16();
+            let why = format!("the authority answered HTTP {code}: {why}");
+            // The metadata service answers 404 while the identity is not yet the machine's, and
+            // 410 as it starts, each to be asked again (Azure's IMDS documentation); the
+            // authority's 4xx are the credentials', which no try again changes.
+            let starting =
+                matches!(self.source, Source::ManagedIdentity { .. }) && matches!(code, 404 | 410);
+            return Err(match retry::transient_status(code) || starting {
+                true => Failed::transient(why, after),
+                false => Failed::refused(why),
+            });
         }
         let parsed = serde_json::from_slice::<TokenResponse>(&answer);
-        answer.zeroize();
-        let parsed = parsed.map_err(|err| format!("the authority's answer: {err}"))?;
+        drop(answer);
+        let parsed =
+            parsed.map_err(|err| Failed::refused(format!("the authority's answer: {err}")))?;
         let seconds = match &parsed.expires_in {
             Seconds::Number(seconds) => Some(*seconds),
-            // Not a number: no lifetime said, the token asked for again at its next use.
+            // Not a number: refused below, naming it.
             Seconds::String(seconds) => seconds.parse().ok(),
         };
-        let lifetime = Duration::from_secs(seconds.unwrap_or(0));
-        let token = Zeroizing::new(parsed.access_token);
-        self.held.lock().unwrap().insert(audience, (token.clone(), asked + lifetime));
-        Ok(token)
+        // No lifetime said: refused, not taken for none, which would fetch at every call (hotbed
+        // question 461).
+        let seconds = seconds.ok_or_else(|| {
+            Failed::refused("the authority's answer: its expires_in is no number of seconds".into())
+        })?;
+        Ok(Held::new(Zeroizing::new(parsed.access_token), asked, Duration::from_secs(seconds)))
     }
 }
 
@@ -585,7 +739,8 @@ impl Kms for AzureKms {
         tenant: u64,
         key: &Secret,
     ) -> impl Future<Output = Result<Wrapped, Error>> + Send {
-        self.wrap_now(tenant, key)
+        let (inner, key) = (self.inner.clone(), Secret::from_bytes(key.expose()));
+        self.runtime.run(tenant, async move { inner.wrap_now(tenant, &key).await })
     }
 
     fn unwrap(
@@ -593,25 +748,45 @@ impl Kms for AzureKms {
         tenant: u64,
         wrapped: &Wrapped,
     ) -> impl Future<Output = Result<Secret, Error>> + Send {
-        self.unwrap_now(tenant, wrapped)
+        let (inner, wrapped) = (self.inner.clone(), wrapped.clone());
+        self.runtime.run(tenant, async move { inner.unwrap_now(tenant, &wrapped).await })
     }
 }
 
-/// `KeyVaultError`'s `error`, what of it is read.
+/// `KeyVaultError`'s `error`, what of it is read: its code, message, and inner error, whose code
+/// says more (`ForbiddenByFirewall`), and so on.
 #[derive(Default, Deserialize)]
 struct VaultError {
     #[serde(default)]
     code: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    innererror: Option<Box<VaultError>>,
 }
+
+impl VaultError {
+    /// Its code, then its inner errors', each in turn.
+    fn codes(&self) -> impl Iterator<Item = &str> {
+        std::iter::successors(Some(self), |error| error.innererror.as_deref())
+            .map(|error| &error.code[..])
+    }
+}
+
+/// The codes of a 403 that refuse the host's network, not the tenant's key: the vault's firewall
+/// and its private endpoints' (Key Vault's documentation, Troubleshooting firewall). Any other 403
+/// is the key's: its access policy or role taken away (`ForbiddenByPolicy`, `ForbiddenByRbac`), or
+/// the key disabled (hotbed question 459).
+const NETWORK_REFUSALS: [&str; 2] = ["ForbiddenByFirewall", "ForbiddenByConnection"];
 
 /// What the vault's refusal of `op` with key `id` for `tenant`, of HTTP status `code` and body
 /// `body`, means:
 ///
 /// - 404, `KeyNotFound`: the tenant has no KEK, [`Error::NoSuchTenant`] (a key deleted, purged or
 ///   soft-deleted, reads as none, as a real KMS forgets a deleted key);
-/// - 403: the tenant took cladefs's access to its key away, or disabled the key:
+/// - 403 of the vault's network ([`NETWORK_REFUSALS`]: its firewall, its private endpoints): the
+///   host's, not the tenant's, [`Error::Io`] naming the vault and why (board 8481);
+/// - any other 403: the tenant took cladefs's access to its key away, or disabled the key:
 ///   [`Error::Revoked`];
 /// - 400 of an unwrap: a ciphertext not the key's, [`Error::Unauthentic`];
 /// - 401: the vault refused the token, fetched again once ([`AzureKms::call`]), else
@@ -623,7 +798,15 @@ fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
         .ok()
         .and_then(|value| serde_json::from_value::<VaultError>(value.get("error")?.clone()).ok())
         .unwrap_or_default();
-    let refused = |error| Failure { error, transient: false, unauthorized: false };
+    let refused = |error| Failure { failed: Failed::refused(error), unauthorized: false };
+    let network = error.codes().find(|code| NETWORK_REFUSALS.contains(code));
+    if let (403, Some(network)) = (code, network) {
+        let why = format!(
+            "HTTP 403, {network}: the vault refuses this host's network, not the tenant's key: {}",
+            error.message
+        );
+        return refused(io_error(tenant, id, op, why));
+    }
     match code {
         404 if error.code == "KeyNotFound" => return refused(Error::NoSuchTenant { tenant }),
         403 => return refused(Error::Revoked { tenant }),
@@ -637,9 +820,12 @@ fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
     }
     let named = if error.code.is_empty() { "no code" } else { &error.code[..] };
     let why = format!("HTTP {code}, {named}: {}", error.message);
+    let error = io_error(tenant, id, op, why);
     Failure {
-        error: io_error(tenant, id, op, why),
-        transient: code == 429 || code >= 500,
+        failed: match retry::transient_status(code) {
+            true => Failed::transient(error, None),
+            false => Failed::refused(error),
+        },
         unauthorized: code == 401,
     }
 }
@@ -648,18 +834,6 @@ fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
 fn io_error(tenant: u64, id: &str, op: Op, why: String) -> Error {
     let source = io::Error::other(format!("Azure Key Vault, {} with {id}: {why}", op.method()));
     Error::Io { tenant, source }
-}
-
-/// `error` and its sources, each after the one before.
-fn chain(error: &dyn std::error::Error) -> String {
-    let mut why = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        why.push_str(": ");
-        why.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    why
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use super::*;
 use fxfs::filesystem::FxFilesystemBuilder;
 use fxfs::lock_keys;
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{NewChildStoreOptions, SpecialFile, StoreOptions};
+use fxfs::object_store::{NewChildStoreOptions, SpecialFile};
 use storage_device::DeviceHolder;
 use storage_device::fake_device::FakeDevice;
 
@@ -91,7 +91,7 @@ impl Fxfs<Tested> {
 /// defaults its attributes give, and which Fxfs makes of the fields a change gives, the rest 0: a
 /// chown of it alone left it mode 000, which a FUSE mount of a new store refused its owner
 /// (TASK-222). So for the root, and for a file that has them.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn mode_owner_and_group_change_one_at_a_time() {
     let changes = [
         (SetAttr { valid: SET_MODE, mode: S_IFDIR | 0o700, ..SetAttr::default() }, (0o700, 0, 0)),
@@ -118,7 +118,7 @@ async fn mode_owner_and_group_change_one_at_a_time() {
 /// A readdir lists FIFOs, sockets and devices as what they are: a FIFO was listed as a regular
 /// file (TASK-149.36). Their entries say so, made, linked or moved, and readdir takes their word,
 /// looking up no record (TASK-236); fsck checks that their objects agree.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn readdir_lists_special_files_as_what_they_are() {
     let (fs, root) = volume().await;
     let kinds = [S_IFREG, S_IFIFO, S_IFSOCK, S_IFCHR, S_IFBLK, S_IFDIR];
@@ -149,12 +149,12 @@ async fn readdir_lists_special_files_as_what_they_are() {
     assert_eq!(listing(dir).await, expected);
 
     let entry = async |dir, name| fs.directory(dir).await.unwrap().lookup(name).await.unwrap();
-    let special = |special| Some((inos[1], ObjectDescriptor::Special(special), false));
+    let special = |special| Some((inos[1], ObjectDescriptor::Special(special)));
     assert_eq!(entry(root, "b").await, special(SpecialFile::Fifo));
     assert_eq!(entry(dir, "fifo").await, special(SpecialFile::Fifo));
-    let socket = Some((inos[2], ObjectDescriptor::Special(SpecialFile::Socket), false));
+    let socket = Some((inos[2], ObjectDescriptor::Special(SpecialFile::Socket)));
     assert_eq!(entry(dir, "socket").await, socket);
-    assert_eq!(entry(root, "a").await, Some((inos[0], ObjectDescriptor::File, false)));
+    assert_eq!(entry(root, "a").await, Some((inos[0], ObjectDescriptor::File)));
 
     fs.stop_delayed().await.unwrap();
     let options = fxfs::fsck::FsckOptions { fail_on_warning: true, ..Default::default() };
@@ -163,7 +163,7 @@ async fn readdir_lists_special_files_as_what_they_are() {
 
 /// An unlink no others join goes by itself: it holds its room, and its place in the journal, for
 /// no sync.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_lone_unlink_goes_by_itself() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -174,7 +174,7 @@ async fn a_lone_unlink_goes_by_itself() {
 }
 
 /// So does an eviction queued after its unlink: it frees the object.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn an_eviction_goes_by_itself() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -187,7 +187,7 @@ async fn an_eviction_goes_by_itself() {
 }
 
 /// statfs counts what was unlinked as gone.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn statfs_applies_what_is_queued() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -198,7 +198,7 @@ async fn statfs_applies_what_is_queued() {
 }
 
 /// A change of a name, wherever it is, comes after the unlinks before it, in the journal too.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn names_change_after_the_unlinks_queued() {
     let (fs, root) = volume().await;
     let (a, b) = (fs.new_dir(root, b"a").await, fs.new_dir(root, b"b").await);
@@ -210,7 +210,7 @@ async fn names_change_after_the_unlinks_queued() {
 }
 
 /// A lookup, the kernel taking a file's link count from it, finds another of its names gone.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn lookups_count_links_queued_to_go() {
     let (fs, root) = volume().await;
     let (a, b) = (fs.new_dir(root, b"a").await, fs.new_dir(root, b"b").await);
@@ -225,7 +225,7 @@ async fn lookups_count_links_queued_to_go() {
 /// A lookup applies no unlink queued of the directory's other names: with the kernel's dentries
 /// cold, each unlinkat's lookup applied the unlink before it, alone (TASK-92.26). It finds no name
 /// queued to go, though the name's record is there until the unlink is made.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_lookup_leaves_the_unlinks_of_other_names_queued() {
     let (fs, root) = volume().await;
     let (a, b) = (fs.new_file(root, b"a").await, fs.new_file(root, b"b").await);
@@ -240,7 +240,7 @@ async fn a_lookup_leaves_the_unlinks_of_other_names_queued() {
 
 /// Nor one another case of it names, in a casefolding directory, which looks the name up as it is
 /// in neither.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_lookup_finds_no_name_queued_to_go_in_another_case() {
     let (fs, root) = volume().await;
     let dir = fs.new_dir(root, b"folded").await;
@@ -256,7 +256,7 @@ async fn a_lookup_finds_no_name_queued_to_go_in_another_case() {
 /// A drain of what is queued, an fsync's or a sync's, applies what was queued before it began,
 /// not what is queued while it goes on: another's bulk delete held an fsync for as long as it went
 /// on (TASK-92.27).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_drain_leaves_what_is_queued_after_it_began() {
     let (fs, root) = volume().await;
     let (a, b) = (fs.new_file(root, b"a").await, fs.new_file(root, b"b").await);
@@ -274,7 +274,7 @@ async fn a_drain_leaves_what_is_queued_after_it_began() {
 }
 
 /// As does an exchange of names, its attributes being what the kernel keeps.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn exchanges_count_links_queued_to_go() {
     let (fs, root) = volume().await;
     let (a, b) = (fs.new_dir(root, b"a").await, fs.new_dir(root, b"b").await);
@@ -290,7 +290,7 @@ async fn exchanges_count_links_queued_to_go() {
 
 /// A batch that fails leaves the object it may have left a name to: an eviction frees nothing, and
 /// changes fail.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_failed_batch_keeps_what_the_kernel_evicts() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -311,7 +311,7 @@ async fn a_failed_batch_keeps_what_the_kernel_evicts() {
 /// An object freed in the batch that unlinks it takes what a truncate short of room left in the
 /// graveyard with it (TASK-82): fsck found the entry of an object gone. Too narrow for sequences to
 /// reach, 6000 of them missing it with the bug back, so this makes the state.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn an_object_freed_in_a_batch_takes_a_trim_left_in_the_graveyard() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -338,7 +338,7 @@ fn set_size(size: u64, valid: u32) -> SetAttr {
 
 /// What a truncate cut from the last block stays gone when a write past the end makes that block
 /// part of the file again (xfstests generic/130).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_write_past_the_end_finds_a_truncates_tail_zeroed() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -355,7 +355,7 @@ async fn a_write_past_the_end_finds_a_truncates_tail_zeroed() {
 }
 
 /// A truncate that says to keep the tail leaves the block where a DAX window maps it.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_truncate_keeping_its_tail_leaves_the_last_block_in_place() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -370,7 +370,7 @@ async fn a_truncate_keeping_its_tail_leaves_the_last_block_in_place() {
 /// Whatever grows a file past its end, what its last block held past the end reads back as zeros,
 /// though the truncate that left it there didn't zero it, as one with no room can't: the growth
 /// zeroes it, every way a file grows (TASK-150.19, TASK-153.4).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn every_growth_finds_what_a_cut_left_past_the_end_zeroed() {
     let (fs, root) = volume().await;
     let source = fs.new_file(root, b"source").await;
@@ -412,7 +412,7 @@ async fn every_growth_finds_what_a_cut_left_past_the_end_zeroed() {
 /// the file past an end within a block that a cut left as it was (SET_KEEP_TAIL, a DAX file's),
 /// rewrites that block too, zeroed past the end (`txn_grow_size`), which no page of it paid for: it
 /// failed NoSpace, on a filesystem all but empty (TASK-149.29, found by crates/fxfs-sim-diff).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_writeback_paid_with_dirty_room_has_room_for_the_tail_its_growth_zeroes() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"grown").await;
@@ -430,7 +430,7 @@ async fn a_writeback_paid_with_dirty_room_has_room_for_the_tail_its_growth_zeroe
 }
 
 /// The last bytes a file can hold are read back as written (xfstests generic/303, generic/525).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_files_last_bytes_read_back() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"a").await;
@@ -459,7 +459,7 @@ async fn a_files_last_bytes_read_back() {
 }
 
 /// A new node's ctime is no earlier than its mtime, whatever it is (xfstests generic/423).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_new_nodes_ctime_is_no_earlier_than_its_mtime() {
     let (fs, root) = volume().await;
     let fifo = 0o010000 | 0o644;
@@ -473,7 +473,7 @@ async fn a_new_nodes_ctime_is_no_earlier_than_its_mtime() {
 }
 
 /// As `a_files_last_bytes_read_back`, across an unmount, which xfstests' test does between them.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_files_last_bytes_read_back_after_a_remount() {
     const LAST: u64 = i64::MAX as u64 - 1;
     let device = DeviceHolder::new(FakeDevice::new(16384, 4096));
@@ -492,7 +492,7 @@ async fn a_files_last_bytes_read_back_after_a_remount() {
 
     let filesystem = FxFilesystem::open(device).await.expect("opening");
     let root = root_volume((*filesystem).clone()).await.expect("the root volume");
-    let volume = root.volume("test", StoreOptions::default()).await.unwrap();
+    let volume = root.volume("test").await.unwrap();
     let fs = Fxfs::new((*filesystem).clone(), volume, false, Tested);
     let mut read = vec![0xff; 4096];
     let start = LAST & !4095;
@@ -508,7 +508,7 @@ async fn a_files_last_bytes_read_back_after_a_remount() {
 /// as ext4's setxattr journals it: no writeback of the inode (`write_inode`) is waited for, which
 /// lost a change it failed to write behind fsync's 0 (TASK-199). A new object's, inline or not, are
 /// made in its creation's transaction.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn xattrs_are_made_at_once() {
     use SetExtendedAttributeMode::{Create, Replace, Set};
     let device = DeviceHolder::new(FakeDevice::new(16384, 4096));
@@ -542,7 +542,7 @@ async fn xattrs_are_made_at_once() {
 
     let filesystem = FxFilesystemBuilder::new().open(device).await.expect("opening");
     let volumes = root_volume((*filesystem).clone()).await.expect("the root volume");
-    let volume = volumes.volume("test", StoreOptions::default()).await.unwrap();
+    let volume = volumes.volume("test").await.unwrap();
     let fs = Fxfs::new((*filesystem).clone(), volume, false, Tested);
     let mut names = fs.list_xattrs(ino).await.unwrap();
     names.sort();
@@ -561,7 +561,7 @@ async fn xattrs_are_made_at_once() {
 /// cladefs: a full filesystem refuses an extended attribute it has no room for (NoSpace), as ext4
 /// does, where one kept in memory was lost as its writeback failed; what it refused it hasn't; and
 /// it removes one, which frees what it held, as an unlink does (TASK-199).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_full_filesystem_refuses_xattrs_and_removes_them() {
     let (fs, root) = volume().await;
     let ino = fs.new_file(root, b"attributed").await;
@@ -601,7 +601,7 @@ async fn a_full_filesystem_refuses_xattrs_and_removes_them() {
 /// A volume is read-only if mounted so, or if its filesystem is, whatever its mount says: the
 /// filesystem owns read-only, and its volumes derive theirs from it (TASK-160.26). The guest's
 /// `flush_volume` of a volume mounted -o ro on a writable filesystem checked the filesystem's.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_volume_is_read_only_as_it_or_its_filesystem_is() {
     let device = DeviceHolder::new(FakeDevice::new(16384, 4096));
     let filesystem = FxFilesystem::new_empty(device).await.expect("formatting");
@@ -617,7 +617,7 @@ async fn a_volume_is_read_only_as_it_or_its_filesystem_is() {
     let filesystem =
         FxFilesystemBuilder::new().read_only(true).open(device).await.expect("opening");
     let root = root_volume((*filesystem).clone()).await.expect("the root volume");
-    let volume = root.volume("test", StoreOptions::default()).await.unwrap();
+    let volume = root.volume("test").await.unwrap();
     let mounted = |read_only| Fxfs::new((*filesystem).clone(), volume.clone(), read_only, Tested);
     assert_eq!([mounted(false).read_only(), mounted(true).read_only()], [true, true]);
     drop((volume, root));
@@ -732,7 +732,7 @@ async fn applies(op: Op, unlink: fn(&Objects) -> (u64, &'static str, u64)) -> bo
 /// them: those of what it names, which it reads (a lookup's link count, a directory's names), and
 /// every one queued before it, if it changes names, makes them durable or counts what they free.
 /// Not those it needn't: each applied alone, under its directory's lock (TASK-92.26).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn each_operation_comes_after_the_unlinks_its_row_says() {
     let mut wrong = Vec::new();
     for op in EVERY_OP {
@@ -750,7 +750,7 @@ async fn each_operation_comes_after_the_unlinks_its_row_says() {
 /// Once a batch of queued unlinks failed, Fxfs may hold names the kernel doesn't: every change a VFS
 /// asks fails, until the filesystem remounts; what reads, or makes durable what's there, works.
 /// The page cache's writeback refused leaves the room it reserved as one that fails does.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn every_change_fails_once_a_batch_failed() {
     let mut refused = Vec::new();
     for op in EVERY_OP {
@@ -804,7 +804,7 @@ impl Platform for Durably {
 /// asked the device nothing, and returned with the fsync's commit not yet durable, which a lost
 /// host lost (fxfs-guest-soak, TASK-67: syncfs returned for files a lost host's successor didn't
 /// have).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn syncs_make_what_fsyncs_ordered_durable() {
     let wanted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let durable_barriers = Arc::new(AtomicU64::new(0));
@@ -841,7 +841,7 @@ async fn syncs_make_what_fsyncs_ordered_durable() {
 /// ordered alone: each durable commit waits for object storage, a round trip, where the guest's
 /// sync(2) made three, a write overwriting a block (the frees its flush records) then a sync, as
 /// a loop of them does (TASK-371: 3 a second at 25 ms of latency).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn syncs_make_one_commit_durable() {
     let wanted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let durable_barriers = Arc::new(AtomicU64::new(0));
@@ -878,7 +878,7 @@ async fn syncs_make_one_commit_durable() {
 /// leave it, a flush during the fill writes the volume's layer file as the metadata reservation
 /// shrinks, and the journal grows, which a model of the reservation alone missed by 5 MB on 256
 /// MiB; in the guest, whose flush compacted layers, freeing old ones, by 3 MB (TASK-257).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn a_removed_fill_gives_back_all_its_data() {
     use fxfs::object_store::allocator::STAGING_SIZE;
     use fxfs::object_store::journal::{JournalOptions, LazyFlush};

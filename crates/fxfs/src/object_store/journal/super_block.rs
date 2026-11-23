@@ -24,7 +24,6 @@ use crate::filesystem::{ApplyContext, ApplyMode, FxFilesystem, JournalingObject}
 use crate::log::*;
 use crate::lsm_tree::types::LayerIterator;
 use crate::lsm_tree::{LSMTree, LayerSet, Query};
-use crate::metrics;
 use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::journal::bootstrap_handle::{
     ExtentObjectHandle, JournalExtentHandle, prune_spans_before,
@@ -32,14 +31,13 @@ use crate::object_store::journal::bootstrap_handle::{
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, Journal, JournalCheckpoint, JournalCheckpointV32};
-use crate::object_store::object_record::ObjectItemV63;
+use crate::object_store::object_record::ObjectItemV65;
 use crate::object_store::transaction::AssocObj;
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{Mutation, ObjectKey, ObjectStore, ObjectValue};
 use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, Version, Versioned, VersionedLatest};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use fprint::TypeFingerprint;
-use fuchsia_inspect::{Property as _, UintProperty};
 use fuchsia_sync::Mutex;
 use futures::FutureExt;
 use rustc_hash::FxHashMap as HashMap;
@@ -48,7 +46,6 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::time::SystemTime;
 use storage_device::{Device, ExtentId, ExtentRange};
 use storage_units::BlockSize;
 use uuid::Uuid;
@@ -338,36 +335,18 @@ impl<'de> Deserialize<'de> for UuidWrapper {
     }
 }
 
-pub type SuperBlockRecord = SuperBlockRecordV64;
+pub type SuperBlockRecord = SuperBlockRecordV65;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum SuperBlockRecordV64 {
+pub enum SuperBlockRecordV65 {
     // Following the super-block header are ObjectItem records that are to be replayed into the root
     // parent object store.
-    ObjectItem(ObjectItemV63),
+    ObjectItem(ObjectItemV65),
 
     // Marks the end of the full super-block.
     End,
-}
-
-struct SuperBlockMetrics {
-    /// Time we wrote the most recent superblock in milliseconds since [`std::time::UNIX_EPOCH`].
-    last_super_block_update_time_ms: UintProperty,
-
-    /// Offset of the most recent superblock we wrote in the journal.
-    last_super_block_offset: UintProperty,
-}
-
-impl Default for SuperBlockMetrics {
-    fn default() -> Self {
-        SuperBlockMetrics {
-            last_super_block_update_time_ms: metrics::detail()
-                .create_uint("last_super_block_update_time_ms", 0),
-            last_super_block_offset: metrics::detail().create_uint("last_super_block_offset", 0),
-        }
-    }
 }
 
 /// Reads the single atomic super-block and `root_parent` store from `extent` on `device`.
@@ -517,7 +496,6 @@ pub(super) struct SuperBlockManager {
     state: futures::lock::Mutex<RootState>,
     /// Sync mirror for `Journal::known_extents()` and `Journal::system_bytes()`.
     known: Arc<Mutex<KnownSystem>>,
-    metrics: SuperBlockMetrics,
 }
 
 impl SuperBlockManager {
@@ -525,7 +503,6 @@ impl SuperBlockManager {
         Self {
             state: futures::lock::Mutex::new(RootState::default()),
             known: Arc::new(Mutex::new(KnownSystem::default())),
-            metrics: Default::default(),
         }
     }
 
@@ -821,18 +798,6 @@ impl SuperBlockManager {
             journal_handle.prune_before(state.unsealed_journal_freed_to);
             self.sync_known(&state);
         }
-
-        self.metrics
-            .last_super_block_offset
-            .set(super_block_header.super_block_journal_file_offset);
-        self.metrics.last_super_block_update_time_ms.set(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                .try_into()
-                .unwrap_or(0u64),
-        );
         Ok(())
     }
 }
@@ -1161,7 +1126,7 @@ mod tests {
         device.commit_root(&root.encode()).await.expect("commit root failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_written_super_block() {
         let device = DeviceHolder::new(
             FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, TEST_DEVICE_BLOCK_SIZE.get() as u32).calm(),
@@ -1192,7 +1157,6 @@ mod tests {
                     &fs.object_manager().root_parent_store(),
                     &mut transaction,
                     HandleOptions::default(),
-                    None,
                 )
                 .await
                 .expect("create_object failed")
@@ -1238,7 +1202,7 @@ mod tests {
         assert_eq!(root_shrunk.super_block.as_ref().unwrap().len(), MIN_SUPER_BLOCK_SIZE);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_generation_wrapping_on_flush() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
         let mut device =
@@ -1251,14 +1215,9 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            ObjectStore::create_object(
-                &root_store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
             transaction.commit().await.expect("commit failed");
             fs.sync(SyncOptions::default()).await.expect("sync failed");
             fs.close().await.expect("close failed");
@@ -1299,7 +1258,7 @@ mod tests {
         assert!(header.generation < 10);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_guid_assign_on_read() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
         let device = DeviceHolder::new(FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, 4096));
@@ -1327,7 +1286,7 @@ mod tests {
         assert!(!super_block_header.0.guid.0.is_nil());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_init_wipes_superblocks() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE.get() as u32));
 
@@ -1350,7 +1309,7 @@ mod tests {
         assert_ne!(old_guid, after.0.guid);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_root_parent_is_compacted() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE.get() as u32));
 
@@ -1362,10 +1321,9 @@ mod tests {
             .await
             .expect("new_transaction failed");
         let store = fs.root_parent_store();
-        let handle =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed");
+        let handle = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create_object failed");
         store.add_to_graveyard(&mut transaction, handle.object_id());
         transaction.commit().await.expect("commit failed");
 
@@ -1381,14 +1339,9 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            ObjectStore::create_object(
-                &root_store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
             transaction.commit().await.expect("commit failed");
         }
 
@@ -1433,7 +1386,7 @@ mod tests {
 
     /// cladefs: where a super-block starts the journal may be anything: a reader may start within a
     /// block's contents, and not near the end of what offsets can count.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_journal_checkpoint_validation() {
         let device = DeviceHolder::new(FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, 4096));
         let device = (*device).clone();
@@ -1446,7 +1399,7 @@ mod tests {
     /// cladefs: a mount of a filesystem whose super-block starts its journal anywhere is refused,
     /// wherever that is: in a block's seal, before or past the journal's spans, near the end of
     /// what offsets can count, or within a block that doesn't verify (TASK-149.23).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mount_with_a_journal_that_starts_anywhere() {
         let device = DeviceHolder::new(FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, 4096));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1460,7 +1413,6 @@ mod tests {
                 &fs.root_store(),
                 &mut transaction,
                 HandleOptions::default(),
-                None,
             )
             .await
             .expect("create_object failed");
@@ -1519,7 +1471,7 @@ mod tests {
 
     /// cladefs: a super-block's records are checked as the journal's are: an extent's key must be on
     /// the filesystem's blocks' bounds, whatever its value.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_records_are_validated() {
         let device = DeviceHolder::new(FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, 4096));
         let device = (*device).clone();
@@ -1534,7 +1486,7 @@ mod tests {
 
     /// cladefs: a root's extents and journal spans are strictly validated on read, and old
     /// `FxfsRoot` magic is refused outright.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_root_validation() {
         let device = FakeDevice::new(8, 4096);
         let extent = ExtentRange::new(ExtentId::new(1, 1), 0..4096);
@@ -1600,7 +1552,7 @@ mod tests {
         Root::read(&device).await.expect_err("sequence-exhausting super-block accepted");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_invalid_object_ids_validation() {
         const BLOCK_SIZE: BlockSize = BlockSize::new(MIN_SUPER_BLOCK_SIZE as u32).unwrap();
         let device =
@@ -1675,7 +1627,7 @@ mod tests {
     #[test_case(Says::SuperBlock; "of the super-block")]
     #[test_case(Says::Journal; "of the journal")]
     #[test_case(Says::Layers; "of the layers")]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mount_of_the_previous_version_is_refused(says: Says) {
         const PREVIOUS: Version = Version { major: LATEST_VERSION.major - 1, minor: 0 };
         let armed = Arc::new(AtomicBool::new(false));

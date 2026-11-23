@@ -251,6 +251,26 @@ enum Acking {
     Forged,
 }
 
+/// The stage operation an `ACK` of mallory's acknowledges (board 8463): as it is, or the last it
+/// was sent as it says it, or the one after that, which the daemon never sent yet.
+#[derive(Clone, Copy, Debug)]
+enum AckId {
+    Is(u64),
+    Last,
+    PastLast,
+}
+
+impl AckId {
+    /// Its ID, the last stage operation its connection was sent being `last`.
+    fn id(self, last: u64) -> u64 {
+        match self {
+            AckId::Is(id) => id,
+            AckId::Last => last,
+            AckId::PastLast => last.wrapping_add(1),
+        }
+    }
+}
+
 /// A message mallory says, `repeat` times, each of a window's `PRIVATE`s, `UNMAP`s and `FAULT`s
 /// 7 pages on from the one before: a storm.
 #[derive(Clone, Debug)]
@@ -258,7 +278,7 @@ struct Said {
     kind: u32,
     flags: u32,
     /// Its ID, if it has one of its own: an `ACK`'s, of the stage operation it acknowledges.
-    id: Option<u64>,
+    id: Option<AckId>,
     args: [Word; 5],
     payload: Payload,
     /// A descriptor it carries.
@@ -303,25 +323,6 @@ struct Hostile {
     /// Whether it then floods the daemon with reads past its credit, their replies unread.
     flood: bool,
     last_words: LastWords,
-}
-
-impl Hostile {
-    /// cladefs: whether it says a payload on a kind that carries none, an `ACK`, a
-    /// `STAGE_COUNTS` or a `STAGE_PRIVATE_COUNTS`, which ends its connection there (TASK-581): its
-    /// cell commits nothing after.
-    fn ends_its_connection(&self) -> bool {
-        let carries = |payload: &Payload| match payload {
-            Payload::Bytes(bytes) => !bytes.is_empty(),
-            Payload::Filled(_, len) => *len > 0,
-            Payload::Extents(extents) => !extents.is_empty(),
-            Payload::Path(_) => true,
-        };
-        self.acts.iter().any(|act| {
-            matches!(act, Act::Say(said)
-                if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&said.kind)
-                    && carries(&said.payload))
-        })
-    }
 }
 
 /// What alice does, through her one connection, as the protocol allows: each result as her model
@@ -642,15 +643,22 @@ fn message() -> BoxedStrategy<Said> {
     ];
     // The protocol's own: acknowledgements forged, what its stage operations cost, its build, a
     // second window and transfer area, answers to asks never made.
+    // cladefs: at the edges of what the daemon sent as often as anywhere else (board 8463): 0, 1,
+    // the last sent and the one after it, past every one it will send, and any.
+    let ack_id = prop_oneof![
+        Just(AckId::Is(0)),
+        Just(AckId::Is(1)),
+        Just(AckId::Last),
+        Just(AckId::PastLast),
+        Just(AckId::Is(u64::MAX)),
+        (1u64..1024).prop_map(AckId::Is),
+        any::<u64>().prop_map(AckId::Is),
+    ];
     let abusing = prop_oneof![
-        (
-            prop_oneof![Just(0u64), Just(u64::MAX), 1u64..1024, any::<u64>()],
-            [word(), word(), word(), word(), word()]
-        )
-            .prop_map(|(id, args)| Said {
-                id: Some(id),
-                ..said(ACK, 0, args, Payload::Bytes(Vec::new()))
-            }),
+        (ack_id, [word(), word(), word(), word(), word()]).prop_map(|(id, args)| Said {
+            id: Some(id),
+            ..said(ACK, 0, args, Payload::Bytes(Vec::new()))
+        }),
         [word(), word(), word(), word(), word()].prop_map(|args| said(
             STAGE_COUNTS,
             0,
@@ -751,12 +759,13 @@ fn hostile() -> impl Strategy<Value = Hostile> {
         Just(LastWords::PartOfAHeader),
         any::<u64>().prop_map(LastWords::MissingPayload),
         // cladefs: and lengths the daemon admits, as any u64 almost never is (board 2492): at and
-        // around the most a payload holds, and small.
+        // around the most a payload holds, small, and any it admits (board 8459).
         prop_oneof![
             Just(MAX_PAYLOAD),
             Just(MAX_PAYLOAD + 64),
             Just(MAX_PAYLOAD + 65),
             1u64..=4096,
+            1u64..=MAX_PAYLOAD,
         ]
         .prop_map(LastWords::MissingPayload),
         (1u32..4).prop_map(LastWords::MissingDescriptors),
@@ -1447,6 +1456,10 @@ struct Seen {
     page_ins: BTreeMap<Option<i32>, u64>,
     /// Its fills' writes' statuses (TASK-94).
     filled: Vec<Option<i32>>,
+    /// cladefs: whether it said what may end its connection, which its cell commits nothing after:
+    /// a payload past what its kind holds (TASK-581, board 8459), or an acknowledgement of a stage
+    /// operation past the last it was sent, which may be one never sent (board 8463).
+    may_end: bool,
 }
 
 /// What both of a connection's threads share: what it sent, by ID, and what was answered.
@@ -1465,6 +1478,20 @@ struct Shared {
     flooding: Mutex<BTreeSet<u64>>,
     /// The largest window it was granted, as `LIMIT` was raised for it.
     granted: AtomicU64,
+    /// cladefs: the last stage operation it was sent, as it received them.
+    last_stage: AtomicU64,
+    /// cladefs: whether it said what may end its connection ([`Seen::may_end`]).
+    may_end: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    /// cladefs: it acknowledges stage operation `id`: past the last it received, one the daemon
+    /// may never have sent, which ends its connection (board 8463).
+    fn acknowledging(&self, id: u64) {
+        if id > self.last_stage.load(Ordering::Relaxed) {
+            self.may_end.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The tenants beside mallory's, what it may not reach of theirs.
@@ -1573,7 +1600,9 @@ fn receive(
         if header.kind == REPLY || header.kind == CAPACITY {
             continue;
         }
+        shared.last_stage.fetch_max(header.id, Ordering::Relaxed);
         let ack = |id| {
+            shared.acknowledging(id);
             let _ = sender.send(Header::new(ACK, id), &[], &[]);
         };
         match acking {
@@ -1627,6 +1656,14 @@ fn run_hostile(
                 let named = payload.split(|byte| *byte == 0).next().unwrap_or_default();
                 let named = PathBuf::from(std::ffi::OsStr::from_bytes(named));
                 shared.paths.lock().unwrap().insert(header.id, named);
+            }
+            // cladefs: past what its kind holds, refused at its header (board 8459).
+            let said = Header { len: payload.len() as u64, ..header };
+            if said.len > super::super::codec::most_payload(&said) {
+                shared.may_end.store(true, Ordering::Relaxed);
+            }
+            if header.kind == ACK {
+                shared.acknowledging(header.id);
             }
             let fds: Vec<BorrowedFd<'_>> = fd.iter().map(|fd| fd.as_fd()).collect();
             sender.send(header, payload, &fds).map(|()| header.id)
@@ -1761,7 +1798,8 @@ fn run_hostile(
             if said.repeat > 1 && [UNMAP, FAULT].contains(&said.kind) {
                 args[0] = (args[0].wrapping_add(time * 7 * ps)) % WINDOW_BYTES;
             }
-            let id = said.id.unwrap_or_else(&mut id);
+            let last = shared.last_stage.load(Ordering::Relaxed);
+            let id = said.id.map_or_else(&mut id, |acked| acked.id(last));
             let header = Header::new(said.kind, id).with_body(&args).with_flags(said.flags);
             let payload = names.payload(&said.payload, own);
             // The daemon may have let it go by now.
@@ -1834,15 +1872,26 @@ fn run_hostile(
         let _ = std::io::Write::write_all(&mut &stream, bytes);
     };
     let header = |len, fds| Header { kind: WRITE, len, fds, ..Default::default() };
+    // cladefs: a payload the daemon admits, none of which comes, its connection open: which the
+    // daemon ends once none has come for `STALL` (board 8459), as the VM process says no more.
+    let mut held_open = false;
     match hostile.last_words {
         LastWords::Nothing => {}
         LastWords::PartOfAHeader => raw(&header(0, 0).as_bytes()[..16]),
-        LastWords::MissingPayload(len) => raw(header(len, 0).as_bytes()),
+        LastWords::MissingPayload(len) => {
+            // A payload of none is a message whole, which the daemon answers.
+            held_open = len > 0 && len <= super::super::codec::most_payload(&header(len, 0));
+            raw(header(len, 0).as_bytes())
+        }
         LastWords::MissingDescriptors(fds) => raw(header(0, fds).as_bytes()),
     }
-    // Shut down for writing too: the daemon may be sending it what it never reads.
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    // Shut down for writing too: the daemon may be sending it what it never reads. cladefs: but a
+    // payload held open, which the daemon ends.
+    if !held_open {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
     let mut seen = receiving.join().unwrap();
+    seen.may_end = shared.may_end.load(Ordering::Relaxed);
     let answered: u64 = seen.page_ins.values().sum();
     let unanswered = shared.flooding.lock().unwrap().len() as u64 - answered;
     if unanswered > 0 {
@@ -2029,8 +2078,9 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 // It has one cell at most, however many of its OPENs were at once (TASK-150.5).
                 let opened = seen.opens.iter().filter(|(_, _, status)| *status == 0).count();
                 prop_assert!(opened <= 1, "a connection opened {opened} cells: {:?}", seen.opens);
-                // What follows, unless it said what ends its connection (TASK-581).
-                let ended = hostile.ends_its_connection();
+                // What follows, unless it said what may end its connection (TASK-581, board 8459,
+                // board 8463).
+                let ended = seen.may_end;
                 // Its cell, if it writes one, commits.
                 if let Some(status) = seen.committed.filter(|_| !ended) {
                     prop_assert_eq!(
@@ -2295,13 +2345,12 @@ fn what_requests_hold_is_within_the_credit() {
     });
     assert_eq!(super::call(&sender, &mut receiver, warm, &[]).header.status, 0);
     // Its root, no larger than a root holds, read back as many at once as the connection serves:
-    // one as large as a payload refused, as it would be copied into each reply, uncounted.
-    let mut root = |id, len| {
-        let rooted = Header::new(COMMIT, id).with_flags(COMMIT_ROOT);
-        super::call(&sender, &mut receiver, rooted, &vec![5; len]).header.status
-    };
-    assert_eq!(root(5, len as usize), -Errno::EINVAL.raw());
-    assert_eq!(root(6, MAX_ROOT), 0);
+    // one larger is refused at its header, ending its connection
+    // (`payloads_of_kinds_that_carry_none_end_their_connections`, board 8459), as it would be
+    // copied into each reply.
+    let rooted = Header::new(COMMIT, 6).with_flags(COMMIT_ROOT);
+    let status = super::call(&sender, &mut receiver, rooted, &vec![5; MAX_ROOT]).header.status;
+    assert_eq!(status, 0);
     // So many of each kind, `at_once` in flight, as many as the protocol allows: those of the
     // stream whose data the credit holds, and those of the area all of them. Their replies are read
     // as they come.
@@ -2604,16 +2653,24 @@ fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
 /// TASK-581: a payload on a kind that carries none, an `ACK`, a `STAGE_COUNTS` or a
 /// `STAGE_PRIVATE_COUNTS`, which the daemon counts in no bytes in flight, ends its connection
 /// before any of it is held: before, it was read whole, 64 MiB of it at most a connection,
-/// uncounted, and held for as long as the VM process sent all but its last byte.
+/// uncounted, and held for as long as the VM process sent all but its last byte. Board 8459: so
+/// does one past what any kind holds, refused at its header, before any byte is reserved: here
+/// an `INFO`'s and a `READ`'s, which carry none, and a kind no request is of. At once, long before
+/// [`STALL`] would end a payload that never comes.
 #[test]
 fn payloads_of_kinds_that_carry_none_end_their_connections() {
     host();
     let dir = tempfile::tempdir().unwrap();
-    let (cells, socket, _mallory) = served_tenant(dir.path(), "mallory", MALLORY);
-    for (n, kind) in [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].into_iter().enumerate() {
+    let (cells, socket, mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    let at_once = Duration::from_secs(2);
+    assert!(at_once < STALL);
+    let kinds = [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS, INFO, READ, 0xffff].map(|kind| (kind, 0));
+    // And a root past the most a root holds, which a commit's payload is.
+    let kinds = kinds.into_iter().chain([(COMMIT, COMMIT_ROOT)]);
+    for (n, (kind, flags)) in kinds.enumerate() {
         let (sender, _receiver, stream, _) =
             super::raw_connection(&socket, &cells.join(format!("store-{n}")), 1 << 30);
-        let mut said = Header::new(kind, 1);
+        let mut said = Header::new(kind, 1).with_flags(flags);
         said.len = MAX_PAYLOAD;
         let mut sent = &stream;
         std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&said)).unwrap();
@@ -2624,7 +2681,8 @@ fn payloads_of_kinds_that_carry_none_end_their_connections() {
             Err(err) if super::shut(&err) => {}
             Err(err) => panic!("sending the payload: {err}"),
         }
-        super::assert_let_go(&sender, &stream, WAIT);
+        super::assert_let_go(&sender, &stream, at_once);
+        assert_eq!(mallory.in_flight().held(), 0, "a {kind}'s payload held");
     }
 }
 
@@ -2824,6 +2882,223 @@ fn a_tenants_in_flight_data_is_bounded() {
         "alice was held up"
     );
     assert_eq!(alice_read.payload, super::pattern(2, MIB as usize), "alice read other data");
+}
+
+/// Whether `ready` holds within `wait`, looked at every 10 ms.
+fn comes_true(wait: Duration, ready: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    while !ready() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::park_timeout(Duration::from_millis(10));
+    }
+    true
+}
+
+/// Whether the daemon hung `stream` up within `wait`: let its VM process go, or ended its
+/// connection.
+fn hung_up(stream: &UnixStream, wait: Duration) -> bool {
+    let mut hung_up = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
+    let wait = libc::c_int::try_from(wait.as_millis()).unwrap();
+    // SAFETY: Polls the stream, which the caller keeps open, for `wait` at most.
+    let ready = unsafe { libc::poll(&mut hung_up, 1, wait) };
+    ready == 1 && hung_up.revents & libc::POLLRDHUP != 0
+}
+
+/// Board 8459: a connection that stays open and idle holds none of its tenant's bytes in flight
+/// past [`STALL`]: neither one that sent a header and none of the payload it was admitted, nor one
+/// that leaves the replies to its reads unread. Here 128 of mallory's connections each send a
+/// `WRITE`'s header claiming the most a payload holds, 8 GiB together, the tenant's whole room,
+/// and nothing more, their sockets open: they are ended, the tenant holds nothing, and another VM
+/// process of its opens its cell and writes. Then 16 connections each read 4 MiB, leaving the
+/// replies unread, far within their credits: each is let go, and the tenant holds nothing. Before,
+/// both held their bytes for good, the tenant's every later request with stream data, an `OPEN`'s
+/// path too, waiting for them, and nothing ended them.
+#[test]
+fn idle_connections_hold_none_of_their_tenants_bytes_in_flight() {
+    const IDLE: u64 = 128;
+    const UNREAD: usize = 16;
+    const READ_BYTES: u64 = 4 << 20;
+    // What the daemon takes to end them: the bound, a look of its watchdog's, and slack.
+    let ended = STALL + Duration::from_secs(10);
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (cells, socket, mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    assert_eq!(mallory.in_flight().budget(), IDLE * MAX_PAYLOAD, "the tenant's room");
+    // Headers alone, of no cell: admitted, their bytes taken, before their payloads are read.
+    let idle: Vec<UnixStream> = (0..IDLE)
+        .map(|n| {
+            let stream = UnixStream::connect(&socket).unwrap();
+            let mut said = Header::new(WRITE, 1 + n);
+            said.len = MAX_PAYLOAD;
+            std::io::Write::write_all(&mut &stream, said.as_bytes()).unwrap();
+            stream
+        })
+        .collect();
+    let full = comes_true(WAIT, || mallory.in_flight().held() == IDLE * MAX_PAYLOAD);
+    assert!(full, "{} MiB admitted", mallory.in_flight().held() >> 20);
+    // Another VM process of the tenant's: its OPEN's path waits for room, which comes back.
+    let opening = (socket.clone(), cells.join("store"));
+    let opened = within(ended, move || super::raw_connection(&opening.0, &opening.1, 1 << 30));
+    let (sender, mut receiver, _stream, cell) = opened.expect("the cell opened");
+    let written = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: 1 << 20,
+        ..Default::default()
+    });
+    let data = super::pattern(1, 1 << 20);
+    let answered = within(ended, move || super::call(&sender, &mut receiver, written, &data))
+        .expect("the write answered");
+    assert_eq!(answered.header.status, 0);
+    for (n, stream) in idle.iter().enumerate() {
+        assert!(hung_up(stream, ended), "idle connection {n} still open");
+    }
+    assert!(comes_true(ended, || mallory.in_flight().held() == 0), "the idle connections' bytes");
+    drop(idle);
+
+    // Replies left unread, by connections that stay open.
+    let unread: Vec<_> = (0..UNREAD)
+        .map(|n| {
+            let path = cells.join(format!("unread-{n}"));
+            let (sender, mut receiver, stream, cell) =
+                super::raw_connection(&socket, &path, 1 << 30);
+            let written = Header::new(WRITE, 2).with_body(&WriteBody {
+                cell,
+                sequence: 1,
+                data_len: READ_BYTES,
+                ..Default::default()
+            });
+            let data = super::pattern(n as u8, READ_BYTES as usize);
+            assert_eq!(super::call(&sender, &mut receiver, written, &data).header.status, 0);
+            let read = Header::new(READ, 3).with_body(&ReadBody {
+                cell,
+                sequence: 1,
+                offset: 0,
+                len: READ_BYTES,
+                transfer_at: 0,
+            });
+            sender.send(read, &[], &[]).unwrap();
+            (sender, receiver, stream)
+        })
+        .collect();
+    let queued = comes_true(WAIT, || super::super::server::most_queued() > 0);
+    assert!(queued, "no reply queued");
+    for (n, (sender, _, stream)) in unread.iter().enumerate() {
+        assert!(hung_up(stream, ended), "connection {n} leaving its reply unread kept");
+        let sent = sender.send(Header::new(INFO, 4), &[], &[]);
+        assert!(sent.as_ref().is_err_and(super::shut), "sent once let go: {sent:?}");
+    }
+    assert!(comes_true(ended, || mallory.in_flight().held() == 0), "the unread replies' bytes");
+}
+
+/// Board 8463: an acknowledgement of a stage operation past the last the daemon sent lets its VM
+/// process go at once, whatever it names: the one after the last, `u64::MAX - 1`, `u64::MAX`.
+/// Before, it was taken for every operation sent after it made, so that what took pages away
+/// was taken for made before it was, the pages freed while the VM process may map them, and the
+/// watchdog never found it silent: let go here only at once, as the watchdog would let it go
+/// later. One of 0, before any sent, takes nothing for made: the VM process, frozen with an unmap
+/// unacknowledged, keeps the pages an eviction takes from it quarantined, and is let go as silent.
+#[test]
+fn acknowledgements_of_operations_never_sent_let_their_vm_process_go() {
+    const EXTENT: u64 = 2 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (cells, socket, mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    let frozen = |n: usize| {
+        let mut vm = super::HandVm::open(&socket, &cells.join(format!("store-{n}")));
+        let its = vm.write_an_extent(EXTENT);
+        let pages = vm.map_an_extent(its, EXTENT);
+        let last = vm.freeze_with_an_unmap(its, EXTENT);
+        (vm, pages, last)
+    };
+    // Well within what the watchdog lets it be silent for.
+    let at_once = Duration::from_secs(2);
+    assert!(at_once < super::super::server::UNRESPONSIVE);
+    for (n, past) in [None, Some(u64::MAX - 1), Some(u64::MAX)].into_iter().enumerate() {
+        let (vm, _, last) = frozen(n);
+        let acked = past.unwrap_or(last + 1);
+        vm.ack(acked);
+        assert!(hung_up(&vm.stream, at_once), "acknowledging {acked}, {last} the last sent, kept");
+    }
+    let (mut vm, pages, _) = frozen(3);
+    vm.ack(0);
+    // Served on.
+    vm.call(INFO, &(), &[], false);
+    // An eviction of its extent, which it may map: its pages wait for it.
+    crate::cache::evict_least_used(Some(mallory.arena()), |_| false);
+    let free = |page: &crate::pages::PhysLocation| crate::slabs::is_free(*page) == Some(true);
+    assert!(!pages.is_empty() && !pages.iter().any(free), "freed while it may map them");
+    // Silent, it is let go, and they are free.
+    assert!(hung_up(&vm.stream, WAIT), "a VM process silent kept");
+    assert!(comes_true(WAIT, || pages.iter().all(free)), "its pages kept once it was let go");
+}
+
+/// Board 8465: what tenants hold of the daemon together is bounded, however many there are, and
+/// leaves another tenant room: three tenants each connecting past their share of the most
+/// connections the daemon serves at once (12 here, 2 kept for each tenant alive) hold no more than
+/// the daemon serves, and a fourth tenant's VM process connects, opens its cell and commits; then
+/// they flood past their rooms with payloads that never come, and hold no more bytes in flight
+/// than every tenant's together may. Before, each tenant's limits were its own, every tenant's
+/// together their sum.
+#[test]
+fn tenants_together_are_bounded_and_leave_another_room() {
+    const MOST: usize = 12;
+    const KEPT: usize = 2;
+    const EACH: usize = 8;
+    let limits = super::super::server::CONNECTION_LIMITS_GIVEN.set((MOST, KEPT));
+    assert!(limits.is_ok(), "the limits given");
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["mallory", "trudy", "eve", "alice"];
+    let tenants: Vec<_> = (names.iter().enumerate())
+        .map(|(n, name)| served_tenant(dir.path(), name, 10 + n as u64))
+        .collect();
+    let total = super::super::memory::total_in_flight();
+    super::super::memory::set_total_in_flight(Some(2 * MAX_PAYLOAD)).unwrap();
+    for n in 0..3 {
+        super::super::memory::set_in_flight(Some(10 + n), Some(MAX_PAYLOAD)).unwrap();
+    }
+    // Each of the three connects past its share, in turn: the first takes what the others' shares
+    // leave it, the fourth's among them; the others their shares alone.
+    let shares = [MOST - 3 * KEPT, KEPT, KEPT];
+    let mut floods = Vec::new();
+    for ((_, socket, tenant), share) in tenants.iter().zip(shares) {
+        floods.extend((0..EACH).map(|_| UnixStream::connect(socket).unwrap()));
+        let served = comes_true(WAIT, || tenant.connections() == share);
+        assert!(served, "{} of {share} connections served", tenant.connections());
+    }
+    // Refused, the rest are closed.
+    let refused = || floods.iter().filter(|stream| hung_up(stream, Duration::ZERO)).count();
+    let expected = 3 * EACH - shares.iter().sum::<usize>();
+    assert!(comes_true(WAIT, || refused() == expected), "{} refused of {expected}", refused());
+    // The fourth's VM process connects, within its share, opens its cell, and commits.
+    let (cells, socket, _) = &tenants[3];
+    let opening = (socket.clone(), cells.join("store"));
+    let (sender, mut receiver, _stream, _) =
+        within(WAIT, move || super::raw_connection(&opening.0, &opening.1, 1 << 24))
+            .expect("the fourth tenant's cell opened");
+    let committed = within(WAIT, move || {
+        super::call(&sender, &mut receiver, Header::new(COMMIT, 2), &[]).header.status
+    });
+    assert_eq!(committed, Ok(0));
+    // Each connection served sends a header of the most a payload holds, past its tenant's room,
+    // and nothing more: within every tenant's together, those past it waiting, as past a
+    // tenant's room, until those admitted are ended (`STALL`).
+    for (n, stream) in floods.iter().enumerate() {
+        let mut said = Header::new(WRITE, 1 + n as u64);
+        said.len = MAX_PAYLOAD;
+        // Refused, its connection closed: nothing to send.
+        let _ = std::io::Write::write_all(&mut &*stream, said.as_bytes());
+    }
+    assert!(comes_true(WAIT, || total.held() == 2 * MAX_PAYLOAD), "{} held", total.held());
+    assert!(total.peak() <= 2 * MAX_PAYLOAD, "{} MiB held at once", total.peak() >> 20);
+    for (n, (_, _, tenant)) in tenants[..3].iter().enumerate() {
+        let peak = tenant.in_flight().peak();
+        assert!(peak <= MAX_PAYLOAD, "tenant {n} held {} MiB at once", peak >> 20);
+    }
+    drop(floods);
 }
 
 /// `len` bytes of `seed`'s that don't compress, as a closed segment's framing would otherwise

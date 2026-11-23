@@ -10,10 +10,10 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -1527,7 +1527,7 @@
+@@ -926,7 +926,7 @@
  	for (;;) {
  		seals = cladefs_device_seals(dax->dev);
- 		count = cladefs_nofs(cladefs_dax_extents(fs, ino, offset, len, found, capacity));
+ 		count = cladefs_dax_extents(fs, ino, offset, len, found, capacity);
 -		if (count < 0 || (!(seals & 1) && cladefs_device_seals(dax->dev) == seals))
 +		if (count < 0 || true)
  			return count;

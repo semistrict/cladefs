@@ -14,9 +14,9 @@
 use crate::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use crate::buffer_allocator::{BufferAllocator, BufferSource};
 use crate::{Device, DeviceHolder, ExtentId, NoExtent, OpenExtents, OtherCell, SealedExtent};
+use crate::{WriteFlags, WriteOptions};
 use anyhow::{Error, ensure};
 use async_trait::async_trait;
-use block_protocol::{ReadOptions, WriteFlags, WriteOptions};
 use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
 use rand::rngs::StdRng;
@@ -893,12 +893,11 @@ impl Device for FakeDevice {
     }
 
     /// Blocks within the extent never written, and past its end, read as zeros.
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
-        _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         ensure!(!self.closed.load(Ordering::Relaxed));
         (self.operation_closure)(Op::Read)?;
@@ -1186,7 +1185,7 @@ mod tests {
     use super::{Crashes, EPOCH_SHIFT, FakeDevice, RoundTrips};
     use crate::Device;
     use crate::{ExtentId, OtherCell, SealedExtent};
-    use block_protocol::{WriteFlags, WriteOptions};
+    use crate::{WriteFlags, WriteOptions};
     use fuchsia_sync::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -1205,7 +1204,7 @@ mod tests {
         buffer.to_vec()
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extents() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32).calm().with_cell(7);
@@ -1246,7 +1245,7 @@ mod tests {
         assert_eq!(error.downcast_ref::<OtherCell>(), Some(&OtherCell(other)));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_once() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32);
@@ -1279,7 +1278,7 @@ mod tests {
 
     /// An extent the filesystem minted is open once it says so, until the next barrier; one sealed
     /// stays sealed.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_opened() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32);
@@ -1302,7 +1301,7 @@ mod tests {
     /// A write reaching an extent a barrier came before opens nothing: the device takes it, the
     /// barrier having sealed nothing of the extent, which goes on reading as sealed, as it is once
     /// the next barrier comes (TASK-153.3).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_writes_open_nothing() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32);
@@ -1323,7 +1322,7 @@ mod tests {
         assert!(!device.is_open(extent));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_root() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32);
@@ -1339,7 +1338,7 @@ mod tests {
         assert_eq!(read(&**snapshot, extent, 0, BS).await, vec![1; BS]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_crashes() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let crashes = Crashes::new(1, 1);
@@ -1385,7 +1384,7 @@ mod tests {
 
     /// cladefs: every crash at a barrier is every subset of what it may lose: writes to an extent
     /// lost together, frees alone. A barrier with nothing to lose has no crash.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_every_crash() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let crashes = Crashes::every(1, 3);
@@ -1424,7 +1423,7 @@ mod tests {
 
     /// cladefs: past its bound, a barrier's crashes are losing nothing, all, each alone, or all but
     /// each, which the counts own up to.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_every_crash_past_the_bound() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let crashes = Crashes::every(1, 2);
@@ -1448,7 +1447,7 @@ mod tests {
     }
 
     /// cladefs: a free waits while the test holds the frees, and is made once it lets go.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_frees_held() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let held = Arc::new(futures::lock::Mutex::new(()));
@@ -1466,7 +1465,7 @@ mod tests {
 
     /// cladefs: reads, or writes, awaited one after another take a round trip each; those issued
     /// together, few or many (which `join_all` polls otherwise), share one.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_round_trips() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let trips = Arc::new(RoundTrips::default());
@@ -1498,7 +1497,7 @@ mod tests {
 
     /// cladefs: an awkward device's numbers start large, as its seed says, some past a floor, and
     /// only those floors jump, as another writer takes over: all of it as its seed says.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_awkward_numbers() {
         let numbers = async |seed| {
             let device = FakeDevice::new(8, 512).awkward(seed);
@@ -1531,7 +1530,7 @@ mod tests {
 
     /// cladefs: what a crash leaves of an awkward device is awkward: a floor as it was, or past it,
     /// and numbers as they were.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_awkward_crashes() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let seed = (0..).find(|seed| {
@@ -1554,7 +1553,7 @@ mod tests {
 
     /// cladefs: reads, writes and frees issued together on an awkward device end in another order
     /// than they were issued, as its seed says.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_awkward_requests_finish_out_of_order() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         async fn order(seed: u64) -> Vec<usize> {
@@ -1582,7 +1581,7 @@ mod tests {
 
     /// cladefs: a seal on an awkward device, as a guest's: it waits for writes in flight and keeps
     /// new ones out until it answers, and no one takes an extent for open from when it starts.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_awkward_seals() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32).awkward(3);
@@ -1610,7 +1609,7 @@ mod tests {
     }
 
     /// cladefs: a seal's own write may write what was open when it started.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_awkward_commit_writes_what_was_open() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32).awkward(3);
@@ -1628,7 +1627,7 @@ mod tests {
 
     /// cladefs: a write's barrier sets the root it carries, which a crash after it keeps, with the
     /// write.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_post_barrier_sets_the_root() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32);
@@ -1647,7 +1646,7 @@ mod tests {
         assert_eq!(read(snapshot.as_ref(), extent, 0, BS).await, vec![7; BS]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_discard_random_undoes_frees() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
         let device = FakeDevice::new(8, BS as u32);
@@ -1670,7 +1669,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_discard_random_with_barriers() {
         let device = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE as u32);
         // Loop 100 times to catch errors.

@@ -73,13 +73,6 @@ pub struct BloomFilterReader<V> {
     _type: PhantomData<V>,
 }
 
-pub struct BloomFilterStats {
-    pub size: usize,
-    pub num_hashes: usize,
-    // The percentage (rounded up to the nearest whole) of the bits which are set.
-    pub fill_percentage: usize,
-}
-
 /// The maximum number of fuzzy hash partitions that will be checked in a bloom filter query before
 /// falling back to returning true.
 pub const MAX_HASH_PARTITIONS: usize = 4;
@@ -132,25 +125,6 @@ impl<V: FuzzyHash> BloomFilterReader<V> {
             }
         }
         true
-    }
-
-    /// Call sparingly; this is expensive to compute.
-    /// Note that the return value can be trivially cached since the reader is immutable.
-    pub fn stats(&self) -> BloomFilterStats {
-        BloomFilterStats {
-            size: self.data.len().div_ceil(8),
-            num_hashes: self.num_hashes,
-            fill_percentage: self.compute_fill_percentage(),
-        }
-    }
-
-    // Use sparingly; this is expensive to compute.
-    fn compute_fill_percentage(&self) -> usize {
-        if self.data.is_empty() {
-            return 0;
-        }
-        let count = self.data.blocks().map(|b| b.count_ones() as u64).sum::<u64>();
-        ((100 * count).div_ceil(self.data.len() as u64)) as usize
     }
 
     #[cfg(test)]

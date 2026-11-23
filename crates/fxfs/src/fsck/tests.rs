@@ -16,31 +16,22 @@ use crate::lsm_tree::types::{Item, ItemRef, Key, LayerIterator, LayerWriter, Val
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle, WriteObjectHandle};
 use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
 use crate::object_store::data_object_handle::OverwriteOptions;
-use crate::object_store::directory::{
-    self, Directory, MutableAttributesInternal, encrypt_filename,
-};
-use crate::object_store::extent::MIN_BLOCK_SIZE;
-use crate::object_store::transaction::{self, LockKey, ObjectStoreMutation, Options, lock_keys};
+use crate::object_store::directory::{self, Directory, MutableAttributesInternal};
+use crate::object_store::transaction::{self, LockKey, Options, lock_keys};
 use crate::object_store::volume::root_volume;
 use crate::object_store::{
-    AttributeId, AttributeKey, BytesAndNodes, ChildValue, DataObjectHandle, DirType,
-    EncryptionKeys, ExtentMode, ExtentValue, FsverityMetadata, HandleOptions, Mutation,
-    NewChildStoreOptions, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind,
-    ObjectStore, ObjectValue, ProjectId, RootDigest, SpecialFile, StoreInfo, StoreOptions,
-    Timestamp, VOLUME_DATA_KEY_ID,
+    AttributeId, AttributeKey, BytesAndNodes, ChildValue, DataObjectHandle, DirType, ExtentValue,
+    HandleOptions, MutableNodeAttributes, Mutation, NewChildStoreOptions, ObjectAttributes,
+    ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectId,
+    SpecialFile, StoreInfo, Timestamp,
 };
 use crate::serialized_types::VersionedLatest;
 use crate::testing::writer::Writer;
 use anyhow::{Context, Error};
 use assert_matches::assert_matches;
-use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
 use futures::join;
-use fxfs_crypt_common::CryptBase;
-use fxfs_crypto::{Crypt, EncryptionKey, KeyPurpose, WrappingKeyId};
-use fxfs_insecure_crypto::new_insecure_crypt;
-use mundane::hash::{Digest, Hasher, Sha256};
 use std::ops::Deref;
 use std::sync::Arc;
 use storage_device::DeviceHolder;
@@ -50,12 +41,10 @@ use test_case::test_case;
 
 const TEST_DEVICE_BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
 const TEST_DEVICE_BLOCK_COUNT: u64 = 8192;
-const WRAPPING_KEY_ID: WrappingKeyId = u128::to_le_bytes(2);
 
 struct FsckTest {
     filesystem: Option<OpenFxFilesystem>,
     errors: Mutex<Vec<FsckIssue>>,
-    crypt: Option<Arc<CryptBase>>,
 }
 
 #[derive(Default)]
@@ -74,7 +63,7 @@ impl FsckTest {
         .await
         .expect("new_empty failed");
 
-        Self { filesystem: Some(filesystem), errors: Mutex::new(vec![]), crypt: None }
+        Self { filesystem: Some(filesystem), errors: Mutex::new(vec![]) }
     }
     async fn remount(&mut self) -> Result<(), Error> {
         let fs = self.filesystem.take().unwrap();
@@ -122,13 +111,7 @@ impl FsckTest {
             fsck_with_options(self.filesystem(), &options).await?;
         }
         if let Some(store_id) = test_options.volume_store_id {
-            fsck_volume_with_options(
-                self.filesystem().as_ref(),
-                &options,
-                store_id,
-                self.crypt.clone().map(|x| x as Arc<dyn Crypt>),
-            )
-            .await?;
+            fsck_volume_with_options(self.filesystem().as_ref(), &options, store_id).await?;
         }
         Ok(())
     }
@@ -137,9 +120,6 @@ impl FsckTest {
     }
     fn errors(&self) -> Vec<FsckIssue> {
         self.errors.lock().clone()
-    }
-    fn get_crypt(&mut self) -> Arc<CryptBase> {
-        self.crypt.get_or_insert_with(|| Arc::new(new_insecure_crypt())).clone()
     }
 }
 
@@ -159,25 +139,10 @@ async fn install_items_in_store<K: Key, V: Value>(
         .new_transaction(lock_keys![], Options::default())
         .await
         .expect("new_transaction failed");
-    let layer_handle = if let Some(crypt) = store.crypt().as_deref() {
-        let object_id = store.get_next_object_id().await.unwrap();
-        let (key, unwrapped_key) =
-            crypt.create_key(object_id.get(), KeyPurpose::Data).await.unwrap();
-        ObjectStore::create_object_with_key(
-            parent_store,
-            &mut transaction,
-            object_id,
-            HandleOptions::default(),
-            EncryptionKey::Fxfs(key),
-            unwrapped_key,
-        )
-        .await
-        .expect("create_object failed")
-    } else {
-        ObjectStore::create_object(parent_store, &mut transaction, HandleOptions::default(), None)
+    let layer_handle =
+        ObjectStore::create_object(parent_store, &mut transaction, HandleOptions::default())
             .await
-            .expect("create_object failed")
-    };
+            .expect("create_object failed");
     transaction.commit().await.expect("commit failed");
 
     {
@@ -202,7 +167,6 @@ async fn install_items_in_store<K: Key, V: Value>(
         parent_store,
         store.store_info_handle_object_id().unwrap(),
         HandleOptions::default(),
-        None,
     )
     .await
     .expect("open store info handle failed");
@@ -228,7 +192,7 @@ async fn install_items_in_store<K: Key, V: Value>(
 }
 
 /* TODO(https://fxbug.dev/42173686): Fix this test
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_missing_graveyard() {
     let mut test = FsckTest::new().await;
 
@@ -261,7 +225,7 @@ async fn test_missing_graveyard() {
 }
 */
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_bad_graveyard_value() {
     let mut test = FsckTest::new().await;
 
@@ -292,7 +256,7 @@ async fn test_bad_graveyard_value() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_extra_allocation() {
     let mut test = FsckTest::new().await;
 
@@ -319,7 +283,7 @@ async fn test_extra_allocation() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::ExtraAllocations(_)), ..]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_misaligned_allocation() {
     let test = FsckTest::new().await;
 
@@ -341,7 +305,7 @@ async fn test_misaligned_allocation() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MisalignedAllocation(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_malformed_allocation() {
     let test = FsckTest::new().await;
 
@@ -366,107 +330,7 @@ async fn test_malformed_allocation() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MalformedAllocation(..))]);
 }
 
-#[fuchsia::test]
-async fn test_misaligned_extent_in_child_store() {
-    let mut test = FsckTest::new().await;
-
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store.store_object_id(),
-            Mutation::insert_object(
-                ObjectKey::extent(
-                    555,
-                    AttributeId::TEST_ID,
-                    MIN_BLOCK_SIZE.get()..fs.block_size().get(),
-                ),
-                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1, VOLUME_DATA_KEY_ID)),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions {
-        halt_on_error: true,
-        volume_store_id: Some(store_id),
-        ..Default::default()
-    })
-    .await
-    .expect_err("Fsck should fail");
-    assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MisalignedExtent(..))]);
-}
-
-#[fuchsia::test]
-async fn test_malformed_extent_in_child_store() {
-    let mut test = FsckTest::new().await;
-
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store.store_object_id(),
-            Mutation::insert_object(
-                ObjectKey::extent(555, AttributeId::TEST_ID, fs.block_size().get()..0),
-                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1, VOLUME_DATA_KEY_ID)),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions {
-        halt_on_error: true,
-        volume_store_id: Some(store_id),
-        ..Default::default()
-    })
-    .await
-    .expect_err("Fsck should fail");
-    assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MalformedExtent(..))]);
-}
-
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_allocation_mismatch() {
     let mut test = FsckTest::new().await;
 
@@ -503,26 +367,15 @@ async fn test_allocation_mismatch() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_volume_allocation_mismatch() {
     let mut test = FsckTest::new().await;
     let store_id = {
         let fs = test.filesystem();
         let store_id = {
             let root_volume = root_volume(fs.clone()).await.unwrap();
-            let volume = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(test.get_crypt()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
+            let volume =
+                root_volume.new_volume("vol", NewChildStoreOptions::default()).await.unwrap();
             let root_directory = Directory::open(&volume, volume.root_directory_object_id())
                 .await
                 .expect("open failed");
@@ -605,7 +458,7 @@ async fn test_volume_allocation_mismatch() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_missing_allocation() {
     let test = FsckTest::new().await;
 
@@ -658,7 +511,7 @@ async fn test_missing_allocation() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_too_many_object_refs() {
     let mut test = FsckTest::new().await;
 
@@ -703,7 +556,7 @@ async fn test_too_many_object_refs() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::RefCountMismatch(..)),]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_too_few_object_refs() {
     let mut test = FsckTest::new().await;
 
@@ -718,7 +571,7 @@ async fn test_too_few_object_refs() {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default(), None)
+        ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
             .await
             .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
@@ -729,7 +582,7 @@ async fn test_too_few_object_refs() {
     assert_matches!(test.errors()[..], [FsckIssue::Warning(FsckWarning::OrphanedObject(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_missing_object_tree_layer_file() {
     let mut test = FsckTest::new().await;
 
@@ -737,23 +590,14 @@ async fn test_missing_object_tree_layer_file() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let volume = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let mut transaction = volume
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        ObjectStore::create_object(&volume, &mut transaction, HandleOptions::default(), None)
+        ObjectStore::create_object(&volume, &mut transaction, HandleOptions::default())
             .await
             .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
@@ -779,7 +623,7 @@ async fn test_missing_object_tree_layer_file() {
     test.remount().await.expect_err("Remount succeeded");
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_missing_object_store_handle() {
     let mut test = FsckTest::new().await;
 
@@ -787,19 +631,8 @@ async fn test_missing_object_store_handle() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store_id = {
-            let volume = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(test.get_crypt()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
+            let volume =
+                root_volume.new_volume("vol", NewChildStoreOptions::default()).await.unwrap();
             volume.store_object_id()
         };
         let mut transaction = fs
@@ -819,7 +652,7 @@ async fn test_missing_object_store_handle() {
     test.remount().await.expect_err("Remount succeeded");
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_misordered_layer_file() {
     let mut test = FsckTest::new().await;
 
@@ -829,16 +662,7 @@ async fn test_misordered_layer_file() {
         let bs = fs.block_size().get();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         install_items_in_store(
@@ -867,7 +691,7 @@ async fn test_misordered_layer_file() {
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::MalformedLayerFile(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_overlapping_keys_in_layer_file() {
     let mut test = FsckTest::new().await;
 
@@ -877,16 +701,7 @@ async fn test_overlapping_keys_in_layer_file() {
         let bs = fs.block_size().get();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         install_items_in_store(
@@ -919,7 +734,7 @@ async fn test_overlapping_keys_in_layer_file() {
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::MalformedLayerFile(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_overlapping_keys_in_root_store_layer_file() {
     let mut test = FsckTest::new().await;
 
@@ -958,7 +773,7 @@ impl Value for u32 {
     const DELETED_MARKER: Self = 0;
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_unexpected_record_in_layer_file() {
     let mut test = FsckTest::new().await;
     // This test relies on the value below being something that doesn't deserialize to a valid
@@ -967,16 +782,7 @@ async fn test_unexpected_record_in_layer_file() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         install_items_in_store(
@@ -995,7 +801,7 @@ async fn test_unexpected_record_in_layer_file() {
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::MalformedLayerFile(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_mismatched_key_and_value() {
     let mut test = FsckTest::new().await;
 
@@ -1003,16 +809,7 @@ async fn test_mismatched_key_and_value() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         install_items_in_store(
@@ -1037,7 +834,7 @@ async fn test_mismatched_key_and_value() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_link_to_root_directory() {
     let mut test = FsckTest::new().await;
 
@@ -1071,7 +868,7 @@ async fn test_link_to_root_directory() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::RootObjectHasParent(..)), ..]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_multiple_links_to_directory() {
     let mut test = FsckTest::new().await;
 
@@ -1079,16 +876,7 @@ async fn test_multiple_links_to_directory() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -1123,7 +911,7 @@ async fn test_multiple_links_to_directory() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_conflicting_link_types() {
     let mut test = FsckTest::new().await;
 
@@ -1162,7 +950,7 @@ async fn test_conflicting_link_types() {
 // cladefs: a file's entries say what its POSIX mode says it is, a regular file or a special file, as
 // readdir takes their word for it (TASK-236): an entry saying otherwise is reported, a FIFO's that
 // says it is a regular file, and a regular file's that says it is a FIFO.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_conflicting_special_file_link_types() {
     for (mode, descriptor) in [
         (0o010644, ObjectDescriptor::File),
@@ -1189,7 +977,7 @@ async fn test_conflicting_special_file_link_types() {
                 .create_child_node(&mut transaction, "a", descriptor, true)
                 .await
                 .expect("create_child_node failed");
-            let posix = fio::MutableNodeAttributes { mode: Some(mode), ..Default::default() };
+            let posix = MutableNodeAttributes { mode: Some(mode), ..Default::default() };
             file.update_attributes(&mut transaction, Some(&posix), None)
                 .await
                 .expect("update_attributes failed");
@@ -1209,7 +997,7 @@ async fn test_conflicting_special_file_link_types() {
     }
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_volume_in_child_store() {
     let mut test = FsckTest::new().await;
 
@@ -1217,16 +1005,7 @@ async fn test_volume_in_child_store() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -1254,7 +1033,7 @@ async fn test_volume_in_child_store() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::VolumeInChildStore(..)), ..]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_children_on_file() {
     let mut test = FsckTest::new().await;
 
@@ -1262,16 +1041,7 @@ async fn test_children_on_file() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -1313,93 +1083,7 @@ async fn test_children_on_file() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::ObjectHasChildren(..)), ..]);
 }
 
-#[fuchsia::test]
-async fn test_non_file_marked_as_verified() {
-    let mut test = FsckTest::new().await;
-
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume.new_volume("vol", NewChildStoreOptions::default()).await.unwrap();
-
-        install_items_in_store(
-            &fs,
-            store.as_ref(),
-            vec![
-                Item::new(
-                    ObjectKey::object(10),
-                    ObjectValue::Object {
-                        kind: ObjectKind::Directory { sub_dirs: 0, dir_type: DirType::Normal },
-                        attributes: ObjectAttributes { ..Default::default() },
-                    },
-                ),
-                Item::new(
-                    ObjectKey::attribute(10, AttributeId::DATA, AttributeKey::Attribute),
-                    ObjectValue::verified_attribute(
-                        0,
-                        FsverityMetadata::Internal(RootDigest::Sha256([0; 32]), vec![]),
-                    ),
-                ),
-            ],
-        )
-        .await;
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-    assert_matches!(
-        test.errors()[..],
-        [FsckIssue::Error(FsckError::NonFileMarkedAsVerified(..)), ..]
-    );
-}
-
-#[fuchsia::test]
-async fn test_verified_file_merkle_attribute_missing() {
-    let mut test = FsckTest::new().await;
-
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume.new_volume("vol", NewChildStoreOptions::default()).await.unwrap();
-
-        install_items_in_store(
-            &fs,
-            store.as_ref(),
-            vec![
-                Item::new(
-                    ObjectKey::object(10),
-                    ObjectValue::Object {
-                        kind: ObjectKind::File { refs: 1 },
-                        attributes: ObjectAttributes { ..Default::default() },
-                    },
-                ),
-                Item::new(
-                    ObjectKey::attribute(10, AttributeId::DATA, AttributeKey::Attribute),
-                    ObjectValue::verified_attribute(
-                        0,
-                        FsverityMetadata::Internal(RootDigest::Sha256([0; 32]), vec![]),
-                    ),
-                ),
-            ],
-        )
-        .await;
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-    assert_matches!(
-        test.errors()[..],
-        [FsckIssue::Error(FsckError::VerifiedFileDoesNotHaveAMerkleAttribute(..)), ..]
-    );
-}
-
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_orphaned_extended_attribute_record() {
     let mut test = FsckTest::new().await;
 
@@ -1407,16 +1091,7 @@ async fn test_orphaned_extended_attribute_record() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1442,7 +1117,7 @@ async fn test_orphaned_extended_attribute_record() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_orphaned_large_extended_attribute_record() {
     let mut test = FsckTest::new().await;
 
@@ -1450,16 +1125,7 @@ async fn test_orphaned_large_extended_attribute_record() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1485,7 +1151,7 @@ async fn test_orphaned_large_extended_attribute_record() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_large_extended_attribute_nonexistent_attribute() {
     let mut test = FsckTest::new().await;
 
@@ -1493,16 +1159,7 @@ async fn test_large_extended_attribute_nonexistent_attribute() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1528,7 +1185,7 @@ async fn test_large_extended_attribute_nonexistent_attribute() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_invalid_extended_attribute_id() {
     let mut test = FsckTest::new().await;
 
@@ -1536,16 +1193,7 @@ async fn test_invalid_extended_attribute_id() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1585,7 +1233,7 @@ async fn test_invalid_extended_attribute_id() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_orphaned_extended_attribute() {
     let mut test = FsckTest::new().await;
 
@@ -1593,16 +1241,7 @@ async fn test_orphaned_extended_attribute() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1632,7 +1271,7 @@ async fn test_orphaned_extended_attribute() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_orphaned_attribute() {
     let mut test = FsckTest::new().await;
 
@@ -1640,16 +1279,7 @@ async fn test_orphaned_attribute() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1675,7 +1305,7 @@ async fn test_orphaned_attribute() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_records_for_tombstoned_object() {
     let mut test = FsckTest::new().await;
 
@@ -1683,16 +1313,7 @@ async fn test_records_for_tombstoned_object() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1721,7 +1342,7 @@ async fn test_records_for_tombstoned_object() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_invalid_value_graveyard_attribute_entry() {
     let mut test = FsckTest::new().await;
 
@@ -1729,23 +1350,24 @@ async fn test_invalid_value_graveyard_attribute_entry() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
+        // The graveyard's entry first, as its key sorts.
+        assert!(store.graveyard_directory_object_id() < 10);
         install_items_in_store(
             &fs,
             store.as_ref(),
             vec![
+                Item::new(
+                    ObjectKey::graveyard_attribute_entry(
+                        store.graveyard_directory_object_id(),
+                        10,
+                        AttributeId::TEST_ID,
+                    ),
+                    ObjectValue::Trim,
+                ),
                 Item::new(
                     ObjectKey::object(10),
                     ObjectValue::Object {
@@ -1756,14 +1378,6 @@ async fn test_invalid_value_graveyard_attribute_entry() {
                 Item::new(
                     ObjectKey::attribute(10, AttributeId::TEST_ID, AttributeKey::Attribute),
                     ObjectValue::attribute(100, false),
-                ),
-                Item::new(
-                    ObjectKey::graveyard_attribute_entry(
-                        store.graveyard_directory_object_id(),
-                        10,
-                        AttributeId::TEST_ID,
-                    ),
-                    ObjectValue::Trim,
                 ),
             ],
         )
@@ -1778,7 +1392,6 @@ async fn test_invalid_value_graveyard_attribute_entry() {
     assert_matches!(
         test.errors()[..],
         [
-            FsckIssue::Error(FsckError::MissingEncryptionKeys(..)),
             FsckIssue::Error(FsckError::TrimValueForGraveyardAttributeEntry(
                 ..,
                 10,
@@ -1789,7 +1402,7 @@ async fn test_invalid_value_graveyard_attribute_entry() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_tombstoned_attribute_does_not_exist() {
     let mut test = FsckTest::new().await;
 
@@ -1797,30 +1410,16 @@ async fn test_tombstoned_attribute_does_not_exist() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
+        // The graveyard's entry first, as its key sorts.
+        assert!(store.graveyard_directory_object_id() < 10);
         install_items_in_store(
             &fs,
             store.as_ref(),
             vec![
-                Item::new(
-                    ObjectKey::object(10),
-                    ObjectValue::Object {
-                        kind: ObjectKind::Directory { sub_dirs: 0, dir_type: DirType::Normal },
-                        attributes: ObjectAttributes { ..Default::default() },
-                    },
-                ),
                 Item::new(
                     ObjectKey::graveyard_attribute_entry(
                         store.graveyard_directory_object_id(),
@@ -1828,6 +1427,13 @@ async fn test_tombstoned_attribute_does_not_exist() {
                         AttributeId::TEST_ID,
                     ),
                     ObjectValue::Some,
+                ),
+                Item::new(
+                    ObjectKey::object(10),
+                    ObjectValue::Object {
+                        kind: ObjectKind::Directory { sub_dirs: 0, dir_type: DirType::Normal },
+                        attributes: ObjectAttributes { ..Default::default() },
+                    },
                 ),
             ],
         )
@@ -1852,7 +1458,7 @@ async fn test_tombstoned_attribute_does_not_exist() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_invalid_object_in_store() {
     let mut test = FsckTest::new().await;
 
@@ -1860,16 +1466,7 @@ async fn test_invalid_object_in_store() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -1892,7 +1489,7 @@ async fn test_invalid_object_in_store() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_invalid_child_in_store() {
     let mut test = FsckTest::new().await;
 
@@ -1924,7 +1521,7 @@ async fn test_invalid_child_in_store() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_link_cycle() {
     let mut test = FsckTest::new().await;
 
@@ -1966,7 +1563,7 @@ async fn test_link_cycle() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_orphaned_link_cycle() {
     // This checks we catch a cycle where two directories refer to each other as children.
     let mut test = FsckTest::new().await;
@@ -1985,8 +1582,8 @@ async fn test_orphaned_link_cycle() {
             .await
             .expect("new_transaction failed");
 
-        let dir1 = Directory::create(&mut transaction, &store, None).await.expect("create failed");
-        let dir2 = Directory::create(&mut transaction, &store, None).await.expect("create failed");
+        let dir1 = Directory::create(&mut transaction, &store).await.expect("create failed");
+        let dir2 = Directory::create(&mut transaction, &store).await.expect("create failed");
 
         dir1.insert_child(&mut transaction, "dir2", dir2.object_id(), ObjectDescriptor::Directory)
             .await
@@ -2003,276 +1600,7 @@ async fn test_orphaned_link_cycle() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::LinkCycle(..)), ..]);
 }
 
-#[fuchsia::test]
-async fn test_incorrect_merkle_tree_size_empty_file() {
-    let mut test = FsckTest::new().await;
-    let proper_size;
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let object = root_directory
-            .create_child_file(&mut transaction, "verified file")
-            .await
-            .expect("Create child failed");
-        transaction.commit_and_continue().await.expect("commit_and_continue transaction failed");
-
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-        proper_size = if let ObjectValue::Attribute { size, .. } = store
-            .tree()
-            .find(&ObjectKey::attribute(
-                object.object_id(),
-                AttributeId::FSVERITY_MERKLE,
-                AttributeKey::Attribute,
-            ))
-            .await
-            .expect("Finding verity attribute")
-            .expect("Verity attribute doesn't exist")
-            .value
-        {
-            size
-        } else {
-            panic!("Invalid type");
-        };
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    object.object_id(),
-                    AttributeId::FSVERITY_MERKLE,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::attribute(0, false),
-            ),
-        );
-        transaction.commit().await.expect("commit transaction failed");
-        store.store_object_id()
-    };
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should have failed");
-    assert_matches!(
-        &test.errors()[..],
-        [.., FsckIssue::Error(FsckError::IncorrectMerkleTreeSize(.., expected_size, actual_size))]
-            if *actual_size == 0 && expected_size == &proper_size
-    );
-}
-
-#[fuchsia::test]
-async fn test_incorrect_merkle_tree_size_one_data_block() {
-    let mut test = FsckTest::new().await;
-    let proper_size;
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let object = root_directory
-            .create_child_file(&mut transaction, "verified file")
-            .await
-            .expect("Create child failed");
-        transaction.commit_and_continue().await.expect("commit_and_continue transaction failed");
-
-        let mut buf = object.allocate_buffer(fs.block_size().get() as usize).await;
-        buf.fill(1);
-        object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-        proper_size = if let ObjectValue::Attribute { size, .. } = store
-            .tree()
-            .find(&ObjectKey::attribute(
-                object.object_id(),
-                AttributeId::FSVERITY_MERKLE,
-                AttributeKey::Attribute,
-            ))
-            .await
-            .expect("Finding verity attribute")
-            .expect("Verity attribute doesn't exist")
-            .value
-        {
-            size
-        } else {
-            panic!("Invalid type");
-        };
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    object.object_id(),
-                    AttributeId::FSVERITY_MERKLE,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::attribute(2 * <Sha256 as Hasher>::Digest::DIGEST_LEN as u64, false),
-            ),
-        );
-        transaction.commit().await.expect("commit transaction failed");
-        store.store_object_id()
-    };
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should have failed");
-    assert_matches!(
-        &test.errors()[..],
-        [FsckIssue::Error(FsckError::IncorrectMerkleTreeSize(.., expected_size, actual_size)), ..]
-            if *actual_size == 2 * <Sha256 as Hasher>::Digest::DIGEST_LEN as u64 && expected_size == &proper_size
-    );
-}
-
-#[fuchsia::test]
-async fn test_incorrect_merkle_tree_size_data_unaligned() {
-    let mut test = FsckTest::new().await;
-    let block_size;
-    let proper_size;
-    let store_id = {
-        let fs = test.filesystem();
-        block_size = fs.block_size();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let object = root_directory
-            .create_child_file(&mut transaction, "verified file")
-            .await
-            .expect("Create child failed");
-        transaction.commit_and_continue().await.expect("commit_and_continue transaction failed");
-
-        let mut buf = object.allocate_buffer((1 + 5 * fs.block_size()) as usize).await;
-        buf.fill(1);
-        object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-        object
-            .enable_verity(fio::VerificationOptions {
-                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
-                salt: Some(vec![]),
-                ..Default::default()
-            })
-            .await
-            .expect("set verified file metadata failed");
-        proper_size = if let ObjectValue::Attribute { size, .. } = store
-            .tree()
-            .find(&ObjectKey::attribute(
-                object.object_id(),
-                AttributeId::FSVERITY_MERKLE,
-                AttributeKey::Attribute,
-            ))
-            .await
-            .expect("Finding verity attribute")
-            .expect("Verity attribute doesn't exist")
-            .value
-        {
-            size
-        } else {
-            panic!("Invalid type");
-        };
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    object.object_id(),
-                    AttributeId::FSVERITY_MERKLE,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::attribute(block_size + 1, false),
-            ),
-        );
-        transaction.commit().await.expect("commit transaction failed");
-        store.store_object_id()
-    };
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should have failed");
-    assert_matches!(
-        &test.errors()[..],
-        [
-            FsckIssue::Error(FsckError::IncorrectMerkleTreeSize(
-                ..,
-                expected_size,
-                actual_size,
-            )),
-            ..
-        ] if *actual_size == block_size + 1 && expected_size == &proper_size
-    );
-}
-
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_file_length_mismatch() {
     let mut test = FsckTest::new().await;
 
@@ -2286,10 +1614,9 @@ async fn test_file_length_mismatch() {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let handle =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create object failed");
+        let handle = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create object failed");
         transaction.commit().await.expect("commit transaction failed");
 
         let mut transaction = fs
@@ -2355,7 +1682,7 @@ async fn test_file_length_mismatch() {
 
 /// cladefs: blocks past a file's end, to a 64 KiB boundary, are those appends through a DAX window
 /// reserve (TASK-133).
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_blocks_reserved_past_the_end() {
     let mut test = FsckTest::new().await;
     {
@@ -2367,10 +1694,9 @@ async fn test_blocks_reserved_past_the_end() {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let handle =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create object failed");
+        let handle = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create object failed");
         transaction.commit().await.expect("commit transaction failed");
 
         let mut transaction = fs
@@ -2404,7 +1730,7 @@ async fn test_blocks_reserved_past_the_end() {
     assert_matches!(test.errors()[..], [FsckIssue::Warning(FsckWarning::OrphanedObject(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_spurious_extents() {
     let mut test = FsckTest::new().await;
     const SPURIOUS_OFFSET: u64 = 100 << 20;
@@ -2413,16 +1739,7 @@ async fn test_spurious_extents() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
 
@@ -2435,22 +1752,14 @@ async fn test_spurious_extents() {
             store.store_object_id(),
             Mutation::insert_object(
                 ObjectKey::extent(555, AttributeId::TEST_ID, 0..4096),
-                ObjectValue::Extent(ExtentValue::new_raw(
-                    TEST_EXTENT,
-                    SPURIOUS_OFFSET,
-                    VOLUME_DATA_KEY_ID,
-                )),
+                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, SPURIOUS_OFFSET)),
             ),
         );
         transaction.add(
             store.store_object_id(),
             Mutation::insert_object(
                 ObjectKey::extent(store.root_directory_object_id(), AttributeId::TEST_ID, 0..4096),
-                ObjectValue::Extent(ExtentValue::new_raw(
-                    TEST_EXTENT,
-                    SPURIOUS_OFFSET,
-                    VOLUME_DATA_KEY_ID,
-                )),
+                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, SPURIOUS_OFFSET)),
             ),
         );
         transaction.commit().await.expect("commit failed");
@@ -2472,1138 +1781,7 @@ async fn test_spurious_extents() {
     assert_eq!(found, 3, "Missing expected errors: {:?}", test.errors());
 }
 
-#[fuchsia::test]
-async fn test_missing_encryption_key() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_file(&mut transaction, "child_file")
-            .await
-            .expect("create_child_file failed");
-        let buf = handle.allocate_buffer(1).await;
-        handle.txn_write(&mut transaction, 1_048_576, buf.as_ref()).await.expect("write failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| {
-                matches!(
-                    m.mutation,
-                    Mutation::ObjectStore(ObjectStoreMutation {
-                        item: Item {
-                            key: ObjectKey {
-                                data: ObjectKeyData::Attribute(_, AttributeKey::Extent(_)),
-                                ..
-                            },
-                            ..
-                        },
-                        ..
-                    })
-                )
-            })
-            .expect("find failed");
-
-        let mut mutation = txn_mutation.mutation.clone();
-
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item: Item { value: ObjectValue::Extent(ExtentValue::Some { key_id, .. }), .. },
-            ..
-        }) = &mut mutation
-        {
-            *key_id += 1;
-        } else {
-            unreachable!();
-        }
-
-        transaction.add(store_id, mutation);
-
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [ FsckIssue::Error(FsckError::MissingKey(sid, oid, 1)) ] if *sid == store_id && *oid == object_id);
-}
-
-#[fuchsia::test]
-async fn test_orphaned_keys() {
-    let mut test = FsckTest::new().await;
-
-    let store_id;
-    {
-        let fs = test.filesystem();
-        let root_store = fs.root_store();
-        store_id = root_store.store_object_id();
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![LockKey::object(store_id, 1000)], Options::default())
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store_id,
-            Mutation::insert_object(
-                ObjectKey::keys(1000),
-                ObjectValue::Keys(EncryptionKeys::default()),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-    }
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(
-        &test.errors()[..],
-        [
-            FsckIssue::Warning(FsckWarning::OrphanedKeys(sid, 1000)),
-            FsckIssue::Error(FsckError::BadLastObjectId(_, _))
-        ] if *sid == store_id
-    );
-}
-
-#[fuchsia::test]
-async fn test_missing_encryption_keys() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_file(&mut transaction, "child_file")
-            .await
-            .expect("create_child_file failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| {
-                matches!(
-                    m.mutation,
-                    Mutation::ObjectStore(ObjectStoreMutation {
-                        item: Item { key: ObjectKey { data: ObjectKeyData::Keys, .. }, .. },
-                        ..
-                    })
-                )
-            })
-            .expect("find failed");
-
-        let mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation);
-
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [ FsckIssue::Error(FsckError::MissingEncryptionKeys(sid, oid)) ] if *sid == store_id && *oid == object_id);
-}
-
-#[fuchsia::test]
-async fn test_encrypted_symlink_has_missing_keys() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, symlink_id) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        handle
-            .update_attributes(
-                transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                0,
-                None,
-            )
-            .await
-            .expect("update attributes failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let symlink_id = handle
-            .create_symlink(&mut transaction, b"target", "child_symlink")
-            .await
-            .expect("create_symlink failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| match m.mutation {
-                Mutation::ObjectStore(ObjectStoreMutation {
-                    item:
-                        Item { key: ObjectKey { object_id, data: ObjectKeyData::Keys { .. } }, .. },
-                    ..
-                }) if object_id == symlink_id => true,
-                _ => false,
-            })
-            .expect("find failed");
-
-        let mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, symlink_id)
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [ FsckIssue::Error(FsckError::MissingKey(sid, oid, 1)) ]
-        if *sid == store_id && *oid == symlink_id);
-}
-
-#[fuchsia::test]
-async fn test_encrypted_directory_has_unencrypted_child() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, parent_oid, child_oid) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        handle
-            .update_attributes(
-                transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                0,
-                None,
-            )
-            .await
-            .expect("update attributes failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let subdir = handle
-            .create_child_dir(&mut transaction, "subdir")
-            .await
-            .expect("create_child_file failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| {
-                match m.mutation {
-                    Mutation::ObjectStore(ObjectStoreMutation {
-                        item: Item {
-                            key: ObjectKey {
-                                object_id,
-                                data: ObjectKeyData::EncryptedChild { .. },
-                            },
-                            ..
-                        },
-                        ..
-                    }) if object_id == handle.object_id() => true,
-                    _ => false
-                }
-            })
-            .expect("find failed");
-
-        let mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item: Item { value, key: ObjectKey { object_id, .. }, .. },
-            ..
-        }) = &mutation
-        {
-            let mutation = Mutation::replace_or_insert_object(
-                ObjectKey::child(*object_id, "subdir", DirType::Normal),
-                value.clone(),
-            );
-            transaction.add(store_id, mutation);
-            transaction.commit().await.expect("commit failed");
-        } else {
-            unreachable!();
-        }
-
-        (store_id, handle.object_id(), subdir.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    let expected = [FsckIssue::Error(FsckError::EncryptedDirectoryHasUnencryptedChild(
-        store_id, parent_oid, child_oid,
-    ))];
-    assert_eq!(&test.errors()[..], &expected);
-}
-
-#[fuchsia::test]
-async fn test_encrypted_directory_has_legacy_casefold_child() {
-    let mut test = FsckTest::new().await;
-    assert!(test.filesystem.is_some());
-
-    let (store_id, parent_oid, child_oid) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        // Set up the wrapping key up front.
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        // Make the directory encrypted.
-        let transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle
-            .update_attributes(
-                transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                0,
-                None,
-            )
-            .await
-            .expect("update attributes failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let subdir = Directory::create_with_options(&mut transaction, &store, DirType::Normal)
-            .await
-            .expect("create_directory");
-
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::child(handle.object_id(), "subdir", DirType::LegacyCasefold),
-                ObjectValue::child(subdir.object_id(), ObjectDescriptor::Directory),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-
-        (store.store_object_id(), handle.object_id(), subdir.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    // Check that the expected error is present. We use `any` to ignore other incidental
-    // errors (like `SubDirCountMismatch`) triggered by manual corruption.
-    // The `if` clause is a match guard. `sid`, `pid`, and `cid` are bound as references
-    // because `e` is a reference, so we dereference them to compare with values.
-    assert!(test.errors().iter().any(|e| matches!(
-        e,
-        FsckIssue::Error(FsckError::EncryptedDirectoryHasUnencryptedChild(
-            sid, pid, cid
-        )) if *sid == store_id && *pid == parent_oid && *cid == child_oid
-    )));
-}
-
-#[fuchsia::test]
-async fn test_unencrypted_directory_has_encrypted_child() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, parent_oid, child_oid) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        let subdir = handle
-            .create_child_dir(&mut transaction, "subdir")
-            .await
-            .expect("create_child_file failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| match m.mutation {
-                Mutation::ObjectStore(ObjectStoreMutation {
-                    item:
-                        Item {
-                            key: ObjectKey { object_id, data: ObjectKeyData::Child { .. } },
-                            value: ObjectValue::Child(..),
-                            ..
-                        },
-                    ..
-                }) if object_id == handle.object_id() => true,
-                _ => false,
-            })
-            .expect("find failed");
-
-        let mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item: Item { value, key: ObjectKey { object_id, .. }, .. },
-            ..
-        }) = &mutation
-        {
-            let mutation = Mutation::replace_or_insert_object(
-                ObjectKey::encrypted_child(*object_id, [1, 2, 3].to_vec(), Some(0)),
-                value.clone(),
-            );
-            transaction.add(store_id, mutation);
-            transaction.commit().await.expect("commit failed");
-        } else {
-            unreachable!();
-        }
-
-        (store_id, handle.object_id(), subdir.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(
-        &test.errors()[..],
-        [
-            FsckIssue::Error(FsckError::UnencryptedDirectoryHasEncryptedChild(
-                sid1,
-                oid1,
-                oid_child1
-            )),
-            ..
-        ] if *sid1 == store_id && *oid1 == parent_oid && *oid_child1 == child_oid
-    );
-}
-
-#[fuchsia::test]
-async fn test_parent_and_child_encrypted_with_different_wrapping_keys() {
-    const CHILD_WRAPPING_KEY_ID: WrappingKeyId = u128::to_le_bytes(3);
-    let mut test = FsckTest::new().await;
-
-    let (store_id, parent_oid, child_oid) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        handle
-            .update_attributes(
-                transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                0,
-                None,
-            )
-            .await
-            .expect("update attributes failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        let subdir = handle
-            .create_child_dir(&mut transaction, "subdir")
-            .await
-            .expect("create_child_file failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| match m.mutation {
-                Mutation::ObjectStore(ObjectStoreMutation {
-                    item:
-                        Item {
-                            key: ObjectKey { object_id, data: ObjectKeyData::Object },
-                            value:
-                                ObjectValue::Object {
-                                    kind: ObjectKind::Directory { dir_type, .. }, ..
-                                },
-                            ..
-                        },
-                    ..
-                }) if object_id == subdir.object_id() && dir_type.is_encrypted() => true,
-                _ => false,
-            })
-            .expect("find failed");
-
-        let mut mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item:
-                Item {
-                    value: ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. },
-                    ..
-                },
-            ..
-        }) = &mut mutation
-        {
-            *dir_type = DirType::Encrypted(CHILD_WRAPPING_KEY_ID);
-        } else {
-            unreachable!();
-        }
-        transaction.add(store_id, mutation);
-
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id(), subdir.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(
-        &test.errors()[..],
-        [FsckIssue::Error(FsckError::ChildEncryptedWithDifferentWrappingKeyThanParent(
-            sid, oid, oid_child, parent_id, child_id
-        ))]
-        if *sid == store_id
-            && *oid == parent_oid
-            && *oid_child == child_oid
-            && *parent_id == WRAPPING_KEY_ID
-            && *child_id == CHILD_WRAPPING_KEY_ID
-    );
-}
-
-#[fuchsia::test]
-async fn test_encrypted_directory_no_wrapping_key() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, child_oid) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        handle
-            .update_attributes(
-                transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                0,
-                None,
-            )
-            .await
-            .expect("update attributes failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let subdir = handle
-            .create_child_dir(&mut transaction, "subdir")
-            .await
-            .expect("create_child_file failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| match m.mutation {
-                Mutation::ObjectStore(ObjectStoreMutation {
-                    item:
-                        Item {
-                            key: ObjectKey { object_id, data: ObjectKeyData::Object },
-                            value:
-                                ObjectValue::Object {
-                                    kind: ObjectKind::Directory { dir_type, .. }, ..
-                                },
-                            ..
-                        },
-                    ..
-                }) if object_id == subdir.object_id() && dir_type.is_encrypted() => true,
-                _ => false,
-            })
-            .expect("find failed");
-
-        let mut mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item:
-                Item {
-                    value: ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. },
-                    ..
-                },
-            ..
-        }) = &mut mutation
-        {
-            *dir_type = DirType::Normal;
-        } else {
-            unreachable!();
-        }
-        transaction.add(store_id, mutation);
-
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, subdir.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [FsckIssue::Error(FsckError::EncryptedChildDirectoryNoWrappingKey(sid, oid)) ]
-    if *sid == store_id && *oid == child_oid);
-}
-
-#[fuchsia::test]
-async fn test_directory_missing_encryption_key_for_large_extended_attribute() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    handle.object_id(),
-                    AttributeId::XATTR_RANGE_START,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::attribute(300, false),
-            ),
-        );
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::extended_attribute(handle.object_id(), b"foo".to_vec()),
-                ObjectValue::extended_attribute(AttributeId::XATTR_RANGE_START),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-        (store.store_object_id(), handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [ FsckIssue::Error(FsckError::MissingKey(sid, oid, 0)) ] if *sid == store_id && *oid == object_id);
-}
-
-#[fuchsia::test]
-async fn test_directory_missing_encryption_key_for_fscrypt() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let crypt = test.get_crypt();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        handle
-            .set_wrapping_key(&mut transaction, WRAPPING_KEY_ID)
-            .await
-            .expect("failed to set wrapping key");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| match &m.mutation {
-                Mutation::ObjectStore(ObjectStoreMutation {
-                    item:
-                        Item {
-                            key: ObjectKey { data: ObjectKeyData::Keys, .. },
-                            value: ObjectValue::Keys(keys),
-                            ..
-                        },
-                    ..
-                }) => {
-                    assert!(keys.get(1).is_some());
-                    true
-                }
-                _ => false,
-            })
-            .expect("find failed");
-
-        let mut mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item: Item { value: ObjectValue::Keys(keys), .. },
-            ..
-        }) = &mut mutation
-        {
-            // Move the key from index 1 (FSCRYPT_KEY_ID) to index 0 (VOLUME_DATA_KEY_ID).
-            let key = keys.remove(1).unwrap();
-            keys.insert(0, key);
-        } else {
-            unreachable!();
-        }
-
-        transaction.add(store_id, mutation);
-
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [ FsckIssue::Error(FsckError::MissingKey(sid, oid, 1)) ] if *sid == store_id && *oid == object_id);
-}
-
-#[fuchsia::test]
-async fn test_duplicate_key() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id, key_id) = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let handle;
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        handle = root_directory
-            .create_child_file(&mut transaction, "child_file")
-            .await
-            .expect("create_child_file failed");
-
-        let txn_mutation = transaction
-            .mutations()
-            .iter()
-            .find(|m| {
-                matches!(
-                    m.mutation,
-                    Mutation::ObjectStore(ObjectStoreMutation {
-                        item: Item { key: ObjectKey { data: ObjectKeyData::Keys, .. }, .. },
-                        ..
-                    })
-                )
-            })
-            .expect("find failed");
-
-        let mut mutation = txn_mutation.mutation.clone();
-        let store_id = store.store_object_id();
-        transaction.remove(store_id, mutation.clone());
-
-        let key_id;
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item: Item { value: ObjectValue::Keys(keys), .. },
-            ..
-        }) = &mut mutation
-        {
-            let (id, key) = keys.first().unwrap().clone();
-            key_id = id;
-            keys.insert(id, key);
-        } else {
-            unreachable!();
-        }
-
-        transaction.add(store_id, mutation);
-
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id(), key_id)
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert_matches!(&test.errors()[..], [ FsckIssue::Error(FsckError::DuplicateKey(sid, oid, kid)) ] if *sid == store_id && *oid == object_id && *kid == key_id);
-}
-
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_project_accounting() {
     let mut test = FsckTest::new().await;
 
@@ -3757,7 +1935,7 @@ async fn test_project_accounting() {
     assert_eq!(test.errors().len(), 2);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_zombie_file() {
     let mut test = FsckTest::new().await;
 
@@ -3765,16 +1943,7 @@ async fn test_zombie_file() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -3816,7 +1985,7 @@ async fn test_zombie_file() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_zombie_dir() {
     let mut test = FsckTest::new().await;
 
@@ -3824,16 +1993,7 @@ async fn test_zombie_dir() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -3874,7 +2034,7 @@ async fn test_zombie_dir() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_zombie_symlink() {
     let mut test = FsckTest::new().await;
 
@@ -3882,16 +2042,7 @@ async fn test_zombie_symlink() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -3931,7 +2082,7 @@ async fn test_zombie_symlink() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_empty_volume() {
     let mut test = FsckTest::new().await;
     let store_id = {
@@ -3991,7 +2142,7 @@ async fn test_empty_volume() {
 /// emptied again, passes fsck without warnings (TASK-82): a file written a MiB at a time, removed;
 /// files of a block; half of them removed, a file of every other block, then directories; the
 /// file truncated while full; and all of it removed.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_filled_and_emptied_without_warnings() {
     let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
     let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4120,7 +2271,7 @@ async fn test_filled_and_emptied_without_warnings() {
     };
     let checked = async {
         fsck_with_options(fs.clone(), &options).await?;
-        fsck_volume_with_options(fs.as_ref(), &options, store_id, None).await
+        fsck_volume_with_options(fs.as_ref(), &options, store_id).await
     };
     let result = checked.await;
     assert!(result.is_ok() && issues.lock().is_empty(), "{result:?}: {:?}", issues.lock());
@@ -4129,7 +2280,7 @@ async fn test_filled_and_emptied_without_warnings() {
 
 #[test_case(true; "read_only")]
 #[test_case(false; "read_write")]
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_full_disk(read_only: bool) {
     let mut test = FsckTest::new().await;
 
@@ -4143,14 +2294,10 @@ async fn test_full_disk(read_only: bool) {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let layer_handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("create_object failed");
+        let layer_handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
 
         // Now write out our 'fill the disk' allocation.
@@ -4189,7 +2336,6 @@ async fn test_full_disk(read_only: bool) {
             &root_store,
             fs.allocator().object_id(),
             HandleOptions::default(),
-            None,
         )
         .await
         .expect("open allocator handle failed");
@@ -4216,7 +2362,6 @@ async fn test_full_disk(read_only: bool) {
             &root_store,
             fs.allocator().object_id(),
             HandleOptions::default(),
-            None,
         )
         .await
         .expect("open allocator handle failed");
@@ -4236,7 +2381,7 @@ async fn test_full_disk(read_only: bool) {
     }
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_delete_volume() {
     let mut test = FsckTest::new().await;
     let store_id;
@@ -4311,7 +2456,7 @@ async fn test_delete_volume() {
     test.run(TestOptions::default()).await.expect("Fsck should succeed");
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_casefold() {
     let mut test = FsckTest::new().await;
 
@@ -4380,7 +2525,7 @@ async fn test_casefold() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_legacy_casefold_inconsistency() {
     let mut test = FsckTest::new().await;
 
@@ -4443,7 +2588,7 @@ async fn test_legacy_casefold_inconsistency() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_missing_overwrite_extents() {
     let mut test = FsckTest::new().await;
 
@@ -4495,7 +2640,7 @@ async fn test_missing_overwrite_extents() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_overwrite_extent_flag_not_set() {
     let mut test = FsckTest::new().await;
 
@@ -4545,7 +2690,7 @@ async fn test_overwrite_extent_flag_not_set() {
     );
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_invalid_bloom_filter_for_allocator() {
     let mut test = FsckTest::new().await;
 
@@ -4559,14 +2704,10 @@ async fn test_invalid_bloom_filter_for_allocator() {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let layer_handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("create_object failed");
+        let layer_handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
 
         {
@@ -4619,7 +2760,6 @@ async fn test_invalid_bloom_filter_for_allocator() {
             &root_store,
             fs.allocator().object_id(),
             HandleOptions::default(),
-            None,
         )
         .await
         .expect("open allocator handle failed");
@@ -4633,7 +2773,7 @@ async fn test_invalid_bloom_filter_for_allocator() {
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::InvalidBloomFilter(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_invalid_bloom_filter_for_volume() {
     let mut test = FsckTest::new().await;
 
@@ -4651,14 +2791,10 @@ async fn test_invalid_bloom_filter_for_volume() {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let layer_handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("create_object failed");
+        let layer_handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
 
         {
@@ -4704,7 +2840,6 @@ async fn test_invalid_bloom_filter_for_volume() {
             &root_store,
             store.store_info_handle_object_id().unwrap(),
             HandleOptions::default(),
-            None,
         )
         .await
         .expect("open store info handle failed");
@@ -4740,23 +2875,14 @@ async fn test_invalid_bloom_filter_for_volume() {
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::InvalidBloomFilter(..))]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_bad_casefold_hash() {
     let mut test = FsckTest::new().await;
     let store_id = {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -4784,22 +2910,8 @@ async fn test_bad_casefold_hash() {
 
         dir.set_casefold(true).await.expect("set_casefold failed");
 
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        test.get_crypt().add_wrapping_key(WRAPPING_KEY_ID, [0; 32]).unwrap();
-        dir.set_wrapping_key(&mut transaction, WRAPPING_KEY_ID)
-            .await
-            .expect("set_wrapping_key failed");
-        transaction.commit().await.expect("commit failed");
-
-        // Create a child file "foo" so we have a valid child and key set up.
-        // But we want to insert a BAD child "bar" with wrong hash.
+        // Create a child file "foo" so we have a valid child, and another, "bar", manually with a
+        // wrong hash.
         let mut transaction = fs
             .root_store()
             .new_transaction(
@@ -4810,36 +2922,19 @@ async fn test_bad_casefold_hash() {
             .expect("new_transaction failed");
         let _file =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        // Create another file manually with wrong hash.
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let bad_file = ObjectStore::create_object(
-            &store,
-            &mut transaction,
-            HandleOptions::default(),
-            Some(WRAPPING_KEY_ID),
-        )
-        .await
-        .expect("create_object failed");
-
-        let cipher = dir.get_fscrypt_key().await.expect("get_key").into_cipher().expect("cipher");
-        let name = "bar";
-        let encrypted_name = encrypt_filename(cipher.as_ref(), dir.object_id(), name).unwrap();
-        let correct_hash = cipher.hash_code_casefold(name);
-        let bad_hash = correct_hash.wrapping_add(1);
-
+        let bad_file =
+            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
+        let mut key = ObjectKey::child(dir.object_id(), "bar", DirType::Casefold);
+        let ObjectKeyData::CasefoldChild { hash_code, .. } = &mut key.data else {
+            panic!("{key:?}");
+        };
+        *hash_code = hash_code.wrapping_add(1);
         transaction.add(
             store.store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::encrypted_child(dir.object_id(), encrypted_name, Some(bad_hash)),
+                key,
                 ObjectValue::child(bad_file.object_id(), ObjectDescriptor::File),
             ),
         );
@@ -4867,7 +2962,7 @@ async fn test_bad_casefold_hash() {
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::BadCasefoldHash(..)), ..]);
 }
 
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_bad_last_object_id() {
     let mut test = FsckTest::new().await;
 
@@ -4875,16 +2970,7 @@ async fn test_bad_last_object_id() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         let root_directory =
@@ -4926,218 +3012,7 @@ async fn test_bad_last_object_id() {
     );
 }
 
-#[fuchsia::test]
-async fn test_ino_lblk32_key_used_for_non_data_attribute() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_store = fs.root_store();
-        let store_id = root_store.store_object_id();
-
-        let handle;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, root_store.root_directory_object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
-            .await
-            .expect("open failed");
-        handle = root_directory
-            .create_child_file(&mut transaction, "foo")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        let mut keys = EncryptionKeys::default();
-        keys.insert(2, EncryptionKey::FscryptInoLblk32File { key_identifier: [0u8; 16] });
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::keys(handle.object_id()),
-                ObjectValue::Keys(keys),
-            ),
-        );
-        transaction.add(
-            store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::extent(handle.object_id(), AttributeId::XATTR_RANGE_START, 0..4096),
-                ObjectValue::Extent(ExtentValue::Some {
-                    extent: TEST_EXTENT,
-                    extent_offset: 0,
-                    mode: ExtentMode::Raw,
-                    key_id: 2,
-                }),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert!(
-        test.errors().iter().any(|e| matches!(
-            e,
-            FsckIssue::Error(FsckError::InvalidInoLblk32KeyUsage(sid, oid))
-                if *sid == store_id && *oid == object_id
-        )),
-        "errors: {:?}",
-        test.errors()
-    );
-}
-
-#[fuchsia::test]
-async fn test_ino_lblk32_dir_key_used_for_file() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_store = fs.root_store();
-        let store_id = root_store.store_object_id();
-
-        let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
-            .await
-            .expect("open failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, root_store.root_directory_object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let handle = root_directory
-            .create_child_file(&mut transaction, "foo")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        let mut keys = EncryptionKeys::default();
-        keys.insert(
-            0,
-            EncryptionKey::FscryptInoLblk32Dir { key_identifier: [0u8; 16], nonce: [0u8; 16] },
-        );
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::keys(handle.object_id()),
-                ObjectValue::Keys(keys),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert!(
-        test.errors().iter().any(|e| matches!(
-            e,
-            FsckIssue::Error(FsckError::InvalidInoLblk32KeyUsage(sid, oid))
-                if *sid == store_id && *oid == object_id
-        )),
-        "errors: {:?}",
-        test.errors()
-    );
-}
-
-#[fuchsia::test]
-async fn test_ino_lblk32_file_key_used_for_directory() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_store = fs.root_store();
-        let store_id = root_store.store_object_id();
-
-        let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
-            .await
-            .expect("open failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, root_store.root_directory_object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let handle = root_directory
-            .create_child_dir(&mut transaction, "bardir")
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit failed");
-
-        let mut keys = EncryptionKeys::default();
-        keys.insert(0, EncryptionKey::FscryptInoLblk32File { key_identifier: [0u8; 16] });
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::keys(handle.object_id()),
-                ObjectValue::Keys(keys),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-
-    assert!(
-        test.errors().iter().any(|e| matches!(
-            e,
-            FsckIssue::Error(FsckError::InvalidInoLblk32KeyUsage(sid, oid))
-                if *sid == store_id && *oid == object_id
-        )),
-        "errors: {:?}",
-        test.errors()
-    );
-}
-
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_concurrent_fsck_volume_and_flush() {
     let mut test = FsckTest::new().await;
 
@@ -5145,16 +3020,7 @@ async fn test_concurrent_fsck_volume_and_flush() {
         let fs = test.filesystem();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(test.get_crypt()),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
             .await
             .unwrap();
         store.store_object_id()
@@ -5163,7 +3029,6 @@ async fn test_concurrent_fsck_volume_and_flush() {
     test.remount_rw().await.expect("Remount failed");
 
     let fs = test.filesystem();
-    let crypt = test.get_crypt();
 
     // Acquire a write lock on `LockKey::flush(store_id)` to simulate an ongoing flush / journal
     // compaction on the store.
@@ -5174,16 +3039,9 @@ async fn test_concurrent_fsck_volume_and_flush() {
     // `fsck_volume_with_options` will block waiting for `LockKey::flush(store_id)` BEFORE
     // acquiring the commit_mutex.
     let fs_clone = fs.clone();
-    let crypt_clone = crypt.clone();
     let fsck_task = fasync::Task::spawn(async move {
         let options = FsckOptions::default();
-        fsck_volume_with_options(
-            fs_clone.as_ref(),
-            &options,
-            store_id,
-            Some(crypt_clone as Arc<dyn Crypt>),
-        )
-        .await
+        fsck_volume_with_options(fs_clone.as_ref(), &options, store_id).await
     });
 
     // Give fsck_task a short interval to run until it blocks on LockKey::flush(store_id).
@@ -5199,76 +3057,11 @@ async fn test_concurrent_fsck_volume_and_flush() {
     fsck_task.await.expect("fsck_volume_with_options failed");
 }
 
-#[fuchsia::test]
-async fn test_illegal_key_in_root_store() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, object_id) = {
-        let fs = test.filesystem();
-        let root_store = fs.root_store();
-        let store_id = root_store.store_object_id();
-
-        let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
-            .await
-            .expect("open failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, root_store.root_directory_object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let handle = root_directory
-            .create_child_file(&mut transaction, "foo")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        let mut keys = EncryptionKeys::default();
-        keys.insert(0, EncryptionKey::FscryptInoLblk32File { key_identifier: [0u8; 16] });
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store_id, handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::keys(handle.object_id()),
-                ObjectValue::Keys(keys),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-
-        (store_id, handle.object_id())
-    };
-
-    test.remount().await.expect("remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("fsck should fail");
-
-    assert!(
-        test.errors().iter().any(|e| matches!(
-            e,
-            FsckIssue::Error(FsckError::IllegalKeyInRootStore(err_store_id, err_object_id))
-                if *err_store_id == store_id && *err_object_id == object_id
-        )),
-        "errors: {:?}",
-        test.errors()
-    );
-}
-
 // cladefs: a check with the filesystem's lock finds nothing amiss while it compacts, as its flush
 // task may at any time. Without the lock, a compaction's commits overtook a check, which found a
 // journal block missing from the allocator and another extra, or a layer file orphaned
 // (TASK-176): fsck without the lock is only for one whose commits the caller holds off.
-#[fuchsia::test]
+#[fuchsia_async::run_singlethreaded(test)]
 async fn test_a_check_while_compacting_finds_nothing() {
     let test = FsckTest::new().await;
     let fs = test.filesystem();

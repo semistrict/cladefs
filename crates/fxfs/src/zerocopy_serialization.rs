@@ -181,7 +181,7 @@ mod tests {
     use crate::serialized_types::{LATEST_VERSION, Versioned};
     use serde::{Deserialize, Serialize};
 
-    #[fuchsia::test]
+    #[test]
     fn test_boxed_slice_of_u8_is_the_same() {
         #[derive(Serialize, Deserialize, Versioned)]
         struct Regular(Box<[u8]>);
@@ -205,7 +205,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_vec_of_u8_is_the_same() {
         #[derive(Serialize, Deserialize, Versioned)]
         struct Regular(Vec<u8>);
@@ -229,7 +229,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_boxed_slice_of_array_of_u8() {
         #[derive(Serialize, Deserialize, Versioned)]
         struct Regular(Box<[[u8; 4]]>);
@@ -256,7 +256,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_vec_of_array_of_u8() {
         #[derive(Serialize, Deserialize, Versioned)]
         struct Regular(Vec<[u8; 4]>);
@@ -283,7 +283,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_vec_of_u64_round_trip() {
         #[derive(Serialize, Deserialize, Versioned, PartialEq, Eq, Debug)]
         struct Optimized(#[serde(with = "crate::zerocopy_serialization")] Vec<u64>);
@@ -303,7 +303,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_empty_vec() {
         #[derive(Serialize, Deserialize, Versioned, PartialEq, Eq, Debug)]
         struct OptimizedVec(#[serde(with = "crate::zerocopy_serialization")] Vec<u8>);
@@ -316,7 +316,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_visit_byte_buf_capacity_mismatch() {
         // Create a Vec<u8> with capacity that is not a multiple of 4.
         let mut bytes = Vec::with_capacity(11);
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(&result, &[[1, 2, 3, 4], [5, 6, 7, 8]]);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_visit_byte_buf_invalid_length() {
         let bytes = vec![1, 2, 3, 4, 5]; // Length 5 is not a multiple of 4.
         let visitor = super::Visitor(std::marker::PhantomData::<Vec<[u8; 4]>>);
@@ -342,7 +342,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_visit_bytes_invalid_length() {
         let bytes = vec![1, 2, 3, 4, 5]; // Length 5 is not a multiple of 2.
         let visitor = super::Visitor(std::marker::PhantomData::<Vec<u16>>);
@@ -351,7 +351,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_visit_bytes_with_bad_alignment() {
         const E1: u64 = 0x0123456789ABCDEF;
         const E2: u64 = u64::MAX;
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(&result, &[E1, E2]);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_visit_bytes_with_empty_slice() {
         let visitor = super::Visitor(std::marker::PhantomData::<Vec<u64>>);
         let result: Vec<u64> =

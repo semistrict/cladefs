@@ -104,6 +104,8 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
     }
     if kept.ephemeral {
         vars.push(("CLADEFSD_EPHEMERAL", root.join("ephemeral").display().to_string()));
+        // Its cells migrated here at names in its root, as the migrations' `to` names them.
+        vars.push(("CLADEFSD_EPHEMERAL_CELLS", root.display().to_string()));
     }
     node_local::env::set_vars(vars);
     cladefs::cladefsd::use_bucket(bucket);

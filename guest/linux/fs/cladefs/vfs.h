@@ -8,8 +8,10 @@
 #define _FS_CLADEFS_VFS_H
 
 #include <linux/fs.h>
+#include <linux/gfp.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/rwsem.h>
 #include <linux/sched/mm.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
@@ -27,6 +29,72 @@
 		memalloc_nofs_restore(__nofs);                 \
 		__ret;                                         \
 	})
+
+static inline void cladefs_nofs_leave(unsigned int *was)
+{
+	memalloc_nofs_restore(*was);
+}
+
+/*
+ * cladefs: a NOFS allocation scope from here to the end of the enclosing block, which no return
+ * skips, so that scopes close in the order they opened, as memalloc_nofs_restore needs: for what
+ * holds a lock reclaim may take (cladefs_nofs_held).
+ */
+#define cladefs_nofs_scope()                                                              \
+	unsigned int __cladefs_nofs __attribute__((__cleanup__(cladefs_nofs_leave))) = \
+		memalloc_nofs_save()
+
+/*
+ * cladefs: a lock reclaim from the filesystem may take, a DAX file's writeback lock and semaphore
+ * (dax.c), taken and let go of in a NOFS scope alone, which these check at each: so that no
+ * allocation under it, of whatever code, reclaims from the filesystem and waits on it.
+ */
+static inline void cladefs_nofs_held(void)
+{
+	WARN_ON_ONCE(current_gfp_context(GFP_KERNEL) & __GFP_FS);
+}
+
+static inline void cladefs_nofs_down_read(struct rw_semaphore *sem)
+{
+	cladefs_nofs_held();
+	down_read(sem);
+}
+
+static inline void cladefs_nofs_up_read(struct rw_semaphore *sem)
+{
+	cladefs_nofs_held();
+	up_read(sem);
+}
+
+static inline void cladefs_nofs_down_write(struct rw_semaphore *sem)
+{
+	cladefs_nofs_held();
+	down_write(sem);
+}
+
+static inline int cladefs_nofs_down_write_trylock(struct rw_semaphore *sem)
+{
+	cladefs_nofs_held();
+	return down_write_trylock(sem);
+}
+
+static inline void cladefs_nofs_up_write(struct rw_semaphore *sem)
+{
+	cladefs_nofs_held();
+	up_write(sem);
+}
+
+static inline void cladefs_nofs_mutex_lock(struct mutex *lock)
+{
+	cladefs_nofs_held();
+	mutex_lock(lock);
+}
+
+static inline void cladefs_nofs_mutex_unlock(struct mutex *lock)
+{
+	cladefs_nofs_held();
+	mutex_unlock(lock);
+}
 
 struct virtio_extent;
 struct cladefs_dax;

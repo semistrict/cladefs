@@ -18,10 +18,10 @@ use fxfs::errors::FxfsError;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
 use fxfs::lsm_tree::types::{ItemRef, LayerIterator, MergeableKey, Value};
 use fxfs::lsm_tree::{LSMTree, Query};
+use fxfs::object_store::NewChildStoreOptions;
 use fxfs::object_store::allocator::merge::filter_tombstones;
 use fxfs::object_store::allocator::{Allocator, AllocatorValue};
 use fxfs::object_store::volume::{RootVolume, root_volume};
-use fxfs::object_store::{NewChildStoreOptions, StoreOptions};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
@@ -324,7 +324,7 @@ impl ImageShared {
             Compactions {
                 allocator: TreeCompactions::of(object_manager.allocator().tree()),
                 stores: object_manager
-                    .unlocked_stores()
+                    .stores()
                     .iter()
                     .map(|store| TreeCompactions::of(store.tree()))
                     .fold(TreeCompactions::default(), std::ops::Add::add),
@@ -355,7 +355,7 @@ impl ImageShared {
                     if create {
                         root_volume.new_volume(&name, NewChildStoreOptions::default()).await
                     } else {
-                        root_volume.volume(&name, StoreOptions::default()).await
+                        root_volume.volume(&name).await
                     }
                 }
             })

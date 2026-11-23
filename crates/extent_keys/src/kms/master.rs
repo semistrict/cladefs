@@ -8,9 +8,9 @@
 //! known by its ID ([`MasterKeyId`]), a short hash of it, which is all that is ever written or
 //! said of it.
 
+use super::Vars;
 use crate::{KEY_LEN, Secret};
 use aws_lc_rs::digest;
-use std::ffi::OsString;
 use zeroize::Zeroize as _;
 
 /// The variable holding the master keys: each 64 hexadecimal digits, separated by commas or white
@@ -36,7 +36,11 @@ pub struct MasterKeyId(pub [u8; MASTER_ID_LEN]);
 impl MasterKeyId {
     /// The ID of `key`.
     fn of(key: &Secret) -> Self {
-        let hash = digest::digest(&digest::SHA256, &[ID_LABEL, key.expose()].concat());
+        // The label and the key hashed one after the other, never copied together (board 8589).
+        let mut context = digest::Context::new(&digest::SHA256);
+        context.update(ID_LABEL);
+        context.update(key.expose());
+        let hash = context.finish();
         Self(hash.as_ref()[..MASTER_ID_LEN].try_into().expect("SHA-256 is 32 bytes"))
     }
 }
@@ -151,30 +155,21 @@ impl MasterKeys {
     /// [`MASTER_KEY_FILE_VAR`] names; none if neither is set (or both are empty). Both set is
     /// refused. What was read of them is zeroed once parsed (the environment's own copy stays).
     pub fn from_env() -> Result<Option<Self>, String> {
-        Self::from_vars(&|name| std::env::var_os(name))
+        Self::from_vars(&Vars::from_env()?)
     }
 
-    /// cladefs: the same, of the variables `var` gives by name (TASK-633.6): a bucket's own
-    /// (`bucket_cell::object_bucket::numbered_options`).
-    pub fn from_vars(var: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Self>, String> {
-        let var = |name| var(name).filter(|value| !value.is_empty());
-        match (var(MASTER_KEY_VAR), var(MASTER_KEY_FILE_VAR)) {
+    /// cladefs: the same, of `vars` (TASK-633.6): a bucket's own over the host's
+    /// ([`Vars::numbered`]).
+    pub fn from_vars(vars: &Vars) -> Result<Option<Self>, String> {
+        match (vars.get(MASTER_KEY_VAR), vars.get(MASTER_KEY_FILE_VAR)) {
             (None, None) => Ok(None),
             (Some(_), Some(_)) => Err(format!(
                 "both {MASTER_KEY_VAR} and {MASTER_KEY_FILE_VAR} are set: give the master keys \
                  one way"
             )),
-            (Some(value), None) => {
-                let mut text = value.into_string().map_err(|value| {
-                    value.into_encoded_bytes().zeroize();
-                    format!("{MASTER_KEY_VAR}: not text")
-                })?;
-                let keys = Self::parse(&text, MASTER_KEY_VAR);
-                text.zeroize();
-                keys.map(Some)
-            }
+            (Some(text), None) => Self::parse(text, MASTER_KEY_VAR).map(Some),
             (None, Some(path)) => {
-                let source = format!("{MASTER_KEY_FILE_VAR} {}", path.to_string_lossy());
+                let source = format!("{MASTER_KEY_FILE_VAR} {path}");
                 let mut bytes = std::fs::read(&path).map_err(|err| format!("{source}: {err}"))?;
                 let keys = Self::of_file(&bytes, &source);
                 bytes.zeroize();

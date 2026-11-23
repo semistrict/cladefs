@@ -1126,7 +1126,7 @@ mod tests {
 
     /// An extent dies with its last allocation, which removes it from the tree, and is freed once
     /// the journal is flushed past where it died.
-    #[fuchsia::test]
+    #[test]
     fn an_extent_dies_with_its_last_allocation() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1168,7 +1168,7 @@ mod tests {
 
     /// A deallocation takes a reference from each part of its range, and deallocates those that
     /// had one.
-    #[fuchsia::test]
+    #[test]
     fn references_split_a_deallocation() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1203,7 +1203,7 @@ mod tests {
     /// transactions not yet committed. One of those committing allocates it again, as large as it
     /// was, with none of the references it had. It dies with the last pin, and leaves the tree
     /// then, to be freed as it would have been when it last emptied.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn pins_hold_an_emptied_shared_extent() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1268,7 +1268,7 @@ mod tests {
     /// A staging extent that no allocation committed in dies once nothing pins it, unrecorded, and
     /// taking what the allocations dropped in it reached, to be freed at once, as its data may have
     /// been written.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn a_staging_extent_nothing_committed_in_dies_unrecorded() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1299,7 +1299,7 @@ mod tests {
     /// once, whichever of its allocations commits or drops first. Given back, the range was taken
     /// twice: a full device's filesystem held more than the device, and its next mount found too
     /// little free to reserve its metadata (TASK-211).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn a_shared_extent_takes_what_was_dropped_in_it_once() {
         let device = FakeDevice::new(64, BS as u32);
         for drop_first in [true, false] {
@@ -1329,7 +1329,7 @@ mod tests {
 
     /// An extent a dropped transaction allocated dies, as far as it was allocated, to be freed at
     /// once; one no allocator mints doesn't.
-    #[fuchsia::test]
+    #[test]
     fn a_dropped_allocation_kills_its_extent() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1346,7 +1346,7 @@ mod tests {
 
     /// The extents of owners deleted die, the staging extent with them, to be freed once a flush
     /// past the deletion is recorded.
-    #[fuchsia::test]
+    #[test]
     fn owners_deleted_kill_their_extents_and_the_staging_extent() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1384,7 +1384,7 @@ mod tests {
     /// Dead extents are freed in the order they died. Those the device fails to free are dead
     /// again, after those that died meanwhile; those it frees are dying until a flush that began
     /// after their frees is done.
-    #[fuchsia::test]
+    #[test]
     fn frees_go_in_death_order_and_failures_wait_at_the_back() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1420,7 +1420,7 @@ mod tests {
 
     /// Extents being freed are dying, as the device may never make their frees, and their owners
     /// still hold dead extents, until their frees are done (TASK-79.22).
-    #[fuchsia::test]
+    #[test]
     fn extents_being_freed_are_dying() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1441,7 +1441,7 @@ mod tests {
     }
 
     /// A transition that fails changes nothing: neither the extent, nor the bytes counted.
-    #[fuchsia::test]
+    #[test]
     fn a_failed_transition_changes_nothing() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1487,7 +1487,7 @@ mod tests {
     /// owners deleted, those of which nothing is allocated, and those dying when the tree was
     /// compacted are dead, and those of which nothing is allocated leave the tree (TASK-119.22).
     /// Orphans die after replay, and minting resumes past them.
-    #[fuchsia::test]
+    #[test]
     fn a_mount_loads_the_extents_alive_and_kills_the_rest() {
         let device = FakeDevice::new(64, BS as u32);
         let [alive, empty, deleted, gone] = [1, 2, 3, 4].map(|s| ExtentId::new(DEFAULT_CELL, s));
@@ -1534,7 +1534,7 @@ mod tests {
     /// Orphans die where they are sought, and wherever what replay discarded names them, outside
     /// that too, as another writer's range's are (TASK-149.41): those it names after a recorded
     /// flush, the rest at once. Nothing alive, nor anything dying already, dies again.
-    #[fuchsia::test]
+    #[test]
     fn orphans_die_where_sought_and_where_what_replay_discarded_names_them() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1567,7 +1567,7 @@ mod tests {
     /// Replay, which pins aren't in, kills an extent with its last deallocation, which nothing
     /// frees until the mount settles it; an allocation replayed in it after revives it, as far as
     /// that allocation reaches, as one of a shared extent that pins kept alive, live.
-    #[fuchsia::test]
+    #[test]
     fn replay_kills_an_emptied_extent_unsettled_and_revives_it() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
@@ -1594,7 +1594,7 @@ mod tests {
     /// what replay killed at once, as a replay after reads what it says of it as this one did; and
     /// so orphans, found after replay as what it discarded settled (TASK-149.41). The extents of
     /// owners deleted wait for a recorded flush either way.
-    #[fuchsia::test]
+    #[test]
     fn a_mount_settles_what_it_found_dead_by_what_replay_discarded() {
         let device = FakeDevice::new(64, BS as u32);
         for named in [true, false] {

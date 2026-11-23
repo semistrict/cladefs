@@ -359,7 +359,7 @@ impl Storage {
                 let store_ids =
                     list_volumes(root_volume(filesystem.clone()).await?.volume_directory()).await?;
                 for store_id in store_ids {
-                    fsck_volume_with_options(filesystem.as_ref(), &options, store_id, None).await?;
+                    fsck_volume_with_options(filesystem.as_ref(), &options, store_id).await?;
                 }
                 anyhow::Ok(())
             };

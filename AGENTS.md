@@ -156,9 +156,30 @@ A decision doesn't wait for the user. Make your best guess, act on it, and recor
 
 Only what you can't do yourself is an open question: an action only the user can take (signing in, anything the user's own instructions reserve to them, such as deleting a test), or a fact only they know with no reasonable guess. Ask open questions in hotbed with `hotbed question add` (AskUserQuestion JSON on stdin or `--file`, under project `cladefs`), then carry on with whatever doesn't depend on them. Check `hotbed question ls` before asking (another session may have asked already) and `hotbed question outbox` before starting work; once you act on an answer or dismissal, acknowledge it with `hotbed question ack ID`. Edit (`hotbed question edit ID`) or delete (`hotbed question rm ID --reason ...`) any open question that becomes wrong or moot.
 
-## No migrations, ever: formats change outright
+## Frozen formats: every later build reads every frozen version
 
-The user's rule (2026-11-05), not a phase: cladefs never migrates data. On-disk, bucket and wire formats change whenever that's the better design, and the new code refuses the old format (`Error::Format` and its kind) rather than reading, converting or upgrading it: no migration code, no compatibility shim, no dual-format reader, nothing kept to read old data, and no task or plan step proposing one. Don't trade a design down to avoid a format change.
+The user's rule (2026-11-23, doc-28, board 10033), as cladefs goes into production: no backwards
+incompatible format change. A family of formats (a bucket's objects, a cell directory's files, an
+ephemeral host's, Fxfs, ...) is frozen once its golden corpus is under `formats/<family>/`, and
+from then on:
+
+- **Every later build reads every version from the family's frozen one on**, `oldest..=current`
+  of its `formats::Format`, through `Format::check`, and refuses any other by name.
+- **A change is a new version, never an edit of an old one.** The old version's decoder and types
+  stay as they are; the reader converts what it reads into the current types (Fxfs's
+  `versioned_type!` model: `From<V27> for V28`). Or the change goes through an extension point the
+  format has (a key kind the collector keeps, a protobuf field). Nothing is rewritten in place to
+  convert it; writers write the current version.
+- **The corpus is append-only.** A change adds the new version's cases (`CLADEFS_FORMATS_WRITE=1`
+  on the family's corpus test writes the missing ones) and never edits, deletes or moves one, nor
+  raises `oldest`. `scripts/format-freeze.py` refuses that in the commit-msg hook and in CI. Only
+  the user agrees to a break, in a hotbed question the commit names in a `Breaks-format:` line.
+
+A family not frozen yet keeps the rule before (2026-11-05): its reader refuses every version but
+its own (`Error::Format` and its kind), and its format changes outright, with no migration code,
+no shim and no dual-format reader. Each takes its last incompatible change in its board 10033
+subtask, then freezes. What doc-28 leaves unfrozen (the VM process and daemon's wire, caches,
+diagnostics) keeps it for good.
 
 ## Trust boundaries: check untrusted input once, where it enters
 

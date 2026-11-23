@@ -10,7 +10,8 @@
 //!
 //! [`drain`] does, in order:
 //!
-//! 1. The health service says NOT_SERVING ([`super::stop_serving`]).
+//! 1. The health service says NOT_SERVING ([`super::stop_serving`]), within [`REPORTING`]: past
+//!    it, its reporter gone, the drain goes on, and fails (board 8503).
 //! 2. The daemon drains: its VM sockets take no more connections, the daemon's own and every
 //!    tenant's, their listeners shut down; the control API refuses calls (`UNAVAILABLE`); and
 //!    every VM process's connection is closed, its VM told its daemon went, as at any daemon's
@@ -65,9 +66,19 @@ pub fn bound() -> Result<Duration, String> {
     }
 }
 
+/// cladefs: how long a drain waits at most, of its bound, for the health service to report
+/// NOT_SERVING ([`super::stop_serving`]): in the process, it takes a moment; past this, its
+/// reporter is gone, which would report it never, and the drain goes on without, so as to close
+/// the cells all the same, failing (board 8503, hotbed question 447). Before, it waited for ever,
+/// outside its bound, the daemon neither drained nor exited.
+pub const REPORTING: Duration = Duration::from_secs(1);
+
 /// What a drain left, past its bound: nothing of it if it drained.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Left {
+    /// cladefs: whether the health service was left saying SERVING, not having reported
+    /// NOT_SERVING within [`REPORTING`] (board 8503).
+    pub health: bool,
     /// VM processes' connections not yet gone, their cells open.
     pub connections: usize,
     /// The control API's calls in flight.
@@ -81,28 +92,40 @@ pub struct Left {
 
 impl std::fmt::Display for Left {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { connections, calls, uploaders, mount } = self;
+        let Self { health, connections, calls, uploaders, mount } = self;
         write!(
             f,
             "{connections} VM processes' connections, {calls} control calls and {uploaders} \
              cells' uploaders left"
         )?;
-        match mount {
-            true => write!(f, ", and the FUSE mount of cells"),
+        if *mount {
+            write!(f, ", and the FUSE mount of cells")?;
+        }
+        match health {
+            true => write!(f, "; the health service never reported NOT_SERVING"),
             false => Ok(()),
         }
     }
 }
 
-/// Drains the daemon, as the module says, within `within`: `Err` with what is left past it.
+/// Drains the daemon, as the module says, within `within`: `Err` with what is left past it, or
+/// if the health service never said it stopped serving.
 /// cladefs: a future, awaited where the daemon is told to drain, its signal's thread blocking on it
 /// there, its outermost entry (doc-24 step 12).
 pub async fn drain(within: Duration) -> Result<(), Left> {
-    super::stop_serving().await;
+    let began = tokio::time::Instant::now();
+    let reported = tokio::time::timeout(REPORTING.min(within), super::stop_serving()).await;
+    let health = reported.is_err();
+    if health {
+        log::error!(
+            "cladefsd: draining: the health service reported NOT_SERVING not within \
+             {REPORTING:?}: draining all the same"
+        );
+    }
     DRAINING.get().send_replace(true);
     super::server::stop_accepting();
     let drained = async {
-        tokio::time::timeout(within, async {
+        tokio::time::timeout(within.saturating_sub(began.elapsed()), async {
             super::server::CONNECTIONS.done().await;
             super::control::CALLS.done().await;
             let mount = super::mount::close().await;
@@ -117,8 +140,9 @@ pub async fn drain(within: Duration) -> Result<(), Left> {
         .await
     };
     match drained.await {
-        Ok(true) => Ok(()),
-        Ok(false) | Err(_) => Err(Left {
+        Ok(true) if !health => Ok(()),
+        _ => Err(Left {
+            health,
             connections: super::server::CONNECTIONS.count(),
             calls: super::control::CALLS.count(),
             uploaders: *crate::bucket::uploaders().borrow(),

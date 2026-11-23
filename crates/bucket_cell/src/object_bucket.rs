@@ -38,6 +38,7 @@ use crate::bucket::{
     Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Refusal, Version,
 };
 use crate::client::Client;
+use crate::clock::Clock;
 use crate::layout::{self, Kind};
 pub use crate::routed::{Resolve, RoutedBucket};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
@@ -49,7 +50,6 @@ use object_store::{
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single bucket's objects under a prefix (for multi-bucket routing, wrap in [`RoutedBucket`]).
 pub struct ObjectBucket {
@@ -76,6 +76,132 @@ pub struct ObjectBucket {
     /// (TASK-691). Never the defaults a bucket not yet formatted goes by, which its formatting,
     /// by any handle, replaces (board 5534).
     settings: std::sync::OnceLock<crate::identity::Settings>,
+    /// cladefs: its backend's clock, as it dates objects ([`Bucket::now`], board 8467).
+    clock: Clock,
+    /// cladefs: how it deletes an object only if it is of a version ([`Bucket::delete_if`], board
+    /// 9229), and, over HTTP, whether its backend was found to honour the condition, once asked.
+    deletes: Deletes,
+    honours_deletes: tokio::sync::OnceCell<bool>,
+}
+
+/// cladefs: how a bucket deletes an object only if it is of a version ([`Bucket::delete_if`], board
+/// 9229), which `object_store` sends no request for.
+#[derive(Clone, Debug)]
+pub(crate) enum Deletes {
+    /// A DELETE of the object alone, through cladefs's client, carrying the condition `by` names
+    /// ([`crate::client::conditioned`]): `objects`, the backend as it deletes a request an object
+    /// (S3's with DeleteObjects off). Checked to honour it before the first is relied on
+    /// ([`ObjectBucket::honours_deletes`]): one of S3's kin that ignored it would delete
+    /// unconditionally.
+    Http { objects: Arc<dyn ObjectStore>, by: Condition },
+    /// A file bucket's, under the lock of the object's directory ([`crate::local::Local::delete_if`]).
+    Local(crate::local::Local),
+    /// A store of this process's alone, memory's: its version compared and the object deleted
+    /// under `lock`, held alone, which every write of the store through a bucket shares
+    /// ([`in_process`]).
+    InProcess(Arc<tokio::sync::RwLock<()>>),
+    /// None it can make: Azure's, whose deletes `object_store` sends in batches (Blob Batch), and
+    /// signs with the condition left out.
+    Refused,
+}
+
+/// cladefs: what makes a DELETE conditional on a version over HTTP ([`Deletes::Http`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Condition {
+    /// S3's `If-Match`, on the object's e-tag.
+    ETag,
+    /// GCS's `x-goog-if-generation-match`, on its generation.
+    Generation,
+}
+
+impl Condition {
+    /// The header saying a delete is of `version` alone: none if `version` has none of what it
+    /// names.
+    fn header(
+        self,
+        version: &Version,
+    ) -> Option<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> {
+        let (name, value) = match self {
+            Self::ETag => (reqwest::header::IF_MATCH, version.e_tag.as_deref()?),
+            Self::Generation => (
+                reqwest::header::HeaderName::from_static("x-goog-if-generation-match"),
+                version.version.as_deref()?,
+            ),
+        };
+        // Not one a header carries: none, the delete refused as unsupported.
+        Some((name, reqwest::header::HeaderValue::from_str(value).ok()?))
+    }
+}
+
+/// cladefs: whether `objects` honours the condition `by` on a delete of `path`, its probe's object
+/// of `version` (board 9229, [`ObjectBucket::honours_deletes`]): a delete of another version must
+/// be refused, the object kept, and one of its version delete it. A failure, which answers nothing
+/// of the condition, fails it (hotbed review 53).
+async fn probe_deletes(
+    objects: &Arc<dyn ObjectStore>,
+    by: Condition,
+    path: &Path,
+    version: &Version,
+) -> object_store::Result<bool> {
+    // No backend makes this e-tag; no object's generation is 0.
+    let other =
+        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
+    let (Some(header), Some(own)) = (by.header(&other), by.header(version)) else {
+        // cladefs: none it names: the object deleted, the condition not to be sent.
+        delete_one(&**objects, path).await?;
+        return Ok(false);
+    };
+    let deleting = delete_one(&**objects, path);
+    let refused = match crate::client::conditioned(header, path.to_string(), deleting).await.0 {
+        Err(object_store::Error::Precondition { .. }) => true,
+        Ok(()) | Err(object_store::Error::NotFound { .. }) => false,
+        Err(failed) => return Err(failed),
+    };
+    let options = GetOptions { head: true, ..GetOptions::default() };
+    match objects.get_opts(path, options).await {
+        Ok(_) => {}
+        // Deleted: the condition ignored.
+        Err(object_store::Error::NotFound { .. }) => return Ok(false),
+        Err(other) => return Err(other),
+    }
+    let (deleted, _) =
+        crate::client::conditioned(own, path.to_string(), delete_one(&**objects, path)).await;
+    deleted?;
+    Ok(refused)
+}
+
+/// cladefs: deletes the object at `path` of `store`, through its `delete_stream`, as a delete of
+/// one object alone: of S3's with DeleteObjects off, a DeleteObject (board 9229).
+async fn delete_one(store: &dyn ObjectStore, path: &Path) -> object_store::Result<()> {
+    let deleting = path.clone();
+    let mut deleted = store.delete_stream(stream::once(async move { Ok(deleting) }).boxed());
+    match deleted.next().await {
+        Some(deleted) => deleted.map(drop),
+        None => Err(object_store::Error::Generic {
+            store: "cladefs",
+            source: format!("{path}: a delete answered nothing").into(),
+        }),
+    }
+}
+
+/// cladefs: the lock of the store `store`, of this process's alone, which every bucket of it shares
+/// ([`Deletes::InProcess`]): its writes hold it shared, its conditional deletes alone, so that none
+/// lands between such a delete's comparison and its deletion. By the store's address, while it
+/// lives.
+fn in_process(store: &Arc<dyn ObjectStore>) -> Arc<tokio::sync::RwLock<()>> {
+    type Locks = Vec<(std::sync::Weak<dyn ObjectStore>, Arc<tokio::sync::RwLock<()>>)>;
+    // cladefs: the process's, not a simulated host's: a store in memory is the process's, and the
+    // hosts holding it share it, and so its lock.
+    static LOCKS: std::sync::Mutex<Locks> = std::sync::Mutex::new(Vec::new());
+    let mut locks = LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|(held, _)| held.strong_count() > 0);
+    let found = locks.iter().find(|(held, _)| std::ptr::addr_eq(held.as_ptr(), Arc::as_ptr(store)));
+    if let Some((_, lock)) = found {
+        return lock.clone();
+    }
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    locks.push((Arc::downgrade(store), lock.clone()));
+    lock
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
@@ -607,13 +733,18 @@ impl Drop for Timed<'_> {
 }
 impl ObjectBucket {
     /// The objects of `backend` under `prefix`, a path of segments separated by `/`, or empty.
-    /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it.
+    /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it;
+    /// and dates objects by the host's clock, as they do ([`Clock::Host`]): a backend that dates
+    /// them by its own, a cloud's, is reached by its URL ([`ObjectBucket::from_url`]).
     pub fn new(backend: Arc<dyn ObjectStore>, prefix: &str) -> Self {
         Self::paged(backend, None, prefix)
     }
 
     /// cladefs: the objects of `backend` under `prefix`, a level of which `pages`, the same
-    /// backend, lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's.
+    /// backend, lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's. Dated by
+    /// the host's clock, as [`ObjectBucket::new`]'s. Its conditional deletes, as of a store of this
+    /// process's alone ([`Deletes::InProcess`]): one reached by its URL makes them as its backend
+    /// does ([`ObjectBucket::from_url`]).
     pub fn paged(
         backend: Arc<dyn ObjectStore>,
         pages: Option<Arc<dyn PaginatedListStore>>,
@@ -623,6 +754,7 @@ impl ObjectBucket {
         let (counts, honoured, decoded) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
         let (rewrites, settings) = Default::default();
+        let deletes = Deletes::InProcess(in_process(&backend));
         Self {
             backend,
             pages,
@@ -634,14 +766,18 @@ impl ObjectBucket {
             objectids,
             rewrites,
             settings,
+            clock: Clock::Host,
+            deletes,
+            honours_deletes: tokio::sync::OnceCell::new(),
         }
     }
 
     /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its
     /// backend needs.
     fn reached(reached: Reached) -> Self {
-        let Reached { objects, pages, prefix, rewrite_every } = reached;
-        Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every)
+        let Reached { objects, pages, prefix, rewrite_every, clock, deletes } = reached;
+        let bucket = Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every);
+        Self { clock, deletes, ..bucket }
     }
 
     /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
@@ -874,6 +1010,11 @@ pub(crate) struct Reached {
     /// [`GCS_REWRITE_EVERY`], or a degraded backend's that refuses them faster
     /// ([`crate::faults::Fault::rewrite_every`]).
     pub rewrite_every: std::time::Duration,
+    /// cladefs: its clock, as it dates objects (board 8467): the host's, of files and memory; of a
+    /// cloud's, as its responses date them.
+    pub clock: Clock,
+    /// cladefs: how it deletes an object only if it is of a version (board 9229).
+    pub deletes: Deletes,
 }
 
 /// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
@@ -980,76 +1121,136 @@ pub(crate) fn reach(
     client: &Client,
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
-    let (backend, pages, path): (Arc<dyn ObjectStore>, _, Path) = match url.scheme() {
-        // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
-        "file" => {
-            let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
-            let local =
-                crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
-            (Arc::new(local), None, Path::default())
-        }
-        _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
-    };
+    let (backend, pages, path, clock, deletes): (Arc<dyn ObjectStore>, _, Path, _, _) =
+        match url.scheme() {
+            // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
+            "file" => {
+                let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
+                let local =
+                    crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
+                let deletes = Deletes::Local(local.clone());
+                (Arc::new(local), None, Path::default(), Clock::Host, deletes)
+            }
+            _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
+        };
     let mut rewrite_every = match provider_of(url.as_str())? {
         "gcs" => GCS_REWRITE_EVERY,
         _ => std::time::Duration::ZERO,
     };
-    // cladefs: degraded as the environment says, its pages too (board 5740).
-    let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
-        Some(faults) => {
-            rewrite_every = rewrite_every.max(faults.now().rewrite_every);
-            let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
-                Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
-            });
-            (Arc::new(crate::faults::Faulty::new(backend, faults)), pages)
-        }
-        None => (backend, pages),
-    };
-    Ok(Reached { objects, pages, prefix: path.as_ref().to_owned(), rewrite_every })
+    // cladefs: degraded as the environment says, its pages too (board 5740), and its conditional
+    // deletes over HTTP; a file bucket's, under its lock, not.
+    let (objects, pages, deletes): (Arc<dyn ObjectStore>, _, _) =
+        match crate::faults::Faults::from_env()? {
+            Some(faults) => {
+                rewrite_every = rewrite_every.max(faults.now().rewrite_every);
+                let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
+                    Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
+                });
+                let deletes = match deletes {
+                    Deletes::Http { objects, by } => {
+                        let objects = Arc::new(crate::faults::Faulty::new(objects, faults.clone()));
+                        Deletes::Http { objects, by }
+                    }
+                    deletes => deletes,
+                };
+                (Arc::new(crate::faults::Faulty::new(backend, faults)), pages, deletes)
+            }
+            None => (backend, pages, deletes),
+        };
+    let prefix = path.as_ref().to_owned();
+    Ok(Reached { objects, pages, prefix, rewrite_every, clock, deletes })
 }
 
+/// cladefs: what [`cloud`] reaches.
+type Cloud = (Arc<dyn ObjectStore>, Pages, Path, Clock, Deletes);
+
 /// The backend of a URL of a cloud's, or of memory, the same backend as it lists a level of keys a
-/// page a request, if it does, and the path it names in it, as `object_store::parse_url_opts`
-/// makes them, but with `client`.
+/// page a request, if it does, the path it names in it, as `object_store::parse_url_opts` makes
+/// them, but with `client`; its clock: a cloud's, as its responses date them, memory's the
+/// host's; and how it deletes an object only if it is of a version (board 9229).
 fn cloud(
     url: &url::Url,
     options: impl IntoIterator<Item = (String, String)>,
     client: &Client,
-) -> object_store::Result<(Arc<dyn ObjectStore>, Pages, Path)> {
+) -> object_store::Result<Cloud> {
     use object_store::ObjectStoreScheme as Scheme;
     let (scheme, path) = Scheme::parse(url)?;
     let path = Path::parse(path)?;
+    let served = Arc::new(crate::clock::Served::default());
+    // cladefs: what the bucket's own requests name, which its clock hears the dates of (board
+    // 8467's review): `s3://bucket`'s, `gs://bucket`'s, `az://container`'s host. A URL of another
+    // form (`https://...`) names it in ways of its backend's own, refused.
+    let bucket = || match url.scheme() {
+        "s3" | "s3a" | "gs" | "az" => url.host_str().map(str::to_owned),
+        _ => None,
+    };
+    let bucket = || {
+        bucket().ok_or_else(|| object_store::Error::Generic {
+            store: "cladefs",
+            source: "a bucket is named by its URL's host: s3://BUCKET, gs://BUCKET, az://CONTAINER"
+                .into(),
+        })
+    };
     // The client's options first, which the environment's add to.
-    macro_rules! built {
+    macro_rules! configured {
         ($builder:ty) => {{
             let builder = (<$builder>::new().with_url(url.as_str()))
                 .with_client_options(client.options())
-                .with_http_connector(*client);
-            let builder = options.into_iter().fold(builder, |builder, (key, value)| {
+                .with_http_connector(crate::client::Connector {
+                    client: *client,
+                    clock: served.clone(),
+                    bucket: bucket()?,
+                });
+            options.into_iter().fold(builder, |builder, (key, value)| {
                 match key.to_ascii_lowercase().parse() {
                     Ok(key) => builder.with_config(key, value),
                     // Not one of this backend's: the environment holds every cloud's, each builder
                     // taking its own.
                     Err(_) => builder,
                 }
-            });
-            let built = Arc::new(builder.build()?);
-            (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
+            })
         }};
     }
-    let (backend, pages) = match scheme {
+    // A backend built, as it lists a page a request.
+    fn paged<S: ObjectStore + PaginatedListStore + 'static>(
+        built: S,
+    ) -> (Arc<dyn ObjectStore>, Pages) {
+        let built = Arc::new(built);
+        (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
+    }
+    let (backend, pages, clock, deletes) = match scheme {
         Scheme::Memory => {
-            (Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>, None)
+            let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+            let deletes = Deletes::InProcess(in_process(&memory));
+            (memory, None, Clock::Host, deletes)
         }
-        Scheme::AmazonS3 => built!(object_store::aws::AmazonS3Builder),
-        Scheme::GoogleCloudStorage => built!(object_store::gcp::GoogleCloudStorageBuilder),
-        Scheme::MicrosoftAzure => built!(object_store::azure::MicrosoftAzureBuilder),
+        // cladefs: its conditional deletes a DeleteObject each, not DeleteObjects', whose body
+        // the client can't condition (board 9229).
+        Scheme::AmazonS3 => {
+            let builder = configured!(object_store::aws::AmazonS3Builder);
+            let objects = Arc::new(builder.clone().with_disable_bulk_delete(true).build()?);
+            let deletes = Deletes::Http { objects, by: Condition::ETag };
+            let (backend, pages) = paged(builder.build()?);
+            (backend, pages, Clock::Served(served), deletes)
+        }
+        // A DELETE an object already.
+        Scheme::GoogleCloudStorage => {
+            let builder = configured!(object_store::gcp::GoogleCloudStorageBuilder);
+            let (backend, pages) = paged(builder.build()?);
+            let deletes = Deletes::Http { objects: backend.clone(), by: Condition::Generation };
+            (backend, pages, Clock::Served(served), deletes)
+        }
+        Scheme::MicrosoftAzure => {
+            let builder = configured!(object_store::azure::MicrosoftAzureBuilder);
+            let (backend, pages) = paged(builder.build()?);
+            (backend, pages, Clock::Served(served), Deletes::Refused)
+        }
         other => {
             let source = format!("no buckets of {other:?}").into();
             return Err(object_store::Error::Generic { store: "cladefs", source });
         }
     };
-    Ok((backend, pages, path))
+    Ok((backend, pages, path, clock, deletes))
 }
 
 /// What a request's failure means to cells. Failures other than the ones the protocol answers
@@ -1317,6 +1518,7 @@ impl ObjectBucket {
                 true => self.counts.turns[request as usize].turn().await,
                 false => None,
             };
+            let _shared = self.shared().await;
             let timed = self.counts.request(request, Some(&path));
             let len = bytes.len() as u64;
             let options = PutOptions { mode, ..PutOptions::default() };
@@ -1339,6 +1541,7 @@ impl ObjectBucket {
     fn object_delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
         let (backend, path) = (self.backend.clone(), self.path(key));
         async move {
+            let _shared = self.shared().await;
             let timed = self.counts.request(Request::Delete, Some(&path));
             let deleting = path.clone();
             let mut deleted =
@@ -1360,6 +1563,7 @@ impl ObjectBucket {
         let paths: Vec<object_store::Result<Path>> =
             keys.iter().map(|key| Ok(self.path(key))).collect();
         async move {
+            let _shared = self.shared().await;
             let timed = self.counts.request(Request::DeleteBatch, None);
             let objects = paths.len();
             // Every answer awaited, the first failure kept: the rest took effect, or failed too.
@@ -1374,6 +1578,112 @@ impl ObjectBucket {
                 .await;
             timed.span.set_count(crate::trace::OBJECTS, objects as u64);
             timed.answered(deleted, |_| 0)
+        }
+    }
+
+    /// cladefs: the object at `key` deleted only if it is of `version` ([`Bucket::delete_if`],
+    /// board 9229), as its backend makes such a delete ([`Deletes`]): a request of its own, counted
+    /// as a delete.
+    fn object_delete_if(
+        &self,
+        key: &str,
+        version: &Version,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        let (path, version) = (self.path(key), version.clone());
+        async move {
+            let timed = self.counts.request(Request::Delete, Some(&path));
+            let deleted = self.deleted_if(&path, &version).await;
+            timed.answered(deleted, |_| 0)
+        }
+    }
+
+    async fn deleted_if(&self, path: &Path, version: &Version) -> object_store::Result<()> {
+        let precondition = |found: &dyn std::fmt::Debug| object_store::Error::Precondition {
+            path: path.to_string(),
+            source: format!("{found:?} is not {version:?}").into(),
+        };
+        let unsupported = |why: &str| object_store::Error::NotSupported {
+            source: format!("a delete of {path} conditional on its version: {why}").into(),
+        };
+        match &self.deletes {
+            Deletes::Local(local) => {
+                let Version { e_tag, version } = version.clone();
+                local.delete_if(path, &UpdateVersion { e_tag, version }).await
+            }
+            Deletes::InProcess(lock) => {
+                let _alone = lock.write().await;
+                let options = GetOptions { head: true, ..GetOptions::default() };
+                let found = match self.backend.get_opts(path, options).await {
+                    Ok(found) => Some(found.meta.e_tag),
+                    Err(object_store::Error::NotFound { .. }) => None,
+                    Err(other) => return Err(other),
+                };
+                if found.as_ref().is_none_or(|e_tag| *e_tag != version.e_tag) {
+                    return Err(precondition(&found));
+                }
+                delete_one(&*self.backend, path).await
+            }
+            Deletes::Http { objects, by } => {
+                let header =
+                    by.header(version).ok_or_else(|| unsupported("no version it names"))?;
+                if !self.honours_deletes(objects, *by).await? {
+                    return Err(unsupported("its backend ignores the condition"));
+                }
+                let (deleted, sent) = crate::client::conditioned(
+                    header,
+                    path.to_string(),
+                    delete_one(&**objects, path),
+                )
+                .await;
+                // cladefs: an invariant of this build's, not of what a backend sends: deleted with
+                // no request carrying the condition, it went unconditioned.
+                assert!(sent || deleted.is_err(), "{path}: deleted with no condition sent");
+                match deleted {
+                    // None there, as S3 may say it.
+                    Err(object_store::Error::NotFound { .. }) => Err(precondition(&"none")),
+                    deleted => deleted,
+                }
+            }
+            Deletes::Refused => Err(unsupported("its backend's deletes go unconditioned")),
+        }
+    }
+
+    /// cladefs: whether its backend over HTTP, `objects`, honours the condition `by` on a delete
+    /// (board 9229), found once, with an object of its own at `probe/deletes-<random>`, which it
+    /// removes: a delete of another version must fail, the object kept, and one of its version
+    /// succeed. One that ignores it, as a store of S3's kin may, would delete unconditionally: its
+    /// conditional deletes are refused. Its requests failing fail it, to be asked again.
+    async fn honours_deletes(
+        &self,
+        objects: &Arc<dyn ObjectStore>,
+        by: Condition,
+    ) -> object_store::Result<bool> {
+        let probe = || async {
+            let path = self.path(&format!("probe/deletes-{}", base32_id::Padded(rand::random())));
+            let create = PutOptions { mode: object_store::PutMode::Create, ..Default::default() };
+            let made = objects.put_opts(&path, PutPayload::from_static(b"probe"), create).await?;
+            let version = Version { e_tag: made.e_tag, version: made.version };
+            let checked = probe_deletes(objects, by, &path, &version).await;
+            if checked.is_err() {
+                // cladefs: best effort (hotbed review 54): what is left of a probe is its own
+                // object, which no cell names; the failure is what the check gives.
+                let _ = delete_one(&**objects, &path).await;
+            }
+            checked
+        };
+        let honoured = *self.honours_deletes.get_or_try_init(probe).await?;
+        if !honoured {
+            log::error!("bucket: its backend ignores the condition of a delete ({by:?}): refused");
+        }
+        Ok(honoured)
+    }
+
+    /// cladefs: the lock of its store of this process's alone, held shared by each write
+    /// ([`Deletes::InProcess`]); none for any other.
+    async fn shared(&self) -> Option<tokio::sync::RwLockReadGuard<'_, ()>> {
+        match &self.deletes {
+            Deletes::InProcess(lock) => Some(lock.read().await),
+            _ => None,
         }
     }
 }
@@ -1444,8 +1754,16 @@ impl Bucket for ObjectBucket {
         self.object_delete_batch(keys)
     }
 
+    fn delete_if(
+        &self,
+        key: &str,
+        version: &Version,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        self.object_delete_if(key, version)
+    }
+
     fn now(&self) -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+        self.clock.now()
     }
 
     fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
@@ -1461,7 +1779,10 @@ fn backoff(failures: u32) -> std::time::Duration {
 
 /// Checks that `bucket` honours the conditional writes cells rely on, with an object of its
 /// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
-/// of a version that is not the object's, and one of the object's version succeeds. cladefs: a step
+/// of a version that is not the object's, and one of the object's version succeeds. cladefs: and
+/// that its clock is its backend's ([`Bucket::now`], board 8467): within [`crate::clock::SKEW`] of
+/// the date the backend gave the object as it was updated, as a read of it says, so that no window
+/// measured against the backend's dates closes early by more ([`crate::clock::checked`]). A step
 /// failing as a bucket out of reach does, `Unavailable`, says nothing of what the backend honours:
 /// the probe begins again, with an object of its own anew, as a conditional write that failed so
 /// may or may not have landed, backing off as the bucket's requests do (TASK-699). A refusal fails it
@@ -1544,6 +1865,7 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     if stale != Err(Error::Precondition) {
         return refused("an update of another version", &stale);
     }
+    let started = std::time::Instant::now();
     let updated =
         bucket.put(&key, bytes::Bytes::from_static(b"updated"), PutMode::Update(version)).await;
     if let Some(failed) = failed(&updated) {
@@ -1551,6 +1873,18 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     }
     if updated.is_err() {
         return refused("an update of the object's version", &updated);
+    }
+    // cladefs: its clock, against the date its backend gave what it just wrote (board 8467).
+    match bucket.head(&key).await {
+        Ok(meta) => {
+            if let Err(off) = crate::clock::checked(meta.modified, bucket.now(), started.elapsed())
+            {
+                return Probed::Answered(Err(format!("{key}: {off}")));
+            }
+        }
+        Err(Error::Unavailable) => return Probed::Unavailable(key),
+        Err(Error::Expired) => return Probed::Expired(key),
+        Err(error) => return Probed::Answered(Err(format!("reading {key}: {error}"))),
     }
     match bucket.delete(&key).await {
         Err(Error::Unavailable | Error::Expired) => Probed::Unavailable(key),
@@ -1761,8 +2095,8 @@ pub(crate) mod tests {
     }
 
     /// TASK-633.8: a bucket, `own`, its clock `ahead` of its own, a mirror's pin taken over by
-    /// another mirror as its `taken_at`th conditional write lands, if any, and the keys it deletes
-    /// noted, in order, in `deleted`.
+    /// another mirror as its `taken_at`th conditional write lands, an update or (board 9229) a
+    /// delete, if any, and the keys it deletes noted, in order, in `deleted`.
     struct Watched<B: Bucket = ObjectBucket> {
         own: Arc<B>,
         ahead: u64,
@@ -1775,6 +2109,20 @@ pub(crate) mod tests {
         fn new(own: Arc<B>, ahead: u64, taken_at: Option<usize>) -> Self {
             let (updates, deleted) = Default::default();
             Self { own, ahead, taken_at, updates, deleted }
+        }
+
+        /// Counts a conditional write of `key`, if it is a pin's, and takes the pin over for
+        /// another mirror first if it is the `taken_at`th.
+        async fn taken(&self, key: &str) -> Result<(), Error> {
+            if !matches!(layout::kind(key), layout::Kind::Pin { .. }) {
+                return Ok(());
+            }
+            let updates = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
+            if self.taken_at == Some(updates) {
+                let another = layout::encode(&layout::Reference::of(u64::MAX));
+                self.own.put(key, another.into(), PutMode::Overwrite).await?;
+            }
+            Ok(())
         }
     }
 
@@ -1805,13 +2153,8 @@ pub(crate) mod tests {
             bytes: crate::Bytes,
             mode: PutMode,
         ) -> Result<Version, Error> {
-            let pin = matches!(layout::kind(key), layout::Kind::Pin { .. });
-            if pin && matches!(mode, PutMode::Update(_)) {
-                let updates = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
-                if self.taken_at == Some(updates) {
-                    let another = layout::encode(&layout::Reference::of(u64::MAX));
-                    self.own.put(key, another.into(), PutMode::Overwrite).await?;
-                }
+            if matches!(mode, PutMode::Update(_)) {
+                self.taken(key).await?;
             }
             self.own.put(key, bytes, mode).await
         }
@@ -1819,6 +2162,12 @@ pub(crate) mod tests {
         async fn delete(&self, key: &str) -> Result<(), Error> {
             self.deleted.lock().unwrap().push(key.to_owned());
             self.own.delete(key).await
+        }
+
+        async fn delete_if(&self, key: &str, version: &Version) -> Result<(), Error> {
+            self.deleted.lock().unwrap().push(key.to_owned());
+            self.taken(key).await?;
+            self.own.delete_if(key, version).await
         }
 
         fn now(&self) -> u64 {
@@ -2164,7 +2513,8 @@ pub(crate) mod tests {
             assert!(two.home.object_get(&pin).await.is_err(), "the pin stands");
             assert_eq!(two.refers(origin, child).await, (false, true, true));
 
-            // Its pin taken over as it lets it go, written again first: the other's left.
+            // Its pin taken over as it lets it go: the other's left, its delete conditional on its
+            // own write (board 9229).
             two.home.object_put(&pin, another.clone().into(), PutMode::Overwrite).await.unwrap();
             let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
             let done = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
@@ -2444,6 +2794,16 @@ pub(crate) mod tests {
             for key in heads_of(child) {
                 home.object_delete(&key).await.unwrap();
             }
+            // cladefs: a pass past its sweep's budget, which would retire the reference and delete
+            // the copy whole, deletes none of it, the reference neither: all it would delete taken
+            // at once, or none (board 8529).
+            let before = (listed(home, parent).await, listed(other, parent).await);
+            let budget = Some(Arc::new(crate::collector::Budget::new(Some(1), None)));
+            let capped = pass().budget(budget.clone());
+            let report = capped.collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+            let after = (listed(home, parent).await, listed(other, parent).await);
+            assert_eq!((report, after), (crate::collector::Report::default(), before), "capped");
+            assert_eq!(budget.unwrap().refused(), 1);
             put(home, &layout::pin(parent, 3), b"pin".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 1), "pinned");
@@ -3016,6 +3376,14 @@ pub(crate) mod tests {
             self.0.delete(key)
         }
 
+        fn delete_if(
+            &self,
+            key: &str,
+            version: &Version,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.0.delete_if(key, version)
+        }
+
         fn now(&self) -> u64 {
             self.0.now()
         }
@@ -3266,6 +3634,12 @@ pub(crate) mod tests {
     #[test]
     fn memory_buckets_conform() {
         futures::executor::block_on(crate::bucket::conformance(&*memory(), "conformance"));
+        let bucket = memory();
+        futures::executor::block_on(crate::bucket::conditional_deletes(
+            &*bucket,
+            "conformance",
+            true,
+        ));
     }
 
     /// cladefs: a bucket on the host's filesystem does what every bucket must (TASK-165.1).
@@ -3273,12 +3647,20 @@ pub(crate) mod tests {
     fn file_buckets_conform() {
         let dir = tempfile::tempdir().unwrap();
         futures::executor::block_on(crate::bucket::conformance(&*file(dir.path()), "conformance"));
+        let bucket = file(dir.path());
+        futures::executor::block_on(crate::bucket::conditional_deletes(
+            &*bucket,
+            "conformance",
+            true,
+        ));
     }
 
     #[test]
     fn simulated_buckets_conform() {
         let bucket = crate::testing::Direct(crate::testing::SimBucket::new());
         futures::executor::block_on(crate::bucket::conformance(&bucket, "conformance"));
+        let deletes = crate::bucket::conditional_deletes(&bucket, "conformance", true);
+        futures::executor::block_on(deletes);
     }
 
     /// cladefs: `object_store`'s own bucket of a directory refuses conditional updates, which the
@@ -3304,13 +3686,113 @@ pub(crate) mod tests {
     }
 
     /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
-    fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
+    pub(crate) fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
         let url = format!("s3://{}/{prefix}", crate::s3_server::BUCKET);
         Arc::new(ObjectBucket::reached(reach(&url, server.options(), client).unwrap()))
     }
 
-    fn runtime() -> tokio::runtime::Runtime {
+    pub(crate) fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// Board 8467's review: its clock hears the dates of the bucket's own requests' responses
+    /// alone, which name it, as its host's first label or one of its path's first two segments,
+    /// at no link-local address: not those of requests naming it nowhere, as its credentials' do
+    /// (an instance's metadata service's `/latest/...`, STS's, OAuth's `/token`), a service an hour
+    /// ahead of the bucket's backend dating them.
+    #[test]
+    fn only_the_buckets_own_requests_date_it() {
+        use object_store::client::{HttpConnector as _, HttpRequestBody};
+        let url = |url: &str| reqwest::Url::parse(url).unwrap();
+        let named = [
+            "https://s3.us-east-1.amazonaws.com/cladefs/cells/1",
+            "https://cladefs.s3.us-east-1.amazonaws.com/cells/1",
+            "https://storage.googleapis.com/cladefs?list-type=2",
+            "http://127.0.0.1:10000/devstoreaccount1/cladefs/cells/1",
+        ];
+        let unnamed = [
+            "http://169.254.169.254/cladefs/meta-data/iam/security-credentials/",
+            "http://[fd00:ec2::254]/cladefs/api/token",
+            "https://sts.us-east-1.amazonaws.com/",
+            "https://oauth2.googleapis.com/token",
+            "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+            "https://storage.googleapis.com/a/b/cladefs",
+        ];
+        for at in named {
+            assert!(crate::client::names("cladefs", &url(at)), "{at}");
+        }
+        for at in unnamed {
+            assert!(!crate::client::names("cladefs", &url(at)), "{at}");
+        }
+
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let served = Arc::new(crate::clock::Served::default());
+        let bucket = crate::s3_server::BUCKET.to_owned();
+        let connector =
+            crate::client::Connector { client: Client::DEFAULT, clock: served.clone(), bucket };
+        let client = connector.connect(&Client::DEFAULT.options().with_allow_http(true)).unwrap();
+        let options = server.options();
+        let endpoint = &options.iter().find(|(key, _)| key == "aws_endpoint").unwrap().1;
+        let get = |path: &str| {
+            let request = hyper::Request::get(format!("{endpoint}/{path}"));
+            serving
+                .block_on(client.execute(request.body(HttpRequestBody::empty()).unwrap()))
+                .unwrap();
+        };
+        server.clock_ahead(3_600_000);
+        get("latest/api/token");
+        get("token");
+        assert_eq!(served.now(), 0);
+        server.clock_ahead(0);
+        get("cladefs/absent");
+        let host = crate::clock::Clock::Host.now();
+        assert!(served.now() <= host && served.now() + 2_000 >= host, "{}", served.now());
+    }
+
+    /// Board 8467: a bucket over HTTP keeps its backend's clock, as its responses date it, whatever
+    /// the host's: none before its first response; then never ahead of the backend's, and within
+    /// a second and a round trip of it, of the date its backend gives what it writes too, the
+    /// backend's clock an hour behind the host's or ahead, or stepped forward a day. Its probe
+    /// passes it; it refuses one whose backend dates no response, and one whose clock reads ahead
+    /// of the backend's by more than [`crate::clock::SKEW`], as the host's clock did.
+    #[test]
+    fn buckets_keep_their_backends_clock() {
+        use crate::clock::{Clock, SKEW};
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let (hour, day) = (3_600_000, 86_400_000);
+        let served = |ahead: i64| Clock::Host.now().checked_add_signed(ahead).unwrap();
+        // Read as the backend's clock reads `served`: at most a second and a round trip behind it.
+        let reads = |now: u64, served: u64| {
+            assert!(now <= served && now + 2_000 >= served, "{now} for {served}");
+        };
+        for ahead in [-hour, hour] {
+            server.clock_ahead(ahead);
+            let bucket = s3(&server, "clock", &Client::DEFAULT);
+            assert_eq!(bucket.now(), 0);
+            let put = bucket.put("dated", vec![1].into(), PutMode::Overwrite);
+            serving.block_on(put).unwrap();
+            let modified = serving.block_on(bucket.head("dated")).unwrap().modified;
+            reads(bucket.now(), served(ahead));
+            assert!(modified <= bucket.now() && bucket.now() < modified + 2_000, "{modified}");
+            server.clock_ahead(ahead + day);
+            serving.block_on(bucket.head("dated")).unwrap();
+            reads(bucket.now(), served(ahead + day));
+            assert_eq!(serving.block_on(probe(&*bucket, 1)), Ok(()));
+        }
+
+        server.dating(false);
+        let undated = s3(&server, "undated", &Client::DEFAULT);
+        let key = format!("probe/{}", base32_id::Padded(1));
+        let none = "the bucket's clock has no time: none of its backend's responses carried a \
+                    date it could read (`Date`)";
+        assert_eq!(serving.block_on(probe(&*undated, 1)), Err(format!("{key}: {none}")));
+        server.dating(true);
+        let ahead = Watched::new(s3(&server, "ahead", &Client::DEFAULT), SKEW + 2_000, None);
+        let refused = serving.block_on(probe(&ahead, 1)).unwrap_err();
+        let said = "ms ahead of the date its backend gave it";
+        assert!(refused.starts_with(&key) && refused.contains(said), "{refused}");
     }
 
     /// board 5861: what a bucket refuses for good, its helpers that retry failures till they pass
@@ -3418,10 +3900,13 @@ pub(crate) mod tests {
             spawned: false,
             kms: Some(crate::keys::testing::kms()),
         };
+        // cladefs: the listing's refusal its own outcome, no pass's (board 8509).
         let swept = serving.block_on(sweep.run(&bucket, |_| {}));
-        assert_eq!((swept.visited, swept.failed), (0, 1));
+        assert_eq!((swept.visited, swept.failed), (0, 0));
+        let Some(crate::sweep::Stopped::Unlisted(_)) = swept.stopped else { panic!("{swept:?}") };
+        assert!(!swept.complete());
         let swept = serving.block_on(sweep.run_cell(&bucket, cell, |_| {}));
-        assert_eq!((swept.visited, swept.failed), (1, 1));
+        assert_eq!((swept.visited, swept.failed, swept.stopped), (1, 1, None));
     }
 
     /// cladefs: a bucket's connections are tasks of the runtime that opened them (`reqwest`, as
@@ -3463,7 +3948,44 @@ pub(crate) mod tests {
             let server = S3Server::start(None);
             let bucket = s3(&server, "conformance", &Client::DEFAULT);
             crate::bucket::conformance(&*bucket, "conformance").await;
+            crate::bucket::conditional_deletes(&*bucket, "conformance", true).await;
             cell_lifecycle(s3(&server, "cells", &Client::DEFAULT), 1).await;
+        });
+    }
+
+    /// board 9229, hotbed review 53: a bucket's check that its backend honours a conditional
+    /// delete, its delete of another version failing (the server refusing it once), answers
+    /// nothing of the condition: the delete fails, and the next asks again, finds it honoured,
+    /// and deletes, never taking the failure for "ignored" for good. Over S3, a conditional delete
+    /// is a DeleteObject, not DeleteObjects. The check failing at any step deletes its object.
+    #[test]
+    fn conditional_deletes_check_their_backend_again_after_a_failure() {
+        runtime().block_on(async {
+            let server = S3Server::start(None);
+            let bucket = s3(&server, "deletes", &Client::DEFAULT);
+            let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
+            server.answering_next(crate::s3_server::Next::ConditionalDelete, 403);
+            let refused = bucket.delete_if("key", &version).await;
+            assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
+            assert_eq!(bucket.get("key").await.unwrap().bytes, [1]);
+            let before = server.requests();
+            assert_eq!(bucket.delete_if("key", &version).await, Ok(()));
+            assert_eq!(bucket.head("key").await.map(drop), Err(Error::NotFound));
+            let deletes =
+                |requests: &std::collections::BTreeMap<&str, u64>| requests.get("delete").copied();
+            // The check's two, then its own.
+            assert_eq!(deletes(&server.requests()), deletes(&before).map(|n| n + 3));
+            assert_eq!(server.requests().get("delete-objects"), before.get("delete-objects"));
+
+            // hotbed review 54: the check failing at any step leaves nothing of its probe.
+            let bucket = s3(&server, "leaks", &Client::DEFAULT);
+            let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
+            server.answering_next(crate::s3_server::Next::Head, 403);
+            let refused = bucket.delete_if("key", &version).await;
+            assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
+            let left: Vec<String> =
+                bucket.list("").await.unwrap().into_iter().map(|meta| meta.key).collect();
+            assert_eq!(left, ["key"]);
         });
     }
 
@@ -3661,6 +4183,10 @@ pub(crate) mod tests {
             // reach (TASK-645). Even, so that the child's, the next, is one too.
             let root = (crate::objectid::named() & !1).max(2);
             crate::bucket::conformance(&*bucket, &format!("conformance-{root:x}")).await;
+            // cladefs: made by all but Azure's, through `object_store` (board 9229).
+            let made = provider_of(url) != Ok("azure");
+            crate::bucket::conditional_deletes(&*bucket, &format!("conformance-{root:x}"), made)
+                .await;
             cell_lifecycle(bucket, root).await;
         });
     }
@@ -3688,7 +4214,8 @@ pub(crate) mod tests {
         const SIZE: usize = 8 << 20;
         runtime().block_on(async {
             let bucket = ObjectBucket::from_url(&url).unwrap();
-            let run = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let run = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+            let run = run.as_nanos();
             let keys: Vec<String> = (0..OBJECTS).map(|n| format!("uploads-{run:x}/{n}")).collect();
             let start = std::time::Instant::now();
             let puts = keys

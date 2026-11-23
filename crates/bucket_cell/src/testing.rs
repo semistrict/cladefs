@@ -30,6 +30,8 @@ enum Op {
     ListDelimited(String, Option<String>, usize),
     Put(String, Vec<u8>, PutMode),
     Delete(String),
+    /// cladefs: a delete of the object if it is of the version (board 9229).
+    DeleteIf(String, Version),
 }
 
 enum Reply {
@@ -379,7 +381,8 @@ impl Op {
             | Op::List(key)
             | Op::ListDelimited(key, ..)
             | Op::Put(key, ..)
-            | Op::Delete(key) => key,
+            | Op::Delete(key)
+            | Op::DeleteIf(key, _) => key,
         }
     }
 
@@ -397,6 +400,9 @@ impl Op {
             }
             Op::Put(key, ..) => format!("put {key}"),
             Op::Delete(key) => format!("delete {key}"),
+            Op::DeleteIf(key, Version { e_tag, .. }) => {
+                format!("delete {key} if {}", e_tag.as_deref().unwrap_or("none"))
+            }
         }
     }
 
@@ -520,6 +526,13 @@ impl Inner {
                     version: None,
                 }))
             }
+            Op::DeleteIf(key, Version { e_tag, .. }) => {
+                let there = self.objects.get(&at(&key)).map(|stored| stored.version.to_string());
+                if there.is_none() || there != e_tag {
+                    return Err(Error::Precondition);
+                }
+                self.apply(region, Op::Delete(key))
+            }
             Op::Delete(key) => {
                 // The creates held at its key wait again once an object there is deleted.
                 if self.objects.remove(&at(&key)).is_some() {
@@ -597,6 +610,17 @@ impl Bucket for SimBucket {
 
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
         let future = self.request(Op::Delete(key.to_owned()));
+        async move { future.await.map(|_| ()) }
+    }
+
+    /// cladefs: its condition checked as the request completes, not as it is sent: one held in
+    /// flight past another's write of the key deletes nothing (board 9229).
+    fn delete_if(
+        &self,
+        key: &str,
+        version: &Version,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        let future = self.request(Op::DeleteIf(key.to_owned(), version.clone()));
         async move { future.await.map(|_| ()) }
     }
 
@@ -734,6 +758,15 @@ impl Bucket for Direct {
 
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
         let result = self.apply(Op::Delete(key.to_owned())).map(|_| ());
+        std::future::ready(result)
+    }
+
+    fn delete_if(
+        &self,
+        key: &str,
+        version: &Version,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        let result = self.apply(Op::DeleteIf(key.to_owned(), version.clone())).map(|_| ());
         std::future::ready(result)
     }
 
@@ -1089,6 +1122,8 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             | Kind::Marks { .. }
             | Kind::Marking
             | Kind::Retired { .. } => true,
+            // cladefs: a host's tombstone, for good (board 8519).
+            Kind::Decommissioned { .. } => true,
             // cladefs: as its mirror's copy says ([`uncollected_copies`]).
             Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),

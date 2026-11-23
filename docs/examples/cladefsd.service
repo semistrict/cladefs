@@ -1,0 +1,94 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# A host's extent daemon under systemd: a reference unit (docs/operating-a-host.md, "Running under
+# systemd", board 8609). The paths, the memory and the bucket are this example's: adapt them to the
+# host. Install it as /etc/systemd/system/cladefsd.service; the daemon's user is `cladefsd`, in the
+# group `kvm`, which the udev rule of "Access to userfaultfd" gives /dev/userfaultfd.
+
+[Unit]
+Description=cladefs extent daemon (cladefsd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=cladefsd
+Group=cladefsd
+SupplementaryGroups=kvm
+# Jails run as other users than the daemon's (docs/integrator-guide.md): a grant gives a tenant's
+# socket to its jails' user, then its mode, then links it in place (cladefsd::bind_given: CAP_CHOWN,
+# and CAP_FOWNER for a file no longer its own), and a VM process is served only if the daemon may
+# kill it (Peer::connected's signal 0: CAP_KILL for another user's). Those three, no others.
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_KILL
+
+# Its sockets in a directory of its own, which systemd removes as the daemon stops, a crash
+# included: a daemon started over a dead one's sockets refuses them (board 5227). The VM manager
+# finds the VM socket, the control socket and the tenants' there.
+RuntimeDirectory=cladefsd
+RuntimeDirectoryMode=0750
+# Its cell directories, part cache and replica directory, which outlive it.
+StateDirectory=cladefsd
+StateDirectoryMode=0700
+
+# What it needs said: the bucket and the placement's token, which the control plane gives, in a
+# file only root reads (CLADEFSD_BUCKET, CLADEFSD_TOKEN, the bucket's credentials); the master key
+# as a credential, never in the environment's file (CLADEFS_MASTER_KEY_FILE), or CLADEFS_KMS in
+# the file instead.
+EnvironmentFile=/etc/cladefs/cladefsd.env
+LoadCredential=master-key:/etc/cladefs/master-key
+Environment=CLADEFS_MASTER_KEY_FILE=%d/master-key
+Environment=CLADEFSD_GRPC=/run/cladefsd/control.sock
+Environment=CLADEFSD_PART_CACHE=/var/lib/cladefsd/part-cache
+Environment=CLADEFSD_REPLICAS=/var/lib/cladefsd/replicas
+Environment=CLADEFSD_METRICS=127.0.0.1:9184
+Environment=CLADEFS_LOG_FORMAT=json
+# The drain's bound, which TimeoutStopSec must exceed.
+Environment=CLADEFSD_DRAIN=60
+
+# Its memory fixed, 64 GiB here, in a cgroup whose limit holds it and the daemon's own heap
+# (cladefsd_process_anon_budget_bytes, which /metrics reports: 8 GiB is this example's guess):
+# under memory.max the governor, which reads the host's free memory and not the cgroup's, would
+# take what the cgroup's OOM killer then stops it for. The cgroup is charged for every VM's cached
+# file pages (docs/operating-a-host.md, "The daemon's memory").
+ExecStart=/usr/local/bin/cladefsd /run/cladefsd/vm.sock 68719476736
+MemoryMax=72G
+# The kernel's OOM killer takes VMs before it: the daemon's death takes every VM on the host.
+OOMScoreAdjust=-900
+
+# Each cell keeps its files open, and each VM process's connection a few: the daemon raises its
+# limit to the hard limit this sets (cladefs::cladefsd::raise_open_files_limit), and serves at most
+# three quarters of it over 4 files a connection; under 35,840 it refuses to start (board 8595,
+# hotbed question 507).
+LimitNOFILE=1048576
+
+# SIGTERM drains it: no new VM processes or control calls, every connection closed (its VM exits
+# 158), every cell closed and uploaded, within CLADEFSD_DRAIN seconds, then exit 0, or 1 past them
+# saying what was left (docs/upgrading-a-host.md). systemd's stop waits longer than the drain, so
+# that it never SIGKILLs one under way.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+# A restart, the daemon having died or exited, takes the host's VMs with it: they exited 158 as it
+# went. The default start limit (5 in 10 s) is never reached 2 s apart: it restarts until it runs.
+Restart=always
+RestartSec=2
+
+# Sandboxing systemd gives for nothing; no system call filter, whose call missed would kill the
+# daemon and every VM with it (hotbed question 510). FUSE mounts (CLADEFSD_MOUNT) by a user other than root need
+# fusermount3's setuid, which NoNewPrivileges takes away: drop it on such a host.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/cladefsd /run/cladefsd
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

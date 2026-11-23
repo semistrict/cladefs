@@ -209,6 +209,9 @@ struct Node {
     /// Of those, the pages of runs quarantined, every arena's, those removed too: room on its way,
     /// which relief exhausts no arena starved at the total while any is to come back (TASK-132).
     quarantined: AtomicU64,
+    /// cladefs: of those, the pages of runs held for a wedged VM process (board 8535): not on their
+    /// way, as they come back only once it exits, if ever ([`Quarantined::wedged`]).
+    wedged: AtomicU64,
     /// The most pages they populated together at once, so far.
     peak: AtomicU64,
     /// Whether arenas keep spares.
@@ -264,6 +267,7 @@ impl Node {
             punching: AtomicU64::new(0),
             spares: AtomicU64::new(0),
             quarantined: AtomicU64::new(0),
+            wedged: AtomicU64::new(0),
             peak: AtomicU64::new(0),
             keep_spares: AtomicBool::new(true),
             alloc_failed_no_mem: AtomicBool::new(false),
@@ -299,19 +303,34 @@ impl Node {
         self.populated.load(Ordering::Relaxed) + pages <= self.limit()
     }
 
-    /// The arena `id`, while it is not removed; the default made at its first use.
+    /// The arena `id`, while it is not removed; the default made at its first use, or none if its
+    /// memory object can't be made, which [`Node::default_arena`] logs.
     fn arena(&'static self, id: ArenaId) -> Option<Arc<Arena>> {
-        let mut arenas = self.arenas.lock().unwrap();
-        if id == ArenaId::DEFAULT && arenas.0.is_empty() {
-            let default = Arena::new(self, ArenaId::DEFAULT);
-            arenas.0.insert(ArenaId::DEFAULT, default);
+        if id == ArenaId::DEFAULT {
+            // Its error logged by `default_arena`: none, which fails what asked for it (NoMemory).
+            return self.default_arena().ok();
         }
-        arenas.0.get(&id).cloned()
+        self.arenas.lock().unwrap().0.get(&id).cloned()
     }
 
-    /// The arenas, the default among them.
+    /// cladefs: the default arena, made at its first use: an error, logged, if its memory object
+    /// can't be made, as with as many files open as the process may (board 8491). Made holding no
+    /// lock, so that a failure leaves the arenas as they were, and the next use tries again.
+    fn default_arena(&'static self) -> std::io::Result<Arc<Arena>> {
+        if let Some(default) = self.arenas.lock().unwrap().0.get(&ArenaId::DEFAULT) {
+            return Ok(default.clone());
+        }
+        let made = Arena::new(self, ArenaId::DEFAULT).inspect_err(|err| {
+            log::error!("cladefs: making the default arena's memory object: {err}");
+        })?;
+        let mut arenas = self.arenas.lock().unwrap();
+        Ok(arenas.0.entry(ArenaId::DEFAULT).or_insert(made).clone())
+    }
+
+    /// The arenas, the default among them, if it could be made.
     fn all(&'static self) -> Vec<Arc<Arena>> {
-        self.arena(ArenaId::DEFAULT);
+        // Made here if it can be, or left out, which `default_arena` logged.
+        let _ = self.default_arena();
         self.arenas.lock().unwrap().0.values().cloned().collect()
     }
 
@@ -346,11 +365,12 @@ impl Node {
 }
 
 impl Arena {
-    /// A new arena of `node`'s, `id`, holding nothing: its object made, of no bytes.
-    fn new(node: &'static Node, id: ArenaId) -> Arc<Self> {
-        let object = object::Object::new().expect("an arena's memory object");
+    /// A new arena of `node`'s, `id`, holding nothing: its object made, of no bytes; or why it
+    /// couldn't be (board 8491).
+    fn new(node: &'static Node, id: ArenaId) -> std::io::Result<Arc<Self>> {
+        let object = object::Object::new()?;
         let state = Mutex::new(ArenaState::new(slab_pages()));
-        Arc::new(Self { id, node, object, state })
+        Ok(Arc::new(Self { id, node, object, state }))
     }
 
     /// Where `run` begins in its object, in bytes.
@@ -648,15 +668,21 @@ pub fn alloc(arena: ArenaId, pages: u64, wait: Wait) -> Result<PartSlab, NoMemor
     node().arena(arena).ok_or(NoMemory)?.alloc(pages, wait)
 }
 
-/// A new arena, which holds no page.
-pub fn create_arena() -> ArenaId {
+/// A new arena, which holds no page; or why its memory object, or the default arena's, couldn't
+/// be made, as with as many files open as the process may (board 8491): made holding no lock, so
+/// that a failure leaves the arenas as they were.
+pub fn create_arena() -> std::io::Result<ArenaId> {
     let node = node();
-    node.arena(ArenaId::DEFAULT);
-    let mut arenas = node.arenas.lock().unwrap();
-    let id = ArenaId(arenas.1);
-    arenas.1 += 1;
-    arenas.0.insert(id, Arena::new(node, id));
-    id
+    node.default_arena()?;
+    let id = {
+        let mut arenas = node.arenas.lock().unwrap();
+        let id = ArenaId(arenas.1);
+        arenas.1 += 1;
+        id
+    };
+    let made = Arena::new(node, id)?;
+    node.arenas.lock().unwrap().0.insert(id, made);
+    Ok(id)
 }
 
 /// Removes `arena`, not the default: its allocations fail from now on, whether or not they may wait
@@ -681,9 +707,10 @@ pub fn arena_fd(arena: ArenaId) -> Option<Arc<OwnedFd>> {
     Some(node().arena(arena)?.object.fd().clone())
 }
 
-/// The default arena's shared memory object, for mapping its pages elsewhere.
-pub fn default_fd() -> Arc<OwnedFd> {
-    arena_fd(ArenaId::DEFAULT).expect("the default arena")
+/// The default arena's shared memory object, for mapping its pages elsewhere; or why it couldn't
+/// be made (board 8491).
+pub fn default_fd() -> std::io::Result<Arc<OwnedFd>> {
+    Ok(node().default_arena()?.object.fd().clone())
 }
 
 /// Caps the memory `arena` may hold, in bytes, rounded down to pages, or lifts its cap. Lowered
@@ -787,6 +814,12 @@ pub fn leaked_bytes() -> u64 {
 pub fn quarantined_bytes() -> u64 {
     let pages: u64 = node().all().iter().map(|arena| arena.state.lock().unwrap().quarantined).sum();
     pages * page_size()
+}
+
+/// cladefs: the memory of runs held for wedged VM processes, in bytes, every arena's (board 8535):
+/// of [`quarantined_bytes`], what comes back only once those VM processes exit, if ever.
+pub fn wedged_bytes() -> u64 {
+    node().wedged.load(Ordering::Relaxed) * page_size()
 }
 
 /// cladefs: how many arenas' relief found nothing to free while they were starved, so that their

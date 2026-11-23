@@ -58,7 +58,7 @@ where
 mod tests {
     use super::*;
 
-    #[fuchsia::test]
+    #[test]
     fn test_custom_future_is_smaller() {
         async fn large_future() -> [u8; 128] {
             let held_across_await = [0; 128];

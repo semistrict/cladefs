@@ -49,7 +49,7 @@ use fxfs::object_store::journal::RESET_XOR;
 use fxfs::object_store::journal::super_block::Root;
 use fxfs::object_store::object_record::{ObjectKey, ObjectKeyData};
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{ExtentMode, ExtentValue, NewChildStoreOptions, StoreOptions};
+use fxfs::object_store::{ExtentMode, ExtentValue, NewChildStoreOptions};
 use rand::rngs::StdRng;
 use rand::{RngExt as _, SeedableRng as _};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -476,7 +476,7 @@ async fn read_volume(fs: &Fxfs<Tested>, root: u64) -> (Reading, u64) {
 /// The volume `test` of a mounted filesystem, as a guest's mount opens it.
 async fn volume_of(filesystem: &OpenFxFilesystem, read_only: bool) -> Result<Fxfs<Tested>, Error> {
     let volumes = root_volume((**filesystem).clone()).await?;
-    let volume = volumes.volume("test", StoreOptions::default()).await?;
+    let volume = volumes.volume("test").await?;
     Ok(Fxfs::new((**filesystem).clone(), volume, read_only, Tested))
 }
 
@@ -520,8 +520,8 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
     let root_id = root_store.store_object_id();
     let allocator = filesystem.allocator();
     let volumes = root_volume((*filesystem).clone()).await.expect("the root volume");
-    let test = volumes.volume("test", StoreOptions::default()).await.expect("the volume");
-    let snapshot = volumes.volume("snapshot", StoreOptions::default()).await.expect("the snapshot");
+    let test = volumes.volume("test").await.expect("the volume");
+    let snapshot = volumes.volume("snapshot").await.expect("the snapshot");
     let (test_id, snapshot_id) = (test.store_object_id(), snapshot.store_object_id());
     let mut volume_layers = test.parent_objects();
     volume_layers.extend(snapshot.parent_objects());
@@ -816,15 +816,13 @@ impl Record {
             }
             Record::BitsShortOfKey => {
                 let (.., range) = extent_of(&items[at].key)?;
-                let ObjectValue::Extent(ExtentValue::Some {
-                    extent, extent_offset, key_id, ..
-                }) = &items[at].value
+                let ObjectValue::Extent(ExtentValue::Some { extent, extent_offset, .. }) =
+                    &items[at].value
                 else {
                     return None;
                 };
                 let bits = ((range.end - range.start) / PAGE - 1) as usize;
-                let value =
-                    ExtentValue::blank_overwrite_extent(*extent, *extent_offset, bits, *key_id);
+                let value = ExtentValue::blank_overwrite_extent(*extent, *extent_offset, bits);
                 items[at].value = ObjectValue::Extent(value);
             }
             Record::OutOfOrder => {

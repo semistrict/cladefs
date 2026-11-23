@@ -5,6 +5,7 @@
 //! cladefs's own: how a real KMS's URL names each tenant's KEK ([`KeyNames`]): what every real
 //! backend shares (TASK-411.16, .17, .18).
 
+use super::Origin;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -38,7 +39,8 @@ impl KeyNames {
             if line.is_empty() {
                 continue;
             }
-            let at = |why: &str| format!("the key overrides' line {}: {why}: {line:?}", number + 1);
+            // Its number alone, never what it holds: the file may be any (board 8525 AC #4).
+            let at = |why: &str| format!("the key overrides' line {}: {why}", number + 1);
             let mut words = line.split_whitespace();
             let (Some(tenant), Some(name), None) = (words.next(), words.next(), words.next())
             else {
@@ -53,9 +55,11 @@ impl KeyNames {
     }
 
     /// The names a KMS URL's query gives: its `key`, the template, and its `keys`, the path of a
-    /// file of overrides, read now.
+    /// file of overrides, read now; refused unread if the URL is of `origin` the registry of
+    /// buckets (board 8525).
     pub fn of_query<'a>(
         query: impl IntoIterator<Item = (&'a str, &'a str)>,
+        origin: Origin,
     ) -> Result<Self, String> {
         let (mut template, mut overrides) = (None, None);
         for (name, value) in query {
@@ -64,6 +68,9 @@ impl KeyNames {
                 "keys" => overrides = Some(value),
                 _ => {}
             }
+        }
+        if overrides.is_some() {
+            origin.file("keys=FILE")?;
         }
         let template = template.ok_or("the KMS URL names no key template: key=...{tenant}...")?;
         let overrides = match overrides {
@@ -74,6 +81,11 @@ impl KeyNames {
             None => None,
         };
         Self::new(template, overrides.as_deref())
+    }
+
+    /// The template, `{tenant}` in it.
+    pub fn template(&self) -> &str {
+        &self.template
     }
 
     /// The name of `tenant`'s KEK.
@@ -101,5 +113,20 @@ mod tests {
         let why =
             "the key template \"cladefs\" holds no {tenant}: every tenant would share one KEK";
         assert_eq!(refused, Err(why.to_owned()));
+    }
+
+    /// board 8525 AC #4: a line of the overrides refused is named by its number alone, never what
+    /// it holds, whatever file `keys` named: /etc/shadow's first line, a token's file.
+    #[test]
+    fn overrides_refused_say_their_line_number_alone() {
+        let secret = "root:$6$s3cr3t:19000:0:99999:7:::";
+        for (overrides, why) in [
+            (format!("{secret}\n"), "the key overrides' line 1: not a tenant and a key's name"),
+            (format!("7 k\n\n{secret} x\n"), "the key overrides' line 3: no tenant in base 32"),
+            (format!("7 k\n# {secret}\n7 j\n"), "the key overrides' line 3: a tenant named twice"),
+            (format!("a b {secret}\n"), "the key overrides' line 1: not a tenant and a key's name"),
+        ] {
+            assert_eq!(KeyNames::new("k{tenant}", Some(&overrides)), Err(why.to_owned()));
+        }
     }
 }

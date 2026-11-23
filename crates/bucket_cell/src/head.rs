@@ -611,7 +611,7 @@ mod tests {
         assert_eq!((held.head.swaps, held.head.epoch), (N, 1));
         let behind = held.clone();
         for end in 1..=N + 2 {
-            let next = Head { end, ..held.head.clone() };
+            let next = held.head.clone().holding(held.head.epoch, end);
             held = block_on(swap(&bucket, CELL, &held, next)).unwrap();
         }
         assert_eq!(held.head.swaps, 2 * N + 2);
@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(listed.len() as u64, N);
         assert_eq!(listed[2], (2, 2 * N + 2));
         assert_eq!(listed[3], (3, N + 3));
-        let stale = Head { end: 99, ..behind.head.clone() };
+        let stale = behind.head.clone().holding(behind.head.epoch, 99);
         assert_eq!(block_on(swap(&bucket, CELL, &behind, stale)).map(drop), Err(Error::Fenced));
         assert_eq!(block_on(get(&bucket, CELL)).unwrap().unwrap().end, N + 2);
     }
@@ -638,7 +638,7 @@ mod tests {
         for key in block_on(bucket::list(&bucket, &layout::heads(CELL))).unwrap() {
             block_on(bucket::delete(&bucket, &key.key)).unwrap();
         }
-        let next = Head { end: 5, ..held.head.clone() };
+        let next = held.head.clone().holding(held.head.epoch, 5);
         let swapped = block_on(swap(&bucket, CELL, &held, next)).map(drop);
         let found = block_on(bucket::get(&bucket, &held.next_key(CELL)))
             .unwrap()

@@ -13,14 +13,14 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2403,15 +2403,11 @@
+@@ -2473,15 +2473,11 @@
  		/* Between the count and the swap, where iomaps may dirty more (pause points). */
  		cladefs_dax_pause_file(CLADEFS_DAX_STEP_COUNTED, inode->i_ino);
- 		down_write(&file->sem);
+ 		cladefs_nofs_down_write(&file->sem);
 -		now = cladefs_dax_dirty_ranges(file);
 -		if (now && now <= most)
 -			break;
--		up_write(&file->sem);
+-		cladefs_nofs_up_write(&file->sem);
 -		kvfree(batch);
 -		batch = NULL;
 -		most = now;

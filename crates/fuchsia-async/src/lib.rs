@@ -36,11 +36,6 @@
 mod runtime;
 pub use self::runtime::*;
 
-mod handle;
-pub use self::handle::channel::{Channel, RecvMsg};
-pub use self::handle::on_signals::OnSignalsRef;
-pub use self::handle::socket::Socket;
-
 /// Asynchronous networking abstractions.
 #[cfg(not(target_os = "none"))]
 pub mod net;

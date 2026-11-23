@@ -24,8 +24,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     /// `range` (a reflink: FICLONE, FICLONERANGE, copy_file_range), copying no data: `dst`'s
     /// extents there go, and this file's take their place, each referenced once more
     /// (`Allocator::reference`), its holes holes there. Writes to either file afterwards move the
-    /// blocks they change (`Allocator::is_shared`). Both files are this store's, unencrypted and
-    /// not verified, and the caller locks them; `range` and `dst_offset` are block aligned, and if
+    /// blocks they change (`Allocator::is_shared`). Both files are this store's, and the caller
+    /// locks them; `range` and `dst_offset` are block aligned, and if
     /// `dst` is this file, the ranges don't overlap. The caller updates `dst`'s size. Extents
     /// written in place (overwrite modes), which can't be shared, fail with NotSupported.
     pub async fn txn_clone_range(
@@ -53,12 +53,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 || range.end <= dst_range.start,
             FxfsError::InvalidArgs
         );
-        for file in [self, dst] {
-            ensure!(
-                !file.handle.is_encrypted() && !file.is_verified_file(),
-                FxfsError::NotSupported
-            );
-        }
         if len == 0 {
             return Ok(());
         }
@@ -242,7 +236,7 @@ mod tests {
     /// cladefs: a clone across a hole takes no more commits however long the hole is: counted as
     /// bytes to clone, one of exabytes (xfstests' generic/303) committed for ever, and the journal,
     /// which couldn't keep up, panicked the guest with a write larger than its transfer buffer.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clone_range_crosses_holes_at_once() {
         const FAR: u64 = 1 << 50;
         let clones = Clones::new().await;
@@ -282,7 +276,7 @@ mod tests {
     /// place of what the clone held there: each file reads as it should, before and after either is
     /// written, which moves the blocks it changes; fsck finds nothing wrong, after a remount too;
     /// and the extents are freed once neither file holds them.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clone_range() {
         let clones = Clones::new().await;
         let bs = clones.fs.block_size().get();
@@ -332,7 +326,7 @@ mod tests {
         let store = fs.root_store();
         let root = Directory::open(&store, store.root_directory_object_id()).await.expect("open");
         let open = async |store: &Arc<ObjectStore>, object_id| {
-            ObjectStore::open_object(store, object_id, HandleOptions::default(), None)
+            ObjectStore::open_object(store, object_id, HandleOptions::default())
                 .await
                 .expect("open_object failed")
         };
@@ -355,7 +349,7 @@ mod tests {
     /// in one truncation, which frees them; fsck finds nothing wrong between. The references are
     /// read back from the allocator's layers, the journal compacted into them, after a remount
     /// (`test_clone_range` replays them from the journal).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clone_range_within_a_file() {
         let clones = Clones::new().await;
         let bs = clones.fs.block_size().get();
@@ -379,10 +373,9 @@ mod tests {
         device.reopen(false);
         let fs = FxFilesystem::open(device).await.expect("open failed");
         fsck(fs.clone()).await.expect("fsck failed");
-        let file =
-            ObjectStore::open_object(&fs.root_store(), file_id, HandleOptions::default(), None)
-                .await
-                .expect("open_object failed");
+        let file = ObjectStore::open_object(&fs.root_store(), file_id, HandleOptions::default())
+            .await
+            .expect("open_object failed");
         assert_eq!(&file.contents(usize::MAX).await.expect("contents")[..], &expected[..]);
         // The metadata's own allocations are as compaction left them.
         let allocated = fs.allocator().get_allocated_bytes();

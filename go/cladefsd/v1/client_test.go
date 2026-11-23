@@ -10,22 +10,60 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
 	cladefsdv1 "github.com/semistrict/cladefs/go/cladefsd/v1"
+	mountv1 "github.com/semistrict/cladefs/go/mount/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // fake serves the control API as the daemon answers it: Grant a socket, StatCell failing as the
-// daemon fails a call, with a status and its errno, or with an errno entry that is none.
+// daemon fails a call, with a status and its errno, or with an errno entry that is none, GetStats
+// and ListCells answers past gRPC's default limit of a message, 4 MiB.
 type fake struct {
 	cladefsdv1.UnimplementedCladefsdServer
+}
+
+// fakeMount serves the FUSE mount's Mount service, its List of one cell.
+type fakeMount struct {
+	mountv1.UnimplementedMountServer
+}
+
+func (fakeMount) List(context.Context, *mountv1.ListRequest) (*mountv1.ListResponse, error) {
+	return &mountv1.ListResponse{Cells: []*mountv1.AttachedCell{{Tenant: 1, Cell: 42}}}, nil
+}
+
+// large is how large GetStats's and ListCells's answers are, past gRPC's default limit of a
+// message, 4 MiB, short of MaxMessageBytes: some 2,600 VM processes' stats, at their 2 KiB each.
+const large = 5 << 20
+
+// path is a path of n bytes.
+func path(n int) string {
+	return "/" + strings.Repeat("p", n-1)
+}
+
+func (fake) GetStats(context.Context, *cladefsdv1.GetStatsRequest) (*cladefsdv1.GetStatsResponse, error) {
+	vms := make([]*cladefsdv1.VmStats, large/(4<<10))
+	for i := range vms {
+		vms[i] = &cladefsdv1.VmStats{Connection: uint64(i), Path: path(4 << 10)}
+	}
+	return &cladefsdv1.GetStatsResponse{Vms: vms}, nil
+}
+
+func (fake) ListCells(context.Context, *cladefsdv1.ListCellsRequest) (*cladefsdv1.ListCellsResponse, error) {
+	cells := make([]*cladefsdv1.ListedCell, large/(4<<10))
+	for i := range cells {
+		cells[i] = &cladefsdv1.ListedCell{Path: path(4 << 10), Stat: &cladefsdv1.StatCellResponse{Cell: uint64(i)}}
+	}
+	return &cladefsdv1.ListCellsResponse{Stores: cells}, nil
 }
 
 // base32 is id as the daemon names a tenant's socket by it: in base 32, Crockford's digits, lower
@@ -44,8 +82,18 @@ func (fake) Grant(_ context.Context, req *cladefsdv1.GrantRequest) (*cladefsdv1.
 }
 
 func (fake) StatCell(ctx context.Context, req *cladefsdv1.StatCellRequest) (*cladefsdv1.StatCellResponse, error) {
-	errno := map[string]string{"missing": "2", "garbled": "ENOENT"}[req.Path]
-	if err := grpc.SetTrailer(ctx, metadata.Pairs(cladefsdv1.ErrnoKey, errno)); err != nil {
+	errnos := map[string][]string{
+		"missing":  {"2"},
+		"stale":    {"116"},
+		"garbled":  {"ENOENT"},
+		"zero":     {"0"},
+		"negative": {"-2"},
+		"wide":     {"4294967298"},
+		"two":      {"2", "2"},
+	}[req.Path]
+	trailer := metadata.MD{}
+	trailer.Append(cladefsdv1.ErrnoKey, errnos...)
+	if err := grpc.SetTrailer(ctx, trailer); err != nil {
 		return nil, err
 	}
 	return nil, status.Error(codes.NotFound, "ENOENT")
@@ -69,6 +117,7 @@ func serve(t *testing.T) string {
 	server := grpc.NewServer()
 	cladefsdv1.RegisterCladefsdServer(server, fake{})
 	healthpb.RegisterHealthServer(server, health.NewServer())
+	mountv1.RegisterMountServer(server, fakeMount{})
 	go server.Serve(listener)
 	t.Cleanup(server.Stop)
 	return socket
@@ -98,6 +147,51 @@ func TestCalls(t *testing.T) {
 	}
 	if health.Status != healthpb.HealthCheckResponse_SERVING {
 		t.Errorf("health = %v, want SERVING", health.Status)
+	}
+	// The FUSE mount's Mount service, on the same connection (board 8587).
+	listed, err := client.Mount.List(t.Context(), &mountv1.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Cells) != 1 || listed.Cells[0].Cell != 42 {
+		t.Errorf("Mount.List = %v, want cell 42 alone", listed.Cells)
+	}
+}
+
+// Answers past gRPC's default limit of 4 MiB, as GetStats's and ListCells's of a host of many VMs
+// and cells, are taken (board 8581).
+func TestLargeAnswers(t *testing.T) {
+	client := client(t, serve(t))
+	stats, err := client.GetStats(t.Context(), &cladefsdv1.GetStatsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := proto.Size(stats); size < large || size > cladefsdv1.MaxMessageBytes {
+		t.Errorf("GetStats's answer is %d bytes, want %d to %d", size, large, cladefsdv1.MaxMessageBytes)
+	}
+	cells, err := client.ListCells(t.Context(), &cladefsdv1.ListCellsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := proto.Size(cells); size < large || size > cladefsdv1.MaxMessageBytes {
+		t.Errorf("ListCells's answer is %d bytes, want %d to %d", size, large, cladefsdv1.MaxMessageBytes)
+	}
+}
+
+// A failed call's errno is Linux's, whatever system the client runs on: ErrnoOf returns Linux's
+// number, and errors.Is finds this system's errno of it (board 8587).
+func TestLinuxErrno(t *testing.T) {
+	client := client(t, serve(t))
+	_, err := client.StatCell(t.Context(), &cladefsdv1.StatCellRequest{Path: "stale"})
+	errno, ok := cladefsdv1.ErrnoOf(err)
+	if !ok || errno != cladefsdv1.ESTALE {
+		t.Errorf("ErrnoOf(%v) = %d, %v, want 116 (Linux's ESTALE), true", err, errno, ok)
+	}
+	if !errors.Is(err, syscall.ESTALE) {
+		t.Errorf("errors.Is(%v, ESTALE) = false", err)
+	}
+	if _, ok := cladefsdv1.ErrnoOf(errors.New("no call's")); ok {
+		t.Errorf("ErrnoOf found an errno of an error no call's")
 	}
 }
 
@@ -133,19 +227,31 @@ func TestNoErrno(t *testing.T) {
 	}
 }
 
-// An errno entry that is no number is said, and no errno taken from it.
+// An errno entry that is no errno is said, and no errno taken from it: no number, 0, which the
+// daemon never says of a failure (board 8587), a negative one, one past 32 bits, two entries.
 func TestGarbledErrno(t *testing.T) {
 	client := client(t, serve(t))
-	_, err := client.StatCell(t.Context(), &cladefsdv1.StatCellRequest{Path: "garbled"})
-	want := `rpc error: code = NotFound desc = ENOENT (its cladefs-errno ["ENOENT"] is no errno)`
-	if err.Error() != want {
-		t.Errorf("err = %q, want %q", err, want)
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		t.Errorf("errors.As(%v) found errno %v, want none", err, errno)
-	}
-	if code := status.Code(err); code != codes.NotFound {
-		t.Errorf("status.Code(%v) = %v, want NotFound", err, code)
+	for path, entry := range map[string]string{
+		"garbled":  `["ENOENT"]`,
+		"zero":     `["0"]`,
+		"negative": `["-2"]`,
+		"wide":     `["4294967298"]`,
+		"two":      `["2" "2"]`,
+	} {
+		_, err := client.StatCell(t.Context(), &cladefsdv1.StatCellRequest{Path: path})
+		want := `rpc error: code = NotFound desc = ENOENT (its cladefs-errno ` + entry + ` is no errno)`
+		if err.Error() != want {
+			t.Errorf("%s: err = %q, want %q", path, err, want)
+		}
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			t.Errorf("%s: errors.As(%v) found errno %v, want none", path, err, errno)
+		}
+		if errno, ok := cladefsdv1.ErrnoOf(err); ok {
+			t.Errorf("%s: ErrnoOf(%v) = %d, want none", path, err, errno)
+		}
+		if code := status.Code(err); code != codes.NotFound {
+			t.Errorf("%s: status.Code(%v) = %v, want NotFound", path, err, code)
+		}
 	}
 }

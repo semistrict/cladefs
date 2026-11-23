@@ -24,7 +24,7 @@
 //! [`SPARSE_KEPT`]. An extent device's root is small ([`storage_device::MAX_ROOT`], the extent
 //! daemon's 4 KiB), and the root at its largest fits it ([`MAX_ROOT_BYTES`]).
 
-use anyhow::{Error, ensure};
+use anyhow::{Context as _, Error, ensure};
 use storage_device::ExtentId;
 
 /// The bytes of a ref.
@@ -48,6 +48,14 @@ pub(crate) const SPARSE_KEPT: usize = 16;
 
 /// The most dying extents a root names itself: more are listed in an extent of their own.
 pub(crate) const DYING_KEPT: usize = 64;
+
+/// The most dying extents a list names: 16 MiB of them, which a flush leaving more dying fails
+/// before it writes anything, and a root read back naming more is refused (board 8549). Within
+/// the extent daemon's largest extent (doc-4's `max_extent`, 64 MiB), and within a daemon
+/// device's transfer buffers (`cladefs::DaemonDevice`'s 32 MiB), whose allocation of more panics
+/// (hotbed review 57). A flush of 4 KiB blocks in extents of 1024 leaves that many dying having
+/// discarded 4 TiB.
+pub(crate) const MAX_LISTED: u64 = (16 << 20) / 16;
 
 /// The bytes of the largest root: [`DYING_KEPT`] dying extents and [`SPARSE_KEPT`] to compact.
 pub(crate) const MAX_ROOT_BYTES: usize = ROOT_MAGIC.len()
@@ -208,9 +216,12 @@ pub(crate) struct Root {
     pub tree: TreeRoot,
 }
 
-/// The bytes of an extent listing `count` extents, in blocks of `block_size`.
-pub(crate) fn list_len(count: u64, block_size: usize) -> usize {
-    (count as usize * 16).div_ceil(block_size).max(1) * block_size
+/// The bytes of an extent listing `count` extents, in blocks of `block_size`: none if past a
+/// `usize`, as a count a root read back names may be.
+pub(crate) fn list_len(count: u64, block_size: usize) -> Option<usize> {
+    // Past a `usize`: none, which the caller refuses.
+    let bytes = usize::try_from(count).ok()?.checked_mul(16)?;
+    bytes.div_ceil(block_size).max(1).checked_mul(block_size)
 }
 
 /// The bytes of an extent listing `extents`, in blocks of `block_size`.
@@ -219,7 +230,7 @@ pub(crate) fn encode_list(extents: &[ExtentId], block_size: usize) -> Vec<u8> {
         .flat_map(|extent| [extent.cell.to_le_bytes(), extent.sequence.to_le_bytes()])
         .flatten()
         .collect();
-    out.resize(list_len(extents.len() as u64, block_size), 0);
+    out.resize(list_len(extents.len() as u64, block_size).expect("a list in memory"), 0);
     out
 }
 
@@ -261,7 +272,10 @@ impl Root {
         out
     }
 
-    /// The root `bytes` hold: none if empty, as an extent device's root is until set.
+    /// The root `bytes` hold: none if empty, as an extent device's root is until set. Untrusted
+    /// (AGENTS.md, trust boundaries): the host's disk holds it, or another tenant's version a fork
+    /// came from.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, Error> {
         if bytes.is_empty() {
             return Ok(None);
@@ -275,15 +289,18 @@ impl Root {
         ensure!(version == ROOT_VERSION, "a block device of version {version}");
         let minted = reader.u64()?;
         let count = reader.u64()?;
-        ensure!(count as usize <= DYING_KEPT, "a root naming {count} dying extents");
+        ensure!(count <= DYING_KEPT as u64, "a root naming {count} dying extents");
         let dying = (0..count).map(|_| reader.extent()).collect::<Result<_, Error>>()?;
         let (list, count) = (reader.extent()?, reader.u64()?);
+        // More than a list holds is none, whose reading would ask for memory without bound
+        // (board 8549).
+        ensure!(count <= MAX_LISTED, "a root listing {count} dying extents, past {MAX_LISTED}");
         let dying_list = (count > 0).then_some((list, count));
         let size = reader.u64()?;
         let height = reader.u32()?;
-        let top = decode_ref(reader.take(REF_BYTES)?.try_into().unwrap())?;
+        let top = decode_ref(reader.take(REF_BYTES)?.try_into()?)?;
         let count = reader.u64()?;
-        ensure!(count as usize <= SPARSE_KEPT, "a root naming {count} extents to compact");
+        ensure!(count <= SPARSE_KEPT as u64, "a root naming {count} extents to compact");
         let sparse = (0..count)
             .map(|_| Ok((reader.extent()?, reader.u32()?)))
             .collect::<Result<_, Error>>()?;
@@ -293,26 +310,27 @@ impl Root {
     }
 }
 
+/// A cursor over a root's bytes, or a list's, read back from a device: untrusted.
 struct Reader<'a>(&'a [u8]);
 
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 impl<'a> Reader<'a> {
     fn extent(&mut self) -> Result<ExtentId, Error> {
         Ok(ExtentId::new(self.u64()?, self.u64()?))
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
-        ensure!(self.0.len() >= len, "the root ends early");
-        let (taken, rest) = self.0.split_at(len);
+        let (taken, rest) = self.0.split_at_checked(len).context("the root ends early")?;
         self.0 = rest;
         Ok(taken)
     }
 
     fn u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_le_bytes(self.take(4)?.try_into()?))
     }
 
     fn u64(&mut self) -> Result<u64, Error> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(u64::from_le_bytes(self.take(8)?.try_into()?))
     }
 }
 
@@ -376,11 +394,44 @@ mod tests {
         let listed: Vec<_> = (0..300).map(|n| ExtentId::new(1, n)).collect();
         let list = encode_list(&listed, 4096);
         assert_eq!(list.len(), 8192);
+        assert_eq!(list_len(300, 4096), Some(8192));
+        assert_eq!(list_len(u64::MAX, 4096), None);
         assert_eq!(decode_list(&list, 300).unwrap(), listed);
         let error = Root::decode(b"something else").unwrap_err();
         assert_eq!(error.to_string(), "the device holds no block device");
         let error = Root::decode(b"FXSQLVOL\x04\0\0\0").unwrap_err();
         assert_eq!(error.to_string(), "the device holds no block device");
+    }
+
+    /// A root read back listing dying extents in an extent of their own is refused if it lists
+    /// more than a list holds, before anything is read or allocated for them: a count of
+    /// `u64::MAX` asked `list_len` for more than a `usize`, which wrapped, or panicked, and an
+    /// allocation of gigabytes otherwise (board 8549). The edges: none, one, the most, one more,
+    /// and the most a root's count holds.
+    #[test]
+    fn a_root_listing_more_than_a_list_holds_is_refused() {
+        let root = |count: u64| {
+            let dying_list = (count > 0).then_some((ExtentId::new(1, 9), count));
+            Root { minted: 10, dying_list, ..Root::default() }.encode()
+        };
+        for count in [0, 1, MAX_LISTED - 1, MAX_LISTED] {
+            let decoded = Root::decode(&root(count)).unwrap().unwrap();
+            let listed = decoded.dying_list.map(|(_, count)| count).unwrap_or(0);
+            assert_eq!(listed, count);
+        }
+        for count in [MAX_LISTED + 1, 1 << 40, u64::MAX - 1, u64::MAX] {
+            let error = Root::decode(&root(count)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("a root listing {count} dying extents, past {MAX_LISTED}")
+            );
+        }
+        // And a root cut short anywhere past its magic is refused, never read past its end.
+        let whole = root(3);
+        for len in ROOT_MAGIC.len()..whole.len() {
+            let error = Root::decode(&whole[..len]).unwrap_err();
+            assert_eq!(error.to_string(), "the root ends early", "cut at {len}");
+        }
     }
 
     /// The root at its largest, as many dying extents and extents to compact as it names, fits

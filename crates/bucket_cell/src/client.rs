@@ -29,6 +29,7 @@ use object_store::client::{
     HttpResponse, HttpResponseBody,
 };
 use object_store::{ClientConfigKey, ClientOptions};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,10 +59,98 @@ impl Client {
     }
 }
 
-impl HttpConnector for Client {
+/// cladefs: what connects a bucket's backend: [`Client`]'s, the date of each response to a request
+/// of the bucket's own heard by its clock (`Date`, [`crate::clock::Served`], board 8467): one that
+/// names `bucket` ([`names`]). Its credentials' requests go through it too, to services of clocks
+/// of their own (an instance's metadata, STS, OAuth), whose dates it hears not.
+#[derive(Debug)]
+pub(crate) struct Connector {
+    pub client: Client,
+    pub clock: Arc<crate::clock::Served>,
+    /// The bucket's name, or its container's: what its own requests name.
+    pub bucket: String,
+}
+
+impl HttpConnector for Connector {
     fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
-        Ok(HttpClient::new(Watched { client: reqwest_client(options)?, stall: self.stall }))
+        let client = reqwest_client(options)?;
+        let (stall, clock) = (self.client.stall, self.clock.clone());
+        let bucket = self.bucket.clone();
+        Ok(HttpClient::new(Watched { client, stall, clock, bucket }))
     }
+}
+
+/// Whether a request to `url` is of `bucket`'s own, as its backend's requests are: naming it as its
+/// host's first label (virtual-hosted, `bucket.s3.region.amazonaws.com`), or one of its path's first
+/// two segments (path-style S3's and GCS's first, Azure's container, the emulator's second, after
+/// its account), and at no link-local address, an instance's metadata service's (whose paths begin
+/// `/latest/`, a bucket's name as well as any). Its credentials' requests, to services of their
+/// own, name it nowhere.
+pub(crate) fn names(bucket: &str, url: &reqwest::Url) -> bool {
+    let local = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_link_local(),
+        // EC2's metadata service's, fd00:ec2::254, and link-local addresses.
+        Some(url::Host::Ipv6(ip)) => {
+            let segments = ip.segments();
+            segments[..2] == [0xfd00, 0xec2] || segments[0] & 0xffc0 == 0xfe80
+        }
+        _ => false,
+    };
+    let labelled = url.host_str().and_then(|host| host.split('.').next()) == Some(bucket);
+    let pathed = url.path_segments().is_some_and(|path| path.take(2).any(|at| at == bucket));
+    !local && (labelled || pathed)
+}
+
+/// cladefs: the condition of a delete of one object (board 9229), which `object_store` sends no
+/// request for: the header saying it (S3's `If-Match`, GCS's `x-goog-if-generation-match`), the
+/// object's path in its bucket, and whether a request carried it. [`conditioned`] puts it on the
+/// DELETE of that path the future it runs sends through a [`Connector`]'s client.
+#[derive(Debug)]
+pub(crate) struct Condition {
+    pub header: (reqwest::header::HeaderName, reqwest::header::HeaderValue),
+    pub path: String,
+    sent: std::sync::atomic::AtomicBool,
+}
+
+tokio::task_local! {
+    /// The condition of the delete [`conditioned`] runs: what its requests, in its task, carry.
+    static CONDITION: Condition;
+}
+
+/// cladefs: runs `delete`, a delete through a [`Connector`]'s client of the object at `path`, its
+/// DELETE request carrying `header` (board 9229); and whether a request did. One that did not was
+/// sent some other way than a DELETE of the object alone through the client (a batch's), and
+/// unconditioned: a caller makes sure none is ([`crate::object_bucket`]'s single deletes).
+pub(crate) async fn conditioned<T>(
+    header: (reqwest::header::HeaderName, reqwest::header::HeaderValue),
+    path: String,
+    delete: impl Future<Output = T>,
+) -> (T, bool) {
+    let condition = Condition { header, path, sent: std::sync::atomic::AtomicBool::new(false) };
+    CONDITION
+        .scope(condition, async {
+            let deleted = delete.await;
+            (deleted, CONDITION.with(|condition| condition.sent.load(Ordering::Relaxed)))
+        })
+        .await
+}
+
+/// Puts the condition of the delete under way in this task, if any, on `request`, if it is that
+/// delete's: a DELETE of the condition's path, as `url`, decoded, ends with it.
+fn condition(request: &mut reqwest::Request) {
+    if request.method() != reqwest::Method::DELETE {
+        return;
+    }
+    let path = percent_encoding::percent_decode_str(request.url().path()).decode_utf8_lossy();
+    let path = path.into_owned();
+    // No delete conditioned in this task: nothing to add.
+    let _ = CONDITION.try_with(|condition| {
+        if path.strip_suffix(condition.path.as_str()).is_some_and(|rest| rest.ends_with('/')) {
+            let (name, value) = condition.header.clone();
+            request.headers_mut().insert(name, value);
+            condition.sent.store(true, Ordering::Relaxed);
+        }
+    });
 }
 
 /// The user agent of a client whose options name none.
@@ -185,11 +274,14 @@ fn stalled(stall: Duration) -> HttpError {
     HttpError::new(HttpErrorKind::Timeout, Stalled(stall))
 }
 
-/// reqwest's client, whose requests time out once they stall.
+/// reqwest's client, whose requests time out once they stall, and the dates of whose responses to
+/// `bucket`'s own requests `clock` hears.
 #[derive(Debug)]
 struct Watched {
     client: reqwest::Client,
     stall: Duration,
+    clock: Arc<crate::clock::Served>,
+    bucket: String,
 }
 
 #[async_trait::async_trait]
@@ -198,8 +290,12 @@ impl object_store::client::HttpService for Watched {
         let (parts, body) = request.into_parts();
         let url = reqwest::Url::parse(&parts.uri.to_string())
             .map_err(|error| HttpError::new(HttpErrorKind::Unknown, error))?;
+        let dated = names(&self.bucket, &url);
         let mut sent = reqwest::Request::new(parts.method, url);
         *sent.headers_mut() = parts.headers;
+        // cladefs: after its signing, of the headers it names alone: S3 takes an `If-Match`
+        // unsigned, and GCS's requests carry a bearer token, signing none (board 9229).
+        condition(&mut sent);
         let progress = Arc::new(Progress::new());
         let body = Sending { body, slice: Bytes::new(), progress: progress.clone() };
         *sent.body_mut() = Some(reqwest::Body::wrap(body));
@@ -209,6 +305,10 @@ impl object_store::client::HttpService for Watched {
             Either::Left((response, _)) => response.map_err(http_error)?,
             Either::Right(((), _)) => return Err(stalled(self.stall)),
         };
+        // As it arrived, headers read: a failure's response is dated as well as any.
+        if let Some(date) = response.headers().get(reqwest::header::DATE).filter(|_| dated) {
+            self.clock.heard(date.as_bytes(), std::time::Instant::now());
+        }
         let (parts, body) = hyper::Response::<reqwest::Body>::from(response).into_parts();
         let body = Receiving { body, stall: self.stall, waiting: None };
         Ok(HttpResponse::from_parts(parts, HttpResponseBody::new(body)))

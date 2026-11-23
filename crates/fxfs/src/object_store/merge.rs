@@ -261,7 +261,7 @@ mod tests {
     use crate::object_store::extent::MIN_BLOCK_SIZE;
     use crate::object_store::extent_record::ExtentValue;
     use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectValue, Timestamp};
-    use crate::object_store::{AttributeId, ProjectId, VOLUME_DATA_KEY_ID};
+    use crate::object_store::{AttributeId, ProjectId};
     use anyhow::Error;
 
     async fn test_merge<K: MergeableKey, V: Value + PartialEq>(
@@ -287,7 +287,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_non_overlapping() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -295,14 +295,14 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..512),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 512..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
         ))
         .expect("insert error");
 
@@ -317,7 +317,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_rewrite_right() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -325,14 +325,14 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 512..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
         ))
         .expect("insert error");
 
@@ -342,20 +342,20 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..512));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0))
         );
         iter.advance().await?;
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1024));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_rewrite_left() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -367,7 +367,6 @@ mod tests {
                 TEST_EXTENT,
                 0,
                 Checksums::fletcher(vec![1, 2]),
-                VOLUME_DATA_KEY_ID,
             )),
         ))
         .expect("insert error");
@@ -379,7 +378,6 @@ mod tests {
                 TEST_EXTENT,
                 16384,
                 Checksums::fletcher(vec![3]),
-                VOLUME_DATA_KEY_ID,
             )),
         ))
         .expect("insert error");
@@ -393,8 +391,7 @@ mod tests {
             &ObjectValue::Extent(ExtentValue::with_checksum(
                 TEST_EXTENT,
                 16384,
-                Checksums::fletcher(vec![3]),
-                VOLUME_DATA_KEY_ID
+                Checksums::fletcher(vec![3])
             ))
         );
         iter.advance().await?;
@@ -404,8 +401,7 @@ mod tests {
             &ObjectValue::Extent(ExtentValue::with_checksum(
                 TEST_EXTENT,
                 512,
-                Checksums::fletcher(vec![2]),
-                VOLUME_DATA_KEY_ID
+                Checksums::fletcher(vec![2])
             ))
         );
         iter.advance().await?;
@@ -413,7 +409,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_rewrite_middle() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -425,7 +421,6 @@ mod tests {
                 TEST_EXTENT,
                 0,
                 Checksums::fletcher(vec![1, 2, 3, 4]),
-                VOLUME_DATA_KEY_ID,
             )),
         ))
         .expect("insert error");
@@ -437,7 +432,6 @@ mod tests {
                 TEST_EXTENT,
                 16384,
                 Checksums::fletcher(vec![5]),
-                VOLUME_DATA_KEY_ID,
             )),
         ))
         .expect("insert error");
@@ -451,8 +445,7 @@ mod tests {
             &ObjectValue::Extent(ExtentValue::with_checksum(
                 TEST_EXTENT,
                 0,
-                Checksums::fletcher(vec![1, 2]),
-                VOLUME_DATA_KEY_ID
+                Checksums::fletcher(vec![1, 2])
             ))
         );
         iter.advance().await?;
@@ -462,8 +455,7 @@ mod tests {
             &ObjectValue::Extent(ExtentValue::with_checksum(
                 TEST_EXTENT,
                 16384,
-                Checksums::fletcher(vec![5]),
-                VOLUME_DATA_KEY_ID
+                Checksums::fletcher(vec![5])
             ))
         );
         iter.advance().await?;
@@ -473,8 +465,7 @@ mod tests {
             &ObjectValue::Extent(ExtentValue::with_checksum(
                 TEST_EXTENT,
                 1536,
-                Checksums::fletcher(vec![4]),
-                VOLUME_DATA_KEY_ID
+                Checksums::fletcher(vec![4])
             ))
         );
         iter.advance().await?;
@@ -482,7 +473,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_rewrite_eclipses() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -490,14 +481,14 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 1024..1536),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..2048),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
         ))
         .expect("insert error");
 
@@ -507,14 +498,14 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..2048));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_delete_left() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -522,7 +513,7 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
@@ -542,14 +533,14 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1024));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 512, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 512))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_delete_right() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -557,7 +548,7 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
@@ -574,7 +565,7 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..512));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0))
         );
         iter.advance().await?;
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1024));
@@ -584,7 +575,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_delete_middle() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -592,7 +583,7 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..2048),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
@@ -609,7 +600,7 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1024));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0))
         );
         iter.advance().await?;
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 1024..1536));
@@ -618,14 +609,14 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 1536..2048));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1536, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1536))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_extents_delete_eclipses() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -633,7 +624,7 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 1024..1536),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
@@ -654,7 +645,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_new_layer_joins_two_deletions() -> Result<(), Error> {
         // Old layer:  [----]    [----]
         // New layer:       [----]
@@ -692,7 +683,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_new_layer_joined_by_old_deletion() -> Result<(), Error> {
         // Old layer:       [----]
         // New layer:  [----]    [----]
@@ -730,7 +721,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_overlapping_newest_on_right() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -759,7 +750,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_overlapping_newest_on_left() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -787,7 +778,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_new_layer_contained_in_old() -> Result<(), Error> {
         // Old layer:  [--------------]
         // New layer:       [----]
@@ -820,7 +811,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_new_layer_eclipses_old() -> Result<(), Error> {
         // Old layer:       [----]
         // New layer:  [--------------]
@@ -853,7 +844,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_does_not_coalesce_if_not_adjacent_layers()
     -> Result<(), Error> {
         // Layer 0:  [XXXXX]
@@ -873,7 +864,7 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
@@ -893,14 +884,14 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1024));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 512, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 512))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extents_does_not_coalesce_if_not_adjacent_deletions()
     -> Result<(), Error> {
         // Layer 0:  [XXXXX|--------]
@@ -912,7 +903,7 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 1024..1536),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.seal();
@@ -924,7 +915,7 @@ mod tests {
         .expect("insert error");
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 512..1536),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
 
@@ -937,14 +928,14 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1536));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extent_into_overwrites_extents() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -952,12 +943,12 @@ mod tests {
 
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..1024),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))
         .expect("insert error");
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 1024..2048),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
         ))
         .expect("insert error");
         let key = ObjectKey::extent(object_id, attr_id, 512..1536);
@@ -972,7 +963,7 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..512));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0))
         );
         iter.advance().await?;
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1536));
@@ -981,14 +972,14 @@ mod tests {
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 1536..2048));
         assert_eq!(
             iter.get().unwrap().value,
-            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16896, VOLUME_DATA_KEY_ID))
+            &ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16896))
         );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_deleted_extent_into_merges_with_other_deletions() -> Result<(), Error> {
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
@@ -1021,7 +1012,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_size_records() {
         let left = &[Item::new(
             ObjectKey::attribute(1, AttributeId::TEST_ID, AttributeKey::Attribute),
@@ -1035,7 +1026,7 @@ mod tests {
         test_merge(&tree, left, right, left).await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_different_attributes_not_merged() {
         let left = Item::new(
             ObjectKey::attribute(1, AttributeId::TEST_ID, AttributeKey::Attribute),
@@ -1050,17 +1041,17 @@ mod tests {
 
         let left = Item::new(
             ObjectKey::extent(1, AttributeId::TEST_ID, 0..100),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         );
         let right = Item::new(
             ObjectKey::extent(1, AttributeId::TEST_ID.next(), 0..100),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1)),
         );
         let tree = LSMTree::new(merge, None);
         test_merge(&tree, &[left.clone()], &[right.clone()], &[left, right]).await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_tombstone_discards_all_other_records() {
         let tombstone = Item::new(ObjectKey::object(1), ObjectValue::None);
         let other_object = Item::new(
@@ -1105,14 +1096,13 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extent_overlapping_boundaries() {
-        use crate::object_store::VOLUME_DATA_KEY_ID;
         let object_id = 1;
         let attr_id = AttributeId::TEST_ID;
         let base = Item::new(
             ObjectKey::extent(object_id, attr_id, 50..100),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         );
 
         // 1. Same end, start off-by-one.
@@ -1124,16 +1114,12 @@ mod tests {
             &[base.clone()],
             &[Item::new(
                 ObjectKey::extent(object_id, attr_id, 49..100),
-                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
             )],
             &[
                 Item::new(
                     ObjectKey::extent(object_id, attr_id, 49..50),
-                    ObjectValue::Extent(ExtentValue::new_raw(
-                        TEST_EXTENT,
-                        16384,
-                        VOLUME_DATA_KEY_ID,
-                    )),
+                    ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
                 ),
                 base.clone(),
             ],
@@ -1148,7 +1134,7 @@ mod tests {
             &[base.clone()],
             &[Item::new(
                 ObjectKey::extent(object_id, attr_id, 51..100),
-                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
             )],
             &[base.clone()],
         )
@@ -1158,13 +1144,16 @@ mod tests {
     // Tests merging across three LSM tree layers (top, middle, base) with various overlapping
     // combinations. `calculate_expected` constructs a 1-D point oracle where the newest layer
     // (top = 1, middle = 2, base = 3) wins for each byte position, and aggregates continuous
-    // segments to verify against the merger iterator output and layer advance depths.
-    #[fuchsia::test]
+    // segments to verify against the merger iterator output and layer advance depths. Each layer's
+    // extents are in a cell of its number, which says which layer an extent came from.
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extent_complex_multi_layer() {
         use crate::object_store::extent_record::ExtentValue;
         use crate::object_store::object_record::{
             AttributeKey, ObjectKey, ObjectKeyData, ObjectValue,
         };
+        use storage_device::ExtentId;
+        let layer_extent = |layer: u64| ExtentValue::new_raw(ExtentId::new(layer, 0), 0);
 
         let object_id = 1;
         let attr_id = AttributeId::TEST_ID;
@@ -1243,7 +1232,7 @@ mod tests {
                 // Base layer (Layer 2)
                 tree.insert(Item::new(
                     ObjectKey::extent(object_id, attr_id, scale_range(base_range.clone())),
-                    ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, 3)), // key_id = 3
+                    ObjectValue::Extent(layer_extent(3)),
                 ))
                 .expect("insert error");
                 tree.seal();
@@ -1251,7 +1240,7 @@ mod tests {
                 // Middle layer (Layer 1)
                 tree.insert(Item::new(
                     ObjectKey::extent(object_id, attr_id, scale_range(middle_range.clone())),
-                    ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, 2)), // key_id = 2
+                    ObjectValue::Extent(layer_extent(2)),
                 ))
                 .expect("insert error");
                 tree.seal();
@@ -1259,7 +1248,7 @@ mod tests {
                 // Top layer (Layer 0)
                 tree.insert(Item::new(
                     ObjectKey::extent(object_id, attr_id, scale_range(top_range.clone())),
-                    ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, 1)), // key_id = 1
+                    ObjectValue::Extent(layer_extent(1)),
                 ))
                 .expect("insert error");
 
@@ -1287,8 +1276,8 @@ mod tests {
                     } else {
                         panic!("Unexpected key type");
                     }
-                    if let ObjectValue::Extent(ExtentValue::Some { key_id, .. }) = value {
-                        assert_eq!(key_id, &e.1);
+                    if let ObjectValue::Extent(ExtentValue::Some { extent, .. }) = value {
+                        assert_eq!(extent.cell, e.1);
                     } else {
                         panic!("Unexpected value type");
                     }
@@ -1301,7 +1290,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_next_key_behavior() -> Result<(), Error> {
         let object_id = 1;
         let attr_id = AttributeId::TEST_ID;
@@ -1310,14 +1299,14 @@ mod tests {
         // Layer 1 (older)
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 50 * MIN_BLOCK_SIZE..101 * MIN_BLOCK_SIZE),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 0)),
         ))?;
         tree.seal();
 
         // Layer 0 (newer)
         tree.insert(Item::new(
             ObjectKey::extent(object_id, attr_id, 0..100 * MIN_BLOCK_SIZE),
-            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384, VOLUME_DATA_KEY_ID)),
+            ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 16384)),
         ))?;
 
         let layer_set = tree.layer_set();
@@ -1348,7 +1337,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_project_usage() {
         let tree = LSMTree::new(merge, None);
         let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
@@ -1384,7 +1373,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_project_usage_gap_layer() {
         let tree = LSMTree::new(merge, None);
         let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
@@ -1439,7 +1428,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_project_usage_to_zero() {
         let tree = LSMTree::new(merge, None);
         let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
@@ -1460,7 +1449,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_project_usage_recover_from_zero() {
         let tree = LSMTree::new(merge, None);
         let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
@@ -1490,7 +1479,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_project_usage_layer_merge_to_negative() {
         let tree = LSMTree::new(merge, None);
         let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());

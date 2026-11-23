@@ -4,7 +4,13 @@
 # found in the LICENSE file.
 
 # Refuses a commit that weakens a check (an assertion gone, a test ignored, a count lowered...)
-# unless its message says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9).
+# unless its message says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9);
+# and one that breaks a frozen format unless its message names the user's agreement in a
+# 'Breaks-format:' line (scripts/format-freeze.py, doc-28). Both say what they find.
 # `git config core.hooksPath scripts/hooks` installs it.
 set -euo pipefail
-exec "$(dirname "$0")/../test-weakening.py" --staged --message "$1"
+scripts=$(dirname "$0")/..
+status=0
+"$scripts/test-weakening.py" --staged --message "$1" || status=1
+"$scripts/format-freeze.py" --staged --message "$1" || status=1
+exit "$status"

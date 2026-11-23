@@ -7,9 +7,6 @@
 
 pub use super::implementation::scope::{Scope, ScopeActiveGuard, ScopeHandle};
 
-#[cfg(target_os = "fuchsia")]
-pub use super::implementation::scope::{Join, ScopeStream, Spawnable};
-
 #[cfg(test)]
 mod tests {
     use crate::{JoinHandle, Scope, TestExecutor, yield_now};
@@ -24,54 +21,25 @@ mod tests {
     use std::task::{Context, Poll};
 
     // Tokio doesn't have the equivalent of poll_until_stalled. This has a crude workaround.
-    async fn poll_until_stalled<T>(future: impl Future<Output = T> + Unpin) -> Poll<T> {
-        #[cfg(target_os = "fuchsia")]
-        {
-            TestExecutor::poll_until_stalled(future).await
-        }
-
-        #[cfg(not(target_os = "fuchsia"))]
-        {
-            let mut future = future;
-            for _ in 0..10 {
-                if let Poll::Ready(result) = futures::poll!(&mut future) {
-                    return Poll::Ready(result);
-                }
-                crate::yield_now().await;
+    async fn poll_until_stalled<T>(mut future: impl Future<Output = T> + Unpin) -> Poll<T> {
+        for _ in 0..10 {
+            if let Poll::Ready(result) = futures::poll!(&mut future) {
+                return Poll::Ready(result);
             }
-            Poll::Pending
+            crate::yield_now().await;
         }
+        Poll::Pending
     }
 
     fn new_scope() -> Scope {
-        #[cfg(target_os = "fuchsia")]
-        {
-            crate::EHandle::local().global_scope().new_child()
-        }
-
-        #[cfg(not(target_os = "fuchsia"))]
-        {
-            Scope::new_with_name("test")
-        }
+        Scope::new_with_name("test")
     }
 
     fn abort_task(task: JoinHandle<()>) {
-        #[cfg(target_os = "fuchsia")]
-        {
-            drop(task.abort());
-        }
-
-        #[cfg(not(target_os = "fuchsia"))]
-        {
-            task.abort();
-        }
+        task.abort();
     }
 
     fn run_with_test_executor(fut: impl Future) {
-        #[cfg(target_os = "fuchsia")]
-        assert!(TestExecutor::new().run_until_stalled(&mut pin!(fut)).is_ready());
-
-        #[cfg(not(target_os = "fuchsia"))]
         TestExecutor::new().run_singlethreaded(fut);
     }
 

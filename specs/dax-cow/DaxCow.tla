@@ -23,7 +23,14 @@
 (*   write(2), whose copy into the window is between its iomap_begin and  *)
 (*   iomap_end, holding the file's semaphore shared. Before either, a page*)
 (*   not counted waits, holding nothing, for the budget to have room for  *)
-(*   it (private_max).                                                     *)
+(*   it (private_max). Or a pin for writing (get_user_pages, FOLL_WRITE),  *)
+(*   as an O_DIRECT read into the mapping takes one: faulted in as a write *)
+(*   is, then a store through the pin, with no fault whatever the PTE, as  *)
+(*   the read's DMA does, then the pin let go (TASK-598).                  *)
+(* - the user, at any time: an mprotect of the mapping, read-only then    *)
+(*   writable again, which makes each PTE writable with no fault where it *)
+(*   is dirty (can_change_shared_pte_writable), as a userfaultfd's         *)
+(*   write-protect and unprotect do (Toggle, TASK-558).                    *)
 (* - the other task: writeback (->writepages), fsync (writeback, then the *)
 (*   seal that makes it durable), rebinding (a private page MAPped anew to*)
 (*   its extent's page, freeing it), and punching a page (truncate).      *)
@@ -99,6 +106,13 @@
 (*   away what the VM process installed there, for the next touch to      *)
 (*   install anew (dax::uffd's take_away): a page left installed reads    *)
 (*   what the window mapped before.                                         *)
+(* - protectCleans: writeback's write-protect cleans the PTEs too           *)
+(*   (mapping_wrprotect_range): one it leaves dirty, an mprotect toggle   *)
+(*   makes writable with no fault, and the next store lands in no set     *)
+(*   (TASK-558, dax.c's cladefs_dax_protect).                              *)
+(* - keepPinned: writeback keeps the pages a pin holds dirty, written now  *)
+(*   and again after: a store through the pin after the copy faults        *)
+(*   nowhere, and is in no set (TASK-598).                                 *)
 (*                                                                         *)
 (* Writeback keeps punches and rebinds out from its swap to its commit,    *)
 (* which doc-13 doesn't say: else one meets a copy whose commit is to come, *)
@@ -123,7 +137,7 @@ CONSTANTS
 
 AllRules == {"privateAtIomap", "protectByPageTables", "swapFirst", "swapExclusive",
              "rebindExclusive", "rebindAfterSeal", "keepUntilSealed", "countPrivate",
-             "bytesFirst", "installAsNamed", "changesTakeAway"}
+             "bytesFirst", "installAsNamed", "changesTakeAway", "protectCleans", "keepPinned"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME PrivateMax \in Nat \ {0}
@@ -151,6 +165,9 @@ VARIABLES
     errors,     \* what the host refused that it shouldn't have been asked
     \* The guest.
     pte,        \* pte[p]: the user's mapping of p: "none", "ro" or "rw"
+    pdirty,     \* the pages whose PTE is dirty: made writable by a fault, or stored through
+    pinned,     \* the pages a pin for writing holds (the storer's, sWay "pin")
+    kept,       \* of the writeback set, those a pin held as it was copied (keepPinned)
     dirty,      \* the file's dirty set
     wb,         \* the writeback set, from the swap to the commit
     sealing,    \* the writeback set, from the commit to the seal (keepUntilSealed)
@@ -167,7 +184,7 @@ VARIABLES
 hostVars == <<win, inst, refused>>
 fxfsVars == <<file, durable>>
 ghostVars == <<latest, next, errors>>
-guestVars == <<pte, dirty, wb, sealing, counted, semX, semR>>
+guestVars == <<pte, dirty, wb, sealing, counted, semX, semR, pdirty, pinned, kept>>
 sVars == <<spc, sPage, sWay, stores>>
 wVars == <<wpc, wOp, wPage, floor, buf, punches>>
 lVars == <<lpc, lPage, lSeen, loads>>
@@ -218,6 +235,11 @@ WriteProtected ==
     [p \in Pages |-> IF pte[p] = "rw" /\ ("protectByPageTables" \in Rules \/ ~EntryHeld(p))
                      THEN "ro" ELSE pte[p]]
 
+\* What the write-protect leaves dirty: the PTEs it made read-only it cleans too (protectCleans,
+\* mapping_wrprotect_range), or leaves dirty (wp_shared_mapping_range).
+ProtectedDirty ==
+    IF "protectCleans" \in Rules THEN {p \in pdirty : WriteProtected[p] = "rw"} ELSE pdirty
+
 \* A seal: the open extents sealed, the commits so far durable, the writeback set let go of, and
 \* the extents the commits replaced freed: a window page mapping one reads zeros.
 SealEffect ==
@@ -236,10 +258,12 @@ SealEffect ==
 \* A write to a page: through its PTE if it is writable, or a fault; or a write(2).
 SStart ==
     /\ spc = "idle" /\ stores < MaxStores
-    /\ \E p \in Pages, way \in {"fault", "write"} :
+    /\ \E p \in Pages, way \in {"fault", "write", "pin"} :
          /\ sPage' = p
          /\ sWay' = way
-         /\ spc' = IF way = "fault" /\ pte[p] = "rw" THEN "store" ELSE "throttle"
+         /\ spc' = CASE way = "fault" /\ pte[p] = "rw" -> "store"
+                    [] way = "pin" /\ pte[p] = "rw" -> "pin"
+                    [] OTHER -> "throttle"
     /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, guestVars, stores, wVars>>
 
 \* The budget: a page not counted waits, holding nothing, until there is room for it.
@@ -253,8 +277,8 @@ SLock ==
     /\ spc = "lock" /\ semX = "none"
     /\ semR' = semR \cup {"S"}
     /\ spc' = "begin"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, sPage,
-                   sWay, stores, wVars>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, pdirty,
+                   pinned, kept, sPage, sWay, stores, wVars>>
 
 \* cladefs_dax_iomap_begin, IOMAP_WRITE (fxfs_dax_cow_dirty): the page made private on the host
 \* (privateAtIomap), unless the host refuses, then dirty, counted private (countPrivate); a fault
@@ -264,16 +288,18 @@ SBegin ==
     /\ IF "privateAtIomap" \in Rules /\ ~CanStore(sPage)
        THEN /\ refused' = TRUE
             /\ spc' = "stopped"
-            /\ UNCHANGED <<win, inst, pte, dirty, counted>>
+            /\ UNCHANGED <<win, inst, pte, dirty, counted, pdirty>>
        ELSE /\ win' = IF "privateAtIomap" \in Rules
                       THEN [win EXCEPT ![sPage] = MadePrivate(sPage)] ELSE win
             /\ inst' = IF "privateAtIomap" \in Rules THEN MadePrivateInst(sPage) ELSE inst
             /\ dirty' = dirty \cup {sPage}
             /\ counted' = IF "countPrivate" \in Rules THEN counted \cup {sPage} ELSE counted
-            /\ pte' = IF sWay = "fault" THEN [pte EXCEPT ![sPage] = "rw"] ELSE pte
-            /\ spc' = IF sWay = "fault" THEN "unlock" ELSE "copy"
+            /\ pte' = IF sWay \in {"fault", "pin"} THEN [pte EXCEPT ![sPage] = "rw"] ELSE pte
+            /\ pdirty' = IF sWay \in {"fault", "pin"} THEN pdirty \cup {sPage} ELSE pdirty
+            /\ spc' = IF sWay \in {"fault", "pin"} THEN "unlock" ELSE "copy"
             /\ UNCHANGED refused
-    /\ UNCHANGED <<fxfsVars, ghostVars, wb, sealing, semX, semR, sPage, sWay, stores, wVars>>
+    /\ UNCHANGED <<fxfsVars, ghostVars, wb, sealing, semX, semR, pinned, kept, sPage, sWay, stores,
+                   wVars>>
 
 \* A write(2)'s copy into the window, between its iomap_begin and iomap_end.
 SCopy ==
@@ -287,19 +313,19 @@ SCopy ==
 SUnlock ==
     /\ spc = "unlock"
     /\ semR' = semR \ {"S"}
-    /\ IF sWay = "fault"
+    /\ IF sWay \in {"fault", "pin"}
        THEN /\ spc' = "entry"
             /\ UNCHANGED <<sPage, sWay>>
        ELSE /\ spc' = "idle"
             /\ sPage' = 0
             /\ sWay' = "none"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, stores,
-                   wVars>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, pdirty,
+                   pinned, kept, stores, wVars>>
 
-\* The fault returns, its page's DAX entry let go of, and the write is retried.
+\* The fault returns, its page's DAX entry let go of, and the write, or the pin's walk, is retried.
 SReturn ==
     /\ spc = "entry"
-    /\ spc' = "store"
+    /\ spc' = IF sWay = "pin" THEN "pin" ELSE "store"
     /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, guestVars, sPage, sWay, stores, wVars>>
 
 \* The write through the PTE, writable still; or, write-protected or unmapped since, a fault again.
@@ -315,7 +341,38 @@ SStore ==
             /\ UNCHANGED <<win, inst, refused, latest, next, stores, sPage, sWay>>
     /\ UNCHANGED <<fxfsVars, errors, guestVars, wVars>>
 
+\* A pin's walk (get_user_pages, FOLL_WRITE): the page writable, its pin taken; or, write-protected
+\* or unmapped since, a fault again, as for a write.
+SPin ==
+    /\ spc = "pin"
+    /\ IF pte[sPage] = "rw"
+       THEN /\ pinned' = pinned \cup {sPage}
+            /\ spc' = "pinStore"
+       ELSE /\ spc' = "throttle"
+            /\ UNCHANGED pinned
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, semR,
+                   pdirty, kept, sPage, sWay, stores, wVars>>
+
+\* The kernel's store through the pin, as an O_DIRECT read's DMA does: whatever the PTE, no fault.
+SPinStore ==
+    /\ spc = "pinStore"
+    /\ Store(sPage)
+    /\ stores' = stores + 1
+    /\ spc' = IF CanStore(sPage) THEN "unpin" ELSE "stopped"
+    /\ UNCHANGED <<fxfsVars, errors, guestVars, sPage, sWay, wVars>>
+
+\* The pin let go of, its page marked dirty (folio_mark_dirty_lock), which DAX takes as nothing.
+SUnpin ==
+    /\ spc = "unpin"
+    /\ pinned' = pinned \ {sPage}
+    /\ spc' = "idle"
+    /\ sPage' = 0
+    /\ sWay' = "none"
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, semR,
+                   pdirty, kept, stores, wVars>>
+
 StorerNext == SStart \/ SThrottle \/ SLock \/ SBegin \/ SCopy \/ SUnlock \/ SReturn \/ SStore
+              \/ SPin \/ SPinStore \/ SUnpin
 
 -----------------------------------------------------------------------------
 (* The other task: writeback, fsync, rebinding, punching. *)
@@ -338,9 +395,10 @@ WStart ==
 WWpFirst ==
     /\ wpc = "wpFirst"
     /\ pte' = WriteProtected
+    /\ pdirty' = ProtectedDirty
     /\ wpc' = "swapLock"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, dirty, wb, sealing, counted, semX, semR, sVars,
-                   wOp, wPage, floor, buf, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, dirty, wb, sealing, counted, semX, semR, pinned,
+                   kept, sVars, wOp, wPage, floor, buf, punches>>
 
 WSwapLock ==
     /\ wpc = "swapLock" /\ semX = "none"
@@ -351,8 +409,8 @@ WSwapLock ==
        ELSE /\ semR' = semR \cup {"W"}
             /\ UNCHANGED semX
     /\ wpc' = "swap"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, sVars, wOp,
-                   wPage, floor, buf, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, pdirty, pinned,
+                   kept, sVars, wOp, wPage, floor, buf, punches>>
 
 \* The dirty set swapped out for an empty one; the semaphore downgraded, held shared to the commit.
 WSwap ==
@@ -362,22 +420,27 @@ WSwap ==
     /\ semX' = "none"
     /\ semR' = semR \cup {"W"}
     /\ wpc' = IF "swapFirst" \in Rules THEN "wp" ELSE "copy"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, sealing, counted, sVars, wOp, wPage, floor,
-                   buf, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, sealing, counted, pdirty, pinned, kept, sVars,
+                   wOp, wPage, floor, buf, punches>>
 
 WWp ==
     /\ wpc = "wp"
     /\ pte' = WriteProtected
+    /\ pdirty' = ProtectedDirty
     /\ wpc' = "copy"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, dirty, wb, sealing, counted, semX, semR, sVars,
-                   wOp, wPage, floor, buf, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, dirty, wb, sealing, counted, semX, semR, pinned,
+                   kept, sVars, wOp, wPage, floor, buf, punches>>
 
-\* cladefs_write_many's copy of the pages, from the window into its transfer buffer.
+\* cladefs_write_many's copy of the pages, from the window into its transfer buffer; those a pin
+\* holds kept, to be dirty again once written (keepPinned): a store through the pin comes later, with
+\* no fault (cladefs_dax_protect notes them as it write-protects, before the copy).
 WCopy ==
     /\ wpc = "copy"
     /\ buf' = [p \in Pages |-> IF p \in wb THEN win[p].data ELSE buf[p]]
+    /\ kept' = IF "keepPinned" \in Rules THEN wb \cap pinned ELSE {}
     /\ wpc' = IF "bytesFirst" \in Rules THEN "write" ELSE "commit"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, guestVars, sVars, wOp, wPage, floor, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, semR,
+                   pdirty, pinned, sVars, wOp, wPage, floor, punches>>
 
 \* Its WRITE of them to a new extent: before the commit (bytesFirst), or after it.
 WWrite ==
@@ -389,11 +452,15 @@ WWrite ==
                            IF p \in wb THEN [file[p] EXCEPT !.data = buf[p]] ELSE file[p]]
             /\ wb' = {}
             /\ wpc' = "unlock"
-    /\ UNCHANGED <<hostVars, durable, ghostVars, pte, dirty, sealing, counted, semX, semR, sVars,
-                   wOp, wPage, floor, buf, punches>>
+    /\ dirty' = IF "bytesFirst" \in Rules THEN dirty ELSE dirty \cup kept
+    /\ kept' = IF "bytesFirst" \in Rules THEN kept ELSE {}
+    /\ UNCHANGED <<hostVars, durable, ghostVars, pte, sealing, counted, semX, semR, pdirty, pinned,
+                   sVars, wOp, wPage, floor, buf, punches>>
 
 \* The transaction naming the new extent, open; its pages kept until it is sealed. The blocks it
-\* replaces die at the next seal: a window page mapping one, not private, is doomed.
+\* replaces die at the next seal: a window page mapping one, not private, is doomed. As the set is
+\* let go of, those a pin held are dirty again (keepPinned, cladefs_dax_keep), in one step: dax.c
+\* holds the writeback lock from its copy to then, which keeps every other look at the sets out.
 WCommit ==
     /\ wpc = "commit"
     /\ file' = [p \in Pages |->
@@ -406,9 +473,11 @@ WCommit ==
                   ELSE win[p]]
     /\ sealing' = IF "keepUntilSealed" \in Rules THEN sealing \cup wb ELSE sealing
     /\ wb' = IF "bytesFirst" \in Rules THEN {} ELSE wb
+    /\ dirty' = IF "bytesFirst" \in Rules THEN dirty \cup kept ELSE dirty
+    /\ kept' = IF "bytesFirst" \in Rules THEN {} ELSE kept
     /\ wpc' = IF "bytesFirst" \in Rules THEN "unlock" ELSE "write"
-    /\ UNCHANGED <<inst, refused, durable, ghostVars, pte, dirty, counted, semX, semR, sVars, wOp,
-                   wPage, floor, buf, punches>>
+    /\ UNCHANGED <<inst, refused, durable, ghostVars, pte, counted, semX, semR, pdirty, pinned,
+                   sVars, wOp, wPage, floor, buf, punches>>
 
 WUnlock ==
     /\ wpc = "unlock"
@@ -417,16 +486,16 @@ WUnlock ==
     /\ wpc' = IF wOp = "fsync" THEN "fsSeal" ELSE "idle"
     /\ wPage' = 0
     /\ buf' = [p \in Pages |-> 0]
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, sVars, wOp,
-                   floor, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, pdirty, pinned,
+                   kept, sVars, wOp, floor, punches>>
 
 \* An fsync's seal (cladefs_fsync), after its writeback.
 WFsSeal ==
     /\ wpc = "fsSeal"
     /\ SealEffect
     /\ wpc' = "fsDone"
-    /\ UNCHANGED <<refused, ghostVars, pte, dirty, wb, counted, semX, semR, sVars, wOp, wPage,
-                   floor, buf, punches>>
+    /\ UNCHANGED <<refused, ghostVars, pte, dirty, wb, counted, semX, semR, pdirty, pinned, kept,
+                   sVars, wOp, wPage, floor, buf, punches>>
 
 \* The fsync returns.
 WFsDone ==
@@ -444,8 +513,8 @@ WRbLock ==
        ELSE /\ semR' = semR \cup {"W"}
             /\ UNCHANGED semX
     /\ wpc' = "rbLook"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, sVars, wOp,
-                   wPage, floor, buf, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, pdirty, pinned,
+                   kept, sVars, wOp, wPage, floor, buf, punches>>
 
 \* A private page in neither set (rebindAfterSeal: nor waiting for its seal), if there is one.
 WRbLook ==
@@ -473,24 +542,26 @@ WRbMap ==
     /\ inst' = TakenAway({wPage})
     /\ counted' = counted \ {wPage}
     /\ wpc' = "unlock"
-    /\ UNCHANGED <<refused, fxfsVars, latest, next, pte, dirty, wb, sealing, semX, semR, sVars,
-                   wOp, wPage, floor, buf, punches>>
+    /\ UNCHANGED <<refused, fxfsVars, latest, next, pte, dirty, wb, sealing, semX, semR, pdirty,
+                   pinned, kept, sVars, wOp, wPage, floor, buf, punches>>
 
 WPtLock ==
     /\ wpc = "ptLock" /\ semX = "none" /\ semR = {}
     /\ semX' = "W"
     /\ wpc' = "punch"
-    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semR, sVars,
-                   wOp, wPage, floor, buf, punches>>
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semR, pdirty,
+                   pinned, kept, sVars, wOp, wPage, floor, buf, punches>>
 
-\* A punch of a page: out of both sets, unmapped, MAP_ZEROS over it, a hole in Fxfs.
+\* A punch of a page: out of both sets, unmapped, MAP_ZEROS over it, a hole in Fxfs. Not of a page
+\* a pin holds, which a truncate waits for (dax_layout_busy_page_range).
 WPunch ==
     /\ wpc = "punch"
-    /\ \E p \in Pages :
+    /\ \E p \in Pages \ pinned :
          /\ dirty' = dirty \ {p}
          /\ sealing' = sealing \ {p}
          /\ counted' = counted \ {p}
          /\ pte' = [pte EXCEPT ![p] = "none"]
+         /\ pdirty' = pdirty \ {p}
          /\ win' = [win EXCEPT ![p] = [kind |-> "zeros", data |-> next]]
          /\ inst' = TakenAway({p})
          /\ file' = [file EXCEPT ![p] = [state |-> "hole", data |-> next]]
@@ -498,7 +569,8 @@ WPunch ==
     /\ next' = next + 1
     /\ punches' = punches + 1
     /\ wpc' = "unlock"
-    /\ UNCHANGED <<refused, durable, errors, wb, semX, semR, sVars, wOp, wPage, floor, buf>>
+    /\ UNCHANGED <<refused, durable, errors, wb, semX, semR, pinned, kept, sVars, wOp, wPage, floor,
+                   buf>>
 
 OtherNext ==
     \/ WStart \/ WWpFirst \/ WSwapLock \/ WSwap \/ WWp \/ WCopy \/ WWrite \/ WCommit \/ WUnlock
@@ -510,7 +582,18 @@ OtherNext ==
 Seal ==
     /\ \E p \in Pages : file[p].state = "open"
     /\ SealEffect
-    /\ UNCHANGED <<refused, ghostVars, pte, dirty, wb, counted, semX, semR, sVars, wVars>>
+    /\ UNCHANGED <<refused, ghostVars, pte, dirty, wb, counted, semX, semR, pdirty, pinned, kept,
+                   sVars, wVars>>
+
+\* The user's mprotect of the mapping, read-only, then writable again (change_protection): each PTE
+\* read-only, then writable with no fault where it is dirty (can_change_shared_pte_writable), the
+\* kernel taking a dirty PTE's filesystem to have been told of its store; a userfaultfd's
+\* write-protect and unprotect do the same. The rest fault on their next store.
+Toggle ==
+    /\ pte' = [p \in Pages |-> IF pte[p] = "none" THEN "none"
+                               ELSE IF p \in pdirty THEN "rw" ELSE "ro"]
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, dirty, wb, sealing, counted, semX, semR, pdirty,
+                   pinned, kept, sVars, wVars>>
 
 \* The host's cache evicting a sealed extent's page, or zeros', which the window maps: the window
 \* unmaps it, and maps it again as a fault brings it in, the same bytes; what the VM process
@@ -578,6 +661,7 @@ Init ==
     /\ next = 1
     /\ errors = {}
     /\ pte = [p \in Pages |-> "none"]
+    /\ pdirty = {} /\ pinned = {} /\ kept = {}
     /\ dirty = {} /\ wb = {} /\ sealing = {} /\ counted = {}
     /\ semX = "none" /\ semR = {}
     /\ spc = "idle" /\ sPage = 0 /\ sWay = "none" /\ stores = 0
@@ -586,7 +670,7 @@ Init ==
     /\ buf = [p \in Pages |-> 0]
     /\ lpc = "idle" /\ lPage = 0 /\ lSeen = 0 /\ loads = 0
 
-Next == ((StorerNext \/ OtherNext \/ Seal) /\ UNCHANGED lVars) \/ Evict \/ LoaderNext
+Next == ((StorerNext \/ OtherNext \/ Seal \/ Toggle) /\ UNCHANGED lVars) \/ Evict \/ LoaderNext
 
 Spec == Init /\ [][Next]_vars
 

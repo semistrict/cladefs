@@ -85,6 +85,12 @@ static inline struct folio *page_folio(const struct page *page)
 #define folio_ref_count(folio) atomic_read(&(folio)->_refcount)
 #define folio_ref_inc(folio) atomic_inc(&(folio)->_refcount)
 #define folio_get(folio) atomic_inc(&(folio)->_refcount)
+/* A pin's references (FOLL_PIN), as try_grab_folio takes them for a small folio. */
+#define GUP_PIN_COUNTING_BIAS (1U << 10)
+static inline bool folio_maybe_dma_pinned(struct folio *folio)
+{
+	return (unsigned int)folio_ref_count(folio) >= GUP_PIN_COUNTING_BIAS;
+}
 #define folio_order(folio) ((folio)->order)
 #define folio_reset_order(folio) ((folio)->order = 0)
 #define folio_pfn(folio) page_to_pfn(&(folio)->page)
@@ -211,6 +217,8 @@ int pfn_mkclean_range(unsigned long pfn, unsigned long nr_pages, pgoff_t pgoff,
 		      struct vm_area_struct *vma);
 unsigned long wp_shared_mapping_range(struct address_space *mapping, pgoff_t first_index,
 				      pgoff_t nr);
+int mapping_wrprotect_range(struct address_space *mapping, pgoff_t pgoff, unsigned long pfn,
+			    unsigned long nr_pages);
 #define vma_interval_tree_foreach(vma, root, start, last)			\
 	list_for_each_entry(vma, root, mapping_list)				\
 		if (vma->vm_pgoff <= (last) &&					\

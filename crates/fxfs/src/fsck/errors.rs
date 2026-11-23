@@ -9,7 +9,6 @@ use crate::log::*;
 use crate::lsm_tree::types::ItemRef;
 use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
 use crate::object_store::{AttributeId, ObjectDescriptor, ProjectId};
-use fxfs_crypto::WrappingKeyId;
 use std::ops::Range;
 use storage_device::ExtentId;
 
@@ -115,7 +114,6 @@ pub enum FsckWarning {
     LimitForNonExistentStore(u64, u64),
     OrphanedAttribute(u64, u64, AttributeId),
     OrphanedObject(u64, u64),
-    OrphanedKeys(u64, u64),
     OrphanedExtendedAttribute(u64, u64, AttributeId),
     OrphanedExtendedAttributeRecord(u64, u64),
     ProjectUsageInconsistent(u64, ProjectId, (i64, i64), (i64, i64)),
@@ -157,9 +155,6 @@ impl FsckWarning {
             }
             FsckWarning::OrphanedObject(store_id, object_id) => {
                 format!("Orphaned object {} was found in store {}", object_id, store_id)
-            }
-            FsckWarning::OrphanedKeys(store_id, object_id) => {
-                format!("Orphaned keys for object {} were found in store {}", object_id, store_id)
             }
             FsckWarning::OrphanedExtendedAttribute(store_id, object_id, attribute_id) => {
                 format!(
@@ -206,9 +201,6 @@ impl FsckWarning {
             FsckWarning::OrphanedObject(store_id, oid) => {
                 warn!(oid, store_id; "Orphaned object");
             }
-            FsckWarning::OrphanedKeys(store_id, oid) => {
-                warn!(oid, store_id; "Orphaned keys");
-            }
             FsckWarning::OrphanedExtendedAttribute(store_id, oid, attribute_id) => {
                 warn!(oid, store_id, attribute_id; "Orphaned extended attribute");
             }
@@ -232,18 +224,12 @@ pub enum FsckError {
     BadGraveyardValue(u64, u64),
     BadLastObjectId(u64, u64),
     CasefoldInconsistency(u64, u64, u64),
-    ChildEncryptedWithDifferentWrappingKeyThanParent(u64, u64, u64, WrappingKeyId, WrappingKeyId),
     ConflictingTypeForLink(u64, u64, Value, Value),
-    DuplicateKey(u64, u64, u64),
-    EncryptedChildDirectoryNoWrappingKey(u64, u64),
-    EncryptedDirectoryHasUnencryptedChild(u64, u64, u64),
     ExtentExceedsLength(u64, u64, AttributeId, u64, Value),
     /// An extent, with its owner and bytes allocated as the tree has them, and as the allocator
     /// keeps them.
     ExtentMismatch(ExtentId, Option<(u64, u64)>, Option<(u64, u64)>),
     ExtraAllocations(Vec<Allocation>),
-    IllegalKeyInRootStore(u64, u64),
-    IncorrectMerkleTreeSize(u64, u64, u64, u64),
     LinkCycle(u64, u64),
     MalformedAllocation(Allocation),
     MalformedExtent(u64, u64, Range<u64>, u64),
@@ -254,13 +240,10 @@ pub enum FsckError {
     InvalidExtendedAttributeId(u64, u64, AttributeId),
     MissingAttributeForExtendedAttribute(u64, u64, AttributeId),
     MissingDataAttribute(u64, u64),
-    MissingEncryptionKeys(u64, u64),
-    MissingKey(u64, u64, u64),
     MissingObjectInfo(u64, u64),
     MissingOverwriteExtents(u64, u64, AttributeId),
     MultipleLinksToDirectory(u64, u64),
     NextObjectIdInUse(u64, u64),
-    NonFileMarkedAsVerified(u64, u64),
     NonRootProjectIdMetadata(u64, u64, ProjectId),
     ObjectCountMismatch(u64, u64, u64),
     ObjectHasChildren(u64, u64),
@@ -273,16 +256,13 @@ pub enum FsckError {
     TombstonedAttributeDoesNotExist(u64, u64, AttributeId),
     TombstonedObjectHasRecords(u64, u64),
     TrimValueForGraveyardAttributeEntry(u64, u64, AttributeId),
-    UnencryptedDirectoryHasEncryptedChild(u64, u64, u64),
     UnexpectedJournalFileOffset(u64),
     UnexpectedObjectInGraveyard(u64),
     UnexpectedRecordInObjectStore(u64, Key, Value),
-    VerifiedFileDoesNotHaveAMerkleAttribute(u64, u64),
     VolumeInChildStore(u64, u64),
     ZombieDir(u64, u64, u64),
     ZombieFile(u64, u64, Vec<u64>),
     ZombieSymlink(u64, u64, Vec<u64>),
-    InvalidInoLblk32KeyUsage(u64, u64),
 }
 
 impl FsckError {
@@ -341,9 +321,6 @@ impl FsckError {
             }
             FsckError::ExtraAllocations(allocations) => {
                 format!("Unexpected allocations {:?}", allocations)
-            }
-            FsckError::IllegalKeyInRootStore(store_id, object_id) => {
-                format!("Object {object_id} in root store {store_id} uses an illegal key type")
             }
             FsckError::ObjectHasChildren(store_id, object_id) => {
                 format!("Object {} in store {} has unexpected children", object_id, store_id)
@@ -464,46 +441,6 @@ impl FsckError {
             FsckError::BadGraveyardValue(store_id, object_id) => {
                 format!("Bad graveyard value with key <{}, {}>", store_id, object_id)
             }
-            FsckError::MissingEncryptionKeys(store_id, object_id) => {
-                format!("Missing encryption keys for <{}, {}>", store_id, object_id)
-            }
-            FsckError::MissingKey(store_id, object_id, key_id) => {
-                format!("Missing encryption key for <{}, {}, {}>", store_id, object_id, key_id)
-            }
-            FsckError::EncryptedChildDirectoryNoWrappingKey(store_id, object_id) => {
-                format!(
-                    "Encrypted directory {} in store {} does not have a wrapping key id set",
-                    object_id, store_id
-                )
-            }
-            FsckError::EncryptedDirectoryHasUnencryptedChild(store_id, parent_oid, child_oid) => {
-                format!(
-                    "Encrypted parent directory {} in store {} has unencrypted child {}",
-                    parent_oid, store_id, child_oid
-                )
-            }
-            FsckError::UnencryptedDirectoryHasEncryptedChild(store_id, parent_oid, child_oid) => {
-                format!(
-                    "Unencrypted parent directory {} in store {} has encrypted child {}",
-                    parent_oid, store_id, child_oid
-                )
-            }
-            FsckError::ChildEncryptedWithDifferentWrappingKeyThanParent(
-                store_id,
-                parent_id,
-                child_id,
-                parent_wrapping_key_id,
-                child_wrapping_key_id,
-            ) => {
-                format!(
-                    "Parent directory {} in store {} encrypted with {:?}, child {} encrypted with \
-                    {:?}",
-                    parent_id, store_id, parent_wrapping_key_id, child_id, child_wrapping_key_id,
-                )
-            }
-            FsckError::DuplicateKey(store_id, object_id, key_id) => {
-                format!("Duplicate key for <{}, {}, {}>", store_id, object_id, key_id)
-            }
             FsckError::ZombieFile(store_id, object_id, parent_object_ids) => {
                 format!(
                     "File {object_id} in store {store_id} is in graveyard but still has links \
@@ -520,28 +457,6 @@ impl FsckError {
                 format!(
                     "Symlink {object_id} in store {store_id} is in graveyard but still has \
                      links from {parent_object_ids:?}",
-                )
-            }
-            FsckError::VerifiedFileDoesNotHaveAMerkleAttribute(store_id, object_id) => {
-                format!(
-                    "Object {} in store {} is marked as fsverity-enabled but is missing a \
-                        merkle attribute",
-                    store_id, object_id
-                )
-            }
-            FsckError::NonFileMarkedAsVerified(store_id, object_id) => {
-                format!(
-                    "Object {} in store {} is marked as verified but is not a file",
-                    store_id, object_id
-                )
-            }
-            FsckError::InvalidInoLblk32KeyUsage(store_id, object_id) => {
-                format!("Object {object_id} in store {store_id} uses an InoLblk32 key invalidly")
-            }
-            FsckError::IncorrectMerkleTreeSize(store_id, object_id, expected_size, actual_size) => {
-                format!(
-                    "Object {} in store {} has merkle tree of size {} expected {}",
-                    object_id, store_id, actual_size, expected_size
                 )
             }
             FsckError::TombstonedAttributeDoesNotExist(store_id, object_id, attribute_id) => {
@@ -612,9 +527,6 @@ impl FsckError {
             }
             FsckError::ExtraAllocations(allocations) => {
                 error!(allocations:?; "Unexpected allocations");
-            }
-            FsckError::IllegalKeyInRootStore(store_id, oid) => {
-                error!(store_id, oid; "Illegal key in root store");
             }
             FsckError::ObjectHasChildren(store_id, oid) => {
                 error!(store_id, oid; "Object has unexpected children");
@@ -700,46 +612,6 @@ impl FsckError {
             FsckError::BadGraveyardValue(store_id, oid) => {
                 error!(store_id, oid; "Bad graveyard value");
             }
-            FsckError::MissingEncryptionKeys(store_id, oid) => {
-                error!(store_id, oid; "Missing encryption keys");
-            }
-            FsckError::MissingKey(store_id, oid, key_id) => {
-                error!(store_id, oid, key_id; "Missing encryption key");
-            }
-            FsckError::EncryptedChildDirectoryNoWrappingKey(store_id, oid) => {
-                error!(store_id, oid; "Encrypted directory does not have a wrapping key id");
-            }
-            FsckError::EncryptedDirectoryHasUnencryptedChild(store_id, parent_oid, child_oid) => {
-                error!(
-                    store_id,
-                    parent_oid, child_oid; "Encrypted directory has unencrypted child"
-                );
-            }
-            FsckError::UnencryptedDirectoryHasEncryptedChild(store_id, parent_oid, child_oid) => {
-                error!(
-                    store_id,
-                    parent_oid, child_oid; "Unencrypted directory has encrypted child"
-                );
-            }
-            FsckError::ChildEncryptedWithDifferentWrappingKeyThanParent(
-                store_id,
-                parent_id,
-                child_id,
-                parent_wrapping_key_id,
-                child_wrapping_key_id,
-            ) => {
-                error!(
-                    store_id,
-                    parent_id,
-                    child_id,
-                    parent_wrapping_key_id:?,
-                    child_wrapping_key_id:?;
-                    "Child object encrypted with different wrapping key than parent"
-                );
-            }
-            FsckError::DuplicateKey(store_id, oid, key_id) => {
-                error!(store_id, oid, key_id; "Duplicate key")
-            }
             FsckError::ZombieFile(store_id, oid, parent_oids) => {
                 error!(store_id, oid, parent_oids:?; "Links exist to file in graveyard")
             }
@@ -748,21 +620,6 @@ impl FsckError {
             }
             FsckError::ZombieSymlink(store_id, oid, parent_oids) => {
                 error!(store_id, oid, parent_oids:?; "Links exists to symlink in graveyard")
-            }
-            FsckError::VerifiedFileDoesNotHaveAMerkleAttribute(store_id, oid) => {
-                error!(store_id, oid; "Verified file does not have a merkle attribute")
-            }
-            FsckError::NonFileMarkedAsVerified(store_id, oid) => {
-                error!(store_id, oid; "Non-file marked as verified")
-            }
-            FsckError::InvalidInoLblk32KeyUsage(store_id, oid) => {
-                error!(store_id, oid; "Invalid InoLblk32 key usage")
-            }
-            FsckError::IncorrectMerkleTreeSize(store_id, oid, expected_size, actual_size) => {
-                error!(
-                    store_id,
-                    oid, expected_size, actual_size; "Verified file has incorrect merkle tree size"
-                )
             }
             FsckError::TombstonedAttributeDoesNotExist(store_id, oid, attribute_id) => {
                 error!(store_id, oid, attribute_id; "Tombstoned attribute does not exist")

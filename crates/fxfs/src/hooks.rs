@@ -32,7 +32,6 @@ type SyncHookFn<'a> = dyn Fn() + Send + Sync + 'a;
 struct HooksTable {
     pre_commit: Option<Arc<PreCommitHookFn<'static>>>,
     before_commit: Option<Arc<SyncHookFn<'static>>>,
-    unlock_resources_acquired: Option<Arc<SyncHookFn<'static>>>,
     waiting_for_journal_space: Option<Arc<SyncHookFn<'static>>>,
 }
 
@@ -104,19 +103,6 @@ impl<'a> Hooks<'a> {
         }
     }
 
-    /// Sets the hook executed when resources are acquired during unlock.  This is called
-    /// after acquiring all the keys that might be required from the crypt service.
-    pub fn set_unlock_resources_acquired(&mut self, hook: impl Fn() + Send + Sync + 'a) {
-        let boxed: Box<SyncHookFn<'a>> = Box::new(hook);
-        // SAFETY: `'a` is transmuted to `'static`. This is safe because `Hooks<'a>` owns the
-        // `Arc<HooksInner>` and its `detach` method (or `drop`) blocks until all `Arc<HooksInner>`
-        // references drop.
-        let static_hook: Box<SyncHookFn<'static>> = unsafe { std::mem::transmute(boxed) };
-        if let Some(inner) = &self.inner {
-            inner.table.lock().unlock_resources_acquired = Some(Arc::from(static_hook));
-        }
-    }
-
     /// Sets the hook executed when a transaction or flush operation blocks waiting for journal
     /// space.
     pub fn set_waiting_for_journal_space(&mut self, hook: impl Fn() + Send + Sync + 'a) {
@@ -174,17 +160,6 @@ impl HooksHandle {
         }
     }
 
-    /// Invokes the registered `unlock_resources_acquired` hook, if any.
-    pub fn on_unlock_resources_acquired(&self) {
-        if let Some(inner) = self.inner.upgrade() {
-            // The strong is held until after the hook is called.
-            let hook = inner.table.lock().unlock_resources_acquired.clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-    }
-
     /// Invokes the registered `waiting_for_journal_space` hook, if any.
     pub fn on_waiting_for_journal_space(&self) {
         if let Some(inner) = self.inner.upgrade() {
@@ -231,20 +206,6 @@ mod tests {
         // hooks dropped here
         handle.on_before_commit();
         assert!(!called.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_hooks_unlock_resources_acquired() {
-        let called = AtomicBool::new(false);
-        let (mut hooks, handle) = Hooks::new();
-
-        let called_ref = &called;
-        hooks.set_unlock_resources_acquired(move || {
-            called_ref.store(true, Ordering::Relaxed);
-        });
-
-        handle.on_unlock_resources_acquired();
-        assert!(called.load(Ordering::Relaxed));
     }
 
     #[test]

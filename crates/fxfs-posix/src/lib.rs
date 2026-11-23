@@ -22,7 +22,6 @@ pub use errno::{Errno, device_error, errno, xattr_errno};
 
 use anyhow::{Error, anyhow, bail, ensure};
 use event_listener::Event;
-use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 use futures::FutureExt as _;
 use futures::future::{BoxFuture, Either, select};
@@ -36,8 +35,8 @@ use fxfs::object_store::transaction::{LockKey, LockKeys, Mutation, Options, Tran
 use fxfs::object_store::{
     AttributeId, AttributeKey, DataObjectHandle, Directory, ExtentAccess, FileExtent,
     HandleOptions, MAX_INLINE_XATTR_SIZE, MAX_XATTR_NAME_SIZE, MAX_XATTR_VALUE_SIZE,
-    ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue, PosixAttributes,
-    SetExtendedAttributeMode, StoreObjectHandle, Timestamp,
+    MutableNodeAttributes, ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue,
+    PosixAttributes, SetExtendedAttributeMode, StoreObjectHandle, Timestamp,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
@@ -701,7 +700,7 @@ impl<P: Platform> Fxfs<P> {
                 };
                 (S_IFREG, refs, size)
             }
-            ObjectKind::Symlink { refs, link } | ObjectKind::EncryptedSymlink { refs, link } => {
+            ObjectKind::Symlink { refs, link } => {
                 // cladefs: a long target is in chunks of its own, its record's link empty
                 // (`directory::LONG_SYMLINK_XATTR`): its length theirs, as `size` says or reading
                 // them does. A size of 0 said so: lstat's st_size, which readlink(1) and realpath
@@ -749,12 +748,12 @@ impl<P: Platform> Fxfs<P> {
         // Fxfs's names are UTF-8: no other name is in a directory.
         let name = str::from_utf8(name).map_err(|_| anyhow!(FxfsError::NotFound))?;
         let dir = self.directory(dir).await?;
-        let (mut ino, _, _) = dir.lookup(name).await?.ok_or(FxfsError::NotFound)?;
+        let (mut ino, _) = dir.lookup(name).await?.ok_or(FxfsError::NotFound)?;
         // The name may be queued to go, which changes the inode it links, as may another of its
         // names, the kernel taking its link count from here: once they are made, it is looked up
         // again. The kernel holds the directory: no other inode takes the name meanwhile.
         if self.begin(Op::Lookup, Some(ino)).await?.drained {
-            (ino, _, _) = dir.lookup(name).await?.ok_or(FxfsError::NotFound)?;
+            (ino, _) = dir.lookup(name).await?.ok_or(FxfsError::NotFound)?;
         }
         self.attr(ino).await
     }
@@ -953,7 +952,7 @@ impl<P: Platform> Fxfs<P> {
         let begun = self.begin(Op::Create, None).await?;
         let dir = self.directory(dir).await?;
         let mut transaction = begun.transaction(&[dir.object_id()]).await?;
-        let attributes = fio::MutableNodeAttributes {
+        let attributes = MutableNodeAttributes {
             mode: Some(mode),
             uid: Some(uid),
             gid: Some(gid),
@@ -1016,7 +1015,7 @@ impl<P: Platform> Fxfs<P> {
         // cladefs: its times too, as a file's are made: it has only an mtime of Fxfs's own, and a
         // ctime of 0 before it (xfstests generic/423).
         let now = Timestamp::now();
-        let owner = fio::MutableNodeAttributes {
+        let owner = MutableNodeAttributes {
             mode: Some(S_IFLNK | 0o777),
             uid: Some(uid),
             gid: Some(gid),
@@ -1061,7 +1060,7 @@ impl<P: Platform> Fxfs<P> {
         let dir = self.directory(dir).await?;
         let mut transaction = begun.transaction(&[dir.object_id()]).await?;
         let child = dir.create_child_unnamed_temporary_file(&mut transaction).await?;
-        let attributes = fio::MutableNodeAttributes {
+        let attributes = MutableNodeAttributes {
             mode: Some(mode),
             uid: Some(uid),
             gid: Some(gid),
@@ -1087,10 +1086,9 @@ impl<P: Platform> Fxfs<P> {
         let dir = self.directory(dir).await?;
         let object = self.volume.tree().find(&ObjectKey::object(ino)).await?;
         let descriptor = match object.map(|item| item.value) {
-            Some(ObjectValue::Object {
-                kind: ObjectKind::Symlink { .. } | ObjectKind::EncryptedSymlink { .. },
-                ..
-            }) => ObjectDescriptor::Symlink,
+            Some(ObjectValue::Object { kind: ObjectKind::Symlink { .. }, .. }) => {
+                ObjectDescriptor::Symlink
+            }
             Some(ObjectValue::Object { kind: ObjectKind::File { .. }, attributes }) => {
                 ObjectDescriptor::of_file(attributes.posix_attributes.map(|posix| posix.mode))
             }
@@ -1177,12 +1175,12 @@ impl<P: Platform> Fxfs<P> {
         let begun = self.begin(Op::Exchange, None).await?;
         let (src, dst) = (self.directory(dir).await?, self.directory(new_dir).await?);
         loop {
-            let (a, a_kind, _) = src.lookup(name).await?.ok_or(FxfsError::NotFound)?;
-            let (b, b_kind, _) = dst.lookup(new_name).await?.ok_or(FxfsError::NotFound)?;
+            let (a, a_kind) = src.lookup(name).await?.ok_or(FxfsError::NotFound)?;
+            let (b, b_kind) = dst.lookup(new_name).await?.ok_or(FxfsError::NotFound)?;
             let mut transaction = begun.transaction(&[dir, new_dir, a, b]).await?;
             // The names may have changed before the locks were taken: look again under them.
-            let still = |found: Option<(u64, ObjectDescriptor, bool)>, ino| {
-                found.is_some_and(|(found, _, _)| found == ino)
+            let still = |found: Option<(u64, ObjectDescriptor)>, ino| {
+                found.is_some_and(|(found, _)| found == ino)
             };
             if !still(src.lookup(name).await?, a) || !still(dst.lookup(new_name).await?, b) {
                 continue;
@@ -1654,7 +1652,7 @@ impl<P: Platform> Fxfs<P> {
             }
         }
         let flag = |bit: u32| set.valid & bit != 0;
-        let mut attributes = fio::MutableNodeAttributes {
+        let mut attributes = MutableNodeAttributes {
             mode: flag(SET_MODE).then_some(set.mode),
             uid: flag(SET_UID).then_some(set.uid),
             gid: flag(SET_GID).then_some(set.gid),
@@ -1662,7 +1660,7 @@ impl<P: Platform> Fxfs<P> {
             modification_time: flag(SET_MTIME).then_some(set.mtime_ns),
             ..Default::default()
         };
-        if attributes != fio::MutableNodeAttributes::default() || flag(SET_CTIME) {
+        if attributes != MutableNodeAttributes::default() || flag(SET_CTIME) {
             // cladefs: changing a record, it borrows the metadata space it needs, as Fuchsia's
             // `update_attributes` does: an inode's writeback on a full filesystem failed (TASK-82).
             let begun = self.begin(Op::SetAttr, None).await?;
@@ -1777,12 +1775,12 @@ impl<P: Platform> Fxfs<P> {
 
     /// A handle to the object `ino`, of whatever kind, for its attributes.
     fn handle(&self, ino: u64) -> StoreObjectHandle<ObjectStore> {
-        StoreObjectHandle::new(self.volume.clone(), ino, false, HandleOptions::default(), false)
+        StoreObjectHandle::new(self.volume.clone(), ino, HandleOptions::default(), false)
     }
 
     /// The file `ino`'s handle: the inode's, opened if it isn't yet.
     async fn file(&self, ino: u64) -> Result<Arc<DataObjectHandle<ObjectStore>>, Error> {
-        let file = ObjectStore::open_object(&self.volume, ino, HandleOptions::default(), None);
+        let file = ObjectStore::open_object(&self.volume, ino, HandleOptions::default());
         if let Some(file) = self.files.lock().unwrap().get(&ino) {
             return Ok(file.clone());
         }
@@ -1887,9 +1885,7 @@ fn data_key(ino: u64) -> ObjectKey {
 /// The size of the data whose record is `data`: none if there is none.
 fn data_size(data: Option<ObjectValue>) -> u64 {
     match data {
-        Some(ObjectValue::Attribute { size, .. } | ObjectValue::VerifiedAttribute { size, .. }) => {
-            size
-        }
+        Some(ObjectValue::Attribute { size, .. }) => size,
         _ => 0,
     }
 }

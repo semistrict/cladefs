@@ -288,6 +288,10 @@ fn link_error(err: local_cell::replica::Error) -> LinkError {
     }
 }
 
+/// The address of the member whose link panics at its next append, once, if any: a bug's panic
+/// in its writer's task serving it (board 8505).
+static PANICKING: Mutex<Option<String>> = Mutex::new(None);
+
 impl MemberLink for Link {
     fn append<'a>(
         &'a self,
@@ -297,6 +301,9 @@ impl MemberLink for Link {
     ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
         Box::pin(async move {
             let bytes = &bytes[..];
+            if PANICKING.lock().unwrap().take_if(|panicking| *panicking == self.address).is_some() {
+                panic!("a panic appending to {}, as a test asks", self.address);
+            }
             self.reach()?;
             self.replicas.append(self.of, log, offset, bytes).map_err(link_error)
         })
@@ -753,6 +760,47 @@ async fn lost_members_are_replaced_and_commits_stay_replicated() {
     taken.made().unwrap();
     assert!(taken.last_commit().unwrap() >= last);
     assert_eq!(host.contents(&taken).await, expected);
+    drop(uploader);
+}
+
+/// board 8505: a member whose writer's task serving it panics, as a link's call may, is down, lost
+/// once it has been for long, and replaced. Before, its task's panic went unobserved: the member
+/// counted as up for ever, its ends never moving, and was never replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_whose_tasks_panic_are_replaced() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
+    let last = commit(&cell, 0, 2).await;
+    uploader.replicated(last).await.unwrap();
+
+    // b's task panics at its next append: c alone holds what comes next, until b is replaced.
+    let replicator = cell.replicator().unwrap();
+    *PANICKING.lock().unwrap() = Some("b".into());
+    let last = commit(&cell, 2, 2).await;
+    uploader.replicated(last).await.unwrap();
+    until("b down", async || replicator.members_up() == 1).await;
+    assert!(replicator.lost(Duration::ZERO), "{:?}", replicator.down());
+    assert!(!replicator.degraded(), "c holds what f = 1 asks for");
+    until("b replaced", async || configuration_named(&host).await.number == 2).await;
+    until("swapped", async || {
+        let status = uploader.status().unwrap().replication.unwrap();
+        !status.degraded && !status.replacing && status.members_up == 2
+    })
+    .await;
+    let last = commit(&cell, 4, 2).await;
+    uploader.replicated(last).await.unwrap();
     drop(uploader);
 }
 
@@ -1594,4 +1642,102 @@ async fn takes_fail_with_the_one_longest_copy_stalled() {
     let taken = taken_through(&host, Stalling::new(peers("d"), Some("b"))).await;
     let err = taken.map(drop).unwrap_err().to_string();
     assert!(err.contains("b reading log") && err.contains("no other copy as long"), "{err}");
+}
+
+/// board 8453 (Codex's review 56): what a take holds of its members' logs is counted with the hot
+/// replication buffers, which the daemon's memory governor counts, from its reads until its new
+/// configuration's replicator holds it: at its picking of the new configuration's members,
+/// between the two, all of it, each log's longest copy (it was let go of, uncounted, as the take
+/// read the last).
+#[tokio::test(flavor = "multi_thread")]
+async fn takes_count_the_members_logs_they_hold_until_seeded() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let (expected, last) = written_then_lost(&host, peers, &lost, false).await;
+    let counting = Arc::new(Counting {
+        peers: peers("d"),
+        longest: Mutex::default(),
+        at_pick: Mutex::default(),
+    });
+    let before = replicate::hot_bytes();
+    let (taken, uploader) = taken_through(&host, counting.clone()).await.unwrap();
+    taken.made().unwrap();
+    assert!(taken.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&taken).await, expected);
+    let held: u64 = counting.longest.lock().unwrap().values().sum();
+    assert!(held > 0, "the members held nothing past the head");
+    assert_eq!(*counting.at_pick.lock().unwrap(), Some(before + held));
+    drop(uploader);
+}
+
+/// A host's peers as [`Peers`] reaches them, noting the longest copy of each log a take read, and
+/// the hot replication buffers' bytes as it picks members.
+struct Counting {
+    peers: Peers,
+    longest: Mutex<BTreeMap<u64, u64>>,
+    at_pick: Mutex<Option<u64>>,
+}
+
+impl local_cell::upload::Members for Counting {
+    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
+        self.peers.me()
+    }
+
+    fn pick<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        number: u64,
+        f: u8,
+        avoid: &'a [String],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
+        self.at_pick.lock().unwrap().get_or_insert(replicate::hot_bytes());
+        self.peers.pick(cell, number, f, avoid)
+    }
+
+    fn link(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn MemberLink> {
+        self.peers.link(cell, configuration, member)
+    }
+
+    fn fence<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        self.peers.fence(cell, configuration, member, epoch)
+    }
+
+    fn read<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        log: u64,
+        end: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let bytes = self.peers.read(cell, configuration, member, log, end).await?;
+            let mut longest = self.longest.lock().unwrap();
+            let held = longest.entry(log).or_default();
+            *held = (*held).max(bytes.len() as u64);
+            Ok(bytes)
+        })
+    }
+
+    fn drop_before<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        self.peers.drop_before(cell, configuration, member)
+    }
 }

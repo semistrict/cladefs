@@ -10,7 +10,6 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 event-listener.workspace = true
-fidl-fuchsia-io.workspace = true
 fuchsia-async.workspace = true
 futures.workspace = true
 fxfs.workspace = true
@@ -18,7 +17,6 @@ log.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
-fuchsia.workspace = true
 fxfs-unicode.workspace = true
 proptest.workspace = true
 rand.workspace = true

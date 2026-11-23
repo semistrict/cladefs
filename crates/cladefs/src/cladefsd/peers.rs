@@ -21,9 +21,11 @@ use proto::{
     GetPartRequest, GetPartResponse, IncarnationRequest, IncarnationResponse, LogEnd,
     ReadLogRequest, ReadLogResponse, ReplicaOf,
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tonic::transport::Channel;
 use tonic::{Code, Request, Response, Status};
 
 /// What hosts sharing a bucket serve each other, generated from its .proto.
@@ -44,11 +46,22 @@ const THREADS: usize = 2;
 
 /// cladefs: how often a member's stream to or from a peer pings it, unanswered past [`CONNECT`]
 /// a stream to a peer down (doc-21): a writer's appends have no deadline, a stream's life being
-/// the configuration's.
+/// the configuration's. The server pings its connections as often (board 8575): a writer's host
+/// lost without a word, its stream of appends, which the server only reads, ends so.
 const KEEPALIVE: Duration = Duration::from_secs(5);
 
 /// cladefs: how much of a log a member sends a take at once (`ReadLog`).
 const READ_PIECE: u64 = 1 << 20;
+
+/// cladefs: the largest piece of a log a take takes from a member (`ReadLog`, board 8453): a
+/// member sends [`READ_PIECE`] at most, with its message's few bytes more.
+const READ_PIECE_MOST: usize = READ_PIECE as usize + 64;
+
+/// cladefs: the largest fence answer a take takes (board 8453): [`replica::LOGS_MOST`] logs, each
+/// 24 bytes at most as protobuf encodes it (a tag and a length, then two tagged varints), and a
+/// few bytes more. A member answering past it, by the million, is refused by the decoder before
+/// anything of it is held.
+const FENCE_ANSWER_MOST: usize = replica::LOGS_MOST * 24 + 64;
 
 /// cladefs: the largest message a member takes or sends (doc-21): a writer's append carries its
 /// flush's records, their data inline, and a writer sends 4 MiB at most at once, well within it;
@@ -58,6 +71,50 @@ pub(crate) const MESSAGE_MOST: usize = 64 << 20;
 /// cladefs: how often a member sweeps its replica directory, reading each cell's head (doc-21,
 /// Sweeping stale replica logs).
 const SWEEP_EVERY: Duration = Duration::from_secs(600);
+
+/// cladefs: the version of the peer service's protocol, `peer.proto`'s (board 8455): a change to
+/// what a call means, or to a message's fields, is a new one, which [`formats`] names.
+pub(crate) const PROTOCOL: u32 = 2;
+
+/// cladefs: the formats of what this daemon hands its peers, in a line: its cell directories'
+/// (`local_cell::FORMAT`), its extent frames' (`extent_frame::FORMAT`), its bucket's layout's
+/// (`bucket_cell::layout::FORMAT`) and the protocol's ([`PROTOCOL`]). Two daemons hand each other
+/// a cell (a migration's prepare names them), or a writer's logs (every replication call names
+/// them, [`same_formats`]), only if theirs are the same (boards 8455, 8457): nothing of another
+/// build's format is taken, as nothing migrates (AGENTS.md, "No migrations").
+pub(crate) fn formats() -> String {
+    let named = |cell: &str| {
+        let (frames, layout) = (extent_frame::FORMAT, bucket_cell::layout::FORMAT);
+        format!(
+            "cell directories {cell:?}, extent frames {frames}, bucket layout {layout}, peers {PROTOCOL}"
+        )
+    };
+    // A test's daemon of another build's cell directories: `peers::formats=return(FORMAT)`.
+    fail::fail_point!("peers::formats", |cell: Option<String>| named(&cell.unwrap_or_default()));
+    named(local_cell::FORMAT)
+}
+
+/// cladefs: whether `theirs`, the formats a replication call names, are this host's ([`formats`],
+/// board 8457): FAILED_PRECONDITION if not, an asker of a build before them naming none (""), so
+/// that no writer of another format is acked, nor a take of another given logs it would misread.
+fn same_formats(theirs: &str) -> Result<(), Status> {
+    let ours = formats();
+    if theirs == ours {
+        return Ok(());
+    }
+    // Its first 256 characters: a peer's string, said in a log line and an answer.
+    let theirs: String = theirs.chars().take(256).collect();
+    Err(Status::failed_precondition(format!(
+        "the asker's formats ({theirs:?}) are not this host's ({ours:?}): refused"
+    )))
+}
+
+/// cladefs: the most a member holds of a configuration's logs, in bytes: the lag bound a writer's
+/// bytes are kept within, which its replica directory holds each configuration to, and a take
+/// holds each member's fence answer to ([`fence_answer`], board 8453).
+fn members_most() -> u64 {
+    local_cell::upload::Options::default().max_lag_bytes
+}
 
 /// The parts the daemon served its peers, and those it had not as they asked.
 // The process's count, every simulated host's together, as a process's metrics are.
@@ -106,16 +163,17 @@ pub async fn start(
             bucket: url.clone(),
             me: address.to_owned(),
             incarnation: replicas.incarnation(),
-            runtime: runtime.clone(),
+            channels: Channels::new(runtime.clone()),
         };
         crate::bucket::replicate_with(Arc::new(members))?;
     }
     let serving = crate::bucket::serving_peers(bucket, cache);
     let serving = serving.map_err(|err| failed(&err.to_string()))?;
-    let server = Server { bucket: url, region, serving, replicas };
+    let server = Server { bucket: url, region, serving, replicas, appending: Arc::default() };
     #[cfg(not(madsim))]
     listening.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
     // cladefs: on threads of its own, or under madsim a task (`super::run`, doc-24 step 12).
+    // An accept that fails for good, the listener's, stops the daemon, saying so (board 8573).
     let serving = super::run::service("cladefsd peers", THREADS, move || async move {
         if let Err(err) = serve(listening, server).await {
             log::error!("cladefsd: serving peers: {err}");
@@ -186,20 +244,108 @@ pub(super) fn line() -> Option<String> {
     ))
 }
 
-/// Serves `server` to the peers that connect to `listening`, until accepting fails.
+/// Serves `server` to the peers that connect to `listening`, until accepting fails for good
+/// ([`accepting`]): each connection with no delay, TCP's keepalives on, and pinged as a member's
+/// client pings it (board 8575).
 async fn serve(listening: Listening, server: Server) -> std::io::Result<()> {
+    #[cfg(not(madsim))]
+    {
+        let listener = tokio::net::TcpListener::from_std(listening)?;
+        let incoming = tonic::transport::server::TcpIncoming::from(listener)
+            .with_nodelay(Some(true))
+            .with_keepalive(Some(KEEPALIVE))
+            .with_keepalive_interval(Some(KEEPALIVE));
+        serve_on(incoming, server).await
+    }
+    #[cfg(madsim)]
+    router(server).serve(listening).await.map_err(std::io::Error::other)
+}
+
+/// cladefs: the peer service of `server`, its connections pinged every [`KEEPALIVE`] and closed if
+/// unanswered within [`CONNECT`], as a member's client pings its member (board 8575): a writer's
+/// host lost without a word leaves no stream of appends, its task and its connection, for good.
+fn router(server: Server) -> tonic::transport::server::Router {
     let service = PeerServer::new(server)
         .max_decoding_message_size(MESSAGE_MOST)
         .max_encoding_message_size(MESSAGE_MOST);
-    let router = tonic::transport::Server::builder().tcp_nodelay(true).add_service(service);
-    #[cfg(not(madsim))]
-    let served = {
-        let listener = tokio::net::TcpListener::from_std(listening)?;
-        router.serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)).await
-    };
-    #[cfg(madsim)]
-    let served = router.serve(listening).await;
-    served.map_err(std::io::Error::other)
+    tonic::transport::Server::builder()
+        .http2_keepalive_interval(Some(KEEPALIVE))
+        .http2_keepalive_timeout(Some(CONNECT))
+        .add_service(service)
+}
+
+/// cladefs: serves `server` to the connections `incoming` accepts ([`accepting`]): until it fails
+/// for good, whose error it returns.
+#[cfg(not(madsim))]
+async fn serve_on<IO>(
+    incoming: impl futures::Stream<Item = std::io::Result<IO>> + Unpin + Send + 'static,
+    server: Server,
+) -> std::io::Result<()>
+where
+    IO: tokio::io::AsyncRead
+        + tokio::io::AsyncWrite
+        + tonic::transport::server::Connected
+        + Unpin
+        + Send
+        + 'static,
+{
+    let failed = Arc::new(std::sync::OnceLock::new());
+    let served = router(server).serve_with_incoming(accepting(incoming, failed.clone())).await;
+    served.map_err(std::io::Error::other)?;
+    // Its connections ended, their stream dropped with its note of why.
+    let failed = Arc::into_inner(failed).and_then(std::sync::OnceLock::into_inner);
+    Err(failed.unwrap_or_else(|| std::io::Error::other("the peer listener ended")))
+}
+
+/// cladefs: the connections `incoming` accepts, a failure the host may get over (no descriptor
+/// free, EMFILE or ENFILE, no buffers, a connection gone before it was accepted) logged and tried
+/// again after a pause, [`super::server::ACCEPT_AGAIN`], as the VM sockets are (board 8573):
+/// served by tonic as they come, such a failure was passed over at once, again and again, a busy
+/// loop holding a thread while the descriptors stayed short. One of the listener's own (it is
+/// closed, or no listener: EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP) ends them, noted in `failed`.
+#[cfg(not(madsim))]
+fn accepting<IO>(
+    incoming: impl futures::Stream<Item = std::io::Result<IO>> + Unpin,
+    failed: Arc<std::sync::OnceLock<std::io::Error>>,
+) -> impl futures::Stream<Item = std::io::Result<IO>> {
+    use futures::StreamExt as _;
+    futures::stream::unfold((incoming, false), move |(mut incoming, mut failing)| {
+        let failed = failed.clone();
+        async move {
+            loop {
+                match incoming.next().await? {
+                    Ok(accepted) => return Some((Ok(accepted), (incoming, false))),
+                    // That connection's, gone before it was accepted.
+                    Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => {}
+                    Err(err) if for_good(&err) => {
+                        // The first error for good; there is no other, the stream ending here.
+                        let _ = failed.set(err);
+                        return None;
+                    }
+                    Err(err) => {
+                        if !failing {
+                            log::error!(
+                                "cladefsd: accepting a peer's connection: {err}: trying again \
+                                 every {:?}",
+                                super::server::ACCEPT_AGAIN
+                            );
+                            failing = true;
+                        }
+                        tokio::time::sleep(super::server::ACCEPT_AGAIN).await;
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// cladefs: whether `err`, an accept's, is of the listener itself, which no retry gets over.
+#[cfg(not(madsim))]
+fn for_good(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP | libc::EFAULT)
+    )
 }
 
 /// cladefs: the daemon's replica directory at `dir` (`CLADEFSD_REPLICAS`, doc-21), made if it is
@@ -208,9 +354,8 @@ fn replicas(dir: &std::path::Path) -> Result<Arc<Replicas<HostDir>>, String> {
     // cladefs: made durable, its promises with it (TASK-708).
     let made = host_fs::create_dir_all_durably(dir).and_then(|()| HostDir::new(dir));
     let dir = made.map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
-    let most = local_cell::upload::Options::default().max_lag_bytes;
-    let replicas =
-        Replicas::open(dir, most).map_err(|err| format!("the replica directory: {err}"))?;
+    let replicas = Replicas::open(dir, members_most())
+        .map_err(|err| format!("the replica directory: {err}"))?;
     log::info!("cladefsd: replica directory, incarnation {}", replicas.incarnation());
     Ok(Arc::new(replicas))
 }
@@ -281,6 +426,25 @@ struct Server {
     region: Option<Region>,
     serving: crate::bucket::Serving,
     replicas: Option<Arc<Replicas<HostDir>>>,
+    /// cladefs: how many writers' streams of appends it serves, each a task, for as long as it
+    /// lives (board 8575).
+    appending: Arc<AtomicUsize>,
+}
+
+/// cladefs: one more of a count, for as long as it lives.
+struct Counted(Arc<AtomicUsize>);
+
+impl Counted {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Server {
@@ -314,14 +478,16 @@ fn replicas_of(
     replicas.ok_or_else(|| Status::failed_precondition("no replica directory (CLADEFSD_REPLICAS)"))
 }
 
-/// The replica directory of a host of the bucket `ours`, and what a call of `of` is of.
+/// The replica directory of a host of the bucket `ours`, and what a call of `of` is of: refused
+/// unless it names this host's formats (board 8457).
 fn of_in(
     ours: &str,
     replicas: &Option<Arc<Replicas<HostDir>>>,
     of: Option<ReplicaOf>,
 ) -> Result<(Arc<Replicas<HostDir>>, Of), Status> {
     let of = of.ok_or_else(|| Status::invalid_argument("of what: none said"))?;
-    let ReplicaOf { bucket, tenant, cell, configuration, incarnation } = of;
+    let ReplicaOf { bucket, tenant, cell, configuration, incarnation, formats } = of;
+    same_formats(&formats)?;
     let configuration =
         configuration.ok_or_else(|| Status::invalid_argument("no configuration"))?;
     let key = Key { number: configuration.number, epoch: configuration.epoch };
@@ -340,8 +506,14 @@ fn refused(err: replica::Error) -> Status {
         replica::Error::Refused(refused @ Refused::Fenced { .. }) => {
             Status::failed_precondition(refused.to_string())
         }
-        replica::Error::Refused(refused @ Refused::Full { .. }) => {
+        replica::Error::Refused(refused @ (Refused::Full { .. } | Refused::Logs { .. })) => {
             Status::resource_exhausted(refused.to_string())
+        }
+        // A writer's log, or one held, of another format: this member holds none of it for the
+        // writer (board 8457).
+        replica::Error::Refused(refused @ Refused::Format { .. }) => {
+            log::warn!("cladefsd: the replica directory: {refused}");
+            Status::failed_precondition(refused.to_string())
         }
         replica::Error::Io(err) => {
             log::error!("cladefsd: the replica directory: {err:#}");
@@ -371,7 +543,9 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<IncarnationRequest>,
     ) -> Result<Response<IncarnationResponse>, Status> {
-        let replicas = self.replicas(&request.into_inner().bucket)?;
+        let IncarnationRequest { bucket, formats } = request.into_inner();
+        same_formats(&formats)?;
+        let replicas = self.replicas(&bucket)?;
         Ok(Response::new(IncarnationResponse { incarnation: replicas.incarnation() }))
     }
 
@@ -384,7 +558,9 @@ impl proto::peer_server::Peer for Server {
         let mut appends = request.into_inner();
         let (ours, replicas) = (self.bucket.clone(), self.replicas.clone());
         let (answer, answers) = tokio::sync::mpsc::channel(16);
+        let appending = Counted::new(&self.appending);
         tokio::spawn(async move {
+            let _appending = appending;
             let mut next = match appends.message().await {
                 Ok(next) => next,
                 Err(status) => {
@@ -571,13 +747,20 @@ fn link(
     Arc::new(Grpc { client, bucket: bucket.to_owned(), region })
 }
 
-/// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime: with
-/// no deadline on a request, as a writer's stream of appends lasts as long as its configuration,
-/// but pinging it, so that a member down ends its stream within [`KEEPALIVE`] and [`CONNECT`].
+/// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime, on a
+/// channel of its own ([`channel`]).
 pub(crate) fn member(
     runtime: &tokio::runtime::Handle,
     address: &str,
-) -> Result<PeerClient<tonic::transport::Channel>, String> {
+) -> Result<PeerClient<Channel>, String> {
+    Ok(client(&channel(runtime, address)?))
+}
+
+/// cladefs: a channel to the member at `address` (doc-21), on `runtime`, the bucket runtime,
+/// connected when first used: with no deadline on a request, as a writer's stream of appends lasts
+/// as long as its configuration, but pinging it, so that a member down ends its stream within
+/// [`KEEPALIVE`] and [`CONNECT`].
+fn channel(runtime: &tokio::runtime::Handle, address: &str) -> Result<Channel, String> {
     check_address(address)?;
     let _entered = runtime.enter();
     let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
@@ -587,8 +770,44 @@ pub(crate) fn member(
         .keep_alive_timeout(CONNECT)
         .keep_alive_while_idle(true)
         .tcp_nodelay(true);
-    let client = PeerClient::new(endpoint.connect_lazy());
-    Ok(client.max_decoding_message_size(MESSAGE_MOST).max_encoding_message_size(MESSAGE_MOST))
+    Ok(endpoint.connect_lazy())
+}
+
+/// cladefs: a client of a member on `channel`, its messages [`MESSAGE_MOST`] at most.
+fn client(channel: &Channel) -> PeerClient<Channel> {
+    let client = PeerClient::new(channel.clone());
+    client.max_decoding_message_size(MESSAGE_MOST).max_encoding_message_size(MESSAGE_MOST)
+}
+
+/// cladefs: the channels to the members, one per address (board 8575): every replicated cell's
+/// link to a member and every call to it (fences, log reads, drops, incarnations) share its one
+/// HTTP/2 connection and its pings, where each had a connection of its own, a host of N replicated
+/// cells holding 2N connections to its peers and pinging each every [`KEEPALIVE`]. A channel goes,
+/// its connection with it, once its address is no peer's and nothing holds it (a link of a
+/// configuration's, [`GrpcMember`], or a call): the next asks make another.
+struct Channels {
+    runtime: tokio::runtime::Handle,
+    open: Mutex<HashMap<String, Arc<Channel>>>,
+}
+
+impl Channels {
+    fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self { runtime, open: Mutex::default() }
+    }
+
+    /// The channel to the member at `address`, made if there is none.
+    fn of(&self, address: &str) -> Result<Arc<Channel>, String> {
+        // No peers asked yet: none kept but those held.
+        let peers = crate::bucket::peers().map(|peers| peers.addresses()).unwrap_or_default();
+        let mut open = self.open.lock().unwrap();
+        open.retain(|at, channel| Arc::strong_count(channel) > 1 || peers.contains(at));
+        if let Some(channel) = open.get(address) {
+            return Ok(channel.clone());
+        }
+        let channel = Arc::new(channel(&self.runtime, address)?);
+        open.insert(address.to_owned(), channel.clone());
+        Ok(channel)
+    }
 }
 
 /// cladefs: the hosts sharing the bucket, as a replicated cell's members (doc-21, TASK-537.3.3):
@@ -600,7 +819,7 @@ pub(crate) struct ReplicaMembers {
     bucket: String,
     me: String,
     incarnation: u64,
-    runtime: tokio::runtime::Handle,
+    channels: Channels,
 }
 
 impl local_cell::upload::Members for ReplicaMembers {
@@ -625,8 +844,8 @@ impl local_cell::upload::Members for ReplicaMembers {
         member: &bucket_cell::layout::Member,
     ) -> Arc<dyn local_cell::replicate::MemberLink> {
         let of = self.of(cell, configuration, member);
-        let client = member_client(&self.runtime, &member.address);
-        Arc::new(GrpcMember { client, of, stream: tokio::sync::Mutex::default() })
+        let channel = self.channels.of(&member.address).expect("a peer's address checked");
+        Arc::new(GrpcMember { channel, of, stream: tokio::sync::Mutex::default() })
     }
 
     fn fence<'a>(
@@ -638,11 +857,10 @@ impl local_cell::upload::Members for ReplicaMembers {
     ) -> BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
         Box::pin(async move {
             let request = FenceRequest { of: Some(self.of(cell, configuration, whom)), epoch };
-            let mut client = member(&self.runtime, &whom.address)?;
+            let channel = self.channels.of(&whom.address)?;
+            let mut client = client(&channel).max_decoding_message_size(FENCE_ANSWER_MOST);
             match tokio::time::timeout(DEADLINE, client.fence(request)).await {
-                Ok(Ok(answer)) => {
-                    Ok(answer.into_inner().logs.into_iter().map(|log| (log.log, log.end)).collect())
-                }
+                Ok(Ok(answer)) => fence_answer(answer.into_inner(), members_most()),
                 Ok(Err(status)) => Err(said(&status)),
                 Err(_) => Err(format!("no answer within {DEADLINE:?}")),
             }
@@ -660,7 +878,8 @@ impl local_cell::upload::Members for ReplicaMembers {
         Box::pin(async move {
             let request =
                 ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
-            let mut client = member(&self.runtime, &whom.address)?;
+            let channel = self.channels.of(&whom.address)?;
+            let mut client = client(&channel).max_decoding_message_size(READ_PIECE_MOST);
             let answered = tokio::time::timeout(DEADLINE, client.read_log(request)).await;
             let answered = answered.map_err(|_| format!("no answer within {DEADLINE:?}"))?;
             read_to(answered.map_err(|status| said(&status))?.into_inner(), end, DEADLINE).await
@@ -678,7 +897,7 @@ impl local_cell::upload::Members for ReplicaMembers {
             let mut of = self.of(cell, configuration, whom);
             of.incarnation = whom.incarnation;
             let request = DropLogsRequest { of: Some(of), through: None };
-            let mut client = member(&self.runtime, &whom.address)?;
+            let mut client = client(&*self.channels.of(&whom.address)?);
             match tokio::time::timeout(DEADLINE, client.drop_logs(request)).await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(status)) => Err(said(&status)),
@@ -693,10 +912,41 @@ fn said(status: &Status) -> String {
     format!("{:?}: {}", status.code(), status.message())
 }
 
+/// cladefs: a member's fence answer, `answer`, as a take relies on it (board 8453): the logs it
+/// holds of the configuration, in order, none twice, each with its end; refused, as no member's
+/// answer, if it names more than [`replica::LOGS_MOST`] logs, or ends summing past `most`, what a
+/// member holds of a configuration ([`members_most`]). What a take then reads of a member, to the
+/// ends it answered, is within what a member may hold.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn fence_answer(answer: FenceResponse, most: u64) -> Result<Vec<(u64, u64)>, String> {
+    let FenceResponse { logs } = answer;
+    if logs.len() > replica::LOGS_MOST {
+        return Err(format!(
+            "{} logs answered, past the {} a member holds of a configuration",
+            logs.len(),
+            replica::LOGS_MOST
+        ));
+    }
+    let (mut ends, mut total) = (Vec::with_capacity(logs.len()), 0u64);
+    for LogEnd { log, end } in logs {
+        if let Some(&(last, _)) = ends.last()
+            && log <= last
+        {
+            return Err(format!("log {log} answered after log {last}: out of order, or twice"));
+        }
+        total = total.checked_add(end).filter(|&total| total <= most).ok_or_else(|| {
+            format!("log {log}'s end, {end}, takes the logs' past the {most} bytes a member holds")
+        })?;
+        ends.push((log, end));
+    }
+    Ok(ends)
+}
+
 /// cladefs: the bytes of a log a member streams, `pieces`, to `end`, where its fence said the log
-/// ends, and no further, the stream dropped there; each piece within `deadline` of the one before,
-/// as a member's keepalives are answered however long its disk takes (board 5416). Fewer if the
-/// stream ends before, which its caller refuses.
+/// ends; each piece within `deadline` of the one before, as a member's keepalives are answered
+/// however long its disk takes (board 5416). A piece past `end` fails it (board 8453): a member
+/// that fenced the log at its end holds no more of it, and what a read holds is no more than its
+/// end, which its caller counts. Fewer if the stream ends before, which its caller refuses.
 async fn read_to(
     mut pieces: impl futures::Stream<Item = Result<ReadLogResponse, Status>> + Unpin,
     end: u64,
@@ -706,12 +956,16 @@ async fn read_to(
     let mut bytes = Vec::new();
     while (bytes.len() as u64) < end {
         let piece = tokio::time::timeout(deadline, pieces.next()).await;
-        match piece.map_err(|_| format!("no answer within {deadline:?}"))? {
-            Some(piece) => bytes.extend(piece.map_err(|status| said(&status))?.bytes),
-            None => break,
+        let Some(piece) = piece.map_err(|_| format!("no answer within {deadline:?}"))? else {
+            break;
+        };
+        let piece = piece.map_err(|status| said(&status))?.bytes;
+        let read = (bytes.len() as u64).saturating_add(piece.len() as u64);
+        if read > end {
+            return Err(format!("sent {read} bytes of a log it fenced at {end}"));
         }
+        bytes.extend(piece);
     }
-    bytes.truncate(usize::try_from(end).unwrap_or(usize::MAX));
     Ok(bytes)
 }
 
@@ -770,6 +1024,7 @@ impl ReplicaMembers {
                 epoch: configuration.epoch,
             }),
             incarnation: member.incarnation,
+            formats: formats(),
         }
     }
 }
@@ -778,8 +1033,8 @@ impl ReplicaMembers {
     /// The incarnation of the replica directory of the host at `address`, as it answers within
     /// [`DEADLINE`].
     async fn incarnation_of(&self, address: &str) -> Result<u64, String> {
-        let mut client = member(&self.runtime, address)?;
-        let asked = IncarnationRequest { bucket: self.bucket.clone() };
+        let mut client = client(&*self.channels.of(address)?);
+        let asked = IncarnationRequest { bucket: self.bucket.clone(), formats: formats() };
         match tokio::time::timeout(DEADLINE, client.incarnation(asked)).await {
             Ok(Ok(answer)) => Ok(answer.into_inner().incarnation),
             Ok(Err(status)) => Err(said(&status)),
@@ -788,18 +1043,11 @@ impl ReplicaMembers {
     }
 }
 
-/// cladefs: a client of the member at `address`, checked a peer's when the peers were set.
-fn member_client(
-    runtime: &tokio::runtime::Handle,
-    address: &str,
-) -> PeerClient<tonic::transport::Channel> {
-    member(runtime, address).expect("a peer's address checked")
-}
-
-/// cladefs: a member of a replicated cell's configuration, reached over gRPC (doc-21): one stream
-/// of appends, opened as it is first needed, and again after any failure.
+/// cladefs: a member of a replicated cell's configuration, reached over gRPC (doc-21), on the
+/// channel to its address every cell's links share ([`Channels`]): one stream of appends, opened
+/// as it is first needed, and again after any failure.
 struct GrpcMember {
-    client: PeerClient<tonic::transport::Channel>,
+    channel: Arc<Channel>,
     of: ReplicaOf,
     /// Its one task's (`local_cell::replicate`), so never waited for.
     stream: tokio::sync::Mutex<Option<Appending>>,
@@ -838,7 +1086,7 @@ impl local_cell::replicate::MemberLink for GrpcMember {
         through: u64,
     ) -> BoxFuture<'_, Result<(), local_cell::replicate::LinkError>> {
         let request = DropLogsRequest { of: Some(self.of.clone()), through: Some(through) };
-        let mut client = self.client.clone();
+        let mut client = client(&self.channel);
         Box::pin(async move {
             match tokio::time::timeout(DEADLINE, client.drop_logs(request)).await {
                 Ok(Ok(_)) => Ok(()),
@@ -866,7 +1114,7 @@ impl GrpcMember {
         let answered = async {
             if stream.is_none() {
                 let (sending, sent) = tokio::sync::mpsc::channel(4);
-                let mut client = self.client.clone();
+                let mut client = client(&self.channel);
                 let answers = client
                     .append(tokio_stream::wrappers::ReceiverStream::new(sent))
                     .await

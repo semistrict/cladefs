@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/lib/storage_device/src/buffer.rs`. Buffers' VMOs and physical addresses,
-// which upstream builds only on Fuchsia, are the in-process kernel's.
+// Fuchsia's `src/storage/lib/storage_device/src/buffer.rs`, without buffers' VMOs and physical
+// addresses, which only Fuchsia has.
 
 use crate::buffer_allocator::BufferAllocator as PoolBufferAllocator;
 use std::borrow::Borrow;
@@ -14,8 +14,6 @@ use storage_ptr_slice::{MutPtrByteSlice, PtrByteSlice};
 
 pub use crate::buffer_allocator::{BufferFuture, TryAllocateBuffer};
 
-use zx::sys::zx_paddr_t;
-
 /// An entity capable of reclaiming a memory buffer range when dropped.
 pub trait BufferAllocator: Send + Sync + std::fmt::Debug + 'static {
     /// Frees or reclaims the specified memory range.
@@ -24,19 +22,6 @@ pub trait BufferAllocator: Send + Sync + std::fmt::Debug + 'static {
     /// Returns true if buffers produced by this allocator are trusted (unshared).
     fn is_trusted(&self) -> bool {
         false
-    }
-
-    /// Returns the underlying VMO if backed by a VMO and untrusted.
-    ///
-    /// If the allocator is trusted, this returns `None` to prevent external modification
-    /// of memory that is assumed to be unshared.
-    fn vmo(&self) -> Option<Arc<zx::Vmo>> {
-        None
-    }
-
-    /// Returns the physical addresses for `range` if pinned, along with the contiguity.
-    fn paddrs(&self, _range: &Range<usize>) -> Option<(&[zx_paddr_t], u64)> {
-        None
     }
 }
 
@@ -158,23 +143,6 @@ impl<'a, H: Borrow<A>, A: ?Sized + BufferAllocator> BufferImpl<'a, H, A> {
     /// Returns the buffer's capacity.
     pub fn len(&self) -> usize {
         self.range.end - self.range.start
-    }
-
-    /// Returns the physical addresses for DMA if this buffer is pinned by its allocator.
-    pub fn paddrs(&self) -> Option<&[zx_paddr_t]> {
-        self.allocator.borrow().paddrs(&self.range).map(|(paddrs, _)| paddrs)
-    }
-
-    /// Returns the contiguity used when pinning this buffer, if pinned by its allocator.
-    pub fn contiguity(&self) -> Option<u64> {
-        self.allocator.borrow().paddrs(&self.range).map(|(_, contig)| contig)
-    }
-
-    /// Returns the underlying VMO if the buffer is untrusted and backed by a VMO.
-    ///
-    /// Returns `None` if the buffer is trusted.
-    pub fn vmo(&self) -> Option<Arc<zx::Vmo>> {
-        self.allocator.borrow().vmo()
     }
 
     /// Returns a reference to the underlying data if the buffer is trusted.
@@ -676,7 +644,7 @@ mod tests {
         check();
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_chunks() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(512, source);
@@ -735,7 +703,7 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_chunks_mut() {
         let source = BufferSource::new(1024 * 1024);
         let allocator = BufferAllocator::new(512, source);

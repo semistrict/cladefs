@@ -28,7 +28,9 @@
 //! they changed go to the extent device meanwhile. Reads of the rest copy from the window, and
 //! fetches ([`BlockDevice::fetch`]) read it in place, as SQLite's memory-mapped reads do. While
 //! pages fetched are held, nothing is mapped again, as SQLite's own unix VFS remaps nothing while
-//! pages are out.
+//! pages are out. A map that fails leaves what it was for unmapped, read from the extent device
+//! until the next read or fetch reaching it maps it again, and is counted
+//! ([`BlockDevice::map_failures`]): the window is never given up on for good (board 8549).
 //!
 //! **Opening** reads the root alone: the tree is read as it is used (`pages`, TASK-440).
 //!
@@ -36,7 +38,7 @@
 //! SQLite's calls do: a block device is not to be called from a thread whose executor the extent
 //! device needs.
 
-use crate::format::{self, DYING_KEPT, MAX_ROOT_BYTES, Root};
+use crate::format::{self, DYING_KEPT, MAX_LISTED, MAX_ROOT_BYTES, Root};
 use crate::pages::{Failure, Pages, Plan, REMAP_BATCH};
 use crate::window::{Extents, Run, Window};
 use anyhow::{Context as _, Error, bail};
@@ -87,14 +89,13 @@ struct Inner {
     /// flush's (TASK-540).
     list: Option<ExtentId>,
     failed: Option<String>,
-    /// Whether the window maps the contents: not once a map failed with no page held.
-    mapped: bool,
     /// How many pages are held, fetched ([`BlockDevice::fetch`]).
     fetches: u32,
 }
 
 /// A block device on an extent device. See the module docs.
 pub struct BlockDevice {
+    /// Dropped before the window, as [`Window`] promises its windows.
     device: DeviceHolder,
     options: Options,
     inner: Mutex<Inner>,
@@ -102,6 +103,8 @@ pub struct BlockDevice {
     window: Option<(Box<dyn Window>, u64)>,
     /// How many times pages were fetched to read in place.
     fetched: AtomicU64,
+    /// How many times mapping the window failed.
+    map_failures: AtomicU64,
 }
 
 /// Frees `extents` on `device`, a request at most per [`FREES_AT_ONCE`]: those it failed to free.
@@ -132,12 +135,23 @@ impl BlockDevice {
     pub fn open(device: DeviceHolder, options: Options) -> Result<Arc<Self>, Error> {
         assert!(options.max_extent_blocks > 0, "extents of no blocks");
         let inner = block_on(Self::recover(&**device))?;
-        let fetched = AtomicU64::new(0);
-        Ok(Arc::new(Self { device, options, inner: Mutex::new(inner), window: None, fetched }))
+        Ok(Self::made(device, options, inner, None))
+    }
+
+    fn made(
+        device: DeviceHolder,
+        options: Options,
+        inner: Inner,
+        window: Option<(Box<dyn Window>, u64)>,
+    ) -> Arc<Self> {
+        let (fetched, map_failures) = (AtomicU64::new(0), AtomicU64::new(0));
+        let inner = Mutex::new(inner);
+        Arc::new(Self { device, options, inner, window, fetched, map_failures })
     }
 
     /// The block device on `device`, as [`BlockDevice::open`] opens it, its contents mapped into
-    /// `window` from offset 0, as far as the window's whole blocks go.
+    /// `window` from offset 0, as far as the window's whole blocks go. Failing, it drops `device`
+    /// before `window`, as [`Window`] promises.
     pub fn open_mapped(
         device: DeviceHolder,
         window: Box<dyn Window>,
@@ -147,14 +161,22 @@ impl BlockDevice {
         let block_size = device.block_size() as u64;
         let (base, size) = window.memory();
         let bytes = size / block_size * block_size;
-        if !(base.as_ptr() as u64).is_multiple_of(block_size) || bytes == 0 {
-            bail!("a window of {size} bytes at {base:?} holds no aligned block");
-        }
-        let mut inner = block_on(Self::recover(&**device))?;
+        let inner = match (base.as_ptr() as u64).is_multiple_of(block_size) && bytes > 0 {
+            true => block_on(Self::recover(&**device)),
+            false => {
+                Err(anyhow::anyhow!("a window of {size} bytes at {base:?} holds no aligned block"))
+            }
+        };
+        let mut inner = match inner {
+            Ok(inner) => inner,
+            Err(error) => {
+                drop(device);
+                drop(window);
+                return Err(error);
+            }
+        };
         inner.pages.set_region(Some((base, bytes)));
-        inner.mapped = true;
-        let (window, fetched) = (Some((window, bytes)), AtomicU64::new(0));
-        Ok(Arc::new(Self { device, options, inner: Mutex::new(inner), window, fetched }))
+        Ok(Self::made(device, options, inner, Some((window, bytes))))
     }
 
     /// What `device` holds, its root's dying extents and what a crash left freed, and the root
@@ -171,7 +193,6 @@ impl BlockDevice {
             dying: Vec::new(),
             list: None,
             failed: None,
-            mapped: false,
             fetches: 0,
         };
         let Some(root) = root else {
@@ -185,7 +206,8 @@ impl BlockDevice {
         let orphans = orphans(root.minted, next).map(|sequence| ExtentId::new(cell, sequence));
         let mut freeing: Vec<_> = root.dying.iter().copied().chain(orphans).collect();
         if let Some((list, count)) = root.dying_list {
-            let mut buffer = device.allocate_buffer(format::list_len(count, block_size)).await;
+            let len = format::list_len(count, block_size).context("the dying extents' list")?;
+            let mut buffer = device.allocate_buffer(len).await;
             device
                 .read(list, 0, buffer.as_mut())
                 .await
@@ -245,21 +267,23 @@ impl BlockDevice {
         Ok(extents)
     }
 
-    /// Maps `changed`, ranges of chunks, into the window as the last flush has them. A failure is
-    /// logged, and the contents read from the extent device from then on, the window unmapped;
-    /// but not while pages are held, fetched, which read the window in place: it stays then, what
-    /// it mapped of `changed` left unmapped, to be mapped as reads reach it again (TASK-553).
+    /// Maps `changed`, ranges of chunks, into the window as the last flush has them. A failure
+    /// leaves them unmapped, read from the extent device until a read or fetch reaching them maps
+    /// them again, and is logged and counted ([`BlockDevice::map_failures`]): the window stays, as
+    /// pages held, fetched, read it in place (TASK-553), and no failure gives it up on for good
+    /// (board 8549).
     fn remap(&self, inner: &mut Inner, changed: impl IntoIterator<Item = Range<u64>>) {
-        let Some((window, bytes)) = self.window.as_ref().filter(|_| inner.mapped) else {
-            return;
-        };
+        let Some((window, bytes)) = self.window.as_ref() else { return };
         let block_size = self.block_size();
         let mapped = bytes / block_size;
+        let changed: Vec<_> = changed
+            .into_iter()
+            .map(|range| range.start.min(mapped)..range.end.min(mapped))
+            .collect();
         let (mut runs, mut unmapped, mut marked) = (Vec::new(), Vec::new(), Vec::new());
         let device = &**self.device;
-        let made = changed.into_iter().try_for_each(|range| {
-            let range = range.start.min(mapped)..range.end.min(mapped);
-            for (chunks, contents) in block_on(inner.pages.runs(device, range))? {
+        let made = changed.iter().try_for_each(|range| {
+            for (chunks, contents) in block_on(inner.pages.runs(device, range.clone()))? {
                 let (at, len) =
                     (chunks.start * block_size, (chunks.end - chunks.start) * block_size);
                 match contents {
@@ -275,18 +299,16 @@ impl BlockDevice {
             .and_then(|()| unmapped.iter().try_for_each(|(at, len)| window.unmap(*at, *len)));
         match made {
             Ok(()) => inner.pages.mark_mapped(marked),
-            Err(error) if inner.fetches > 0 => {
-                log::error!("block_device: mapping the window, pages held: {error:#}");
-            }
             Err(error) => {
+                self.map_failures.fetch_add(1, Ordering::Relaxed);
                 log::error!(
-                    "block_device: mapping the window, read from the device from now on: {error:#}"
+                    "block_device: mapping the window, read from the device until mapped again: \
+                     {error:#}"
                 );
-                inner.mapped = false;
-                inner.pages.set_region(None);
-                if let Err(error) = window.unmap(0, *bytes) {
-                    log::error!("block_device: unmapping the window: {error:#}");
-                }
+                // What it was for, and what it mapped of it before it failed, read from the
+                // device: the chunks it took as stale among them, which the window may map as
+                // before the flushes that changed them.
+                inner.pages.mark_mapped(changed.into_iter().map(|range| (range, false)));
             }
         }
     }
@@ -295,7 +317,7 @@ impl BlockDevice {
     /// unless pages are held, fetched, which read as they were until given back, as SQLite's own
     /// unix VFS remaps nothing while pages are out.
     fn refresh(&self, inner: &mut Inner) {
-        if inner.mapped && inner.fetches == 0 && inner.pages.stale_chunks() > 0 {
+        if self.window.is_some() && inner.fetches == 0 && inner.pages.stale_chunks() > 0 {
             let stale = inner.pages.take_stale();
             self.remap(inner, stale);
         }
@@ -304,7 +326,7 @@ impl BlockDevice {
     /// Maps what the window doesn't yet of the chunks `len` bytes at `offset` reach, as the last
     /// flush has them.
     fn map_reached(&self, inner: &mut Inner, offset: u64, len: u64) {
-        if !inner.mapped || len == 0 {
+        if self.window.is_none() || len == 0 {
             return;
         }
         let block_size = self.block_size();
@@ -320,7 +342,7 @@ impl BlockDevice {
     pub fn fetch(&self, offset: u64, len: u64) -> Result<Option<*const u8>, Error> {
         let mut inner = self.lock()?;
         let inner = &mut *inner;
-        if !inner.mapped {
+        if self.window.is_none() {
             return Ok(None);
         }
         self.refresh(inner);
@@ -340,6 +362,12 @@ impl BlockDevice {
     /// How many times pages were fetched to read in place ([`BlockDevice::fetch`]).
     pub fn fetched(&self) -> u64 {
         self.fetched.load(Ordering::Relaxed)
+    }
+
+    /// How many times mapping the window failed: each left what it was for read from the extent
+    /// device until mapped again.
+    pub fn map_failures(&self) -> u64 {
+        self.map_failures.load(Ordering::Relaxed)
     }
 
     /// Gives back a page fetched ([`BlockDevice::fetch`]).
@@ -447,6 +475,11 @@ impl BlockDevice {
         let named = inner.list.take();
         let dying: Vec<_> =
             carried.iter().copied().chain(named).chain(plan.dead.iter().copied()).collect();
+        // More than a list holds, which no root read back may name (board 8549): nothing written.
+        if dying.len() as u64 > MAX_LISTED {
+            (inner.dying, inner.list) = (carried, named);
+            bail!("{} extents dying, past the {MAX_LISTED} a list holds", dying.len());
+        }
         let mut root = Root { dying: dying.clone(), tree: plan.root.clone(), ..Root::default() };
         // Too many dying extents for the root, listed in an extent of their own, written with it.
         let mut list = None;

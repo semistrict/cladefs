@@ -10,6 +10,24 @@
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
 // the bucket on any failure.
+//
+// Formats (board 8455): two daemons of different builds may serve each other only where what they
+// hand each other means the same. A part is the bucket's bytes, the same to every build, checked
+// against the asker's own tail: GetPart names no format. A live migration hands over a cell
+// directory, whose format is its build's: its prepare names the source's formats
+// (MigratePrepareRequest.formats: the cell directory's, the extent frames', the bucket's layout's
+// and this protocol's version, cladefsd::peers::formats), which the target refuses
+// (FAILED_PRECONDITION, "the source's formats ... are not this host's ...") unless they are its
+// own, before it notes or stages anything, as it refuses a prepare naming none (a source of a
+// build before them); and its hand-over opens the cell it staged, as its opening would, before it
+// takes it into place, answering no (the source serving the cell again) if it does not open. The
+// replication calls name the asker's formats too (ReplicaOf.formats, IncarnationRequest.formats,
+// board 8457), which a member refuses (FAILED_PRECONDITION, "the asker's formats ... are not this
+// host's ...") unless they are its own, an asker naming none too: a writer of another build gets
+// no ack of a member's, nor a take of another build the logs it would misread. A member refuses a
+// segment's log not begun with its build's log format (FAILED_PRECONDITION, "... of another
+// format, refused") before it acks any of it, and its replica directory names the formats of the
+// logs it holds, refused by a daemon of others as it opens it.
 
 syntax = "proto3";
 
@@ -31,8 +49,9 @@ service Peer {
   // Replicated cells (doc-21, TASK-537): a daemon is a member of other hosts' cells'
   // configurations, holding their writers' logs, until the bucket does, in its replica directory
   // (CLADEFSD_REPLICAS). Every call names the asker's bucket (FAILED_PRECONDITION if it is not this
-  // host's) and the member's incarnation it means (ABORTED if this host's replica directory is
-  // another's: its disk lost, its promises with it). A daemon with no replica directory refuses
+  // host's) and formats (FAILED_PRECONDITION if they are not this host's, board 8457), and the
+  // member's incarnation it means (ABORTED if this host's replica directory is another's: its disk
+  // lost, its promises with it). A daemon with no replica directory refuses
   // them all (FAILED_PRECONDITION). The writer's records are ciphertext, MACed, which a member
   // never opens.
 
@@ -41,14 +60,18 @@ service Peer {
   // A writer's appends to its configuration's logs on this member, each answered once synced, in
   // order, with the log's end: an append past it writes nothing, and the writer sends again from
   // the end answered. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of
-  // a later epoch fenced the cell (its promise said), RESOURCE_EXHAUSTED past what a member holds
-  // for a configuration. Messages are 64 MiB at most.
+  // a later epoch fenced the cell (its promise said), or a segment's log is not of this host's log
+  // format (board 8457); RESOURCE_EXHAUSTED past the bytes, or the logs, a member holds for a
+  // configuration. Messages are 64 MiB at most.
   rpc Append(stream AppendRequest) returns (stream AppendResponse);
   // A take fences the cell at its epoch, durably, before this answers: appends of older epochs
   // refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
-  // of the logs it holds of the configuration named, which the take reads.
+  // of the logs it holds of the configuration named, which the take reads: in order, each once, at
+  // most as many, and as many bytes, as a member holds of a configuration, which a take refuses
+  // past (board 8453).
   rpc Fence(FenceRequest) returns (FenceResponse);
-  // A log's bytes from an offset to its end, in pieces.
+  // A log's bytes from an offset to its end, in pieces of 1 MiB at most: a take refuses a piece
+  // past the end the fence answered (board 8453).
   rpc ReadLog(ReadLogRequest) returns (stream ReadLogResponse);
   // Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
   // every configuration before it.
@@ -59,15 +82,20 @@ service Peer {
   // cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
   // segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
   // this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
-  // ephemeral cells (CLADEFSD_EPHEMERAL). This host serves one request of a cell's migrations at a
-  // time (board 5732). Asked again, it prepares again, answering as before. A migration older than
-  // one of the cell it takes, by the cell's epoch, it refuses (ABORTED); one it takes it gives up
-  // for a newer (supersedes). UNAVAILABLE if its bucket calls timed out, what it noted undone.
+  // ephemeral cells (CLADEFSD_EPHEMERAL), or none migrated to it (CLADEFSD_EPHEMERAL_CELLS), or
+  // whose formats are not the source's (board 8455), or whose bucket is another than the one the
+  // prepare names (board 8443): each before anything is noted, made or opened. INVALID_ARGUMENT for
+  // a `to` other than a new name in CLADEFSD_EPHEMERAL_CELLS (board 8447). This host serves one
+  // request of a cell's migrations at a time (board 5732). Asked again, it prepares again, answering
+  // as before. A migration older than one of the cell it takes, by the cell's epoch, it refuses
+  // (ABORTED); one it takes it gives up for a newer (supersedes), unless that one goes to another
+  // path (FAILED_PRECONDITION). UNAVAILABLE if its bucket calls timed out, what it noted undone.
   rpc MigratePrepare(MigratePrepareRequest) returns (MigratePrepareResponse);
   // A piece of a file of the cell being migrated, or its holes.
   rpc MigrateFile(MigrateFileRequest) returns (MigrateFileResponse);
-  // Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-  // cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
+  // Takes the migrated cell over, if this host holds every file named whole (openAtNamed), and the
+  // cell they make opens as the cell prepared, of this build's format, its origin and bucket the
+  // prepare's (board 8455): its cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
   // until its source releases it, so that this answers yes to it again, however often asked.
   // Otherwise no, what it took dropped and its reference retired, so that it never takes that
   // migration after (refuseFinal): a hand-over naming another take of it than its prepare's answer
@@ -98,15 +126,21 @@ message MigratePrepareRequest {
   uint64 parent_cell = 5;
   // The segment of the parent's its version is at: its origin.
   uint64 at = 6;
-  // The URL of the bucket its parent is kept in.
+  // The URL of the bucket its parent is kept in: this host's, as CLADEFSD_BUCKET names it, or the
+  // prepare is refused (board 8443). A cell of another bucket of the system is reached through it,
+  // by its registry of buckets.
   string bucket = 7;
-  // Where it goes on this host.
+  // Where it goes on this host: a new name in its directory of migrated ephemeral cells
+  // (CLADEFSD_EPHEMERAL_CELLS), an absolute path, of no name beginning with `.` (board 8447).
   string to = 8;
   // The cell's epoch, as of this migration: greater than every migration's of the cell before it
   // (board 5732).
   uint64 epoch = 9;
   // The epoch of the parent's writer that wrote segment `at` (board 6017).
   uint64 parent_epoch = 10;
+  // The source's formats, as cladefsd::peers::formats names them: the target's own, or refused
+  // (board 8455). Empty, as a source of a build before it sends, is refused too.
+  string formats = 11;
 }
 
 // A migration prepared.
@@ -221,12 +255,17 @@ message ReplicaOf {
   Configuration configuration = 4;
   // This host's incarnation, as the configuration names it.
   uint64 incarnation = 5;
+  // The asker's formats (cladefsd::peers::formats, board 8457): this host's, or the call is
+  // refused, FAILED_PRECONDITION.
+  string formats = 6;
 }
 
 // Asks for this host's replica directory's incarnation.
 message IncarnationRequest {
   // The URL of the bucket, as the asker names it: this host's.
   string bucket = 1;
+  // The asker's formats, as ReplicaOf names them: this host's, or refused, FAILED_PRECONDITION.
+  string formats = 2;
 }
 
 // This host's replica directory's incarnation.

@@ -20,9 +20,9 @@ pub(super) async fn open_file(
 ) -> DataObjectHandle<ObjectStore> {
     let root_directory =
         Directory::open(store, store.root_directory_object_id()).await.expect("open failed");
-    let (object_id, _, _) =
+    let (object_id, _) =
         root_directory.lookup(name).await.expect("lookup failed").expect("not found");
-    ObjectStore::open_object(store, object_id, HandleOptions::default(), None)
+    ObjectStore::open_object(store, object_id, HandleOptions::default())
         .await
         .expect("open_object failed")
 }
@@ -47,8 +47,8 @@ pub(super) async fn write_file(
     let root_directory =
         Directory::open(store, store.root_directory_object_id()).await.expect("open failed");
     let handle = match root_directory.lookup(name).await.expect("lookup failed") {
-        Some((object_id, _, _)) => {
-            ObjectStore::open_object(store, object_id, HandleOptions::default(), None)
+        Some((object_id, _)) => {
+            ObjectStore::open_object(store, object_id, HandleOptions::default())
                 .await
                 .expect("open_object failed")
         }
@@ -83,7 +83,7 @@ pub(super) fn lazily(device: DeviceHolder) -> impl Future<Output = OpenFxFilesys
 
 /// The store of the volume `name`, if it is open.
 pub(super) async fn open_store(filesystem: &FxFilesystem, root: &RootVolume, name: &str) -> bool {
-    let (object_id, _, _) = root.volume_directory().lookup(name).await.unwrap().unwrap();
+    let (object_id, _) = root.volume_directory().lookup(name).await.unwrap().unwrap();
     filesystem.object_manager().store(object_id).is_some()
 }
 

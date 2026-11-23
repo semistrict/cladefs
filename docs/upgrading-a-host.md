@@ -17,6 +17,12 @@ their formats are the same. A VM moves only to a host whose build has the same f
 
 ## What a format change refuses
 
+Formats are freezing (doc-28, board 10033): once a family is frozen (its golden corpus under
+`formats/`), a newer build reads every version of it from its oldest on, so its row below no longer
+refuses the older build's data: the new daemon reads its cell directories, replica directory and
+ephemeral cells in place. A rollback is still refused past any version change. Until its family
+freezes, a row holds as written.
+
 Read the release's notes for which of these changed. Each one changed means what its row says:
 
 | Format | Refused when | How it shows |
@@ -27,6 +33,9 @@ Read the release's notes for which of these changed. Each one changed means what
 | Cells in the bucket (`bucket_cell` `layout::FORMAT`) | A daemon reads a cell of another format | The cell is refused, and the collector's pass stops, deleting nothing. |
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
+| Replica directory (`local_cell::replica::magic`, its `incarnation` file's first line, `cladefs replicas 3, logs FXLOG\x00\x00\x04, own frames 0x6678646178320002`: the directory's format and the formats of the logs it holds, the write-ahead log's `LOG_MAGIC` and the own extents' frames', board 8457) | The new daemon opens a replica directory (`CLADEFSD_REPLICAS`) of another format, or holding logs of another format | The daemon refuses to start: `Error: serving peers: the replica directory: incarnation: not "cladefs replicas 3, ..."`. Delete the directory: the host comes back as a new member, as after a lost disk (below). |
+| Peer service (`cladefsd::peers::PROTOCOL`, and `cladefsd::peers::formats`, which names it with the cell directory, extent frame and bucket layout formats) | A live migration's source and target are of different formats: the target refuses its prepare, before it notes, refers to or stages anything (board 8455); and a hand-over whose staged cell doesn't open as the cell prepared is refused. A replicated cell's writer, or taker, and a member are of different formats: the member refuses every replication call (board 8457) | `MigrateCell` fails with `ENOTSUP`; the source logs "preparing migration M at PEER: ... the source's formats (...) are not this host's (...): refused" and serves the cell on. A refused hand-over is `HandOverCell`'s `EAGAIN`, the cell served on the source again. A member of other formats is not picked (its `Incarnation` refused), and one already in a configuration refuses the writer, which replaces it; a take fencing members of other formats counts them as not answering, failing without f+1 of its own formats (`FAILED_PRECONDITION`, "the asker's formats (...) are not this host's (...): refused"). |
+| Ephemeral host's files (`ephemeral_host::FORMAT`, the first line of `CLADEFSD_EPHEMERAL`'s `incarnation`, each `cells/` note and each `accepted/` record: `cladefs ephemeral host 2`). **Frozen** (doc-28, board 10048): every later build reads version 2 on | A daemon reads a file of a version it doesn't read: 1, an older build's (board 8461), or one newer than its own (a rollback) | The daemon refuses to start: `Error: reading DIR/incarnation: ephemeral host version 1: this build reads version 2 alone`, or the same of a note. Nothing is deleted: the cells' directories, their notes and their references stay as they were. |
 
 Names change too, refused the same way, never read under both. Since TASK-503 the control API is
 `cladefs.cladefsd.v1.Cladefsd` (Go: `go/cladefsd/v1`), not `cladefs.extentd.v1.Extentd`, whose
@@ -39,6 +48,40 @@ with the host's build. The guest kernel's filesystem module is `cladefs` too: a 
 with `mount -t cladefs` (`fxfs` is an unknown type), sets `cladefs.*` parameters and reads the
 `cladefs` tracepoints and `/proc/fs/cladefs`, so guest images and agents move with the guest
 kernel. The VM snapshots and cell directories are unchanged.
+
+### Daemons of two builds side by side
+
+In steps 1 to 6 the hosts of a clade run two builds, and their daemons call each other over the
+peer service (`peer.proto`, `CLADEFSD_PEER_ADDRESS`), unauthenticated (board 8437):
+
+- `GetPart` names no format, and needs none: a part is the bucket's bytes, the same to every
+  build, and the asker checks it against its own tail of the object, fetching it from the bucket
+  on any failure.
+- A live migration of an ephemeral cell (`MigrateCell`, `HandOverCell`) checks formats by name,
+  as the table says: an ephemeral cell moves only between hosts of the same formats. A target
+  takes a migration only to a new name in its `CLADEFSD_EPHEMERAL_CELLS` directory, and only of a
+  source in its own bucket (`CLADEFSD_BUCKET`); a host without the variable takes none
+  (`ENOTSUP` at the source). So drain a host of ephemeral cells by migrating them to a host of its
+  own build. Past a change of any format `cladefsd::peers::formats` names, or of the ephemeral
+  host's files, its ephemeral cells can't follow it to the new build: their only copy is on its
+  disk, and nothing reads it there. Stop their VMs and delete them (`DeleteCell`) before the drain.
+- The replication calls (`Incarnation`, `Append`, `Fence`, `ReadLog`, `DropLogs`) name the
+  asker's formats, `cladefsd::peers::formats`, which a member refuses unless they are its own
+  (board 8457): a writer replaces a member of another build, and a take counts one as not
+  answering. A member refuses a segment's log not of its build's write-ahead log format before
+  it acks any of it, and its replica directory names the formats of the logs it holds, so that a
+  member of a new build refuses the directory as it starts (the table) rather than read a log of
+  the old one's as empty. So across a change of a format `formats` names, or of the replica
+  directory's, a replicated cell's takes need f+1 members of the taker's build: close the cell on
+  its writer's host (its VM stopped or moved, which a drain does, uploading every commit) before
+  its members' hosts are upgraded, and open it again once f+1 of them, and its writer's host, run
+  one build.
+
+A host's replica directory is never copied to another host, nor restored (`operating-a-host.md`,
+"Replicated cells' replica directories"): it stays on its host across the upgrade, opened by the
+new daemon if its format is the same. If its format changed, the new daemon refuses to start
+(above): delete the directory, and the host comes back as a new member of a new incarnation,
+which its cells' configurations replace as they replace a lost disk.
 
 A wire or device protocol change alone leaves cell directories and cells readable: VMs move by
 snapshot to a host of the new build only if the device protocol is the same, and stop and boot

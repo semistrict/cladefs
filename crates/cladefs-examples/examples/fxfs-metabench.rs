@@ -17,7 +17,6 @@
 //! prints each operation's rate, and for unlink, the graveyard's freeing of the objects it
 //! unlinked, which the guest does as the kernel evicts each inode, timed on its own and with it.
 
-use fidl_fuchsia_io as fio;
 use fuchsia_async::LocalExecutor;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
 use fxfs::object_handle::{ObjectHandle, WriteObjectHandle};
@@ -26,8 +25,8 @@ use fxfs::object_store::journal::{JournalOptions, LazyFlush};
 use fxfs::object_store::transaction::{LockKey, LockKeys, Options, Transaction};
 use fxfs::object_store::volume::root_volume;
 use fxfs::object_store::{
-    Directory, HandleOptions, NewChildStoreOptions, ObjectDescriptor, ObjectKey, ObjectStore,
-    SetExtendedAttributeMode, StoreObjectHandle, Timestamp,
+    Directory, HandleOptions, MutableNodeAttributes, NewChildStoreOptions, ObjectDescriptor,
+    ObjectKey, ObjectStore, SetExtendedAttributeMode, StoreObjectHandle, Timestamp,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,7 +77,7 @@ impl Bench {
     }
 
     fn handle(&self, ino: u64) -> StoreObjectHandle<ObjectStore> {
-        StoreObjectHandle::new(self.store.clone(), ino, false, HandleOptions::default(), false)
+        StoreObjectHandle::new(self.store.clone(), ino, HandleOptions::default(), false)
     }
 
     async fn mkdir(&self, parent: &Directory<ObjectStore>, name: &str) -> Directory<ObjectStore> {
@@ -93,7 +92,7 @@ impl Bench {
     async fn create(&self, dir: &Directory<ObjectStore>, name: &str) -> u64 {
         let mut transaction = self.transaction(&[dir.object_id()]).await;
         let child = dir.create_child_file(&mut transaction, name).await.unwrap();
-        let attributes = fio::MutableNodeAttributes {
+        let attributes = MutableNodeAttributes {
             mode: Some(0o100644),
             uid: Some(0),
             gid: Some(0),
@@ -143,7 +142,7 @@ impl Bench {
 
     /// The guest's lookup: the name, and the object's record.
     async fn stat(&self, dir: &Directory<ObjectStore>, name: &str) {
-        let (ino, _, _) = dir.lookup(name).await.unwrap().unwrap();
+        let (ino, _) = dir.lookup(name).await.unwrap().unwrap();
         self.store.tree().find(&ObjectKey::object(ino)).await.unwrap().unwrap();
     }
 

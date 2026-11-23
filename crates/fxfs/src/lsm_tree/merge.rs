@@ -791,7 +791,7 @@ mod tests {
     };
     use crate::lsm_tree::{self, Query, Value};
     use crate::object_store::allocator::TEST_EXTENT;
-    use crate::object_store::{self, AttributeId, ObjectKey, ObjectValue, VOLUME_DATA_KEY_ID};
+    use crate::object_store::{self, AttributeId, ObjectKey, ObjectValue};
     use crate::serialized_types::{
         LATEST_VERSION, Version, Versioned, VersionedLatest, versioned_type,
     };
@@ -827,7 +827,7 @@ mod tests {
         Arc::new(lsm_tree::TreeCounters::default())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_emit_left() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -848,7 +848,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_other_emit() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -871,7 +871,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_left() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -896,7 +896,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_right() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -921,7 +921,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_left_less_than_right() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -939,7 +939,7 @@ mod tests {
         merger.query(Query::FullScan).await.expect("seek failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_left_equals_right() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let item = Item::new(TestKey(1..1), 1);
@@ -959,7 +959,7 @@ mod tests {
         merger.query(Query::FullScan).await.expect("seek failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_keep() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -992,7 +992,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_10_layers() {
         let skip_lists: Vec<_> = (0..10).map(|_| SkipListLayer::new(100)).collect();
         let mut rng = rand::rng();
@@ -1016,7 +1016,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_uses_cmp_lower_bound() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..10), 1), Item::new(TestKey(2..3), 2)];
@@ -1038,7 +1038,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_emit_left() {
         let skip_list = SkipListLayer::new(100);
         let items =
@@ -1061,7 +1061,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_emit_last_after_replacing() {
         let skip_list = SkipListLayer::new(100);
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -1092,7 +1092,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_emit_left_after_replacing() {
         let skip_list = SkipListLayer::new(100);
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(3..3), 3)];
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     // This tests emitting in both branches of merge_into, and most of the discard paths.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_emit_other_and_discard() {
         let skip_list = SkipListLayer::new(100);
         let items =
@@ -1165,7 +1165,7 @@ mod tests {
 
     // This tests replacing the item and discarding the right item (the one remaining untested
     // discard path) in the top branch in merge_into.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_replace_and_discard() {
         let skip_list = SkipListLayer::new(100);
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(3..3), 3)];
@@ -1189,7 +1189,7 @@ mod tests {
 
     // This tests replacing the right item in the top branch of merge_into and the left item in the
     // bottom branch of merge_into.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_replace_merge_item() {
         let skip_list = SkipListLayer::new(100);
         let items =
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     // This tests replacing the right item in the bottom branch of merge_into.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_replace_existing() {
         let skip_list = SkipListLayer::new(100);
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(3..3), 3)];
@@ -1250,7 +1250,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_discard_last() {
         let skip_list = SkipListLayer::new(100);
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -1269,7 +1269,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_into_empty() {
         let skip_list = SkipListLayer::new(100);
         let items = [Item::new(TestKey(1..1), 1)];
@@ -1285,7 +1285,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_uses_minimum_number_of_iterators() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..2), 1), Item::new(TestKey(1..2), 2)];
@@ -1336,7 +1336,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_skips_replaced_items() {
         // The 1..2 and the 2..3 items are overwritten and merging them should be skipped.
         test_advance(
@@ -1350,7 +1350,7 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_advance_skips_replaced_items_at_end() {
         // Like the last test, the 1..2 item is overwritten and seeking for it should skip the merge
         // but this time, the keys are at the end.
@@ -1417,7 +1417,7 @@ mod tests {
 
     // Same set up as `test_seek_skips_replaced_items` except here nothing should skip. Any seek
     // should just place the iterator at a particular spot in the merged layers.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_full_merge_consistent_advance_ordering() {
         let layer_set = [
             [
@@ -1467,7 +1467,7 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_full_merge_always_consult_all_layers() {
         // | 1 |   |
         // |   | 2 |
@@ -1566,7 +1566,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_merge_unbounded_include_all_layers() {
         test_advance(
             &[
@@ -1594,7 +1594,7 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_merge_proceeds_comprehensively_after_seek() {
         test_advance(
             &[
@@ -1622,7 +1622,7 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_merge_seek_finds_lower_layer() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [
@@ -1645,7 +1645,7 @@ mod tests {
         assert_eq!((key, value), (&items[1].key, &items[1].value));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_merge_seek_stops_at_exact_match() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [
@@ -1670,7 +1670,7 @@ mod tests {
         assert_eq!((key, value), (&items[0].key, &items[0].value));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_less_than() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -1692,7 +1692,7 @@ mod tests {
         assert_eq!((key, value), (&items[1].key, &items[1].value));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_to_end() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -1711,7 +1711,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_all_discarded() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items = [Item::new(TestKey(1..2), 1), Item::new(TestKey(2..3), 2)];
@@ -1726,7 +1726,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overlapping_keys() {
         let skip_lists =
             [SkipListLayer::new(100), SkipListLayer::new(100), SkipListLayer::new(100)];
@@ -1819,7 +1819,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_bloom_filters_point_query() {
         let layer_0_items = vec![Item::new(1, 1), Item::new(2, 1)];
         let layer_1_items = vec![Item::new(2, 1), Item::new(4, 1)];
@@ -1853,36 +1853,36 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_bloom_filters_limited_range() {
         // NB: This test uses ObjectKey so that we don't have to reimplement the complex merging
         // logic for range-like keys.
         let layer_0_items = vec![Item::new(
             ObjectKey::extent(0, AttributeId::TEST_ID, 0..2048),
-            ObjectValue::extent(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID),
+            ObjectValue::extent(TEST_EXTENT, 0),
         )];
         let layer_1_items = vec![
             Item::new(
                 ObjectKey::extent(0, AttributeId::TEST_ID, 1024..4096),
-                ObjectValue::extent(TEST_EXTENT, 32768, VOLUME_DATA_KEY_ID),
+                ObjectValue::extent(TEST_EXTENT, 32768),
             ),
             Item::new(
                 ObjectKey::extent(0, AttributeId::TEST_ID, 16384..17408),
-                ObjectValue::extent(TEST_EXTENT, 65536, VOLUME_DATA_KEY_ID),
+                ObjectValue::extent(TEST_EXTENT, 65536),
             ),
         ];
         let items = [
             Item::new(
                 ObjectKey::extent(0, AttributeId::TEST_ID, 0..2048),
-                ObjectValue::extent(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID),
+                ObjectValue::extent(TEST_EXTENT, 0),
             ),
             Item::new(
                 ObjectKey::extent(0, AttributeId::TEST_ID, 2048..4096),
-                ObjectValue::extent(TEST_EXTENT, 33792, VOLUME_DATA_KEY_ID),
+                ObjectValue::extent(TEST_EXTENT, 33792),
             ),
             Item::new(
                 ObjectKey::extent(0, AttributeId::TEST_ID, 16384..17408),
-                ObjectValue::extent(TEST_EXTENT, 65536, VOLUME_DATA_KEY_ID),
+                ObjectValue::extent(TEST_EXTENT, 65536),
             ),
         ];
         let layers: [Arc<dyn Layer<ObjectKey, ObjectValue>>; 2] =
@@ -1938,7 +1938,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_bloom_filters_full_range() {
         let layer_0_items = vec![Item::new(1, 1), Item::new(2, 1)];
         let layer_1_items = vec![Item::new(2, 1), Item::new(4, 1)];
@@ -1960,7 +1960,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_bloom_filters_full_scan() {
         let layer_0_items = vec![Item::new(1, 1), Item::new(2, 1)];
         let layer_1_items = vec![Item::new(2, 1), Item::new(4, 1)];
@@ -1982,7 +1982,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_optimized_merge_lazy_pull() {
         let skip_lists = [SkipListLayer::new(100), SkipListLayer::new(100)];
         let items_top = [
@@ -2032,7 +2032,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_excessive_hash_partitions_counter() {
         use std::sync::atomic::Ordering;
 
@@ -2040,7 +2040,7 @@ mod tests {
             .map(|i| {
                 Item::new(
                     ObjectKey::extent(0, AttributeId::TEST_ID, i * 512..(i + 1) * 512),
-                    ObjectValue::extent(TEST_EXTENT, 0, VOLUME_DATA_KEY_ID),
+                    ObjectValue::extent(TEST_EXTENT, 0),
                 )
             })
             .collect();

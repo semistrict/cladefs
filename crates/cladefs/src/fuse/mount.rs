@@ -12,7 +12,14 @@
 //!
 //! Threads of the mount's own each read a request from the device, have the server handle it, and
 //! write its reply, until the filesystem is unmounted, which ends the connection: reads then fail
-//! with `ENODEV`.
+//! with `ENODEV`. A handler that panics is answered `EIO`, its thread going on (board 8539). A
+//! request may wait long on its cell, as one waiting on the bucket does, holding its thread: of a
+//! mount of many cells, a tenant's requests take at most all threads but two at once
+//! ([`Admission`]), the rest waiting for one of its own to end, so that the other tenants' cells,
+//! and the mount's own directories, are served whatever one tenant's wait on.
+//!
+//! A mount point a dead server left mounted, its connection aborted (`ENOTCONN`), as a daemon
+//! killed with its mount leaves it, is detached first, if it is a cladefs's (board 8537).
 
 use super::server::{MAX_WRITE, Notifier, Server};
 use crate::error::Error;
@@ -20,6 +27,7 @@ use crate::filesystem::Filesystem;
 use crate::node::Owner;
 use crate::storage::Storage;
 use anyhow::{Context as _, bail};
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
@@ -28,9 +36,10 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// The setuid program that mounts FUSE filesystems for users without `CAP_SYS_ADMIN`: libfuse 3's.
@@ -103,11 +112,12 @@ impl MountOptions {
         let device = Arc::new(device);
         let server = Arc::new(server(device.clone()));
         let mut served = Served { unmounter, server: Some(server.clone()), workers: Vec::new() };
+        let admission = Arc::new(Admission::of(self.threads));
         for index in 0..self.threads.get() {
-            let (theirs, server) = (device.clone(), server.clone());
+            let (theirs, server, admission) = (device.clone(), server.clone(), admission.clone());
             let spawned =
                 std::thread::Builder::new().name(format!("fuse {index}")).spawn(move || {
-                    serve(&theirs, &server);
+                    serve(&theirs, &server, &admission);
                 });
             match spawned {
                 Ok(worker) => served.workers.push(worker),
@@ -231,19 +241,24 @@ impl Served {
     }
 
     /// Waits until the filesystem is unmounted and the kernel is done with it, and returns the
-    /// server, which others may share.
+    /// server, which others may share: or goes on with a worker's panic, once all ended.
     fn join_shared(mut self) -> Arc<Server> {
-        self.join_workers();
+        if let Some(panic) = self.join_workers() {
+            std::panic::resume_unwind(panic);
+        }
         self.server.take().expect("joined once")
     }
 
-    /// Waits for the workers, which end once the filesystem is unmounted.
-    fn join_workers(&mut self) {
+    /// Waits for the workers, which end once the filesystem is unmounted: the first one's panic,
+    /// if one panicked outside its handlers, which answer theirs.
+    fn join_workers(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        let mut panicked = None;
         for worker in self.workers.drain(..) {
             if let Err(panic) = worker.join() {
-                std::panic::resume_unwind(panic);
+                panicked.get_or_insert(panic);
             }
         }
+        panicked
     }
 }
 
@@ -253,7 +268,15 @@ impl Drop for Served {
         if let Err(error) = self.unmounter.unmount(true) {
             log::error!("fuse: unmounting {}: {error:#}", self.unmounter.mountpoint.display());
         }
-        self.join_workers();
+        // Said, never unwound: a drop as a panic unwinds that panicked again would abort the
+        // process (board 8539).
+        if let Some(panic) = self.join_workers() {
+            log::error!(
+                "fuse: a worker of {} panicked: {}",
+                self.unmounter.mountpoint.display(),
+                said(&*panic)
+            );
+        }
         // The kernel's DESTROY unmounted what was served, unless it never came.
         if let Err(error) = futures::executor::block_on(server.unmount()) {
             log::error!("fuse: closing {}: {error:#}", self.unmounter.mountpoint.display());
@@ -291,8 +314,77 @@ impl Unmounter {
     }
 }
 
-/// Serves the kernel's requests from `device` until the filesystem is unmounted.
-fn serve(device: &File, server: &Server) {
+/// How many requests of each tenant are in service on a mount's workers, and those waiting for
+/// one of its own to end (board 8539): a request waiting on its cell, as one waiting on the bucket
+/// does (a cold read, an outage), holds its worker, and a tenant's take at most [`Admission::most`]
+/// of them, the rest left for the other tenants' cells and the mount's own directories. Its
+/// waiting requests are served by its own as they end, in the order the kernel sent them, so
+/// none is refused (`EAGAIN` would fail its caller) and none waits on another tenant's. What its
+/// waiting requests hold is bounded ([`Admission::most_waiting`]): past it, a request is served
+/// at once, as all were before, so that writes waiting do not take the daemon's memory (hotbed
+/// review 57).
+#[derive(Debug)]
+struct Admission {
+    /// The most workers a tenant's requests take at once: all but two, one at least.
+    most: usize,
+    /// The most bytes a tenant's waiting requests hold: 64 [`MAX_WRITE`]s.
+    most_waiting: usize,
+    tenants: Mutex<HashMap<Arc<str>, Admitted>>,
+}
+
+/// A tenant's requests on a mount's workers.
+#[derive(Debug, Default)]
+struct Admitted {
+    /// How many workers serve its requests.
+    serving: usize,
+    /// Its requests read, waiting for one of those to end.
+    waiting: VecDeque<Vec<u8>>,
+    /// The bytes they hold.
+    waiting_bytes: usize,
+}
+
+impl Admission {
+    /// The bound of a mount served by `threads` workers.
+    fn of(threads: NonZeroUsize) -> Self {
+        let most = threads.get().saturating_sub(2).max(1);
+        Self { most, most_waiting: 64 * MAX_WRITE as usize, tenants: Mutex::default() }
+    }
+
+    /// Whether the caller serves `request`, one of `tenant`'s, now: if not, it waits, kept, for
+    /// one of the tenant's in service to end ([`Admission::next`]).
+    fn admit(&self, tenant: &Arc<str>, request: &[u8]) -> bool {
+        let mut tenants = self.tenants.lock().unwrap();
+        let admitted = tenants.entry(tenant.clone()).or_default();
+        let room = admitted.waiting_bytes + request.len() <= self.most_waiting;
+        if admitted.serving < self.most || !room {
+            admitted.serving += 1;
+            return true;
+        }
+        admitted.waiting_bytes += request.len();
+        admitted.waiting.push_back(request.to_vec());
+        false
+    }
+
+    /// One of `tenant`'s requests in service ended: the next of its waiting, for the caller to
+    /// serve, if any.
+    fn next(&self, tenant: &Arc<str>) -> Option<Vec<u8>> {
+        let mut tenants = self.tenants.lock().unwrap();
+        let admitted = tenants.get_mut(tenant).expect("a tenant in service");
+        if let Some(next) = admitted.waiting.pop_front() {
+            admitted.waiting_bytes -= next.len();
+            return Some(next);
+        }
+        admitted.serving -= 1;
+        if admitted.serving == 0 {
+            tenants.remove(tenant);
+        }
+        None
+    }
+}
+
+/// Serves the kernel's requests from `device` until the filesystem is unmounted, a tenant's as
+/// `admission` lets it.
+fn serve(device: &File, server: &Server, admission: &Admission) {
     let mut request = vec![0; REQUEST_ROOM];
     loop {
         let len = match (&*device).read(&mut request) {
@@ -308,27 +400,74 @@ fn serve(device: &File, server: &Server) {
                 }
             },
         };
-        let reply = match futures::executor::block_on(server.handle(&request[..len])) {
-            Ok(Some(reply)) => reply,
-            Ok(None) => continue,
-            Err(error) => {
-                log::error!("fuse: handling a request: {error:#}");
-                continue;
+        let request = &request[..len];
+        match server.tenant_of(request) {
+            None => answer(device, server, request),
+            Some(tenant) if admission.admit(&tenant, request) => {
+                tenant_failpoint(&tenant);
+                answer(device, server, request);
+                while let Some(waited) = admission.next(&tenant) {
+                    tenant_failpoint(&tenant);
+                    answer(device, server, &waited);
+                }
             }
-        };
-        // A reply is written whole, in one write, or not at all.
-        match (&*device).write(&reply) {
-            Ok(written) if written == reply.len() => {}
-            Ok(written) => log::error!("fuse: {written} bytes of a {}-byte reply", reply.len()),
-            // The request was interrupted, and its reply is not wanted.
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
-            Err(error) => log::error!("fuse: writing a reply: {error}"),
+            // Kept, for one of its tenant's to serve as it ends.
+            Some(_) => {}
         }
     }
 }
 
+/// A test's failpoint, `fuse::tenant::TENANT`, before each of `tenant`'s requests is handled: to
+/// hold them, as a bucket that never answers holds a cell's.
+#[cfg(feature = "failpoints")]
+fn tenant_failpoint(tenant: &str) {
+    fail::fail_point!(&format!("fuse::tenant::{tenant}"));
+}
+
+#[cfg(not(feature = "failpoints"))]
+fn tenant_failpoint(_: &str) {}
+
+/// Has `server` handle `request` and writes its reply to `device`: `EIO` if its handling panicked
+/// (board 8539), the worker going on, where a panic ended the worker for good, and with the eighth
+/// every request of the mount went unread, its callers hung in the kernel for the daemon's life.
+fn answer(device: &File, server: &Server, request: &[u8]) {
+    // Unwind safe as far as the server needs: its tables are behind locks a panic poisons, and a
+    // panic through a cell's locks halts the cell (`crate::halt`).
+    let handled = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        futures::executor::block_on(server.handle(request))
+    }));
+    let reply = match handled {
+        Ok(Ok(Some(reply))) => reply,
+        Ok(Ok(None)) => return,
+        Ok(Err(error)) => return log::error!("fuse: handling a request: {error:#}"),
+        Err(panic) => {
+            log::error!("fuse: handling a request panicked: {}", said(&*panic));
+            match Server::panicked(request) {
+                Some(reply) => reply,
+                None => return,
+            }
+        }
+    };
+    // A reply is written whole, in one write, or not at all.
+    match (&*device).write(&reply) {
+        Ok(written) if written == reply.len() => {}
+        Ok(written) => log::error!("fuse: {written} bytes of a {}-byte reply", reply.len()),
+        // The request was interrupted, and its reply is not wanted.
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(error) => log::error!("fuse: writing a reply: {error}"),
+    }
+}
+
+/// What a panic said, as its payload has it.
+fn said(panic: &(dyn std::any::Any + Send)) -> &str {
+    (panic.downcast_ref::<&str>().copied())
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic of no message")
+}
+
 /// Mounts a FUSE filesystem at `mountpoint`, and returns the device it is served through.
 fn mount(mountpoint: &Path, allow_other: bool) -> anyhow::Result<(File, How)> {
+    detach_dead(mountpoint)?;
     // Opened close-on-exec, as std opens files.
     let device = File::options().read(true).write(true).open("/dev/fuse").context("/dev/fuse")?;
     // SAFETY: Plain calls returning the process's IDs.
@@ -363,6 +502,86 @@ fn mount(mountpoint: &Path, allow_other: bool) -> anyhow::Result<(File, How)> {
     let device = fusermount(mountpoint, allow_other)
         .with_context(|| format!("mounting {} through {FUSERMOUNT}", mountpoint.display()))?;
     Ok((device, How::Fusermount))
+}
+
+/// Detaches the mount at `mountpoint` if it is a dead cladefs's, as a server killed with its
+/// mount leaves it (board 8537): its connection aborted, every access there, the lookup mount(2)
+/// does of its target among them, fails with `ENOTCONN`, and nothing mounts there until it goes.
+/// Only a cladefs's, as this process's mountinfo says (`fuse.cladefs`), is detached, lazily, as it
+/// was mounted (mount(2)'s, or `fusermount3`'s, which refuses `umount2` to a user without
+/// `CAP_SYS_ADMIN`): any other file system not connected there is refused, named. Anything else
+/// wrong with the mount point, mounting it says.
+fn detach_dead(mountpoint: &Path) -> anyhow::Result<()> {
+    match std::fs::metadata(mountpoint) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => {}
+        _ => return Ok(()),
+    }
+    // Its directory's path as the kernel says it: the mount point itself answers nothing.
+    let (Some(parent), Some(name)) = (mountpoint.parent(), mountpoint.file_name()) else {
+        bail!("{} is not connected", mountpoint.display());
+    };
+    let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+    let at = parent.canonicalize().with_context(|| format!("resolving {}", parent.display()))?;
+    let at = at.join(name);
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").context("mountinfo")?;
+    let fstype = mounted_at(&mountinfo, &at);
+    if fstype != Some("fuse.cladefs") {
+        let what = fstype.map_or("nothing mountinfo lists".to_owned(), |fstype| fstype.to_owned());
+        bail!("{} is not connected, and holds {what}, no cladefs mount", mountpoint.display());
+    }
+    let detached = match umount(&at, true) {
+        Err(error)
+            if error.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error)
+                == Some(libc::EPERM) =>
+        {
+            fusermount_unmount(&at, true)
+        }
+        detached => detached,
+    };
+    detached.with_context(|| format!("detaching the dead cladefs mount at {}", at.display()))?;
+    log::warn!("fuse: detached the dead cladefs mount at {}, its server gone", at.display());
+    Ok(())
+}
+
+/// The type of the file system `mountinfo`, a `/proc/PID/mountinfo`'s, says is mounted at `at` on
+/// top (the last line of `at`), if any.
+fn mounted_at<'a>(mountinfo: &'a str, at: &Path) -> Option<&'a str> {
+    let at = at.as_os_str().as_bytes();
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let point = fields.nth(4)?;
+            // Past the optional fields, `-` ends.
+            let fstype = fields.skip_while(|field| *field != "-").nth(1)?;
+            (unescaped(point) == at).then_some(fstype)
+        })
+        .next_back()
+}
+
+/// `field`, a mountinfo path, its space, tab, newline and backslash unescaped from octal (`\040`).
+fn unescaped(field: &str) -> Vec<u8> {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        let octal = bytes.get(at + 1..at + 4).filter(|digits| {
+            byte == b'\\' && digits.iter().all(|digit| (b'0'..=b'7').contains(digit))
+        });
+        match octal {
+            Some(digits) => {
+                let value =
+                    digits.iter().fold(0u32, |value, digit| value * 8 + u32::from(digit - b'0'));
+                out.push(value as u8);
+                at += 4;
+            }
+            None => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Has `fusermount3` mount a FUSE filesystem at `mountpoint`, and returns the device it hands
@@ -504,4 +723,51 @@ fn fusermount_unmount(mountpoint: &Path, lazily: bool) -> anyhow::Result<()> {
         bail!("{FUSERMOUNT} -u failed, {}: {}{held}", output.status, said.trim());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tenant's requests past the most in service wait, in order, until what they hold would
+    /// pass the most it keeps: then one is served at once, beside the others (hotbed review 57).
+    /// Each tenant's apart, and one served ending takes the next waiting.
+    #[test]
+    fn a_tenants_waiting_requests_are_bounded_in_bytes() {
+        let admission = Admission { most: 2, most_waiting: 10, tenants: Mutex::default() };
+        let (slow, fast): (Arc<str>, Arc<str>) = (Arc::from("slow"), Arc::from("fast"));
+        assert!(admission.admit(&slow, b"1"));
+        assert!(admission.admit(&slow, b"2"));
+        assert!(!admission.admit(&slow, b"three"));
+        assert!(!admission.admit(&slow, b"four"));
+        // Five bytes more would hold eleven.
+        assert!(admission.admit(&slow, b"fifth"));
+        assert!(admission.admit(&fast, b"f"));
+        assert_eq!(admission.next(&slow), Some(b"three".to_vec()));
+        assert!(!admission.admit(&slow, b"six"));
+        assert_eq!(admission.next(&slow), Some(b"four".to_vec()));
+        assert_eq!(admission.next(&slow), Some(b"six".to_vec()));
+        for _ in 0..3 {
+            assert_eq!(admission.next(&slow), None);
+        }
+        assert_eq!(admission.next(&fast), None);
+        assert!(admission.tenants.lock().unwrap().is_empty(), "tenants left in service");
+    }
+
+    /// A mount point is found as mountinfo escapes it, its space, tab, newline and backslash in
+    /// octal, the last mount at it the one on top; past the optional fields, whatever their count.
+    #[test]
+    fn mountinfo_names_what_is_mounted_on_top() {
+        let mountinfo = "\
+            22 1 0:21 / /proc rw,nosuid shared:5 - proc proc rw\n\
+            90 22 0:50 / /tmp/a\\040b rw - ext4 /dev/sda rw\n\
+            91 90 0:51 / /tmp/a\\040b rw,nosuid shared:7 master:3 - fuse.cladefs cladefs rw\n\
+            92 22 0:52 / /tmp/c\\134d\\011e rw - fuse.other other rw\n\
+            93 22 0:53 / /tmp/bad\\9 rw - tmpfs tmpfs rw\n";
+        assert_eq!(mounted_at(mountinfo, Path::new("/tmp/a b")), Some("fuse.cladefs"));
+        assert_eq!(mounted_at(mountinfo, Path::new("/tmp/c\\d\te")), Some("fuse.other"));
+        assert_eq!(mounted_at(mountinfo, Path::new("/tmp/bad\\9")), Some("tmpfs"));
+        assert_eq!(mounted_at(mountinfo, Path::new("/tmp/a")), None);
+        assert_eq!(mounted_at("truncated line", Path::new("/tmp/a b")), None);
+    }
 }

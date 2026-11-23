@@ -37,6 +37,10 @@ pub struct Run {
 
 /// A block device's window. Offsets and lengths are multiples of the device's block size, which is
 /// the window's page size.
+///
+/// A block device drops its extent device before its window, whether it opened or not
+/// ([`crate::BlockDevice::open_mapped`]): a window whose memory may go only once what maps it
+/// has, as a daemon's cell's, which its extent device holds too, frees it then (board 8551).
 pub trait Window: Send + Sync {
     /// The memory: its first byte, and how many it holds.
     fn memory(&self) -> (NonNull<u8>, u64);
