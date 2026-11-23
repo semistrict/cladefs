@@ -541,15 +541,18 @@ impl Server {
         unmounted
     }
 
-    /// The tenant of the cell whose node `request`, as the kernel sent it, is of, in a server of
-    /// many cells: what the mount's workers bound the requests in service of, so that no tenant's,
-    /// nor any cell's, waiting on its bucket, can take every worker (board 8539). None for a
-    /// server of one filesystem, the server's own directories, and the requests that never wait
-    /// on a cell (`INIT`, `DESTROY`, `FORGET`, `BATCH_FORGET`, `INTERRUPT`).
+    /// The tenant whose cells `request`, as the kernel sent it, may wait on, in a server of many
+    /// cells: what the mount's workers bound the requests in service of, so that no tenant's, nor
+    /// any cell's, waiting on its bucket, can take every worker (board 8539). A node's request is
+    /// its cell's tenant's; one of the server's own directories under a tenant's, whose lookups and
+    /// listings read its cells' roots, that tenant's (hotbed review 57), as is a lookup of a name
+    /// in the root, a tenant's or a cell's own. None for a server of one filesystem, the root's
+    /// other requests, which read no cell, and those that never wait on a cell (`INIT`,
+    /// `DESTROY`, `FORGET`, `BATCH_FORGET`, `INTERRUPT`).
     pub(crate) fn tenant_of(&self, request: &[u8]) -> Option<Arc<str>> {
         let Shape::Many { .. } = self.shape else { return None };
         // Shorter than a header: no cell's, which its handling refuses.
-        let (header, _) = InHeader::read_from_prefix(request).ok()?;
+        let (header, body) = InHeader::read_from_prefix(request).ok()?;
         if matches!(
             header.opcode,
             opcode::INIT
@@ -560,14 +563,27 @@ impl Server {
         ) {
             return None;
         }
-        let slot = self.slot_of(header.nodeid);
-        if slot == 0 {
-            return None;
-        }
         // As a panic left the table, if one did, which the request's handling then answers: a
-        // tenant's name is the slot's from its attaching on.
+        // tenant's name is the slot's from its attaching on, a directory's from its making.
         let cells = self.cells.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        cells.slots.get(&slot).map(|slot| slot.tenant.clone())
+        let slot = self.slot_of(header.nodeid);
+        if slot != 0 {
+            return cells.slots.get(&slot).map(|slot| slot.tenant.clone());
+        }
+        if header.nodeid == ROOT_ID {
+            if header.opcode != opcode::LOOKUP {
+                return None;
+            }
+            let name = body.split(|&byte| byte == 0).next()?;
+            // Not UTF-8: no tenant's, nor any cell's, which its lookup refuses.
+            return std::str::from_utf8(name).ok().map(Arc::from);
+        }
+        // The directory of the root's that this one is, or is under.
+        let mut dir = cells.dirs.get(&header.nodeid)?;
+        while dir.parent != ROOT_ID {
+            dir = cells.dirs.get(&dir.parent)?;
+        }
+        Some(Arc::from(dir.name.as_str()))
     }
 
     /// The reply to `request`, as the kernel sent it, whose handling panicked: `EIO`, unless it

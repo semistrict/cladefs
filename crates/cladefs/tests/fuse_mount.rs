@@ -810,6 +810,19 @@ fn handlers_that_panic_are_answered_eio_and_their_workers_serve_on() {
 #[test]
 fn one_tenant_waiting_holds_no_other_tenants_requests() {
     use std::sync::{Arc, Condvar, Mutex};
+    /// Held requests' count, and whether they are let go.
+    type Held = Arc<(Mutex<(usize, bool)>, Condvar)>;
+    /// Lets the held requests go, and holds no more, however the test ends: a held request no
+    /// one let go would hold the mount's unmount for good.
+    struct LetGo(Held);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            let (state, changed) = &*self.0;
+            state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).1 = true;
+            changed.notify_all();
+            fail::remove("fuse::tenant::slow");
+        }
+    }
     let dir = tempfile::tempdir().unwrap();
     let m = dir.path().join(".gvfs");
     std::fs::create_dir(&m).unwrap();
@@ -818,8 +831,12 @@ fn one_tenant_waiting_holds_no_other_tenants_requests() {
         let fs = format(&dir.path().join(cell));
         block_on(mount.server().attach(name, std::future::ready(Ok(fs)))).unwrap();
     }
-    // Each request of tenant `slow` held, counted, until let go.
-    let held = Arc::new((Mutex::new((0usize, false)), Condvar::new()));
+    // Looked up once, so that the lookups below revalidate names the kernel has, which go to the
+    // mount at once, where a name's first lookups wait in the kernel on one.
+    std::fs::metadata(m.join("slow/a")).unwrap();
+    // Each request of tenant `slow` held, counted, until let go: its lookups of its directory's
+    // name among them, which read its cells' roots (hotbed review 57).
+    let held: Held = Arc::new((Mutex::new((0usize, false)), Condvar::new()));
     let holding = held.clone();
     fail::cfg_callback("fuse::tenant::slow", move || {
         let (state, changed) = &*holding;
@@ -831,6 +848,7 @@ fn one_tenant_waiting_holds_no_other_tenants_requests() {
         }
     })
     .unwrap();
+    let let_go = LetGo(held.clone());
     let waiting: Vec<_> = (0..16)
         .map(|n| {
             let missing = m.join("slow/a").join(format!("missing-{n}"));
@@ -853,13 +871,8 @@ fn one_tenant_waiting_holds_no_other_tenants_requests() {
     });
     let answered = answered.recv_timeout(std::time::Duration::from_secs(1));
     let held_then = held.0.lock().unwrap().0;
-    {
-        let (state, changed) = &*held;
-        state.lock().unwrap().1 = true;
-        changed.notify_all();
-    }
+    drop(let_go);
     let still: Vec<_> = waiting.into_iter().map(|thread| thread.join().unwrap()).collect();
-    fail::remove("fuse::tenant::slow");
     assert_eq!(answered, Ok((Some(libc::ENOENT), vec!["fast".to_owned(), "slow".to_owned()])));
     assert_eq!(held_then, 6, "the most of slow's requests in service");
     assert_eq!(still, vec![Some(libc::ENOENT); 16]);

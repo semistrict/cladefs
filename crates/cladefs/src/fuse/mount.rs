@@ -319,11 +319,16 @@ impl Unmounter {
 /// does (a cold read, an outage), holds its worker, and a tenant's take at most [`Admission::most`]
 /// of them, the rest left for the other tenants' cells and the mount's own directories. Its
 /// waiting requests are served by its own as they end, in the order the kernel sent them, so
-/// none is refused (`EAGAIN` would fail its caller) and none waits on another tenant's.
+/// none is refused (`EAGAIN` would fail its caller) and none waits on another tenant's. What its
+/// waiting requests hold is bounded ([`Admission::most_waiting`]): past it, a request is served
+/// at once, as all were before, so that writes waiting do not take the daemon's memory (hotbed
+/// review 57).
 #[derive(Debug)]
 struct Admission {
     /// The most workers a tenant's requests take at once: all but two, one at least.
     most: usize,
+    /// The most bytes a tenant's waiting requests hold: 64 [`MAX_WRITE`]s.
+    most_waiting: usize,
     tenants: Mutex<HashMap<Arc<str>, Admitted>>,
 }
 
@@ -334,13 +339,15 @@ struct Admitted {
     serving: usize,
     /// Its requests read, waiting for one of those to end.
     waiting: VecDeque<Vec<u8>>,
+    /// The bytes they hold.
+    waiting_bytes: usize,
 }
 
 impl Admission {
     /// The bound of a mount served by `threads` workers.
     fn of(threads: NonZeroUsize) -> Self {
         let most = threads.get().saturating_sub(2).max(1);
-        Self { most, tenants: Mutex::default() }
+        Self { most, most_waiting: 64 * MAX_WRITE as usize, tenants: Mutex::default() }
     }
 
     /// Whether the caller serves `request`, one of `tenant`'s, now: if not, it waits, kept, for
@@ -348,10 +355,12 @@ impl Admission {
     fn admit(&self, tenant: &Arc<str>, request: &[u8]) -> bool {
         let mut tenants = self.tenants.lock().unwrap();
         let admitted = tenants.entry(tenant.clone()).or_default();
-        if admitted.serving < self.most {
+        let room = admitted.waiting_bytes + request.len() <= self.most_waiting;
+        if admitted.serving < self.most || !room {
             admitted.serving += 1;
             return true;
         }
+        admitted.waiting_bytes += request.len();
         admitted.waiting.push_back(request.to_vec());
         false
     }
@@ -362,6 +371,7 @@ impl Admission {
         let mut tenants = self.tenants.lock().unwrap();
         let admitted = tenants.get_mut(tenant).expect("a tenant in service");
         if let Some(next) = admitted.waiting.pop_front() {
+            admitted.waiting_bytes -= next.len();
             return Some(next);
         }
         admitted.serving -= 1;
@@ -718,6 +728,31 @@ fn fusermount_unmount(mountpoint: &Path, lazily: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tenant's requests past the most in service wait, in order, until what they hold would
+    /// pass the most it keeps: then one is served at once, beside the others (hotbed review 57).
+    /// Each tenant's apart, and one served ending takes the next waiting.
+    #[test]
+    fn a_tenants_waiting_requests_are_bounded_in_bytes() {
+        let admission = Admission { most: 2, most_waiting: 10, tenants: Mutex::default() };
+        let (slow, fast): (Arc<str>, Arc<str>) = (Arc::from("slow"), Arc::from("fast"));
+        assert!(admission.admit(&slow, b"1"));
+        assert!(admission.admit(&slow, b"2"));
+        assert!(!admission.admit(&slow, b"three"));
+        assert!(!admission.admit(&slow, b"four"));
+        // Five bytes more would hold eleven.
+        assert!(admission.admit(&slow, b"fifth"));
+        assert!(admission.admit(&fast, b"f"));
+        assert_eq!(admission.next(&slow), Some(b"three".to_vec()));
+        assert!(!admission.admit(&slow, b"six"));
+        assert_eq!(admission.next(&slow), Some(b"four".to_vec()));
+        assert_eq!(admission.next(&slow), Some(b"six".to_vec()));
+        for _ in 0..3 {
+            assert_eq!(admission.next(&slow), None);
+        }
+        assert_eq!(admission.next(&fast), None);
+        assert!(admission.tenants.lock().unwrap().is_empty(), "tenants left in service");
+    }
 
     /// A mount point is found as mountinfo escapes it, its space, tab, newline and backslash in
     /// octal, the last mount at it the one on top; past the optional fields, whatever their count.
