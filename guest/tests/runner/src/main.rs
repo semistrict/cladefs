@@ -954,11 +954,11 @@ mod tests {
     fn a_temporary_directory_too_long_for_sockets_is_refused() {
         assert!(sockets_fit(Path::new("/tmp")).is_ok());
         assert!(sockets_fit(Path::new(&format!("/{}", "t".repeat(MAX_TMPDIR - 1)))).is_ok());
-        let long = "/mnt/fxdax-scratch/fxdax-host/run-r3305-20261112T014517Z-8434a7ea/results";
+        let long = "/work/cladefs/target/host-runs/run-r3305-20261112T014517Z-8434a7ea/results";
         assert_eq!(
             sockets_fit(Path::new(long)).unwrap_err().to_string(),
             format!(
-                "the temporary directory {long} is 73 bytes, past the 40 the cases' sockets fit \
+                "the temporary directory {long} is 74 bytes, past the 40 the cases' sockets fit \
                  under (SUN_LEN): set TMPDIR to a shorter one, such as /tmp"
             )
         );

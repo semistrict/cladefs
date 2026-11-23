@@ -5,7 +5,7 @@
 
 # Benchmark cladefs against ext4 on virtio-blk (scripts/bench.sh) on the test host, an x86-64 Linux
 # machine of one's own with KVM, over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh),
-# as a measurement, alone there and on CPUs of its own (fxjob --bench), and keep the results in the
+# as a measurement, alone there and on CPUs of its own (hotbed run --bench), and keep the results in the
 # repo: the measurements, the test host, the source measured, the comparison of the filesystems
 # (comparison.md) and what the run was for (note.md); and bring
 # docs/measurements/fs-bench-history.md up to date (scripts/bench-history.py).

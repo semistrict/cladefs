@@ -31,7 +31,7 @@ from pathlib import Path
 # (`process:`'s cpu-ns over `daemon:`'s written_raw_bytes, all its daemons' together), TASK-382:
 # nothing held a daemon's CPU, and main's spent 1.55 times the pin's in the bucket soak, its uploads
 # all sending their objects again and again to the full and failing bucket. As the qualification
-# runs, alone on the test host's measurement cores (fxjob --bench), TASK-330.4's A/B measured the
+# runs, alone on the test host's measurement cores (hotbed run --bench), TASK-330.4's A/B measured the
 # sandboxes' daemons at 14.4-14.6 ms (16.7 in a round a neighbour's disk loader overlapped), and the
 # soak's at 24.3-25.5 ms on main then, 16.2 ms on the pin. With writes taking turns while the bucket
 # fails, the soak's daemon spent 11.2 ms even run as plain work on a loaded test host, its writes

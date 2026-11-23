@@ -3,48 +3,41 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Rounds of guest test cases on this Linux host, a shared one, each case run once a round, the
-# cases' order reversed every other round (A B, B A, ...), so that what drifts on the host over the
-# hours moves every case alike (TASK-350). Each run is a scripts/test-e2e.sh of the one case, as
-# root (its cases attach loop devices), as a measurement: `fxjob --bench`, which gives it cores,
-# most of the L3, memory bandwidth and memory of its own whatever else the host runs, or fails the
-# run (the test host's setup). So a run doesn't wait for the host to be quiet: what the rest of the
-# host does reaches it only through what isolation can't split, the disks (ZFS schedules its own IO)
-# and the kernel's shared locks. Before each run it drops the host's caches, the page cache and what
-# of ZFS's ARC can go; and it records, in RESULTS/runs.tsv, each run's round, case, outcome, the
-# host's load and the ARC's size before and after, and the time the run's tasks stalled (pressure
-# stall information of fxdax-bench.slice, in ms, `some`) waiting on CPU, memory and IO: what a run's
-# numbers are read against.
+# Rounds of guest test cases in a hotbed workspace on a test host, each case run once a round,
+# the cases' order reversed every other round (A B, B A, ...), so that what drifts on the host over
+# the hours moves every case alike (TASK-350). The rounds run as one measurement, a `hotbed run
+# --bench` command, which has the node's measurement CPUs, most of its L3 and its memory bandwidth
+# to itself whatever else the host runs (the fleet's hotbed): what the rest of the host does reaches
+# a run only through what isolation can't split, the disks and the kernel's shared locks. Before each
+# run it syncs; and it records, in RESULTS/runs.tsv, each run's round, case, outcome, the host's load
+# and the ARC's size before and after, and the time the run's tasks stalled (pressure stall
+# information of the measurement's own cgroup, in ms, `some`) waiting on CPU, memory and IO: what a
+# run's numbers are read against. Nothing runs as root, which a workspace has none of: no cache is
+# dropped (board 6058).
 #
 #   scripts/bench-rounds.sh RESULTS ROUNDS CASE...
 #
 # The cases' artifacts are built once, first, into RESULTS/artifacts (CLADEFS_E2E_BUILD_ONLY), as
-# ordinary work (fxjob without --bench, at niceness 19, CARGO_BUILD_JOBS at once, 4 unless the
-# caller says, into the caller's CARGO_TARGET_DIR if one is set), and every run boots those
-# (CLADEFS_E2E_PREBUILT): no run builds, which a measurement refuses to (scripts/lib/measurement.sh,
-# TASK-368), nor runs the harness's own tests.
-# Each run may hold CLADEFS_ROUNDS_MEM (16G) of memory, page cache, the extent daemon's and its
-# bucket together.
+# ordinary work, CARGO_BUILD_JOBS at once (4 unless the caller says), into the caller's
+# CARGO_TARGET_DIR if one is set, and every run boots those (CLADEFS_E2E_PREBUILT): no run builds,
+# which a measurement refuses to (scripts/lib/measurement.sh, TASK-368), nor runs the harness's own
+# tests. CLADEFS_TEST_HOST_PHASE says which: build, a command of work, the artifacts alone; measure,
+# the rounds, under hotbed run --bench, of what build made; unset, both, here, for a run of no
+# measurement's.
 #
-# A run's numbers are cladefs's on a host's disks, not this host's results' filesystem's (the test
-# host's home, ZFS, whose syncs a durable sync then measured: bench-fs-fxfs-guest-dax's sync-loop
-# 10.8/s there at 25 ms of bucket latency, 30.1/s as below, TASK-397). Each run's cells and its
-# extent daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
-# fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
-# refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on tmpfs,
-# whose distance CLADEFS_BUCKET_LATENCY_MS stands for, unless CLADEFSD_BUCKET names one: it counts
-# against the run's memory, and a case whose working set of gigabytes overruns that (TASK-350) takes
-# more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
+# A run's numbers are cladefs's on the workspace's filesystem, ZFS on the fleet's hosts, its cells
+# and its extent daemon's part cache in the command's temporary directory (scripts/test-e2e-job.sh),
+# its bucket test-e2e.sh's own, a file bucket in memory, on tmpfs, whose distance
+# CLADEFS_BUCKET_LATENCY_MS stands for, unless CLADEFSD_BUCKET names one.
 #
 # Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs (e2e, copied there as the run
 # ends, without the cells and the guests' root filesystems), and the fs bench's report as JSON
 # (CLADEFS_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
 # round directories; and what others wrote to the run's disk meanwhile (contamination.json there,
-# scripts/contamination.py, TASK-375), the job's scratch disk, the cells', which only the job
-# can name: test-e2e-job.sh runs the cases under it, a run others wrote beside left out of the
-# comparison's timings. The environment's CLADEFS_* and CLADEFSD_* variables pass to every run (sudo drops them
-# otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
-# and such. It fails if a run did; a run refused before it started (2: no ext4 for its cells,
+# scripts/contamination.py, TASK-375), the cells', which test-e2e-job.sh names, a run others wrote
+# beside left out of the comparison's timings. The environment's CLADEFS_* and CLADEFSD_* variables
+# pass to every run: CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS,
+# CLADEFS_PGBENCH_RUNS and such. It fails if a run did; a run refused before it started (2:
 # artifacts it can't boot) ends the rounds there, as every other would be. CLADEFS_TEST_HOST_PROC
 # and CLADEFS_TEST_HOST_SYS name the host's /proc and /sys, for the tests.
 set -euo pipefail
@@ -56,48 +49,29 @@ cases=("$@")
 [[ $rounds =~ ^[1-9][0-9]*$ ]] || { echo "ROUNDS is a count" >&2; exit 2; }
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
-command -v fxjob > /dev/null || { echo "fxjob not found: this runs on a test host with fxjob" >&2; exit 2; }
-
+phase=${CLADEFS_TEST_HOST_PHASE:-all}
+[[ $phase == all || $phase == build || $phase == measure ]] ||
+    { echo "CLADEFS_TEST_HOST_PHASE is build or measure, or unset for both" >&2; exit 2; }
 proc=${CLADEFS_TEST_HOST_PROC:-/proc} sys=${CLADEFS_TEST_HOST_SYS:-/sys}
 load() { cut -d' ' -f1 "$proc/loadavg"; }
 arc_bytes() {
     awk '$1 == "size" { print $3 }' "$proc/spl/kstat/zfs/arcstats" 2> /dev/null || echo -
 }
-
-# The time, in µs, fxdax-bench.slice's tasks have stalled on RESOURCE (cpu, memory, io), some
-# of them at least.
-bench=$sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/fxdax.slice/fxdax-bench.slice
+# The time, in µs, this command's cgroup's tasks have stalled on RESOURCE (cpu, memory, io), some
+# of them at least: the measurement's own, hotbed's unit of it.
+cgroup=$sys/fs/cgroup$(sed -n 's/^0:://p' "$proc/self/cgroup")
 stalled() {
-    sed -n 's/^some .*total=//p' "$bench/$1.pressure"
+    sed -n 's/^some .*total=//p' "$cgroup/$1.pressure"
 }
-
-# The CLADEFS_* and CLADEFSD_* variables of this environment, as env's NAME=VALUE words.
-passed=()
-while IFS= read -r name; do
-    passed+=("$name=${!name}")
-done < <(compgen -e | grep -E '^CLADEFSD?_' || true)
-
-# as_root COMMAND...: COMMAND as root, inside a job, with the job's TMPDIR, fxjob's, which it
-# removes with the job: sudo, set-user-ID, never passes it on (glibc drops it), so env sets it,
-# expanded by the job's shell.
-# shellcheck disable=SC2016 # Expanded by the job's shell.
-as_root=(bash -c 'exec sudo env TMPDIR="${TMPDIR:-/tmp}" "$@"' as-root)
-
-# Built as root, as the runs boot it, then given back: with the caller's bounds on cargo, which sudo
-# would drop (TASK-446), as scripts/lib/host.sh's runs build, 4 jobs at once by default.
 artifacts=$results/artifacts
-cargo_env=("CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}")
-built=("$repo" "$HOME/.cargo" "$HOME/.rustup" "$results")
-if [[ -n ${CARGO_TARGET_DIR:-} ]]; then
-    cargo_env+=("CARGO_TARGET_DIR=$CARGO_TARGET_DIR")
-    built+=("$CARGO_TARGET_DIR")
+if [[ $phase != measure ]]; then
+    source "$repo/scripts/lib/measurement.sh"
+    measurement_refuses "bench-rounds.sh's build"
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} CLADEFS_E2E_BUILD_ONLY=$artifacts \
+        "$repo/scripts/test-e2e.sh" "${cases[@]}" > "$results/build.log" 2>&1 ||
+        { echo "building failed: $results/build.log" >&2; exit 1; }
 fi
-fxjob --name rounds-build --mem 8G -- nice -n 19 \
-    "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${cargo_env[@]}" ${passed[@]+"${passed[@]}"} \
-    "CLADEFS_E2E_BUILD_ONLY=$artifacts" "$repo/scripts/test-e2e.sh" "${cases[@]}" \
-    > "$results/build.log" 2>&1 || { echo "building failed: $results/build.log" >&2; exit 1; }
-sudo chown -R "$(id -u):$(id -g)" "${built[@]}"
-
+if [[ $phase == build ]]; then exit 0; fi
 [[ -f $results/runs.tsv ]] ||
     printf 'round\tcase\toutcome\tload_before\tload_after\tarc_before\tarc_after\tstarted\t%s\n' \
         'cpu_stall_ms	memory_stall_ms	io_stall_ms' \
@@ -113,18 +87,13 @@ for ((round = 1; round <= rounds; round++)); do
         out=$results/$case/round-$round
         mkdir -p "$out"
         sync
-        # shellcheck disable=SC2016 # For sh to expand.
-        sudo sh -c 'echo 3 > "$1"' drop "$proc/sys/vm/drop_caches"
         load_before=$(load) arc_before=$(arc_bytes) started=$(date -u +%FT%TZ)
         stalls_before=()
         for resource in cpu memory io; do stalls_before+=("$(stalled "$resource")"); done
         outcome=ok ran=0
-        fxjob --bench --mem "${CLADEFS_ROUNDS_MEM:-16G}" --name "rounds-$case-$round" -- \
-            "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" ${passed[@]+"${passed[@]}"} \
-            "CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \
+        CLADEFS_E2E_PREBUILT=$artifacts CLADEFS_BENCH_RESULTS=$out \
             "$repo/scripts/test-e2e-job.sh" "$out/e2e" "$case" > "$out/run.log" 2>&1 || ran=$?
         if (( ran == 2 )); then
-            sudo chown -R "$(id -u):$(id -g)" "$results"
             echo "round $round $case: refused, and so would every run be: $out/run.log" >&2
             exit 2
         fi
@@ -143,5 +112,4 @@ for ((round = 1; round <= rounds; round++)); do
         echo "round $round $case: $outcome (stalled ms: cpu ${stalls[0]}, memory ${stalls[1]}, io ${stalls[2]})" >&2
     done
 done
-sudo chown -R "$(id -u):$(id -g)" "$results"
 exit "$status"

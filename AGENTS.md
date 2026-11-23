@@ -45,36 +45,33 @@ builds; long ones with `--detach`. The workstation (macOS) compiles no Rust at a
 code included: CI's `macos` job compiles and tests that, so push and read its result. Local
 commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `vb`, and fast Python checks.
 
-### Linux runs go to the least loaded test host
+### Linux runs go to a test host, through hotbed
 
-Linux runs go to a test host: a physical machine others' agents share, with `fxjob` (`--bench`
-for measurements), `/dev/kvm` and `/dev/fuse`, set up once by its own setup. The user keeps
-several, and their names, what each can run and how to pick the least loaded one live outside the
-repo, in the user's `fleet` skill: read it before any Linux run. A run goes to the least loaded
-test host that can run it; an A/B, or a number compared with earlier ones, stays on the host whose
-numbers it is compared with.
+Linux runs go to a test host: a physical machine others' agents share, with `/dev/kvm` and
+`/dev/fuse`, where hotbed runs commands in workspaces (`hotbed run`; `--bench` for measurements).
+The user keeps several, and their names, what each can run and how to pick one live outside the
+repo, in the user's `fleet` skill: read it before any Linux run. An A/B, or a number compared with
+earlier ones, stays on the node whose numbers it is compared with.
 
-Runs go through the `scripts/*-host.sh` drivers (`scripts/lib/host.sh`;
-`CLADEFS_TEST_HOST` names another test host): `test-host.sh`, `bench-host.sh`, `bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
-`mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`,
-`fork-time-host.sh`, `gc-sweep-host.sh`. A run is a worktree there of a commit origin has (push first; HEAD of a clean
-tree by default, `CLADEFS_TEST_HOST_COMMIT` names another), its own target directories, its job under
-`fxjob` (`--bench` for measurements), results copied back, worktree removed. A measurement builds
-nothing inside `fxjob --bench`: its run builds first as a job of work, then measures what that
-built (`host_job`'s `CLADEFS_TEST_HOST_PHASE`), and anything that would build inside a measurement
-refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come
-from a cache on the test host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
-the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it, within six
-hours of its end, after which the next run removes it, passed or failed (board 2324). Scratch of your
-own on a test host's scratch disk (a worktree, a target, results, a kernel) goes in your job's
-`TMPDIR` where it can, which fxjob removes with the job; anything that must outlive one job goes in
-one directory named for your task, which you remove once nothing of yours runs there. fxjob refuses
-a job when the scratch disk is nearly full, rather than let it fail midway. Pass the run
-number as `CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). An agent's shell runs under no_new_privs, which stops sudo
-however sudoers reads: run a driver needing root (`CLADEFS_TEST_HOST=local` ones) through
-`systemd-run --user --wait --pipe -- ...`, a service of the user's manager that does not inherit
-it, rather than leave the run to the user (the user's word, 2026-11-19). What a run needs
-installed goes into the test host's setup as a step, never into a run.
+Everything of a run is the hotbed workspace's: builds, guest kernels, results, temporary files
+(the user's rule, 2026-11-22). Nothing goes on a host's own disk; there is no scratch disk.
+
+Runs go through the `scripts/*-host.sh` drivers (`scripts/lib/host.sh`; `CLADEFS_TEST_HOST` names
+the hotbed node, unset for the one hotbed picks): `test-host.sh`, `bench-host.sh`,
+`bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
+`mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`, `fork-time-host.sh`,
+`gc-sweep-host.sh`. A run is a directory in the session's workspace, which hotbed syncs this
+checkout into, uncommitted changes too; its tree is the checkout itself (building incrementally
+from the base's build), or a worktree of `CLADEFS_TEST_HOST_COMMIT`; its job a hotbed command of
+the workspace; results copied back, the directory removed. A measurement builds nothing inside
+`hotbed run --bench`: its run builds first as a command of work, then measures what that built
+(`host_job`'s `CLADEFS_TEST_HOST_PHASE`), and anything that would build inside a measurement
+refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come from the workspace's cache
+keyed by their sources (`scripts/guest-kernel.sh`, `host_kernel`), which `scripts/test-e2e.sh`
+uses too when `CLADEFS_GUEST_KERNEL` names none. A driver stopped mid-run leaves the job running:
+`DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run number as
+`CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). Nothing in a workspace runs as root: a test that needs root
+is skipped there, and what a run needs installed is a hotbed setup step, never part of a run.
 
 ## Commit in batches, only what compiled and passed its tests
 

@@ -3,10 +3,9 @@
 # found in the LICENSE file.
 
 """Tests of scripts/test-e2e-job.sh, which runs scripts/test-e2e.sh with what it writes, the
-cases' cells among it, in the job's temporary directory, on ext4, and copies the results back
+cases' cells among it, in the command's temporary directory, and copies the results back
 (TASK-397): here in a tree of its own, test-e2e-job.sh as it is, and in place of test-e2e.sh one
-that says where it ran and leaves what a case leaves, of findmnt one that says the filesystem
-given, and of scripts/contamination.py, under which the cases run (TASK-375), one that says how it
+that says where it ran and leaves what a case leaves, and of scripts/contamination.py, under which the cases run (TASK-375), one that says how it
 was run; and of scripts/bench-rounds.sh's runs, which go through it, and its build, which they
 boot."""
 
@@ -16,7 +15,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fake_ssh import FXJOB
 from script import SCRIPTS
 
 # test-e2e.sh, which says in its results what it was given, leaves a case's log, its cell, its
@@ -39,14 +37,6 @@ printf '%s\\n' "$@" > "$FAKE_RECORDED"
 shift 4
 exec "$@"
 """
-# findmnt, which says every directory is on $FAKE_FSTYPE, or fails if that is empty.
-FINDMNT = """#!/bin/bash
-echo "$*" > "$FAKE_ASKED"
-[[ -n $FAKE_FSTYPE ]] || exit 1
-echo "$FAKE_FSTYPE"
-"""
-
-
 def files(directory):
     """The files under `directory`, by their paths in it."""
     return sorted(str(path.relative_to(directory)) for path in directory.rglob("*")
@@ -54,17 +44,15 @@ def files(directory):
 
 
 class Job(unittest.TestCase):
-    def job(self, *arguments, fstype="ext4", status=0, tmpdir=True, env=None):
-        """Runs test-e2e-job.sh with `arguments` after its results directory, in a job whose
-        temporary directory is on `fstype` (none, if `tmpdir` is false), its cases ending with
-        `status`: its status and errors."""
+    def job(self, *arguments, status=0, env=None):
+        """Runs test-e2e-job.sh with `arguments` after its results directory, in a command with a
+        temporary directory of its own, its cases ending with `status`: its status and errors."""
         self.tree = tree = Path(tempfile.mkdtemp()).resolve()
         (tree / "scripts").mkdir()
         (tree / "scripts" / "test-e2e-job.sh").symlink_to(SCRIPTS / "test-e2e-job.sh")
         (tree / "bin").mkdir()
         for path, text in [(tree / "scripts" / "test-e2e.sh", CASES),
-                           (tree / "scripts" / "contamination.py", CONTAMINATION),
-                           (tree / "bin" / "findmnt", FINDMNT)]:
+                           (tree / "scripts" / "contamination.py", CONTAMINATION)]:
             path.write_text(text)
             path.chmod(0o755)
         (tree / "tmp").mkdir()
@@ -73,10 +61,8 @@ class Job(unittest.TestCase):
             env={
                 "PATH": f"{tree / 'bin'}:/usr/bin:/bin",
                 "FAKE_STATUS": str(status),
-                "FAKE_FSTYPE": fstype,
-                "FAKE_ASKED": str(tree / "asked"),
                 "FAKE_RECORDED": str(tree / "recorded"),
-                **({"TMPDIR": str(tree / "tmp")} if tmpdir else {}),
+                "TMPDIR": str(tree / "tmp"),
                 **(env or {}),
             },
             capture_output=True,
@@ -97,12 +83,6 @@ class Job(unittest.TestCase):
         """How contamination.py was run: its arguments."""
         return (self.tree / "recorded").read_text().splitlines()
 
-    def left(self):
-        """What the tree holds once a job was refused: no results, no round run or recorded,
-        nothing in the temporary directory, and `asked` if findmnt was."""
-        self.assertEqual(list((self.tree / "tmp").iterdir()), [])
-        return sorted(path.name for path in self.tree.iterdir())
-
     def test_the_run_writes_in_the_jobs_temporary_directory_and_its_results_come_back(self):
         status, errors = self.job("bench-fs-fxfs-guest-dax")
         self.assertEqual((status, errors), (0, self.moved()))
@@ -113,11 +93,10 @@ class Job(unittest.TestCase):
         self.assertEqual(list((self.tree / "tmp").iterdir()), [])
         # The bucket is test-e2e.sh's own, on tmpfs: none is named.
         self.assertEqual((bucket, arguments), ("no bucket named", ["bench-fs-fxfs-guest-dax"]))
-        self.assertEqual((self.tree / "asked").read_text(), f"-no FSTYPE -T {self.tree / 'tmp'}\n")
 
     def test_the_run_is_a_round_recorded_of_the_disk_its_cells_are_on(self):
-        # The directory the run wrote in, in the job's temporary one, is the round's disk, and no
-        # other: not the results', which is the test host's ZFS home under bench-rounds.sh, unchecked.
+        # The directory the run wrote in, in the command's temporary one, is the round's disk, and
+        # no other: not the results'.
         status, errors = self.job("bench-fs-fxfs-guest-dax")
         self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(self.recorded(), [
@@ -149,32 +128,6 @@ class Job(unittest.TestCase):
         self.assertEqual(files(self.tree / "results"), ["case/log.txt", "given.txt"])
         self.assertEqual(list((self.tree / "tmp").iterdir()), [])
 
-    def test_a_temporary_directory_on_another_filesystem_is_refused(self):
-        # the test host's home, where a durable sync measured ZFS's syncs, and /tmp, memory.
-        for fstype in ["zfs", "tmpfs"]:
-            with self.subTest(fstype):
-                status, errors = self.job("case", fstype=fstype)
-                self.assertEqual(
-                    (status, errors),
-                    (2, f"{self.tree / 'tmp'} is on {fstype}: the run's cells go on ext4, as a "
-                        "host's (TMPDIR, fxjob's on its scratch disk)\n"))
-                self.assertEqual(self.left(), ["asked", "bin", "scripts", "tmp"])
-
-    def test_a_filesystem_findmnt_does_not_name_is_refused(self):
-        status, errors = self.job("case", fstype="")
-        self.assertEqual(
-            (status, errors),
-            (2, f"findmnt doesn't say what filesystem {self.tree / 'tmp'} is on\n"))
-        self.assertEqual(self.left(), ["asked", "bin", "scripts", "tmp"])
-
-    def test_no_temporary_directory_is_refused(self):
-        status, errors = self.job("case", tmpdir=False)
-        self.assertEqual(
-            (status, errors),
-            (2, "TMPDIR is unset: the run's cells go in the job's temporary directory, fxjob's "
-                "(run this under fxjob)\n"))
-        self.assertEqual(self.left(), ["bin", "scripts", "tmp"])
-
     def test_it_takes_a_results_directory(self):
         done = subprocess.run(["/bin/bash", SCRIPTS / "test-e2e-job.sh"], capture_output=True,
                               text=True, env={"PATH": "/usr/bin:/bin"})
@@ -182,10 +135,10 @@ class Job(unittest.TestCase):
                          (2, "#   scripts/test-e2e-job.sh RESULTS [ARG...]\n"))
 
 
-# test-e2e.sh for bench-rounds.sh: says, a line of $CLADEFS_FAKE_SAID (a CLADEFS_* variable, which
-# bench-rounds.sh passes through sudo), how it was run, building or booting what was built, as work
-# or a measurement (scripts/lib/measurement.sh), and with what bounds on cargo; builds, as the real
-# one does, refusing to inside a measurement, artifacts.txt its build.
+# test-e2e.sh for bench-rounds.sh: says, a line of $CLADEFS_FAKE_SAID, how it was run, building or
+# booting what was built, as work or a measurement (scripts/lib/measurement.sh), and with what
+# bounds on cargo; builds, as the real one does, refusing to inside a measurement, artifacts.txt
+# its build.
 ROUNDS_CASES = """#!/bin/bash
 set -euo pipefail
 source "$(dirname "$0")/lib/measurement.sh"
@@ -207,79 +160,83 @@ ROUNDS_JOB = """#!/bin/bash
 shift
 exec "$(dirname "$0")/test-e2e.sh" "$@"
 """
-# sudo, which runs its command in an environment of its own, as sudo does, but for the cgroup the
-# fake fxjob says the caller is in, which a process keeps under sudo.
-ROUNDS_SUDO = """#!/bin/bash
-exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
-    ${CLADEFS_SELF_CGROUP:+CLADEFS_SELF_CGROUP=$CLADEFS_SELF_CGROUP} "$@"
-"""
+WORK = "0::/user.slice/user-1000.slice/user-1000-hotbed.slice/hotbed-build.service"
+BENCH = "0::/user.slice/user-1000.slice/user-1000-hotbed_bench.slice/hotbed-rounds.service"
 
 
 class Rounds(unittest.TestCase):
-    """scripts/bench-rounds.sh's runs: in a tree of its own, with fxjob, sudo, test-e2e.sh and
-    test-e2e-job.sh that say how they ran, and the host's /proc and /sys a tree of their own
-    (CLADEFS_TEST_HOST_PROC, CLADEFS_TEST_HOST_SYS); and by its text."""
+    """scripts/bench-rounds.sh's runs: in a tree of its own, with test-e2e.sh and test-e2e-job.sh
+    that say how they ran, the host's /proc and /sys a tree of their own (CLADEFS_TEST_HOST_PROC,
+    CLADEFS_TEST_HOST_SYS), and its phases each a hotbed command's, a measurement's in hotbed's
+    measurement slice (CLADEFS_SELF_CGROUP); and by its text."""
 
-    def rounds(self, env=None):
-        """Runs bench-rounds.sh for one round of the case fxfs-guest: its status, errors and the
-        tree it ran in."""
+    def rounds(self, phases, env=None):
+        """Runs bench-rounds.sh for one round of the case fxfs-guest, once for each phase, as
+        hotbed runs it: its status, errors and the tree it ran in."""
         tree = Path(tempfile.mkdtemp()).resolve()
-        scripts, bin = tree / "scripts", tree / "bin"
+        scripts = tree / "scripts"
         (scripts / "lib").mkdir(parents=True)
-        bin.mkdir()
         (scripts / "bench-rounds.sh").symlink_to(SCRIPTS / "bench-rounds.sh")
         (scripts / "lib" / "measurement.sh").symlink_to(SCRIPTS / "lib" / "measurement.sh")
         for path, text in [(scripts / "test-e2e.sh", ROUNDS_CASES),
-                           (scripts / "test-e2e-job.sh", ROUNDS_JOB),
-                           (bin / "fxjob", FXJOB), (bin / "sudo", ROUNDS_SUDO)]:
+                           (scripts / "test-e2e-job.sh", ROUNDS_JOB)]:
             path.write_text(text)
             path.chmod(0o755)
-        home = tree / "home"
-        for directory in [home / ".cargo", home / ".rustup", tree / "proc" / "sys" / "vm"]:
-            directory.mkdir(parents=True)
+        (tree / "proc" / "self").mkdir(parents=True)
         (tree / "proc" / "loadavg").write_text("1.50 1.20 1.00 2/300 4000\n")
-        (tree / "proc" / "sys" / "vm" / "drop_caches").write_text("")
-        uid = os.getuid()
-        slice = (tree / "sys" / "fs" / "cgroup" / "user.slice" / f"user-{uid}.slice" /
-                 f"user@{uid}.service" / "fxdax.slice" / "fxdax-bench.slice")
-        slice.mkdir(parents=True)
-        for resource in ["cpu", "memory", "io"]:
-            (slice / f"{resource}.pressure").write_text(
-                "some avg10=0.00 avg60=0.00 avg300=0.00 total=5000\n")
-        done = subprocess.run(
-            ["/bin/bash", scripts / "bench-rounds.sh", tree / "results", "1", "fxfs-guest"],
-            env={"PATH": f"{bin}:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
-                 "CLADEFS_FAKE_SAID": str(tree / "said"), "CLADEFS_TEST_HOST_PROC": str(tree / "proc"),
-                 "CLADEFS_TEST_HOST_SYS": str(tree / "sys"), **(env or {})},
-            capture_output=True, text=True)
-        return done.returncode, done.stderr, tree
+        for cgroup in (WORK, BENCH):
+            unit = tree / "sys" / "fs" / "cgroup" / cgroup.removeprefix("0::/")
+            unit.mkdir(parents=True)
+            for resource in ["cpu", "memory", "io"]:
+                (unit / f"{resource}.pressure").write_text(
+                    "some avg10=0.00 avg60=0.00 avg300=0.00 total=5000\n")
+        for phase in phases:
+            # A phase and the cgroup it runs in, or a phase alone, a measurement's measure.
+            phase, cgroup = phase if isinstance(phase, tuple) else (
+                phase, BENCH if phase == "measure" else WORK)
+            (tree / "proc" / "self" / "cgroup").write_text(cgroup + "\n")
+            (tree / "cgroup").write_text(cgroup + "\n")
+            done = subprocess.run(
+                ["/bin/bash", scripts / "bench-rounds.sh", tree / "results", "1", "fxfs-guest"],
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "CLADEFS_FAKE_SAID": str(tree / "said"),
+                     "CLADEFS_TEST_HOST_PROC": str(tree / "proc"),
+                     "CLADEFS_TEST_HOST_SYS": str(tree / "sys"),
+                     "CLADEFS_SELF_CGROUP": str(tree / "cgroup"),
+                     **({"CLADEFS_TEST_HOST_PHASE": phase} if phase else {}), **(env or {})},
+                capture_output=True, text=True)
+            if done.returncode:
+                return done.returncode, done.stderr, tree
+        return 0, "", tree
 
     def test_the_cases_build_as_work_and_each_run_boots_them_alone(self):
-        """TASK-368: the build an fxjob of work, the run a measurement that builds nothing."""
-        status, errors, tree = self.rounds()
+        """TASK-368: the build a command of work, the runs a measurement that builds nothing."""
+        status, errors, tree = self.rounds(["build", "measure"])
         self.assertEqual(status, 0, errors)
-        calls = (tree / "home" / "fxjob-calls").read_text().splitlines()
-        self.assertEqual([call.split(" -- ")[0] for call in calls],
-                         ["--name rounds-build --mem 8G", "--bench --mem 16G --name rounds-fxfs-guest-1"])
         self.assertEqual((tree / "said").read_text().splitlines(),
                          ["build work fxfs-guest jobs=4 target=",
                           "prebuilt bench fxfs-guest jobs= target="])
-        self.assertEqual((tree / "proc" / "sys" / "vm" / "drop_caches").read_text(), "3\n")
         self.assertEqual((tree / "results" / "runs.tsv").read_text().splitlines()[1].split("\t")[:4],
                          ["1", "fxfs-guest", "ok", "1.50"])
 
+    def test_a_measurement_that_would_build_is_refused(self):
+        """Both phases at once inside a measurement, as before TASK-368: refused before it builds."""
+        status, errors, tree = self.rounds([("", BENCH)])
+        self.assertEqual(status, 2)
+        self.assertTrue(errors.startswith("bench-rounds.sh's build would build inside a measurement "
+                                          f"(hotbed run --bench, {BENCH})"), errors)
+        self.assertFalse((tree / "said").exists())
+
     def test_the_build_takes_the_callers_bounds_on_cargo(self):
-        """TASK-446: sudo dropped CARGO_BUILD_JOBS and CARGO_TARGET_DIR, and the build ran a job a
-        CPU, in the worktree's target."""
         target = tempfile.mkdtemp()
-        status, errors, tree = self.rounds({"CARGO_BUILD_JOBS": "2", "CARGO_TARGET_DIR": target})
+        status, errors, tree = self.rounds(["build"], {"CARGO_BUILD_JOBS": "2",
+                                                       "CARGO_TARGET_DIR": target})
         self.assertEqual(status, 0, errors)
         self.assertEqual((tree / "said").read_text().splitlines()[0],
                          f"build work fxfs-guest jobs=2 target={target}")
 
     def test_each_run_goes_through_the_job_with_no_bucket_or_store_of_the_results(self):
         text = (SCRIPTS / "bench-rounds.sh").read_text()
-        self.assertIn('"CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \\\n'
+        self.assertIn('CLADEFS_E2E_PREBUILT=$artifacts CLADEFS_BENCH_RESULTS=$out \\\n'
                       '            "$repo/scripts/test-e2e-job.sh" "$out/e2e" "$case" '
                       '> "$out/run.log" 2>&1 || ran=$?', text)
         # Neither a bucket nor test-e2e.sh's results, the cells with them, in the results'
@@ -287,7 +244,8 @@ class Rounds(unittest.TestCase):
         self.assertNotIn("CLADEFSD_BUCKET=", text)
         self.assertNotIn("CLADEFS_E2E_RESULTS=", text)
         self.assertNotIn("/scripts/test-e2e.sh\" \"$case\"", text)
-        # Nor the round's record here, of the results' disk: the job's, of its cells' (TASK-375).
+        # Nor the round's record here, of the results' disk: test-e2e-job.sh's, of its cells'
+        # (TASK-375).
         self.assertNotIn("contamination.py", text.split("set -euo pipefail")[1])
 
 

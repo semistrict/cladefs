@@ -5,7 +5,7 @@
 
 # How long a fork of a 10 GiB base takes, at commits of cladefs's, on the test host, an x86-64 Linux
 # machine of one's own, over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh), as one
-# measurement there, alone and on CPUs of its own (fxjob --bench) (TASK-165.7): a worktree of each
+# measurement there, alone and on CPUs of its own (hotbed run --bench) (TASK-165.7): a worktree of each
 # COMMIT there, whose extent daemon and cladefsctl this tree's host script
 # (scripts/lib/fork-time-linux-host.sh) builds; it imports the base and times its forks and their
 # first opens, for every commit on the one test host. The results come back to RESULTS, each

@@ -3,9 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Says when others wrote to a measurement round's disk (TASK-375). `fxjob --bench` gives a
-measurement cores, cache, memory bandwidth and memory of its own, and caps other fxjob work's I/O
-on the test host's scratch disk alone: the disk it does not isolate. The test host had one NVMe, its
+"""Says when others wrote to a measurement round's disk (TASK-375). `hotbed run --bench` gives a
+measurement cores, cache, memory bandwidth and memory of its own, and caps other hotbed work's I/O
+on one disk at most: the disk it does not isolate. The test host had one NVMe, its
 scratch disk a zvol on the pool /home is on, and a round of TASK-330.4's A/B ran wholly beside
 another agent's 186 MB/s loader with nothing in its results saying so. A round driver runs its
 round under this (scripts/lib/bench-ab-linux-host.sh, scripts/lib/bench-linux-host.sh, and
@@ -25,7 +25,7 @@ The record says, over the round:
   a zvol; tmpfs, which has no device and nothing to record, said. Of each, what it read and wrote
   (/sys/block/DEV/stat) less what the round's cgroup did (its io.stat for the device) is others'.
   The round's cgroup is the process's own, or the nearest above it with I/O accounting, as long
-  as nothing else runs in that one: under fxjob, the measurement's slice, which holds one
+  as nothing else runs in that one: under hotbed, the measurement's slice, which holds one
   measurement at a time.
 - **under a zvol**, the pool's other datasets' writes, by ZFS's own counts of each
   (/proc/spl/kstat/zfs/POOL/objset-*, nwritten: what was written to the dataset's files, as it
@@ -50,7 +50,7 @@ CLADEFS_CONTAMINATION_WRITE_MB_S over the round (default 10) and
 CLADEFS_CONTAMINATION_MINUTE_WRITE_MB_S in any one minute (default 50), TASK-375's proposal. What
 the test host has shown since: beside clean rounds, what the scratch zvol wrote that was not the
 measurement's (ext4's journal thread, which is no cgroup's, among it) was 0.5 to 6.3 MB/s in 30 s
-samples (TASK-330.5, TASK-322); ordinary work beside a measurement, capped by fxjob, 25 to 27 MB/s
+samples (TASK-330.5, TASK-322); ordinary work beside a measurement, capped by fxjob then, 25 to 27 MB/s
 (TASK-374); the loader that went unseen, 186 MB/s. Reads are recorded and not judged: nothing
 measured says what others' reads cost a round. Nor is pressure, unless
 CLADEFS_CONTAMINATION_STALL_PCT names bounds, RESOURCE=PERCENT words (`io=20 cpu=5`), the share of

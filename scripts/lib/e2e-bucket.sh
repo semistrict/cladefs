@@ -5,8 +5,8 @@
 
 # A run's bucket in memory, for scripts/test-e2e.sh, which sources this: a directory of ROOT's
 # (/dev/shm), cladefs-e2e-bucket.XXXXXX, which the run's EXIT trap removes. A run killed outright
-# (SIGKILL: a runner's timeout, fxjob's memory limit, a dropped ssh) runs no trap, and its bucket
-# stayed, memory held for good: gigabytes of them, which kept fxjob's slice past its high mark
+# (SIGKILL: a runner's timeout, a command's memory limit, a dropped connection) runs no trap, and its bucket
+# stayed, memory held for good: gigabytes of them, which kept the jobs' slice past its high mark
 # (board 1764). So each bucket has an owner, .owner, which its run holds locked (flock) for as long
 # as it, or anything it started, lives; the next run's e2e_bucket removes every bucket whose owner
 # is gone. A bucket with no .owner, of a tree from before, it leaves.

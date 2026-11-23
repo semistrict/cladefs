@@ -40,7 +40,7 @@
 # --prepare builds the binaries and fills the buckets, and stops; --prepared sweeps what a
 # --prepare of the same WORK and sides made, building nothing: a measurement's job of work, then
 # its measurement, alone (scripts/lib/gc-sweep-linux-host.sh, TASK-368). Inside a measurement
-# (fxjob --bench), building is refused (scripts/lib/measurement.sh).
+# (hotbed run --bench), building is refused (scripts/lib/measurement.sh).
 #
 #   scripts/gc-sweep.sh [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]
 set -euo pipefail

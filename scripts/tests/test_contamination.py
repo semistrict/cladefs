@@ -169,17 +169,17 @@ class Cgroups(unittest.TestCase):
                          (self.top / "job.scope", self.top / "job.scope", "/job.scope", ""))
 
     def test_the_nearest_above_that_accounts_io(self):
-        """Under fxjob --bench: the job's scope has no io.stat, the measurements' slice has, and
-        holds one measurement at a time."""
-        self.tree.cgroup("/fxdax.slice", io={})
-        self.tree.cgroup("/fxdax.slice/fxdax-bench.slice", io={})
-        self.tree.cgroup("/fxdax.slice/fxdax-work.slice", io={})
-        self.tree.cgroup("/fxdax.slice/fxdax-bench.slice/fxjob-r1-7.scope")
-        self.tree.cgroup("/fxdax.slice/fxdax-bench.slice/fxjob-r0-3.scope", populated=False)
-        self.tree.runs_in("0::/fxdax.slice/fxdax-bench.slice/fxjob-r1-7.scope\n")
-        bench = self.top / "fxdax.slice/fxdax-bench.slice"
-        self.assertEqual(self.found(), (bench / "fxjob-r1-7.scope", bench,
-                                        "/fxdax.slice/fxdax-bench.slice", ""))
+        """Under hotbed run --bench: the command's unit has no io.stat, the measurements' slice
+        has, and holds one measurement at a time."""
+        self.tree.cgroup("/hotbed.slice", io={})
+        self.tree.cgroup("/hotbed.slice/hotbed_bench.slice", io={})
+        self.tree.cgroup("/hotbed.slice/hotbed_work.slice", io={})
+        self.tree.cgroup("/hotbed.slice/hotbed_bench.slice/hotbed-r1.service")
+        self.tree.cgroup("/hotbed.slice/hotbed_bench.slice/hotbed-r0.service", populated=False)
+        self.tree.runs_in("0::/hotbed.slice/hotbed_bench.slice/hotbed-r1.service\n")
+        bench = self.top / "hotbed.slice/hotbed_bench.slice"
+        self.assertEqual(self.found(), (bench / "hotbed-r1.service", bench,
+                                        "/hotbed.slice/hotbed_bench.slice", ""))
 
     def test_one_shared_with_others_work_is_not_the_rounds(self):
         self.tree.cgroup("/user.slice", io={})
@@ -575,10 +575,10 @@ class Drivers(unittest.TestCase):
         bench = (SCRIPTS / "lib" / "bench-linux-host.sh").read_text()
         self.assertIn('CLADEFS_BENCH_RESULTS="$results" "$repo/scripts/contamination.py" run '
                       '"$results" -- \\\n    "$repo/scripts/bench.sh" "$iterations"', bench)
-        # bench-rounds.sh's through the job, which alone can name the disk its cells are on, its
-        # scratch directory: the record of that disk, in the round's directory.
+        # bench-rounds.sh's through test-e2e-job.sh, which alone can name the disk its cells are
+        # on, its temporary directory: the record of that disk, in the round's directory.
         rounds = (SCRIPTS / "bench-rounds.sh").read_text()
-        self.assertIn('"CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \\\n'
+        self.assertIn('CLADEFS_E2E_PREBUILT=$artifacts CLADEFS_BENCH_RESULTS=$out \\\n'
                       '            "$repo/scripts/test-e2e-job.sh" "$out/e2e" "$case"', rounds)
         job = (SCRIPTS / "test-e2e-job.sh").read_text()
         self.assertIn('CLADEFS_E2E_RESULTS="$work" "$root/scripts/contamination.py" run \\\n'
@@ -586,15 +586,19 @@ class Drivers(unittest.TestCase):
                       '"$root/scripts/test-e2e.sh" "$@" || status=$?\n', job)
 
     def test_the_hosts_check_refuses_what_it_cannot_run(self):
-        """scripts/contamination-check.sh, the two rounds on a host with fxjob."""
+        """scripts/contamination-check.sh, the two rounds in a hotbed workspace on a node it
+        needs named."""
         def check(*args):
             done = subprocess.run(["/bin/bash", str(SCRIPTS / "contamination-check.sh"), *args],
                                   capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
             return done.returncode, done.stdout, done.stderr
 
-        self.assertEqual(check(), (2, "", "usage: contamination-check.sh RESULTS\n"))
-        self.assertEqual(check(tempfile.mkdtemp()), (
-            2, "", "fxjob not found: this runs on a test host with fxjob\n"))
+        self.assertEqual(check(), (2, "", "usage: contamination-check.sh NAME\n"))
+        self.assertEqual(check("a/b"), (2, "", "usage: contamination-check.sh NAME\n"))
+        status, out, errors = check("check-1")
+        self.assertEqual((status, out), (1, ""))
+        self.assertTrue(errors.endswith(
+            "CLADEFS_TEST_HOST: CLADEFS_TEST_HOST names the hotbed node the rounds run on\n"), errors)
 
 
 if __name__ == "__main__":

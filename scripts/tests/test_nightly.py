@@ -3,9 +3,8 @@
 # found in the LICENSE file.
 
 """Tests of the nightly (TASK-441.1, TASK-441.2), end to end: scripts/nightly-host.sh as cron runs
-it, in the nightly's clone of an origin, on this machine as its local test host
-(scripts/lib/host.sh's CLADEFS_TEST_HOST=local), with fake_ssh.py's host tools (fxjob, which says
-whether a job measured, sudo, setsid, timeout, flock), a board CLI of its own (FAKE_VB) and a host script in the
+it, in the nightly's clone of an origin, its runs in fake_hotbed.py's workspace (scripts/lib/host.sh),
+with flock (fake_flock.py), a board CLI of its own (FAKE_VB) and a host script in the
 bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as the test host's
 (test_ab_rounds.write_round). And scripts/nightly-install.sh's cron entry."""
 
@@ -20,17 +19,13 @@ import unittest
 import weakref
 from pathlib import Path
 
-import fake_ssh
 from script import SCRIPTS
 from test_ab_rounds import CONTROL, write_round
-from test_host import hold
 
 # The host script of the A/B, as the nightly's tests have it: says each job of it, its phase, where
 # it ran (work, or a measurement) and the sides' revisions, a line of RESULTS/jobs.txt; builds the
 # sides, or fails the one CLADEFS_FAKE_NIGHTLY=fail-build-SIDE names, as the real one does
-# (RESULTS/build-failed), and fills the scratch disk to CLADEFS_FAKE_FILL KiB free if set
-# (fake_ssh.py's df); measures by copying the rounds CLADEFS_FAKE_ROUNDS holds, and says the
-# rounds' results held CLADEFS_FAKE_ROUNDS_SIZE bytes (RESULTS/rounds-size.txt), if set.
+# (RESULTS/build-failed); measures by copying the rounds CLADEFS_FAKE_ROUNDS holds.
 FAKE_AB = """#!/bin/bash
 set -euo pipefail
 tools=$1 results=$2 a_source=$3 b_source=$4
@@ -46,13 +41,9 @@ if [[ $phase == build ]]; then
         fi
         echo "built" > "$results/artifacts-$side.txt"
     done
-    if [[ -n ${CLADEFS_FAKE_FILL:-} ]]; then echo "$CLADEFS_FAKE_FILL" > "$HOME/df-free"; fi
     exit 0
 fi
 cp -R "$CLADEFS_FAKE_ROUNDS/." "$results/"
-if [[ -n ${CLADEFS_FAKE_ROUNDS_SIZE:-} ]]; then
-    echo "$CLADEFS_FAKE_ROUNDS_SIZE" > "$results/rounds-size.txt"
-fi
 """
 
 # The board's CLI, as the nightly calls it, its tasks in $BOARD_STATE: `tasks CHANNEL --label L
@@ -91,7 +82,7 @@ state.write_text(json.dumps(tasks))
 
 # The scripts the nightly runs, linked into the origin; the host script of the A/B is FAKE_AB.
 LINKED = ["nightly-host.sh", "nightly.py", "ab-rounds.py", "bench-ab.py", "contamination.py",
-          "bench-ab-host.sh", "build-commit.sh", "lib/host.sh", "lib/host-remote.sh",
+          "bench-ab-host.sh", "build-commit.sh", "lib/host.sh", "lib/host-workspace.sh",
           "lib/measurement.sh"]
 IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
             "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_COUNT": "1",
@@ -110,21 +101,25 @@ class NightlyHost:
         self.home = self.dir / "home"
         self.home.mkdir()
         bin_ = self.dir / "bin"
-        fake_ssh.tools(bin_)
+        bin_.mkdir()
+        for name, script in [("flock", "fake_flock.py"), ("hotbed", "fake_hotbed.py")]:
+            (bin_ / name).write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} '
+                                     f'{shlex.quote(str(Path(__file__).with_name(script)))} "$@"\n')
+            (bin_ / name).chmod(0o755)
+        self.hotbed = self.dir / "hotbed"
+        self.hotbed.mkdir()
+        (self.hotbed / "calls").write_text("")
         (bin_ / "fake_vb.py").write_text(FAKE_VB)
         (bin_ / "vb").write_text(
             f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "{bin_}/fake_vb.py" "$@"\n')
         (bin_ / "vb").chmod(0o755)
         self.state = self.home / ".local" / "state" / "cladefs" / "nightly"
-        # The scratch disk as fake_ssh.py's df has it, 250 GiB free, as the test host's whole: room for a
-        # night, whatever this machine's disk has.
-        (self.home / "df-free").write_text(f"{250 << 20}\n")
         self.board = self.dir / "board.json"
         self.environment = {
             "PATH": f"{bin_}:/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home),
-            "CLADEFS_TEST_HOST_SCRATCH": str(self.dir / "scratch"),
-            "CLADEFS_NIGHTLY_KEEP": str(self.dir / "keep"),
+            "FAKE_HOTBED": str(self.hotbed),
+            "CLADEFS_HOTBED_WORK": str(self.hotbed / "work"),
             "BOARD_STATE": str(self.board),
             "BOARD_URL": "http://127.0.0.1:4100/api/board",
             **IDENTITY,
@@ -196,6 +191,11 @@ class NightlyHost:
                               env={**self.environment, **environment})
         return done.returncode, done.stdout, done.stderr
 
+    def measured(self):
+        """The nights' measurements so far: hotbed's commands run as one (--bench)."""
+        return [call for call in (self.hotbed / "calls").read_text().splitlines()
+                if "--bench" in call]
+
     def tasks(self):
         return json.loads(self.board.read_text()) if self.board.exists() else []
 
@@ -227,11 +227,11 @@ class Nights(unittest.TestCase):
         status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
         before = host1.main()
-        calls = (host1.home / "fxjob-calls").read_text()
+        calls = host1.measured()
         status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
         self.assertEqual(host1.main(), before)
-        self.assertEqual((host1.home / "fxjob-calls").read_text(), calls)
+        self.assertEqual(host1.measured(), calls)
         [record] = host1.nights()
         self.assertEqual(host1.log().splitlines()[-1].split(" ", 1)[1],
                          f"nothing to measure: main's code is {record['head'][:12]}'s, which the "
@@ -405,105 +405,6 @@ class Nights(unittest.TestCase):
         self.assertRegex(nights[0], rf"^{host}-nightly-\d{{4}}-\d\d-\d\dT\d{{6}}Z-{head[:8]}-2$")
 
 
-GIB = 1 << 30
-
-
-class Room(unittest.TestCase):
-    """TASK-489: the scratch disk, which every job on the test host shares, full as the first night's
-    measurement began."""
-
-    def test_a_night_short_of_room_before_measuring_says_so(self):
-        host1 = NightlyHost()
-        (host1.home / "df-free").write_text(f"{200 * GIB >> 10}\n")
-        (host1.home / "du-size").write_text(f"{83 * GIB >> 10}\n")
-        host1.advance()
-        status, _, err = host1.night(host1.rounds(1.0), CLADEFS_FAKE_FILL=f"{5 * GIB >> 10}")
-        self.assertEqual(status, 0, err)
-        [record] = host1.nights()
-        why = ("the scratch disk /mnt/fake-scratch had 5.0 GiB free before measuring, the night "
-               "needs 20.0 GiB (see room.txt; CLADEFS_NIGHTLY_ROOM_MEASURE)")
-        self.assertEqual((record["outcome"], record["why"], record["status"]),
-                         ("could not run", why, 28))
-        self.assertEqual(record["room"], {
-            "checks": [{"phase": "build", "free": 200 * GIB, "need": 120 * GIB, "verdict": "ok",
-                        "disk": "/mnt/fake-scratch"},
-                       {"phase": "measure", "free": 5 * GIB, "need": 20 * GIB,
-                        "verdict": "short", "disk": "/mnt/fake-scratch"}],
-            "built": 83 * GIB, "rounds": None})
-        self.assertEqual(host1.jobs(record), [f"build work {record['base']} {record['head']}"])
-        directory = record_directory(host1, record)
-        self.assertEqual(host1.git(host1.origin, "show",
-                                  f"main:docs/measurements/{directory}/nightly.md").splitlines()[2:9],
-                         [f"Base {record['base']}, head (main) {record['head']}: could not run: "
-                          f"{why}.", "", "## The scratch disk", "",
-                          "- Before building: 200.0 GiB free on /mnt/fake-scratch, 120.0 GiB "
-                          "needed (ok).",
-                          "- Before measuring: 5.0 GiB free on /mnt/fake-scratch, 20.0 GiB "
-                          "needed (short).",
-                          "- The run's directory once built: 83.0 GiB."])
-        lines = [line.split(" ", 1)[1] for line in host1.log().splitlines()]
-        self.assertIn(f"night {record['base'][:8]}..{record['head'][:8]}: could not run: {why}; "
-                      "0 moved, 0 broke; tasks none", lines)
-
-    def test_a_night_short_of_room_before_building_builds_nothing(self):
-        host1 = NightlyHost()
-        (host1.home / "df-free").write_text(f"{100 * GIB >> 10}\n")
-        host1.advance()
-        status, _, err = host1.night(host1.rounds(1.0))
-        self.assertEqual(status, 0, err)
-        [record] = host1.nights()
-        self.assertEqual((record["outcome"], record["why"]), (
-            "could not run", "the scratch disk /mnt/fake-scratch had 100.0 GiB free before "
-                             "building, the night needs 120.0 GiB (see room.txt; "
-                             "CLADEFS_NIGHTLY_ROOM_BUILD)"))
-        self.assertFalse((host1.home / "fxjob-calls").exists())
-
-    def test_the_need_follows_what_earlier_nights_took(self):
-        host1 = NightlyHost()
-        (host1.home / "df-free").write_text(f"{250 * GIB >> 10}\n")
-        (host1.home / "du-size").write_text(f"{90 * GIB >> 10}\n")
-        host1.advance("first")
-        status, _, err = host1.night(host1.rounds(1.0), CLADEFS_FAKE_ROUNDS_SIZE=str(30 * GIB))
-        self.assertEqual(status, 0, err)
-        host1.advance("second")
-        status, _, err = host1.night(host1.rounds(1.0))
-        self.assertEqual(status, 0, err)
-        first, second = host1.nights()
-        self.assertEqual((first["room"]["built"], first["room"]["rounds"]), (90 * GIB, 30 * GIB))
-        # A fifth more than the most taken: 108 GiB built and 36 measured.
-        self.assertEqual([check["need"] for check in second["room"]["checks"]],
-                         [144 * GIB, 36 * GIB])
-        # Or the settings, if more.
-        self.assertEqual(
-            subprocess.run([sys.executable, str(SCRIPTS / "nightly.py"), "--root", str(host1.clone),
-                            "room"], capture_output=True, text=True, check=True,
-                           env={**host1.environment, "CLADEFS_NIGHTLY_ROOM_BUILD": "1T",
-                                "CLADEFS_NIGHTLY_ROOM_MEASURE": "40G"}).stdout,
-            f"{(1 << 40) + 40 * GIB} {40 * GIB}\n")
-
-    def test_earlier_nights_runs_go_but_what_others_and_the_next_night_use(self):
-        host1 = NightlyHost()
-        scratch = host1.dir / "scratch"
-        ended = scratch / "run-nightly-20261116T070003Z-2ad571cf"
-        running = scratch / "run-nightly-20261115T070003Z-11111111"
-        others = [scratch / "run-t435-20261116T070003Z-22222222",
-                  scratch / "run-nightlyx-20261116T070003Z-33333333"]
-        for run in (ended, running, *others):
-            (run / "job").mkdir(parents=True)
-            (run / "job" / "lock").touch()
-            (run / "trees" / "head" / "target" / "release").mkdir(parents=True)
-        hold(self, running / "job" / "lock")
-        host1.advance()
-        status, _, err = host1.night(host1.rounds(1.0))
-        self.assertEqual(status, 0, err)
-        self.assertEqual(sorted(path.name for path in scratch.iterdir()),
-                         sorted([running.name] + [path.name for path in others]))
-        [record] = host1.nights()
-        driver = host1.git(host1.origin, "show", f"main:docs/measurements/"
-                                               f"{record_directory(host1, record)}/driver.log")
-        self.assertEqual(driver.splitlines()[:2], [f"Keeping {running}: its job runs.",
-                                                   f"Removing {ended}, an earlier run of "
-                                                   "nightly's."])
 
 
 def short(sha):
@@ -592,13 +493,16 @@ class Install(unittest.TestCase):
         (bin_ / "crontab").write_text(
             f'#!/bin/sh\nif [ "$1" = -l ]; then cat {crontab}; else cat > {crontab}.new && '
             f'mv {crontab}.new {crontab}; fi\n')
-        for tool in ("fxjob", "cargo"):
+        for tool in ("hotbed",):
             if not (bin_ / tool).exists():
                 (bin_ / tool).write_text("#!/bin/sh\nexit 0\n")
                 (bin_ / tool).chmod(0o755)
         (bin_ / "crontab").chmod(0o755)
         environment = {**host1.environment, "CLADEFS_NIGHTLY_CRONTAB": str(bin_ / "crontab"),
                        "CLADEFS_NIGHTLY_REPO": str(host1.dir / "installed")}
+        environment.pop("HOTBED_CONTROLLER", None)
+        node = subprocess.run(["hostname", "-s"], capture_output=True, text=True,
+                              check=True).stdout.strip()
         for _ in range(2):
             done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"),
                                    str(host1.origin)], capture_output=True, text=True,
@@ -609,6 +513,7 @@ class Install(unittest.TestCase):
             "5 * * * * other job",
             f"0 2 * * * PATH={bin_}:/usr/local/bin:/usr/bin:/bin "
             "BOARD_URL=http://127.0.0.1:4100/api/board "
+            f"CLADEFS_TEST_HOST={node} HOTBED_CONTROLLER= "
             f"{host1.dir / 'installed'}/scripts/nightly-host.sh >> {state}/cron.log 2>&1 "
             "# cladefs nightly (scripts/nightly-install.sh)"])
         self.assertEqual(host1.git(host1.dir / "installed", "config", "user.name"), "cladefs nightly")
@@ -625,7 +530,7 @@ class Install(unittest.TestCase):
                               capture_output=True, text=True,
                               env={**host1.environment, "PATH": str(path), "BOARD_URL": ""})
         self.assertEqual((done.returncode, done.stderr),
-                         (1, "The nightly can't run here: missing fxjob flock vb cargo BOARD_URL\n"))
+                         (1, "The nightly can't run here: missing hotbed flock vb BOARD_URL\n"))
 
 
 if __name__ == "__main__":

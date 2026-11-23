@@ -31,7 +31,7 @@ parts=${CLADEFS_TEST_PARTS:-$parts}
 part() { # name: whether CLADEFS_TEST_PARTS has it
     [[ " $parts " == *" $1 "* ]]
 }
-# Every part but the scripts' compiles, which a measurement (fxjob --bench) refuses to (TASK-368).
+# Every part but the scripts' compiles, which a measurement (hotbed run --bench) refuses to (TASK-368).
 source "$root/scripts/lib/measurement.sh"
 read -ra listed <<< "$parts"
 if [[ ${listed[*]} != scripts ]]; then

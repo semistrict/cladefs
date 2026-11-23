@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""flock(1), as scripts/lib/host-remote.sh calls it, for hosts without util-linux's (fake_ssh.py):
+"""flock(1), as scripts/nightly-host.sh calls it, for machines without util-linux's (macOS):
 `flock [-n] [-u] FD` locks, or with -u unlocks, the file its caller has open as FD, the lock its
 caller's as long as it keeps the file open; `flock [-n] FILE COMMAND...` runs COMMAND holding a lock
 of FILE, made if it is not there. -n fails, with 1, rather than wait for another's lock.

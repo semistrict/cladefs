@@ -5,7 +5,7 @@
 
 # Measure cladefs-gc's sweeps over a bucket of files of many cells on the test host, an x86-64 Linux
 # machine of one's own, over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh), as a
-# measurement, alone there and on CPUs of its own (fxjob --bench) (TASK-395.5): scripts/gc-sweep.sh,
+# measurement, alone there and on CPUs of its own (hotbed run --bench) (TASK-395.5): scripts/gc-sweep.sh,
 # through scripts/lib/gc-sweep-linux-host.sh, fills a bucket of about 1M objects in 10k cells and
 # times sweeps of it by passes at once, with their peak memory. The table, the test host and the
 # source measured go to docs/measurements/HOST-gc-sweep-<time>-<mark>, the run's mark, unless named,

@@ -9,7 +9,7 @@
 # the cells' tests against it, scripts/test-e2e-rustfs.sh the guest tests, their extent daemons'
 # cells in it, and scripts/sandboxes.sh LangSmith's sandboxes' run. A process, not a container: one
 # way to start it on every host, CI's runners, the test host and macOS; and on the test host its
-# CPU, memory and I/O are the run's own, in its fxjob cgroup and on its CPUs, as LangSmith's RustFS
+# CPU, memory and I/O are the run's own, in its hotbed command's cgroup and on its CPUs, as LangSmith's RustFS
 # shared their runner with their sandboxes (TASK-330.5), where a container's ran in the engine's
 # cgroup, beside other agents' jobs.
 #

@@ -6,8 +6,8 @@
 # An A/B of the fs bench on the test host, an x86-64 Linux machine of one's own, over ssh
 # (CLADEFS_TEST_HOST; scripts/lib/host.sh; scripts/lib/bench-ab-linux-host.sh,
 # TASK-276): each side's commit built there once, in a worktree of its own, into artifacts of its
-# own, as ordinary work (fxjob), then, as a measurement, alone and on CPUs of its own (fxjob
-# --bench), which no build takes (scripts/lib/host.sh's host_job, TASK-368), ROUNDS rounds of both
+# own, as ordinary work (a hotbed command), then, as a measurement, alone and on CPUs of its own
+# (hotbed run --bench), which no build takes (scripts/lib/host.sh's host_job, TASK-368), ROUNDS rounds of both
 # sides interleaved, A B, then B A, against those artifacts, so that what drifts on the test host
 # over the hours moves both alike and no round rebuilds anything; then scripts/bench-ab.py's
 # comparison, the ext4 case the control, into RESULTS/ab.md; the build's log in
