@@ -112,18 +112,10 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
             .with_context(|| format!("making {}", tenants.display()))?;
         serve_control(&control, tenants)?;
     }
+    // cladefs: its metrics and z-pages over HTTP, where CLADEFSD_METRICS and CLADEFSD_ZPAGES say
+    // (board 8559); outside the simulation (doc-24).
     #[cfg(not(madsim))]
-    if let Some(address) = set_os("CLADEFSD_METRICS") {
-        let address = address.to_str().context("CLADEFSD_METRICS must be an address")?;
-        let metrics = std::net::TcpListener::bind(address)
-            .with_context(|| format!("serving metrics and z-pages at {address}"))?;
-        // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
-        super::run::thread("cladefsd http", move || {
-            if let Err(err) = super::serve_http(metrics) {
-                log::error!("cladefsd: serving HTTP: {err}");
-            }
-        })?;
-    }
+    super::http::start()?;
     // cladefs: its VM socket bound last, once all else serves: that a VM process, or what waits
     // for the daemon, connects to it says the control API answers too.
     #[cfg(not(madsim))]

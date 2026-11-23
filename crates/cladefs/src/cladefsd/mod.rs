@@ -145,7 +145,7 @@ pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
 #[cfg(target_os = "linux")]
 pub use device::DaemonDevice;
-pub use http::serve_http;
+pub use http::{Pages, serve_http};
 pub use run::supervised;
 pub use server::{Tenant, serve, serve_tenant};
 

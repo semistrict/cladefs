@@ -5,16 +5,26 @@
 //! The daemon's HTTP server, on the address `CLADEFSD_METRICS` names: its metrics, `GET /metrics`,
 //! for whoever scrapes them (TASK-47, `super::metrics`); cladefs: and its z-pages, under `/z/`, for
 //! whoever looks into it (TASK-672, `super::zpages`). A server of its own, small, as what it
-//! answers is a few GETs, each on a thread of its own, within deadlines that no client holds past.
+//! answers is a few requests, each on a thread of its own, within deadlines that no client holds
+//! past.
+//!
+//! cladefs: `CLADEFSD_ZPAGES` says where the z-pages are served (board 8559): unset, with the
+//! metrics, on `CLADEFSD_METRICS`' address; `off`, nowhere; an address (`HOST:PORT`), there alone,
+//! the metrics' address serving `/metrics` alone. Whoever may reach the z-pages may profile the
+//! daemon's CPU and change what it logs, which whoever scrapes its metrics need not
+//! (hotbed question 501).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How long a client has to send its request, and then to take the response: one deadline for
 /// each half of the exchange, as a client sending a byte at a time, or taking nothing, would hold
 /// its turn for good against a timeout of each read or write (TASK-79.27). cladefs: two, as what is
-/// asked for may take long to make, as a CPU profile of the seconds asked for (TASK-672.3).
+/// asked for may take long to make, as a CPU profile of the seconds asked for (TASK-672.3), which
+/// waits for those seconds alone, and ends once its client hangs up ([`Client::hung_up`], board
+/// 8559).
 const EXCHANGE: Duration = Duration::from_secs(5);
 
 /// The most bytes of a request's line and headers read: a scraper's are a line and a few headers.
@@ -55,28 +65,81 @@ impl Response {
     }
 }
 
-/// Serves the metrics and z-pages to whoever connects to `listener` and asks for them over HTTP,
-/// until it listens no more (`EINVAL`): each client on a thread of its own, [`AT_ONCE`] at most,
-/// within [`EXCHANGE`]. An accept that fails otherwise, as with as many files open as the daemon
-/// may, is tried again after a while (`server::ACCEPT_AGAIN`), as the daemon's VM sockets' are:
-/// given up on, the daemon's metrics would be served no more, the daemon serving on (TASK-79.35).
-pub fn serve_http(listener: TcpListener) -> std::io::Result<()> {
-    let serving = std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
+/// cladefs: what a server answers (board 8559): the metrics, the z-pages, or both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pages {
+    /// `/metrics` and `/z/`, on one address: `CLADEFSD_ZPAGES` unset.
+    All,
+    /// `/metrics` alone: the z-pages served on an address of their own, or nowhere.
+    Metrics,
+    /// `/z/` alone, on `CLADEFSD_ZPAGES`' address.
+    Zpages,
+}
+
+/// cladefs: where the z-pages are served, as `CLADEFSD_ZPAGES` says (board 8559).
+#[cfg(not(madsim))]
+enum Zpages {
+    /// With the metrics: unset.
+    WithMetrics,
+    /// Nowhere: `off`.
+    Off,
+    /// At an address of their own.
+    At(String),
+}
+
+/// cladefs: binds and serves the daemon's HTTP servers as its environment says, each on a thread
+/// of its own (`CLADEFSD_METRICS`, `CLADEFSD_ZPAGES`): none, if it names no address; an address
+/// it can't bind to, an error, the daemon refusing to start.
+#[cfg(not(madsim))]
+pub(super) fn start() -> anyhow::Result<()> {
+    use anyhow::Context;
+    let address = |name: &str| -> anyhow::Result<Option<String>> {
+        let value = node_local::env::var_os(name).filter(|value| !value.is_empty());
+        let value = value.map(|value| value.into_string());
+        value.transpose().map_err(|_| anyhow::anyhow!("{name} must be an address"))
+    };
+    let zpages = match address("CLADEFSD_ZPAGES")?.as_deref() {
+        None => Zpages::WithMetrics,
+        Some("off") => Zpages::Off,
+        Some(address) => Zpages::At(address.to_owned()),
+    };
+    let serve = |address: &str, pages: Pages| -> anyhow::Result<()> {
+        let listener =
+            TcpListener::bind(address).with_context(|| format!("serving HTTP at {address}"))?;
+        // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
+        super::run::thread("cladefsd http", move || {
+            if let Err(err) = serve_http(listener, pages) {
+                log::error!("cladefsd: serving HTTP: {err}");
+            }
+        })?;
+        Ok(())
+    };
+    if let Some(metrics) = address("CLADEFSD_METRICS")? {
+        let pages = match zpages {
+            Zpages::WithMetrics => Pages::All,
+            Zpages::Off | Zpages::At(_) => Pages::Metrics,
+        };
+        serve(&metrics, pages)?;
+    }
+    match zpages {
+        Zpages::At(address) => serve(&address, Pages::Zpages)?,
+        Zpages::Off => log::info!("cladefsd: z-pages off (CLADEFSD_ZPAGES=off)"),
+        Zpages::WithMetrics => {}
+    }
+    Ok(())
+}
+
+/// Serves `pages` to whoever connects to `listener` and asks for them over HTTP, until it listens
+/// no more (`EINVAL`): each client on a thread of its own, [`AT_ONCE`] at most, within
+/// [`EXCHANGE`]. An accept that fails otherwise, as with as many files open as the daemon may, is
+/// tried again after a while (`server::ACCEPT_AGAIN`), as the daemon's VM sockets' are: given up
+/// on, the daemon's metrics would be served no more, the daemon serving on (TASK-79.35).
+pub fn serve_http(listener: TcpListener, pages: Pages) -> std::io::Result<()> {
+    let slots = Arc::new(Slots::default());
     let mut failing = false;
     loop {
-        {
-            let (count, done) = &*serving;
-            let mut count = count.lock().unwrap();
-            while *count == AT_ONCE {
-                count = done.wait(count).unwrap();
-            }
-            *count += 1;
-        }
-        let accepted = listener.accept();
-        if accepted.is_err() {
-            *serving.0.lock().unwrap() -= 1;
-        }
-        let stream = match accepted {
+        let slot = slots.take();
+        let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(err) if err.raw_os_error() == Some(libc::EINVAL) => return Err(err),
             // That client's, gone before it was accepted.
@@ -91,33 +154,100 @@ pub fn serve_http(listener: TcpListener) -> std::io::Result<()> {
             }
         };
         failing = false;
-        let served = serving.clone();
         // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
         let spawned = std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
-            if let Err(err) = answer(stream) {
+            // Given back as the thread ends, however it does: a page's panic unwinding through it
+            // too, which held its slot for good before (board 8559).
+            let _slot = slot;
+            if let Err(err) = answer(stream, pages) {
                 log::warn!("cladefsd: serving HTTP: {err}");
             }
-            let (count, done) = &*served;
-            *count.lock().unwrap() -= 1;
-            done.notify_one();
         });
+        // Its slot, in what the thread would have run, given back with it.
         if let Err(err) = spawned {
             log::warn!("cladefsd: serving HTTP: {err}");
-            *serving.0.lock().unwrap() -= 1;
         }
     }
 }
 
-/// What `method` asks of `target`, a path and its query: the metrics, at `/metrics`; the z-pages,
-/// under `/z/`.
-fn route(method: &str, target: &str) -> Response {
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    match (method, path) {
-        ("GET", "/metrics") => Response::ok(METRICS, super::metrics::render()),
-        ("GET", path) if let Some(page) = path.strip_prefix("/z") => {
-            super::zpages::serve(page, query)
+/// cladefs: the clients being served, [`AT_ONCE`] at most, each holding a [`Slot`] (board 8559).
+#[derive(Default)]
+struct Slots {
+    serving: Mutex<usize>,
+    done: Condvar,
+}
+
+impl Slots {
+    /// A slot, once one is free.
+    fn take(self: &Arc<Self>) -> Slot {
+        // A count, which no panic leaves half changed: poisoned, as it is.
+        let mut serving = self.serving.lock().unwrap_or_else(PoisonError::into_inner);
+        while *serving == AT_ONCE {
+            serving = self.done.wait(serving).unwrap_or_else(PoisonError::into_inner);
         }
-        _ => Response::not_found(),
+        *serving += 1;
+        Slot(Arc::clone(self))
+    }
+}
+
+/// cladefs: a client's turn among [`AT_ONCE`], given back as it drops.
+struct Slot(Arc<Slots>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // As in `Slots::take`.
+        *self.0.serving.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        self.0.done.notify_one();
+    }
+}
+
+/// cladefs: the client of an exchange, as a page that takes long to make asks after it, so that
+/// what it asked for is made no longer once it is gone (board 8559).
+pub(super) struct Client<'a>(Option<&'a TcpStream>);
+
+impl Client<'_> {
+    /// A client that never hangs up: a test's, asking a page itself.
+    #[cfg(test)]
+    pub const NONE: Client<'static> = Client(None);
+
+    /// Whether it hung up: its connection ended, or reset. Asked without waiting. A client that
+    /// shuts down its connection's writing half, waiting to read, counts as gone, as no scraper,
+    /// browser or `go tool pprof` does that.
+    pub fn hung_up(&self) -> bool {
+        let Some(stream) = self.0 else { return false };
+        if let Err(err) = stream.set_nonblocking(true) {
+            log::warn!("cladefsd: asking whether an HTTP client hung up: {err}");
+            return true;
+        }
+        let peeked = stream.peek(&mut [0]);
+        if let Err(err) = stream.set_nonblocking(false) {
+            log::warn!("cladefsd: asking whether an HTTP client hung up: {err}");
+            return true;
+        }
+        match peeked {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(err) => !matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ),
+        }
+    }
+}
+
+/// What `method` asks of `target`, a path and its query, of `pages`: the metrics, at `/metrics`;
+/// the z-pages, under `/z/`. None, if `client` hung up before it was made.
+fn route(method: &str, target: &str, pages: Pages, client: &Client<'_>) -> Option<Response> {
+    // cladefs: a page's panic, which the server's tests inject (board 8559).
+    fail::fail_point!("cladefsd::http::route");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let zpage = path.strip_prefix("/z").filter(|_| pages != Pages::Metrics);
+    match (method, path, zpage) {
+        ("GET", "/metrics", _) if pages != Pages::Zpages => {
+            Some(Response::ok(METRICS, super::metrics::render()))
+        }
+        (method, _, Some(page)) => super::zpages::serve(method, page, query, client),
+        _ => Some(Response::not_found()),
     }
 }
 
@@ -155,10 +285,11 @@ impl Write for Deadlined<'_> {
     }
 }
 
-/// Answers the HTTP request `stream` carries ([`route`]), its head read within [`EXCHANGE`] and
-/// what it asked for sent within another; `431`, for a request whose line and headers are more
-/// than [`HEAD_MAX`] bytes.
-fn answer(stream: TcpStream) -> std::io::Result<()> {
+/// Answers the HTTP request `stream` carries of `pages` ([`route`]), its head read within
+/// [`EXCHANGE`] and what it asked for sent within another; `431`, for a request whose line and
+/// headers are more than [`HEAD_MAX`] bytes; nothing, to a client that hung up before what it asked
+/// for was made.
+fn answer(stream: TcpStream, pages: Pages) -> std::io::Result<()> {
     let deadline = Instant::now() + EXCHANGE;
     let mut reader = BufReader::new(Deadlined { stream: &stream, deadline }.take(HEAD_MAX));
     let mut request = String::new();
@@ -175,12 +306,15 @@ fn answer(stream: TcpStream) -> std::io::Result<()> {
     let mut parts = request.split_whitespace();
     let response = match (parts.next(), parts.next()) {
         _ if too_large => {
-            Response::plain("431 Request Header Fields Too Large", "request too large")
+            Some(Response::plain("431 Request Header Fields Too Large", "request too large"))
         }
-        (Some(method), Some(target)) => route(method, target),
-        _ => Response::plain("400 Bad Request", "no request line"),
+        (Some(method), Some(target)) => route(method, target, pages, &Client(Some(&stream))),
+        _ => Some(Response::plain("400 Bad Request", "no request line")),
     };
-    let Response { status, content_type, body } = response;
+    let Some(Response { status, content_type, body }) = response else {
+        log::info!("cladefsd: an HTTP client hung up before its answer was made");
+        return Ok(());
+    };
     let deadline = Instant::now() + EXCHANGE;
     let mut connection = Deadlined { stream: &stream, deadline };
     write!(

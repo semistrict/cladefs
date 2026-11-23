@@ -5,13 +5,23 @@
 //! The daemon's metrics, in Prometheus' text exposition format, served over HTTP to whoever scrapes
 //! them (TASK-47): `GET /metrics` on the address `CLADEFSD_METRICS` names (`super::http`).
 //!
+//! cladefs: a cell is labelled one way in every family, `cell="TENANT/CELL"`, each in base 32, as
+//! cells name it (`CellId`'s display; board 8563): `cladefsd_vm_*` joins `cladefsd_upload_*` and
+//! `cladefsd_replication_*` on it. Those families are per cell, and every fork is a cell of its
+//! own, so their series come and go with the cells opened: an operator aggregates them (`sum
+//! without (cell)`, or recording rules) rather than keep each cell's for long. No family is per
+//! connection: a VM process's number, new for each, would make series of every VM started.
+//!
 //! - `cladefsd_requests_total{kind}`, `cladefsd_request_errors_total{kind}`, and
 //!   `cladefsd_request_duration_seconds{kind}`, a histogram: the VM processes' requests, by
-//!   kind, as the daemon served them, from their dispatch to their reply's sending.
+//!   kind, as the daemon served them, from their dispatch to their reply's sending. cladefs: its
+//!   `+Inf` bucket and `_count` are the sum of the buckets as a scrape read them, so that no
+//!   bucket is ever past them (board 8561); its `_sum` is read apart, as Prometheus allows. Its
+//!   bounds past 1 s are board 5750's.
 //! - `cladefsd_build_info{commit}`, 1: the commit the daemon was built of
 //!   (`crate::BUILD_COMMIT`); `cladefsd_vm_build_info{cell,commit}`: the VM processes
-//!   connected, by their cell, in base 32, and the commit they said they were built
-//!   of (`wire::BUILD`), a writer and its followers counted together (TASK-111.7).
+//!   connected, by their cell and the commit they said they were built of (`wire::BUILD`), a
+//!   writer and its followers counted together (TASK-111.7).
 //! - `cladefsd_connections`, `cladefsd_stores_open` and `cladefsd_follower_views`:
 //!   the VM processes connected, the cells their connections write, and the followers' views.
 //! - `cladefsd_extent_cache_pinned_entries` and `cladefsd_extent_cache_idle_entries`: the sealed
@@ -22,9 +32,9 @@
 //!   `cladefsd_window_private_pages`, the private copies of windows that copy on write, as their
 //!   VM processes say (doc-26), and `cladefsd_window_open_maps_refused_total`, the `MAP`s of open extents refused, which no
 //!   guest makes (backlog doc-13).
-//! - cladefs: of each VM process connected that opened a cell, by its cell, in
-//!   base 32, and its connection's number (`connection`), which tells a writer and its
-//!   followers apart (TASK-111.5): `cladefsd_vm_window_mappings`,
+//! - cladefs: of the VM processes connected that opened a cell, by their cell and their `role`,
+//!   `writer` or `follower`, a cell's followers summed (TASK-111.5, board 8563):
+//!   `cladefsd_vm_window_mappings`,
 //!   `cladefsd_vm_window_mapped_bytes`, `cladefsd_vm_window_pages` and
 //!   `cladefsd_vm_window_private_pages`, its window's, as the gauges above count all windows';
 //!   `cladefsd_vm_host_mappings`, the runs of pages its window's second stage has installed in
@@ -61,8 +71,7 @@
 //! - `cladefsd_upload_pending_bytes{cell}`, `cladefsd_upload_oldest_pending_seconds
 //!   {cell}` and `cladefsd_upload_stalls_total{cell}`: for each open cell whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
-//!   many commits waited for the lag to shrink (TASK-91.3); its cell as `TENANT/CELL`, in
-//!   base 32 (TASK-364).
+//!   many commits waited for the lag to shrink (TASK-91.3).
 //! - cladefs: `cladefsd_replication_degraded{cell}` and `cladefsd_replication_members_up{cell}`:
 //!   for each open cell of a replicated cell, 1 while it is degraded (fewer than f members of its
 //!   configuration take its writer's commits, or it dropped to f = 0, its commits waiting for the
@@ -72,8 +81,8 @@
 //!   every cell's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
 //!   (`crate::bucket::upload_memory`, TASK-317).
 //! - cladefs: `cladefsd_part_cache_bytes` and `cladefsd_part_cache_capacity_bytes`: what
-//!   the host's part cache keeps, once a cell opened it, and its budget,
-//!   `CLADEFSD_PART_CACHE_BYTES` (TASK-406.1).
+//!   the host's part cache keeps and its budget, `CLADEFSD_PART_CACHE_BYTES` (TASK-406.1): 0
+//!   until a cell opens it, or if the daemon keeps none (board 8561).
 //! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the cells' fetchers asked the
 //!   peers that own them for, by what came of it (`given`, `missing`, `failed`), and
 //!   `cladefsd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for
@@ -83,14 +92,15 @@
 //!   memory, as last sampled and at most; `cladefsd_process_anon_budget_bytes`, what its
 //!   design bounds that by, and `cladefsd_process_anon_over_budget_total`, the samples past
 //!   it, what an operator alerts on; `cladefsd_process_shmem_bytes`, its shared memory, the
-//!   extent cache's pages (`super::process`, TASK-330.2).
+//!   extent cache's pages (`super::process`, TASK-330.2). Each scrape samples them, so that they
+//!   are the daemon's from its start, before any cell opens (board 8561).
 //! - `cladefsd_object_storage_requests_total{request}`,
 //!   `cladefsd_object_storage_uploaded_bytes_total{object}` and
 //!   `cladefsd_object_storage_downloaded_bytes_total`: what the daemon did with its bucket;
 //!   `cladefsd_object_storage_bucket_gets_total{bucket}` and
 //!   `cladefsd_object_storage_bucket_downloaded_bytes_total{bucket}`, by bucket number, its own and
-//!   those of other buckets' cells (TASK-633.4),
-//!   once it opened a cell.
+//!   those of other buckets' cells (TASK-633.4): 0 until a cell opens the bucket (board 8561),
+//!   and each bucket's series once a cell asked it for something.
 
 use super::wire::*;
 use std::fmt::Write as _;
@@ -133,14 +143,27 @@ const BUCKETS: [f64; 14] = [
     1.0,
 ];
 
-/// The requests of a kind served: how many took at most each bucket's bound, how many in all,
-/// their nanoseconds, and how many failed.
+/// The requests of a kind served: how many took at most each bucket's bound, and longer than the
+/// last, their nanoseconds, and how many failed. cladefs: no count of them all apart, which a
+/// scrape would read at another moment than the buckets, a bucket's cumulative count then past it
+/// (board 8561): the count is the buckets' sum, as one read of them has them ([`Requests::counts`]).
 #[derive(Default)]
 struct Requests {
-    buckets: [AtomicU64; BUCKETS.len()],
-    count: AtomicU64,
+    /// Each of [`BUCKETS`]' (those over the bound before it), then those past them all.
+    buckets: [AtomicU64; BUCKETS.len() + 1],
     nanos: AtomicU64,
     errors: AtomicU64,
+}
+
+impl Requests {
+    /// How many took at most each bucket's bound, of those over the bound before it, and how many
+    /// in all, as of one read of each bucket.
+    fn counts(&self) -> ([u64; BUCKETS.len()], u64) {
+        let read = self.buckets.each_ref().map(|bucket| bucket.load(Ordering::Relaxed));
+        let mut within = [0; BUCKETS.len()];
+        within.copy_from_slice(&read[..BUCKETS.len()]);
+        (within, read.iter().sum())
+    }
 }
 
 /// Each kind's requests, in [`KINDS`]' order.
@@ -169,10 +192,8 @@ pub(super) fn served(kind: u32, took: Duration, failed: bool) {
     let Some(at) = KINDS.iter().position(|(known, _)| *known == kind) else { return };
     let requests = &REQUESTS[at];
     let seconds = took.as_secs_f64();
-    if let Some(bucket) = BUCKETS.iter().position(|bound| seconds <= *bound) {
-        requests.buckets[bucket].fetch_add(1, Ordering::Relaxed);
-    }
-    requests.count.fetch_add(1, Ordering::Relaxed);
+    let bucket = BUCKETS.iter().position(|bound| seconds <= *bound).unwrap_or(BUCKETS.len());
+    requests.buckets[bucket].fetch_add(1, Ordering::Relaxed);
     requests.nanos.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
     if failed {
         requests.errors.fetch_add(1, Ordering::Relaxed);
@@ -185,7 +206,7 @@ pub(super) fn served(kind: u32, took: Duration, failed: bool) {
 pub(super) fn requests_line() -> String {
     let mut line = String::from("requests:");
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
-        let count = requests.count.load(Ordering::Relaxed);
+        let (_, count) = requests.counts();
         if count > 0 {
             let nanos = requests.nanos.load(Ordering::Relaxed);
             let _ = write!(line, " {kind}={count} {kind}-ns={nanos}");
@@ -236,16 +257,23 @@ impl Laps {
 pub fn render() -> String {
     let mut out = String::new();
     let mut laps = Laps::new();
-    let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
+    render_requests(&mut out);
+    laps.lap("requests");
+    render_rest(out, laps)
+}
 
-    out += "# HELP cladefsd_requests_total VM processes' requests served, by kind.\n";
-    out += "# TYPE cladefsd_requests_total counter\n";
-    for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
-        let _ =
-            writeln!(out, "cladefsd_requests_total{{kind=\"{kind}\"}} {}", load(&requests.count));
+/// The VM processes' requests' metrics, appended to `out`: each kind's, its histogram's buckets,
+/// `+Inf` and count as of one read of its buckets.
+fn render_requests(out: &mut String) {
+    let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
+    let counts: Vec<_> = REQUESTS.iter().map(Requests::counts).collect();
+    *out += "# HELP cladefsd_requests_total VM processes' requests served, by kind.\n";
+    *out += "# TYPE cladefsd_requests_total counter\n";
+    for ((_, kind), (_, count)) in KINDS.iter().zip(&counts) {
+        let _ = writeln!(out, "cladefsd_requests_total{{kind=\"{kind}\"}} {count}");
     }
-    out += "# HELP cladefsd_request_errors_total VM processes' requests that failed, by kind.\n";
-    out += "# TYPE cladefsd_request_errors_total counter\n";
+    *out += "# HELP cladefsd_request_errors_total VM processes' requests that failed, by kind.\n";
+    *out += "# TYPE cladefsd_request_errors_total counter\n";
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
         let _ = writeln!(
             out,
@@ -253,24 +281,25 @@ pub fn render() -> String {
             load(&requests.errors)
         );
     }
-    out += "# HELP cladefsd_request_duration_seconds How long VM processes' requests took to \
-            serve, from their dispatch to their reply, by kind.\n";
-    out += "# TYPE cladefsd_request_duration_seconds histogram\n";
-    for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
+    *out += "# HELP cladefsd_request_duration_seconds How long VM processes' requests took to \
+             serve, from their dispatch to their reply, by kind.\n";
+    *out += "# TYPE cladefsd_request_duration_seconds histogram\n";
+    for (((_, kind), requests), (within, count)) in KINDS.iter().zip(REQUESTS.iter()).zip(&counts) {
         let name = "cladefsd_request_duration_seconds";
         let mut cumulative = 0;
-        for (bound, bucket) in BUCKETS.iter().zip(&requests.buckets) {
-            cumulative += load(bucket);
+        for (bound, bucket) in BUCKETS.iter().zip(within) {
+            cumulative += bucket;
             let _ = writeln!(out, "{name}_bucket{{kind=\"{kind}\",le=\"{bound}\"}} {cumulative}");
         }
-        let count = load(&requests.count);
         let _ = writeln!(out, "{name}_bucket{{kind=\"{kind}\",le=\"+Inf\"}} {count}");
         let sum = load(&requests.nanos) as f64 / 1e9;
         let _ = writeln!(out, "{name}_sum{{kind=\"{kind}\"}} {sum}");
         let _ = writeln!(out, "{name}_count{{kind=\"{kind}\"}} {count}");
     }
+}
 
-    laps.lap("requests");
+/// The metrics but the requests', appended to `out`, each part lapped: `out`.
+fn render_rest(mut out: String, mut laps: Laps) -> String {
     let name = "cladefsd_build_info";
     let _ = writeln!(out, "# HELP {name} The daemon's build, by the commit it was built of.");
     let _ = writeln!(out, "# TYPE {name} gauge");
@@ -283,11 +312,9 @@ pub fn render() -> String {
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
     for ((cell, commit), count) in super::stats::vm_builds() {
-        let _ = writeln!(
-            out,
-            "{name}{{cell=\"{cell}\",commit=\"{commit}\"}} {count}",
-            cell = base32_id::Short(cell)
-        );
+        // cladefs: the commit as its VM process said it, which it may have said with anything.
+        let commit = label_value(&commit);
+        let _ = writeln!(out, "{name}{{cell=\"{cell}\",commit=\"{commit}\"}} {count}");
     }
 
     laps.lap("builds");
@@ -303,7 +330,7 @@ pub fn render() -> String {
     let _ = writeln!(out, "# TYPE {name} counter");
     let _ = writeln!(out, "{name} {}", crate::open_cell::open_maps_refused());
 
-    // cladefs: each VM process's (TASK-111.5).
+    // cladefs: each cell's writer's, and its followers' together (TASK-111.5, board 8563).
     let vms = super::stats::vms();
     type Gauge = fn(&super::stats::Vm) -> Option<u64>;
     let series: [(&str, &str, Gauge); 6] = [
@@ -332,15 +359,15 @@ pub fn render() -> String {
     for (name, help, value) in series {
         let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
         let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
+        let mut summed = std::collections::BTreeMap::new();
         for vm in &vms {
             if let Some(value) = value(vm) {
-                let (cell, connection) = (vm.cell, vm.connection);
-                let labels = format!(
-                    "cell=\"{cell}\",connection=\"{connection}\"",
-                    cell = base32_id::Short(cell)
-                );
-                let _ = writeln!(out, "cladefsd_{name}{{{labels}}} {value}");
+                let role = if vm.follower { "follower" } else { "writer" };
+                *summed.entry((vm.cell, role)).or_insert(0) += value;
             }
+        }
+        for ((cell, role), value) in summed {
+            let _ = writeln!(out, "cladefsd_{name}{{cell=\"{cell}\",role=\"{role}\"}} {value}");
         }
     }
 
@@ -462,24 +489,21 @@ pub fn render() -> String {
         let _ = writeln!(out, "{name} {value}");
     }
 
-    // cladefs: what the part cache keeps, and its budget (TASK-406.1).
-    if let Some(cache) = super::cells::opened_cache() {
-        for (name, help, value) in [
-            (
-                "cladefsd_part_cache_bytes",
-                "Bytes of objects the host's part cache keeps.",
-                cache.bytes(),
-            ),
-            (
-                "cladefsd_part_cache_capacity_bytes",
-                "The most bytes of objects the host's part cache keeps.",
-                cache.capacity(),
-            ),
-        ] {
-            let _ = writeln!(out, "# HELP {name} {help}");
-            let _ = writeln!(out, "# TYPE {name} gauge");
-            let _ = writeln!(out, "{name} {value}");
-        }
+    // cladefs: what the part cache keeps, and its budget (TASK-406.1): 0 until a cell opens it, or
+    // if there is none, so that its series are there from the start (board 8561).
+    let cache = super::cells::opened_cache();
+    let (bytes, capacity) = cache.map_or((0, 0), |cache| (cache.bytes(), cache.capacity()));
+    for (name, help, value) in [
+        ("cladefsd_part_cache_bytes", "Bytes of objects the host's part cache keeps.", bytes),
+        (
+            "cladefsd_part_cache_capacity_bytes",
+            "The most bytes of objects the host's part cache keeps.",
+            capacity,
+        ),
+    ] {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        let _ = writeln!(out, "{name} {value}");
     }
 
     // cladefs: the parts asked of peers, and served them (TASK-406.2).
@@ -500,8 +524,10 @@ pub fn render() -> String {
         }
     }
 
-    // cladefs: what the process holds and spent, against its budget (TASK-330.2).
-    let process = super::process::last();
+    // cladefs: what the process holds and spent, against its budget (TASK-330.2), sampled now: the
+    // stats' thread samples it only once a cell opened the bucket, and until then it would read 0,
+    // an idle daemon's, to whoever alerts on it (board 8561, hotbed question 504).
+    let process = super::process::sample();
     let series: [(&str, &str, &str, String); 6] = [
         (
             "cladefsd_process_cpu_seconds_total",
@@ -606,7 +632,10 @@ pub fn render() -> String {
         }
     }
 
-    if let Some(stats) = super::cells::bucket_stats() {
+    // cladefs: 0 until a cell opens the bucket, so that its series are there from the start
+    // (board 8561).
+    {
+        let stats = super::cells::bucket_stats().unwrap_or_default();
         use bucket_cell::object_bucket::{Request, Upload};
         let name = "cladefsd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
@@ -780,4 +809,49 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
 /// newlines escaped.
 fn label_value(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// board 8561: scraped while requests are served, each kind's histogram is whole: its buckets'
+    /// cumulative counts never fall, none is past `+Inf`, and `+Inf` is `_count`. Its count read
+    /// apart from its buckets, a request served between the two reads put a bucket past them. The
+    /// requests here take up to 1 s, the last bound, whose bucket a scrape read last before the
+    /// count: none past it, whose bucket, counted in `+Inf` alone, would hide a count read early.
+    #[test]
+    fn histograms_scraped_while_requests_are_served_are_whole() {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let serving: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        served(READ, Duration::from_millis(500), false);
+                        served(READ, Duration::from_micros(5), true);
+                    }
+                })
+            })
+            .collect();
+        let name = "cladefsd_request_duration_seconds";
+        for _ in 0..20_000 {
+            let mut out = String::new();
+            render_requests(&mut out);
+            let value = |line: &str| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap();
+            let of_read = |prefix: &str| -> Vec<u64> {
+                let prefix = format!("{name}_{prefix}{{kind=\"read\"");
+                out.lines().filter(|line| line.starts_with(&prefix)).map(value).collect()
+            };
+            let buckets = of_read("bucket");
+            assert_eq!(buckets.len(), BUCKETS.len() + 1, "{out}");
+            assert!(buckets.is_sorted(), "a bucket's cumulative count fell: {buckets:?}");
+            assert_eq!(Some(&of_read("count")[0]), buckets.last(), "{out}");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for thread in serving {
+            thread.join().unwrap();
+        }
+    }
 }

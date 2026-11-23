@@ -2346,7 +2346,7 @@ fn metrics_refuse_requests_too_long() {
     use std::io::{Read as _, Write as _};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    std::thread::spawn(move || super::serve_http(listener));
+    std::thread::spawn(move || super::serve_http(listener, super::Pages::All));
     let mut stream = std::net::TcpStream::connect(address).unwrap();
     let mut writing = stream.try_clone().unwrap();
     // A line of a mebibyte, which a server reading lines whole holds whole.
@@ -2372,7 +2372,7 @@ fn metrics_are_served_beside_slow_clients() {
     use std::io::{Read as _, Write as _};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    std::thread::spawn(move || super::serve_http(listener));
+    std::thread::spawn(move || super::serve_http(listener, super::Pages::All));
     let mut slow = std::net::TcpStream::connect(address).unwrap();
     write!(slow, "GET /metrics HTTP/1.1\r\n").unwrap();
     let scraped = within(std::time::Duration::from_secs(30), move || {
@@ -2387,6 +2387,173 @@ fn metrics_are_served_beside_slow_clients() {
     slow.set_nonblocking(true).unwrap();
     let answered = slow.read(&mut [0; 64]).map_err(|err| err.kind());
     assert_eq!(answered, Err(std::io::ErrorKind::WouldBlock), "the slow client was let go first");
+}
+
+/// What the HTTP server at `address` answers `request`, its line and headers, read to its end
+/// within 30 s.
+fn http(address: std::net::SocketAddr, request: &str) -> String {
+    use std::io::{Read as _, Write as _};
+    let request = format!("{request}\r\nHost: cladefsd\r\n\r\n");
+    let answered = within(std::time::Duration::from_secs(30), move || {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        // A connection the server dropped, its page panicking, reset or ended: what it read.
+        let _ = stream.read_to_end(&mut response);
+        String::from_utf8_lossy(&response).into_owned()
+    });
+    answered.expect("the HTTP server answered never")
+}
+
+/// An HTTP server serving `pages` on a port of localhost's, on a thread: its address.
+fn http_server(pages: super::Pages) -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || super::serve_http(listener, pages));
+    address
+}
+
+/// board 8559: a page that panics, as many times as clients are served at once, gives back each
+/// one's turn: the metrics are served after. Its turn held for good as it unwound, the server
+/// answered nothing more after four, the daemon serving on.
+#[test]
+fn metrics_are_served_after_pages_panic() {
+    let address = http_server(super::Pages::All);
+    fail::cfg("cladefsd::http::route", "4*panic").unwrap();
+    for _ in 0..4 {
+        assert_eq!(http(address, "GET /metrics HTTP/1.1"), "", "a page that panics answers");
+    }
+    let scraped = http(address, "GET /metrics HTTP/1.1");
+    assert!(scraped.starts_with("HTTP/1.1 200 OK\r\n"), "{scraped}");
+}
+
+/// board 8559: a CPU profile whose client hangs up ends then, within a second, rather than
+/// sample on for the 300 seconds it asked for, holding one of the server's turns and refusing
+/// every other profile (409).
+#[test]
+fn profiles_end_as_their_clients_hang_up() {
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+    let address = http_server(super::Pages::All);
+    let mut gone = std::net::TcpStream::connect(address).unwrap();
+    write!(gone, "GET /z/pprof/profile?seconds=300 HTTP/1.1\r\nHost: cladefsd\r\n\r\n").unwrap();
+    let until = |taken: bool, what: &str| {
+        let began = Instant::now();
+        while super::zpages::pprof::taken() != taken {
+            assert!(began.elapsed() < Duration::from_secs(10), "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    until(true, "the profile was never taken");
+    drop(gone);
+    until(false, "the profile went on, its client gone");
+    let next = http(address, "GET /z/pprof/profile?seconds=1 HTTP/1.1");
+    assert_eq!(next.lines().next(), Some("HTTP/1.1 200 OK"));
+}
+
+/// board 8559: a server of the metrics alone serves no z-page, CPU profiles above all, which a
+/// scraper need not take; one of the z-pages alone, no metrics (`CLADEFSD_ZPAGES`).
+#[test]
+fn z_pages_are_served_apart_from_the_metrics() {
+    let (metrics, zpages) = (http_server(super::Pages::Metrics), http_server(super::Pages::Zpages));
+    let status = |answer: String| answer.lines().next().unwrap_or_default().to_owned();
+    assert_eq!(status(http(metrics, "GET /metrics HTTP/1.1")), "HTTP/1.1 200 OK");
+    for page in ["/z/", "/z/pprof/profile?seconds=1", "/z/log"] {
+        let answer = http(metrics, &format!("GET {page} HTTP/1.1"));
+        assert_eq!(status(answer), "HTTP/1.1 404 Not Found", "{page}");
+    }
+    assert_eq!(status(http(zpages, "GET /metrics HTTP/1.1")), "HTTP/1.1 404 Not Found");
+    assert_eq!(status(http(zpages, "GET /z/ HTTP/1.1")), "HTTP/1.1 200 OK");
+}
+
+/// board 8571: what the daemon logs changes while it runs, `POST /z/log?level=`, as
+/// `CLADEFS_LOG_LEVEL` says it, and is put back, `POST /z/log`: a daemon serving its VMs, which a
+/// restart would crash, logs a target at debug, then as before. What is not a level is refused,
+/// nothing changed.
+#[test]
+fn what_the_daemon_logs_changes_while_it_runs() {
+    let lines = super::logging::capture();
+    let address = http_server(super::Pages::All);
+    let logged = |what: &str| {
+        log::debug!(target: "cladefs::cladefsd::server", "{what}");
+        log::info!(target: "bucket_cell::object_bucket", "{what}");
+        let lines = lines.lock().unwrap();
+        let of =
+            |target: &str| lines.iter().any(|line| line.contains(&format!("{target}: {what}")));
+        (of("cladefs::cladefsd::server"), of("bucket_cell::object_bucket"))
+    };
+    let body = |answer: String| answer.split_once("\r\n\r\n").map(|(_, body)| body.to_owned());
+    assert_eq!(logged("as started"), (true, true));
+    let set = http(address, "POST /z/log?level=warn,cladefs::cladefsd=debug HTTP/1.1");
+    assert_eq!(body(set), Some("warn,cladefs::cladefsd=debug\n".to_owned()));
+    assert_eq!(logged("as told"), (true, false));
+    let refused = http(address, "POST /z/log?level=loud HTTP/1.1");
+    assert!(refused.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{refused}");
+    let now = http(address, "GET /z/log HTTP/1.1");
+    assert_eq!(body(now), Some("warn,cladefs::cladefsd=debug\n".to_owned()));
+    let put_back = http(address, "POST /z/log HTTP/1.1");
+    assert_eq!(body(put_back), Some("debug\n".to_owned()));
+    assert_eq!(logged("as before"), (true, true));
+}
+
+/// board 8561: the process's metrics are the daemon's from its start, before any cell opens, and
+/// its bucket's and part cache's families are there, 0: they read 0, an idle daemon's, and were
+/// missing, until a cell opened the bucket.
+#[test]
+fn metrics_are_there_before_any_cell_opens() {
+    let metrics = super::metrics::render();
+    let value = |name: &str| {
+        let line = metrics.lines().find_map(|line| line.strip_prefix(&format!("{name} ")));
+        line.unwrap_or_else(|| panic!("no {name} in {metrics}")).parse::<f64>().unwrap()
+    };
+    assert!(value("cladefsd_process_anon_bytes") > 0.0, "{metrics}");
+    assert!(value("cladefsd_process_cpu_seconds_total") > 0.0, "{metrics}");
+    assert!(value("cladefsd_process_anon_budget_bytes") > 0.0, "{metrics}");
+    assert_eq!(value("cladefsd_part_cache_bytes"), 0.0);
+    assert_eq!(value("cladefsd_object_storage_downloaded_bytes_total"), 0.0);
+    let get = bucket_cell::object_bucket::Request::Get.name();
+    assert_eq!(value(&format!("cladefsd_object_storage_requests_total{{request=\"{get}\"}}")), 0.0);
+}
+
+/// board 8563: a cell is labelled alike in every family, `TENANT/CELL`, as cells name it: its
+/// writer's and its follower's window gauges, its VM processes' builds, and its uploads', which a
+/// query joins on; and by role, not by connection, whose number made a series of each VM process.
+#[test]
+fn a_cells_metrics_name_it_alike_in_every_family() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (writer, written) = connect(&path, 1 << 24);
+    let writers = memory(2);
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { writer.create_dax_window_in_host_memory(writers, 2 * ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { cell: writer.cell(), sequence: 1 };
+    write(&writer, extent, 0, &pattern(4, ps)).unwrap();
+    writer.commit(None).unwrap();
+    let (follower, followed) = follow(&path).unwrap();
+    let followers = memory(2);
+    // SAFETY: As above. A follower's, which copies nothing on write.
+    unsafe { follower.create_dax_window_in_host_memory(followers, 2 * ps as u64, None, 0) }
+        .unwrap();
+    let cell = cell_at(&path);
+    let metrics = super::metrics::render();
+    for line in [
+        format!("cladefsd_vm_window_mappings{{cell=\"{cell}\",role=\"writer\"}} "),
+        format!("cladefsd_vm_window_mappings{{cell=\"{cell}\",role=\"follower\"}} "),
+        format!("cladefsd_vm_build_info{{cell=\"{cell}\",commit=\"{}\"}} 2", crate::BUILD_COMMIT),
+        format!("cladefsd_upload_pending_bytes{{cell=\"{cell}\"}} "),
+    ] {
+        assert!(metrics.lines().any(|each| each.starts_with(&line)), "no {line} in {metrics}");
+    }
+    assert!(!metrics.contains("connection="), "{metrics}");
+    drop((follower, writer));
+    followed.join().unwrap();
+    written.join().unwrap();
+    for memory in [writers, followers] {
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+    }
 }
 
 /// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept
@@ -4759,7 +4926,7 @@ fn metrics_are_served_on_after_failing_to_accept() {
     std::thread::spawn(move || {
         // Dropped as serving stops.
         let _serving = serving;
-        super::serve_http(listener)
+        super::serve_http(listener, super::Pages::All)
     });
     let served = stopped.recv_timeout(std::time::Duration::from_secs(1));
     // SAFETY: As above.

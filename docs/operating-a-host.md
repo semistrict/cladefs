@@ -308,6 +308,47 @@ or the managed identity; `CLADEFS_KMS_AZURE_TOKEN`, an access token, is for
 development. Its refusals are mapped by Key Vault's error codes, not yet checked
 against the service itself (tests run against a fake of the vault).
 
+## Observing the daemon
+
+`CLADEFSD_METRICS=HOST:PORT` serves `/metrics` (Prometheus) and, unless told otherwise, the
+z-pages under `/z/`: spans by latency (`/z/tracez`), CPU profiles (`/z/pprof/profile?seconds=N`,
+`/z/pprof/flamegraph?seconds=N`) and what the daemon logs (`/z/log`). Whoever reaches the z-pages
+may profile the daemon's CPU and change its log; whoever scrapes need not (board 8559):
+
+| `CLADEFSD_ZPAGES` | `/metrics` | `/z/` |
+|---|---|---|
+| unset | on `CLADEFSD_METRICS` | on `CLADEFSD_METRICS` too |
+| `off` | on `CLADEFSD_METRICS` | nowhere |
+| `HOST:PORT` | on `CLADEFSD_METRICS`, alone | there, alone |
+
+Bind either to localhost or to a network only operators reach. A profile whose client hangs up
+ends then; one profile at a time (`409` while one is taken).
+
+Metrics label a cell `cell="TENANT/CELL"`, in base 32, as cells name it, in every family
+(`cladefsd_vm_*`, `cladefsd_vm_build_info`, `cladefsd_upload_*`, `cladefsd_replication_*`), so
+that they join on it. Those families are per cell, and a fork is a cell of its own: their series
+come and go with the cells opened, so aggregate them (`sum without (cell)`, recording rules)
+rather than keep each cell's. `cladefsd_vm_*` tells a cell's writer from its followers by
+`role="writer|follower"`, the followers summed; no family is per connection (board 8563). The
+`cladefsd_process_*` gauges are sampled at each scrape, right from the daemon's start; the
+object storage and part cache families read 0 until a cell opens them (board 8561).
+
+The log is on standard error (`CLADEFS_LOG_FORMAT`, `CLADEFS_LOG_LEVEL`): text records begin with
+their RFC 3339 time and escape control characters; a record logged within a span carries its
+`trace_id` and `span_id`. What it logs changes while the daemon runs, which a restart would crash
+its cells for (board 8571):
+
+```sh
+curl -X POST 'http://ZPAGES/z/log?level=info,bucket_cell::object_bucket=debug'
+curl http://ZPAGES/z/log            # what it logs now
+curl -X POST http://ZPAGES/z/log    # back to CLADEFS_LOG_LEVEL's
+```
+
+SIGQUIT logs every thread's stack, a record a thread, through eu-stack, killed past 10 s. SIGTERM,
+SIGINT and SIGHUP each drain the daemon (`CLADEFSD_DRAIN`) and end it: Ctrl-C in its terminal, or
+its terminal or ssh session closing, no longer kills it with every cell crashed (board 8567). A
+second signal while it drains changes nothing; SIGKILL ends it at once.
+
 ## Access to userfaultfd
 
 On Linux, DAX windows take KVM's faults through userfaultfd, which needs

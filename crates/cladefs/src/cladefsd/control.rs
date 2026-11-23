@@ -195,7 +195,7 @@ fn stats_response(
     };
     let vms = stats.vms.into_iter().map(|vm| VmStats {
         connection: vm.connection,
-        cell: vm.cell,
+        cell: vm.cell.id,
         path: vm.path.to_string_lossy().into_owned(),
         follower: vm.follower,
         build: vm.build.clone().unwrap_or_default(),

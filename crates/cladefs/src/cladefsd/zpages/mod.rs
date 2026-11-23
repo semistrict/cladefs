@@ -11,17 +11,24 @@
 //!   bucket, the stack that waited for it ([`tracez`]).
 //! - `/z/pprof/profile?seconds=N` and `/z/pprof/flamegraph?seconds=N`: the daemon's CPU, sampled
 //!   for N seconds, as pprof's protobuf or an SVG flamegraph ([`pprof`]).
+//! - cladefs: `/z/log`: what the daemon logs, as `CLADEFS_LOG_LEVEL` says it (`super::logging`);
+//!   `POST /z/log?level=LEVELS` changes it while it runs, and `POST /z/log` puts back what the
+//!   environment said (board 8571): a target raised to debug on a daemon serving its VMs, which a
+//!   restart would crash (hotbed question 503).
+//!
+//! cladefs: `CLADEFSD_ZPAGES` serves them apart from the metrics, or nowhere (`super::http`,
+//! board 8559).
 
 pub mod pprof;
 pub mod tracez;
 
-use super::http::Response;
+use super::http::{Client, Response};
 
 /// The content type of the pages.
 const HTML: &str = "text/html; charset=utf-8";
 
 /// The z-pages: each one's path under `/z/` and what it shows.
-const PAGES: [(&str, &str); 3] = [
+const PAGES: [(&str, &str); 4] = [
     (
         "tracez",
         "Spans by latency, wall clock, with samples of each: whole traces, their attributes, and \
@@ -32,15 +39,54 @@ const PAGES: [(&str, &str); 3] = [
         "The daemon's CPU, sampled for 30 seconds, as pprof's protobuf: go tool pprof URL.",
     ),
     ("pprof/flamegraph?seconds=30", "The same, as an SVG flamegraph."),
+    (
+        "log",
+        "What the daemon logs, by target: POST /z/log?level=LEVELS changes it, POST /z/log puts \
+         back CLADEFS_LOG_LEVEL's.",
+    ),
 ];
 
-/// The page at `/z{page}`, asked with `query`.
-pub(super) fn serve(page: &str, query: &str) -> Response {
-    match page {
-        "" | "/" => Response::ok(HTML, index()),
-        "/tracez" => tracez::page(query),
-        page if let Some(page) = page.strip_prefix("/pprof") => pprof::serve(page, query),
+/// The page at `/z{page}`, asked by `method` with `query`, of `client`: none, if it hung up before
+/// the page was made.
+pub(super) fn serve(
+    method: &str,
+    page: &str,
+    query: &str,
+    client: &Client<'_>,
+) -> Option<Response> {
+    Some(match (method, page) {
+        ("GET", "" | "/") => Response::ok(HTML, index()),
+        ("GET", "/tracez") => tracez::page(query),
+        ("GET", page) if let Some(page) = page.strip_prefix("/pprof") => {
+            return pprof::serve(page, query, client);
+        }
+        ("GET", "/log") => log_levels(super::logging::levels()),
+        ("POST", "/log") => set_log_levels(query),
         _ => Response::not_found(),
+    })
+}
+
+/// cladefs: `POST /z/log`: what the daemon logs from now on, its query's `level`, as
+/// `CLADEFS_LOG_LEVEL` says it; without one, what that said as the daemon started (board 8571).
+fn set_log_levels(query: &str) -> Response {
+    let level = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "level")
+        .map(|(_, value)| value.into_owned());
+    match super::logging::set_levels(level.as_deref()) {
+        Ok(levels) => {
+            log::warn!("cladefsd: logging {levels} from now on, as /z/log was told");
+            log_levels(Ok(levels))
+        }
+        Err(why) => Response::plain("400 Bad Request", why),
+    }
+}
+
+/// cladefs: `levels`, what the daemon logs, as `CLADEFS_LOG_LEVEL` says it, in plain text; or why
+/// it can't say.
+fn log_levels(levels: Result<String, String>) -> Response {
+    match levels {
+        Ok(levels) => Response::plain("200 OK", levels),
+        Err(why) => Response::plain("409 Conflict", why),
     }
 }
 

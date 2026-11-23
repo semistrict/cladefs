@@ -1279,7 +1279,7 @@ impl Opening<'_> {
         let follower = matches!(opened, Phase::Following);
         let key = cell_dir_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
-        self.0.report.opened(key, open_cell.cell().id, follower);
+        self.0.report.opened(key, open_cell.cell(), follower);
         assert!(self.0.open_cell.set(open_cell).is_ok(), "a connection opened a second cell");
         let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);
         assert!(matches!(was, Phase::Opening), "a connection opened a cell not opening one");

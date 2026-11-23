@@ -8,7 +8,9 @@
 //! the same as an SVG flamegraph. N from 1 to [`MOST`], [`DEFAULT`] if not given. Sampled by
 //! pprof-rs (Apache-2.0), with SIGPROF, [`FREQUENCY`] times a CPU second, walking frame pointers,
 //! which every build here keeps (`.cargo/config.toml`). One at a time: a second asked for while
-//! one is taken is refused, `409`, as SIGPROF's timer is the process's.
+//! one is taken is refused, `409`, as SIGPROF's timer is the process's. cladefs: a profile whose
+//! client hung up ends then, within [`HUNG_UP_EVERY`], rather than sample on for the seconds no one
+//! waits for any more, holding one of the HTTP server's turns (board 8559).
 //!
 //! What sampling costs the daemon: a signal on a thread running, about [`FREQUENCY`] times a
 //! second for each, its stack walked; and SIGPROF interrupts system calls, which it restarts
@@ -18,10 +20,10 @@
 //! Untagged: samples say the stack alone, not the cell or the request they were for (Census's
 //! tags), which pprof-rs keeps no place for.
 
-use crate::cladefsd::http::Response;
+use crate::cladefsd::http::{Client, Response};
 use pprof::protos::Message as _;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// How long a profile samples, unless `seconds` says.
 pub const DEFAULT: Duration = Duration::from_secs(30);
@@ -33,9 +35,39 @@ pub const MOST: Duration = Duration::from_secs(300);
 /// step with what runs every 10 ms.
 pub const FREQUENCY: i32 = 99;
 
-/// Held while a profile is taken: one at a time.
+/// cladefs: how often a profile asks whether its client hung up ([`Client::hung_up`]).
+const HUNG_UP_EVERY: Duration = Duration::from_millis(250);
+
+/// Set while a profile is taken ([`Profiling`]): one at a time. cladefs: a flag, not a mutex, which
+/// a panic while profiling poisoned, every profile after refused as if one were being taken
+/// (board 8559).
 // The process's profiler, which samples every thread of it: one profile at a time for the process.
-static PROFILING: Mutex<()> = Mutex::new(());
+static PROFILING: AtomicBool = AtomicBool::new(false);
+
+/// cladefs: whether a profile is being taken: for tests that watch one end.
+#[cfg(test)]
+pub(in crate::cladefsd) fn taken() -> bool {
+    PROFILING.load(Ordering::Acquire)
+}
+
+/// cladefs: the profile being taken, the only one, until it drops, however it does.
+struct Profiling;
+
+impl Profiling {
+    /// The profile, unless one is being taken.
+    fn take() -> Option<Self> {
+        // Relaxed on failure: refused, it reads nothing the profile being taken wrote.
+        let taken = PROFILING.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed);
+        // Its Err is the answer, not a failure: one is being taken.
+        taken.ok().map(|_| Self)
+    }
+}
+
+impl Drop for Profiling {
+    fn drop(&mut self) {
+        PROFILING.store(false, Ordering::Release);
+    }
+}
 
 /// What a profile is given as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,25 +78,25 @@ enum Format {
     Flamegraph,
 }
 
-/// The page at `/z/pprof{page}`, asked with `query`.
-pub(super) fn serve(page: &str, query: &str) -> Response {
+/// The page at `/z/pprof{page}`, asked with `query`, of `client`: none, if it hung up first.
+pub(super) fn serve(page: &str, query: &str, client: &Client<'_>) -> Option<Response> {
     let format = match page {
         "/profile" => Format::Pprof,
         "/flamegraph" => Format::Flamegraph,
-        _ => return Response::not_found(),
+        _ => return Some(Response::not_found()),
     };
     let duration = match seconds(query) {
         Ok(duration) => duration,
-        Err(why) => return Response::plain("400 Bad Request", why),
+        Err(why) => return Some(Response::plain("400 Bad Request", why)),
     };
-    let Ok(_profiling) = PROFILING.try_lock() else {
-        return Response::plain("409 Conflict", "a profile is being taken: one at a time");
+    let Some(_profiling) = Profiling::take() else {
+        return Some(Response::plain("409 Conflict", "a profile is being taken: one at a time"));
     };
-    match profile(duration, format) {
+    match profile(duration, format, client) {
         Ok(response) => response,
         Err(error) => {
             log::warn!("cladefsd: taking a CPU profile: {error}");
-            Response::plain("500 Internal Server Error", format!("taking a profile: {error}"))
+            Some(Response::plain("500 Internal Server Error", format!("taking a profile: {error}")))
         }
     }
 }
@@ -85,19 +117,37 @@ fn seconds(query: &str) -> Result<Duration, String> {
         .ok_or_else(|| format!("seconds must be 1 to {}, not {asked:?}", MOST.as_secs()))
 }
 
-/// The daemon's threads sampled for `duration`, given as `format`.
-fn profile(duration: Duration, format: Format) -> Result<Response, pprof::Error> {
+/// The daemon's threads sampled for `duration`, given as `format`: none, if `client` hung up
+/// meanwhile.
+fn profile(
+    duration: Duration,
+    format: Format,
+    client: &Client<'_>,
+) -> Result<Option<Response>, pprof::Error> {
+    // cladefs: a panic while profiling, which the tests inject (board 8559).
+    fail::fail_point!("cladefsd::pprof::profile");
     let profiler = pprof::ProfilerGuardBuilder::default()
         .frequency(FREQUENCY)
         // Not sampled within them: a signal there would walk, or resolve, through code that may
         // hold the locks doing so takes.
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build()?;
-    std::thread::sleep(duration);
+    let until = Instant::now() + duration;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        std::thread::sleep(left.min(HUNG_UP_EVERY));
+        if client.hung_up() {
+            log::info!("cladefsd: a CPU profile's client hung up: profiling no more");
+            return Ok(None);
+        }
+    }
     let report = profiler.report().build()?;
     drop(profiler);
     let mut body = Vec::new();
-    Ok(match format {
+    Ok(Some(match format {
         Format::Pprof => {
             report.pprof()?.encode(&mut body).map_err(std::io::Error::other)?;
             Response::ok("application/octet-stream", body)
@@ -106,13 +156,12 @@ fn profile(duration: Duration, format: Format) -> Result<Response, pprof::Error>
             report.flamegraph(&mut body)?;
             Response::ok("image/svg+xml", body)
         }
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A thread spinning for the profile's second, named, is what it sampled: pprof's protobuf,
     /// whose functions name it; and a flamegraph, SVG. Asked for again until a profile's second
@@ -152,7 +201,7 @@ mod tests {
         let while_spinning = |page: &str| {
             for _ in 0..30 {
                 let before = ran();
-                let response = serve(page, "seconds=1");
+                let response = serve(page, "seconds=1", &Client::NONE).unwrap();
                 if ran() - before >= Duration::from_millis(200) {
                     return response;
                 }
@@ -179,5 +228,17 @@ mod tests {
         assert!(svg.contains("spins_for_the_profile"), "{svg}");
         stop.store(true, Ordering::Relaxed);
         spinning.join().unwrap();
+    }
+
+    /// board 8559: a profile that panics leaves none being taken: the next is taken, not refused
+    /// as one being taken (409), as it was for good once a panic poisoned the lock that said so.
+    #[test]
+    fn profiles_after_a_panic_are_taken() {
+        fail::cfg("cladefsd::pprof::profile", "1*panic").unwrap();
+        let panicked = std::panic::catch_unwind(|| serve("/profile", "seconds=1", &Client::NONE));
+        assert!(panicked.is_err(), "the profile panicked not");
+        let response = serve("/profile", "seconds=1", &Client::NONE).unwrap();
+        let body = String::from_utf8_lossy(&response.body);
+        assert_eq!(response.status, "200 OK", "{body}");
     }
 }

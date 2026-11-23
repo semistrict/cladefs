@@ -61,7 +61,9 @@ fn page_ins_from_the_bucket_show_on_tracez_with_the_stack_that_waited() {
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    std::thread::spawn(move || cladefs::cladefsd::serve_http(listener));
+    std::thread::spawn(move || {
+        cladefs::cladefsd::serve_http(listener, cladefs::cladefsd::Pages::All)
+    });
     let page_ins = tracez::recorder().samples("cache.page_in", None);
     let source = |sample: &tracez::Sample| {
         let attributes = &sample.span().attributes;
