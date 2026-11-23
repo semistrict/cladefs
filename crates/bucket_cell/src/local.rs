@@ -362,6 +362,23 @@ mod tests {
     use crate::bucket::{Bucket as _, Error, PutMode};
     use crate::object_bucket::tests::file;
 
+    /// Board 10060, doc-28: every build locks an object's directory by the same file, as builds
+    /// of a rolling upgrade share a bucket's directory: one hashing otherwise would lock another
+    /// file for the same object, and two updates of it both win. The names of fixed keys' locks,
+    /// as FNV-1a gives them, pinned.
+    #[test]
+    fn every_build_locks_a_directory_by_the_same_file() {
+        for (location, lock) in [
+            ("identity", ".cladefs-lock.25"),
+            ("tenants/0000000000001/cells/0000000000002/head/00", ".cladefs-lock.05"),
+            ("tenants/0000000000001/cells/0000000000002/head/01", ".cladefs-lock.05"),
+            ("tenants/0000000000001/cells/0000000000002/gc/lease", ".cladefs-lock.35"),
+            ("ephemeral/0001/abc.decommissioned", ".cladefs-lock.1b"),
+        ] {
+            assert_eq!(lock_of(location), lock, "{location}");
+        }
+    }
+
     /// Updates of one version, many at once through two buckets of one directory, as two
     /// processes' would be: one wins, whose bytes the object holds, and the others find it changed.
     #[test]
