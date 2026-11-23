@@ -97,7 +97,10 @@ const PIN_REFRESH: Duration = Duration::from_millis(PIN_STALE / 10);
 /// sends only within this. Half of [`PIN_STALE`]: the other half for a request so sent to land, and
 /// for its host's clock and its bucket's to run apart, so that it lands before another mirror may
 /// take the pin over. A host stopped past it, its pin taken over meanwhile, finds so as it writes
-/// its pin again, conditionally, and writes nothing more.
+/// its pin again, conditionally, and writes nothing more. Not a fence: a request sent within it that
+/// lands only past [`PIN_STALE`] (nothing bounds how long one may wait in flight) still deletes what
+/// a mirror that took the pin over wrote, until deletes are conditional on the version a mirror
+/// wrote (board 9229).
 const PIN_HELD: Duration = Duration::from_millis(PIN_STALE / 2);
 
 /// Whether the pin `meta` lists in `own` is stale ([`PIN_STALE`]).
