@@ -7,8 +7,8 @@
 # (CLADEFS_TEST_HOST; scripts/lib/host.sh): a worktree there of the commit, which
 # origin has, runs the workspace's tests and cladefs's guest tests (guest/tests), in its
 # Firecracker, whose DAX window takes KVM's faults through userfaultfd
-# (scripts/lib/test-linux-host.sh), under fxjob; the results come back to RESULTS (default: a
-# temporary directory), and the worktree goes.
+# (scripts/lib/test-linux-host.sh), in a hotbed workspace; the results come back to RESULTS
+# (default: a temporary directory), and the run's directory goes.
 #
 # Usage: test-host.sh [RESULTS]
 #        test-host.sh resume RUN RESULTS

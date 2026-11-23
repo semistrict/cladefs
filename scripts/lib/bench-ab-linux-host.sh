@@ -27,7 +27,7 @@
 # CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
 # sides (and the qualification's harness) into the work directory, and stops; `measure` runs the
 # rounds of what a build there made, and compares them; unset, both. scripts/bench-ab-host.sh runs
-# the build as work and the rounds alone as a measurement (fxjob --bench, scripts/lib/host.sh's
+# the build as work and the rounds alone as a measurement (hotbed run --bench, scripts/lib/host.sh's
 # host_job), so that compiling takes no measurement's cores (TASK-330.4, TASK-368).
 #
 # TOOLS is the tree whose scripts run, this one's: the sides' trees may be of before them (an
@@ -150,13 +150,9 @@ ab_prune() {
     done < <(ls -1t "$CLADEFS_AB_KEEP" | sed -n "$((keep + 1)),\$p")
 }
 
-# ab_tidy records in RESULTS/rounds-size.txt the bytes the rounds' results hold, with the guests'
-# root filesystems and the cells failed cases leave in them, for the room a later run asks for
-# (scripts/nightly.py's room, TASK-489); then removes those, which are not results.
+# ab_tidy removes the guests' root filesystems and the cells failed cases leave in the rounds'
+# results, which are not results.
 ab_tidy() {
-    local kib
-    kib=$(du -sk "$results" | cut -f1)
-    echo "$((kib * 1024))" > "$results/rounds-size.txt"
     find "$results" -type d \( -name rootfs -o -name extents -o -name '*.img' \) -prune \
         -exec rm -rf {} +
     find "$results" -type f \( -name '*.img' -o -name rootfs.ext4 \) -delete

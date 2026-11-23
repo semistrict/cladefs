@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Move a VM between hosts through a bucket (TASK-28.11), on test hosts, Linux machines of one's own,
-# over ssh (scripts/lib/host.sh). On the first, the guest test fxfs-guest-migrate-dax runs a VM
+# Move a VM between hosts through a bucket (TASK-28.11), in hotbed workspaces on test hosts
+# (scripts/lib/host.sh). On the first, the guest test fxfs-guest-migrate-dax runs a VM
 # whose cell its extent daemon keeps in the bucket, and snapshots it, the snapshot, its
 # memory and the VM's root filesystem left in a bundle; then the run there ends, its directory gone;
 # on the second, which has nothing of the cell, the same test restores the VM from the bundle, its
@@ -16,67 +16,62 @@
 #
 #   scripts/migrate-host.sh [RESULTS]
 #
-# CLADEFS_MIGRATE_HOSTS names the two test hosts, as ssh does (default: CLADEFS_TEST_HOST twice,
-# the second run on the same test host as the first, after it): of one CPU model, which a
-# snapshot restores on. CLADEFS_MIGRATE_BUCKET names the bucket and prefix the run keeps its
-# cells under, a bucket's URL both test hosts reach, under a prefix of the run's own,
-# which the run leaves; by default, with one test host for both, a directory of the run's own there
-# (file://). CLADEFS_GUEST_KERNEL names cladefs's x86-64 guest kernel here, or
-# CLADEFS_GUEST_KERNEL_BUILD the one each test host builds (release by default,
-# scripts/test-host.sh). Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches
-# the test hosts too (scripts/lib/host.sh).
+# Both runs are on one node, CLADEFS_TEST_HOST's or the one hotbed picks, the second after the
+# first, in the session's one workspace there: hotbed carries no files between two nodes'
+# workspaces yet, which a bundle would need (board 7817). CLADEFS_MIGRATE_BUCKET names the bucket
+# and prefix the run keeps its cells under, under a prefix of the run's own, which the run leaves;
+# by default, a directory of the run's own in the workspace (file://). CLADEFS_GUEST_KERNEL names a
+# guest kernel in the workspace, or CLADEFS_GUEST_KERNEL_BUILD the one it builds (release by
+# default, scripts/test-host.sh). Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set
+# here reaches the workspace too (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"
 limit=2h
-read -ra hosts <<< "${CLADEFS_MIGRATE_HOSTS:-$host $host}"
-(( ${#hosts[@]} == 2 )) || { echo "CLADEFS_MIGRATE_HOSTS names two hosts" >&2; exit 2; }
-for each in "${hosts[@]}"; do
-    [[ $each =~ ^[A-Za-z0-9._@-]+$ ]] || { echo "CLADEFS_MIGRATE_HOSTS names hosts, as ssh does: $each" >&2; exit 2; }
-done
+if [[ -n ${CLADEFS_MIGRATE_HOSTS:-} ]]; then
+    echo "CLADEFS_MIGRATE_HOSTS is gone: both runs are on one node, CLADEFS_TEST_HOST's (board 7817)" >&2
+    exit 2
+fi
 top=${1:-$(mktemp -d "${TMPDIR:-/tmp}/cladefs-migrate.XXXXXX")}
 mkdir -p "$top"
 top=$(cd "$top" && pwd)
 # What outlasts each host's run: the bundle, and the bucket if it is the run's own.
-held=$host_scratch/$host_run.held
+held=$host_dir.held
+# Both runs in the one workspace, which holds the bundle between them.
+host_keep_session=1
 if [[ -n ${CLADEFS_MIGRATE_BUCKET:-} ]]; then
     [[ $CLADEFS_MIGRATE_BUCKET =~ ^[a-z0-9]+://[A-Za-z0-9._/-]*$ ]] ||
         { echo "CLADEFS_MIGRATE_BUCKET is a bucket's URL, as s3://bucket/prefix" >&2; exit 2; }
     remote=${CLADEFS_MIGRATE_BUCKET%/}/$host_run
-elif [[ ${hosts[0]} == "${hosts[1]}" ]]; then
-    remote=file://$held/bucket
 else
-    echo "Name a bucket both hosts reach: CLADEFS_MIGRATE_BUCKET." >&2
-    exit 2
+    remote=file://$held/bucket
 fi
 
-# cleanup, the trap, ends the run on the host it is on, and removes what it held on each host.
+# cleanup, the trap, ends the run, and removes what it held, once a run placed it.
 cleanup() {
-    local status=$? each
+    local status=$?
     trap - EXIT
     host_end || status=1
-    for each in "${hosts[@]}"; do
-        host=$each
-        host_ssh "if [ -e $(printf %q "$held") ]; then sudo rm -r -- $(printf %q "$held"); fi" ||
-            status=1
-    done
+    if [[ -n $host_node || $host == local ]]; then
+        host_shell "rm -rf -- $(printf %q "$held")" > /dev/null || status=1
+    fi
+    host_session_end || status=1
     echo "Results: $top" >&2
     exit "$status"
 }
 trap cleanup EXIT
 
-# migrate SIDE PHASE TOKEN runs the test's PHASE, alone, on the host of SIDE (0 for a, 1 for b), as
-# of the placement TOKEN, its cells in the bucket, its results in RESULTS/a or b; and ends the
-# run there.
+# migrate SIDE PHASE TOKEN runs the test's PHASE, alone, as SIDE (0 for a, 1 for b), as of the
+# placement TOKEN, its cells in the bucket, its results in RESULTS/a or b; and ends the run.
 migrate() {
     local side=$1 phase=$2 token=$3 status=0
-    host=${hosts[$side]} results=$top/$(tr 01 ab <<< "$side")
+    results=$top/$(tr 01 ab <<< "$side")
     # host_start's trap is this script's.
     host_need_arch x86_64 "migrate-host.sh: its VM boots an x86-64 guest kernel"
     host_start || status=$?
     trap cleanup EXIT
     (( status == 0 )) || return "$status"
-    host_ssh "mkdir -p $(printf %q "$held")" || return
+    host_shell "mkdir -p $(printf %q "$held")" || return
     host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_BUCKET=$remote/cells" \
         "CLADEFSD_TOKEN=$token" "CLADEFS_MIGRATE_PHASE=$phase" "CLADEFS_MIGRATE_BUNDLE=$held/bundle" \
         test-linux-host.sh fxfs-guest-migrate-dax > "$results/remote.log" 2>&1 || status=$?
@@ -89,13 +84,8 @@ migrate() {
 }
 
 migrate 0 source 1
-if [[ ${hosts[0]} != "${hosts[1]}" ]]; then
-    # The bundle, from the first host to the second.
-    host=${hosts[0]}
-    host_ssh "sudo tar -C $(printf %q "$held") -czf - bundle" |
-        ssh "${host_ssh_options[@]}" "${hosts[1]}" \
-            "mkdir -p $(printf %q "$held") && tar -C $(printf %q "$held") -xzf -"
-fi
-# A later placement than the first host's.
+# The second run's own directory, of a name of its own, on the first's node.
+host_name "$host_run-b"
+# A later placement than the first run's.
 migrate 1 target 2
-echo "The VM moved: restored on ${hosts[1]} from what ${hosts[0]} left in $remote." >&2
+echo "The VM moved: restored on $(host_label) from what the first run left in $remote." >&2

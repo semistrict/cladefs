@@ -82,10 +82,17 @@ impl Daemon {
     /// once it finds its VM process's connection gone, on its own side, after that end is shut
     /// down, not with it (board 5885). Fails if it is open still ten seconds on.
     pub fn wait_closed(&mut self, path: &Path) -> StatCellResponse {
+        self.stat_once_closed(path).unwrap()
+    }
+
+    /// StatCell of the cell at `path`, as [`Daemon::wait_closed`] waits for it, or its failure: a
+    /// cell whose keys are forgotten is stated while it is open, and refused once closed (board
+    /// 8282).
+    pub fn stat_once_closed(&mut self, path: &Path) -> Result<StatCellResponse, tonic::Status> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let stat = self.stat(path).unwrap();
-            if !stat.open {
+            let stat = self.stat(path);
+            if !stat.as_ref().is_ok_and(|stat| stat.open) {
                 return stat;
             }
             assert!(

@@ -158,6 +158,24 @@ pub trait Dir: Send + Sync + 'static {
     /// Makes everything synced durable, past any cache the host's storage keeps.
     fn barrier(&self) -> io::Result<()>;
 
+    /// cladefs: whether its syncs are skipped now, its durability deferred by its maker
+    /// ([`crate::defer_durability`], board 7420).
+    fn defers(&self) -> bool {
+        false
+    }
+
+    /// cladefs: whether it is whole in this process, unmade on the disk as its durability is
+    /// deferred ([`crate::defer_durability`]).
+    fn made_deferred(&self) -> bool {
+        false
+    }
+
+    /// cladefs: makes it durable, its durability deferred ([`crate::defer_durability`]): what
+    /// a cell's first flush and its close do first.
+    fn settle(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Takes the directory for this process, against other processes' takings of it: what a
     /// process holds while it has the cell open, or opens or deletes it, so that two
     /// processes never change one cell at once. It waits a while for another process to let
@@ -304,6 +322,8 @@ pub struct DiskDir {
     handle: Arc<host_fs::File>,
     /// cladefs: the disk of its filesystem (doc-22).
     disk: Arc<bucket_cell::host_disk::HostDisk>,
+    /// cladefs: its durability's deferral, if its maker defers it ([`crate::defer_durability`]).
+    deferral: Option<Arc<crate::deferral::Deferral>>,
 }
 
 impl DiskDir {
@@ -311,14 +331,28 @@ impl DiskDir {
     pub fn new(path: &Path) -> io::Result<Self> {
         let handle = Arc::new(host_fs::File::open(path)?);
         let disk = bucket_cell::host_disk::HostDisk::of(path)?;
-        Ok(Self { path: path.to_owned(), handle, disk })
+        let deferral = crate::deferral::of(path);
+        Ok(Self { path: path.to_owned(), handle, disk, deferral })
+    }
+
+    /// cladefs: a rename of a file in it, in flight until what is returned goes, if its
+    /// durability is deferred: begun once no settling is, and waited for by the next
+    /// ([`crate::defer_durability`]).
+    fn renaming(&self) -> Option<crate::deferral::Renaming<'_>> {
+        self.deferral.as_ref().map(|deferral| deferral.renaming())
+    }
+
+    /// cladefs: whether a sync of its, or of a file of its, is skipped now
+    /// ([`crate::defer_durability`]).
+    fn skips(deferral: &Option<Arc<crate::deferral::Deferral>>) -> bool {
+        deferral.as_ref().is_some_and(|deferral| deferral.skips())
     }
 
     /// `file`, opened at `path`, bypassing the host's page cache, or refused, naming it, if its
     /// file system refuses that (`InvalidInput`, [`bucket_cell::direct::bypass`]).
     fn file(&self, path: &str, file: host_fs::File) -> io::Result<DiskFile> {
         bucket_cell::direct::bypass(&file, &self.path.join(path))?;
-        Ok(DiskFile { file, tail: Mutex::default() })
+        Ok(DiskFile { file, tail: Mutex::default(), deferral: self.deferral.clone() })
     }
 }
 
@@ -349,10 +383,13 @@ impl Dir for DiskDir {
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let _renaming = self.renaming();
+        fail::fail_point!("dir::renaming");
         host_fs::rename(self.path.join(from), self.path.join(to))
     }
 
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
+        let _renaming = self.renaming();
         host_fs::hard_link(self.path.join(from), self.path.join(to))
     }
 
@@ -391,6 +428,7 @@ impl Dir for DiskDir {
         let file = self.create(&new, false)?;
         file.write_at(bytes, 0)?;
         file.sync()?;
+        let _renaming = self.renaming();
         host_fs::rename(self.path.join(&new), self.path.join(path))
     }
 
@@ -414,6 +452,9 @@ impl Dir for DiskDir {
     }
 
     fn sync_dir(&self, path: &str) -> io::Result<()> {
+        if Self::skips(&self.deferral) {
+            return Ok(());
+        }
         let dir = host_fs::File::open(self.path.join(path))?;
         #[cfg(target_os = "macos")]
         {
@@ -493,6 +534,9 @@ impl Dir for DiskDir {
     }
 
     fn barrier(&self) -> io::Result<()> {
+        if Self::skips(&self.deferral) {
+            return Ok(());
+        }
         #[cfg(target_os = "macos")]
         {
             host_fs::sync_with(&self.handle, &[libc::F_FULLFSYNC])
@@ -502,6 +546,18 @@ impl Dir for DiskDir {
             let _ = &self.handle;
             Ok(())
         }
+    }
+
+    fn defers(&self) -> bool {
+        Self::skips(&self.deferral)
+    }
+
+    fn made_deferred(&self) -> bool {
+        self.deferral.as_ref().is_some_and(|deferral| deferral.made())
+    }
+
+    fn settle(&self) -> io::Result<()> {
+        self.deferral.as_ref().map_or(Ok(()), |deferral| deferral.settle())
     }
 
     fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
@@ -635,6 +691,9 @@ fn take_from_others(handle: &host_fs::File) -> io::Result<host_fs::Flock> {
 pub struct DiskFile {
     file: host_fs::File,
     tail: Mutex<bucket_cell::direct::Tail>,
+    /// cladefs: its directory's durability's deferral, if its maker defers it
+    /// ([`crate::defer_durability`]).
+    deferral: Option<Arc<crate::deferral::Deferral>>,
 }
 
 impl HostFile {
@@ -665,6 +724,9 @@ impl File for DiskFile {
     }
 
     fn sync(&self) -> io::Result<()> {
+        if DiskDir::skips(&self.deferral) {
+            return Ok(());
+        }
         #[cfg(target_os = "macos")]
         {
             host_fs::sync_with(&self.file, &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])

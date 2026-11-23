@@ -19,8 +19,8 @@
 //
 //   sudo bpftrace -q -o TRACE scripts/bpftrace/store-syncs.bt [CGROUP]
 //
-// With CGROUP, only the daemons whose cgroup is in the one of that name, as fxdax-bench.slice for
-// the one run `fxjob --bench` holds the bench for at a time (its scope in that slice): other
+// With CGROUP, only the daemons whose cgroup is in the one of that name, as hotbed's *_bench.slice
+// for the one run `hotbed run --bench` holds the bench for at a time (its unit in that slice): other
 // daemons on the host, other agents' runs, left out (TASK-369).
 
 config = {

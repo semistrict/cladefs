@@ -1484,11 +1484,13 @@ fn needs_closes_to_wait_for_flushes() {
 
 /// The cell closing while a closing between commits frames a segment: another opening
 /// of the cell frames it again meanwhile, from its raw file, which the first removes, or the first
-/// finds the framed file made.
+/// finds the framed file made; or the other opening's recovery finds the framed file the first's
+/// framing made after it closed, which its footprint says was made around it (board 8187).
 #[test]
 fn needs_closes_to_wait_for_framings() {
     let rules = Rules { close_waits_for_framings: false, ..Rules::ALL };
-    fails_without(rules, &["raced the cell's closing"], closing_during_a_framing);
+    let expected = ["raced the cell's closing", "made around its cell directory"];
+    fails_without(rules, &expected, closing_during_a_framing);
 }
 
 /// The segments a commit closes past the one it ends in, those filled since the commit before,

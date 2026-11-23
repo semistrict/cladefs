@@ -89,7 +89,7 @@ scripts/python-sandbox-host.sh   # CLADEFS_PYSANDBOX_ROUNDS, default 2
 
 LangSmith runs cladefs at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
 bump it now and then. Before a candidate is offered, it is qualified against their pin on the test host,
-alone there (`fxjob --bench`), the two interleaved, A B then B A (TASK-330.4):
+alone there (`hotbed run --bench`), the two interleaved, A B then B A (TASK-330.4):
 
 ```sh
 CLADEFS_AB_SUITE=qualify CLADEFS_AB_ROUNDS=2 CLADEFS_AB_A=pin=96c7808b8 \
@@ -111,7 +111,7 @@ its kernel's count (disk written, peak memory, CPU), whatever the daemon says of
 ranges apart), and each side's failed checks. A candidate goes to LangSmith when its side passes
 every check and nothing moved the wrong way that the change didn't mean to move.
 
-`fxjob --bench` gives a measurement cores, cache, memory bandwidth and memory of its own; not the
+`hotbed run --bench` gives a measurement cores, cache, memory bandwidth and memory of its own; not the
 disk, the test host's one NVMe, which others write to all the while. So every round of a measurement runs
 under `scripts/contamination.py` (the A/B's rounds, `scripts/bench-host.sh`'s run,
 `scripts/bench-rounds.sh`'s), which records in the round's results (`contamination.json`) what
@@ -126,20 +126,19 @@ clean round on a side is NO RESULT, and fails the comparison. Where others' I/O 
 from the round's own (no cgroup v2 cgroup of its own, as in a CI runner's container or on macOS;
 a ZFS dataset as the round's disk), the round is unchecked, said as such, never clean
 (TASK-375). A round run by hand is recorded the same way, and `scripts/contamination-check.sh`
-checks the record on a host with fxjob, a round alone and one beside a loader of its own:
+checks the record in a hotbed workspace, a round alone and one beside a loader:
 
 ```sh
 scripts/contamination.py run RESULTS -- scripts/qualify.sh RESULTS
-scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check   # the test host, four minutes
+CLADEFS_TEST_HOST=<node> scripts/contamination-check.sh check-1   # four minutes
 ```
 
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
 the guest tests on it, in Lima on macOS.
 
-`scripts/test-host.sh` runs them too, on the test host, a Linux machine of one's own, over ssh
-(`CLADEFS_TEST_HOST`): in a worktree there of a commit origin has,
-under `fxjob`, copying the results back and removing the worktree
-(`scripts/lib/host.sh`).
+`scripts/test-host.sh` runs them too, in a hotbed workspace on a test host (`CLADEFS_TEST_HOST`
+names the node): this checkout synced there, the run a hotbed command, the results copied back and
+the run's directory removed (`scripts/lib/host.sh`).
 
 The protocols whose bugs are rare interleavings have TLA+ specs, which TLC
 model-checks exhaustively over small bounds (`specs/`): the guest Fxfs's copy-on-write
@@ -164,7 +163,7 @@ since the last night that measured (its newest commit that changed more than `do
 `backlog/` before tasks moved to the board), it does nothing. Otherwise it measures main's head against the commit that night
 measured, as an A/B (`scripts/bench-ab-host.sh`, on the test host itself, `CLADEFS_TEST_HOST=local`): the
 head built as work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`),
-then three rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases
+then three rounds of both sides interleaved alone in `hotbed run --bench`, each of the fs bench's cases
 an agent sandbox stands on: the guest's Fxfs with DAX (cold and warm reads, fsynced appends,
 SQLite's scans, small files' create, stat, readdir and read, create with fsync, sync, syncfs and
 freeze loops), a fork's boot cold and warm, and ext4 on virtio-blk, no cladefs in it, as the
@@ -188,18 +187,12 @@ night pushes it first.
 
 - Results: `docs/measurements/<host>-nightly-<time>-<head>/nightly.md` for each night, and
   `docs/measurements/nightly-history.md` for all of them, newest first.
-- A night that **could not run** (a side failed to build, no round ran, or the scratch disk was
-  short of room) or that has **no result** (every round was left out: the disk was busy, or the
+- A night that **could not run** (a side failed to build, or no round ran) or that has **no result** (every round was left out: the disk was busy, or the
   host drifted) measured nothing: its row says why, and its `nightly.md` lists each round and why
   it was left out. The next night measures the same commits again, or main's newer head against
   the same base. Three such nights in a row file a task (`[nightly:no-result]`).
-- The scratch disk, `/mnt/fxdax-scratch`, is every job's (TASK-489). A night first removes its own
-  earlier runs' directories (`run-nightly-*` whose job isn't running) and keeps the artifacts of
-  tonight's two sides alone; then checks the disk has room before it builds and before it
-  measures: `CLADEFS_NIGHTLY_ROOM_BUILD` (100G) and `CLADEFS_NIGHTLY_ROOM_MEASURE` (20G), or a
-  fifth more than the most the last 7 nights took, if more (`scripts/nightly.py`'s `ROOM` says
-  why). Short of it, the night could not run, and its `nightly.md` names the disk, the free space
-  found and the need.
+- Each night runs in a hotbed session of its own, on `CLADEFS_TEST_HOST`'s node, which the cron
+  entry sets, and builds both sides in its workspace (board 6058).
   A single metric's NO RESULT means one of its rounds and that round's rerun were both left out.
 - The log: `~/.local/state/cladefs/nightly/nightly.log` on the test host, a line a step; cron's output in
   `cron.log` beside it.
@@ -211,7 +204,7 @@ A night by hand, on the test host (it skips if a night measured main's code alre
 ```
 
 The nightly host's setup installs it: it runs `scripts/nightly-install.sh` as the user (the clone,
-its git identity, the cron entry; it checks first that fxjob, flock, cargo-nextest, the board's
+its git identity, the cron entry; it checks first that hotbed, flock, the board's
 `vb`, `BOARD_URL` (which the cron entry keeps) and a fetch without a prompt are there):
 
 ```sh

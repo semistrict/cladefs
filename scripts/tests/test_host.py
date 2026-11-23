@@ -2,36 +2,30 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/lib/host.sh, which the drivers that run cladefs on a Linux host of one's own
-source, of its host's half, scripts/lib/host-remote.sh, and of the drivers.
+"""Tests of scripts/lib/host.sh, which the drivers that run cladefs in a hotbed workspace on a test
+host source, of its workspace's half, scripts/lib/host-workspace.sh, and of the drivers (board
+6058).
 
-host_command builds the command a run's job runs its host script with, and the environment it
-runs in: bash builds the command, as a driver does, and another bash, as the host's shell, takes
-it apart into the words it runs. The runs, their worktrees and their jobs run on hosts of
-fake_ssh.py's: this machine, each host a home of its own, its clone of an origin made here, whose
-host scripts are FAKE_HOST_SCRIPT."""
+host_command builds the environment and the command a run's job runs its host script with. The
+runs, their worktrees and their jobs run in the workspace of fake_hotbed.py's one node: a directory
+here, the checkout a clone of a fleet's origin, whose host scripts are FAKE_HOST_SCRIPT."""
 
-import json
 import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import unittest
 import weakref
 from pathlib import Path
 
-import fake_ssh
 from script import SCRIPTS
 
 HOST = SCRIPTS / "lib" / "host.sh"
-FAKE_SSH = Path(__file__).resolve().with_name("fake_ssh.py")
-HOST_HOME = "/host/home"
+FAKE_HOTBED = Path(__file__).resolve().with_name("fake_hotbed.py")
 # The variables that stay here (host_env_local), in its order.
 KEPT = [
     "CLADEFS_DOCKER_STATIC",
@@ -45,82 +39,57 @@ KEPT = [
     "CLADEFSD_TENANTS",
     "CLADEFS_BENCH_RESULTS",
     "CLADEFS_TEST_HOST",
+    "CLADEFS_HOTBED_WORK",
+    "CLADEFS_HOTBED_REPO",
 ]
-# The run host_command's tests name, and its directory on the host.
+# The run host_command's tests name, and its directory in the workspace.
 RUN = "run-x"
-DIR = f"/mnt/fxdax-scratch/fxdax-host/{RUN}"
-# What every job's command sets: the user's Rust, the builds' jobs, and the run's own.
+CHECKOUT = "/work/cladefs"
+DIR = f"{CHECKOUT}/target/host-runs/{RUN}"
+# What every job's environment holds: the builds' jobs, and the run's own.
 BASE = [
-    f"PATH={HOST_HOME}/.cargo/bin:/usr/bin:/bin",
-    f"HOME={HOST_HOME}",
-    # The job's own, fxjob's (TASK-379): sudo passes none, so host_command names it, /tmp outside a
-    # job.
-    "TMPDIR=/tmp",
     "CARGO_BUILD_JOBS=4",
     "NEXTEST_TEST_THREADS=4",
-    "GIT_CONFIG_COUNT=1",
-    "GIT_CONFIG_KEY_0=safe.directory",
-    "GIT_CONFIG_VALUE_0=*",
-    "CLADEFS_TEST_HOST_IN_PLACE=1",
     "CLADEFS_GUEST_KERNEL_JOBS=4",
-    "CLADEFS_TEST_HOST_KERNELS=/mnt/fxdax-scratch/fxdax-host/kernels",
+    "CLADEFS_TEST_HOST_IN_PLACE=1",
+    f"CLADEFS_TEST_HOST_KERNELS={CHECKOUT}/target/guest-kernels",
     "CLADEFS_TEST_HOST_PROVISIONED=1",
     f"CLADEFS_TEST_HOST_WORK={DIR}/work",
 ]
-# What follows the environment: the host script and its arguments.
-COMMAND = [
-    "timeout",
-    "--signal=TERM",
-    "--kill-after=30s",
-    "6h",
-    "bash",
-    f"{DIR}/tree/scripts/lib/test-linux-host.sh",
-    f"{DIR}/tree",
-    f"{DIR}/results",
-]
+# Its command: the host script of the run's tree, the checkout's, and its arguments.
+COMMAND = ["bash", f"{CHECKOUT}/scripts/lib/test-linux-host.sh", CHECKOUT, f"{DIR}/results"]
 
 
 class HostCommand(unittest.TestCase):
-    def host_command(self, environment, *args, preamble=""):
-        """The words the host runs for `host_command ARGS...` of the run run-x, run in
-        `environment`: what runs sudo, sudo env's variables, sorted, and the command they run."""
+    def host_command(self, environment, *args):
+        """host_command ARGS... of the run run-x, run in `environment`: its environment, sorted,
+        and its command."""
         built = subprocess.run(
             [
                 # macOS's 3.2 there, as a driver runs in.
                 "/bin/bash",
                 "-c",
-                f'set -euo pipefail; limit=6h; source "$0"; host_name {RUN}; {preamble}'
-                'host_command "$@"',
+                f'set -euo pipefail; limit=6h; source "$0"; host_name {RUN}; host_tree={CHECKOUT}; '
+                'host_command "$@"; printf "%s\\0" "${host_environment[@]}"; printf "\\1\\0"; '
+                'printf "%s\\0" "${host_argv[@]}"',
                 HOST,
                 *args,
             ],
-            env={"PATH": "/usr/bin:/bin", "HOME": "/laptop/home", "CLADEFS_TEST_HOST": "host1",
-                 **environment},
+            env={"PATH": "/usr/bin:/bin", "HOME": "/laptop/home", **environment},
             capture_output=True,
             text=True,
         )
         self.assertEqual((built.returncode, built.stderr), (0, ""))
-        words = subprocess.run(
-            ["/bin/bash", "-c", 'eval "set -- $0"; printf "%s\\0" "$@"', built.stdout],
-            env={"PATH": "/usr/bin:/bin", "HOME": HOST_HOME},
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.split("\0")[:-1]
-        sudo = words.index("sudo")
-        self.assertEqual(words[sudo + 1], "env")
-        command = words.index("timeout")
-        return words[:sudo], sorted(words[sudo + 2:command]), words[command:]
+        words = built.stdout.split("\0")[:-1]
+        split = words.index("\1")
+        return sorted(words[:split]), words[split + 1:]
 
-    def test_every_variable_reaches_the_host(self):
+    def test_every_variable_reaches_the_workspace(self):
         self.assertEqual(
             self.host_command(
                 {
                     "CLADEFS_PJDFSTEST_TESTS": "chmod chown",
-                    "CLADEFS_BENCH_WATCHDOG_SECS": "900",
                     "CLADEFS_ZSTD_LEVEL": "3",
-                    "CLADEFS_BENCH_PGBENCH_SCALE": "50",
-                    "CLADEFS_BUCKET_LATENCY_MS": "25",
                     "PJDFSTEST_COMMIT": "85a8aea9",
                     # A driver's own, which does nothing there.
                     "CLADEFS_TEST_HOST_RUN": "r1040",
@@ -131,13 +100,9 @@ class HostCommand(unittest.TestCase):
                 "a",
             ),
             (
-                ["nice", "-n", "19"],
                 sorted(BASE + [
-                    "CLADEFS_BENCH_PGBENCH_SCALE=50",
-                    "CLADEFS_BENCH_WATCHDOG_SECS=900",
                     "CLADEFS_TEST_HOST_RUN=r1040",
                     "CLADEFS_PJDFSTEST_TESTS=chmod chown",
-                    "CLADEFS_BUCKET_LATENCY_MS=25",
                     "CLADEFS_ZSTD_LEVEL=3",
                     "PJDFSTEST_COMMIT=85a8aea9",
                 ]),
@@ -147,28 +112,28 @@ class HostCommand(unittest.TestCase):
 
     def test_this_machines_own_setup_stays_here(self):
         here = {name: "/laptop/" + name for name in KEPT}
-        here["CLADEFS_TEST_HOST"] = "laptop-host"
-        # Knobs for the host: where its cells keep their cells, and its daemons what they read
-        # from them. And a path of this machine's build that the host scripts set themselves.
+        here["CLADEFS_TEST_HOST"] = "node1"
+        here["CLADEFS_HOTBED_WORK"] = "/work"
+        here["CLADEFS_HOTBED_REPO"] = "cladefs"
+        # Knobs for the workspace: where its cells keep their cells, and its daemons what they
+        # read from them. And a path of this machine's build that the host scripts set themselves.
         host = {
             "CLADEFSD_BUCKET": "s3://bucket/prefix",
-            "CLADEFS_S3_URL": "s3://bucket/test",
             "CLADEFSD_PART_CACHE": "/cache",
             "CLADEFS_FIRECRACKER": "/laptop/firecracker",
         }
         self.assertEqual(
-            self.host_command({**here, **host}, "test-linux-host.sh")[1],
+            self.host_command({**here, **host}, "test-linux-host.sh")[0],
             sorted(BASE + [
                 "CLADEFSD_PART_CACHE=/cache",
                 "CLADEFSD_BUCKET=s3://bucket/prefix",
                 "CLADEFS_FIRECRACKER=/laptop/firecracker",
-                "CLADEFS_S3_URL=s3://bucket/test",
             ]),
         )
 
     def test_every_variable_kept_here_is_one_the_code_reads(self):
         # A name the code no longer reads, as after a rename, would keep nothing here, and send
-        # the new name, which may name this machine's own setup, to the hosts.
+        # the new name, which may name this machine's own setup, to the workspace.
         body = re.search(r"\nhost_env_local\(\) \{\n(.*?)\n\}\n", HOST.read_text(), re.S).group(1)
         patterns = re.findall(r"^ *([A-Z0-9_ |]+)\) ;;$", body, re.M)
         self.assertEqual([name for pattern in patterns for name in pattern.split(" | ")], KEPT)
@@ -187,25 +152,13 @@ class HostCommand(unittest.TestCase):
 
     def test_empty_values_are_not_sent(self):
         empty = {"CLADEFS_ZSTD_LEVEL": "", "CLADEFS_BENCH_PERF": ""}
-        self.assertEqual(self.host_command(empty, "test-linux-host.sh")[1:], (sorted(BASE), COMMAND))
+        self.assertEqual(self.host_command(empty, "test-linux-host.sh"), (sorted(BASE), COMMAND))
 
     def test_values_arrive_as_they_are(self):
         note = "a 'quoted' \"note\": $HOME, `id`, \\back\\slashes\\, *?, ×\nand a line"
         self.assertEqual(
-            self.host_command({"CLADEFS_BENCH_NOTE": note}, "test-linux-host.sh", note)[1:],
+            self.host_command({"CLADEFS_BENCH_NOTE": note}, "test-linux-host.sh", note),
             (sorted(BASE + [f"CLADEFS_BENCH_NOTE={note}"]), COMMAND + [note]),
-        )
-
-    def test_the_guest_kernel_is_the_copy_on_the_host(self):
-        self.assertEqual(
-            self.host_command({"CLADEFS_GUEST_KERNEL": "/laptop/vmlinux"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"CLADEFS_GUEST_KERNEL={DIR}/guest-kernel"]),
-        )
-
-    def test_a_path_in_home_is_in_the_hosts(self):
-        self.assertEqual(
-            self.host_command({"CLADEFSD_PART_CACHE": "~/cache"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"CLADEFSD_PART_CACHE={HOST_HOME}/cache"]),
         )
 
     def test_the_callers_values_replace_this_machines(self):
@@ -215,54 +168,33 @@ class HostCommand(unittest.TestCase):
                  # The run's own, which no caller's replaces.
                  "CLADEFS_TEST_HOST_WORK": "/laptop/work"},
                 "CLADEFSD_BUCKET=s3://bucket/prefix/run-x",
-                "CLADEFS_MIGRATE_BUNDLE=~/run-x/bundle",
                 # Empty, unset there.
                 "CLADEFS_ZSTD_LEVEL=",
                 "test-linux-host.sh",
                 "CLADEFS_NOT=an argument",
-            )[1:],
-            (
-                sorted(BASE + [
-                    "CLADEFSD_BUCKET=s3://bucket/prefix/run-x",
-                    f"CLADEFS_MIGRATE_BUNDLE={HOST_HOME}/run-x/bundle",
-                ]),
-                COMMAND + ["CLADEFS_NOT=an argument"],
             ),
+            (sorted(BASE + ["CLADEFSD_BUCKET=s3://bucket/prefix/run-x"]),
+             COMMAND + ["CLADEFS_NOT=an argument"]),
         )
 
-    def test_nothing_to_send_and_no_arguments(self):
-        self.assertEqual(self.host_command({}, "test-linux-host.sh")[1:], (sorted(BASE), COMMAND))
-
-    def test_the_builds_jobs_and_niceness_are_the_callers(self):
-        nice, sent, _ = self.host_command(
-            {"CLADEFS_TEST_HOST_JOBS": "2", "CLADEFS_TEST_HOST_NICE": "5", "CLADEFS_GUEST_KERNEL_JOBS": "3"},
-            "test-linux-host.sh")
-        self.assertEqual(nice, ["nice", "-n", "5"])
+    def test_the_builds_jobs_are_the_callers(self):
+        sent, _ = self.host_command(
+            {"CLADEFS_TEST_HOST_JOBS": "2", "CLADEFS_GUEST_KERNEL_JOBS": "3"}, "test-linux-host.sh")
         self.assertIn("CARGO_BUILD_JOBS=2", sent)
         self.assertIn("NEXTEST_TEST_THREADS=2", sent)
         # The kernel's jobs the caller's, as it named them.
         self.assertIn("CLADEFS_GUEST_KERNEL_JOBS=3", sent)
         self.assertNotIn("CLADEFS_GUEST_KERNEL_JOBS=2", sent)
 
-    def test_a_measurement_runs_at_its_own_niceness(self):
-        # Its builds' niceness is its script's (bench-ab-linux-host.sh's CLADEFS_AB_BUILD_NICE).
-        self.assertEqual(
-            self.host_command({}, "test-linux-host.sh", preamble="host_bench=1; ")[0], [])
 
-    def test_the_limit_is_the_callers(self):
-        self.assertEqual(
-            self.host_command({"CLADEFS_TEST_HOST_LIMIT": "30m"}, "test-linux-host.sh")[2][:4],
-            ["timeout", "--signal=TERM", "--kill-after=30s", "30m"])
-
-
-# A host script, as the tests' hosts have every one of them: says each job of it, its phase
+# A host script, as the fleet's origin has every one of them: says each job of it, its phase
 # (CLADEFS_TEST_HOST_PHASE, all if none) and whether it ran as work or a measurement, a line of
 # RESULTS/jobs.txt; builds, as the host scripts do, unless it measures, which a measurement refuses
 # (scripts/lib/measurement.sh, TASK-368); and, but for a build alone, says how it was run, its
 # arguments and the variables it was given, in RESULTS/ran.txt, and does as CLADEFS_FAKE_HOST says:
-# fail; block until it is ended (signal.pause), its pid in RESULTS/waiting.pid; or a phase of a migration, the source's leaving its
-# snapshot in the bundle, the target's taking it from there. CLADEFS_FAKE_HOST=fail-build fails its
-# build.
+# fail; block until it is ended, its pid in RESULTS/waiting.pid; or a phase of a migration, the
+# source's leaving its snapshot in the bundle, the target's taking it from there.
+# CLADEFS_FAKE_HOST=fail-build fails its build.
 FAKE_HOST_SCRIPT = f"""#!/bin/bash
 set -euo pipefail
 source=$1 results=$2
@@ -274,8 +206,6 @@ echo "$(basename "$0") $phase $where" >> "$results/jobs.txt"
 if [[ $phase != measure ]]; then
     measurement_refuses "$(basename "$0")'s build"
     [[ ${{CLADEFS_FAKE_HOST:-}} != fail-build ]] || exit 4
-    # The build fills the scratch disk to CLADEFS_FAKE_FILL KiB free (fake_ssh.py's df).
-    if [[ -n ${{CLADEFS_FAKE_FILL:-}} ]]; then echo "$CLADEFS_FAKE_FILL" > "$HOME/df-free"; fi
 fi
 if [[ $phase == build ]]; then exit 0; fi
 {{
@@ -303,7 +233,7 @@ HOST_SCRIPTS = ["test", "bench", "bench-ab", "gets", "mutants", "fork-time", "gc
 # The drivers, and what they run, as the origin has them.
 DRIVERS = ["test-host.sh", "bench-host.sh", "bench-ab-host.sh", "gets-host.sh", "mutants-host.sh",
            "fork-time-host.sh", "gc-sweep-host.sh", "migrate-host.sh", "perf-gate-host.sh",
-           "soak-host.sh", "build-commit.sh", "lib/host.sh", "lib/host-remote.sh",
+           "soak-host.sh", "build-commit.sh", "lib/host.sh", "lib/host-workspace.sh",
            "lib/measurement.sh"]
 # Copied, not linked: they find the tree they keep their results in by where they are.
 COPIED = ["bench-history.py", "bench_results.py"]
@@ -313,37 +243,34 @@ IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NA
 
 
 class Fleet:
-    """Hosts of fake_ssh.py's, as `state` (fake_ssh.py) has them, in a temporary directory: an
-    origin, a checkout of cladefs whose vendor/firecracker is a submodule, its scripts the drivers
-    and FAKE_HOST_SCRIPT; host1, a host whose home's src/fxdax is a clone of it; and the scratch
-    directory runs are made in on the hosts (CLADEFS_TEST_HOST_SCRATCH)."""
+    """fake_hotbed.py's node, in a temporary directory: an origin, a checkout of cladefs whose
+    vendor/firecracker is a submodule, its scripts the drivers and FAKE_HOST_SCRIPT, which the
+    drivers run from; and the workspace, work, whose checkout hotbed syncs from it."""
 
-    def __init__(self, state=None):
+    def __init__(self, arch=None):
         # As git names it, its links resolved (macOS's /var); removed with the fleet.
         self.directory = Path(tempfile.mkdtemp()).resolve()
         weakref.finalize(self, shutil.rmtree, self.directory, True)
-        (self.directory / "state.json").write_text(json.dumps(state or {}))
         (self.directory / "calls").write_text("")
+        if arch:
+            (self.directory / "arch").write_text(arch + "\n")
         (self.directory / "bin").mkdir()
-        ssh = self.directory / "bin" / "ssh"
-        ssh.write_text(
-            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_SSH))} "$@"\n')
-        ssh.chmod(0o755)
-        # A driver waits a while between tries to reach a host: here not at all.
-        (self.directory / "bin" / "sleep").write_text("#!/bin/sh\n")
-        (self.directory / "bin" / "sleep").chmod(0o755)
-        self.scratch = self.directory / "scratch"
+        hotbed = self.directory / "bin" / "hotbed"
+        hotbed.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_HOTBED))} "$@"\n')
+        hotbed.chmod(0o755)
+        self.work = self.directory / "work"
+        self.checkout = self.work / "cladefs"
         self.environment = {
             "PATH": f"{self.directory / 'bin'}:/usr/bin:/bin",
             "HOME": str(self.directory),
-            "FAKE_SSH": str(self.directory),
-            "CLADEFS_TEST_HOST": "host1",
-            "CLADEFS_TEST_HOST_SCRATCH": str(self.scratch),
+            "FAKE_HOTBED": str(self.directory),
+            "CLADEFS_HOTBED_WORK": str(self.work),
             **IDENTITY,
         }
         self.firecracker = self.commit(self.directory / "firecracker", {"README": "firecracker\n"})
         self.origin = self.directory / "origin"
-        files = {"README": "cladefs\n", ".gitignore": "/docs/measurements/\n"}
+        files = {"README": "cladefs\n", ".gitignore": "/docs/measurements/\n/target/\n"}
         files.update({f"scripts/lib/{name}-linux-host.sh": FAKE_HOST_SCRIPT for name in HOST_SCRIPTS})
         self.commit(self.origin, files)
         for name in DRIVERS:
@@ -354,8 +281,6 @@ class Fleet:
                  "vendor/firecracker")
         self.git(self.origin, "add", ".")
         self.git(self.origin, "commit", "-q", "-m", "cladefs")
-        self.clone = self.home("host1") / "src" / "fxdax"
-        self.git(self.directory, "clone", "-q", str(self.origin), str(self.clone))
 
     def git(self, tree, *args):
         return subprocess.run(["git", "-C", str(tree), *args], env=self.environment,
@@ -379,31 +304,19 @@ class Fleet:
     def head(self):
         return self.git(self.origin, "rev-parse", "HEAD")
 
-    def home(self, host):
-        home = self.directory / "hosts" / host / "home"
-        home.mkdir(parents=True, exist_ok=True)
-        return home
-
-    def state(self):
-        return json.loads((self.directory / "state.json").read_text())
-
     def calls(self):
-        """The calls of ssh, each its host and the first word of what it ran there, and its
-        action, if it was host-remote.sh's."""
-        said = []
-        for call in (self.directory / "calls").read_text().splitlines():
-            host, *words = call.split(" ")
-            said.append(" ".join([host, *words[:4]] if words[:3] == ["bash", "-s", "--"]
-                                 else [host, words[0]]))
-        return said
+        return (self.directory / "calls").read_text().splitlines()
 
     def runs(self):
-        """The runs' directories on the hosts."""
-        return sorted(path.name for path in self.scratch.glob("run-*")) if self.scratch.exists() else []
+        """The runs' directories in the workspace."""
+        runs = self.checkout / "target" / "host-runs"
+        return sorted(path.name for path in runs.iterdir()) if runs.exists() else []
 
     def worktrees(self):
-        """The host's clone's worktrees, but its own."""
-        listed = self.git(self.clone, "worktree", "list", "--porcelain")
+        """The workspace checkout's worktrees, but its own."""
+        if not self.checkout.exists():
+            return []
+        listed = self.git(self.checkout, "worktree", "list", "--porcelain")
         return [line.split(" ", 1)[1] for line in listed.splitlines()
                 if line.startswith("worktree ")][1:]
 
@@ -438,7 +351,7 @@ NAME = r"run-\d{8}T\d{6}Z-[0-9a-f]{8}"
 
 
 class RunNames(unittest.TestCase):
-    """Each run's name, its directory on the host and its job's (host_run)."""
+    """Each run's name, and its directory in the workspace (host_run)."""
 
     def test_two_drivers_started_at_once_name_their_runs_apart(self):
         # Two drivers, in the same second: each sources host.sh, with a mark of its own.
@@ -450,7 +363,6 @@ class RunNames(unittest.TestCase):
         first, second = output.splitlines()
         self.assertRegex(first, f"^{NAME}$")
         self.assertRegex(second, f"^{NAME}$")
-        # Apart whatever second each started in: by their marks.
         self.assertNotEqual(first.rsplit("-", 1)[1], second.rsplit("-", 1)[1])
 
     def test_a_run_is_named_for_its_number_and_once(self):
@@ -460,61 +372,60 @@ class RunNames(unittest.TestCase):
         self.assertEqual((status, errors), (0, ""))
         run, directory = output.splitlines()
         self.assertRegex(run, r"^run-r1040-\d{8}T\d{6}Z-[0-9a-f]{8}$")
-        self.assertEqual(directory, f"{fleet.scratch}/{run}")
+        self.assertEqual(directory, f"{fleet.checkout}/target/host-runs/{run}")
 
-    def test_a_host_and_a_run_number_are_named_as_they_may_be(self):
+    def test_a_node_and_a_run_number_are_named_as_they_may_be(self):
         fleet = Fleet()
         self.assertEqual(fleet.drive("true", environment={"CLADEFS_TEST_HOST": "a host"}),
-                         (2, "", "CLADEFS_TEST_HOST names a host, as ssh does: a host\n"))
-        self.assertEqual(
-            fleet.drive("true", environment={"CLADEFS_TEST_HOST": ""}),
-            (2, "", "CLADEFS_TEST_HOST names the test host, as ssh does, or local: none is set\n"))
+                         (2, "", "CLADEFS_TEST_HOST names a hotbed node, or local: a host\n"))
         self.assertEqual(
             fleet.drive("true", environment={"CLADEFS_TEST_HOST_RUN": "R1"}),
             (2, "", "CLADEFS_TEST_HOST_RUN names a run in lower-case letters and digits, such as r1040\n"))
 
 
 class Runs(unittest.TestCase):
-    """A run's life: its directory on the host, a worktree of its commit, which its job runs in,
-    removed whatever happens."""
+    """A run's life: its directory in the workspace, its tree, which its job runs in, removed
+    whatever happens."""
 
-    def test_a_run_runs_its_commit_and_leaves_nothing(self):
+    def test_a_run_runs_the_checkout_and_leaves_nothing(self):
         fleet = Fleet()
         status, out, errors = fleet.drive(RAN)
-        self.assertEqual((status, out, errors), (0, "status 0\n", ""))
+        self.assertEqual((status, out), (0, "status 0\n"), errors)
         results = fleet.directory / "results"
         ran = (results / "ran.txt").read_text().splitlines()
-        run = (results / "run.txt").read_text().splitlines()[0].removeprefix("run ")
-        self.assertEqual(ran[:2], ["test-linux-host.sh a b", f"source {fleet.scratch}/{run}/tree"])
+        self.assertEqual(ran[:2], ["test-linux-host.sh a b", f"source {fleet.checkout}"])
         self.assertEqual((results / "remote.log").read_text(), "ran test-linux-host.sh a b\n")
-        # Its directory gone, and its worktree with it.
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
+        # A session started for the run, and ended with it; the checkout synced once, first.
         self.assertEqual(
             fleet.calls(),
-            ["host1 bash -s -- prepare", "host1 mkdir", "host1 bash -s -- launch",
-             "host1 bash -s -- wait", "host1 bash -s -- log", "host1 bash -s -- fetch",
-             "host1 bash -s -- clean"],
-        )
+            ["session current", "session start", "run bash", "run --detach --no-sync --node node1 bash",
+             "run --no-sync --node node1 bash", "run --no-sync --node node1 bash",
+             "run --no-sync --node node1 bash", "session end"])
 
-    def test_a_local_host_runs_here_without_ssh(self):
-        """CLADEFS_TEST_HOST=local: the run's host half runs on this machine, in its home, as the
-        nightly does from cron (scripts/nightly-host.sh, TASK-441)."""
+    def test_a_run_keeps_to_the_session_and_node_it_has(self):
         fleet = Fleet()
-        tools = fleet.directory / "local-bin"
-        fake_ssh.tools(tools)
-        status, out, errors = fleet.drive(
-            RAN + 'host_label\n',
-            environment={"CLADEFS_TEST_HOST": "local", "CLADEFS_TEST_HOST_REPO": str(fleet.clone),
-                         "PATH": f"{tools}:{fleet.environment['PATH']}"})
+        (fleet.directory / "session").write_text("mine\n")
+        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST": "node1"})
+        self.assertEqual((status, out), (0, "status 0\n"), errors)
+        self.assertEqual(fleet.calls()[:2], ["session current", "run --node node1 bash"])
+        self.assertNotIn("session end", fleet.calls())
+        self.assertEqual((fleet.directory / "session").read_text(), "mine\n")
+
+    def test_a_local_host_runs_here_without_hotbed(self):
+        """CLADEFS_TEST_HOST=local: the run runs in this checkout, as a run inside a hotbed command
+        does."""
+        fleet = Fleet()
+        status, out, errors = fleet.drive(RAN + 'host_label\n',
+                                          environment={"CLADEFS_TEST_HOST": "local"})
         hostname = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout
-        self.assertEqual((status, out, errors), (0, f"status 0\n{hostname}", ""))
+        self.assertEqual((status, out), (0, f"status 0\n{hostname}"), errors)
         results = fleet.directory / "results"
-        run = (results / "run.txt").read_text().splitlines()[0].removeprefix("run ")
         self.assertEqual((results / "ran.txt").read_text().splitlines()[:2],
-                         ["test-linux-host.sh a b", f"source {fleet.scratch}/{run}/tree"])
-        self.assertEqual((fleet.directory / "fxjob-calls").read_text(), f"--name {run} --mem 12G -- "
-                         f"bash {fleet.scratch}/{run}/job/command\n")
-        self.assertEqual((fleet.calls(), fleet.runs(), fleet.worktrees()), ([], [], []))
+                         ["test-linux-host.sh a b", f"source {fleet.origin}"])
+        self.assertEqual(fleet.calls(), [])
+        self.assertFalse((fleet.origin / "target" / "host-runs").exists() and
+                         any((fleet.origin / "target" / "host-runs").iterdir()))
 
     def test_a_run_whose_job_fails_leaves_nothing(self):
         fleet = Fleet()
@@ -522,38 +433,39 @@ class Runs(unittest.TestCase):
         self.assertEqual((status, out), (0, "status 3\n"))
         self.assertEqual((fleet.directory / "results" / "remote.log").read_text(),
                          "ran test-linux-host.sh a b\n")
-        self.assertTrue((fleet.directory / "results" / "ran.txt").exists())
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
 
     def test_a_run_needing_another_architecture_makes_nothing_there(self):
-        fleet = Fleet()
-        (fleet.home("host1") / "arch").write_text("aarch64\n")
+        fleet = Fleet(arch="aarch64")
         need = 'host_need_arch x86_64 "a driver: its guests boot" "an x86-64 kernel"\n'
-        self.assertEqual(
-            fleet.drive(need + RAN),
-            (2, "", "a driver: its guests boot an x86-64 kernel: this test host is aarch64, the run "
-                    "needs x86_64\n"))
+        # Placed by architecture, which no node has.
+        status, out, errors = fleet.drive(need + RAN)
+        self.assertEqual((status, out), (2, ""))
+        self.assertEqual(errors, "error: no node of architecture amd64\n")
+        # On the node named, refused there before anything is made.
+        status, out, errors = fleet.drive(need + RAN, environment={"CLADEFS_TEST_HOST": "node1"})
+        self.assertEqual((status, out), (2, ""))
+        self.assertIn("a driver: its guests boot an x86-64 kernel: this test host is aarch64, the "
+                      "run needs x86_64\n", errors)
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
-        self.assertFalse((fleet.home("host1") / "fxjob-calls").exists())
-        # A run that needs none runs there; one that needs the host's own runs too.
+        # A run that needs none runs there; one that needs the node's own runs too.
         self.assertEqual(fleet.drive(RAN)[:2], (0, "status 0\n"))
         self.assertEqual(fleet.drive('host_need_arch aarch64 "arm64"\n' + RAN)[:2],
                          (0, "status 0\n"))
 
-    def test_test_host_runs_the_workspaces_tests_alone_on_an_arm64_host(self):
-        fleet = Fleet()
-        (fleet.home("host1") / "arch").write_text("aarch64\n")
+    def test_test_host_runs_the_workspaces_tests_alone_on_an_arm64_node(self):
+        fleet = Fleet(arch="aarch64")
         results = fleet.directory / "results"
-        status, _, errors = fleet.run_driver("test-host.sh", str(results))
+        status, _, errors = fleet.run_driver("test-host.sh", str(results),
+                                             environment={"CLADEFS_TEST_HOST": "node1"})
         self.assertEqual(status, 2)
-        self.assertEqual(errors.splitlines()[-1],
-                         "test-host.sh: the guest tests boot an x86-64 guest kernel "
-                         "(CLADEFS_GUEST_TESTS=0 runs the workspace's tests alone): this test host "
-                         "is aarch64, the run needs x86_64")
+        self.assertIn("test-host.sh: the guest tests boot an x86-64 guest kernel "
+                      "(CLADEFS_GUEST_TESTS=0 runs the workspace's tests alone): this test host "
+                      "is aarch64, the run needs x86_64", errors)
         self.assertEqual(fleet.runs(), [])
-        status, _, _ = fleet.run_driver("test-host.sh", str(results),
-                                        environment={"CLADEFS_GUEST_TESTS": "0"})
-        self.assertEqual(status, 0)
+        status, _, errors = fleet.run_driver("test-host.sh", str(results),
+                                             environment={"CLADEFS_GUEST_TESTS": "0"})
+        self.assertEqual(status, 0, errors)
         self.assertEqual((results / "remote.log").read_text(), "ran test-linux-host.sh \n")
 
     def test_a_driver_that_fails_leaves_nothing(self):
@@ -562,45 +474,26 @@ class Runs(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
 
-    def test_a_commit_origin_lacks_runs_nothing(self):
-        fleet = Fleet()
-        # A commit here, not pushed.
-        local = fleet.directory / "local"
-        fleet.git(fleet.directory, "clone", "-q", str(fleet.origin), str(local))
-        unpushed = fleet.commit(local, {"README": "changed\n"})
-        status, out, errors = fleet.drive(RAN, preamble=f"repo={shlex.quote(str(local))}")
-        self.assertEqual((status, out), (1, ""))
-        self.assertEqual(errors, f"{unpushed} is not on origin: push it first\n")
-        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
-
-    def test_a_commit_pushed_since_the_hosts_clone_is_fetched(self):
-        fleet = Fleet()
-        pushed = fleet.commit(fleet.origin, {"README": "newer\n"})
-        self.assertEqual(fleet.drive(RAN)[:2], (0, "status 0\n"))
-        self.assertEqual((fleet.directory / "results" / "source.txt").read_text().splitlines()[0],
-                         f"revision {pushed}")
-
-    def test_a_tree_that_changes_what_it_tracks_runs_nothing(self):
+    def test_a_checkout_that_changes_what_it_tracks_runs_its_changes(self):
         fleet = Fleet()
         (fleet.origin / "README").write_text("changed, not committed\n")
-        self.assertEqual(
-            fleet.drive(RAN),
-            (2, "", f"{fleet.origin} changes what it tracks, which would not run: commit and push "
-                    "it, or name a commit with CLADEFS_TEST_HOST_COMMIT.\n"))
-        self.assertEqual(fleet.calls(), [])
-        # Unless the commit is named: then that runs.
-        older = fleet.head()
-        status, out, _ = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_COMMIT": older})
-        self.assertEqual((status, out), (0, "status 0\n"))
+        self.assertEqual(fleet.drive(RAN + 'cat "$results/source.txt"\n')[:2],
+                         (0, f"status 0\nrevision {fleet.head()}+changes\n"
+                             f"firecracker {fleet.firecracker}\n"))
+        self.assertEqual((fleet.checkout / "README").read_text(), "changed, not committed\n")
 
     def test_a_named_commit_is_the_one_run(self):
         fleet = Fleet()
         older = fleet.head()
         fleet.commit(fleet.origin, {"README": "newer\n"})
-        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_COMMIT": "HEAD~"})[:2],
-                         (0, "status 0\n"))
-        self.assertEqual((fleet.directory / "results" / "source.txt").read_text().splitlines()[0],
-                         f"revision {older}")
+        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_COMMIT": "HEAD~"})
+        self.assertEqual((status, out), (0, "status 0\n"), errors)
+        results = fleet.directory / "results"
+        self.assertEqual((results / "source.txt").read_text().splitlines()[0], f"revision {older}")
+        run = (results / "run.txt").read_text().splitlines()[0].removeprefix("run ")
+        self.assertEqual((results / "ran.txt").read_text().splitlines()[1],
+                         f"source {fleet.checkout}/target/host-runs/{run}/tree")
+        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
         self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_COMMIT": "nowhere"}),
                          (2, "", f"nowhere: no commit of {fleet.origin}'s\n"))
 
@@ -608,74 +501,27 @@ class Runs(unittest.TestCase):
         # The first stopped after its start, its trap not run, as a driver killed: the second's
         # run and end leave it alone.
         fleet = Fleet()
+        (fleet.directory / "session").write_text("mine\n")
         status, first, _ = fleet.drive('host_start; echo "$host_run"; trap - EXIT')
         self.assertEqual(status, 0)
         self.assertEqual(fleet.drive(RAN)[:2], (0, "status 0\n"))
         self.assertEqual(fleet.runs(), [first.strip()])
-        self.assertEqual(fleet.worktrees(), [f"{fleet.scratch}/{first.strip()}/tree"])
 
-    def test_runs_that_ran_nothing_for_six_hours_go_passed_or_failed(self):
-        """board 2324: a run that failed, or whose driver died, kept its directory for days, and
-        such runs filled the scratch disk. Those that ran nothing for six hours go as the next
-        run starts, whatever their status; one whose job runs, or ended within six hours, stays."""
-        fleet = Fleet()
-        fleet.scratch.mkdir()
-        passed, failed, unlaunched, running, recent = (
-            fleet.scratch / f"run-2026010{n}T000000Z-0000000{n}" for n in range(1, 6))
-        for run, status in ((passed, "0"), (failed, "1"), (unlaunched, None), (running, None),
-                            (recent, "1")):
-            (run / "results").mkdir(parents=True)
-            (run / "job").mkdir()
-            (run / "job" / "lock").touch()
-            (run / "job" / "log").write_text("a log\n")
-            if status is not None:
-                (run / "job" / "status").write_text(f"{status:<20}\n")
-        # The running one's job holds its lock.
-        hold(self, running / "job" / "lock")
-        long_ago = time.time() - 6 * 3600 - 60
-        for run in (passed, failed, unlaunched, running, recent):
-            paths = [run, *run.iterdir(), *(run / "job").iterdir()]
-            if run == recent:
-                # Its job ended a minute ago.
-                paths.remove(run / "job" / "status")
-            for path in paths:
-                os.utime(path, (long_ago, long_ago))
-        status, out, errors = fleet.drive(RAN)
-        self.assertEqual((status, out), (0, "status 0\n"))
-        self.assertEqual(errors, "".join(f"Removing {run}, which ran nothing for six hours.\n"
-                                         for run in (passed, failed, unlaunched)))
-        self.assertEqual(fleet.runs(), [running.name, recent.name])
-
-    def test_a_host_that_does_not_answer_runs_nothing(self):
-        fleet = Fleet({"down": ["host1"]})
-        status, out, errors = fleet.drive(RAN)
-        # Its end failed too, which fails it.
-        self.assertEqual((status, out), (1, ""))
-        self.assertEqual(errors.splitlines()[0], "ssh: connect to host host1 port 22: Connection refused")
-        # Its end tried too.
-        self.assertEqual(fleet.calls(), ["host1 bash -s -- prepare", "host1 bash -s -- clean"])
-        self.assertIn(f"Removing {fleet.scratch}/", errors.splitlines()[-1])
-
-    def test_a_job_runs_under_fxjob_and_a_measurement_alone_after_its_build_as_work(self):
-        """TASK-368: a measurement's run is two jobs, its build as work, in work's memory, then
-        the measurement alone under fxjob --bench, in its own, building nothing; any other run's
-        one job of work, of no phase."""
+    def test_a_job_runs_as_work_and_a_measurement_alone_after_its_build_as_work(self):
+        """TASK-368: a measurement's run is two commands, its build as work, then the measurement
+        alone under hotbed run --bench, building nothing; any other run's one command of work, of
+        no phase."""
         for bench, said, jobs in [
-            ("0", ["--name RUN --mem 12G -- bash"], ["test-linux-host.sh all work"]),
-            ("1", ["--name RUN --mem 12G -- bash", "--name RUN --bench --mem 16G -- bash"],
+            ("0", ["run --detach --no-sync --node node1 bash"], ["test-linux-host.sh all work"]),
+            ("1", ["run --detach --no-sync --node node1 bash", "run --bench --detach --no-sync --node node1 bash"],
              ["test-linux-host.sh build work", "test-linux-host.sh measure bench"]),
         ]:
             with self.subTest(bench=bench):
                 fleet = Fleet()
-                memory = {} if bench == "0" else {"CLADEFS_TEST_HOST_MEM": "16G"}
-                status, out, errors = fleet.drive(
-                    RAN, environment={"CLADEFS_TEST_HOST_BENCH": bench, **memory})
+                status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_BENCH": bench})
                 self.assertEqual((status, out), (0, "status 0\n"), errors)
                 results = fleet.directory / "results"
-                run = (results / "run.txt").read_text().split()[1]
-                calls = (fleet.home("host1") / "fxjob-calls").read_text()
-                self.assertEqual(calls.replace(run, "RUN").splitlines(),
-                                 [f"{call} {fleet.scratch}/RUN/job/command" for call in said])
+                self.assertEqual([call for call in fleet.calls() if "--detach" in call], said)
                 self.assertEqual((results / "jobs.txt").read_text().splitlines(), jobs)
                 # The build's log apart, the measurement's the run's own.
                 self.assertEqual((results / "remote-build.log").exists(), bench == "1")
@@ -686,10 +532,9 @@ class Runs(unittest.TestCase):
         status, out, errors = fleet.drive(
             RAN, environment={"CLADEFS_TEST_HOST_BENCH": "1", "CLADEFS_FAKE_HOST": "fail-build"})
         self.assertEqual((status, out), (0, "status 4\n"), errors)
-        results = fleet.directory / "results"
-        self.assertEqual((results / "jobs.txt").read_text().splitlines(),
+        self.assertEqual((fleet.directory / "results" / "jobs.txt").read_text().splitlines(),
                          ["test-linux-host.sh build work"])
-        self.assertNotIn("--bench", (fleet.home("host1") / "fxjob-calls").read_text())
+        self.assertFalse(any("--bench" in call for call in fleet.calls()))
         self.assertEqual(fleet.runs(), [])
 
     def test_a_measurement_that_would_build_is_refused(self):
@@ -698,7 +543,7 @@ class Runs(unittest.TestCase):
         fleet = Fleet()
         status, out, errors = fleet.drive(
             "host_start\nstatus=0\n"
-            'host_launch 12G test-linux-host.sh a b > "$results/remote.log" 2>&1 || status=$?\n'
+            'host_launch test-linux-host.sh a b > "$results/remote.log" 2>&1 || status=$?\n'
             'if [[ $host_state == ended ]]; then host_fetch || status=$?; fi\necho "status $status"\n',
             environment={"CLADEFS_TEST_HOST_BENCH": "1"})
         self.assertEqual((status, out), (0, "status 2\n"), errors)
@@ -708,164 +553,70 @@ class Runs(unittest.TestCase):
         self.assertFalse((results / "ran.txt").exists())
         refusal = (results / "remote.log").read_text()
         self.assertRegex(refusal, r"^test-linux-host.sh's build would build inside a measurement "
-                                  r"\(fxjob --bench, 0::/user.slice/user-1000.slice/user@1000.service/"
-                                  r"fxdax.slice/fxdax-bench.slice/fxjob-\d+.scope\), holding its "
-                                  r"cores and memory from every other measurement")
+                                  r"\(hotbed run --bench, 0::/user.slice/user-1000.slice/"
+                                  r"user-1000-hotbed_bench.slice/hotbed-[0-9a-f]+.service\)")
         self.assertTrue(refusal.endswith("(TASK-368)\n"), refusal)
 
 
-GIB = 1 << 30
-
-
-def hold(test, lock):
-    """Holds `lock`, a file, as a running job holds its run's, until `test` ends."""
-    holder = subprocess.Popen(
-        [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1]); "
-         "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()", lock],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    test.addCleanup(holder.stdout.close)
-    test.addCleanup(holder.wait)
-    test.addCleanup(holder.stdin.close)
-    test.assertEqual(holder.stdout.readline(), "held\n")
-
-
-class Room(unittest.TestCase):
-    """TASK-489: a run that names the room it needs on the scratch disk, which every job on the
-    host shares, checks it is there before it builds (CLADEFS_TEST_HOST_ROOM) and before its
-    measurement (CLADEFS_TEST_HOST_ROOM_MEASURE), each check a line of RESULTS/room.txt; and its
-    earlier runs of the same name go first (CLADEFS_TEST_HOST_SWEEP)."""
-
-    def test_a_run_short_of_room_prepares_nothing(self):
-        fleet = Fleet()
-        (fleet.home("host1") / "df-free").write_text(f"{GIB >> 10}\n")
-        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_ROOM": str(2 * GIB)})
-        self.assertEqual((status, out, errors), (
-            28, "", "Not enough room: the scratch disk /mnt/fake-scratch has 1073741824 bytes free "
-                    "before the run builds, which needs 2147483648 (CLADEFS_TEST_HOST_ROOM).\n"))
-        self.assertEqual((fleet.directory / "results" / "room.txt").read_text(),
-                         "build 1073741824 2147483648 short /mnt/fake-scratch\n")
-        self.assertEqual((fleet.calls(), fleet.runs()), (["host1 bash -s -- room"], []))
-
-    def test_a_measurement_whose_build_filled_the_disk_measures_nothing(self):
-        """The first night: its sides built, the disk was full as its measurement began,
-        which could not write even its status."""
-        for fill, status_, jobs, measured in [
-            (str(4 * GIB >> 10), "status 0", ["test-linux-host.sh build work",
-                                              "test-linux-host.sh measure bench"],
-             "measure 4294967296 2147483648 ok"),
-            ("1024", "status 28", ["test-linux-host.sh build work"],
-             "measure 1048576 2147483648 short"),
-        ]:
-            with self.subTest(fill=fill):
-                fleet = Fleet()
-                (fleet.home("host1") / "df-free").write_text(f"{8 * GIB >> 10}\n")
-                (fleet.home("host1") / "du-size").write_text("3\n")
-                status, out, errors = fleet.drive(RAN, environment={
-                    "CLADEFS_TEST_HOST_BENCH": "1", "CLADEFS_TEST_HOST_ROOM": str(2 * GIB),
-                    "CLADEFS_TEST_HOST_ROOM_MEASURE": str(2 * GIB), "CLADEFS_FAKE_FILL": fill})
-                self.assertEqual((status, out, errors), (0, f"{status_}\n", ""))
-                results = fleet.directory / "results"
-                self.assertEqual((results / "jobs.txt").read_text().splitlines(), jobs)
-                self.assertEqual((results / "room.txt").read_text().splitlines(), [
-                    "build 8589934592 2147483648 ok /mnt/fake-scratch", "built 3072",
-                    f"{measured} /mnt/fake-scratch"])
-                self.assertEqual(fleet.runs(), [])
-        self.assertEqual((results / "remote.log").read_text(),
-                         "Not enough room: the scratch disk /mnt/fake-scratch has 1048576 bytes "
-                         "free before the run measures, which needs 2147483648 "
-                         "(CLADEFS_TEST_HOST_ROOM_MEASURE).\n")
-
-    def test_a_run_names_bytes(self):
-        fleet = Fleet()
-        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_ROOM": "100G"}),
-                         (2, "", "CLADEFS_TEST_HOST_ROOM is a count of bytes: 100G\n"))
-
-    def test_the_earlier_runs_of_its_name_go_but_a_running_one_and_others(self):
-        fleet = Fleet()
-        fleet.scratch.mkdir()
-        ended, running = (fleet.scratch / f"run-nightly-2026111{n}T070003Z-{n}1111111"
-                          for n in (5, 4))
-        others = [fleet.scratch / name for name in (
-            "run-t435-20261115T070003Z-22222222", "run-nightlyx-20261115T070003Z-33333333",
-            "run-20261115T070003Z-44444444", "run-nightly-old", "kernels")]
-        for run in (ended, running, *others):
-            (run / "job").mkdir(parents=True)
-            (run / "job" / "lock").touch()
-            (run / "trees" / "head" / "target").mkdir(parents=True)
-        (ended / "job" / "status").write_text("0\n")
-        hold(self, running / "job" / "lock")
-        status, out, errors = fleet.drive(
-            RAN, environment={"CLADEFS_TEST_HOST_RUN": "nightly", "CLADEFS_TEST_HOST_SWEEP": "1"})
-        self.assertEqual((status, out, errors), (
-            0, "status 0\n", f"Keeping {running}: its job runs.\n"
-                             f"Removing {ended}, an earlier run of nightly's.\n"))
-        self.assertEqual(fleet.runs(), [
-            "run-20261115T070003Z-44444444", running.name, "run-nightly-old",
-            "run-nightlyx-20261115T070003Z-33333333", "run-t435-20261115T070003Z-22222222"])
-        self.assertTrue((fleet.scratch / "kernels").is_dir())
-
-    def test_only_a_named_run_sweeps(self):
-        fleet = Fleet()
-        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_SWEEP": "1"}),
-                         (2, "", "CLADEFS_TEST_HOST_SWEEP sweeps the runs of "
-                                 "CLADEFS_TEST_HOST_RUN's name: name them\n"))
-
-
 class Source(unittest.TestCase):
-    """host_start: the run's worktrees, what they hold, and their records here."""
+    """host_start: the run's trees, what they hold, and their records here."""
 
-    def test_the_commit_is_run_and_recorded(self):
+    def test_the_checkout_is_run_and_recorded(self):
         fleet = Fleet()
         self.assertEqual(fleet.drive(RAN)[:2], (0, "status 0\n"))
         results = fleet.directory / "results"
         self.assertEqual(
             (results / "source.txt").read_text().splitlines(),
             [f"revision {fleet.head()}", f"firecracker {fleet.firecracker}"])
-        run, host, directory = (results / "run.txt").read_text().splitlines()
+        run, node, session, directory = (results / "run.txt").read_text().splitlines()
         self.assertRegex(run, f"^run {NAME}$")
-        self.assertEqual((host, directory), ("host host1", f"directory {fleet.scratch}/{run[4:]}"))
+        self.assertEqual((node, session, directory),
+                         ("host node1", "session fake-session",
+                          f"directory {fleet.checkout}/target/host-runs/{run[4:]}"))
 
     def worktree(self, script, environment=None):
-        """Runs `script` after host_start, which leaves the run on the host: its status, and
+        """Runs `script` after host_start, which leaves the run in the workspace: the fleet and
         the run's directory there."""
         fleet = Fleet()
         status, out, errors = fleet.drive(f'host_start\n{script}\necho "$host_dir"\ntrap - EXIT',
                                           environment=environment)
-        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual((status, errors.replace(self.placed(errors), "")), (0, ""))
         return fleet, Path(out.splitlines()[-1])
 
-    def test_a_worktree_has_firecracker_and_reports_its_commit(self):
-        fleet, directory = self.worktree("")
-        tree = directory / "tree"
-        self.assertEqual((tree / "vendor" / "firecracker" / "README").read_text(), "firecracker\n")
-        # The commit its builds report, as the host scripts' copies, which have no .git, do.
-        self.assertEqual((tree / "source-revision.txt").read_text(), f"{fleet.head()}\n")
-        self.assertEqual(sorted(path.name for path in directory.iterdir()),
-                         ["job", "results", "tree", "trees", "work"])
+    @staticmethod
+    def placed(errors):
+        """What hotbed said of where it ran each command, which a driver passes on."""
+        return "".join(line + "\n" for line in errors.splitlines() if line.startswith("hotbed: "))
 
-    def test_a_patch_is_applied_and_recorded(self):
+    def test_a_patch_is_applied_to_a_worktree_and_recorded(self):
         patch = Path(tempfile.mkdtemp()) / "mutant.patch"
         patch.write_text("--- a/README\n+++ b/README\n@@ -1 +1 @@\n-cladefs\n+mutated\n")
         fleet, directory = self.worktree("", {"CLADEFS_TEST_HOST_PATCH": str(patch)})
         tree = directory / "tree"
         self.assertEqual((tree / "README").read_text(), "mutated\n")
+        self.assertEqual((tree / "vendor" / "firecracker" / "README").read_text(), "firecracker\n")
         self.assertEqual((tree / "source-revision.txt").read_text(), f"{fleet.head()}-dirty\n")
         digest = subprocess.run(["shasum", "-a", "256", patch], capture_output=True, text=True,
                                 check=True).stdout.split()[0]
-        self.assertEqual(
-            (fleet.directory / "results" / "source.txt").read_text().splitlines()[2],
-            f"patch {digest} mutant.patch")
+        source = (fleet.directory / "results" / "source.txt").read_text().splitlines()
+        self.assertEqual(source[0], f"revision {fleet.head()}+changes")
+        self.assertEqual(source[2], f"patch {digest} mutant.patch")
+        # The checkout itself untouched.
+        self.assertEqual((fleet.checkout / "README").read_text(), "cladefs\n")
 
-    def test_a_guest_kernel_is_copied_and_recorded(self):
-        kernel = Path(tempfile.mkdtemp()) / "vmlinux"
-        kernel.write_bytes(b"a kernel")
-        fleet, directory = self.worktree("", {"CLADEFS_GUEST_KERNEL": str(kernel)})
-        self.assertEqual((directory / "guest-kernel").read_bytes(), b"a kernel")
-        digest = subprocess.run(["shasum", "-a", "256", kernel], capture_output=True, text=True,
-                                check=True).stdout.split()[0]
+    def test_a_guest_kernel_is_one_of_the_workspaces(self):
+        fleet = Fleet()
+        kernel = f"{fleet.work}/kernels/vmlinux"
+        status, _, errors = fleet.drive(RAN, environment={"CLADEFS_GUEST_KERNEL": kernel})
+        self.assertEqual(status, 0, errors)
+        self.assertEqual((fleet.directory / "results" / "source.txt").read_text().splitlines()[2],
+                         f"guest kernel {kernel}")
+        self.assertIn(f"CLADEFS_GUEST_KERNEL={kernel}",
+                      (fleet.directory / "results" / "ran.txt").read_text().splitlines())
         self.assertEqual(
-            (fleet.directory / "results" / "source.txt").read_text().splitlines()[2],
-            f"guest kernel {digest}")
+            fleet.drive(RAN, environment={"CLADEFS_GUEST_KERNEL": "/laptop/vmlinux"}),
+            (2, "", "CLADEFS_GUEST_KERNEL names a kernel in the workspace (/work/...), or none, "
+                    "which the workspace builds from the tree: /laptop/vmlinux is this machine's\n"))
 
     def test_other_commits_have_worktrees_of_their_own(self):
         fleet = Fleet()
@@ -873,7 +624,7 @@ class Source(unittest.TestCase):
         newer = fleet.commit(fleet.origin, {"README": "newer\n"})
         status, out, errors = fleet.drive(
             'host_start base=HEAD~ same=HEAD; echo "$host_dir"; trap - EXIT')
-        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(status, 0, errors)
         directory = Path(out.strip())
         self.assertEqual((directory / "trees" / "base" / "README").read_text(), "cladefs\n")
         self.assertEqual((directory / "trees" / "same" / "README").read_text(), "newer\n")
@@ -885,133 +636,30 @@ class Source(unittest.TestCase):
                          (2, "", "BASE=HEAD: LABEL=COMMIT, LABEL in lower-case letters, digits "
                                  "and -\n"))
 
-    def test_a_firecracker_the_host_cannot_get_runs_nothing(self):
-        fleet = Fleet()
-        # vendor/firecracker at a commit its origin doesn't have.
-        missing = "0123456789abcdef0123456789abcdef01234567"
-        fleet.git(fleet.origin, "update-index", "--cacheinfo", f"160000,{missing},vendor/firecracker")
-        fleet.git(fleet.origin, "commit", "-q", "-m", "a firecracker of nowhere")
-        # The origin's own checkout of it the earlier one, which the commit names.
-        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_TEST_HOST_COMMIT": "HEAD"})
-        # git's status.
-        self.assertEqual((status, out), (128, ""))
-        self.assertIn(missing, errors)
-        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
 
-    def test_a_copy_that_failed_runs_nothing(self):
-        kernel = Path(tempfile.mkdtemp()) / "vmlinux"
-        kernel.write_bytes(b"a kernel")
-        fleet = Fleet({"calls": [{"fail": 1}]})
-        status, out, _ = fleet.drive(RAN, environment={"CLADEFS_GUEST_KERNEL": str(kernel)})
-        self.assertEqual((status, out), (1, ""))
-        self.assertEqual(fleet.calls(), ["host1 mkdir", "host1 bash -s -- clean"])
+class Fetch(unittest.TestCase):
+    """host_fetch: the results come back, but what isn't results."""
 
-
-class Jobs(unittest.TestCase):
-    """What runs on a host, under a driver's `|| status=$?`."""
-
-    def started(self, state, preamble="", environment=None):
-        """Runs a run's job, after host_start and `preamble`, on hosts as `state` has them from
-        the call after host_start's: its status, output (the job's, its status, `kept` if its pid
-        was kept on the host, and where the run stands) and errors, and the fleet."""
-        fleet = Fleet()
-        status, out, errors = fleet.drive(
-            f"host_start\n{preamble}\n"
-            f"echo {shlex.quote(json.dumps(state))} > \"$FAKE_SSH/state.json\"\n"
-            'status=0; host_job test-linux-host.sh || status=$?; echo "status $status"\n'
-            'if [[ -e $host_dir/job/pid ]]; then echo kept; fi; echo "$host_state"',
-            environment=environment)
-        return status, out, errors, fleet
-
-    def test_a_job_that_did_not_start_is_not_waited_for(self):
-        # Its launch fails, and a fresh connection's look for its pid finds none.
-        status, out, errors, fleet = self.started(
-            {"calls": [None, {"fail": 255}, {"fail": 1}]},
-            # Waiting would take until the host answered no more.
-            preamble='sleep() { echo "waited for the job" >&2; exit 3; }')
-        self.assertEqual((status, out, errors), (0, "status 255\nprepared\n", ""))
-        self.assertEqual(fleet.calls()[-3:], ["host1 bash -s -- launch", "host1 test",
-                                              "host1 bash -s -- clean"])
-
-    def test_a_job_keeps_its_pid_and_is_waited_for(self):
-        status, out, _, _ = self.started({}, environment={"CLADEFS_FAKE_HOST": "fail"})
-        self.assertEqual((status, out), (0, "ran test-linux-host.sh \nstatus 3\nkept\nended\n"))
-
-    def test_a_job_whose_launching_connection_dropped_is_waited_for(self):
-        # TASK-235: the launch's SSH fails once the job runs, as GCE r942's did: a fresh
-        # connection finds its pid, and it is waited for.
-        status, out, _, fleet = self.started({"calls": [None, {"status": 255}]})
-        self.assertEqual((status, out), (0, "ran test-linux-host.sh \nstatus 0\nkept\nended\n"))
-        self.assertEqual(fleet.calls()[2:5], ["host1 bash -s -- launch", "host1 test",
-                                              "host1 bash -s -- wait"])
-
-    def test_a_dropped_wait_is_tried_again(self):
-        status, out, _, fleet = self.started({"calls": [None, None, {"fail": 255}, {"fail": 255}]})
-        self.assertEqual((status, out), (0, "ran test-linux-host.sh \nstatus 0\nkept\nended\n"))
-        self.assertEqual(fleet.calls().count("host1 bash -s -- wait"), 3)
-
-    def test_a_host_gone_quiet_is_waited_for_no_longer_and_its_run_left(self):
-        # Every try fails: the job may run on, and its run's directory stays for a resume.
-        status, out, errors, fleet = self.started({"calls": [None, None] + [{"fail": 255}] * 20})
-        self.assertEqual((status, out), (0, "status 1\nkept\nlaunched\n"))
-        self.assertEqual(fleet.calls().count("host1 bash -s -- wait"), 20)
-        run = fleet.runs()[0]
-        self.assertEqual(errors, f"host1 does not answer: {run}'s job may run on.\n"
-                                 f"{run} runs on, on host1: wait for it and fetch its results with "
-                                 f"`/bin/bash resume {run} {fleet.directory}/results`, or end it "
-                                 f"with `/bin/bash cancel {run}`.\n")
-        self.assertEqual(fleet.worktrees(), [f"{fleet.scratch}/{run}/tree"])
-
-    def fetch(self, state):
-        """Runs host_fetch on hosts as `state` has them, the run's results holding a file, and a
-        root filesystem, which isn't results: its status, its errors, and the files then in the
+    def test_cells_buckets_images_and_root_filesystems_are_not_fetched(self):
+        """board 1868: a job killed mid-case never prunes its cells, bases and images, and the fetch
+        copied 7.1 GB of them. Those directories stay; files of the same names, as perf's, are
         results."""
         fleet = Fleet()
-        status, out, errors = fleet.drive(
-            'host_start\n'
-            'echo results > "$host_dir/results/host.txt"\n'
-            'mkdir -p "$host_dir/results/e2e/rootfs"; echo no > "$host_dir/results/e2e/rootfs/sh"\n'
-            f"echo {shlex.quote(json.dumps(state))} > \"$FAKE_SSH/state.json\"\n"
-            'status=0; host_fetch || status=$?; echo "status $status"')
-        results = fleet.directory / "results"
-        return out, errors, sorted(str(path.relative_to(results)) for path in results.rglob("*"))
-
-    def test_results_are_fetched_but_root_filesystems(self):
-        self.assertEqual(self.fetch({}), ("status 0\n", "", ["e2e", "host.txt", "remote.log",
-                                                             "run.txt", "source.txt"]))
-
-    def test_results_are_fetched_from_an_archive_tar_failed_to_make_whole(self):
-        # tar ends with 1 when a file changed as it read it, as the logs of a daemon a killed host
-        # script left running do, and with 2 when it could not read one: it archived every other.
-        self.assertEqual(self.fetch({"calls": [{"status": 2}]}),
-                         ("status 2\n", "", ["e2e", "host.txt", "remote.log", "run.txt",
-                                              "source.txt"]))
-
-    def test_cells_buckets_and_images_a_killed_case_left_are_not_fetched(self):
-        """board 1868: a job killed mid-case never prunes its cells, bases and images, and the fetch
-        copied 7.1 GB of them. Those directories stay on the host; files of the same names, as
-        perf's, are results."""
-        fleet = Fleet()
         left = ["e2e/fxfs-guest/extents", "e2e/fxfs-guest/vm.root", "e2e/fxfs-guest/vm.data",
-                "sandboxes/a.base", "sandboxes/sandbox-image", "sandboxes/store-1",
+                "e2e/rootfs", "sandboxes/a.base", "sandboxes/sandbox-image", "sandboxes/store-1",
                 "sandboxes/x.bucket", "sandboxes/disk.img", "sandboxes/.cladefsd-cache.ab12"]
+        remote = "".join(f'mkdir -p "$d/{d}"; echo big > "$d/{d}/f"; ' for d in left)
+        remote += 'echo samples > "$d/e2e/fxfs-guest/perf.data"; echo log > "$d/sandboxes/store-1.log"'
         status, out, errors = fleet.drive(
             'host_start\n'
-            + "".join(f'mkdir -p "$host_dir/results/{d}"; echo big > "$host_dir/results/{d}/f"\n'
-                      for d in left)
-            + 'echo samples > "$host_dir/results/e2e/fxfs-guest/perf.data"\n'
-            'echo log > "$host_dir/results/sandboxes/store-1.log"\n'
+            f'host_shell "$(printf \'d=%q; \' "$host_dir/results")"{shlex.quote(remote)} > /dev/null\n'
             'status=0; host_fetch || status=$?; echo "status $status"')
         results = fleet.directory / "results"
-        self.assertEqual((status, out, errors), (0, "status 0\n", ""))
+        self.assertEqual((status, out.splitlines()[-1]), (0, "status 0"), errors)
         self.assertEqual(
             sorted(str(path.relative_to(results)) for path in results.rglob("*")),
             ["e2e", "e2e/fxfs-guest", "e2e/fxfs-guest/perf.data", "remote.log", "run.txt",
              "sandboxes", "sandboxes/store-1.log", "source.txt"])
-
-    def test_a_fetch_that_failed_fails(self):
-        out, _, files = self.fetch({"calls": [{"fail": 255}]})
-        self.assertEqual((out, files), ("status 255\n", ["remote.log", "run.txt", "source.txt"]))
 
 
 class Resume(unittest.TestCase):
@@ -1019,133 +667,30 @@ class Resume(unittest.TestCase):
     job."""
 
     def left(self, environment):
-        """A run left on the host as a driver killed leaves it, its job launched with
-        `environment`: the fleet and the run's name."""
+        """A run left in the workspace as a driver killed leaves it, its job launched with
+        `environment` and not waited for: the fleet and the run's name."""
         fleet = Fleet()
-        status, out, _ = fleet.drive(
-            'host_start\nhost_put <(printf "%s\\n" "$(host_command test-linux-host.sh)") '
-            '"$host_dir/job/command"\n'
-            'host_side launch "$host_dir" "$host_run" 0 ""\necho "$host_run"\ntrap - EXIT',
-            environment=environment)
-        self.assertEqual(status, 0)
+        (fleet.directory / "session").write_text("mine\n")
+        status, out, errors = fleet.drive(
+            'host_start\nhost_wait() { :; }\nhost_launch test-linux-host.sh\n'
+            'host_state=launched\necho "$host_run"\ntrap - EXIT', environment=environment)
+        self.assertEqual(status, 0, errors)
         return fleet, out.strip()
 
     def test_a_run_whose_job_ended_is_resumed_and_ended(self):
         fleet, run = self.left({})
         results = fleet.directory / "resumed"
         status, out, errors = fleet.run_driver("test-host.sh", "resume", run, str(results))
-        self.assertEqual((status, out), (0, ""))
-        self.assertEqual(errors, f"Results: {results}\nran test-linux-host.sh \n"
-                                 f"Results: {results}\n")
+        self.assertEqual((status, out), (0, ""), errors)
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0], "test-linux-host.sh ")
-        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
-
-    def test_a_job_whose_shell_went_without_its_status_is_lost(self):
-        fleet, run = self.left({})
-        directory = fleet.scratch / run
-        # Its status gone, as a job's is whose host restarted under it.
-        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
-        (directory / "job" / "status").unlink()
-        results = fleet.directory / "resumed"
-        status, _, errors = fleet.run_driver("test-host.sh", "resume", run, str(results))
-        self.assertEqual(status, 1)
-        self.assertIn(f"{run} on host1 is lost: its job ended without its status.\n",
-                      (results / "remote.log").read_text())
+        self.assertEqual((results / "remote.log").read_text(), "ran test-linux-host.sh \n")
         self.assertEqual(fleet.runs(), [])
-
-    def test_a_job_whose_shell_went_before_writing_its_status_is_lost(self):
-        """The status's room, taken at launch, still says pending: the job's shell went first."""
-        fleet, run = self.left({})
-        directory = fleet.scratch / run
-        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
-        (directory / "job" / "status").write_text(f"{'pending':<20}\n")
-        self.assertEqual(fleet.drive(f'host_name {run}; host_side wait "$host_dir"'),
-                         (0, "waiting\nlost\n", ""))
-
-    def test_a_jobs_status_is_written_over_the_room_its_launch_took(self):
-        """board 2740: a job whose tests passed could not write its status, others' runs having
-        filled the scratch disk by its end, and its run failed. The launch takes the status's room;
-        the job writes over it in place, the same file, needing no new block."""
-        fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
-        directory = fleet.scratch / run
-        waiting = directory / "results" / "waiting.pid"
-        for _ in range(300):
-            if waiting.exists() and waiting.read_text().strip():
-                break
-            time.sleep(0.1)
-        pid = int(waiting.read_text())
-        self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
-        status_file = directory / "job" / "status"
-        self.assertEqual(status_file.read_text(), f"{'pending':<20}\n")
-        before = status_file.stat()
-        os.kill(pid, signal.SIGTERM)
-        self.assertEqual(fleet.drive(f'host_name {run}; host_side wait "$host_dir"'),
-                         (0, "waiting\nstatus 143\n", ""))
-        self.assertEqual(status_file.read_text(), f"{'143':<20}\n")
-        after = status_file.stat()
-        self.assertEqual((after.st_ino, after.st_size), (before.st_ino, before.st_size))
-        fleet.drive(f'host_name {run}; host_side clean "$host_dir" "$host_repo"')
-
-    def test_two_cleans_of_a_run_at_once_take_turns(self):
-        """board 1856: a cancel's clean and its waiting driver's both ran rm -r of the run at once,
-        each failing on what the other removed, the run left. They take the runs' lock: both
-        wait for it, then the first removes the run, the second finds nothing left."""
-        fleet, run = self.left({})
-        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
-        lock = fleet.clone / ".git" / "cladefs-host.lock"
-        holder = subprocess.Popen(
-            [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1], 'a'); "
-             "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()", lock],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        self.addCleanup(holder.wait)
-        self.addCleanup(holder.stdout.close)
-        self.addCleanup(holder.stdin.close)
-        self.assertEqual(holder.stdout.readline(), "held\n")
-        # Each its own copy of the script on its standard input, as each ssh has.
-        cleans = []
-        for _ in range(2):
-            with open(SCRIPTS / "lib" / "host-remote.sh") as remote:
-                cleans.append(subprocess.Popen(
-                    [sys.executable, str(FAKE_SSH), "host1",
-                     f"bash -s -- clean {fleet.scratch / run} src/fxdax"],
-                    stdin=remote, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    env=fleet.environment))
-        time.sleep(1)
-        self.assertEqual([clean.poll() for clean in cleans], [None, None])
-        self.assertTrue((fleet.scratch / run).exists())
-        holder.stdin.close()
-        self.assertEqual([clean.communicate() + (clean.returncode,) for clean in cleans],
-                         [("", "", 0), ("", "", 0)])
-        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
-
-    def test_a_job_whose_status_is_empty_is_lost(self):
-        """TASK-489: on a full disk the job's shell made its status file and could write nothing in
-        it; the wait read `status ` and bash's return refused the empty number."""
-        fleet, run = self.left({})
-        directory = fleet.scratch / run
-        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
-        for written in ("", "no space\n"):
-            with self.subTest(status=written):
-                (directory / "job" / "status").write_text(written)
-                status, out, errors = fleet.drive(
-                    f'host_name {run}; host_state=launched; status=0; '
-                    'host_wait > /dev/null || status=$?; echo "status $status $host_state"')
-                self.assertEqual((status, out, errors), (
-                    0, "status 1 ended\n",
-                    f"{run} on host1 is lost: its job ended without its status (its status file "
-                    "empty or unreadable: was its disk full?).\n"))
 
     def test_a_running_job_is_cancelled(self):
         fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
         status, out, errors = fleet.run_driver("test-host.sh", "cancel", run)
-        self.assertEqual((status, out, errors), (0, "", f"Ended {run} on host1.\n"))
-        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
-
-    def test_a_running_jobs_run_is_not_removed(self):
-        fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
-        status, _, errors = fleet.drive(f'host_name {run}; host_side clean "$host_dir" "$host_repo"')
-        self.assertEqual((status, errors), (1, f"clean: a job runs in {fleet.scratch}/{run}\n"))
-        self.assertEqual(fleet.run_driver("test-host.sh", "cancel", run)[0], 0)
+        self.assertEqual((status, out, errors.splitlines()[-1]), (0, "", f"Ended {run}."))
+        self.assertEqual(fleet.runs(), [])
 
     def test_only_a_run_is_resumed(self):
         fleet = Fleet()
@@ -1155,75 +700,8 @@ class Resume(unittest.TestCase):
                          (2, "", f"Usage: {fleet.origin}/scripts/test-host.sh resume RUN RESULTS\n"))
 
 
-class Reap(unittest.TestCase):
-    """host-remote.sh's reap: what is left of a job's scope once it ends, root's processes among
-    it, which the user's systemd manager can't kill. Here processes of this machine's, and a
-    directory of processes (CLADEFS_TEST_HOST_PROC) whose cgroup files place them, a process's entry
-    gone as sudo's kill kills it, as /proc's goes."""
-
-    SUDO = """#!/bin/bash
-[[ $1 == kill ]] || exit 3
-for pid in "${@:3}"; do rm -r "$CLADEFS_TEST_HOST_PROC/$pid"; done
-exec "$@"
-"""
-
-    def test_what_is_left_of_a_jobs_scope_is_killed_and_no_other(self):
-        directory = Path(tempfile.mkdtemp())
-        (directory / "bin").mkdir()
-        (directory / "bin" / "sudo").write_text(self.SUDO)
-        (directory / "bin" / "sudo").chmod(0o755)
-        processes = {}
-        for scope in ["fxjob-run-x-41.scope", "fxjob-run-x-41.scope", "fxjob-run-xy-7.scope"]:
-            process = subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
-            self.addCleanup(process.wait)
-            self.addCleanup(process.kill)
-            processes[process] = scope
-            (directory / "proc" / str(process.pid)).mkdir(parents=True)
-            (directory / "proc" / str(process.pid) / "cgroup").write_text(
-                f"0::/user.slice/user-1000.slice/user@1000.service/fxdax.slice/{scope}\n")
-        done = subprocess.run(
-            ["/bin/bash", SCRIPTS / "lib" / "host-remote.sh", "reap", "run-x"],
-            env={"PATH": f"{directory / 'bin'}:/usr/bin:/bin",
-                 "CLADEFS_TEST_HOST_PROC": str(directory / "proc")},
-            capture_output=True, text=True)
-        self.assertEqual((done.returncode, done.stderr), (0, ""))
-        for process, scope in processes.items():
-            if scope == "fxjob-run-x-41.scope":
-                self.assertEqual(process.wait(timeout=10), -9)
-            else:
-                self.assertIsNone(process.poll())
-
-
-class Names(unittest.TestCase):
-    """The drivers' results: two runs at once keep theirs apart, each's directory ending in its
-    run's mark, here on a host that doesn't answer."""
-
-    # Each driver's results directory, before the time, and its own settings.
-    DRIVERS = {
-        "bench-host.sh": ("host1-fs-bench", {}),
-        "bench-ab-host.sh": ("host1-fs-bench-ab", {"CLADEFS_AB_A": "a=HEAD", "CLADEFS_AB_B": "b=same"}),
-        "gets-host.sh": ("host1-gets", {"CLADEFS_GETS_URL": "file:///tmp/gets/"}),
-        "mutants-host.sh": ("host1-mutants", {}),
-        "gc-sweep-host.sh": ("host1-gc-sweep", {}),
-    }
-
-    def test_runs_at_once_have_names_of_their_own(self):
-        for driver, (results, environment) in self.DRIVERS.items():
-            with self.subTest(driver):
-                fleet = Fleet({"down": ["host1"]})
-                for _ in range(2):
-                    self.assertEqual(fleet.run_driver(driver, environment=environment)[0], 1)
-                kept = sorted((fleet.origin / "docs" / "measurements").glob(f"{results}-2*"))
-                marks = {
-                    re.fullmatch(rf"{results}-\d{{4}}-\d{{2}}-\d{{2}}T\d{{4}}Z-([0-9a-f]{{8}})",
-                                 path.name).group(1)
-                    for path in kept
-                }
-                self.assertEqual(len(marks), 2, kept)
-
-
 class Drivers(unittest.TestCase):
-    """Each driver's run, end to end, on a host of fake_ssh.py's."""
+    """Each driver's run, end to end, in fake_hotbed.py's workspace."""
 
     def test_the_tests_run_as_asked(self):
         fleet = Fleet()
@@ -1242,15 +720,15 @@ class Drivers(unittest.TestCase):
 
     def test_a_bench_is_a_measurement_kept_in_the_history(self):
         fleet = Fleet()
-        results = fleet.directory / "origin" / "docs" / "measurements" / "host1-fs-bench-x"
+        results = fleet.origin / "docs" / "measurements" / "node1-fs-bench-x"
         status, _, errors = fleet.run_driver("bench-host.sh", str(results),
                                              environment={"CLADEFS_BENCH_NOTE": "a note"})
         self.assertEqual(status, 0, errors)
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0], "bench-linux-host.sh 3")
-        self.assertIn("--bench", (fleet.home("host1") / "fxjob-calls").read_text())
+        self.assertTrue(any("--bench" in call for call in fleet.calls()))
         self.assertEqual((results / "note.md").read_text().splitlines()[0], "a note")
         history = (fleet.origin / "docs" / "measurements" / "fs-bench-history.md").read_text()
-        self.assertIn("[x](host1-fs-bench-x/)", history)
+        self.assertIn("[x](node1-fs-bench-x/)", history)
 
     def test_an_ab_builds_each_sides_commit(self):
         fleet = Fleet()
@@ -1263,29 +741,17 @@ class Drivers(unittest.TestCase):
                          "CLADEFS_AB_ROUNDS": "2"})
         self.assertEqual(status, 0, errors)
         run = (results / "run.txt").read_text().split()[1]
-        trees = f"{fleet.scratch}/{run}/trees"
+        trees = f"{fleet.checkout}/target/host-runs/{run}/trees"
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0],
                          f"bench-ab-linux-host.sh {trees}/base {trees}/change 2 base change")
         self.assertEqual((results / "base" / "source.txt").read_text().splitlines()[0],
                          f"revision {base}")
-        # Its sides built as work, then its rounds alone measured, jobs of one run.
-        self.assertIn("CLADEFS_TEST_HOST_PHASE=measure", (results / "ran.txt").read_text().splitlines())
         self.assertEqual((results / "jobs.txt").read_text().splitlines(),
                          ["bench-ab-linux-host.sh build work", "bench-ab-linux-host.sh measure bench"])
-        calls = (fleet.home("host1") / "fxjob-calls").read_text().splitlines()
-        self.assertEqual([("--bench" in call, f"--name {run}" in call) for call in calls],
-                         [(False, True), (True, True)])
         self.assertTrue((results / "remote-build.log").exists())
-        # B the same tree: A's, built once.
-        status, _, errors = fleet.run_driver(
-            "bench-ab-host.sh", str(fleet.directory / "same"),
-            environment={"CLADEFS_AB_A": "base=HEAD", "CLADEFS_AB_B": "knob=same"})
-        self.assertEqual(status, 0, errors)
-        self.assertRegex((fleet.directory / "same" / "ran.txt").read_text().splitlines()[0],
-                         r"^bench-ab-linux-host.sh \S+/trees/base same 3 base knob$")
 
     def test_every_timed_driver_builds_as_work_then_measures_alone(self):
-        """TASK-368: no driver's fxjob --bench job builds. Each measures in two jobs of its run, its
+        """TASK-368: no driver's measurement builds. Each measures in two commands of its run, its
         builds as work, then the measurement alone, which would refuse to build (FAKE_HOST_SCRIPT,
         scripts/lib/measurement.sh); perf-gate-host.sh's and soak-host.sh's through test-host.sh."""
         for driver, args, environment, outs in [
@@ -1304,16 +770,15 @@ class Drivers(unittest.TestCase):
         ]:
             with self.subTest(driver=driver):
                 fleet = Fleet()
-                # Where bench-host.sh's history finds it.
-                results = fleet.origin / "docs" / "measurements" / "host1-x"
+                results = fleet.origin / "docs" / "measurements" / "node1-x"
                 args = [str(results) if arg == "RESULTS" else arg for arg in args]
                 status, _, errors = fleet.run_driver(driver, *args, environment=environment)
                 self.assertEqual(status, 0, errors)
                 for out, script in outs.items():
                     self.assertEqual((results / out / "jobs.txt").read_text().splitlines(),
                                      [f"{script} build work", f"{script} measure bench"], out)
-                calls = (fleet.home("host1") / "fxjob-calls").read_text().splitlines()
-                self.assertEqual(["--bench" in call for call in calls], [False, True] * len(outs))
+                launched = [call for call in fleet.calls() if "--detach" in call]
+                self.assertEqual(["--bench" in call for call in launched], [False, True] * len(outs))
                 self.assertEqual(fleet.runs(), [])
 
     def test_a_driver_that_is_no_measurement_runs_one_job_of_work(self):
@@ -1323,7 +788,7 @@ class Drivers(unittest.TestCase):
         self.assertEqual(status, 0, errors)
         self.assertEqual((results / "1024m-2c-2048w" / "jobs.txt").read_text().splitlines(),
                          ["test-linux-host.sh all work"])
-        self.assertNotIn("--bench", (fleet.home("host1") / "fxjob-calls").read_text())
+        self.assertFalse(any("--bench" in call for call in fleet.calls()))
 
     def test_an_ab_needs_its_sides(self):
         fleet = Fleet()
@@ -1369,44 +834,25 @@ class Drivers(unittest.TestCase):
                                              "old=HEAD")
         self.assertEqual(status, 0, errors)
         run = (results / "run.txt").read_text().split()[1]
-        trees = f"{fleet.scratch}/{run}/trees"
+        trees = f"{fleet.checkout}/target/host-runs/{run}/trees"
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0],
                          f"fork-time-linux-host.sh main={trees}/main old={trees}/old")
-        self.assertIn("--bench", (fleet.home("host1") / "fxjob-calls").read_text())
         self.assertEqual(fleet.run_driver("fork-time-host.sh", str(results))[0], 2)
 
-    def test_gc_sweeps_are_a_measurement(self):
-        fleet = Fleet()
-        results = fleet.directory / "gc"
-        status, _, errors = fleet.run_driver(
-            "gc-sweep-host.sh", str(results), environment={"CLADEFS_GC_AT_ONCE": "1 8"})
-        self.assertEqual(status, 0, errors)
-        ran = (results / "ran.txt").read_text().splitlines()
-        # The fake host script says its name, then its arguments: none.
-        self.assertEqual(ran[0], "gc-sweep-linux-host.sh ")
-        self.assertIn("CLADEFS_GC_AT_ONCE=1 8", ran)
-        self.assertIn("--bench", (fleet.home("host1") / "fxjob-calls").read_text())
-        self.assertEqual((results / "note.md").read_text().splitlines()[0],
-                         "cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5).")
-        self.assertEqual(fleet.run_driver("gc-sweep-host.sh", "a", "b")[0], 2)
-
-    def test_gc_sweeps_of_sides_measure_each_commit_in_one_job(self):
+    def test_gc_sweeps_of_sides_measure_each_commit_in_one_measurement(self):
         """TASK-395.17: an A/B of commits' sweeps, each side a worktree of its own, measured in the
-        run's one job, by the run's scripts."""
+        run's one measurement, by the run's scripts."""
         fleet = Fleet()
         results = fleet.directory / "gc-ab"
         status, _, errors = fleet.run_driver("gc-sweep-host.sh", str(results), "old=HEAD",
                                              "new=HEAD")
         self.assertEqual(status, 0, errors)
         run = (results / "run.txt").read_text().split()[1]
-        trees = f"{fleet.scratch}/{run}/trees"
+        trees = f"{fleet.checkout}/target/host-runs/{run}/trees"
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0],
                          f"gc-sweep-linux-host.sh old={trees}/old new={trees}/new")
-        self.assertTrue((results / "old" / "source.txt").is_file())
-        self.assertEqual((fleet.home("host1") / "fxjob-calls").read_text().count("--bench"), 1)
-        # Sides come after the results, which a side can't stand for.
+        self.assertEqual(sum("--bench" in call for call in fleet.calls()), 1)
         self.assertEqual(fleet.run_driver("gc-sweep-host.sh", "old=HEAD")[0], 2)
-        self.assertEqual(fleet.run_driver("gc-sweep-host.sh", str(results), "old")[0], 2)
 
     def test_a_migration_restores_on_the_second_run_what_the_first_left(self):
         fleet = Fleet()
@@ -1416,8 +862,8 @@ class Drivers(unittest.TestCase):
         self.assertEqual(status, 0, errors)
         a, b = ((results / side / "ran.txt").read_text().splitlines() for side in "ab")
         run = (results / "a" / "run.txt").read_text().split()[1]
-        held = f"{fleet.scratch}/{run}.held"
-        # The same paths on both, the second's run of the same name.
+        held = f"{fleet.checkout}/target/host-runs/{run}.held"
+        # The same tree on both: the workspace's checkout.
         self.assertEqual(a[1], b[1])
         for side, phase, token in [(a, "source", "1"), (b, "target", "2")]:
             self.assertIn(f"CLADEFS_MIGRATE_PHASE={phase}", side)
@@ -1426,9 +872,11 @@ class Drivers(unittest.TestCase):
             self.assertIn(f"CLADEFS_MIGRATE_BUNDLE={held}/bundle", side)
         self.assertEqual((results / "b" / "remote.log").read_text(),
                          "ran test-linux-host.sh fxfs-guest-migrate-dax\n"
-                         f"a VM, from {fleet.scratch}/{run}/tree\n")
-        # Nothing left of it.
-        self.assertEqual((list(fleet.scratch.iterdir()), fleet.worktrees()), ([], []))
+                         f"a VM, from {fleet.checkout}\n")
+        # Nothing left of it, and one session for both runs, ended with them.
+        self.assertEqual(fleet.runs(), [])
+        self.assertEqual([call for call in fleet.calls() if call.startswith("session")],
+                         ["session current", "session start", "session end"])
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
 
     def test_a_migration_that_fails_leaves_nothing(self):
@@ -1438,14 +886,15 @@ class Drivers(unittest.TestCase):
                                              environment={"CLADEFS_FAKE_HOST": "fail"})
         self.assertEqual(status, 3)
         self.assertFalse((results / "b").exists())
-        self.assertEqual((list(fleet.scratch.iterdir()), fleet.worktrees()), ([], []))
+        self.assertEqual(fleet.runs(), [])
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
 
-    def test_a_migration_between_two_hosts_names_a_bucket(self):
+    def test_a_migration_between_two_nodes_is_refused(self):
         fleet = Fleet()
         self.assertEqual(
             fleet.run_driver("migrate-host.sh", environment={"CLADEFS_MIGRATE_HOSTS": "a b"}),
-            (2, "", "Name a bucket both hosts reach: CLADEFS_MIGRATE_BUCKET.\n"))
+            (2, "", "CLADEFS_MIGRATE_HOSTS is gone: both runs are on one node, CLADEFS_TEST_HOST's "
+                    "(board 7817)\n"))
 
 
 if __name__ == "__main__":

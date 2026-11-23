@@ -4,65 +4,53 @@
 # found in the LICENSE file.
 
 # An A/B of cell-bench's cases that time a cell on a host's disk (`durable`, `burst`), two
-# worktrees' builds of it, on this Linux host, a shared one: what a change to the cell's
-# write path costs (TASK-539.4, the cells' files counted as they write them).
+# worktrees' builds of it, in a hotbed workspace on a test host: what a change to the cell's write
+# path costs (TASK-539.4, the cells' files counted as they write them).
 #
-#   scripts/cell-bench-ab.sh A_WORKTREE B_WORKTREE RESULTS [ROUNDS]
+#   scripts/cell-bench-ab.sh build A_WORKTREE B_WORKTREE RESULTS
+#   scripts/cell-bench-ab.sh measure A_WORKTREE B_WORKTREE RESULTS [ROUNDS]
 #
-# Each side is built first, as ordinary work (fxjob without --bench, niceness 19, CARGO_BUILD_JOBS
-# 4 unless the caller says), each into a target of its own, RESULTS/target-a and RESULTS/target-b:
-# two worktrees sharing one link each other's crates (TASK-369). Then one measurement, `fxjob
-# --bench`, runs ROUNDS rounds (6), each side's cases once a round, the sides' order reversed every
-# other round (A B, B A, ...), so that what drifts on the host moves both alike. Their cells are
-# on ext4 over a RAM-backed loop device, made in the measurement (sudo) and gone with it, which
-# supports O_DIRECT and leaves the host's disks out: the scratch disk, ext4 on a ZFS zvol, drifts
-# up to four times within one job (TASK-433.8). Each case's output goes to RESULTS/SIDE/CASE-rN.txt,
-# and RESULTS/summary.txt says, for each case's figures, each side's median over the rounds but the
+# build, a hotbed command of work, builds each side (CARGO_BUILD_JOBS 4 unless the caller says),
+# each into a target of its own, RESULTS/target-a and RESULTS/target-b: two worktrees sharing one
+# link each other's crates (TASK-369). measure, a measurement (hotbed run --bench), runs ROUNDS
+# rounds (6), each side's cases once a round, the sides' order reversed every other round (A B, B
+# A, ...), so that what drifts on the host moves both alike. Their cells are in RESULTS/disk, on
+# the workspace's filesystem (board 6058). Each case's output goes to RESULTS/SIDE/CASE-rN.txt, and
+# RESULTS/summary.txt says, for each case's figures, each side's median over the rounds but the
 # first, which runs cold.
 set -euo pipefail
 
-if [[ $# -lt 3 ]]; then
-    echo "usage: $0 A_WORKTREE B_WORKTREE RESULTS [ROUNDS]" >&2
+if [[ $# -lt 4 || ( $1 != build && $1 != measure ) ]]; then
+    echo "usage: $0 build|measure A_WORKTREE B_WORKTREE RESULTS [ROUNDS]" >&2
     exit 2
 fi
-a=$(cd "$1" && pwd)
-b=$(cd "$2" && pwd)
-mkdir -p "$3"
-results=$(cd "$3" && pwd)
-rounds=${4:-6}
+phase=$1
+a=$(cd "$2" && pwd)
+b=$(cd "$3" && pwd)
+mkdir -p "$4"
+results=$(cd "$4" && pwd)
+rounds=${5:-6}
 here=$(cd "$(dirname "$0")" && pwd)
+source "$here/lib/measurement.sh"
 
-if [[ ${CELL_BENCH_AB_INNER:-} != 1 ]]; then
+if [[ $phase == build ]]; then
+    measurement_refuses "cell-bench-ab.sh build"
     for side in a b; do
         tree=$a
         [[ $side == b ]] && tree=$b
         (
             cd "$tree"
-            fxjob --name "cell-bench-ab-build-$side" --mem 8G -- env \
-                CARGO_TARGET_DIR="$results/target-$side" \
-                CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
-                nice -n 19 cargo build --release -p cladefs-examples --example cell-bench
+            CARGO_TARGET_DIR="$results/target-$side" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
+                cargo build --release -p cladefs-examples --example cell-bench
         )
         mkdir -p "$results/$side"
         cp "$results/target-$side/release/examples/cell-bench" "$results/$side/cell-bench"
     done
-    exec fxjob --bench --name cell-bench-ab -- env CELL_BENCH_AB_INNER=1 \
-        "$here/cell-bench-ab.sh" "$a" "$b" "$results" "$rounds"
+    exit 0
 fi
 
-# Inside the measurement: the cells' disk, ext4 over a loop device on tmpfs.
-image=/dev/shm/cell-bench-ab-$$.img
 mount=$results/disk
 mkdir -p "$mount"
-truncate -s 3G "$image"
-mkfs.ext4 -q -F "$image"
-sudo mount -o loop "$image" "$mount"
-cleanup() {
-    sudo umount "$mount" || true
-    rm -f "$image"
-}
-trap cleanup EXIT
-sudo chown "$(id -u):$(id -g)" "$mount"
 
 run() {
     local side=$1 round=$2

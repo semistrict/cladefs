@@ -176,6 +176,18 @@ impl<D: Dir> Dir for CachedDir<D> {
         self.shared.dir.barrier()
     }
 
+    fn defers(&self) -> bool {
+        self.shared.dir.defers()
+    }
+
+    fn made_deferred(&self) -> bool {
+        self.shared.dir.made_deferred()
+    }
+
+    fn settle(&self) -> io::Result<()> {
+        self.shared.dir.settle()
+    }
+
     fn take(&self) -> io::Result<()> {
         self.shared.dir.take()
     }

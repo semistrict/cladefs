@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 """Tests of the guard that nothing builds inside a measurement (scripts/lib/measurement.sh,
-TASK-368): a process in fxjob --bench's slice, as its cgroup says (CLADEFS_SELF_CGROUP standing for
+TASK-368): a process in hotbed run --bench's slice, as its cgroup says (CLADEFS_SELF_CGROUP standing for
 /proc/self/cgroup), is refused each way a build would start there, before it starts, saying why;
 one in work's slice, or on a host of no such cgroups, goes on."""
 
@@ -14,16 +14,16 @@ from pathlib import Path
 
 from script import SCRIPTS
 
-SLICES = "0::/user.slice/user-1000.slice/user@1000.service/fxdax.slice"
-BENCH = f"{SLICES}/fxdax-bench.slice/fxjob-rounds-1-42.scope"
-WORK = f"{SLICES}/fxdax-work.slice/fxjob-rounds-build-41.scope"
+SLICES = "0::/user.slice/user-1000.slice"
+BENCH = f"{SLICES}/user-1000-hotbed_bench.slice/hotbed-rounds42.service"
+WORK = f"{SLICES}/user-1000-hotbed.slice/hotbed-build41.service"
 
 
 def refusal(what):
     """What the guard says, refusing `what` in the bench's cgroup."""
-    return (f"{what} would build inside a measurement (fxjob --bench, {BENCH}), holding its cores "
-            "and memory from every other measurement for as long as it builds: build first as "
-            "work (fxjob without --bench; scripts/lib/host.sh's host_job, test-e2e.sh's "
+    return (f"{what} would build inside a measurement (hotbed run --bench, {BENCH}), holding its "
+            "CPUs from every other measurement for as long as it builds: build first as work (a "
+            "command without --bench; scripts/lib/host.sh's host_job, test-e2e.sh's "
             "CLADEFS_E2E_BUILD_ONLY), then measure what it built (CLADEFS_E2E_PREBUILT) "
             "(TASK-368)\n")
 

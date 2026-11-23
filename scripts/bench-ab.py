@@ -26,7 +26,7 @@ first, before the tables, and it exits 1. A qualification's A/B ran hours with i
 started on neither side, the tables just without its rows.
 
 A round others wrote beside (its contamination.json, scripts/contamination.py, TASK-375:
-`fxjob --bench` doesn't isolate the disk) is contaminated: its timings and rates are left out of
+`hotbed run --bench` doesn't isolate the disk) is contaminated: its timings and rates are left out of
 the comparison, said before the tables and in each cell they are missing from, as a load beside a
 round skews them; its counts and sizes (bytes written for each guest byte, peak memory, requests)
 stay, as it doesn't skew those. A metric with no clean round on a side is NO RESULT, never a ratio

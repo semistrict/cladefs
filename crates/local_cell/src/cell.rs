@@ -1683,6 +1683,8 @@ impl<D: Dir> LocalCell<D> {
     /// this one; and with [`Unmade`] if its maker never made it whole (TASK-196).
     pub fn recover(dir: D) -> Result<Recovering<D>, Error> {
         match dir.open(UNMADE, false) {
+            // cladefs: unmade on the disk, but whole here, its durability deferred (board 7420).
+            Ok(_) if dir.made_deferred() => {}
             Ok(_) => return Err(Unmade.into()),
             Err(err) if not_found(&err) => {}
             Err(err) => return Err(err.into()),
@@ -1905,6 +1907,23 @@ impl<D: Dir> LocalCell<D> {
             None => self.flush().await,
         };
         drop(flushing);
+        // cladefs: its durability deferred, and no flush to make it durable, made durable as it
+        // closes, whether or not its flush failed, as a fork's making would have: whole on the
+        // disk for its next opening (board 7420).
+        let settled = crate::upload::blocking(|| self.dir.settle());
+        let flushed = match (flushed, settled) {
+            (Ok(()), settled) => {
+                settled.context("making the cell durable as it closes, its durability deferred")
+            }
+            (Err(error), Err(settled)) => {
+                log::error!(
+                    "extent store: making cell {} durable as it closes, its flush failed: {settled}",
+                    self.cell
+                );
+                Err(error)
+            }
+            (flushed, Ok(())) => flushed,
+        };
         // cladefs: an ephemeral cell's closed segments covered, all of them, its local checkpoint
         // what its next opening starts from (TASK-698.2).
         let flushed = match flushed {
@@ -3532,6 +3551,14 @@ impl<D: Dir> LocalCell<D> {
     fn flush_locked(&self, logs: &mut Logs<D::File>, timed: &mut Flush) -> Result<(), Error> {
         // A cell that failed makes nothing more durable.
         drop(self.state()?);
+        // cladefs: its durability deferred, all of it made durable first, before anything of the
+        // flush: no commit is durable before its cell is (board 7420). Failing, the cell fails, as
+        // any flush's failure fails it.
+        if let Err(err) = self.dir.settle() {
+            let error = Error::new(err).context("making the cell durable, its durability deferred");
+            self.lock().fail(&error);
+            return Err(error);
+        }
         let batch = self.durability.with(Mutex::lock).take();
         let appended = batch.is_some();
         let durable = match batch {

@@ -8,8 +8,8 @@
 # by suite, `--tag SUITE` (the guest tests' runner's `list`, whose --help names the suites;
 # default: --tag e2e), which boot cladefs's Firecracker (vendor/firecracker,
 # with its cladefs feature), which this builds, and the guest kernel
-# CLADEFS_GUEST_KERNEL names (scripts/build-guest-kernel.sh builds it). Each test's
-# logs are kept under $CLADEFS_E2E_RESULTS (default: a new temporary directory).
+# CLADEFS_GUEST_KERNEL names, or, unset, this tree's (scripts/guest-kernel.sh, board 7427). Each
+# test's logs are kept under $CLADEFS_E2E_RESULTS (default: a new temporary directory).
 # CLADEFS_E2E_REPEATS runs each case that many times (default 1), as a soak, each a
 # repeat: it stops at a case's first failing repeat, whose logs it keeps, in repeat-K
 # under the case's, and drops the passing repeats' but for what their guests said, in
@@ -84,7 +84,7 @@ if [[ -n $prebuilt && -n ${CLADEFS_FIRECRACKER_JAIL:-} && ! -x $prebuilt/jailer 
     echo "$prebuilt holds no jailer, built with no seccomp filter: CLADEFS_FIRECRACKER_JAIL needs one" >&2
     exit 2
 fi
-# Inside a measurement (fxjob --bench), nothing builds (TASK-368): its artifacts were built as work
+# Inside a measurement (hotbed run --bench), nothing builds (TASK-368): its artifacts were built as work
 # beforehand, every one there; else it refuses, saying so, before anything runs.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/measurement.sh"
 # user_cache, the downloads' cache, the invoking user's under sudo (board 2720).
@@ -108,6 +108,18 @@ if [[ -z ${LIBCLANG_PATH:-} ]] && command -v llvm-config > /dev/null; then
     LIBCLANG_PATH=$(llvm-config --libdir)
 fi
 if [[ -n ${LIBCLANG_PATH:-} ]]; then export LIBCLANG_PATH; fi
+
+# cladefs: the guest kernel, CLADEFS_GUEST_KERNEL's, or else this tree's, from the checkout's
+# cache of kernels, built there if none of these sources is, only what changed since the last
+# (scripts/guest-kernel.sh: in a hotbed workspace, the workspace's, whose base built main's; board
+# 7427). Its build's log is the results' guest-kernel.log.
+if [[ -z $build_only && -z ${CLADEFS_GUEST_KERNEL:-} ]]; then
+    measurement_refuses "the guest kernel's build, CLADEFS_GUEST_KERNEL unset,"
+    CLADEFS_GUEST_KERNEL=$(CLADEFS_GUEST_KERNEL_LOG=$results/guest-kernel.log \
+        "$root/scripts/guest-kernel.sh") ||
+        { echo "building the guest kernel failed: see $results/guest-kernel.log" >&2; exit 1; }
+    export CLADEFS_GUEST_KERNEL
+fi
 
 # The directory cargo builds into, run in directory $1 as `$2` (default cargo): its workspace's
 # target directory, CARGO_TARGET_DIR's if set, as cargo metadata says, not a path guessed here, so

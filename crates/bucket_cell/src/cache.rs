@@ -1174,25 +1174,49 @@ mod tests {
 
     /// Evicted parts' blocks are freed, and parts never kept take none. (APFS, which development
     /// on macOS uses, allocates a sparse file's holes as it is written, and frees none it punches.)
+    /// On any filesystem that frees what is punched: the file's data, as SEEK_DATA and SEEK_HOLE
+    /// find it, not its blocks, which ZFS, a hotbed workspace's, counts compressed and once their
+    /// transaction group syncs; read after a sync, and held to three parts' worth, as ZFS's holes
+    /// are of its records, not 4 KiB blocks (board 7751).
     #[cfg(target_os = "linux")]
     #[test]
     fn evicted_parts_free_their_blocks() {
-        use host_fs::MetadataExt as _;
-        // The bytes the object's file takes on its filesystem.
-        let allocated =
-            |cache: &Cache, key: &str| host_fs::metadata(cache.path(key)).unwrap().blocks() * 512;
+        use std::os::fd::AsRawFd as _;
+        // The bytes of the object's file that are data, not holes, its writes and punches synced.
+        let allocated = |cache: &Cache, key: &str| {
+            let file = host_fs::File::open(cache.path(key)).unwrap();
+            let fd = file.as_raw_fd();
+            // SAFETY: Syncs the filesystem of a descriptor this closure holds open.
+            assert_eq!(unsafe { libc::syncfs(fd) }, 0);
+            let (mut at, mut data) = (0, 0);
+            loop {
+                // SAFETY: Seeks a descriptor this closure holds open.
+                let start = unsafe { libc::lseek(fd, at, libc::SEEK_DATA) };
+                if start < 0 {
+                    // ENXIO: no data past `at`.
+                    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ENXIO));
+                    break data;
+                }
+                // SAFETY: As above.
+                let end = unsafe { libc::lseek(fd, start, libc::SEEK_HOLE) };
+                assert!(end > start);
+                data += (end - start) as u64;
+                at = end;
+            }
+        };
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 64 * PART, 1);
-        // Its tail takes a block, of the parts' last.
-        let tail = object.tail_len().next_multiple_of(4096);
         let cache = Cache::open(dir.path(), 3 * PART + object.tail_len()).unwrap();
         object.keep_tail(&cache);
         for part in 0..3 {
             object.keep_part(&cache, part);
         }
-        assert_eq!(allocated(&cache, KEY), 3 * PART + tail);
+        // Three parts and the tail, which takes a block of the parts' last: none of the 61 others.
+        let kept = allocated(&cache, KEY);
+        assert!((3 * PART..4 * PART).contains(&kept), "{kept} bytes allocated for 3 parts");
+        // A fourth evicts one of the three: its blocks freed.
         object.keep_part(&cache, 63);
-        assert_eq!(allocated(&cache, KEY), 3 * PART + tail);
+        assert_eq!(allocated(&cache, KEY), kept);
     }
 
     /// TASK-443.8: a fill that can't fit, whatever is evicted, evicts nothing: it emptied the cache

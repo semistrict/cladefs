@@ -4,8 +4,8 @@
 # found in the LICENSE file.
 
 # Install the nightly (scripts/nightly-host.sh, TASK-441) for the user running this: its clone of
-# cladefs, its git identity, and its cron entry, at 02:00 local time, the quiet hour in fxjob's
-# history of the test host (jobs in every hour but 02:00-04:00, 2026-11-13..15). Run again, it
+# cladefs, its git identity, and its cron entry, at 02:00 local time, the test host's quiet hour
+# (jobs in every hour but 02:00-04:00, 2026-11-13..15). Run again, it
 # changes nothing that is right already: the entry is replaced, never added twice. The test host's
 # setup calls it, as the user (docs/testing.md).
 #
@@ -14,9 +14,10 @@
 # ORIGIN is what the clone fetches from: by default the origin of ~/src/fxdax, the clone the host
 # runs use. The clone is CLADEFS_NIGHTLY_REPO (~/src/cladefs-nightly), made if missing; it is the
 # nightly's alone, which it resets to origin's main each night. It fails, saying what is missing,
-# if the nightly could not run: fxjob, cargo nextest, flock, vb (the board's CLI, which files the
-# tasks) and BOARD_URL (the board's URL, which the cron entry sets), or a fetch from ORIGIN without
-# a prompt (cron has no agent or terminal).
+# if the nightly could not run: hotbed (which runs its builds and its measurement, in a workspace on
+# CLADEFS_TEST_HOST's node, which the cron entry sets: this host's own name by default), flock, vb
+# (the board's CLI, which files the tasks) and BOARD_URL (the board's URL, which the cron entry
+# sets), or a fetch from ORIGIN without a prompt (cron has no agent or terminal).
 # CLADEFS_NIGHTLY_CRONTAB names crontab(1) (for the tests).
 set -euo pipefail
 clone=${CLADEFS_NIGHTLY_REPO:-$HOME/src/cladefs-nightly}
@@ -25,12 +26,10 @@ origin=${1:-$(git -C "$HOME/src/fxdax" remote get-url origin)}
 mark="# cladefs nightly (scripts/nightly-install.sh)"
 
 missing=()
-for tool in fxjob flock vb cargo hostname; do
+for tool in hotbed flock vb hostname; do
     command -v "$tool" > /dev/null || missing+=("$tool")
 done
-if command -v cargo > /dev/null && ! cargo nextest --version > /dev/null 2>&1; then
-    missing+=("cargo-nextest")
-fi
+node=${CLADEFS_TEST_HOST:-$(hostname -s)}
 if [[ -z ${BOARD_URL:-} ]]; then
     missing+=("BOARD_URL")
 fi
@@ -52,13 +51,13 @@ git -C "$clone" config user.email "nightly@$(hostname -s)"
 
 # cron's PATH is /usr/bin:/bin: the tools' own directories, as this user finds them, before it.
 path=
-for tool in cargo fxjob vb; do
+for tool in hotbed vb; do
     directory=$(dirname "$(command -v "$tool")")
     [[ :$path: == *:$directory:* ]] || path+=$directory:
 done
 path+=/usr/local/bin:/usr/bin:/bin
 state=$HOME/.local/state/cladefs/nightly
 mkdir -p "$state"
-line="0 2 * * * PATH=$path BOARD_URL=$BOARD_URL $clone/scripts/nightly-host.sh >> $state/cron.log 2>&1 $mark"
+line="0 2 * * * PATH=$path BOARD_URL=$BOARD_URL CLADEFS_TEST_HOST=$node HOTBED_CONTROLLER=${HOTBED_CONTROLLER:-} $clone/scripts/nightly-host.sh >> $state/cron.log 2>&1 $mark"
 { "$crontab" -l 2> /dev/null | { grep -vF -- "$mark" || true; }; echo "$line"; } | "$crontab" -
 echo "Installed: $line"

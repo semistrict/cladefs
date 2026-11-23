@@ -13,7 +13,7 @@
 // vCPUs' TLBs (kvm_flush_remote_tlbs). Run as root beside a case, `bpftrace
 // scripts/dax-stage-syscalls.bt [CPUS] > OUT`, and stop it with SIGINT; the seconds' lines line up
 // with the case's log by the wall clock each starts with. CPUS, a mask, traces the threads on those
-// CPUs alone, as a measurement given CPUs of its own runs (the test host's fxjob --bench: 0xf0f0,
+// CPUs alone, as a measurement given CPUs of its own runs (hotbed run --bench on the test host: 0xf0f0,
 // CPUs 4-7 and 12-15, so 61680); none, or 0, every CPU's.
 
 BEGIN

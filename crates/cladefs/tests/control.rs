@@ -526,10 +526,11 @@ fn encrypted_cells_served_and_shredded_through_the_control_api() {
     assert_eq!(forgotten.into_inner().forgotten.unwrap().stores, 1);
     assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Err(Errno::EACCES), Err(Errno::EACCES)));
 
+    // Once the daemon lets them go, which it does after their VM processes' connections went.
     drop(vms);
     let denied = (Code::PermissionDenied, Errno::EACCES);
-    assert_eq!(failure(daemon.stat(&ours)), denied);
-    assert_eq!(failure(daemon.stat(&sibling)), denied);
+    assert_eq!(failure(daemon.stat_once_closed(&ours)), denied);
+    assert_eq!(failure(daemon.stat_once_closed(&sibling)), denied);
 }
 
 /// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts
