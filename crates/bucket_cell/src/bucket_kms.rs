@@ -357,6 +357,21 @@ pub async fn rotate_recorded<B: Bucket>(
     home: &RoutedBucket<B>,
     keys: &MasterKeys,
 ) -> Result<(Rotated, Recorded), String> {
+    rotate_recorded_within(home, keys, SPREAD_WITHIN).await
+}
+
+/// cladefs: how long [`rotate_recorded`] waits for each bucket's copy of the registry to be
+/// written before it says it failed, the bucket out of reach, as [`ByBucket::shred`] waits: the
+/// bucket's requests are asked again until it answers, and one out of reach would hold the rest
+/// (hotbed review 47). Recording again finishes it.
+pub const SPREAD_WITHIN: Duration = Duration::from_secs(30);
+
+/// [`rotate_recorded`], waiting `within` for each copy.
+async fn rotate_recorded_within<B: Bucket>(
+    home: &RoutedBucket<B>,
+    keys: &MasterKeys,
+    within: Duration,
+) -> Result<(Rotated, Recorded), String> {
     let own = home.own();
     let rotated = rotate(&*own, keys).await.map_err(|err| err.to_string())?;
     if !rotated.refused.is_empty() {
@@ -375,22 +390,26 @@ pub async fn rotate_recorded<B: Bucket>(
     let Some(recorded) = recorded.map_err(registry)? else {
         return Ok((rotated, Recorded::Unrecorded));
     };
-    let mut failed = Vec::new();
-    for entry in &recorded.buckets {
-        let bucket = match entry.number {
-            number if number == ours.number => Ok(own.clone()),
-            identity::ROOT => Ok(root.clone()),
-            number => home.numbered(number).await,
+    // Every copy at once, each within `within`.
+    let (recorded, own, root) = (&recorded, &own, &root);
+    let spreads = recorded.buckets.iter().map(|entry| async move {
+        let spread = async {
+            let bucket = match entry.number {
+                number if number == ours.number => own.clone(),
+                identity::ROOT => root.clone(),
+                number => home.numbered(number).await?,
+            };
+            identity::spread(recorded, &*bucket).await
         };
-        let spread = match bucket {
-            Ok(bucket) => identity::spread(&recorded, &*bucket).await,
-            Err(err) => Err(err),
+        let spread = match tokio::time::timeout(within, spread).await {
+            Ok(spread) => spread.map_err(|err| err.to_string()),
+            Err(_) => Err(format!("no answer within {within:?}")),
         };
-        if let Err(err) = spread {
-            failed.push((entry.number, err.to_string()));
-        }
-    }
-    Ok((rotated, Recorded::Recorded { failed }))
+        (entry.number, spread)
+    });
+    let spread = futures::future::join_all(spreads).await;
+    let failed = spread.into_iter().filter_map(|(number, spread)| Some((number, spread.err()?)));
+    Ok((rotated, Recorded::Recorded { failed: failed.collect() }))
 }
 
 /// A host's KMS, as [`from_env`] chose it.
@@ -1262,6 +1281,27 @@ mod tests {
             assert_eq!((rotated.refused.len(), recorded), (1, Recorded::Refused));
             let copy = identity::registry(&home).await.unwrap().unwrap();
             assert_eq!(copy.bucket(2).unwrap().details.master_key_id, Some(id(&new)));
+
+            // hotbed review 47: a bucket out of reach once opened, whose requests are asked
+            // again until it answers, is said failed within the wait; the other copies record
+            // the rotation all the same.
+            let newer = "55".repeat(32);
+            let rotating = gc(&urls[1]);
+            rotating.numbered(3).await.unwrap();
+            let plain_dir = dir.path().join("plain");
+            std::fs::rename(&plain_dir, dir.path().join("gone")).unwrap();
+            std::fs::write(&plain_dir, b"").unwrap();
+            let keys = parsed(&format!("{newer},{new}"));
+            let within = Duration::from_secs(1);
+            let (rotated, recorded) =
+                rotate_recorded_within(&rotating, &keys, within).await.unwrap();
+            assert_eq!(rotated.rewrapped, 1);
+            let failed = vec![(3, "no answer within 1s".to_owned())];
+            assert_eq!(recorded, Recorded::Recorded { failed });
+            for bucket in [&home, &other] {
+                let copy = identity::registry(bucket).await.unwrap().unwrap();
+                assert_eq!(copy.bucket(2).unwrap().details.master_key_id, Some(id(&newer)));
+            }
         });
     }
 

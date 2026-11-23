@@ -353,11 +353,11 @@ fn a_refused_token_evicts_itself_alone() {
     let audience = "https://vault.azure.net";
     block_on(kms.wrap(9, &Secret::random())).unwrap();
     // Another call, the vault having refused token-1, evicted it and fetched token-2.
-    kms.inner.evict(audience, "token-1");
+    kms.inner.tokens.evict(audience, "token-1");
     block_on(kms.wrap(9, &Secret::random())).unwrap();
     assert_eq!(fake.lock().unwrap().tokens, 2);
     // A call that sent token-1 before then, refused, comes to evict it: token-2 stays.
-    kms.inner.evict(audience, "token-1");
+    kms.inner.tokens.evict(audience, "token-1");
     block_on(kms.wrap(9, &Secret::random())).unwrap();
     assert_eq!(fake.lock().unwrap().tokens, 2, "a token fetched since was evicted");
 }
@@ -394,4 +394,32 @@ fn calls_run_on_any_executor_after_their_callers_runtime_is_gone() {
     drop(caller);
     assert_eq!(block_on(kms.unwrap(9, &wrapped)).unwrap().expose(), key.expose());
     assert_eq!(fake.lock().unwrap().asked.len(), 3, "a call made again");
+}
+
+/// hotbed review 47: a token's fetch whose every caller gave up on it holds nothing of the KMS, so
+/// that the KMS dropped is gone, the fetch with it: the slot keeping the fetch is the KMS's own,
+/// and a fetch holding the KMS kept it alive for good.
+#[test]
+fn a_fetch_given_up_on_keeps_no_kms_alive() {
+    let delay = Duration::from_secs(30);
+    let fake = Arc::new(Mutex::new(Fake { token_delay: delay, ..Fake::default() }));
+    let server = serve(&fake);
+    let kms = over(server.base(), "t-{tenant}", None);
+    let inner = Arc::downgrade(&kms.inner);
+    let key = Secret::random();
+    let mut wrap = Box::pin(kms.wrap(9, &key));
+    let waker = futures::task::noop_waker();
+    let pending = wrap.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending();
+    assert!(pending);
+    let eventually = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    eventually("no token asked for", &|| !fake.lock().unwrap().asked.is_empty());
+    drop(wrap);
+    drop(kms);
+    eventually("the KMS kept alive", &|| inner.upgrade().is_none());
 }

@@ -304,12 +304,25 @@ struct Inner {
     names: KeyNames,
     alg: &'static str,
     http: reqwest::Client,
-    source: Source,
-    /// Each audience's token: the one held, and the fetch of the next, if one goes.
-    tokens: Mutex<HashMap<&'static str, Slot>>,
+    tokens: Tokens,
 }
 
-/// An audience's tokens ([`Inner::token`]).
+/// Its tokens, each audience's ([`Tokens::token`]), and where they come from.
+struct Tokens {
+    fetcher: Arc<Fetcher>,
+    /// Each audience's token: the one held, and the fetch of the next, if one goes.
+    slots: Mutex<HashMap<&'static str, Slot>>,
+}
+
+/// What fetches a token: a [`Slot`] holds a fetch while it goes, which holds this alone, never
+/// [`Tokens`] or [`Inner`], so that a fetch whose callers all gave up on it is no cycle keeping the
+/// KMS alive once dropped (hotbed review 47).
+struct Fetcher {
+    http: reqwest::Client,
+    source: Source,
+}
+
+/// An audience's tokens ([`Tokens::token`]).
 #[derive(Default)]
 struct Slot {
     held: Option<Held>,
@@ -387,8 +400,9 @@ impl AzureKms {
         let runtime =
             Background::new("cladefs-azure-kv").map_err(|err| format!("its runtime: {err}"))?;
         let Parsed { vault, audience, names, alg } = parsed;
-        let tokens = Mutex::default();
-        let inner = Inner { vault, audience, names, alg, http, source, tokens };
+        let fetcher = Arc::new(Fetcher { http: http.clone(), source });
+        let tokens = Tokens { fetcher, slots: Mutex::default() };
+        let inner = Inner { vault, audience, names, alg, http, tokens };
         Ok(Self { inner: Arc::new(inner), runtime })
     }
 }
@@ -478,16 +492,19 @@ impl Inner {
         let audience = self.audience(id);
         let (mut retries, mut refreshed) = (0, false);
         loop {
-            let token = (self.token(audience).await)
+            let token = (self.tokens.token(audience).await)
                 .map_err(|why| io_error(tenant, id, op, format!("credentials: {why}")))?;
             let Failure { failed, unauthorized } =
                 match self.attempt(tenant, id, url, op, body, &token).await {
                     Ok(answer) => return Ok(answer),
                     Err(failure) => failure,
                 };
-            if unauthorized && !refreshed && !matches!(self.source, Source::Static(_)) {
+            if unauthorized
+                && !refreshed
+                && !matches!(self.tokens.fetcher.source, Source::Static(_))
+            {
                 refreshed = true;
-                self.evict(audience, &token);
+                self.tokens.evict(audience, &token);
                 continue;
             }
             match failed.transient.then(|| retry::wait(retries, failed.after)).flatten() {
@@ -536,31 +553,33 @@ impl Inner {
         refused.failed.after = after;
         Err(refused)
     }
+}
 
+impl Tokens {
     /// A token for `audience`, a vault's: the one held, until its [`Held::refresh_at`]; else the
     /// one the fetch going gets, or a fetch started now, which those asking meanwhile share
     /// (board 8475).
-    async fn token(self: &Arc<Self>, audience: &'static str) -> Result<Zeroizing<String>, String> {
-        if let Source::Static(token) = &self.source {
+    async fn token(&self, audience: &'static str) -> Result<Zeroizing<String>, String> {
+        if let Source::Static(token) = &self.fetcher.source {
             return Ok(Zeroizing::new(token.clone()));
         }
         let fetch = {
-            let mut tokens = self.tokens.lock().unwrap();
-            let slot = tokens.entry(audience).or_default();
+            let mut slots = self.slots.lock().unwrap();
+            let slot = slots.entry(audience).or_default();
             if let Some(held) = &slot.held
                 && Instant::now() < held.refresh_at
             {
                 return Ok(held.token.clone());
             }
-            let inner = self.clone();
-            let start = move || async move { inner.fetch(audience).await }.boxed().shared();
+            let fetcher = self.fetcher.clone();
+            let start = move || async move { fetcher.fetch(audience).await }.boxed().shared();
             slot.fetching.get_or_insert_with(start).clone()
         };
         let fetched = fetch.clone().await;
         // The first to see its fetch end keeps what it got, and ends it: a failure is not kept,
         // the next call fetching anew.
-        let mut tokens = self.tokens.lock().unwrap();
-        let slot = tokens.entry(audience).or_default();
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.entry(audience).or_default();
         if slot.fetching.as_ref().is_some_and(|going| going.ptr_eq(&fetch)) {
             slot.fetching = None;
             if let Ok(held) = &fetched {
@@ -573,16 +592,18 @@ impl Inner {
     /// Drops `audience`'s token if it is still `used`, which the vault refused: not one fetched
     /// since by another call, which the vault has yet to refuse (board 8475).
     fn evict(&self, audience: &'static str, used: &str) {
-        let mut tokens = self.tokens.lock().unwrap();
-        let slot = tokens.entry(audience).or_default();
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.entry(audience).or_default();
         if slot.held.as_ref().is_some_and(|held| *held.token == *used) {
             slot.held = None;
         }
     }
+}
 
+impl Fetcher {
     /// A token for `audience`, fetched from the source: tried again while it fails as the network
     /// does, or as the authority or the metadata service throttling or failing, which says nothing
-    /// of the credentials ([`Inner::fetch_once`]).
+    /// of the credentials ([`Fetcher::fetch_once`]).
     async fn fetch(&self, audience: &'static str) -> Result<Held, String> {
         retry::retried(|| self.fetch_once(audience)).await
     }
