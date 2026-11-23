@@ -18,6 +18,8 @@ if host_packages_installed "$markers"; then
     exit 0
 fi
 if [[ $(id -u) != 0 ]]; then
+    # Its own, not root's: the checkout's target, which the steps after build into.
+    mkdir -p "$markers"
     exec sudo "$0" "$markers"
 fi
 host_packages_install "$markers"
