@@ -56,17 +56,30 @@ enum Credentials {
 }
 
 impl Credentials {
-    /// The credentials `vars` give. The process's own are the standard chain's, which reads them
-    /// the same. Others, a bucket's view ([`Vars::numbered`]), are read from them alone, never the
-    /// process's environment, which the chain would read first: a key's (`AWS_ACCESS_KEY_ID`,
+    /// The credentials `vars` give. The process's own, and a bucket's taking the host's, are the
+    /// standard chain's, which reads them the same. A bucket's own ([`Vars::numbered`]) are read
+    /// from them alone, never the process's environment, which the chain would read first: a key's (`AWS_ACCESS_KEY_ID`,
     /// `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), a web identity's (`AWS_WEB_IDENTITY_TOKEN_FILE`,
     /// `AWS_ROLE_ARN`, `AWS_ROLE_SESSION_NAME`) or a profile's (`AWS_PROFILE`, `AWS_CONFIG_FILE`,
     /// `AWS_SHARED_CREDENTIALS_FILE`); none of them, the chain's, its container's or instance's. A
     /// container's credentials named, or a key's half, are refused, never the chain taken instead.
     fn of(vars: &Vars) -> Result<Self, String> {
         let get = |name| vars.get(name).map(str::to_owned);
-        if vars.is_process() || !vars.any(CREDENTIAL_VARS) {
+        // The process's, as a bucket that takes the host's has them too, which the chain reads the
+        // same: a container's among them (hotbed review of board 8485).
+        if vars.reads_process(CREDENTIAL_VARS) {
             return Ok(Self::Chain);
+        }
+        if !vars.any(CREDENTIAL_VARS) {
+            return match vars.owns(CREDENTIAL_VARS) {
+                // Its own set empty: the chain would find the host's, which it set them to forgo.
+                true => Err("a bucket's own AWS credentials are set, and empty: a key's, a web \
+                             identity's or a profile's"
+                    .to_owned()),
+                // None given, none the process's: the instance's, or a container's, as the chain
+                // finds them.
+                false => Ok(Self::Chain),
+            };
         }
         // The container's, the last of them.
         let container = &CREDENTIAL_VARS[CREDENTIAL_VARS.len() - 4..];
@@ -304,7 +317,7 @@ impl AwsKms {
         }
         let endpoint = query.iter().find(|(name, _)| name == "endpoint").map(|(_, v)| v.clone());
         if let Some(endpoint) = &endpoint {
-            origin.aws_endpoint(endpoint).map_err(|why| refused(&why))?;
+            origin.aws_endpoint(endpoint, region).map_err(|why| refused(&why))?;
         }
         let names = KeyNames::of_query(query.iter().map(|(n, v)| (n.as_str(), v.as_str())), origin)
             .map_err(|why| refused(&why))?;
@@ -541,6 +554,41 @@ mod tests {
             Err(Error::Unauthentic { tenant: 7, source: Unauthentic(why) })
                 if why == "a wrapped key, under another key than the tenant's"
         );
+    }
+
+    /// hotbed review of board 8485: a bucket taking the host's credentials takes the standard
+    /// chain, as the host does, a container's among them, which a bucket's own may not name; one
+    /// with its own takes them alone; one setting its own empty, or half a key, is refused, never
+    /// given the chain, which would find the host's it set them to forgo.
+    #[test]
+    fn buckets_take_the_hosts_chain_or_credentials_of_their_own() {
+        let host = Vars::as_process(
+            [
+                ("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/credentials"),
+                ("AWS_ACCESS_KEY_ID", "host-id"),
+                ("CLADEFSD_BUCKET_2_AWS_ACCESS_KEY_ID", "two-id"),
+                ("CLADEFSD_BUCKET_2_AWS_SECRET_ACCESS_KEY", "two-secret"),
+                ("CLADEFSD_BUCKET_3_AWS_ACCESS_KEY_ID", ""),
+                ("CLADEFSD_BUCKET_4_AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.2/x"),
+                ("CLADEFSD_BUCKET_5_AWS_ACCESS_KEY_ID", "five-id"),
+                ("CLADEFSD_BUCKET_6_AWS_PROFILE", "six"),
+                ("CLADEFSD_BUCKET_6_AWS_CONFIG_FILE", "/six/config"),
+            ]
+            .map(|(name, value)| (name.to_owned(), value.to_owned())),
+        );
+        let of = |number| Credentials::of(&host.numbered(number));
+        assert!(matches!(Credentials::of(&host), Ok(Credentials::Chain)));
+        assert!(matches!(of(1), Ok(Credentials::Chain)));
+        assert!(matches!(of(2), Ok(Credentials::Key { id, session: None, .. }) if id == "two-id"));
+        let refused = |number| of(number).err().unwrap();
+        assert!(refused(3).starts_with("a bucket's own AWS credentials are set, and empty"));
+        assert!(refused(4).starts_with("AWS_CONTAINER_CREDENTIALS_FULL_URI: a container's"));
+        assert_eq!(refused(5), "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY go together");
+        assert!(matches!(
+            of(6),
+            Ok(Credentials::Profile { name, config: Some(config), credentials: None })
+                if name == "six" && config == "/six/config"
+        ));
     }
 
     // The tests against local-kms, AWS KMS's emulator, which scripts/test-local-kms.sh runs: each

@@ -41,9 +41,12 @@ const NUMBERED: &str = "CLADEFSD_BUCKET_";
 /// bucket's view of them ([`Vars::numbered`]). Printed by their names alone.
 pub struct Vars {
     vars: Vec<(String, Zeroizing<String>)>,
-    /// Whether they are the process's environment, as what reads that alike reads them (AWS's
-    /// default credential chain).
+    /// Whether they are the process's environment, or a bucket's view of it, as what reads that
+    /// alike reads them (AWS's default credential chain).
     process: bool,
+    /// The groups a bucket's view took of its own ([`GROUPS`], by place): what the process's
+    /// environment says of them is not its.
+    own: Vec<usize>,
 }
 
 impl Vars {
@@ -61,13 +64,19 @@ impl Vars {
             })?;
             vars.push((name.to_owned(), Zeroizing::new(value)));
         }
-        Ok(Self { vars, process: true })
+        Ok(Self { vars, process: true, own: Vec::new() })
     }
 
     /// `vars`, none of the process's: tests'.
     pub fn new(vars: impl IntoIterator<Item = (String, String)>) -> Self {
         let vars = vars.into_iter().map(|(name, value)| (name, Zeroizing::new(value))).collect();
-        Self { vars, process: false }
+        Self { vars, process: false, own: Vec::new() }
+    }
+
+    /// `vars`, as if the process's environment: tests'.
+    #[cfg(test)]
+    pub(super) fn as_process(vars: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self { process: true, ..Self::new(vars) }
     }
 
     /// The value of `name`, if set and not empty, the last if it is there twice.
@@ -81,10 +90,17 @@ impl Vars {
         names.iter().any(|name| self.get(name).is_some())
     }
 
-    /// Whether they are the process's environment ([`Vars::from_env`]), which readers of it read
-    /// alike.
-    pub(super) fn is_process(&self) -> bool {
-        self.process
+    /// Whether what they say of `group`, one of [`GROUPS`], is what the process's environment says
+    /// of it, which readers of it read alike: theirs is the process's ([`Vars::from_env`]), or a
+    /// bucket's view of it that took none of `group` of its own.
+    pub(super) fn reads_process(&self, group: &[&str]) -> bool {
+        self.process && !self.owns(group)
+    }
+
+    /// Whether, a bucket's view, they took `group`, one of [`GROUPS`], of the bucket's own: set
+    /// empty too.
+    pub(super) fn owns(&self, group: &[&str]) -> bool {
+        self.own.iter().any(|&at| GROUPS[at] == group)
     }
 
     /// The variables bucket `number`'s KMS reads (board 8485): each `CLADEFSD_BUCKET_<number>_NAME`
@@ -101,7 +117,10 @@ impl Vars {
         let host = (self.vars.iter())
             .filter(|(name, _)| unnumbered(name) == name.as_str() && !replaced(name))
             .map(|(name, value)| (name.clone(), value.clone()));
-        Vars { vars: host.chain(own.iter().cloned()).collect(), process: false }
+        let groups = (0..GROUPS.len())
+            .filter(|&at| own.iter().any(|(name, _)| GROUPS[at].contains(&name.as_str())));
+        let vars = host.chain(own.iter().cloned()).collect();
+        Vars { vars, process: self.process, own: groups.collect() }
     }
 
     /// Whether bucket `number` sets credentials of its own for the KMS `url` names: the variables
@@ -266,6 +285,9 @@ mod tests {
         assert!(host.own_credentials(3, url) && !host.own_credentials(2, url));
         assert!(host.own_credentials(2, "aws-kms://us-east-1?key=k{tenant}"));
         assert!(!host.own_credentials(2, "local:///kms") && !host.own_credentials(4, url));
-        assert!(!host.numbered(2).is_process());
+        let (two, three) = (host.numbered(2), host.numbered(3));
+        assert!(two.owns(GROUPS[0]) && two.owns(GROUPS[4]) && !two.owns(GROUPS[1]));
+        assert!(three.owns(GROUPS[1]) && !three.owns(GROUPS[0]) && !three.owns(GROUPS[4]));
+        assert!(!two.reads_process(GROUPS[1]), "not the process's: Vars::new's");
     }
 }

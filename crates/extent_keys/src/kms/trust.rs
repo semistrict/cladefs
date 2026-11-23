@@ -135,14 +135,19 @@ impl Origin<'_> {
         }
     }
 
-    /// Refuses, of a recorded URL, an AWS KMS endpoint `endpoint` but AWS's own over HTTPS (a host
-    /// of `amazonaws.com`, a VPC endpoint's among them) or one of this host's (an emulator).
-    pub(super) fn aws_endpoint(&self, endpoint: &str) -> Result<(), String> {
-        let Origin::Recorded(_) = self else { return Ok(()) };
+    /// Refuses, of a recorded URL, an AWS KMS endpoint `endpoint` for `region` but AWS KMS's own
+    /// there over HTTPS (`kms.REGION.amazonaws.com`, its FIPS endpoint, or a VPC endpoint of KMS's,
+    /// `*.kms.REGION.vpce.amazonaws.com`), one of this host's (an emulator), or one [`HOSTS_VAR`]
+    /// names: never any other host of `amazonaws.com`, which anyone may have one of (an API
+    /// Gateway's, a load balancer's, an instance's), that would take the host's signed requests and
+    /// the keys in them (hotbed review of board 8525).
+    pub(super) fn aws_endpoint(&self, endpoint: &str, region: &str) -> Result<(), String> {
+        let Origin::Recorded(trust) = self else { return Ok(()) };
         let refused = || {
             format!(
                 "the endpoint {endpoint:?}: a KMS URL the registry of buckets records reaches AWS \
-                 over HTTPS (https://...amazonaws.com), or this host, alone"
+                 KMS over HTTPS (https://kms.{region}.amazonaws.com, a VPC endpoint of KMS's), \
+                 this host, or a host {HOSTS_VAR} names, alone"
             )
         };
         let parsed = url::Url::parse(endpoint).map_err(|_| refused())?;
@@ -150,12 +155,20 @@ impl Origin<'_> {
             return Err(refused());
         }
         let host = parsed.host_str().ok_or_else(refused)?.to_ascii_lowercase();
-        let aws = [".amazonaws.com", ".amazonaws.com.cn"]
-            .iter()
-            .any(|domain| host.strip_suffix(domain).is_some_and(|name| !name.is_empty()));
-        match (parsed.scheme(), aws || loopback(&host)) {
-            ("https", true) => Ok(()),
-            ("http", _) if loopback(&host) => Ok(()),
+        let kms = ["kms", "kms-fips"].iter().any(|service| {
+            ["amazonaws.com", "amazonaws.com.cn"].iter().any(|domain| {
+                let vpce = format!(".{service}.{region}.vpce.{domain}");
+                host == format!("{service}.{region}.{domain}")
+                    || host.strip_suffix(&vpce).is_some_and(|name| {
+                        !name.is_empty()
+                            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    })
+            })
+        });
+        let allowed = trust.allows(&host, parsed.port_or_known_default());
+        match parsed.scheme() {
+            "https" if kms || allowed || loopback(&host) => Ok(()),
+            "http" if loopback(&host) => Ok(()),
             _ => Err(refused()),
         }
     }
@@ -223,7 +236,8 @@ mod tests {
         let not_allowed = "a KMS URL the registry of buckets records reaches only the hosts";
         let cleartext = "reaches another host over TLS alone";
         let file = "names a file of this host's: a KMS URL the registry of buckets records may not";
-        let not_aws = "reaches AWS over HTTPS (https://...amazonaws.com), or this host, alone";
+        let not_aws = "reaches AWS KMS over HTTPS (https://kms.us-east-1.amazonaws.com, a VPC \
+                       endpoint of KMS's), this host, or a host CLADEFSD_KMS_HOSTS names, alone";
         let refused = [
             (bao("openbaos://10.0.0.6:8200"), not_allowed),
             (bao("openbaos://10.0.0.5:8201"), not_allowed),
@@ -248,6 +262,16 @@ mod tests {
             (aws("https://evil.example"), not_aws),
             (aws("http://kms.us-east-1.amazonaws.com"), not_aws),
             (aws("https://amazonaws.com"), not_aws),
+            (aws("https://a1b2c3.execute-api.us-east-1.amazonaws.com"), not_aws),
+            (aws("https://ec2-1-2-3-4.compute-1.amazonaws.com"), not_aws),
+            (aws("https://mine-1.us-east-1.elb.amazonaws.com"), not_aws),
+            (aws("https://bucket.s3.amazonaws.com"), not_aws),
+            (aws("https://kms.us-west-2.amazonaws.com"), not_aws),
+            (aws("https://kms.cn-north-1.amazonaws.com.cn"), not_aws),
+            (aws("https://vpce-1-a.vpce-svc-1.us-east-1.vpce.amazonaws.com"), not_aws),
+            (aws("https://x.y.kms.us-east-1.vpce.amazonaws.com"), not_aws),
+            (aws("https://vpce-1.kms.us-west-2.vpce.amazonaws.com"), not_aws),
+            (aws("http://vault.example.com"), not_aws),
             (aws("https://kms.us-east-1.amazonaws.com.evil.example"), not_aws),
             (aws("https://kms.us-east-1.amazonaws.com."), not_aws),
             (aws("https://user@kms.us-east-1.amazonaws.com"), not_aws),
@@ -296,7 +320,11 @@ mod tests {
             "aws-kms://us-east-1?key=k{tenant}".to_owned(),
             aws("https://kms.us-east-1.amazonaws.com"),
             aws("https://vpce-1-a.kms.us-east-1.vpce.amazonaws.com"),
-            aws("https://kms.cn-north-1.amazonaws.com.cn"),
+            aws("https://kms-fips.us-east-1.amazonaws.com"),
+            "aws-kms://cn-north-1?key=k{tenant}&endpoint=https://kms.cn-north-1.amazonaws.com.cn"
+                .to_owned(),
+            aws("https://vault.example.com"),
+            aws("https://10.0.0.5:8200"),
             aws("http://127.0.0.1:9"),
             aws("http://localhost:9"),
             aws("http://[::1]:9"),

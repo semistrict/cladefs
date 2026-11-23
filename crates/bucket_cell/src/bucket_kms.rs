@@ -703,9 +703,11 @@ impl ByBucket {
         match chosen {
             HostKms::Named(url, kms) => {
                 // The host's credentials' instance, the host's own KMS's if it names the same, is
-                // every such bucket's; one with credentials of its own has its own (board 8485).
+                // every such bucket's; one with credentials of its own has its own (board 8485),
+                // named before its URL, as no URL a KMS takes begins, so that no URL's name is
+                // another's with credentials of its own (hotbed review 58).
                 let key = match self.vars.own_credentials(number, &url) {
-                    true => KmsKey(format!("{url} with bucket {number}'s credentials").into()),
+                    true => KmsKey(format!("bucket {number}'s credentials: {url}").into()),
                     false => KmsKey(url.into()),
                 };
                 let kms = self.named.lock().unwrap().entry(key.clone()).or_insert(kms).clone();
@@ -1394,7 +1396,11 @@ mod tests {
             let ((two, _), (four, hosts)) =
                 (by_bucket.of(2).await.unwrap(), by_bucket.of(4).await.unwrap());
             assert_eq!(four.0.as_ref(), a.url("transit", query));
-            assert_eq!(two.0.as_ref(), format!("{} with bucket 2's credentials", four.0));
+            assert_eq!(two.0.as_ref(), format!("bucket 2's credentials: {}", four.0));
+            // No URL a KMS takes is named so: one beginning as a bucket's credentials do is none.
+            let theirs = format!("bucket 2's credentials: {}", a.url("transit", query));
+            let refused = kms::from_url_with(&theirs, &by_bucket.vars, Origin::Host).err();
+            assert!(refused.is_some_and(|why| why.contains("names no KMS")), "{theirs}");
             let refused = hosts.wrap_dyn(7, &Secret::random()).await.map(drop).unwrap_err();
             assert!(refused.to_string().contains("OpenBao refuses cladefs's token"), "{refused}");
         });
