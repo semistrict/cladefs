@@ -456,7 +456,8 @@ impl<B: Bucket> Writer<B> {
     /// version is uploaded once it does. cladefs: one swap names all that is uploaded until the
     /// bucket's backend takes the head's next write ([`Bucket::rewritable`]): a cell's head is
     /// swapped no faster than the backend takes it, GCS about once a second, however many segments
-    /// upload meanwhile (TASK-690).
+    /// upload meanwhile (TASK-690). cladefs: and the checkpoint this writer landed since the head
+    /// last named one, which costs it no swap of its own (doc-27 step 4, [`Writer::checkpoint`]).
     pub async fn acknowledge(&self) -> Result<Option<u64>, Error> {
         if self.naming()?.is_none() {
             return Ok(self.inner().state.through);
@@ -479,6 +480,9 @@ impl<B: Bucket> Writer<B> {
                     kept.map(|(seq, cut)| (*seq, cut)).collect()
                 };
                 let mut next = held.head.clone().holding(self.epoch, through + 1).naming(named);
+                if let Some(landed) = self.landed(&held.head) {
+                    next.checkpoint = Some((landed, self.epoch));
+                }
                 if let Some(configuration) = &switch
                     && let Some(replication) = next.replication.as_mut()
                 {
@@ -545,6 +549,13 @@ impl<B: Bucket> Writer<B> {
         Ok(Some(Naming { through, cuts, switch }))
     }
 
+    /// cladefs: the checkpoint this writer landed that `head` names not, its newest, if any: one
+    /// past the head's, its own (doc-27 step 4).
+    fn landed(&self, head: &layout::Head) -> Option<u64> {
+        let newest = self.inner().checkpoint?;
+        head.checkpoint.is_none_or(|(at, _)| at < newest).then_some(newest)
+    }
+
     /// cladefs: the cell's versions, as its head names them, as this writer last swapped it
     /// (doc-18, TASK-476): those its acknowledgements named, and those named before it took the
     /// cell, but those dropped.
@@ -595,8 +606,11 @@ impl<B: Bucket> Writer<B> {
         Ok(())
     }
 
-    /// Writes a checkpoint as of the last segment acknowledged, then swaps the head to name it, the
-    /// cell's newest (TASK-407).
+    /// Writes a checkpoint as of the last segment acknowledged, the cell's newest, for the head to
+    /// name (TASK-407). cladefs: named by the next acknowledgement, in its swap, while segments are
+    /// yet to be acknowledged; by a swap of its own only with none, as an idle cell's or a
+    /// closing one's (doc-27 step 4). The collector keeps a checkpoint of the head's epoch it may
+    /// yet name ([`crate::Rules::collector_epochs`]), so that naming it late loses nothing.
     /// cladefs: in a span of its own, `upload.checkpoint`, its bucket's requests children of it
     /// (`crate::trace`, TASK-258).
     pub async fn checkpoint(&self) -> Result<Option<u64>, Error> {
@@ -611,6 +625,10 @@ impl<B: Bucket> Writer<B> {
     async fn write_checkpoint(&self, span: &trace::Span) -> Result<Option<u64>, Error> {
         let state = {
             let inner = self.inner();
+            // A writer stopped names nothing more: its failure, each time.
+            if let Some(error) = &inner.stopped {
+                return Err(error.clone());
+            }
             if inner.state.through.is_none() || inner.state.through <= inner.checkpoint {
                 return Ok(inner.checkpoint);
             }
@@ -628,10 +646,19 @@ impl<B: Bucket> Writer<B> {
         let (checkpoint, kept) = crate::checkpoint::encode_kept(&state, self.keys.encrypting());
         bucket::create(&*self.bucket, &key, checkpoint).await?;
         {
+            // Landed, and decided under the head, which acknowledgements hold as they swap it: a
+            // segment taken that the head names not yet has an acknowledgement to come, which names
+            // it; with none, this swap does. Those the head names, an acknowledgement lets go of
+            // after it lets go of the head.
             let mut held = self.held.lock().await;
-            if held.head.checkpoint.is_none_or(|(at, _)| at < segment) {
+            let idle = {
+                let mut inner = self.inner();
+                inner.checkpoint = inner.checkpoint.max(Some(segment));
+                inner.pending.range(held.head.end..).next().is_none()
+            };
+            if idle && let Some(landed) = self.landed(&held.head) {
                 let next =
-                    layout::Head { checkpoint: Some((segment, self.epoch)), ..held.head.clone() };
+                    layout::Head { checkpoint: Some((landed, self.epoch)), ..held.head.clone() };
                 match head::swap(&*self.bucket, self.cell, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
@@ -640,7 +667,6 @@ impl<B: Bucket> Writer<B> {
         }
         failpoint!("writer::checkpointed");
         let mut inner = self.inner();
-        inner.checkpoint = inner.checkpoint.max(Some(segment));
         // cladefs: and lets go of those of segments it named none in as of it, which it names
         // none in again: what it applied since, it keeps (doc-27).
         for key in state.lengths.keys().filter(|key| !kept.contains_key(*key)) {
@@ -901,6 +927,36 @@ mod tests {
                 [0, 0, 0],
                 "the checkpoint's listings, reads and ranged reads"
             );
+        });
+    }
+
+    /// doc-27 step 4 (board 6220's AC #3): a checkpoint landed while a segment is yet to be
+    /// acknowledged costs no swap of its own: the acknowledgement after it names it, in its own
+    /// swap. An idle cell's checkpoint, no acknowledgement to come, swaps on its own.
+    #[test]
+    fn checkpoints_are_named_by_the_acknowledgements_after_them() {
+        futures::executor::block_on(async {
+            let bucket = memory();
+            let cell = test_cell(1);
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+            let swaps = || bucket.stats().requests(Request::Update);
+            let named = || async { head::get(&*bucket, cell).await.unwrap().unwrap() };
+            let first = add(&writer, Commit { tag: 1, ..Commit::default() }).unwrap();
+            writer.upload(first).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            let second = add(&writer, Commit { tag: 2, ..Commit::default() }).unwrap();
+            let before = swaps();
+            assert_eq!(writer.checkpoint().await, Ok(Some(first)));
+            assert_eq!((swaps() - before, named().await.checkpoint), (0, None));
+            writer.upload(second).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            assert_eq!(swaps() - before, 1, "the acknowledgement's one swap");
+            let head = named().await;
+            assert_eq!((head.end, head.checkpoint), (second + 1, Some((first, writer.epoch()))));
+            assert_eq!(writer.checkpoint().await, Ok(Some(second)));
+            assert_eq!(swaps() - before, 2, "an idle cell's checkpoint's own swap");
+            assert_eq!(named().await.checkpoint, Some((second, writer.epoch())));
         });
     }
 
