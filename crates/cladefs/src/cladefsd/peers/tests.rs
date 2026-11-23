@@ -28,7 +28,13 @@ fn serving_in(bucket: &Arc<RoutedBucket>, dir: &std::path::Path, region: Option<
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket.clone(), cache).unwrap();
-    let server = Server { bucket: URL.to_owned(), region, serving, replicas: None };
+    let server = Server {
+        bucket: URL.to_owned(),
+        region,
+        serving,
+        replicas: None,
+        appending: Arc::default(),
+    };
     // On a runtime of its own, as the daemon serves its peers (`super::super::run::service`).
     let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     std::thread::spawn(move || serving.block_on(serve(listener, server)));
@@ -149,6 +155,23 @@ async fn within(work: impl std::future::Future<Output = ()>) {
 /// cladefs: a daemon's peer server on the loopback, of the bucket [`URL`], with a replica directory
 /// in `dir` (doc-21), or none: its address, and the directory.
 fn member(dir: &std::path::Path, with: bool) -> (String, Option<Arc<Replicas<HostDir>>>) {
+    let served = counted_member(dir, with);
+    (served.address, served.replicas)
+}
+
+/// cladefs: a member served as [`member`] serves it, and its counts.
+struct Served {
+    address: String,
+    replicas: Option<Arc<Replicas<HostDir>>>,
+    /// The writers' streams of appends it serves.
+    appending: Arc<AtomicUsize>,
+    /// The connections it accepted.
+    accepted: Arc<AtomicUsize>,
+}
+
+/// cladefs: [`member`], counting what it serves (board 8575).
+fn counted_member(dir: &std::path::Path, with: bool) -> Served {
+    use futures::StreamExt as _;
     let bucket = crate::bucket::peers::tests::holding(&noise(1)).0;
     let cache = Arc::new(Cache::open(&dir.join("cache"), u64::MAX).unwrap());
     let replicas = with.then(|| super::replicas(&dir.join("replicas")).unwrap());
@@ -156,12 +179,31 @@ fn member(dir: &std::path::Path, with: bool) -> (String, Option<Arc<Replicas<Hos
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
-    let server =
-        Server { bucket: URL.to_owned(), region: None, serving, replicas: replicas.clone() };
-    // On a runtime of its own, as the daemon serves its peers (`super::super::run::service`).
+    let appending = Arc::<AtomicUsize>::default();
+    let server = Server {
+        bucket: URL.to_owned(),
+        region: None,
+        serving,
+        replicas: replicas.clone(),
+        appending: appending.clone(),
+    };
+    let accepted = Arc::<AtomicUsize>::default();
+    let accepting = accepted.clone();
+    // On a runtime of its own, as the daemon serves its peers (`super::super::run::service`), as
+    // `serve` serves them, each connection it accepts counted.
     let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    std::thread::spawn(move || serving.block_on(serve(listener, server)));
-    (address, replicas)
+    std::thread::spawn(move || {
+        serving.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let incoming = tonic::transport::server::TcpIncoming::from(listener)
+                .with_nodelay(Some(true))
+                .inspect(move |_| {
+                    accepting.fetch_add(1, Ordering::Relaxed);
+                });
+            serve_on(incoming, server).await
+        })
+    });
+    Served { address, replicas, appending, accepted }
 }
 
 fn of(incarnation: u64, number: u64, epoch: u64) -> Option<ReplicaOf> {
@@ -172,6 +214,11 @@ fn of(incarnation: u64, number: u64, epoch: u64) -> Option<ReplicaOf> {
         configuration: Some(proto::Configuration { number, epoch }),
         incarnation,
     })
+}
+
+/// cladefs: what asks a member for its incarnation names: [`URL`].
+fn asking() -> IncarnationRequest {
+    IncarnationRequest { bucket: URL.to_owned() }
 }
 
 /// cladefs: a writer streams appends to a member, each answered once synced; a take fences the
@@ -340,7 +387,7 @@ fn writers_append_to_members_through_their_links() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        runtime: runtime.clone(),
+        channels: Channels::new(runtime.clone()),
     };
     let cell = crate::CellId { tenant: 3, id: 9 };
     let configuration =
@@ -400,4 +447,201 @@ async fn logs_read_from_members_end_at_their_fences_or_a_stall() {
     let refused = futures::stream::iter([Err(Status::not_found("no log"))]);
     let read = read_to(Box::pin(refused), 15, WAIT).await;
     assert_eq!(read, Err("NotFound: no log".to_owned()));
+}
+
+/// board 8573: an accept that fails as the host may get over (EMFILE, as with every descriptor
+/// open) is tried again after `ACCEPT_AGAIN`, not at once, over and over, and the connections
+/// after it served; one gone before it was accepted is passed over at once; one of the listener's
+/// own (EBADF) ends them, noted, as the daemon then stops saying why.
+#[tokio::test]
+async fn accepts_failing_are_tried_again_after_a_pause() {
+    use futures::StreamExt as _;
+    use std::io::{Error, ErrorKind};
+    let failing = |errno| Err::<u32, _>(Error::from_raw_os_error(errno));
+    let failed = Arc::new(std::sync::OnceLock::new());
+    let start = tokio::time::Instant::now();
+    let incoming = futures::stream::iter([failing(libc::EMFILE), failing(libc::ENFILE), Ok(1)]);
+    let mut accepted = Box::pin(accepting(incoming, failed.clone()));
+    assert_eq!(accepted.next().await.unwrap().unwrap(), 1);
+    let waited = start.elapsed();
+    assert!(waited >= 2 * super::super::server::ACCEPT_AGAIN, "{waited:?}");
+
+    let start = tokio::time::Instant::now();
+    let aborted = Err(Error::from(ErrorKind::ConnectionAborted));
+    let incoming = futures::stream::iter([aborted, Ok(2), failing(libc::EBADF), Ok(3)]);
+    let mut accepted = Box::pin(accepting(incoming, failed.clone()));
+    assert_eq!(accepted.next().await.unwrap().unwrap(), 2);
+    let waited = start.elapsed();
+    assert!(waited < super::super::server::ACCEPT_AGAIN, "{waited:?}");
+    assert!(accepted.next().await.is_none());
+    assert_eq!(failed.get().unwrap().raw_os_error(), Some(libc::EBADF));
+}
+
+/// board 8573: the peer service goes on serving after an accept failed as the host may get over,
+/// and ends, saying why, once accepting fails for good, so that the daemon stops saying so (it
+/// passed every failure over, at once, again and again, a dead listener's included).
+#[test]
+fn peers_are_served_after_accepts_fail() {
+    use futures::StreamExt as _;
+    let serve_with = |first: std::io::Error| {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = crate::bucket::peers::tests::holding(&noise(1)).0;
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), u64::MAX).unwrap());
+        let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
+        let replicas = Some(super::replicas(&dir.path().join("replicas")).unwrap());
+        let server = Server {
+            bucket: URL.to_owned(),
+            region: None,
+            serving,
+            replicas,
+            appending: Arc::default(),
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let served = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let incoming = futures::stream::iter([Err(first)])
+                    .chain(tonic::transport::server::TcpIncoming::from(listener));
+                let served = serve_on(Box::pin(incoming), server).await;
+                drop(dir);
+                served
+            })
+        });
+        (address, served)
+    };
+    let (address, _served) = serve_with(std::io::Error::from_raw_os_error(libc::EMFILE));
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let mut client = super::member(&runtime, &address).unwrap();
+    runtime.block_on(within(async move {
+        client.incarnation(asking()).await.unwrap();
+    }));
+    let (_, served) = serve_with(std::io::Error::from_raw_os_error(libc::EBADF));
+    let ended = served.join().unwrap().unwrap_err();
+    assert_eq!(ended.raw_os_error(), Some(libc::EBADF), "{ended}");
+}
+
+/// board 8575: a writer's host lost without a word (no FIN, no reset: its packets dropped) leaves
+/// no stream of appends on its member: the member's server pings the connection, unanswered, and
+/// closes it within `KEEPALIVE` and `CONNECT`, its stream's task ending with it. The writer here
+/// pings not, as a host lost does not.
+#[test]
+fn streams_of_writers_lost_without_a_word_end() {
+    use std::sync::atomic::AtomicBool;
+    let dir = tempfile::tempdir().unwrap();
+    let served = counted_member(dir.path(), true);
+    let incarnation = served.replicas.unwrap().incarnation();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let cut = Arc::new(AtomicBool::new(false));
+    let proxy = runtime.block_on(proxy(served.address, cut.clone()));
+    let appending = served.appending;
+    runtime.block_on(within(async move {
+        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{proxy}")).unwrap();
+        let mut client = PeerClient::new(endpoint.connect_lazy());
+        let (sending, sent) = tokio::sync::mpsc::channel(1);
+        let mut answers = (client.append(tokio_stream::wrappers::ReceiverStream::new(sent)))
+            .await
+            .unwrap()
+            .into_inner();
+        let first =
+            AppendRequest { of: of(incarnation, 1, 4), log: 1, offset: 0, bytes: b"x".to_vec() };
+        sending.send(first).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 1, end: 1 }));
+        assert_eq!(appending.load(Ordering::Relaxed), 1);
+        cut.store(true, Ordering::Relaxed);
+        let lost = tokio::time::Instant::now();
+        while appending.load(Ordering::Relaxed) > 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let ended = lost.elapsed();
+        assert!(ended <= KEEPALIVE * 2 + CONNECT, "{ended:?}");
+        drop((sending, answers));
+    }));
+}
+
+/// cladefs: a proxy on the loopback to `to`, relaying each connection both ways until `cut`: then
+/// relaying nothing more and keeping its connections open, as the network to a host lost without
+/// a word does. Its address.
+async fn proxy(to: String, cut: Arc<std::sync::atomic::AtomicBool>) -> String {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    async fn relay(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        cut: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let mut bytes = vec![0; 64 << 10];
+        loop {
+            let read = from.read(&mut bytes).await;
+            if cut.load(Ordering::Relaxed) {
+                // Its halves held for ever: nothing more relayed, nothing closed.
+                std::future::pending::<()>().await;
+            }
+            match read {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    if to.write_all(&bytes[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let (client, _) = listener.accept().await.unwrap();
+            let server = tokio::net::TcpStream::connect(&to).await.unwrap();
+            let ((client_reads, client_writes), (server_reads, server_writes)) =
+                (client.into_split(), server.into_split());
+            tokio::spawn(relay(client_reads, server_writes, cut.clone()));
+            tokio::spawn(relay(server_reads, client_writes, cut.clone()));
+        }
+    });
+    address
+}
+
+/// board 8575: every replicated cell's link to a member, and every fence, log read, drop and
+/// incarnation asked of it, share one connection to it: the connections it accepts do not grow
+/// with the cells.
+#[test]
+fn members_are_reached_on_one_connection_whatever_the_cells() {
+    use local_cell::replicate::own_of;
+    use local_cell::upload::Members as _;
+    let dir = tempfile::tempdir().unwrap();
+    let served = counted_member(dir.path(), true);
+    let incarnation = served.replicas.unwrap().incarnation();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let members = ReplicaMembers {
+        bucket: URL.to_owned(),
+        me: "127.0.0.1:1".to_owned(),
+        incarnation: 1,
+        channels: Channels::new(runtime.clone()),
+    };
+    let configuration =
+        bucket_cell::layout::Configuration { number: 1, epoch: 4, f: 1, members: Vec::new() };
+    let whom = bucket_cell::layout::Member { address: served.address.clone(), incarnation };
+    let cells = (0..32).map(|id| crate::CellId { tenant: 3, id });
+    let links: Vec<_> =
+        cells.clone().map(|cell| members.link(cell, &configuration, &whom)).collect();
+    runtime.block_on(within(async {
+        for link in &links {
+            assert_eq!(link.append(own_of(1), 0, b"abc".to_vec()).await, Ok(3));
+        }
+        for cell in cells {
+            assert_eq!(
+                members.fence(cell, &configuration, &whom, 5).await,
+                Ok(vec![(own_of(1), 3)])
+            );
+            assert_eq!(
+                members.read(cell, &configuration, &whom, own_of(1), 3).await,
+                Ok(b"abc".to_vec())
+            );
+            assert_eq!(members.drop_before(cell, &configuration, &whom).await, Ok(()));
+        }
+        assert_eq!(members.incarnation_of(&served.address).await, Ok(incarnation));
+    }));
+    assert_eq!(served.accepted.load(Ordering::Relaxed), 1);
 }
