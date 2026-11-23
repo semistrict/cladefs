@@ -9,22 +9,31 @@
 //!
 //! cladefs: a record about a guest request, the work on its thread being for one
 //! (`crate::request::current`), names it: `request_id`, the guest's number of it, and `store`, the
-//! cell whose VM process asked, which tells one VM's requests from another's (TASK-260).
+//! cell whose VM process asked, which tells one VM's requests from another's (TASK-260). A record
+//! logged while a span is current names it too, `trace_id` and `span_id`, where it is to be found
+//! in its trace (`bucket_cell::trace::current_ids`, board 8571).
 //!
 //! Two variables set it, read as the log is set up:
 //!
-//! - `CLADEFS_LOG_FORMAT`: `text`, the default, or `json`: each record a JSON object, on a line of
-//!   its own, of its `timestamp` (RFC 3339, UTC, to the microsecond), `level`, `target` and
-//!   `message`, its request's `request_id` and `store` if it is about one, and then each of its
-//!   key-values as a field of its own: a number or boolean as such, anything else as its text. A
-//!   key-value named as one of those fields is `kv_` and its name (TASK-259).
+//! - `CLADEFS_LOG_FORMAT`: `text`, the default, a line of the record's time (RFC 3339, UTC, to the
+//!   microsecond), level, target and message, then its key-values, `key=value`, its control
+//!   characters escaped (`\n`, `\r`, `\t`, `\x1b`, `\u{85}`), so that no message or value, as a
+//!   path a VM asked for, forges a record of its own (board 8571); or `json`: each record a JSON
+//!   object, on a line of its own, of its `timestamp` (RFC 3339, UTC, to the microsecond), `level`,
+//!   `target` and `message`, its request's `request_id` and `store` if it is about one, its span's
+//!   `trace_id` and `span_id` if one is current, and then each of its key-values as a field of its
+//!   own: a number or boolean as such, anything else as its text. A key-value named as one of those
+//!   fields is `kv_` and its name (TASK-259).
 //! - `CLADEFS_LOG_LEVEL`: the gravest records logged, `info` by default: `off`, `error`, `warn`,
 //!   `info`, `debug` or `trace`, then, after commas, `TARGET=LEVEL`s for the targets (module paths)
 //!   at or under TARGET, the longest such that names one deciding: as
 //!   `info,bucket_cell::object_bucket=debug`, which logs each request of object storage too.
+//!   cladefs: changed while the process runs by [`set_levels`], the daemon's `POST /z/log`
+//!   (`super::zpages`, board 8571), and put back.
 
 use std::fmt::{self, Write as _};
 use std::io::Write as _;
+use std::sync::{OnceLock, PoisonError, RwLock};
 use std::time::SystemTime;
 
 /// How the log writes its records: `CLADEFS_LOG_FORMAT`.
@@ -70,18 +79,36 @@ impl Settings {
                 return Err(format!("CLADEFS_LOG_FORMAT is text or json, not {other:?}"));
             }
         }
-        let levels = var("CLADEFS_LOG_LEVEL").unwrap_or_default();
+        settings.set_levels(&var("CLADEFS_LOG_LEVEL").unwrap_or_default())?;
+        Ok(settings)
+    }
+
+    /// Has it log what `levels` says, as `CLADEFS_LOG_LEVEL` says it: the gravest records logged,
+    /// unless given, the default's, then `TARGET=LEVEL`s, after commas. Why not, if it says nothing
+    /// that is.
+    fn set_levels(&mut self, levels: &str) -> Result<(), String> {
         let level = |text: &str| {
             text.parse::<log::LevelFilter>()
                 .map_err(|_| format!("CLADEFS_LOG_LEVEL: {text:?} is no level (off to trace)"))
         };
+        let (mut default, mut targets) = (Self::default().level, Vec::new());
         for part in levels.split(',').map(str::trim).filter(|part| !part.is_empty()) {
             match part.split_once('=') {
-                Some((target, of)) => settings.targets.push((target.to_owned(), level(of)?)),
-                None => settings.level = level(part)?,
+                Some((target, of)) => targets.push((target.trim().to_owned(), level(of.trim())?)),
+                None => default = level(part)?,
             }
         }
-        Ok(settings)
+        (self.level, self.targets) = (default, targets);
+        Ok(())
+    }
+
+    /// cladefs: what it logs, as `CLADEFS_LOG_LEVEL` would say it.
+    fn levels(&self) -> String {
+        let mut levels = self.level.as_str().to_ascii_lowercase();
+        for (target, level) in &self.targets {
+            let _ = write!(levels, ",{target}={}", level.as_str().to_ascii_lowercase());
+        }
+        levels
     }
 
     /// The gravest records of `target` logged.
@@ -114,7 +141,47 @@ pub fn install(settings: Settings) -> Result<(), log::SetLoggerError> {
 
 fn install_to(settings: Settings, sink: Sink) -> Result<(), log::SetLoggerError> {
     let max = settings.max_level();
-    log::set_boxed_logger(Box::new(Logger { settings, sink })).map(|()| log::set_max_level(max))
+    let format = settings.format;
+    let logger =
+        Logger { format, started: settings.clone(), settings: RwLock::new(settings), sink };
+    // The process's for as long as it runs, as `log` keeps it: leaked, once.
+    let logger: &'static Logger = Box::leak(Box::new(logger));
+    log::set_logger(logger)?;
+    log::set_max_level(max);
+    // Only the first to set the process's log gets here.
+    let _ = INSTALLED.set(logger);
+    Ok(())
+}
+
+/// cladefs: the log this module installed, if it did ([`install`]), whose levels [`set_levels`]
+/// changes.
+// The process's log, as `log`'s is: every simulated host's, as their records go to one stderr.
+static INSTALLED: OnceLock<&'static Logger> = OnceLock::new();
+
+/// cladefs: what the process logs, as `CLADEFS_LOG_LEVEL` would say it; why not, if it logs through
+/// another log than this module's.
+pub fn levels() -> Result<String, String> {
+    Ok(installed()?.read().levels())
+}
+
+/// cladefs: has the process log what `levels` says from now on, as `CLADEFS_LOG_LEVEL` says it;
+/// or, if none, what it was installed with (board 8571): what it logs then, or why not.
+pub fn set_levels(levels: Option<&str>) -> Result<String, String> {
+    let logger = installed()?;
+    let mut settings = logger.settings.write().unwrap_or_else(PoisonError::into_inner);
+    let mut changed = settings.clone();
+    match levels {
+        Some(levels) => changed.set_levels(levels)?,
+        None => changed = logger.started.clone(),
+    }
+    *settings = changed;
+    log::set_max_level(settings.max_level());
+    Ok(settings.levels())
+}
+
+/// cladefs: the log this module installed, or why there is none.
+fn installed() -> Result<&'static Logger, String> {
+    INSTALLED.get().copied().ok_or_else(|| "the process logs through another log".to_owned())
 }
 
 /// Logs into what it returns from now on, each record a line, as the defaults say, but for its
@@ -129,8 +196,21 @@ pub(crate) fn capture() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
 }
 
 struct Logger {
-    settings: Settings,
+    /// How it writes its records, whatever its levels.
+    format: Format,
+    /// What it logs now, which [`set_levels`] changes.
+    settings: RwLock<Settings>,
+    /// What it was installed with, which [`set_levels`] puts back.
+    started: Settings,
     sink: Sink,
+}
+
+impl Logger {
+    /// What it logs now.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Settings> {
+        // Replaced whole, which no panic leaves half done: poisoned, as it is.
+        self.settings.read().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Where a [`Logger`] writes its lines.
@@ -142,15 +222,16 @@ enum Sink {
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= self.settings.level_of(metadata.target())
+        metadata.level() <= self.read().level_of(metadata.target())
     }
 
     fn log(&self, record: &log::Record<'_>) {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let format = self.settings.format;
-        let mut line = line(format, record, crate::request::current(), SystemTime::now());
+        let trace = bucket_cell::trace::current_ids();
+        let request = crate::request::current();
+        let mut line = line(self.format, record, request, trace, SystemTime::now());
         match &self.sink {
             Sink::Stderr => {
                 line.push('\n');
@@ -165,45 +246,78 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
-/// `record`'s line, in `format`, about `request`, if any, logged at `now`.
+/// `record`'s line, in `format`, about `request`, if any, within the span of `trace`, its trace's
+/// ID and its own, if any, logged at `now`.
 pub fn line(
     format: Format,
     record: &log::Record<'_>,
     request: Option<crate::request::RequestId>,
+    trace: Option<(String, String)>,
     now: SystemTime,
 ) -> String {
     match format {
-        Format::Text => Text { record, request }.to_string(),
-        Format::Json => json(record, request, now),
+        Format::Text => Text { record, request, trace, now }.to_string(),
+        Format::Json => json(record, request, trace, now),
     }
 }
 
-/// `record`'s text: its level, target and message, then each key-value, `key=value`, and its
-/// request's, if any.
+/// `record`'s text: its time, level, target and message, then each key-value, `key=value`, its
+/// request's, if any, and its span's; what it was given escaped ([`Escaped`]).
 struct Text<'a> {
     record: &'a log::Record<'a>,
     request: Option<crate::request::RequestId>,
+    trace: Option<(String, String)>,
+    now: SystemTime,
 }
 
 impl fmt::Display for Text<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let record = self.record;
-        write!(f, "{} {}: {}", record.level(), record.target(), record.args())?;
-        record.key_values().visit(&mut KeyValues(f)).map_err(|_| fmt::Error)?;
+        let now = humantime::format_rfc3339_micros(self.now);
+        write!(f, "{now} {} {}: ", record.level(), record.target())?;
+        write!(Escaped(&mut *f), "{}", record.args())?;
+        record.key_values().visit(&mut KeyValues(Escaped(&mut *f))).map_err(|_| fmt::Error)?;
         if let Some(request) = &self.request {
             write!(f, " request_id={}", request.guest)?;
             if let Some(open_cell) = &request.open_cell {
-                write!(f, " store={open_cell}")?;
+                write!(Escaped(&mut *f), " store={open_cell}")?;
             }
+        }
+        if let Some((trace, span)) = &self.trace {
+            write!(f, " trace_id={trace} span_id={span}")?;
         }
         Ok(())
     }
 }
 
-/// Writes the key-values it visits, each after a space.
-struct KeyValues<'a, 'b>(&'a mut fmt::Formatter<'b>);
+/// cladefs: writes what it is written into what it holds, each control character escaped: `\n`,
+/// `\r` and `\t`, ASCII's others and DEL as `\xNN`, C1's as `\u{NN}` (board 8571). A message or a
+/// value of a text record holds no line break then, nor a terminal's escape: none forges a record,
+/// as a path a VM asked for with a newline and a record's text in it did.
+struct Escaped<'a>(&'a mut dyn fmt::Write);
 
-impl<'kvs> log::kv::VisitSource<'kvs> for KeyValues<'_, '_> {
+impl fmt::Write for Escaped<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let mut plain = 0;
+        for (at, c) in text.char_indices().filter(|(_, c)| c.is_control()) {
+            self.0.write_str(&text[plain..at])?;
+            match c {
+                '\n' => self.0.write_str("\\n")?,
+                '\r' => self.0.write_str("\\r")?,
+                '\t' => self.0.write_str("\\t")?,
+                c if c.is_ascii() => write!(self.0, "\\x{:02x}", u32::from(c))?,
+                c => write!(self.0, "\\u{{{:x}}}", u32::from(c))?,
+            }
+            plain = at + c.len_utf8();
+        }
+        self.0.write_str(&text[plain..])
+    }
+}
+
+/// Writes the key-values it visits, each after a space.
+struct KeyValues<'a>(Escaped<'a>);
+
+impl<'kvs> log::kv::VisitSource<'kvs> for KeyValues<'_> {
     fn visit_pair(
         &mut self,
         key: log::kv::Key<'kvs>,
@@ -214,12 +328,15 @@ impl<'kvs> log::kv::VisitSource<'kvs> for KeyValues<'_, '_> {
 }
 
 /// The fields every JSON record has, or may, which a key-value of the same name is not.
-const FIELDS: [&str; 6] = ["timestamp", "level", "target", "message", "request_id", "store"];
+const FIELDS: [&str; 8] =
+    ["timestamp", "level", "target", "message", "request_id", "store", "trace_id", "span_id"];
 
-/// `record` as a JSON object, logged at `now`, about `request`, if any.
+/// `record` as a JSON object, logged at `now`, about `request`, if any, within the span of `trace`,
+/// if any.
 fn json(
     record: &log::Record<'_>,
     request: Option<crate::request::RequestId>,
+    trace: Option<(String, String)>,
     now: SystemTime,
 ) -> String {
     let mut out = String::from("{\"timestamp\":");
@@ -236,6 +353,12 @@ fn json(
             out.push_str(",\"store\":");
             string(&mut out, open_cell);
         }
+    }
+    if let Some((trace, span)) = trace {
+        out.push_str(",\"trace_id\":");
+        string(&mut out, &trace);
+        out.push_str(",\"span_id\":");
+        string(&mut out, &span);
     }
     // A String takes every key-value, which none fails.
     drop(record.key_values().visit(&mut JsonFields(&mut out)));
@@ -292,6 +415,11 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_micros(1_794_141_296_789_012)
     }
 
+    /// A span's trace's ID and its own, as exporters write them.
+    fn trace() -> Option<(String, String)> {
+        Some(("4bf92f3577b34da6a3ce929d0e0e4736".to_owned(), "00f067aa0ba902b7".to_owned()))
+    }
+
     fn request(guest: u64, open_cell: Option<&str>) -> Option<RequestId> {
         Some(RequestId {
             guest: NonZeroU64::new(guest).unwrap(),
@@ -320,13 +448,14 @@ mod tests {
             .key_values(&pairs)
             .build();
         assert_eq!(
-            line(Format::Json, &record, request(7, Some("/stores/vm \"2\"")), at()),
-            r#"{"timestamp":"2026-11-08T12:34:56.789012Z","level":"WARN","target":"cladefs::cladefsd::server","message":"cladefsd: a \"quoted\" message\\ with\na line","request_id":7,"store":"/stores/vm \"2\"","len":4096,"delta":-3,"ms":1.5,"sealed":true,"path":"a \"b\"\n\tc\u0001","error":"Cannot allocate memory (os error 12)","kv_level":"mine"}"#
+            line(Format::Json, &record, request(7, Some("/stores/vm \"2\"")), trace(), at()),
+            r#"{"timestamp":"2026-11-08T12:34:56.789012Z","level":"WARN","target":"cladefs::cladefsd::server","message":"cladefsd: a \"quoted\" message\\ with\na line","request_id":7,"store":"/stores/vm \"2\"","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","len":4096,"delta":-3,"ms":1.5,"sealed":true,"path":"a \"b\"\n\tc\u0001","error":"Cannot allocate memory (os error 12)","kv_level":"mine"}"#
         );
         let parsed: serde_json::Value =
-            serde_json::from_str(&line(Format::Json, &record, None, at())).unwrap();
+            serde_json::from_str(&line(Format::Json, &record, None, None, at())).unwrap();
         assert_eq!(parsed["level"], "WARN");
         assert_eq!(parsed["request_id"], serde_json::Value::Null, "no request, no field");
+        assert_eq!(parsed["trace_id"], serde_json::Value::Null, "no span, no field");
         assert_eq!(parsed["path"], "a \"b\"\n\tc\u{1}");
     }
 
@@ -348,10 +477,11 @@ mod tests {
             .build();
         let written = |format, level| {
             let settings = Settings::from_vars(vars(format, level)).unwrap();
-            line(settings.format, &record, None, at())
+            line(settings.format, &record, None, None, at())
         };
-        assert_eq!(written(None, None), "INFO cladefs::cladefsd: cladefsd: serving");
-        assert_eq!(written(Some("text"), None), "INFO cladefs::cladefsd: cladefsd: serving");
+        let text = "2026-11-08T12:34:56.789012Z INFO cladefs::cladefsd: cladefsd: serving";
+        assert_eq!(written(None, None), text);
+        assert_eq!(written(Some("text"), None), text);
         assert_eq!(
             written(Some("json"), None),
             r#"{"timestamp":"2026-11-08T12:34:56.789012Z","level":"INFO","target":"cladefs::cladefsd","message":"cladefsd: serving"}"#
@@ -373,6 +503,28 @@ mod tests {
         assert_eq!(
             Settings::from_vars(vars(None, Some("loud"))),
             Err("CLADEFS_LOG_LEVEL: \"loud\" is no level (off to trace)".to_owned())
+        );
+    }
+
+    /// board 8571: a text record escapes every control character of its message, its key-values
+    /// and its request's cell, as a VM's path may hold them: one line whatever they hold, which
+    /// none forges another record in, nor moves a terminal's cursor; the rest, non-ASCII too, as
+    /// it is. Its span's IDs after the rest.
+    #[test]
+    fn a_text_record_is_one_line_whatever_it_says() {
+        let pairs: [(&str, log::kv::Value<'_>); 2] = [
+            ("path", log::kv::Value::from("/a\nINFO cladefs: forged\r\x1b[2J")),
+            ("name", log::kv::Value::from("caf\u{e9}\u{85}\u{7f}\t")),
+        ];
+        let record = log::Record::builder()
+            .level(log::Level::Warn)
+            .target("cladefs::cladefsd::server")
+            .args(format_args!("opening x\n2026-11-08T00:00:00Z ERROR cladefs: forged"))
+            .key_values(&pairs)
+            .build();
+        assert_eq!(
+            line(Format::Text, &record, request(7, Some("/stores/\n")), trace(), at()),
+            r"2026-11-08T12:34:56.789012Z WARN cladefs::cladefsd::server: opening x\n2026-11-08T00:00:00Z ERROR cladefs: forged path=/a\nINFO cladefs: forged\r\x1b[2J name=café\u{85}\x7f\t request_id=7 store=/stores/\n trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7"
         );
     }
 }
