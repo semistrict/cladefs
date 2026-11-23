@@ -200,7 +200,17 @@ impl Daemon {
         dir: &Path,
         uid: Option<u32>,
     ) -> Result<PathBuf, tonic::Status> {
-        let request = GrantRequest { tenant, dir: name(dir), uid, gid: None };
+        self.grant_to(tenant, dir, (uid, None))
+    }
+
+    /// Grants as [`Daemon::grant`] does, the socket given to the uid and gid `to` names.
+    pub fn grant_to(
+        &mut self,
+        tenant: u64,
+        dir: &Path,
+        (uid, gid): (Option<u32>, Option<u32>),
+    ) -> Result<PathBuf, tonic::Status> {
+        let request = GrantRequest { tenant, dir: name(dir), uid, gid };
         Ok(self.runtime.block_on(self.client.grant(request))?.into_inner().socket.into())
     }
 

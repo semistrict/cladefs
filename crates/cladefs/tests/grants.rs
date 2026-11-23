@@ -297,6 +297,54 @@ fn tenants_granted_again_while_alive_go_on() {
     assert_eq!(copies(follower.physical_memory(), &bytes), 1, "the VM's pages, in its memory");
 }
 
+/// The user this test's process run as root by [`grants_give_sockets_to_whom_they_name_alone`] runs
+/// as otherwise, its uid and gid.
+const AS_ROOT_FOR: &str = "CLADEFS_TEST_AS_ROOT_FOR";
+
+/// board 8531: a Grant gives its tenant's socket to exactly the uid and gid it names, and to the
+/// daemon's own for each it does not, whether its tenant is granted already or not. Before, a
+/// Grant again left what it did not name as the grant before gave it: the group an earlier grant
+/// named connected still. As root, the daemon gives sockets away (in a user namespace of its own
+/// on a test host): needs `sudo -n`, as Lima's VMs have it.
+#[test]
+fn grants_give_sockets_to_whom_they_name_alone() {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(user) = std::env::var_os(AS_ROOT_FOR) else {
+        // SAFETY: Plain system calls.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        assert_ne!((uid, gid), (0, 0), "run as root: the daemon's group is the one granted");
+        let status = std::process::Command::new("sudo")
+            .args(["-n", "env", &format!("{AS_ROOT_FOR}={uid}:{gid}")])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "grants_give_sockets_to_whom_they_name_alone", "--nocapture"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "the grants as root failed: {status}");
+        return;
+    };
+    let user = user.to_str().unwrap().split_once(':').unwrap();
+    let (uid, gid): (u32, u32) = (user.0.parse().unwrap(), user.1.parse().unwrap());
+    // SAFETY: Plain system calls.
+    let daemons = unsafe { (libc::geteuid(), libc::getegid()) };
+    assert_eq!(daemons, (0, 0));
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let mut granted = |tenant: u64, to| {
+        let cells = dir.path().join(tenant.to_string());
+        std::fs::create_dir_all(&cells).unwrap();
+        let socket = daemon.grant_to(tenant, &cells, to).unwrap();
+        let metadata = std::fs::metadata(&socket).unwrap();
+        (metadata.uid(), metadata.gid(), metadata.mode() & 0o777)
+    };
+    assert_eq!(granted(1, (Some(uid), Some(gid))), (uid, gid, 0o660));
+    assert_eq!(granted(1, (Some(uid), None)), (uid, daemons.1, 0o660));
+    assert_eq!(granted(1, (None, Some(gid))), (daemons.0, gid, 0o660));
+    assert_eq!(granted(1, (Some(uid), Some(gid))), (uid, gid, 0o660));
+    assert_eq!(granted(1, (None, None)), (daemons.0, daemons.1, 0o660));
+    assert_eq!(granted(2, (None, None)), (daemons.0, daemons.1, 0o660));
+    assert_eq!(granted(3, (Some(uid), None)), (uid, daemons.1, 0o660));
+}
+
 /// The environment of this test's process run in a jail ([`jailed`]): the socket's path there,
 /// the tenant's socket's path on the host, and the cell directory to open.
 const JAIL_SOCKET: &str = "CLADEFS_TEST_JAIL_SOCKET";

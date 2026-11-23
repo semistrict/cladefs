@@ -36,19 +36,20 @@ impl Grants {
     }
 
     /// Grants the tenant of the ID `id` in the bucket (TASK-364), not the default tenant's
-    /// (`EINVAL`), whose cells are in `dir`, its socket, given to `uid` and `gid` (the daemon's
-    /// own, where not given), and returns its path: a new tenant's, which a thread of its own
-    /// serves; or, granted already, its socket, given again (`EEXIST` with another directory). A
-    /// tenant revoked whose VM processes live on is the one granted again, its socket new: those it
-    /// connects then share its arena with them, and the cells they have open (TASK-79.36), which,
-    /// another tenant's, they could not.
+    /// (`EINVAL`), whose cells are in `dir`, its socket, given to the uid and gid `given` names,
+    /// the daemon's own for each it does not ([`owner`]), and returns its path: a new tenant's,
+    /// which a thread of its own serves; or, granted already, its socket, given again, to them
+    /// alone (`EEXIST` with another directory). A tenant revoked whose VM processes live on is the
+    /// one granted again, its socket new: those it connects then share its arena with them, and
+    /// the cells they have open (TASK-79.36), which, another tenant's, they could not.
     pub fn grant(
         &self,
         id: u64,
         dir: &Path,
-        (uid, gid): (Option<u32>, Option<u32>),
+        given: (Option<u32>, Option<u32>),
     ) -> Result<PathBuf, Errno> {
         check_tenant(id)?;
+        let (uid, gid) = owner(given);
         let dir = dir.canonicalize().map_err(errno)?;
         let mut granted = self.granted.lock().unwrap();
         if let Some(grant) = granted.get(&id) {
@@ -65,7 +66,7 @@ impl Grants {
         let socket = self.sockets.join(socket_name(id));
         remove_stale(&socket)?;
         // Its mode and owner from the moment it is there, not the umask's until given (TASK-159).
-        let listener = super::bind_given(&socket, MODE, uid, gid).map_err(errno)?;
+        let listener = super::bind_given(&socket, MODE, Some(uid), Some(gid)).map_err(errno)?;
         let served = listener.try_clone().map_err(errno).and_then(|accepting| {
             let serving = tenant.clone();
             // cladefs: outside the simulation: a tenant's VM socket (doc-24).
@@ -142,9 +143,20 @@ pub(super) fn socket_name(tenant: u64) -> String {
 /// A tenant's socket's mode: its owner and group alone connect, those it is given to.
 const MODE: u32 = 0o660;
 
-/// Gives the socket at `socket` to `uid` and `gid`, where given, connectable by them alone.
-fn give(socket: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<(), Errno> {
-    std::os::unix::fs::chown(socket, uid, gid).map_err(errno)?;
+/// Whom a tenant's socket is given to: the uid and gid `given` names, and the daemon's own,
+/// effective, for each it does not, as the API says. One place for a first grant and a grant
+/// again: a grant again left what it did not name as the grant before gave it (board 8531), so
+/// that the group an earlier grant named connected still, the VM manager having given the socket
+/// away from it, another tenant's jails' perhaps.
+fn owner((uid, gid): (Option<u32>, Option<u32>)) -> (u32, u32) {
+    // SAFETY: Plain system calls, which always succeed.
+    let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    (uid.unwrap_or(euid), gid.unwrap_or(egid))
+}
+
+/// Gives the socket at `socket` to `uid` and `gid`, connectable by them alone.
+fn give(socket: &Path, uid: u32, gid: u32) -> Result<(), Errno> {
+    std::os::unix::fs::chown(socket, Some(uid), Some(gid)).map_err(errno)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(MODE)).map_err(errno)
 }
 
