@@ -1470,7 +1470,7 @@ impl Client {
     }
 
     /// Makes the call `call` makes with a client, and returns its response; or, failed, an error
-    /// saying it was `what`, with the errno it failed with, if any.
+    /// saying it was `what` ([`failed`]).
     fn call<T, F>(
         &self,
         what: String,
@@ -1482,12 +1482,24 @@ impl Client {
         // cladefs: outside the simulation: the blocking client's call.
         match self.runtime.block_on(call(self.client.clone())) {
             Ok(response) => Ok(response.into_inner()),
-            Err(status) => Err(crate::Error::new(match errno(&status) {
-                Some(errno) => anyhow::Error::new(errno).context(what),
-                None => anyhow::Error::new(status).context(what),
-            })),
+            Err(status) => Err(failed(what, status)),
         }
     }
+}
+
+/// The error of a call that failed with `status`, saying it was `what`: with the errno it failed
+/// with, if any ([`crate::Error::errno`] finds it), and what the daemon said of it (board 8583),
+/// unless it said no more than the errno's name ([`status`]); without an errno, the status whole.
+pub fn failed(what: String, status: Status) -> crate::Error {
+    crate::Error::new(match errno(&status) {
+        Some(errno) => match status.message() {
+            said if said.is_empty() || said == format!("{errno:?}") => {
+                anyhow::Error::new(errno).context(what)
+            }
+            said => anyhow::Error::new(errno).context(said.to_owned()).context(what),
+        },
+        None => anyhow::Error::new(status).context(what),
+    })
 }
 
 /// The tenant `tenant`, as an error says it, in base 32 as cells say it; or, without one,

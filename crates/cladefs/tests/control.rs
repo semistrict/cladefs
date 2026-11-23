@@ -630,7 +630,19 @@ fn cells_are_made_replicated_through_the_control_api() {
     // anything is made (TASK-537.3.3's fail-hard rule), and the head keeps what an f of 0 asks.
     let first = dir.path().join("first");
     let refused = create(&mut daemon, request(&first, 0, Some(1), FsyncLevel::Replicated));
-    assert_eq!(failure(refused).1, Errno::ENOTSUP);
+    // Board 8583: what the daemon said of it, as a client of the API, cladefsctl's, says it, its
+    // errno with it; an errno said alone, not said twice.
+    let said = cladefs::cladefsd::control::failed("making the cell".into(), refused.unwrap_err());
+    assert_eq!(
+        format!("{said:#}"),
+        "making the cell: a replicated cell needs the daemon's peers and replica directory \
+         (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS): ENOTSUP (errno 95)"
+    );
+    assert_eq!(said.errno(), Some(Errno::ENOTSUP));
+    let bare = create(&mut daemon, request(&first, 0, Some(4), FsyncLevel::Ordered));
+    let said = cladefs::cladefsd::control::failed("making the cell".into(), bare.unwrap_err());
+    assert_eq!(format!("{said:#}"), "making the cell: EINVAL (errno 22)");
+    assert_eq!(said.errno(), Some(Errno::EINVAL));
     assert!(!first.exists());
     let made = create(&mut daemon, request(&first, 0, Some(0), FsyncLevel::Local)).unwrap();
     assert_eq!(replicated(&mut daemon, &first), (0, FsyncLevel::Local, 0));
