@@ -1138,10 +1138,13 @@ static void cow_store_through_pin_after_writeback(void)
 	pin = sim_pin_user_page_write(cow_addr + 3 * PAGE_SIZE);
 	check(pin, "a pin of page 3 for writing");
 	check(!sim_fsync(cow_target), "the fsync with page 3 pinned");
-	sim_pin_store(pin, cow_target, 3 * PAGE_SIZE, &round, sizeof(round));
-	memcpy(cow_expected + 3 * PAGE_SIZE, &round, sizeof(round));
-	cow_round[3] = round;
-	sim_unpin_page_dirty(pin, cow_target->f_mapping);
+	/* A sweep's failure may have left no pin to store through (board 9681). */
+	if (pin) {
+		sim_pin_store(pin, cow_target, 3 * PAGE_SIZE, &round, sizeof(round));
+		memcpy(cow_expected + 3 * PAGE_SIZE, &round, sizeof(round));
+		cow_round[3] = round;
+		sim_unpin_page_dirty(pin, cow_target->f_mapping);
+	}
 	cow_check_file("after a store through a pin", 8 * PAGE_SIZE);
 	wait_for(sim_spawn("rebinder", cow_rebind_now, NULL));
 	cow_check(3, true, "a load after the rebind");
