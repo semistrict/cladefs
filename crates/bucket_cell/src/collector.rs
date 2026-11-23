@@ -5,15 +5,15 @@
 //! The collector (`cladefs-gc`): the only thing that deletes.
 //!
 //! cladefs: it collects a cell at a time (doc-7, Garbage collection; TASK-395): a pass over a cell
-//! takes the cell's collector lease, lists the cell's prefix, and reads, compacts and deletes what
-//! is there alone, beside passes over other cells, which it neither fences nor waits for.
-//! Everything it decides by is under the cell's prefix: its cells' objects, their moves, its
-//! lease, and the references of forks of its cells in other cells ([`layout::reference`]). What
-//! its cells inherited from other cells it reads there, and never deletes: those cells keep it,
-//! by the references of the forks that inherited it. A sweep over every cell is a pass over each:
-//! one after another ([`Collector::collect`]), or many at once, by processes any number of them
-//! ([`crate::sweep`]); the cells are found by delimiter listings, a page at a time, listing none
-//! of their objects ([`crate::cell::listed`]).
+//! takes the cell's collector lease, lists the cell's prefix, and reads and deletes what is there
+//! alone, beside passes over other cells, which it neither fences nor waits for. Everything it
+//! decides by is under the cell's prefix: its cells' objects, its lease, and the references of
+//! forks of its cells in other cells ([`layout::reference`]). What its cells inherited from other
+//! cells it reads there, and never deletes: those cells keep it, by the references of the forks
+//! that inherited it. A sweep over every cell is a pass over each: one after another
+//! ([`Collector::collect`]), or many at once, by processes any number of them ([`crate::sweep`]);
+//! the cells are found by delimiter listings, a page at a time, listing none of their objects
+//! ([`crate::cell::listed`]).
 //!
 //! cladefs: a pass holds its cell by the cell's lease (`<C>gc/lease`, [`passed::CollectorLease`],
 //! TASK-395.5) for as long as its collector's [`Holding`] says, renewing it as it goes and letting
@@ -31,13 +31,13 @@
 //! The live cells are those whose records are not deleted, and the children of forks in live
 //! cells' states, of the cell, which get their records only once their forks are acknowledged.
 //! What they need is what recovering them reads, the objects holding the extents their states
-//! name, the moves the way to those goes through, and each one's segments past its end, which may
+//! name, and each one's segments past its end, which may
 //! be uploaded and not yet in it. Segments go only once a checkpoint covers them, so that a reader
 //! that finds one missing knows, from the checkpoints, whether it is the cell's end.
 //!
 //! cladefs: a fork of the cell to a child in another cell is kept by the origin: the
-//! parent's whole state at the end of the segment it was forked at, the objects and moves holding
-//! the extents it names along their ways from where they were sealed, and what recovering it reads
+//! parent's whole state at the end of the segment it was forked at, the objects holding the
+//! extents it names, and what recovering it reads
 //! (TASK-395.4). It is kept while a reference names it, whatever the child frees of it since: the
 //! collector is conservative, reclaiming late rather than reading other cells to find what their
 //! cells still hold. An origin shared by many references, a version cloned many times, is
@@ -65,77 +65,46 @@
 //! after that names what the pass kept, or what it never listed: what a fork after a state read
 //! inherited, that state holds, or a later object; and a fork before it that state names.
 //!
-//! Objects mostly freed are compacted: their live extents copied to their moves, one object,
-//! written whole, before the object goes, a grace period later. Writers record moves in their next
-//! checkpoints, after which the moves go too, unless a state's way to its extents still goes
-//! through them.
+//! cladefs: it compacts nothing, and holds no key (doc-27): writers relocate out of their cells'
+//! sparse segments themselves, in commits of their own, and what a pass keeps and deletes it
+//! decides by metadata alone, authenticated, not encrypted.
 //!
-//! cladefs: marking reads metadata alone, which is authenticated, not encrypted, holding no key;
-//! compacting copies extents out of objects' data, encrypted there, so a pass compacting one
-//! unwraps its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and
-//! its cells' DEKs from their records; and encrypts each one's moves under the key it was encrypted
-//! under, with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting
-//! nothing encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's
-//! KEK revoked or destroyed, or the collector having no KMS, the pass marks and deletes as ever,
-//! and leaves the cell uncompacted, every object encrypted (TASK-411.28), saying so
-//! ([`Report::locked`]): a revoked tenant's compaction stops, its garbage still goes. It records
-//! its listing's digest as any pass does, and what it left ([`Passed::uncompacted`]): a pass after
-//! it, the cell unchanged, skips the cell while the tenant's KEK is still not to be had, which the
-//! KMS is asked once a sweep, for all of the tenant's cells ([`Heard`], TASK-411.13), and goes over
-//! it in full once it is.
-//!
-//! A cell's writer names its extents where the checkpoint it recovered from, or its own since,
-//! said, which the state a pass reads may name further along their moves: a checkpoint another
-//! writer made, landing after the writer recovered the cell (one it took the cell from, which
-//! knew nothing of it), or the state of the parent a cell inherited them from, which its writer
-//! read as it was then. So a state's way to an extent starts where the extent was sealed, its
-//! moves all kept, unless the state's checkpoint is that of the writer holding the cell's head,
-//! read after the checkpoint was listed: a writer taking the cell after that recovers from that
-//! checkpoint or a later one, and the writer that made it took its moves first (TASK-175).
-//!
-//! A pass reads records, recovers cells, reads moves and compacts objects many at once, and
-//! deletes objects in batches where the backend deletes so (TASK-395.5); what forks inherited
-//! together, their parent's state where they were forked, it reads once and takes once for them
-//! all; and a pass reads a record again only once it changed ([`Collector`], TASK-92.7).
+//! A pass reads records and recovers cells many at once, and deletes objects in batches where the
+//! backend deletes so (TASK-395.5); what forks inherited together, their parent's state where they
+//! were forked, it reads once and takes once for them all; and a pass reads a record again only
+//! once it changed ([`Collector`], TASK-92.7).
 //!
 //! cladefs: a pass records in its cell's lease, as it ends, what the next pass goes by
-//! ([`crate::passed`], TASK-395.6, TASK-395.8): the digest of its listing of the cell, what it
-//! deferred to a grace period, and what the cell takes, by kind. A pass whose listing is the one
-//! recorded, of the same options, decides what the recorded pass did, everything it decides by
-//! being under the cell's prefix: it recovers nothing, and deletes only what was deferred, once due
-//! ([`Collector::collect_cell`]). An idle cell costs a pass its lease's read and one listing, a
-//! look that writes nothing (TASK-455).
+//! ([`crate::passed`], TASK-395.6, TASK-395.8): the digest of its listing of the cell, and what the
+//! cell takes, by kind. A pass whose listing is the one recorded decides what the recorded pass
+//! did, everything it decides by being under the cell's prefix: it recovers nothing, and deletes
+//! nothing ([`Collector::collect_cell`]). An idle cell costs a pass its lease's read and one
+//! listing, a look that writes nothing (TASK-455).
+//!
+//! cladefs: a cell holding the moves the collector made in formats before 28 is refused
+//! ([`Error::Format`], [`Kind::Moves`]): nothing of this format reads them.
 //!
 //! cladefs: two passes delete nothing (TASK-264). A mark-only pass ([`Collector::mark_cell`]) is a
-//! pass in every respect but that: it takes the cell's lease and compacts, and writes what it would
-//! delete to a marks object of the cell's (`<C>gc/marks/<epoch>`, [`layout::Marks`]), which every
-//! reader of the cell warns of reaching ([`crate::marks`]), and which the next such pass compares
-//! what it finds doomed with: an object doomed before and kept now, the same object still, is a
-//! bug, as no correct fork or recovery reaches what no live cell reached. Nothing marked goes, so
-//! the bucket grows by what it would have reclaimed, the compacted objects and their moves both,
-//! nor does it retire references. A dry run ([`Collector::dry_run_cell`]) writes nothing at all,
-//! the lease neither: it says what a pass would delete, less what a pass would delete only for
-//! compacting it, a grace period after, and what references it would retire.
+//! pass in every respect but that: it takes the cell's lease, and writes what it would delete to a
+//! marks object of the cell's (`<C>gc/marks/<epoch>`, [`layout::Marks`]), which every reader of the
+//! cell warns of reaching ([`crate::marks`]), and which the next such pass compares what it finds
+//! doomed with: an object doomed before and kept now, the same object still, is a bug, as no
+//! correct fork or recovery reaches what no live cell reached. Nothing marked goes, so the bucket
+//! grows by what it would have reclaimed, nor does it retire references. A dry run
+//! ([`Collector::dry_run_cell`]) writes nothing at all, the lease neither: it says what a pass
+//! would delete, and what references it would retire.
 
-use crate::bucket::{self, Bucket, ByteRange, Created, Meta, Version};
-use crate::keys::{self, CellKeys, Ring};
+use crate::bucket::{self, Bucket, Meta};
 use crate::layout::Head;
-use crate::layout::{self, CellId, Frame, Kind, Location, Marked, Marks, Moves, Origin};
-use crate::moves::{Moved, MovesMaps};
-use crate::passed::{self, CollectorLease, Decided, Deferred, LeaseTaking, Listed, Passed, Usage};
+use crate::layout::{self, CellId, Kind, Location, Marked, Marks, Origin};
+use crate::passed::{self, CollectorLease, LeaseTaking, Listed, Passed, Usage};
 use crate::record::Made;
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, lifecycle, rules};
-use extent_frame::Keys as _;
-use extent_keys::{Secret, kms};
 use futures::StreamExt as _;
-use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use storage_device::ExtentId;
-
-/// How many objects' trailers a pass reads at once, to learn their data's lengths.
-const TRAILERS_AT_ONCE: usize = 32;
 
 /// How many cells a pass recovers at once, and how many origins' states.
 const RECOVERIES_AT_ONCE: usize = 16;
@@ -143,20 +112,6 @@ const RECOVERIES_AT_ONCE: usize = 16;
 /// How many of the checkpoints a pass read whole it keeps for the recoveries after: those of forks
 /// of a base, recovered one after another, which start from the base's.
 const CHECKPOINTS_KEPT: usize = 4;
-
-/// How many objects a pass compacts at once, each read whole: what bounds the memory compacting
-/// takes, as many objects' bytes, and their moves'.
-const COMPACTIONS_AT_ONCE: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Options {
-    /// Objects whose live extents take less than this fraction of their data are compacted.
-    pub compact_below: f64,
-    /// How long, by the backend's clock, a compacted object stays after its moves are written, and
-    /// moves after nothing names the object they are of: what spares a reader that looked an
-    /// extent up just before a round trip.
-    pub grace: u64,
-}
 
 /// cladefs: how a collector's passes hold their cells (TASK-395.5): the default holds none, its
 /// passes taking their cells whatever another holds, but a pass holding it for a time, as the
@@ -179,7 +134,6 @@ pub struct Holding {
 pub struct Report {
     /// The objects of the cell it deleted.
     pub deleted: usize,
-    pub compacted: usize,
     /// cladefs: the references of the cell's deleted children it retired, under their parents'
     /// cells (TASK-395.4), once, whether there or not, as it can't tell without listing other
     /// cells; and those of its own it deleted, marked, written again since their retirements
@@ -187,21 +141,9 @@ pub struct Report {
     pub retired: usize,
     /// cladefs: the bytes of what it deleted, as listed (TASK-395.5).
     pub deleted_bytes: u64,
-    /// cladefs: the bytes of what it compacted, as listed: what goes, a grace period after, of the
-    /// objects, less what their moves take.
-    pub compacted_bytes: u64,
-    /// cladefs: the passes that skipped their cells, each unchanged since its last pass, deleting
-    /// only what that pass deferred (TASK-395.6).
+    /// cladefs: the passes that skipped their cells, each unchanged since its last pass
+    /// (TASK-395.6).
     pub skipped: usize,
-    /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had:
-    /// the KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the
-    /// collector having no KMS (TASK-411.6). Each still marked and deleted what no live cell needs,
-    /// warning of the cell and why. And those that skipped a cell a pass before left so, its
-    /// tenant's KEK still not to be had (TASK-411.13).
-    pub locked: usize,
-    /// cladefs: the objects encrypted that those passes would have compacted, or the pass before a
-    /// skipping one would have.
-    pub uncompacted: usize,
     /// cladefs: the cells it removed whole, dead, their objects counted in `deleted` (TASK-455).
     pub removed: usize,
 }
@@ -209,13 +151,9 @@ pub struct Report {
 impl std::ops::AddAssign for Report {
     fn add_assign(&mut self, other: Self) {
         self.deleted += other.deleted;
-        self.compacted += other.compacted;
         self.retired += other.retired;
         self.deleted_bytes += other.deleted_bytes;
-        self.compacted_bytes += other.compacted_bytes;
         self.skipped += other.skipped;
-        self.locked += other.locked;
-        self.uncompacted += other.uncompacted;
         self.removed += other.removed;
     }
 }
@@ -275,7 +213,7 @@ impl Budget {
 /// cladefs: what a mark-only pass over a cell did ([`Collector::mark_cell`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Marking {
-    /// What it compacted; it deleted nothing, and retired nothing.
+    /// What it did: it deleted nothing, and retired nothing.
     pub report: Report,
     /// The marks it wrote, at [`layout::marks`] of the cell and their epoch: none if a later pass
     /// took the cell's lease from it, which stopped it as it stops a pass before deleting.
@@ -288,12 +226,8 @@ pub struct Marking {
 /// cladefs: what a dry run over a cell found ([`Collector::dry_run_cell`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DryRun {
-    /// What a pass would delete, as listed, in the order of their keys; less what it would compact
-    /// and so delete a grace period after.
+    /// What a pass would delete, as listed, in the order of their keys.
     pub doomed: Vec<Meta>,
-    /// What a pass would compact, as listed: what it deletes too, a grace period after, once no
-    /// state's way to an extent goes through it.
-    pub compactable: Vec<Meta>,
     /// The references, under other cells, a pass would retire, which may be gone already.
     pub retired: Vec<String>,
     /// Whether a pass took the cell's collector lease while it ran: what it read may be older than
@@ -303,16 +237,10 @@ pub struct DryRun {
 
 /// One pass of the collector over every cell, one after another, as `holder`, which must differ
 /// from every other pass's: of a collector of its own, which remembers nothing of it
-/// ([`Collector`]). cladefs: tests', compacting under the tests' KMS (`keys::testing`), which every
-/// test's writer encrypts under (TASK-411.28).
+/// ([`Collector`]).
 #[cfg(any(test, feature = "testing"))]
-pub async fn collect(
-    bucket: &impl Bucket,
-    holder: u64,
-    options: &Options,
-) -> Result<Report, Error> {
-    let kms = Some(crate::keys::testing::kms());
-    Collector::new(*options).kms(kms).collect(bucket, holder).await
+pub async fn collect(bucket: &impl Bucket, holder: u64) -> Result<Report, Error> {
+    Collector::new().collect(bucket, holder).await
 }
 
 /// cladefs: [`collect`], of a bucket whose own bucket is `own` (TASK-633.8): its copies of other
@@ -322,10 +250,8 @@ pub async fn collect_with_own(
     bucket: &impl Bucket,
     own: &impl Bucket,
     holder: u64,
-    options: &Options,
 ) -> Result<Report, Error> {
-    let kms = Some(crate::keys::testing::kms());
-    Collector::new(*options).kms(kms).collect_with_own(bucket, Some(own), holder).await
+    Collector::new().collect_with_own(bucket, Some(own), holder).await
 }
 
 /// cladefs: one pass of the collector over `cell`, as `holder`, which must differ from every other
@@ -336,10 +262,8 @@ pub async fn collect_cell(
     bucket: &impl Bucket,
     cell: CellId,
     holder: u64,
-    options: &Options,
 ) -> Result<Report, Error> {
-    let kms = Some(crate::keys::testing::kms());
-    Collector::new(*options).kms(kms).collect_cell(bucket, cell, holder).await
+    Collector::new().collect_cell(bucket, cell, holder).await
 }
 
 /// The collector. cladefs: it remembers nothing from one pass to the next (TASK-395.4): what a pass
@@ -347,62 +271,13 @@ pub async fn collect_cell(
 /// cells it is passing over. A pass reads a record again only once it changed, as it lists the
 /// records again (TASK-92.7). What is worth keeping across passes is under the cell's prefix, in
 /// its lease, which any collector process reads (TASK-395.6, [`crate::passed`]).
+#[derive(Default)]
 pub struct Collector {
-    options: Options,
     /// cladefs: how its passes hold their cells (TASK-395.5).
     holding: Holding,
-    /// cladefs: the KMS its passes unwrap their cells' KEKs through, to compact what is encrypted
-    /// (TASK-411.6): each pass by a [`keys::CachingKms`] of its own, so that nothing unwrapped
-    /// outlives the pass, and a tenant's KEK revoked stops the next. None: they compact only what
-    /// is in the clear.
-    kms: Option<Arc<dyn keys::Kmses>>,
-    /// cladefs: what its passes heard of their cells' tenants' KEKs, shared with the other passes
-    /// of its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
-    /// [`Collector::collect`] (TASK-411.13).
-    heard: Option<Arc<Heard>>,
     /// cladefs: what its passes may delete, shared with the other passes of their sweep, if
     /// bounded (board 8529).
     budget: Option<Arc<Budget>>,
-}
-
-/// cladefs: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
-/// whether each is to be had, asked once, however many of its passes ask. What a pass goes by over
-/// a cell unchanged since a pass that left objects encrypted uncompacted, its cell's KEK not to be
-/// had ([`Passed::uncompacted`]): skipping it while the KEK is still not, so that a revoked
-/// tenant's idle cells cost a sweep a lease and a listing each, and the KMS one call for all of
-/// them; and going over it in full, compacting them, once it is. The KMS is asked by a wrap of a
-/// key of no use, which it makes only with the tenant's KEK, revoked, destroyed or failing
-/// refusing it as they refuse an unwrap; a KMS that wraps but unwraps not the cell's KEK (another
-/// than the one that wrapped it) has the cell passed in full, and left so, each sweep, as before.
-/// Without a KMS, none is: the cell is skipped, asking nothing.
-#[derive(Default)]
-pub struct Heard {
-    asked: std::sync::Mutex<BTreeMap<(u16, u64), Shared<BoxFuture<'static, bool>>>>,
-}
-
-impl Heard {
-    pub fn new() -> Arc<Self> {
-        Arc::default()
-    }
-
-    /// Whether the KEK of `cell`'s tenant is to be had, as the KMS of its bucket of `kmses` says,
-    /// asked once a bucket's tenant (TASK-633.6): no KMS to be had for the bucket, it is not.
-    async fn to_be_had(&self, kmses: Option<&Arc<dyn keys::Kmses>>, cell: CellId) -> bool {
-        let Some(kmses) = kmses else { return false };
-        let (bucket, tenant) = (crate::objectid::bucket_of(cell.id), cell.tenant);
-        let asking = (self.asked.lock().unwrap().entry((bucket, tenant)))
-            .or_insert_with(|| {
-                let kmses = kmses.clone();
-                async move {
-                    let Ok((_, kms)) = kmses.of(bucket).await else { return false };
-                    kms.wrap_dyn(tenant, &Secret::random()).await.is_ok()
-                }
-                .boxed()
-                .shared()
-            })
-            .clone();
-        asking.await
-    }
 }
 
 /// cladefs: what a pass over a cell keeps as it reads it, and drops with it.
@@ -410,12 +285,16 @@ impl Heard {
 struct Remembered {
     /// The head's slots read, each with the version it was read at, by key (TASK-691).
     heads: BTreeMap<String, (String, Head)>,
-    trailers: Trailers,
 }
 
 impl Collector {
-    pub fn new(options: Options) -> Self {
-        Self { options, holding: Holding::default(), kms: None, heard: None, budget: None }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// cladefs: one whose passes hold their cells as `holding` says (TASK-395.5).
+    pub fn holding(self, holding: Holding) -> Self {
+        Self { holding, ..self }
     }
 
     /// cladefs: one whose passes take what they delete from `budget`, if given, and delete
@@ -430,36 +309,11 @@ impl Collector {
         self.budget.as_ref().is_none_or(|budget| budget.take(objects as u64, bytes))
     }
 
-    /// cladefs: one whose passes hold their cells as `holding` says (TASK-395.5).
-    pub fn holding(self, holding: Holding) -> Self {
-        Self { holding, ..self }
-    }
-
-    /// cladefs: one whose passes compact objects encrypted under their cells' keys, unwrapped
-    /// through `kms`, if given (TASK-411.6): a pass unwraps its cell's KEK only if it compacts an
-    /// object encrypted, once for all of them; marking, dry runs and passes compacting nothing
-    /// encrypted ask it nothing.
-    pub fn kms(self, kms: Option<kms::Shared>) -> Self {
-        self.kmses(kms.map(|kms| Arc::new(keys::OneKms(kms)) as Arc<dyn keys::Kmses>))
-    }
-
-    /// cladefs: the same, through `kmses`, the KMS of each bucket's cells (TASK-633.6).
-    pub fn kmses(self, kms: Option<Arc<dyn keys::Kmses>>) -> Self {
-        Self { kms, ..self }
-    }
-
-    /// cladefs: one whose passes share `heard`, what they heard of their tenants' KEKs, with the
-    /// other passes of their sweep (TASK-411.13): the KMS asked once a tenant for all of them.
-    pub fn heard(self, heard: Arc<Heard>) -> Self {
-        Self { heard: Some(heard), ..self }
-    }
-
     /// cladefs: a pass over every cell of `bucket`, one after another, as `holder`, which must
     /// differ from every other pass's over each ([`Collector::collect_cell`]): the cells found by
     /// delimiter listings, a page at a time ([`crate::cell::listed`]). A pass that fails stops none
     /// of the others; the first error is returned once all ran, what they did then unsaid. A cell
-    /// another pass holds it leaves ([`Error::Left`]), as no failure. cladefs: its passes share
-    /// what they heard of their tenants' KEKs ([`Heard`]).
+    /// another pass holds it leaves ([`Error::Left`]), as no failure.
     pub async fn collect<B: Bucket>(&mut self, bucket: &B, holder: u64) -> Result<Report, Error> {
         self.collect_with_own(bucket, None::<&B>, holder).await
     }
@@ -480,7 +334,6 @@ impl Collector {
         let mut cells = std::pin::pin!(crate::cell::listed(bucket));
         let mut report = Report::default();
         let mut failed = None;
-        let heard = self.heard.clone().unwrap_or_default();
         while let Some(cell) = cells.next().await {
             // cladefs: the listing refused, the sweep stops, failed (board 5861).
             let cell = match cell {
@@ -499,7 +352,7 @@ impl Collector {
                 }
                 continue;
             }
-            match self.collect_hearing(bucket, cell, holder, &heard).await {
+            match self.collect_cell(bucket, cell, holder).await {
                 Ok(done) => report += done,
                 Err(Error::Left(_)) => {}
                 Err(error) => drop(failed.get_or_insert(error)),
@@ -524,9 +377,9 @@ impl Collector {
     /// the objects they share with the copy as copied, and once the cell is deleted it cuts none.
     /// Else its mirrors' holds in `cell`'s bucket go first, then its markers (`markerGoesFirst`),
     /// so that no read is sent here for a version whose objects go, then its objects, then the
-    /// marks of references retired here: the cell's prefix here left empty. Nothing is compacted (a
-    /// copy has no head, no writer, no KEK of `cell`'s here) and no digest recorded: what it keeps
-    /// turns on `cell`'s head, in another bucket. A head not to be read deletes nothing.
+    /// marks of references retired here: the cell's prefix here left empty. No digest is recorded:
+    /// what it keeps turns on `cell`'s head, in another bucket. A head not to be read deletes
+    /// nothing.
     ///
     /// A pin unrefreshed for [`crate::mirror::PIN_STALE`], its mirror's host dead, keeps nothing:
     /// its mirror is begun again here, taking it over, and the copy kept this pass whatever that
@@ -559,6 +412,10 @@ impl Collector {
                 _ => {}
             }
             match layout::kind(&meta.key) {
+                // cladefs: the moves of formats before 28, refused as a pass over the cell does.
+                Kind::Moves { cell } => {
+                    return Err(Error::Format { cell, format: layout::FORMAT - 1 });
+                }
                 Kind::Pin { at, .. } if crate::mirror::stale(own, meta) => stale.push(at),
                 Kind::Pin { .. } => pinned = true,
                 Kind::Reference { at, child, .. } => referring.push((at, child, meta.key.as_str())),
@@ -595,7 +452,6 @@ impl Collector {
                 Kind::Segment { .. }
                     | Kind::Extent { .. }
                     | Kind::Checkpoint { .. }
-                    | Kind::Moves { .. }
                     // cladefs: a fork's read evidence written here, routed nowhere else
                     // (TASK-702.2).
                     | Kind::Evidence { .. }
@@ -651,32 +507,18 @@ impl Collector {
     /// the cell: [`Error::Left`] if it leaves the cell to another, as its lease says.
     ///
     /// It takes the cell's lease, reading what the last pass to end recorded there, and lists the
-    /// cell. A listing of the digest recorded, its options the same, is decided as it was: the pass
-    /// deletes what was deferred to a grace period, once due, and nothing else, recovering nothing
-    /// (TASK-395.6). Otherwise it passes in full. It records what it found as it lets the lease go,
-    /// in the one write ([`Collector::release`]).
+    /// cell. A listing of the digest recorded is decided as it was: the pass deletes nothing,
+    /// recovering nothing (TASK-395.6). Otherwise it passes in full. It records what it found as
+    /// it lets the lease go, in the one write ([`Collector::release`]).
     pub async fn collect_cell(
-        &mut self,
-        bucket: &impl Bucket,
-        cell: CellId,
-        holder: u64,
-    ) -> Result<Report, Error> {
-        let heard = self.heard.clone().unwrap_or_default();
-        self.collect_hearing(bucket, cell, holder, &heard).await
-    }
-
-    /// cladefs: one pass over `cell`, as [`Collector::collect_cell`] says, hearing of its tenant's
-    /// KEK by `heard`.
-    async fn collect_hearing(
         &self,
         bucket: &impl Bucket,
         cell: CellId,
         holder: u64,
-        heard: &Heard,
     ) -> Result<Report, Error> {
         let found = passed::found(bucket, cell).await?;
         let looked = match &found {
-            Some(object) => match self.look(bucket, cell, holder, object, heard).await? {
+            Some(object) => match self.look(bucket, cell, holder, object).await? {
                 Looked::Unchanged(report) => return Ok(report),
                 Looked::Changed(listed, epoch) => Some((listed, epoch)),
                 Looked::Unrecorded => None,
@@ -694,7 +536,7 @@ impl Collector {
             _ => first_listing(bucket, cell).await?,
         };
         let recorded = taken.passed.take();
-        let collected = self.collect_held(bucket, cell, &taken, recorded, heard, listed).await;
+        let collected = self.collect_held(bucket, cell, &taken, recorded, listed).await;
         let ended = match &collected {
             Ok((_, passed)) => PassEnd::Through(passed.clone()),
             // The pass's failure, its caller's below: its lease says it ended.
@@ -706,20 +548,17 @@ impl Collector {
 
     /// cladefs: a look at `cell`, whose collector lease is `found`, for a pass of `holder`, before
     /// it takes the lease (TASK-455): the cell left to another pass, as the lease says
-    /// ([`Error::Left`]); or, its listing of the digest the last pass in full recorded, of the same
-    /// options, with nothing that pass deferred due, nor its tenant's KEK to be had now if it left
-    /// objects encrypted uncompacted, the pass that skips it, which writes nothing and deletes
-    /// nothing but the read evidence past each tenant's newest of each version, which nothing
-    /// relies on ([`Collector::trim_evidence`], TASK-702.2): no other pass need be fenced, and it
-    /// costs the lease's read and the listing. None: the pass goes on, taking the lease, with the
-    /// look's listing and the lease's epoch it read.
+    /// ([`Error::Left`]); or, its listing of the digest the last pass in full recorded, the pass
+    /// that skips it, which writes nothing and deletes nothing but the read evidence past each
+    /// tenant's newest of each version, which nothing relies on ([`Collector::trim_evidence`], TASK-702.2): no
+    /// other pass need be fenced, and it costs the lease's read and the listing. None: the pass
+    /// goes on, taking the lease, with the look's listing and the lease's epoch it read.
     async fn look(
         &self,
         bucket: &impl Bucket,
         cell: CellId,
         holder: u64,
         found: &bucket::Object,
-        heard: &Heard,
     ) -> Result<Looked, Error> {
         let lease = CollectorLease::decode(cell, &found.bytes)?;
         if let Some(left) = lease.leaves(holder, self.holding, bucket.now()) {
@@ -732,16 +571,10 @@ impl Collector {
         let Some(listed) = first_listing(bucket, cell).await? else {
             return Ok(Looked::Unrecorded);
         };
-        let due = passed.deferred.iter().any(|deferred| deferred.due <= bucket.now());
-        if !passed.holds_for(&listed, &self.options) || due {
+        if !passed.holds_for(&listed) {
             return Ok(Looked::Changed(listed, epoch));
         }
-        let uncompacted = passed.uncompacted as usize;
-        if uncompacted > 0 && heard.to_be_had(self.kms.as_ref(), cell).await {
-            return Ok(Looked::Changed(listed, epoch));
-        }
-        let locked = usize::from(uncompacted > 0);
-        let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
+        let skipped = Report { skipped: 1, ..Report::default() };
         Ok(Looked::Unchanged(self.trim_evidence(bucket, cell, &listed, skipped).await?))
     }
 
@@ -819,23 +652,26 @@ impl Collector {
     }
 
     /// cladefs: a pass over `cell`, which holds its lease as `taken` says, and what the last pass
-    /// to end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
-    /// that left objects encrypted uncompacted skips the cell only while its tenant's KEK is still
-    /// not to be had, as `heard` says (TASK-411.13).
+    /// to end recorded, `recorded`: what it did, and what it records, if anything. Its listing the
+    /// one that pass decided by, it decides as that one did, everything a pass decides by being
+    /// under the cell's prefix (doc-7, Passes that skip; TASK-395.6), whatever process that pass
+    /// was of: it recovers nothing, deletes nothing but read evidence nothing relies on
+    /// ([`trim_evidence`]), and records nothing new. It retires no reference again: that pass's
+    /// retirements were marked (TASK-395.14). An unchanged dead cell costs a pass its lease and its
+    /// listing.
     async fn collect_held(
         &self,
         bucket: &impl Bucket,
         cell: CellId,
         taken: &LeaseTaking,
         recorded: Option<Passed>,
-        heard: &Heard,
         listed: Option<Listed>,
     ) -> Result<(Report, Option<Passed>), Error> {
         if let Some(listed) = &listed
-            && let Some(passed) = recorded.filter(|passed| passed.holds_for(listed, &self.options))
-            && (passed.uncompacted == 0 || !heard.to_be_had(self.kms.as_ref(), cell).await)
+            && recorded.as_ref().is_some_and(|passed| passed.holds_for(listed))
         {
-            return self.skip(bucket, cell, taken, passed, listed).await;
+            let skipped = Report { skipped: 1, ..Report::default() };
+            return Ok((self.trim_evidence(bucket, cell, listed, skipped).await?, None));
         }
         if let Some(listed) = &listed
             && let Some(report) = self.unmade(bucket, cell, taken, listed).await?
@@ -851,16 +687,13 @@ impl Collector {
         if !self.renew(bucket, cell, taken).await? {
             return Ok((report, None));
         }
-        let kms = self.kms.as_ref();
-        let compacted =
-            pass.compact(bucket, &self.options, &mut remembered.trailers, kms, &mut report).await?;
-        let (doomed, deferred) = pass.fates(bucket, &self.options).await?;
+        let doomed = pass.fates(bucket)?;
         // A pass a later one took the lease from stops.
         if !self.holds(bucket, cell, taken).await? {
             return Ok((report, None));
         }
         let retired = pass.retired();
-        let removal = pass.removal(&doomed, &deferred);
+        let removal = pass.removal(&doomed);
         // cladefs: past its sweep's budget, it deletes nothing, as one fenced, and records nothing
         // new, so that the next pass decides anew (board 8529): what it would delete, the head of
         // its cell if it goes whole, and the references it would retire.
@@ -908,67 +741,11 @@ impl Collector {
             report.deleted_bytes += removal.heads.iter().map(|meta| meta.size).sum::<u64>();
             return Ok((report, None));
         }
-        // What the cell takes now: as listed, less what went, with what it compacted to.
+        // What the cell takes now: as listed, less what went.
         let mut usage = pass.recording.usage.clone();
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
-        compacted.iter().for_each(|(key, size)| usage.add(key, *size));
-        let decided = Decided::by(&self.options);
-        // cladefs: what it left encrypted uncompacted went by its KMS, outside the cell: recorded,
-        // so that the next skips the cell only while the KEK is still not to be had (TASK-411.13).
-        let uncompacted = report.uncompacted as u64;
-        let listing = pass.recorded_listing(&doomed, &deferred);
-        Ok((report, Some(Passed { listing, decided, deferred, usage, uncompacted })))
-    }
-
-    /// cladefs: a pass over `cell`, holding its lease as `taken` says, whose listing, `listed`, is
-    /// the one the last pass to end, which recorded `passed`, decided by (TASK-395.6): it decides
-    /// as that one did, everything a pass decides by being under the cell's prefix (doc-7, Passes
-    /// that skip), whatever process that pass was of. It recovers nothing, and deletes what that
-    /// pass deferred to a grace period, once due, as that pass would have, slow; and then records
-    /// that a pass is to decide anew, as what goes once those are gone it never worked out: the
-    /// moves of an object gone among them. It retires no reference again: that pass's retirements
-    /// were marked, and one a writer whose read of the child's record came before writes again
-    /// after, the pass over its parent's cell deletes (TASK-395.14). An unchanged dead cell costs
-    /// a pass its lease and its listing. What it records: nothing new, if it deleted nothing.
-    /// cladefs: it says what that pass left encrypted uncompacted, as left still (TASK-411.13).
-    async fn skip(
-        &self,
-        bucket: &impl Bucket,
-        cell: CellId,
-        taken: &LeaseTaking,
-        passed: Passed,
-        listed: &Listed,
-    ) -> Result<(Report, Option<Passed>), Error> {
-        let uncompacted = passed.uncompacted as usize;
-        let locked = usize::from(uncompacted > 0);
-        let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
-        let skipped = self.trim_evidence(bucket, cell, listed, skipped).await?;
-        let now = bucket.now();
-        let (due, deferred): (Vec<Deferred>, Vec<Deferred>) =
-            passed.deferred.iter().cloned().partition(|deferred| deferred.due <= now);
-        if due.is_empty() {
-            return Ok((skipped, None));
-        }
-        if !self.holds(bucket, cell, taken).await? {
-            return Ok((skipped, None));
-        }
-        // cladefs: past its sweep's budget, it deletes nothing, recording nothing new (board 8529).
-        let listed_size =
-            |due: &Deferred| listed.objects.get(due.key.as_str()).map(|meta| meta.size);
-        if !self.may_delete(due.len(), due.iter().filter_map(listed_size).sum()) {
-            return Ok((skipped, None));
-        }
-        let keys: Vec<&str> = due.iter().map(|due| due.key.as_str()).collect();
-        bucket::delete_all(bucket, &keys).await?;
-        let mut report = Report { deleted: skipped.deleted + keys.len(), ..skipped };
-        let mut usage = passed.usage.clone();
-        for key in keys.iter().copied() {
-            if let Some(meta) = listed.objects.get(key) {
-                usage.remove(key, meta.size);
-                report.deleted_bytes += meta.size;
-            }
-        }
-        Ok((report, Some(Passed { listing: None, deferred, usage, ..passed })))
+        let listing = pass.recorded_listing(&doomed);
+        Ok((report, Some(Passed { listing, usage })))
     }
 
     /// cladefs: takes `cell`'s lease for a pass of `holder`, holding it as the collector's
@@ -1065,10 +842,9 @@ impl Collector {
     /// cell needs once a pass that deletes took the lease from it, deleting since what it read
     /// live; a pass not holding the lease could not tell that from a bug. Fenced, it writes no
     /// marks, as a pass fenced deletes nothing: what it read may be older than what a later pass
-    /// did. Compacting, which writes only create-only moves that other passes' stand beside, needs
-    /// the lease no more than before.
+    /// did.
     pub async fn mark_cell(
-        &mut self,
+        &self,
         bucket: &impl Bucket,
         cell: CellId,
         holder: u64,
@@ -1096,20 +872,16 @@ impl Collector {
         let Some(pass) = remembered.survey(bucket, cell, epoch, Writes::Some, listed).await? else {
             return Ok(Marking::default());
         };
-        let mut report = Report::default();
         if !self.renew(bucket, cell, taken).await? {
             return Ok(Marking::default());
         }
-        let (trailers, kms) = (&mut remembered.trailers, self.kms.as_ref());
-        pass.compact(bucket, &self.options, trailers, kms, &mut report).await?;
-        let doomed = pass.doomed(bucket, &self.options).await?;
+        let doomed = pass.doomed(bucket)?;
         if !self.holds(bucket, cell, taken).await? {
-            return Ok(Marking { report, ..Marking::default() });
+            return Ok(Marking::default());
         }
-        let resurrected =
-            resurrected(bucket, cell, epoch, &self.options, &pass.objects, &doomed).await?;
+        let resurrected = resurrected(bucket, cell, epoch, &pass.objects, &doomed).await?;
         let marked = doomed.into_iter().map(Marked::of).collect();
-        let marks = Marks { epoch, grace: self.options.grace, marked };
+        let marks = Marks { epoch, marked };
         // Readers watch the cells' marks only while the bucket says it is marked: first.
         mark_bucket(bucket).await?;
         // The epoch is this pass's taking of the lease alone: nothing else is at its key.
@@ -1118,19 +890,16 @@ impl Collector {
         // meanwhile, which looks for marks again once it did (board 8515): marks are never left
         // unwatched, whichever of the two goes first.
         mark_bucket(bucket).await?;
-        Ok(Marking { report, marks: Some(marks), resurrected })
+        Ok(Marking { report: Report::default(), marks: Some(marks), resurrected })
     }
 
     /// cladefs: what a pass over `cell` would delete, writing nothing (TASK-264): not taking the
     /// cell's collector lease, which would fence a pass that deletes, running meanwhile, out of its
-    /// deletes. It compacts nothing, and so finds doomed none of what a pass would delete only once
-    /// it compacted it, a grace period after: no more than a pass would delete, and less. What a
-    /// pass would compact, it says apart ([`DryRun::compactable`]), and what references it would
-    /// retire ([`DryRun::retired`]). It goes by the lease's epoch as it starts, as a pass by the
-    /// epoch it takes, to tell whether a pass that deletes ran meanwhile ([`DryRun::fenced`]).
-    /// Where a pass would give up on a fork of a version deleted, writing its record, it takes the
-    /// fork as given up on, as a pass mostly finds it. It goes over the cell in full, whatever the
-    /// last pass recorded.
+    /// deletes; and what references it would retire ([`DryRun::retired`]). It goes by the lease's
+    /// epoch as it starts, as a pass by the epoch it takes, to tell whether a pass that deletes ran
+    /// meanwhile ([`DryRun::fenced`]). Where a pass would give up on a fork of a version deleted,
+    /// writing its record, it takes the fork as given up on, as a pass mostly finds it. It goes
+    /// over the cell in full, whatever the last pass recorded.
     pub async fn dry_run_cell(&self, bucket: &impl Bucket, cell: CellId) -> Result<DryRun, Error> {
         let epoch = passed::epoch(bucket, cell).await?;
         let listed = first_listing(bucket, cell).await?;
@@ -1138,12 +907,10 @@ impl Collector {
         let Some(pass) = remembered.survey(bucket, cell, epoch, Writes::None, listed).await? else {
             return Ok(DryRun { fenced: true, ..DryRun::default() });
         };
-        let doomed = pass.doomed(bucket, &self.options).await?.into_iter().cloned().collect();
-        let compactable = pass.compactable(bucket, &self.options, &mut remembered.trailers).await?;
-        let compactable = compactable.into_iter().map(|object| object.meta.clone()).collect();
+        let doomed = pass.doomed(bucket)?.into_iter().cloned().collect();
         let mut retired: Vec<String> = pass.retired().into_iter().map(|(key, _)| key).collect();
         retired.extend(pass.recording.stale.iter().cloned());
-        Ok(DryRun { doomed, compactable, retired, fenced: fenced(bucket, cell, epoch).await? })
+        Ok(DryRun { doomed, retired, fenced: fenced(bucket, cell, epoch).await? })
     }
 }
 
@@ -1189,10 +956,9 @@ pub async fn clear_marking(bucket: &impl Bucket) -> Result<(), Error> {
 
 /// cladefs: what a look at a cell found, before its pass took the lease ([`Collector::look`]).
 enum Looked {
-    /// The cell as the last pass in full recorded it, nothing due: the pass that skips it,
-    /// writing nothing.
+    /// The cell as the last pass in full recorded it: the pass that skips it, writing nothing.
     Unchanged(Report),
-    /// Changed, or something due: its listing, and the lease's epoch the look read.
+    /// Changed: its listing, and the lease's epoch the look read.
     Changed(Listed, u64),
     /// The last pass recorded no listing: nothing to look at.
     Unrecorded,
@@ -1270,10 +1036,9 @@ impl Remembered {
             None => passed::list(bucket, cell).await?,
         };
         let Listed { objects, digest, usage, stale, references } = listed;
-        self.trailers.retain(&objects);
         let recording = Recording { digest: settled.then_some(digest), usage, stale, references };
         let found = (objects, records, live, referenced, recording);
-        Ok(Some(Pass::new(bucket, (cell, epoch), found).await?))
+        Ok(Some(Pass::new(cell, found)))
     }
 
     /// Reads the state of the cell, live, into `live`, and those of its versions. A pass fenced as
@@ -1402,14 +1167,11 @@ enum Writes {
 /// listed by the mark-only pass of `epoch`, holds still, the same objects, and that `doomed`, what
 /// it found no live cell needs, does not: each warned of, loudly. No correct fork or recovery
 /// reaches what no live cell reached, so each is a bug in the collector, which a pass deleting
-/// would have lost. Marks of a shorter grace period than `options`' are compared with none: what a
-/// compacted object needs to go, its moves aged, takes longer by a longer one. Marks it can't read,
-/// it warns of.
+/// would have lost. Marks it can't read, it warns of.
 async fn resurrected(
     bucket: &impl Bucket,
     cell: CellId,
     epoch: u64,
-    options: &Options,
     objects: &BTreeMap<String, Meta>,
     doomed: &[&Meta],
 ) -> Result<Vec<String>, Error> {
@@ -1431,9 +1193,6 @@ async fn resurrected(
             return Ok(Vec::new());
         }
     };
-    if marks.grace < options.grace {
-        return Ok(Vec::new());
-    }
     let doomed: BTreeSet<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
     let mut resurrected = Vec::new();
     for marked in &marks.marked {
@@ -1730,15 +1489,6 @@ async fn lost_is_ok(
     }
 }
 
-/// Whether the writer of the cell `recovered` is of may name the extents it holds anywhere on
-/// their ways from where they were sealed, before the moves its state followed: unless its state
-/// is from a checkpoint its head names of the writer holding the head. The extents it inherited,
-/// its writer may name so whatever this says ([`Live::inherit`]).
-fn behind(recovered: &Recovered<Layers>) -> bool {
-    let epoch = recovered.epoch();
-    rules().ways_from_seals && recovered.checkpoint().is_none_or(|(_, by)| by != epoch)
-}
-
 /// What a pass needs of the live cells' states, folded in as they are recovered.
 #[derive(Default)]
 struct Live {
@@ -1748,15 +1498,10 @@ struct Live {
     cells: BTreeMap<CellId, Vec<Ended>>,
     /// What recovering them read.
     touched: BTreeSet<String>,
-    /// Where the extents they name are: each place once, however many of them name it there.
-    located: BTreeMap<ExtentId, BTreeSet<Location>>,
-    /// The moves they name extents in whose writers may name them anywhere on their ways from
-    /// where they were sealed ([`behind`]).
-    behind: BTreeSet<String>,
-    /// cladefs: whether each object [`Live::behind_at`] was asked of is moves, by its key: each
-    /// key parsed once, not once an extent in it (TASK-395.12). Parsing them took most of a pass
-    /// over a cell whose cell was forked at many versions, each a state of every extent of it.
-    moves: rustc_hash::FxHashMap<String, bool>,
+    /// The objects the extents they name are in: each once, however many of them name extents
+    /// there (TASK-395.12: a pass over a cell forked at many versions, each a state of every extent
+    /// of it, looks each extent's key up, cloning it once).
+    named: rustc_hash::FxHashSet<String>,
     /// cladefs: the origins whose states it keeps, each once ([`Live::keep_origin`]).
     origins: BTreeSet<(CellId, u64)>,
     /// cladefs: whether what it found went by more than the cell holds, which may change with
@@ -1781,7 +1526,7 @@ impl Ended {
     /// `collector_epochs`): of its epoch, or a later one, a segment or an extent of its own at or
     /// past its end, or a checkpoint newer than its own. An object of an earlier epoch, its
     /// writer's swaps all fail: no head ever names it.
-    fn ahead(&self, kind: Kind<'_>) -> bool {
+    fn ahead(&self, kind: Kind) -> bool {
         rules().collector_epochs
             && match kind {
                 Kind::Segment { segment, epoch, .. } | Kind::Extent { segment, epoch, .. } => {
@@ -1812,7 +1557,6 @@ impl Live {
     /// Folds in `recovered`, a live cell's: its own layer, and what it inherited into
     /// `inherited`, its round's, which [`Live::inherit`] folds in once for all its forks.
     fn add(&mut self, recovered: Recovered<Layers>, inherited: &mut InheritedStates) {
-        let behind = behind(&recovered);
         let ended = Ended {
             end: recovered.end(),
             epoch: recovered.epoch(),
@@ -1822,11 +1566,8 @@ impl Live {
         let State { cell, extents, .. } = state;
         let Layered { inherited: from, own, shadowed } = extents;
         self.touched.extend(touched);
-        for (extent, location) in own {
-            if behind {
-                self.behind_at(&location);
-            }
-            self.located.entry(extent).or_default().insert(location);
+        for location in own.values() {
+            self.name(location);
         }
         if let Some(from) = from {
             match inherited.states.iter_mut().find(|(state, _)| Arc::ptr_eq(state, &from)) {
@@ -1838,32 +1579,22 @@ impl Live {
     }
 
     /// Folds in what forks inherited, `inherited`: each state once, but the extents of it none of
-    /// them holds where they inherited them. Their writers may name those anywhere on their ways
-    /// from where they were sealed: each recovered the parent's state as it was then.
+    /// them holds where they inherited them.
     fn inherit(&mut self, inherited: InheritedStates) {
-        let behind = rules().ways_from_seals;
         for (state, unheld) in inherited.states {
             for (extent, location) in &state.extents {
-                if unheld.contains(extent) {
-                    continue;
-                }
-                if behind {
-                    self.behind_at(location);
-                }
-                let located = self.located.entry(*extent).or_default();
-                if !located.contains(location) {
-                    located.insert(location.clone());
+                if !unheld.contains(extent) {
+                    self.name(location);
                 }
             }
         }
     }
 
     /// cladefs: keeps `state`, an origin's, whole, for the forks of it to other cells, which
-    /// `touched` was read to recover (TASK-395.4): the extents it names, along their ways from
-    /// where they were sealed, as a child with no checkpoint of its own names them where it read
-    /// them; and what recovering it read, through which such a child recovers, unless the rule that
-    /// it is kept is off, as a test shows it needed. What its forks freed of it since is no matter:
-    /// the collector is conservative.
+    /// `touched` was read to recover (TASK-395.4): the extents it names, as a child with no
+    /// checkpoint of its own names them where it read them; and what recovering it read, through
+    /// which such a child recovers, unless the rule that it is kept is off, as a test shows it
+    /// needed. What its forks freed of it since is no matter: the collector is conservative.
     fn keep_origin(&mut self, state: &State, touched: BTreeSet<String>) {
         self.keep_read(touched);
         self.keep_places(&state.extents);
@@ -1887,216 +1618,31 @@ impl Live {
         }
     }
 
-    /// cladefs: keeps the extents at `places`, along their ways from where they were sealed.
+    /// cladefs: keeps the extents at `places`.
     fn keep_places<'a>(&mut self, places: impl IntoIterator<Item = (&'a ExtentId, &'a Location)>) {
-        let behind = rules().ways_from_seals;
-        for (extent, location) in places {
-            if behind {
-                self.behind_at(location);
-            }
-            let located = self.located.entry(*extent).or_default();
-            if !located.contains(location) {
-                located.insert(location.clone());
-            }
+        for (_, location) in places {
+            self.name(location);
         }
     }
 
-    /// Notes that a writer may name the extent at `location` anywhere on its way there from where
-    /// it was sealed: in moves, if it is in some.
-    fn behind_at(&mut self, location: &Location) {
-        let key = &location.key;
-        let moves = match self.moves.get(key) {
-            Some(&moves) => moves,
-            None => {
-                let moves = matches!(layout::kind(key), Kind::Moves { .. });
-                self.moves.insert(key.clone(), moves);
-                moves
-            }
-        };
-        if moves && !self.behind.contains(key) {
-            self.behind.insert(key.clone());
+    /// Notes that an extent is at `location`: its object is needed.
+    fn name(&mut self, location: &Location) {
+        if !self.named.contains(&location.key) {
+            self.named.insert(location.key.clone());
         }
     }
-}
-
-/// cladefs: how deep a chain of moves of moves the collector makes: the deepest it compacts no
-/// more, what it holds staying there. Each is in its key, 20 bytes or so more each, which buckets
-/// take [`layout::MAX_KEY`] of, a segment's at 78 bytes, and each a hop that a read of an extent
-/// moved that many times follows, `moves::MOVES` at most (TASK-572).
-pub(crate) const MOVES_DEPTH: usize = 32;
-
-/// Whether `extents`, live in an object of `len` bytes of data, take less than `options`' fraction
-/// of it.
-fn below(extents: &BTreeMap<ExtentId, Location>, options: &Options, len: u64) -> bool {
-    let used: u64 = extents.values().map(|location| location.len).sum();
-    (used as f64) < options.compact_below * len as f64
-}
-
-/// The trailers of the objects a pass may compact, by their keys, with the versions and sizes they
-/// were listed at: read once each, as they never change, and forgotten once they are gone. The live
-/// extents of an object are measured against its data, as its trailer says, which its listed size,
-/// compressed (TASK-29), may be far below: before, a mostly dead segment whose data compressed was
-/// never compacted (TASK-293).
-#[derive(Default)]
-struct Trailers(BTreeMap<String, (Version, u64, Frame)>);
-
-impl Trailers {
-    /// The frame of the object `meta` lists, as its trailer says, if it is still there.
-    fn known(&self, meta: &Meta) -> Option<&Frame> {
-        let (version, size, frame) = self.0.get(&meta.key)?;
-        (*version == meta.version && *size == meta.size).then_some(frame)
-    }
-
-    /// Learns the trailers of the objects `metas` list, those not known yet, many at once.
-    async fn learn(&mut self, bucket: &impl Bucket, metas: &[&Meta]) -> Result<(), Error> {
-        // The reads' futures made first, as in `bucket::delete_all`.
-        let unknown: Vec<&Meta> =
-            metas.iter().copied().filter(|meta| self.known(meta).is_none()).collect();
-        let reads: Vec<_> = unknown.into_iter().map(|meta| learned(bucket, meta)).collect();
-        let reads = futures::stream::iter(reads)
-            .buffer_unordered(TRAILERS_AT_ONCE)
-            .collect::<Vec<_>>()
-            .await;
-        for (meta, frame) in reads {
-            if let Some(frame) = frame? {
-                self.0.insert(meta.key.clone(), (meta.version.clone(), meta.size, frame));
-            }
-        }
-        Ok(())
-    }
-
-    /// Forgets those of objects no longer listed as they were.
-    fn retain(&mut self, objects: &BTreeMap<String, Meta>) {
-        self.0.retain(|key, (version, size, _)| {
-            objects.get(key).is_some_and(|meta| meta.version == *version && meta.size == *size)
-        });
-    }
-}
-
-/// `meta`, and the frame of the object it lists ([`trailer`]).
-async fn learned<'a>(
-    bucket: &impl Bucket,
-    meta: &'a Meta,
-) -> (&'a Meta, Result<Option<Frame>, Error>) {
-    (meta, trailer(bucket, meta).await)
-}
-
-/// The frame of the object `meta` lists, as its trailer says, if it is still there.
-async fn trailer(bucket: &impl Bucket, meta: &Meta) -> Result<Option<Frame>, Error> {
-    let range = ByteRange::Suffix(layout::TRAILER);
-    let Some(trailer) = bucket::get_range(bucket, &meta.key, range).await? else {
-        return Ok(None);
-    };
-    let frame = Frame::of_trailer(&trailer)?;
-    if frame.size() != meta.size {
-        let (key, size) = (&meta.key, meta.size);
-        return Err(Error::Corrupt(format!(
-            "{key}: {size} bytes, {} by its trailer",
-            frame.size()
-        )));
-    }
-    Ok(Some(frame))
-}
-
-/// An object a pass compacts ([`Pass::compactable`]): as listed, and its live extents.
-struct Compactable<'a> {
-    meta: &'a Meta,
-    extents: &'a BTreeMap<ExtentId, Location>,
-}
-
-/// Compacts the object at `key`, of which `extents` are live: copies them to its moves by the pass
-/// of epoch `pass`, at a key of the pass's (TASK-407.1), unless it is gone. The moves' key and
-/// size, if it did: those there first, if the pass created them before. cladefs: it reads the
-/// object under `ring`'s keys of its cell, and encrypts its moves under the key the object was
-/// encrypted under, the DEK of the same generation, with a salt of their own (TASK-411.6): every
-/// reader following the moves read the object under that key, where a cell opened before a newer
-/// generation was added holds none of it.
-async fn compact_object(
-    bucket: &impl Bucket,
-    key: &str,
-    extents: &BTreeMap<ExtentId, Location>,
-    (ring, pass): (&Ring, u64),
-) -> Result<Option<(String, u64)>, Error> {
-    let moves = layout::moves(key, pass)?;
-    let Some(object) = bucket::get(bucket, key).await? else { return Ok(None) };
-    let keys = keys::of_key(ring, key);
-    // Its data, checked: compacting copies none that is corrupt under new CRCs.
-    let object_data = layout::data_under(&object.bytes, &keys)?;
-    let (id, _) = Frame::of(&object.bytes)?.encryption.keyed();
-    let encrypting = (keys.dek(id).ok_or(Error::NoKey(id))?, id);
-    let mut data = Vec::new();
-    let mut entries = Vec::new();
-    for (&extent, location) in extents {
-        // cladefs: checked (board 8545): a location from a checkpoint or a footer the keyless
-        // collector decoded, whose MAC it checked not.
-        let bytes = location_range(location)
-            .and_then(|range| object_data.get(range))
-            .ok_or_else(|| Error::Corrupt(format!("{extent:?} past the end of {key}")))?;
-        let to = Location { key: moves.clone(), offset: data.len() as u64, len: location.len };
-        entries.push((extent, to));
-        data.extend_from_slice(bytes);
-    }
-    // Its own moves of it, created before, stand.
-    let footer = Moves { of: key.to_owned(), extents: entries };
-    let bytes = layout::with_footer(&data, &footer, encrypting);
-    let size = match bucket::create(bucket, &moves, bytes.clone()).await? {
-        Created::Created(_) => bytes.len() as u64,
-        Created::Exists(stood) => stood.meta.size,
-    };
-    Ok(Some((moves, size)))
-}
-
-/// cladefs: the bytes of its object `location` names, if this host addresses them: none for one
-/// whose end is past a u64 or a usize (board 8545).
-#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-fn location_range(location: &Location) -> Option<std::ops::Range<usize>> {
-    // Past what this host addresses: none, the answer.
-    let start = usize::try_from(location.offset).ok()?;
-    // Past what this host addresses: none, the answer.
-    let end = usize::try_from(location.offset.checked_add(location.len)?).ok()?;
-    Some(start..end)
-}
-
-/// cladefs: compacts the object `compactable` is, under `ring`, by the pass of epoch `pass`, as
-/// [`compact_object`] does: its
-/// moves' key and size, and the object's size as listed, if it did. A function of its own, not a
-/// closure's future, so that a pass's future is seen to be `Send` (TASK-395.15: a sweep spawning
-/// its passes).
-async fn compact_listed(
-    bucket: &impl Bucket,
-    compactable: &Compactable<'_>,
-    (ring, pass): (&Ring, u64),
-) -> Result<Option<((String, u64), u64)>, Error> {
-    let Compactable { meta, extents, .. } = compactable;
-    let moves = compact_object(bucket, &meta.key, extents, (ring, pass)).await?;
-    Ok(moves.map(|moves| (moves, meta.size)))
-}
-
-/// cladefs: the keys of the moves of the object at `key` that `objects`, a listing of its cell,
-/// holds, every pass's, in the order of their passes (TASK-407.1).
-fn moves_listed<'a>(
-    objects: &'a BTreeMap<String, Meta>,
-    key: &str,
-) -> Result<Vec<&'a String>, Error> {
-    let prefix = layout::moves_of(key)?;
-    Ok((objects.range(prefix.clone()..))
-        .map(|(moves, _)| moves)
-        .take_while(|moves| moves.starts_with(&prefix))
-        .collect())
 }
 
 /// What becomes of an object a pass listed ([`Pass::fates`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Fate {
     Stays,
     Goes,
-    /// It goes once the backend's clock reads this.
-    GoesAt(u64),
 }
 
 impl Fate {
-    /// Goes at `at`, if it is; stays otherwise.
-    fn at(at: Option<u64>) -> Self {
-        at.map_or(Self::Stays, Self::GoesAt)
+    fn of(goes: bool) -> Self {
+        if goes { Self::Goes } else { Self::Stays }
     }
 }
 
@@ -2104,22 +1650,14 @@ impl Fate {
 /// the origins it keeps need of them.
 struct Pass {
     cell: CellId,
-    /// cladefs: its epoch, its taking of the cell's collector lease, which its moves' keys name
-    /// (TASK-407.1).
-    epoch: u64,
     objects: BTreeMap<String, Meta>,
     records: BTreeMap<CellId, Head>,
     /// Where each recovery of each live cell ended.
     cells: BTreeMap<CellId, Vec<Ended>>,
     /// What recovering the live cells and the origins read.
     touched: BTreeSet<String>,
-    /// The objects holding the extents the live cells and the origins name, and those
-    /// extents in them.
-    named: BTreeMap<String, BTreeMap<ExtentId, Location>>,
-    /// The moves the way to those extents goes through, whose maps are needed even once their
-    /// data moved on: from where the states name them, or, where a writer may name them before
-    /// that, from where they were sealed.
-    hops: BTreeSet<String>,
+    /// The objects holding the extents the live cells and the origins name.
+    named: rustc_hash::FxHashSet<String>,
     /// cladefs: the origins the references under the cell name, as listed after the states.
     referenced: BTreeSet<(CellId, u64)>,
     /// cladefs: what it records of its listing (TASK-395.6, TASK-395.8).
@@ -2140,12 +1678,10 @@ struct Recording {
 }
 
 impl Pass {
-    /// The pass over `cell` of `epoch`, which listed `objects`, and found `records`, what the live
-    /// cells and the origins need (`live`), the origins `referenced`, and what it
-    /// records as it ends: its ways to the extents they name worked out.
-    async fn new(
-        bucket: &impl Bucket,
-        (cell, epoch): (CellId, u64),
+    /// The pass over `cell`, which listed `objects`, and found `records`, what the live cells and
+    /// the origins need (`live`), the origins `referenced`, and what it records as it ends.
+    fn new(
+        cell: CellId,
         found: (
             BTreeMap<String, Meta>,
             BTreeMap<CellId, Head>,
@@ -2153,72 +1689,16 @@ impl Pass {
             BTreeSet<(CellId, u64)>,
             Recording,
         ),
-    ) -> Result<Self, Error> {
+    ) -> Self {
         let (objects, records, live, referenced, recording) = found;
-        let Live { cells, touched, located, behind, .. } = live;
-        let mut named: BTreeMap<String, BTreeMap<ExtentId, Location>> = BTreeMap::new();
-        // The moves on the ways there from where the extents were sealed, those named among them:
-        // each moves is at a key of the moves of what it is of.
-        let mut hops = BTreeSet::new();
-        for key in &behind {
-            let mut key = key.clone();
-            while let Some(from) = layout::moved_from(&key) {
-                if objects.contains_key(&key) {
-                    hops.insert(key);
-                }
-                key = from;
-            }
-        }
-        // Each place once, however many cells name it, followed along its moves a hop at a
-        // time: the moves the ways reach at a hop read at once, as the listing says which there
-        // are (TASK-395.5). cladefs: a place in another cell, and its moves, are no candidates of
-        // this one's, which its listing doesn't hold (TASK-395.4).
-        let mut maps = MovesMaps::default();
-        let mut ways: Vec<(ExtentId, Location)> = (located.iter())
-            .flat_map(|(&extent, locations)| locations.iter().map(move |at| (extent, at.clone())))
-            .collect();
-        while !ways.is_empty() {
-            let mut onward = Vec::new();
-            for (extent, location) in ways {
-                if objects.contains_key(&location.key) {
-                    named.entry(location.key.clone()).or_default().insert(extent, location.clone());
-                }
-                // Every pass's moves of it listed, the way going through the latest that has the
-                // extent, as readers follow it (TASK-407.1).
-                let moves = moves_listed(&objects, &location.key)?;
-                if !moves.is_empty() {
-                    hops.extend(moves.iter().map(|&key| key.clone()));
-                    let moves = moves.into_iter().cloned().collect::<Vec<_>>();
-                    onward.push((extent, location, moves));
-                }
-            }
-            let listed = onward.iter().map(|(_, at, moves)| (at.key.clone(), moves.clone()));
-            maps.read_listed(bucket, listed).await?;
-            ways = (onward.into_iter())
-                .filter_map(|(extent, location, _)| match maps.moved_read(extent, &location.key) {
-                    Moved::To(to) => Some((extent, to)),
-                    Moved::No | Moved::Dropped => None,
-                })
-                .collect();
-        }
-        Ok(Self {
-            cell,
-            epoch,
-            objects,
-            records,
-            cells,
-            touched,
-            named,
-            hops,
-            referenced,
-            recording,
-        })
+        let Live { cells, touched, named, .. } = live;
+        Self { cell, objects, records, cells, touched, named, referenced, recording }
     }
 
     /// cladefs: whether the object of `kind`, which no live state names, a live cell's head may yet
     /// name, by what its key declares ([`Ended::ahead`], TASK-407): by any of the cell's
     /// recoveries, of several origins (TASK-173).
-    fn ahead(&self, kind: Kind<'_>) -> bool {
+    fn ahead(&self, kind: Kind) -> bool {
         let cell = match kind {
             Kind::Segment { cell, .. }
             | Kind::Extent { cell, .. }
@@ -2228,150 +1708,24 @@ impl Pass {
         self.cells.get(&cell).into_iter().flatten().any(|ended| ended.ahead(kind))
     }
 
-    /// The objects mostly freed, as the lengths of their data in their trailers say
-    /// ([`Trailers`]): those [`Pass::compact`] compacts, each with its live extents, which take
-    /// less than `options`' fraction of it.
-    async fn compactable(
-        &self,
-        bucket: &impl Bucket,
-        options: &Options,
-        trailers: &mut Trailers,
-    ) -> Result<Vec<Compactable<'_>>, Error> {
-        let mut ours = Vec::new();
-        for (key, extents) in &self.named {
-            let collectable = match layout::kind(key) {
-                kind @ Kind::Segment { .. } => !self.touched.contains(key) && !self.ahead(kind),
-                // cladefs: but moves as deep as a chain goes, whose moves' key would be longer
-                // still, past what buckets take, and its extents past the hops a read follows
-                // (TASK-572).
-                Kind::Moves { .. } => layout::moves_depth(key) < MOVES_DEPTH,
-                _ => false,
-            };
-            if collectable && moves_listed(&self.objects, key)?.is_empty() {
-                ours.push((&self.objects[key], extents));
-            }
-        }
-        trailers.learn(bucket, &ours.iter().map(|(meta, _)| *meta).collect::<Vec<_>>()).await?;
-        // Those gone since they were listed, whose trailers it could not read, are not compacted.
-        Ok((ours.into_iter())
-            .filter_map(|(meta, extents)| {
-                let frame = trailers.known(meta)?;
-                below(extents, options, frame.data_len).then_some(Compactable { meta, extents })
-            })
-            .collect())
-    }
-
-    /// Compacts the objects mostly freed: copies the live extents of each to its moves.
-    /// [`COMPACTIONS_AT_ONCE`] at once, in any order (TASK-395.5): each writes the moves of an
-    /// object of its own, create-only, which no other compaction of the pass reads, as an object
-    /// is compacted only where no moves of it were listed, and moves only where they were, never
-    /// both of one way. They all end before the pass works out what goes, as one at a time: what
-    /// goes is of the listing before, which none of their moves is in. The moves' keys and sizes.
-    /// cladefs: those encrypted under their cells' DEKs, unwrapped under the cell's KEK through
-    /// `kms` once for the pass, and only if one is to be compacted ([`Pass::compacting`],
-    /// TASK-411.6).
-    async fn compact(
-        &self,
-        bucket: &impl Bucket,
-        options: &Options,
-        trailers: &mut Trailers,
-        kms: Option<&Arc<dyn keys::Kmses>>,
-        report: &mut Report,
-    ) -> Result<Vec<(String, u64)>, Error> {
-        let mut compactable = self.compactable(bucket, options, trailers).await?;
-        let ring = self.compacting(kms, &mut compactable, report).await?;
-        // The compactions' futures made first, as in `bucket::delete_all`.
-        let compactions: Vec<_> = compactable
-            .iter()
-            .map(|object| compact_listed(bucket, object, (&ring, self.epoch)))
-            .collect();
-        let compactions = futures::stream::iter(compactions).buffer_unordered(COMPACTIONS_AT_ONCE);
-        let mut compactions = std::pin::pin!(compactions);
-        let mut compacted = Vec::new();
-        while let Some(done) = compactions.next().await {
-            if let Some((moves, size)) = done? {
-                report.compacted += 1;
-                report.compacted_bytes += size;
-                compacted.push(moves);
-            }
-        }
-        Ok(compacted)
-    }
-
-    /// cladefs: the keys `compactable`'s objects, all encrypted (TASK-411.28), are compacted under
-    /// ([`keys::compacting`], TASK-411.6): their cells' DEKs, as the pass's records of them keep
-    /// them, unwrapped under the cell's KEK by a [`keys::CachingKms`] of this pass's over `kms`,
-    /// each generation of the KEK once: the pass's one call of the KMS, however many objects it
-    /// compacts. Nothing to compact, it asks nothing. The KEK not to be had, `kms` refusing it (a
-    /// tenant's KEK revoked or destroyed, the KMS failing) or none given, the objects are left
-    /// uncompacted, counted in `report` and warned of, and the pass goes on marking and deleting.
-    async fn compacting(
-        &self,
-        kms: Option<&Arc<dyn keys::Kmses>>,
-        compactable: &mut Vec<Compactable<'_>>,
-        report: &mut Report,
-    ) -> Result<Arc<Ring>, Error> {
-        if compactable.is_empty() {
-            return Ok(Ring::keyless());
-        }
-        let cell = self.cell;
-        let ring = match (kms, self.records.get(&cell)) {
-            (None, _) => {
-                Err(Error::Kms(format!("tenant {}: the collector has no KMS", cell.tenant)))
-            }
-            (Some(_), None) => Ok(Ring::keyless()),
-            (Some(kms), Some(head)) => {
-                let keys = CellKeys::of(cell, head, keys::CachingKms::over(kms.clone(), None));
-                keys::compacting(cell, head, &keys).await
-            }
-        };
-        match ring {
-            Err(Error::Kms(why)) => {
-                let encrypted = compactable.len();
-                log::warn!(
-                    cell:%, why:%;
-                    "cladefs-gc: cell {cell}: {encrypted} objects encrypted left uncompacted: {why}"
-                );
-                report.locked += 1;
-                report.uncompacted += encrypted;
-                compactable.clear();
-                Ok(Ring::keyless())
-            }
-            ring => ring,
-        }
-    }
-
     /// What goes: everything listed that the live cells and the origins kept do not need, in
     /// the order of its keys ([`Pass::fates`]).
     /// cladefs: the cell's removal too, if it goes whole ([`Pass::removal`], TASK-455).
-    async fn doomed(&self, bucket: &impl Bucket, options: &Options) -> Result<Vec<&Meta>, Error> {
-        let (mut doomed, deferred) = self.fates(bucket, options).await?;
-        if let Some(removal) = self.removal(&doomed, &deferred) {
+    fn doomed(&self, bucket: &impl Bucket) -> Result<Vec<&Meta>, Error> {
+        let mut doomed = self.fates(bucket)?;
+        if let Some(removal) = self.removal(&doomed) {
             doomed.extend(removal.heads.iter().chain(&removal.lease).copied());
             doomed.sort_by(|a, b| a.key.cmp(&b.key));
         }
         Ok(doomed)
     }
 
-    /// What goes, as [`Pass::doomed`] says; and what would but that it was written too recently, or
-    /// what it was compacted to was, with when it may go (TASK-395.6), in the order of its keys.
-    /// cladefs: a cell with no live cell and no reference, all of it but its records and its
-    /// object, and the collector's own, goes.
-    async fn fates(
-        &self,
-        bucket: &impl Bucket,
-        options: &Options,
-    ) -> Result<(Vec<&Meta>, Vec<Deferred>), Error> {
+    /// What goes, as [`Pass::doomed`] says, in the order of its keys. cladefs: a cell with no live
+    /// cell and no reference, all of it but its records and its object, and the collector's own,
+    /// goes. A cell holding moves, of formats before 28, is refused ([`Error::Format`]).
+    fn fates(&self, bucket: &impl Bucket) -> Result<Vec<&Meta>, Error> {
         let now = bucket.now();
-        let due = |meta: &Meta| meta.modified.saturating_add(options.grace);
-        // When the object at `key` may go for having been compacted: a grace period after its
-        // latest moves were written, if any were listed.
-        let compacted = |key: &str| {
-            // A key of no cell's has no moves.
-            let moves = moves_listed(&self.objects, key).ok()?;
-            moves.last().map(|moves| due(&self.objects[*moves]))
-        };
-        let goes = |goes: bool| if goes { Fate::Goes } else { Fate::Stays };
+        let goes = Fate::of;
         // cladefs: the read evidence that goes (TASK-702.2): of versions the head names no more,
         // all of a dead cell's, and all but each tenant's newest of each.
         let named: BTreeSet<u64> = (self.records.get(&self.cell).filter(|head| !head.deleted()))
@@ -2382,37 +1736,22 @@ impl Pass {
             (crate::evidence::doomed(self.cell, &evidence, Some(&named), now).into_iter())
                 .map(|meta| meta.key.clone())
                 .collect();
-        let (mut doomed, mut deferred) = (Vec::new(), Vec::new());
+        let mut doomed = Vec::new();
         for (key, meta) in &self.objects {
-            let named = self.named.contains_key(key);
+            let named = self.named.contains(key);
             let kind = layout::kind(key);
             let fate = match kind {
                 Kind::Checkpoint { .. } => goes(!self.touched.contains(key) && !self.ahead(kind)),
-                // Once a checkpoint covers it, if its extents are dead or moved; but one its head
-                // may yet name ([`Pass::ahead`]).
+                // Once a checkpoint covers it, if its extents are dead, or relocated by its cell's
+                // writer (doc-27); but one its head may yet name ([`Pass::ahead`]).
                 Kind::Segment { .. } => {
-                    if self.ahead(kind) || self.touched.contains(key) {
-                        Fate::Stays
-                    } else if named {
-                        Fate::at(compacted(key))
-                    } else {
-                        Fate::Goes
-                    }
+                    goes(!named && !self.touched.contains(key) && !self.ahead(kind))
                 }
                 // Once no segment will name it.
                 Kind::Extent { .. } => goes(!named && !self.ahead(kind)),
-                // Moves go once no state's way goes through them, and they are compacted in turn,
-                // or what they are of is gone and they hold no extent a state names.
-                Kind::Moves { cell, of, .. } => {
-                    if self.hops.contains(key) {
-                        Fate::Stays
-                    } else if named {
-                        Fate::at(compacted(key))
-                    } else if self.objects.contains_key(&format!("{}{of}", cell.prefix())) {
-                        Fate::Stays
-                    } else {
-                        Fate::GoesAt(due(meta))
-                    }
+                // cladefs: the moves of formats before 28, which nothing of this one reads.
+                Kind::Moves { cell } => {
+                    return Err(Error::Format { cell, format: layout::FORMAT - 1 });
                 }
                 // A head stays, a deleted cell's too, final, fencing its writers, which no swap of
                 // theirs passes (TASK-174); but with a dead cell that goes whole
@@ -2446,14 +1785,11 @@ impl Pass {
                 | Kind::Unknown => Fate::Stays,
                 Kind::Evidence { .. } => goes(evidence.contains(key)),
             };
-            match fate {
-                Fate::Stays => {}
-                Fate::Goes => doomed.push(meta),
-                Fate::GoesAt(at) if at <= now => doomed.push(meta),
-                Fate::GoesAt(due) => deferred.push(Deferred { key: key.clone(), due }),
+            if fate == Fate::Goes {
+                doomed.push(meta);
             }
         }
-        Ok((doomed, deferred))
+        Ok(doomed)
     }
 
     /// cladefs: the references the pass retires, under other cells (doc-7, References; TASK-395.4):
@@ -2490,16 +1826,15 @@ impl Pass {
         self.recording.references == self.recording.stale.len()
     }
 
-    /// cladefs: what removes the cell whole, if it goes (TASK-455): dead, deferring nothing, its
-    /// listed references all stale, and every object it listed that `doomed` leaves one of a cell
+    /// cladefs: what removes the cell whole, if it goes (TASK-455): dead, its listed references
+    /// all stale, and every object it listed that `doomed` leaves one of a cell
     /// nothing will need again: its head, [`Head::removable`] (a root's or a clone's made,
     /// deleted, of an ID an allocator gave), and its lease. A mark under it (of a reference
     /// retired, which a writer may write again; or a mark-only pass's, an operator's to remove,
-    /// [`clear_marks`]),
-    /// what it defers, and anything else keep it. A cell of no head loses its lease alone, once
+    /// [`clear_marks`]), and anything else keep it. A cell of no head loses its lease alone, once
     /// nothing but its lease is left: one whose removal stopped before its end.
-    fn removal<'a>(&'a self, doomed: &[&Meta], deferred: &[Deferred]) -> Option<Removal<'a>> {
-        if !self.dead() || !deferred.is_empty() || !self.references_all_stale() {
+    fn removal<'a>(&'a self, doomed: &[&Meta]) -> Option<Removal<'a>> {
+        if !self.dead() || !self.references_all_stale() {
             return None;
         }
         let doomed: BTreeSet<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
@@ -2521,15 +1856,14 @@ impl Pass {
     }
 
     /// cladefs: the listing's digest it records, if any ([`Passed::listing`]): of what its listing
-    /// leaves once its deletes land, if its cell is dead and it defers nothing, as a pass in full
-    /// over that finds nothing more to do (TASK-455): so that a dead cell it does not remove is not
-    /// passed over in full twice, the second for the first's deletes, retiring its references
-    /// again. What it leaves must be what a dead cell keeps, its records, heads, object, lease and
-    /// marks: moves left, of an object it deletes, the next pass deletes (or defers), and goes in
-    /// full for. Else of its listing.
-    fn recorded_listing(&self, doomed: &[&Meta], deferred: &[Deferred]) -> Option<[u8; 32]> {
+    /// leaves once its deletes land, if its cell is dead, as a pass in full over that finds nothing
+    /// more to do (TASK-455): so that a dead cell it does not remove is not passed over in full
+    /// twice, the second for the first's deletes, retiring its references again. What it leaves
+    /// must be what a dead cell keeps, its records, heads, object, lease and marks. Else of its
+    /// listing.
+    fn recorded_listing(&self, doomed: &[&Meta]) -> Option<[u8; 32]> {
         let digest = self.recording.digest?;
-        if !self.dead() || !deferred.is_empty() || !self.references_all_stale() {
+        if !self.dead() || !self.references_all_stale() {
             return Some(digest);
         }
         let doomed: BTreeSet<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
@@ -2579,10 +1913,7 @@ mod tests {
     use crate::object_bucket::{ObjectBucket, Request};
     use crate::testing::{Direct, SimBucket};
     use crate::writer::Writer;
-    use extent_frame::Encryption;
-    use extent_frame::KeyId;
-    use extent_keys::kms::LocalKms;
-    use extent_keys::testing::Counted;
+    use futures::FutureExt as _;
     use futures::TryStreamExt as _;
     use futures::executor::block_on;
     use object_store::memory::InMemory;
@@ -2590,9 +1921,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// No compaction, and compacted objects kept long.
-    const KEEP: Options = Options { compact_below: 0.0, grace: 3_600_000 };
 
     fn memory_bucket() -> Arc<ObjectBucket> {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
@@ -2647,186 +1975,13 @@ mod tests {
         let created = bucket::create(&*bucket, key, bytes.read().unwrap()).await.unwrap();
         assert!(matches!(created, Created::Created(_)));
 
-        collect(&*bucket, 1, &KEEP).await.unwrap();
+        collect(&*bucket, 1).await.unwrap();
         let segment = writer.add_segment(objects).unwrap();
         writer.upload(segment).await.unwrap();
         writer.acknowledge().await.unwrap();
         let recovered = recovery::recover(&*bucket, test_cell(1), None).await.unwrap();
         let location = &recovered.state.extents[&late];
         crate::testing::read(&bucket, late, location).await
-    }
-
-    /// TASK-293: a segment whose data compresses, its live extent a third of its data but more than
-    /// half its stored bytes, is compacted: the collector measures what is live against its data,
-    /// not its stored size, as it did before, leaving it uncompacted for as long as the extent
-    /// lived.
-    #[test]
-    fn compressed_objects_are_compacted_by_their_data() {
-        block_on(async {
-            let bucket = memory_bucket();
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let first = writer.chain().next_sequence();
-            let (kept, freed) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-            let extents = vec![(kept, vec![b'k'; 4096]), (freed, vec![b'f'; 8192])];
-            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-            let segment = writer.location(kept).unwrap().key;
-            commit(&writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
-            writer.checkpoint().await.unwrap();
-            let stored = bucket.head(&segment).await.unwrap().size;
-            assert!(stored < 2 * 4096, "{segment}: {stored} bytes stored");
-
-            let compacting = Options { compact_below: 0.5, ..KEEP };
-            let report = collect(&*bucket, 1, &compacting).await.unwrap();
-            assert_eq!(report.compacted, 1);
-            let after = keys(&*bucket).await;
-            assert!(after.contains(&segment) && moves_in(&after, &segment).is_some());
-            let location = writer.location(kept).unwrap();
-            assert_eq!(
-                crate::testing::read(&bucket, kept, &location).await.unwrap(),
-                vec![b'k'; 4096]
-            );
-        });
-    }
-
-    /// cladefs: an object a byte was flipped in, in storage, is compacted to no moves, where its
-    /// extents would be under CRCs of their own: the pass fails, and the object stays, as its
-    /// extents' reads fail (TASK-153.11). In a part stored compressed, the kept extent's bytes
-    /// compressing, and in one stored raw.
-    #[test]
-    fn objects_with_flipped_bytes_are_not_compacted() {
-        for compressible in [true, false] {
-            block_on(async {
-                let bucket = memory_bucket();
-                lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-                let first = writer.chain().next_sequence();
-                let (kept, freed) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-                // The kept extent's bytes compress, or not; the freed one's don't, from a xorshift
-                // generator, so that the part is stored raw where the kept one's don't either.
-                let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-                let mut bytes = |len: u32, compressible: bool| -> Vec<u8> {
-                    (0..len)
-                        .map(|i| match compressible {
-                            true => (i * 7 % 251) as u8,
-                            false => {
-                                state ^= state << 13;
-                                state ^= state >> 7;
-                                state ^= state << 17;
-                                state as u8
-                            }
-                        })
-                        .collect()
-                };
-                let extents =
-                    vec![(kept, bytes(4096, compressible)), (freed, bytes(20_000, false))];
-                commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-                let segment = writer.location(kept).unwrap().key;
-                commit(&writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
-                writer.checkpoint().await.unwrap();
-                let mut bytes = bucket::get(&*bucket, &segment).await.unwrap().unwrap().bytes;
-                let stored =
-                    extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
-                let encoding = match compressible {
-                    true => extent_frame::Encoding::Zstd,
-                    false => extent_frame::Encoding::Raw,
-                };
-                assert_eq!(stored.encoding, encoding);
-                bytes[stored.offset as usize + 9] ^= 0x10;
-                bucket.put(&segment, bytes.into(), PutMode::Overwrite).await.unwrap();
-
-                let compacting = Options { compact_below: 0.5, ..KEEP };
-                let corrupt = Error::Corrupt("an object's part, by its CRC".into());
-                assert_eq!(collect(&*bucket, 1, &compacting).await, Err(corrupt));
-                let after = keys(&*bucket).await;
-                assert!(after.contains(&segment) && moves_in(&after, &segment).is_none());
-                let location = writer.location(kept).unwrap();
-                let read = crate::testing::read(&bucket, kept, &location).await;
-                let corrupt = format!("part 0 of {segment}, by its CRC");
-                assert_eq!(read, Err(Error::Corrupt(corrupt)));
-            });
-        }
-    }
-
-    /// TASK-175: a writer names the extents its checkpoint moves where they went before the
-    /// checkpoint lands: passes of the collector running as the head's swap naming it takes
-    /// effect, before it is answered, trust the checkpoint of the writer holding the head, compact
-    /// the moves in turn and delete the moves before, and the writer still reads the extent.
-    #[test]
-    fn writers_name_what_their_checkpoints_move_before_they_land() {
-        assert_eq!(block_on(read_as_a_checkpoint_lands()), Ok(b"kept".to_vec()));
-    }
-
-    /// A writer naming them so once the head's swap naming its checkpoint is answered: as it takes
-    /// effect, it names the extent where neither the object nor its moves are.
-    #[test]
-    fn writers_naming_what_their_checkpoints_move_need_moves_taken_first() {
-        crate::set_rules(crate::Rules { moves_taken_first: false, ..crate::Rules::ALL });
-        let read = block_on(read_as_a_checkpoint_lands());
-        crate::set_rules(crate::Rules::ALL);
-        assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
-    }
-
-    /// What the writer reads of the extent
-    /// [`writers_name_what_their_checkpoints_move_before_they_land`] keeps, where it names it as
-    /// its checkpoint recording the extent's moves lands, passes of the collector having run until
-    /// they delete nothing more.
-    async fn read_as_a_checkpoint_lands() -> Result<Vec<u8>, Error> {
-        let direct = Arc::new(Direct(SimBucket::new()));
-        let bucket = Arc::new(Hooked::new(direct.clone(), Hook::Swapped));
-        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-        let writer = Arc::new(Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap());
-        let Compacted { kept, moved, .. } = compacted(&*bucket, &writer).await;
-        commit(&writer, Commit { tag: 3, frees: vec![moved], ..Commit::default() }).await;
-        let named = Arc::new(Mutex::new(None));
-        let (passing, naming, watched) = (direct.clone(), named.clone(), Arc::downgrade(&writer));
-        *bucket.then.lock().unwrap() = Some(Box::new(move || {
-            collect_all(&*passing).now_or_never().unwrap();
-            *naming.lock().unwrap() = watched.upgrade().unwrap().location(kept);
-        }));
-        writer.checkpoint().await.unwrap();
-        let location = named.lock().unwrap().clone().unwrap();
-        crate::testing::read(&direct, kept, &location).await
-    }
-
-    /// What [`compacted`] made.
-    struct Compacted {
-        /// An extent the collector moved, which stays.
-        kept: ExtentId,
-        /// One it moved with it, freed next.
-        moved: ExtentId,
-    }
-
-    /// Has `writer` seal three extents in a segment, then free one and checkpoint, and the
-    /// collector compact the segment, moving the two others.
-    async fn compacted<B: Bucket>(bucket: &B, writer: &Writer<B>) -> Compacted {
-        let first = writer.chain().next_sequence();
-        let [kept, moved, freed] = [0, 1, 2].map(|i| ExtentId::new(1, first + i));
-        let extents = vec![
-            (kept, b"kept".to_vec()),
-            (moved, vec![b'm'; 20_000]),
-            (freed, vec![b'f'; 20_000]),
-        ];
-        commit(writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-        commit(writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
-        writer.checkpoint().await.unwrap();
-        let compacting = Options { compact_below: 0.6, ..KEEP };
-        assert_eq!(collect(bucket, 1, &compacting).await.unwrap().compacted, 1);
-        Compacted { kept, moved }
-    }
-
-    /// Runs passes of the collector, compacting objects less than 60% live and deleting what they
-    /// compacted at once, until one does nothing but skip cells unchanged.
-    async fn collect_all(bucket: &impl Bucket) {
-        let now = Options { compact_below: 0.6, grace: 0 };
-        let mut holder = 2;
-        loop {
-            let report = collect(bucket, holder, &now).await.unwrap();
-            if report == (Report { skipped: report.skipped, ..Report::default() }) {
-                return;
-            }
-            holder += 1;
-        }
     }
 
     /// The head written whatever is there: the writer taken over writes it over its successor's,
@@ -2865,7 +2020,7 @@ mod tests {
         for tag in 3..3 + more {
             commit(&taken, Commit { tag, ..Commit::default() }).await;
         }
-        collect(&*bucket, 1, &KEEP).await.unwrap();
+        collect(&*bucket, 1).await.unwrap();
         let key = layout::segment(test_cell(1), segment, taken.epoch());
         let kept = keys(&*bucket).await.contains(&key);
         let recovered = recovery::recover(&*bucket, test_cell(1), None).await;
@@ -2893,7 +2048,7 @@ mod tests {
             .frame(writer.keys().encrypting());
         let segment = writer.add_segment(objects).unwrap();
         writer.upload(segment).await.unwrap();
-        collect(&*bucket, 1, &KEEP).await.unwrap();
+        collect(&*bucket, 1).await.unwrap();
         writer.acknowledge().await.unwrap();
         let recovered = recovery::recover(&*bucket, test_cell(1), None).await;
         recovered.ok().and_then(|recovered| recovered.state.last_commit)
@@ -2935,35 +2090,6 @@ mod tests {
         (uploaded, recovered.ok().and_then(|recovered| recovered.state.last_commit))
     }
 
-    /// TASK-455: a dead cell, its segments compacted before its deletion: the first pass in full
-    /// deletes the segments, and the next, which goes in full for that, as the first recorded its
-    /// listing, not what its deletes left (the simulation found the moves kept for good when it
-    /// did), removes the cell whole, its moves with it; then nothing is left.
-    #[test]
-    fn dead_cells_kept_lose_the_moves_of_what_their_first_pass_deleted() {
-        let sim = SimBucket::new();
-        block_on(async {
-            let bucket = Arc::new(Direct(sim.clone()));
-            mostly_freed(bucket.clone()).await;
-            let compacting = Options { compact_below: 0.5, grace: 0 };
-            collect(&*bucket, 1, &compacting).await.unwrap();
-            let moved = keys(&*bucket).await;
-            let moves = |keys: &[String]| -> usize {
-                keys.iter().filter(|key| matches!(layout::kind(key), Kind::Moves { .. })).count()
-            };
-            assert_eq!(moves(&moved), SEGMENTS as usize);
-            lifecycle::delete(&*bucket, test_cell(1), 11, 0).await.unwrap();
-            let first = collect(&*bucket, 2, &compacting).await.unwrap();
-            assert_eq!(moves(&keys(&*bucket).await), SEGMENTS as usize, "{first:?}");
-            let second = collect(&*bucket, 3, &compacting).await.unwrap();
-            assert_eq!((second.removed, second.skipped), (1, 0));
-            let third = collect(&*bucket, 4, &compacting).await.unwrap();
-            assert_eq!(third, Report::default());
-            assert_eq!(keys(&*bucket).await, Vec::<String>::new());
-            assert_eq!(crate::testing::uncollected(&*bucket, 0.5).await, Vec::<String>::new());
-        });
-    }
-
     /// TASK-455's AC #3: a base's cell keeps nothing of the clones of its version made and gone,
     /// of IDs an allocator gave: each clone's reference retired unmarked, and its cell removed
     /// whole, so that the base's cell holds no reference, as before any, and its pass lists as much
@@ -3002,12 +2128,11 @@ mod tests {
             lifecycle::delete(&*bucket, clone, 20, u64::MAX).await.unwrap();
             cells.push(clone);
         }
-        let options = Options { compact_below: 0.0, grace: 0 };
-        let report = crate::testing::collect_until_quiet(&*bucket, &options).await.unwrap();
+        let report = crate::testing::collect_until_quiet(&*bucket).await.unwrap();
         for cell in cells {
             assert_eq!(bucket::list(&*bucket, &cell.prefix()).await.unwrap(), Vec::new(), "{cell}");
         }
-        assert_eq!(crate::testing::uncollected(&*bucket, 0.0).await, Vec::<String>::new());
+        assert_eq!(crate::testing::uncollected(&*bucket).await, Vec::<String>::new());
         let listed = bucket::list(&*bucket, &base.prefix()).await.unwrap();
         (listed.into_iter().map(|meta| meta.key).collect(), report)
     }
@@ -3028,13 +2153,8 @@ mod tests {
 
     /// Where [`Hooked`] runs what it runs.
     enum Hook {
-        /// As a swap of the head takes effect, before it is answered: a checkpoint's, the hook set
-        /// as it is written.
-        Swapped,
         /// Before the get of the object at this key of this number, from 1.
         Getting(String, usize),
-        /// After the first get of the object at this key, before it is answered.
-        Got(String),
         /// Before the put of a key under this prefix of this number, from 1.
         Putting(String, usize),
     }
@@ -3090,18 +2210,7 @@ mod tests {
             {
                 then();
             }
-            let then = match &self.hook {
-                Hook::Got(at) => self.then(at == key),
-                _ => None,
-            };
-            let get = self.answered(self.bucket.get(key));
-            async move {
-                let got = get.await;
-                if let Some(then) = then {
-                    then();
-                }
-                got
-            }
+            self.answered(self.bucket.get(key))
         }
 
         fn get_range(
@@ -3143,19 +2252,11 @@ mod tests {
             {
                 then();
             }
-            let swap = matches!(layout::kind(key), Kind::Head { .. });
-            let then = self.then(swap && matches!(self.hook, Hook::Swapped));
             let put = self.answered(self.bucket.put(key, bytes, mode));
             if self.dies_after.lock().unwrap().as_deref() == Some(key) {
                 self.dead.store(true, Ordering::SeqCst);
             }
-            async move {
-                let put = put.await;
-                if let Some(then) = then {
-                    then();
-                }
-                put
-            }
+            put
         }
 
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
@@ -3173,108 +2274,6 @@ mod tests {
         fn now(&self) -> u64 {
             self.bucket.now()
         }
-    }
-
-    /// TASK-407.1: a pass that read an object to compact it, then stalled, creates its moves of it
-    /// late, after later passes compacted it, and, its extents freed, deleted it and their own
-    /// moves of it: at a key of its own, which no pass wrote before (specs/bucket's
-    /// NoMovesByPass), as a key is written once.
-    #[test]
-    fn passes_creating_moves_late_create_them_at_keys_of_their_own() {
-        let (late, written) = block_on(moves_created_late());
-        assert!(!written.contains(&late), "{late} written twice: {written:#?}");
-        assert!(matches!(layout::kind(&late), Kind::Moves { pass: 1, .. }), "{late}");
-    }
-
-    /// Keyed by the object alone, the stalled pass's moves land at the key the later passes wrote
-    /// their moves at, and deleted: a key written twice, of other bytes, which a reader's cache may
-    /// hold the first's parts of.
-    #[test]
-    fn passes_creating_moves_late_need_moves_by_pass() {
-        crate::set_rules(crate::Rules { moves_by_pass: false, ..crate::Rules::ALL });
-        let (late, written) = block_on(moves_created_late());
-        crate::set_rules(crate::Rules::ALL);
-        assert!(written.contains(&late), "{late}: {written:#?}");
-    }
-
-    /// The key of the moves a pass of epoch 1 creates of a segment it read before it stalled, as
-    /// the later passes of epochs 2 to 4 compacted it, its extents then freed, and deleted it and
-    /// their moves of it; and every moves key those passes wrote.
-    async fn moves_created_late() -> (String, BTreeSet<String>) {
-        let direct = Arc::new(Direct(SimBucket::new()));
-        lifecycle::create(&*direct, test_cell(1), 0).await.unwrap();
-        let writer = Arc::new(Writer::open(direct.clone(), test_cell(1), 10, 0).await.unwrap());
-        let first = writer.chain().next_sequence();
-        let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-        let extents = vec![(small, b"small".to_vec()), (large, vec![7; 20_000])];
-        commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-        let at = writer.location(small).unwrap();
-        commit(&writer, Commit { tag: 2, frees: vec![large], ..Commit::default() }).await;
-        writer.checkpoint().await.unwrap();
-        // The stalled pass's epoch, 1, a pass's that compacted nothing.
-        collect(&*direct, 1, &KEEP).await.unwrap();
-        let segment = at.key.clone();
-        // cladefs: the writer's keys, which the late compaction reads under (TASK-411.28).
-        let ring = writer.keys().clone();
-        let hooked = Hooked::new(direct.clone(), Hook::Got(segment.clone()));
-        let written = Arc::new(Mutex::new(BTreeSet::new()));
-        let (going, noted, rules) = (direct.clone(), written.clone(), crate::rules());
-        *hooked.then.lock().unwrap() = Some(Box::new(move || {
-            let went = std::thread::spawn(move || {
-                // The test's rules, a thread's.
-                crate::set_rules(rules);
-                block_on(async {
-                    let now = Options { compact_below: 0.5, grace: 0 };
-                    let moves = |keys: Vec<String>| -> Vec<String> {
-                        keys.into_iter()
-                            .filter(|key| matches!(layout::kind(key), Kind::Moves { .. }))
-                            .collect()
-                    };
-                    assert_eq!(collect(&*going, 2, &now).await.unwrap().compacted, 1);
-                    noted.lock().unwrap().extend(moves(keys(&*going).await));
-                    commit(&writer, Commit { tag: 3, frees: vec![small], ..Commit::default() })
-                        .await;
-                    writer.checkpoint().await.unwrap();
-                    collect(&*going, 3, &now).await.unwrap();
-                    collect(&*going, 4, &now).await.unwrap();
-                    let left = keys(&*going).await;
-                    assert!(
-                        !left.contains(&segment) && moves(left.clone()).is_empty(),
-                        "{left:#?}"
-                    );
-                })
-            });
-            went.join().unwrap();
-        }));
-        let found = BTreeMap::from([(small, at.clone())]);
-        let late = compact_object(&hooked, &at.key, &found, (&ring, 1)).await;
-        let (late, _) = late.unwrap().unwrap();
-        let written = written.lock().unwrap().clone();
-        (late, written)
-    }
-
-    /// TASK-395.5: how many segments [`mostly_freed`] makes.
-    const SEGMENTS: u64 = 5;
-
-    /// CellId 1, [`SEGMENTS`] segments of it each holding a small extent it keeps and a large one
-    /// it freed after, and a checkpoint past them: what a pass compacts, a moves each, and the
-    /// next, the moves aged, deletes. The segments' keys.
-    async fn mostly_freed<B: Bucket>(bucket: Arc<B>) -> Vec<String> {
-        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-        let (mut segments, mut frees) = (Vec::new(), Vec::new());
-        for n in 0..SEGMENTS {
-            let first = writer.chain().next_sequence();
-            let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-            let large_bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
-            let extents = vec![(small, b"small".to_vec()), (large, large_bytes)];
-            commit(&writer, Commit { tag: n + 1, extents, ..Commit::default() }).await;
-            segments.push(writer.location(small).unwrap().key);
-            frees.push(large);
-        }
-        commit(&writer, Commit { tag: SEGMENTS + 1, frees, ..Commit::default() }).await;
-        writer.checkpoint().await.unwrap();
-        segments
     }
 
     /// A bucket that marks cell `child`'s record deleted just before the first read of `key`.
@@ -3341,14 +2340,6 @@ mod tests {
 
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
             self.bucket.delete(key)
-        }
-
-        fn delete_if(
-            &self,
-            key: &str,
-            version: &Version,
-        ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.bucket.delete_if(key, version)
         }
 
         fn now(&self) -> u64 {
@@ -3495,51 +2486,13 @@ mod tests {
             cell: test_cell(1),
             meanwhile: std::sync::Mutex::new(Some(meanwhile)),
         };
-        let now = Options { compact_below: 0.0, grace: 0 };
-        block_on(collect(&during, 1, &now)).unwrap();
+        block_on(collect(&during, 1)).unwrap();
         block_on(async {
             let record = crate::head::get(&*direct, test_cell(RESTORED)).await.unwrap();
             let recovered =
                 recovery::recover(&*direct, test_cell(RESTORED), record.unwrap().origin()).await?;
             crate::testing::read(&direct, extent, &recovered.state.extents[&extent]).await
         })
-    }
-
-    /// TASK-411.2: compacting an object encrypted under a key the ring given doesn't hold copies
-    /// none of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
-    /// compacts under its cell's keys, TASK-411.6, or leaves it); under a ring holding its key it
-    /// is compacted, its live extent copied to its moves, encrypted under that key.
-    #[test]
-    fn objects_encrypted_are_not_compacted_without_their_keys() {
-        let (dek, id) = crate::testing::encrypting(test_cell(1));
-        let key = layout::segment(test_cell(1), 0, 1);
-        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
-        let live = ExtentId::new(1, 2);
-        let extents =
-            BTreeMap::from([(live, Location { key: key.clone(), offset: 4096, len: 4096 })]);
-        let footer = layout::encode(&());
-        block_on(async {
-            let bucket = Direct(SimBucket::new());
-            let object = extent_frame::framed(&data, &footer, (dek, id));
-            assert!(matches!(
-                bucket::create(&bucket, &key, object).await.unwrap(),
-                Created::Created(_)
-            ));
-            let before = held(&bucket).await;
-            let compacted = compact_object(&bucket, &key, &extents, (&Ring::keyless(), 1)).await;
-            assert_eq!(compacted, Err(Error::NoKey(id)));
-            assert_eq!(held(&bucket).await, before);
-
-            let ring = crate::testing::ring([test_cell(1)]);
-            let compacted = compact_object(&bucket, &key, &extents, (&ring, 1)).await;
-            let moves = layout::moves(&key, 1).unwrap();
-            let bytes = bucket::get(&bucket, &moves).await.unwrap().unwrap().bytes;
-            assert_eq!(compacted, Ok(Some((moves, bytes.len() as u64))));
-            assert!(
-                matches!(Frame::of(&bytes).unwrap().encryption, Encryption::Encrypted { key, .. } if key == id)
-            );
-            assert_eq!(layout::data_under(&bytes, &ring.of(1)).unwrap(), &data[4096..8192]);
-        });
     }
 
     /// A live cell whose recovery finds what it needs gone, here its parent's segment, which no
@@ -3565,7 +2518,7 @@ mod tests {
         let before = block_on(keys(&direct));
         let checkpoint = layout::checkpoint(origin.parent, origin.at, origin.epoch);
         let lost = Error::Lost(checkpoint.clone());
-        assert_eq!(block_on(collect(&direct, 1, &KEEP)), Err(lost));
+        assert_eq!(block_on(collect(&direct, 1)), Err(lost));
         assert_eq!(block_on(keys(&direct)), before);
 
         let deleting = DeletedAt {
@@ -3574,20 +2527,9 @@ mod tests {
             child: test_cell(2),
             done: AtomicBool::new(false),
         };
-        let report = block_on(collect(&deleting, 2, &KEEP)).unwrap();
-        assert_eq!(report, Report { deleted: 1, compacted: 0, retired: 0, ..report });
+        let report = block_on(collect(&deleting, 2)).unwrap();
+        assert_eq!(report, Report { deleted: 1, retired: 0, ..report });
         assert!(!block_on(keys(&deleting)).contains(&stray));
-    }
-
-    /// TASK-264: what the bucket holds, every object, the collector's lease included: its key, its
-    /// version, size and time, and its bytes.
-    async fn held(bucket: &impl Bucket) -> Vec<(Meta, Vec<u8>)> {
-        let mut held = Vec::new();
-        for meta in bucket::list(bucket, "").await.unwrap() {
-            let bytes = bucket::get(bucket, &meta.key).await.unwrap().unwrap().bytes;
-            held.push((meta, bytes));
-        }
-        held
     }
 
     /// TASK-264: a dry run a pass ran during, which took the collector's lease and deleted, says it
@@ -3604,14 +2546,10 @@ mod tests {
             );
             let passing = direct.clone();
             *during.then.lock().unwrap() = Some(Box::new(move || {
-                let pass = collect(&*passing, 9, &KEEP).now_or_never();
+                let pass = collect(&*passing, 9).now_or_never();
                 assert_eq!(pass, Some(Ok(Report::default())));
             }));
-            let dry = Collector::new(KEEP)
-                .kms(Some(crate::keys::testing::kms()))
-                .dry_run_cell(&during, layout::TEST_CELL)
-                .await
-                .unwrap();
+            let dry = Collector::new().dry_run_cell(&during, layout::TEST_CELL).await.unwrap();
             assert_eq!(dry, DryRun { fenced: true, ..DryRun::default() });
         });
     }
@@ -3644,10 +2582,7 @@ mod tests {
 
             // A wrong pass, deleting what no head names yet (rule `collector_epochs`).
             crate::set_rules(crate::Rules { collector_epochs: false, ..crate::Rules::ALL });
-            let marking = Collector::new(KEEP)
-                .kms(Some(crate::keys::testing::kms()))
-                .mark_cell(&*bucket, layout::TEST_CELL, 1)
-                .await;
+            let marking = Collector::new().mark_cell(&*bucket, layout::TEST_CELL, 1).await;
             crate::set_rules(crate::Rules::ALL);
             let marked: Vec<String> =
                 marking.unwrap().marks.unwrap().marked.into_iter().map(|m| m.key).collect();
@@ -3684,12 +2619,7 @@ mod tests {
         let read_twice = [reached("get-range"), reached("get-range")];
         assert_eq!(warnings(), read_twice);
 
-        let next = block_on(Collector::new(KEEP).kms(Some(crate::keys::testing::kms())).mark_cell(
-            &*bucket,
-            layout::TEST_CELL,
-            2,
-        ))
-        .unwrap();
+        let next = block_on(Collector::new().mark_cell(&*bucket, layout::TEST_CELL, 2)).unwrap();
         assert_eq!(next.resurrected, [key.as_str()]);
         assert_eq!(next.marks.unwrap().marked, Vec::<Marked>::new());
         let resurrected = format!(
@@ -3702,23 +2632,6 @@ mod tests {
     }
 
     // cladefs: the collector per cell, and fork references (TASK-395.2, .3, .4).
-
-    /// CellId `id` of tenant 1's cell `cell`: each of these tests' cells a cell of its own, as
-    /// hosts make them.
-    /// TASK-407.1: the key of the latest pass's moves of the object at `key` among `keys`, if any.
-    fn moves_in(keys: &[String], key: &str) -> Option<String> {
-        let prefix = layout::moves_of(key).unwrap();
-        keys.iter().filter(|listed| listed.starts_with(&prefix)).next_back().cloned()
-    }
-
-    /// TASK-407.1: the key of the latest pass's moves of the object at `key` in `bucket`, if any.
-    async fn moves_at(bucket: &impl Bucket, key: &str) -> Option<String> {
-        bucket::list(bucket, &layout::moves_of(key).unwrap())
-            .await
-            .unwrap()
-            .pop()
-            .map(|meta| meta.key)
-    }
 
     /// The child of a fork to `cell`, its owner its ID.
     fn forked(cell: CellId) -> Child {
@@ -3816,8 +2729,7 @@ mod tests {
     /// Sweeps over every cell, deleting what is free at once, until two in a row delete nothing:
     /// failing as a pass finds what a live cell needs lost.
     async fn sweep(bucket: &impl Bucket) -> Result<(), Error> {
-        let now = Options { compact_below: 0.0, grace: 0 };
-        crate::testing::collect_until_quiet(bucket, &now).await.map(drop)
+        crate::testing::collect_until_quiet(bucket).await.map(drop)
     }
 
     /// Without references, the parent's cell's pass reclaims what the child inherited: it reads its
@@ -4013,7 +2925,7 @@ mod tests {
                 async move { crate::bucket::list(&*bucket, &of(tenant).prefix()).await.unwrap().len() }
             };
             let kept = crate::evidence::KEPT;
-            let mut collector = Collector::new(Options { compact_below: 0.0, grace: 0 });
+            let mut collector = Collector::new();
             let mut sweep = 0;
             let mut collect = async || {
                 sweep += 1;
@@ -4085,7 +2997,7 @@ mod tests {
         assert_eq!(writer.versions().await.len() as u64, versions);
         let segments = writer.chain().next_segment();
         let before = bucket.stats().requests;
-        let dry = Collector::new(KEEP).dry_run_cell(&*bucket, cell).await.unwrap();
+        let dry = Collector::new().dry_run_cell(&*bucket, cell).await.unwrap();
         assert!(!dry.fenced);
         let after = bucket.stats().requests;
         let made = |request: Request| after[request as usize] - before[request as usize];
@@ -4258,10 +3170,9 @@ mod tests {
         let bucket = Hooked::new(direct.clone(), Hook::Putting(layout::head(clone, 0), 2));
         let sweeping = direct.clone();
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
-            let now = Options { compact_below: 0.0, grace: 0 };
             let deleted = async {
                 lifecycle::delete(&*sweeping, origin_cell, 21, 0).await.unwrap();
-                collect_cell(&*sweeping, origin_cell, 1, &now).await.unwrap();
+                collect_cell(&*sweeping, origin_cell, 1).await.unwrap();
             };
             deleted.now_or_never().unwrap();
         }));
@@ -4311,8 +3222,7 @@ mod tests {
                 at
             })
             .0;
-        let options = Options { compact_below: 0.0, grace: 0 };
-        let (report, asked) = bucket.served(collect_cell(&*bucket, child, 7, &options));
+        let (report, asked) = bucket.served(collect_cell(&*bucket, child, 7));
         (asked, report.unwrap(), parent, child, at)
     }
 
@@ -4372,11 +3282,10 @@ mod tests {
                 writer.checkpoint().await.unwrap();
             }
         });
-        let options = Options { compact_below: 0.0, grace: 0 };
         let lists = |cell: CellId| -> Vec<String> {
-            let (first, _) = bucket.served(collect_cell(&*bucket, cell, 1, &options));
+            let (first, _) = bucket.served(collect_cell(&*bucket, cell, 1));
             assert!(first.unwrap().deleted > 0, "the first pass deletes, changing the cell");
-            let (second, asked) = bucket.served(collect_cell(&*bucket, cell, 2, &options));
+            let (second, asked) = bucket.served(collect_cell(&*bucket, cell, 2));
             assert_eq!(second.unwrap().skipped, 0, "{asked:#?}");
             asked.into_iter().filter(|asked| asked.starts_with("list")).collect()
         };
@@ -4418,8 +3327,7 @@ mod tests {
                     at
                 })
                 .0;
-            let options = Options { compact_below: 0.0, grace: 0 };
-            let (report, asked) = bucket.served(collect_cell(&*bucket, origin_cell, 7, &options));
+            let (report, asked) = bucket.served(collect_cell(&*bucket, origin_cell, 7));
             report.unwrap();
             // The origin's state, the checkpoint at it the first clone into another cell wrote.
             let version = format!("get {}", layout::checkpoint(origin_cell, at, 1));
@@ -4462,8 +3370,7 @@ mod tests {
                 writer.checkpoint().await.unwrap();
                 ats
             });
-            let options = Options { compact_below: 0.0, grace: 0 };
-            let (report, asked) = bucket.served(collect_cell(&*bucket, parent, 7, &options));
+            let (report, asked) = bucket.served(collect_cell(&*bucket, parent, 7));
             report.unwrap();
             let count = |request: String| asked.iter().filter(|asked| **asked == request).count();
             let listed = count(format!("list {}", layout::checkpoints(parent)));
@@ -4498,9 +3405,8 @@ mod tests {
         let held = block_on(keys(&*bucket));
         let (forks, later) = (layout::checkpoint(parent, at, 1), layout::checkpoint(parent, at, 2));
         assert!(held.contains(&forks) && held.contains(&later), "{held:#?}");
-        let options = Options { compact_below: 0.0, grace: 0 };
         for pass in 1..=2 {
-            block_on(collect_cell(&*bucket, parent, pass, &options)).unwrap();
+            block_on(collect_cell(&*bucket, parent, pass)).unwrap();
         }
         assert!(block_on(keys(&*bucket)).contains(&forks));
         let origin = Some(Origin { parent, at, epoch: 1 });
@@ -4521,7 +3427,7 @@ mod tests {
             at
         });
         let reference = layout::reference(parent, at, child);
-        let mut collector = Collector::new(KEEP).kms(Some(crate::keys::testing::kms()));
+        let collector = Collector::new();
         let dry = block_on(collector.dry_run_cell(&*bucket, child)).unwrap();
         assert_eq!(dry.retired, std::slice::from_ref(&reference));
         let marking = block_on(collector.mark_cell(&*bucket, child, 1)).unwrap();
@@ -4585,18 +3491,40 @@ mod tests {
         let bucket = Direct(SimBucket::new());
         let (empty, older) =
             (layout::CellId { tenant: 1, id: 7 }, layout::CellId { tenant: 1, id: 8 });
-        let options = Options { compact_below: 0.0, grace: 0 };
-        assert_eq!(block_on(collect_cell(&bucket, empty, 1, &options)), Ok(Report::default()));
+        assert_eq!(block_on(collect_cell(&bucket, empty, 1)), Ok(Report::default()));
         let cell = older;
         let mut format8 = 8u32.to_le_bytes().to_vec();
         format8.extend_from_slice(b"what format 8 held");
         block_on(bucket::create(&bucket, &layout::head(cell, 0), format8)).unwrap();
-        let refused = block_on(collect_cell(&bucket, older, 1, &options));
+        let refused = block_on(collect_cell(&bucket, older, 1));
         assert_eq!(refused, Err(Error::Format { cell, format: 8 }));
         let leases: Vec<String> = (bucket.0.keys().into_iter())
             .filter(|key| matches!(layout::kind(key), Kind::CollectorLease { .. }))
             .collect();
         assert_eq!(leases, Vec::<String>::new());
+    }
+
+    /// doc-27: a cell holding the collector's moves of format 27, which nothing of this format
+    /// reads, is refused, and nothing of it deleted.
+    #[test]
+    fn cells_holding_moves_of_format_27_are_refused() {
+        let bucket = memory_bucket();
+        let cell = test_cell(1);
+        block_on(async {
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+            let extent = ExtentId::new(1, writer.chain().next_sequence());
+            let extents = vec![(extent, b"moved".to_vec())];
+            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
+            let of = "segments/0000000000000.0000000000010";
+            let moves = format!("{}moves/{of}/0000000000001", cell.prefix());
+            assert_eq!(layout::kind(&moves), Kind::Moves { cell });
+            let created = bucket::create(&*bucket, &moves, b"format 27's moves".to_vec());
+            assert!(matches!(created.await.unwrap(), Created::Created(_)));
+        });
+        let before = block_on(keys(&*bucket));
+        assert_eq!(block_on(collect(&*bucket, 1)), Err(Error::Format { cell, format: 27 }));
+        assert_eq!(block_on(keys(&*bucket)), before);
     }
 
     /// TASK-395.10: a clone's host dying at each step of the clone, before its reference, before
@@ -4653,7 +3581,7 @@ mod tests {
         block_on(async {
             lifecycle::delete(&direct, origin_cell, 21, 0).await.unwrap();
             sweep(&direct).await.unwrap();
-            let left = crate::testing::uncollected(&direct, 0.0).await;
+            let left = crate::testing::uncollected(&direct).await;
             let references =
                 keys(&direct).await.iter().filter(|key| key.contains("/refs/")).count();
             (left, references)
@@ -4703,12 +3631,11 @@ mod tests {
                 writer
             })
             .0;
-        let options = Options { compact_below: 0.0, grace: 0 };
-        bucket.served(crate::testing::collect_until_quiet(&*bucket, &options)).0.unwrap();
+        bucket.served(crate::testing::collect_until_quiet(&*bucket)).0.unwrap();
         let cells: Vec<CellId> =
             bucket.served(crate::cell::listed(&*bucket).try_collect()).0.unwrap();
         assert_eq!(cells.len(), 6, "{cells:?}");
-        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
+        let mut collector = Collector::new();
         let mut holder = 0x10;
         let mut sweep = |collector: &mut Collector| {
             holder += 1;
@@ -4784,99 +3711,14 @@ mod tests {
         );
     }
 
-    /// TASK-395.6's AC #1: what a pass deferred to a grace period, compacted objects whose moves
-    /// are too recent, a pass skipping the cell deletes once due, asking nothing more than its
-    /// lease and listing, its taking of the lease, its listing serving it, the lease came next
-    /// (TASK-455), and the lease again, to fence its deletes and record them; the pass after
-    /// goes over the cell in full, as what goes once those are gone none worked out; then passes
-    /// skip it again.
-    #[test]
-    fn passes_skipping_delete_what_was_deferred_once_due() {
-        let bucket = SimBucket::new();
-        let (segments, _) = bucket.served(mostly_freed(bucket.clone()));
-        let cell = test_cell(1);
-        let options = Options { compact_below: 0.5, grace: 1000 };
-        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
-        let mut holder = 0;
-        let mut pass = |collector: &mut Collector| {
-            holder += 1;
-            let (report, asked) = bucket.served(collector.collect_cell(&*bucket, cell, holder));
-            (report.unwrap(), asked)
-        };
-        let skipped = Report { skipped: 1, ..Report::default() };
-        let (report, _) = pass(&mut collector);
-        assert_eq!(report.compacted, SEGMENTS as usize);
-        // In full, the cell's listing changed by the moves: the segments deferred.
-        let (report, asked) = pass(&mut collector);
-        assert_eq!(report, Report::default());
-        assert!(asked.len() > idle(cell).len(), "{asked:#?}");
-        let (report, asked) = pass(&mut collector);
-        assert_eq!((report, asked), (skipped, idle(cell)));
-        bucket.advance(999);
-        let (report, asked) = pass(&mut collector);
-        assert_eq!((report, asked), (skipped, idle(cell)));
-
-        bucket.advance(1);
-        let (report, asked) = pass(&mut collector);
-        assert_eq!(report, Report { deleted: SEGMENTS as usize, skipped: 1, ..report });
-        let lease = layout::collector_lease(cell);
-        let mut expected = idle(cell);
-        expected.extend([format!("put {lease}"), format!("get {lease}")]);
-        expected.extend(segments.iter().map(|segment| format!("delete {segment}")));
-        expected.extend([format!("get {lease}"), format!("put {lease}")]);
-        let mut sorted = asked.clone();
-        sorted[4..4 + SEGMENTS as usize].sort();
-        assert_eq!(sorted, expected);
-        let left = bucket.keys();
-        assert_eq!(segments.iter().filter(|segment| left.contains(segment)).count(), 0);
-        let (report, asked) = pass(&mut collector);
-        assert_eq!(report, Report::default());
-        assert!(asked.len() > idle(cell).len(), "{asked:#?}");
-        let (report, asked) = pass(&mut collector);
-        assert_eq!((report, asked), (skipped, idle(cell)));
-    }
-
-    /// Board 8467's AC #2: a host an hour ahead of its bucket's backend, by its own clock, defers
-    /// what a pass compacted for the grace period by the backend's, as every host does: the
-    /// compacted segments kept by the pass in full after, and by one skipping the cell; deleted by
-    /// the pass once the backend's clock passed their moves' dates by the grace period. By the
-    /// host's own clock, that pass in full deleted them at once.
-    #[test]
-    fn grace_periods_are_by_the_backends_clock() {
-        use crate::client::Client;
-        use crate::object_bucket::tests::{runtime, s3};
-        use crate::s3_server::S3Server;
-        let serving = runtime();
-        let server = serving.block_on(async { S3Server::start(None) });
-        let behind = -3_600_000;
-        server.clock_ahead(behind);
-        let bucket = s3(&server, "grace", &Client::DEFAULT);
-        let segments = serving.block_on(mostly_freed(bucket.clone()));
-        let cell = test_cell(1);
-        let options = Options { compact_below: 0.5, grace: 600_000 };
-        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
-        let mut pass = |holder| serving.block_on(collector.collect_cell(&*bucket, cell, holder));
-        let left = || {
-            let listed = serving.block_on(bucket::list(&*bucket, &cell.prefix())).unwrap();
-            let keys: BTreeSet<String> = listed.into_iter().map(|meta| meta.key).collect();
-            segments.iter().filter(|segment| keys.contains(*segment)).count()
-        };
-        assert_eq!(pass(1).unwrap().compacted, SEGMENTS as usize);
-        assert_eq!(pass(2).unwrap(), Report::default());
-        assert_eq!(pass(3).unwrap(), Report { skipped: 1, ..Report::default() });
-        assert_eq!(left(), SEGMENTS as usize);
-        server.clock_ahead(behind + 600_000 + 2_000);
-        assert_eq!(pass(4).unwrap().deleted, SEGMENTS as usize);
-        assert_eq!(left(), 0);
-    }
-
     /// TASK-395.6: a pass skips nothing it went by more than the cell for. A clone being made in
     /// the cell, of a version in another, its pass reads the version's record for: deleted then,
     /// with nothing of the cell's changed, the next pass gives the clone up, as a pass in full
     /// does. The cell dead, the pass in full retires the clone's reference, marking it, and passes
     /// that skip the cell after ask its lease and listing alone (TASK-395.14): the reference
     /// written again, by a writer whose read came before, the pass over the parent's cell deletes,
-    /// by its mark. And passes of other options, or that only mark, go over the cell in full.
+    /// by its mark. Another collector, which remembers nothing, skips it too, by what the cell's
+    /// lease recorded; and a pass that only marks goes over the cell in full.
     #[test]
     fn passes_skip_only_what_the_cell_alone_decides() {
         use crate::layout::Origin;
@@ -4900,8 +3742,7 @@ mod tests {
             bucket::create(&*bucket, &reference, bytes).await.unwrap();
             crate::testing::make_head(&*bucket, clone, forking).await.unwrap();
         });
-        let options = Options { compact_below: 0.0, grace: 0 };
-        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
+        let mut collector = Collector::new();
         let pass = |collector: &mut Collector, holder| {
             let (report, asked) = bucket.served(collector.collect_cell(&*bucket, clone, holder));
             (report.unwrap(), asked)
@@ -4939,421 +3780,11 @@ mod tests {
         assert_eq!(report.unwrap().retired, 1);
         assert!(!bucket.keys().contains(&reference));
         assert!(bucket.keys().contains(&mark));
-        let mut other = Collector::new(Options { compact_below: 0.5, grace: 0 })
-            .kms(Some(crate::keys::testing::kms()));
+        let other = Collector::new();
         let (report, asked) = bucket.served(other.collect_cell(&*bucket, clone, 7));
-        report.unwrap();
-        assert!(asked.len() > idle(clone).len() + 2, "{asked:#?}");
+        assert_eq!((report.unwrap(), asked), (skipped, idle(clone)));
         let (marking, asked) = bucket.served(collector.mark_cell(&*bucket, clone, 8));
         marking.unwrap();
         assert!(asked.len() > idle(clone).len(), "{asked:#?}");
-    }
-
-    /// TASK-411.6: what the tests of compacting encrypted cells share: a bucket; a KMS holding the
-    /// KEK of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of cell 1 of the
-    /// cell, encrypted, its record's DEK wrapped under the cell's KEK, holding the ring an open
-    /// cell holds.
-    struct Encrypted {
-        bucket: Arc<ObjectBucket>,
-        counted: Arc<Counted<LocalKms>>,
-        kms: kms::Shared,
-        writer: Writer<ObjectBucket>,
-        ring: Arc<Ring>,
-        /// The cell's keys, as its maker holds them.
-        keys: CellKeys,
-        _dir: tempfile::TempDir,
-    }
-
-    /// The segments [`Encrypted::mostly_freed`] writes.
-    const ENCRYPTED_SEGMENTS: u64 = 3;
-
-    impl Encrypted {
-        /// The cell made by a host with a KEK it wrapped, its cell 1 given a DEK by its writer,
-        /// as `local_cell` makes them; the KMS's calls since counted from none.
-        async fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let local = LocalKms::open(dir.path().join("kms")).unwrap();
-            local.create(layout::TEST_CELL.tenant).unwrap();
-            let counted = Arc::new(Counted::new(local));
-            let kms: kms::Shared = counted.clone();
-            let host = keys::CachingKms::new(kms.clone());
-            let bucket = memory_bucket();
-            let cell = layout::TEST_CELL;
-            lifecycle::create(&*bucket, cell, 0).await.unwrap();
-            let kind = Some(crate::cell::Kind::Fxfs);
-            let taking = crate::head::Taking { holder: 10, kind, ..crate::head::Taking::default() };
-            let read = crate::head::read(&*bucket, cell).await.unwrap();
-            let (taken, held) = keys::taking(&*bucket, &host, cell, read, taking).await.unwrap();
-            assert_eq!(taken.head.keks.len(), 1);
-            let ring = keys::ring(&*bucket, &held, cell, &taken.head, true).await.unwrap();
-            let writer =
-                Writer::holding(bucket.clone(), cell, taken, None, ring.clone()).await.unwrap();
-            counted.reset();
-            Self { bucket, counted, kms, writer, ring, keys: held, _dir: dir }
-        }
-
-        /// The KMS's wraps and unwraps, since [`Encrypted::new`] or the last reset.
-        fn calls(&self) -> (u64, u64) {
-            (self.counted.wraps(), self.counted.unwraps())
-        }
-
-        /// A collector of `options` unwrapping through the KMS.
-        fn collector(&self, options: Options) -> Collector {
-            Collector::new(options).kms(Some(self.kms.clone()))
-        }
-
-        /// `commit`, in a segment of its own encrypted under the cell's DEK, uploaded and
-        /// acknowledged.
-        async fn commit(&self, commit: Commit) {
-            let objects = SegmentBuilder::from(commit).close(&mut self.writer.chain());
-            let segment = self.writer.add_segment(objects.frame(self.ring.encrypting())).unwrap();
-            self.writer.upload(segment).await.unwrap();
-            self.writer.acknowledge().await.unwrap();
-        }
-
-        /// [`ENCRYPTED_SEGMENTS`] segments, each of an extent kept, of [`kept`]'s data, and a
-        /// larger one freed after, then a checkpoint past them: what a pass compacting below a half
-        /// compacts.
-        /// The extents kept, each with its segment's key.
-        async fn mostly_freed(&self) -> Vec<(ExtentId, String)> {
-            let (mut kept_at, mut frees) = (Vec::new(), Vec::new());
-            for n in 0..ENCRYPTED_SEGMENTS {
-                let first = self.writer.chain().next_sequence();
-                let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-                let extents = vec![(small, kept(n)), (large, vec![b'f'; 20_000])];
-                self.commit(Commit { tag: n + 1, extents, ..Commit::default() }).await;
-                kept_at.push((small, self.writer.location(small).unwrap().key));
-                frees.push(large);
-            }
-            self.commit(Commit { tag: ENCRYPTED_SEGMENTS + 1, frees, ..Commit::default() }).await;
-            self.writer.checkpoint().await.unwrap();
-            kept_at
-        }
-
-        /// A commit more, of an extent of its own, and a checkpoint of it: where the writer names
-        /// the extents the collector moved from then on.
-        async fn checkpointed(&self) {
-            let extent = ExtentId::new(1, self.writer.chain().next_sequence());
-            let extents = vec![(extent, b"more".to_vec())];
-            self.commit(Commit { tag: ENCRYPTED_SEGMENTS + 2, extents, ..Commit::default() }).await;
-            self.writer.checkpoint().await.unwrap();
-        }
-    }
-
-    /// The data of the extent kept in segment `n` of [`Encrypted::mostly_freed`]'s: of no bytes
-    /// repeated, so that a window of it is found nowhere else.
-    fn kept(n: u64) -> Vec<u8> {
-        let mut state = (n + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-        (0..4096)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect()
-    }
-
-    /// `extent`'s data at `location`, read by a host's fetcher holding `ring`, as a host serving
-    /// the cell holds its keys; none, if `ring` is clear.
-    async fn read_holding(
-        bucket: &Arc<ObjectBucket>,
-        ring: &Arc<Ring>,
-        extent: ExtentId,
-        location: &Location,
-    ) -> Result<Vec<u8>, Error> {
-        let memory = crate::fetch::Memory::new();
-        let _held = memory.keys().hold(ring.clone());
-        let budget = crate::fetch::Budget::new(crate::fetch::Limits::UNBOUNDED);
-        let fetcher = crate::fetch::Fetcher::new(bucket.clone(), budget, memory.clone(), None);
-        let demand = crate::fetch::Priority::Demand;
-        fetcher.read(extent, location, 0, location.len, demand).await
-    }
-
-    /// The encryption of the object at `key`, as its trailer says.
-    async fn encryption_at(bucket: &impl Bucket, key: &str) -> Encryption {
-        let bytes = bucket::get(bucket, key).await.unwrap().unwrap().bytes;
-        Frame::of(&bytes).unwrap().encryption
-    }
-
-    /// TASK-411.6, AC #1, #2: a pass compacting an encrypted cell's objects mostly freed unwraps
-    /// the cell's KEK through the KMS once for them all, and encrypts each one's moves under the
-    /// DEK its segment was encrypted under, of the same generation, with a salt of their own,
-    /// holding none of their data in the clear. A reader holding the cell's keys reads the
-    /// extents moved, from where their writer named them, their segments gone, and from the moves
-    /// its next checkpoint names; one holding none reads none of them. Passes that compact nothing
-    /// (none below their fraction, or nothing left to compact) and dry runs ask the KMS nothing.
-    #[test]
-    fn encrypted_cells_are_compacted_under_their_keys_unwrapped_once_a_pass() {
-        block_on(async {
-            let encrypted = Encrypted::new().await;
-            let kept_at = encrypted.mostly_freed().await;
-            let dek = KeyId { cell: 1, generation: keys::FIRST };
-            let compacting = Options { compact_below: 0.5, grace: 0 };
-
-            // Marking alone, compacting nothing, and a dry run: no call.
-            let report = encrypted.collector(KEEP).collect(&*encrypted.bucket, 1).await.unwrap();
-            assert_eq!((report.compacted, report.locked), (0, 0));
-            let dry = encrypted.collector(compacting);
-            let dry = dry.dry_run_cell(&*encrypted.bucket, layout::TEST_CELL).await.unwrap();
-            assert_eq!(dry.compactable.len(), ENCRYPTED_SEGMENTS as usize);
-            assert_eq!(encrypted.calls(), (0, 0));
-
-            // Compacting them: one unwrap for the three.
-            let mut collector = encrypted.collector(compacting);
-            let report = collector.collect(&*encrypted.bucket, 2).await.unwrap();
-            assert_eq!(
-                (report.compacted, report.locked, report.uncompacted),
-                (ENCRYPTED_SEGMENTS as usize, 0, 0)
-            );
-            assert_eq!(encrypted.calls(), (0, 1));
-            let objects = held(&*encrypted.bucket).await;
-            for (n, (_, segment)) in kept_at.iter().enumerate() {
-                let moves = moves_at(&*encrypted.bucket, segment).await.unwrap();
-                let (
-                    Encryption::Encrypted { key, salt },
-                    Encryption::Encrypted { key: of, salt: of_salt },
-                ) = (
-                    encryption_at(&*encrypted.bucket, &moves).await,
-                    encryption_at(&*encrypted.bucket, segment).await,
-                )
-                else {
-                    panic!("{moves} or {segment} not encrypted");
-                };
-                assert_eq!((key, of), (dek, dek));
-                assert_ne!(salt, of_salt);
-                let data = kept(n as u64);
-                for (meta, bytes) in &objects {
-                    let found = bytes.windows(64).any(|window| window == &data[..64]);
-                    assert!(!found, "{} holds extent {n}'s data in the clear", meta.key);
-                }
-            }
-
-            // The next deletes the segments compacted, compacting nothing: no call more.
-            let report = collector.collect(&*encrypted.bucket, 3).await.unwrap();
-            assert_eq!((report.compacted, report.locked), (0, 0));
-            let left = keys(&*encrypted.bucket).await;
-            assert!(kept_at.iter().all(|(_, segment)| !left.contains(segment)), "{left:?}");
-            assert_eq!(encrypted.calls(), (0, 1));
-
-            // Read where their writer named them, followed to their moves; then where its next
-            // checkpoint names them.
-            for (n, (extent, segment)) in kept_at.iter().enumerate() {
-                let at = encrypted.writer.location(*extent).unwrap();
-                assert_eq!((at.key.as_str(), at.len), (segment.as_str(), 4096));
-                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
-                assert_eq!(read, Ok(kept(n as u64)));
-                let keyless = read_holding(&encrypted.bucket, &Ring::keyless(), *extent, &at).await;
-                assert_eq!(keyless, Err(Error::NoKey(dek)));
-            }
-            encrypted.checkpointed().await;
-            for (n, (extent, segment)) in kept_at.iter().enumerate() {
-                let at = encrypted.writer.location(*extent).unwrap();
-                assert_eq!(Some(at.key.clone()), moves_at(&*encrypted.bucket, segment).await);
-                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
-                assert_eq!(read, Ok(kept(n as u64)));
-            }
-            assert_eq!(encrypted.calls(), (0, 1));
-        });
-    }
-
-    /// TASK-411.6: an object encrypted under a DEK's generation older than its record's newest is
-    /// compacted to moves encrypted under its own: a cell opened before the newer was added, which
-    /// holds none of it, reads the extents moved.
-    #[test]
-    fn moves_are_encrypted_under_the_generation_their_objects_were() {
-        block_on(async {
-            let encrypted = Encrypted::new().await;
-            let kept_at = encrypted.mostly_freed().await;
-            let cell = test_cell(1);
-            let added =
-                keys::add_generation(&*encrypted.bucket, &encrypted.keys, cell).await.unwrap();
-            assert_eq!(added, keys::FIRST + 1);
-            assert_eq!(encrypted.ring.generations(1), [keys::FIRST]);
-            let mut collector = encrypted.collector(Options { compact_below: 0.5, grace: 0 });
-            let report = collector.collect(&*encrypted.bucket, 1).await.unwrap();
-            assert_eq!(report.compacted, ENCRYPTED_SEGMENTS as usize);
-            collector.collect(&*encrypted.bucket, 2).await.unwrap();
-            for (n, (extent, segment)) in kept_at.iter().enumerate() {
-                let moves = moves_at(&*encrypted.bucket, segment).await.unwrap();
-                let encryption = encryption_at(&*encrypted.bucket, &moves).await;
-                let first = KeyId { cell: 1, generation: keys::FIRST };
-                assert!(
-                    matches!(encryption, Encryption::Encrypted { key, .. } if key == first),
-                    "{encryption:?}"
-                );
-                let at = encrypted.writer.location(*extent).unwrap();
-                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
-                assert_eq!(read, Ok(kept(n as u64)));
-            }
-        });
-    }
-
-    /// TASK-411.6, AC #3: a pass over a cell whose tenant's KEK is revoked marks it and deletes
-    /// what no live cell needs, but compacts none of what is encrypted, saying so in its report,
-    /// as one of a collector with no KMS does, which asks none. TASK-411.13, AC #1, #2: it records
-    /// its listing's digest and what it left, so that a pass after it, the cell unchanged, skips
-    /// it, asking its lease and a listing, and the KMS one wrap, refused, while the KEK is still
-    /// not to be had (no call at all without a KMS), saying what is left; a write to the cell has
-    /// the next go over it in full; and the KEK given back, the next compacts.
-    #[test]
-    fn cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted() {
-        block_on(async {
-            let encrypted = Encrypted::new().await;
-            let kept_at = encrypted.mostly_freed().await;
-            let compacting = Options { compact_below: 0.5, grace: 0 };
-            let locked = |report: Report| (report.compacted, report.locked, report.uncompacted);
-            let segments = ENCRYPTED_SEGMENTS as usize;
-            // A pass's report, and the requests it made, by kind.
-            let bucket = &encrypted.bucket;
-            let pass = |collector: Collector, holder| async move {
-                let mut collector = collector;
-                let before = bucket.stats().requests;
-                let report = collector.collect_cell(&**bucket, layout::TEST_CELL, holder);
-                let report = report.await.unwrap();
-                let after = bucket.stats().requests;
-                let made = (Request::ALL.into_iter())
-                    .filter_map(|request| {
-                        let made = after[request as usize] - before[request as usize];
-                        (made > 0).then_some((request, made))
-                    })
-                    .collect::<Vec<_>>();
-                (report, made)
-            };
-            // Its lease read, its listing: a look, writing nothing (TASK-455).
-            let idle = vec![(Request::Get, 1), (Request::List, 1)];
-
-            // No KMS: no call, the encrypted left.
-            let before = keys(&*encrypted.bucket).await;
-            let (report, _) = pass(Collector::new(compacting), 1).await;
-            assert_eq!(locked(report), (0, 1, segments));
-            assert_eq!(encrypted.calls(), (0, 0));
-            let after = keys(&*encrypted.bucket).await;
-            assert_eq!(report.deleted, before.len() - after.len());
-            assert_eq!(report.deleted, 1);
-            assert!(after.iter().all(|key| !matches!(layout::kind(key), Kind::Moves { .. })));
-            // The next in full, the cell changed by what went; then skipped, asking nothing more.
-            let (report, made) = pass(Collector::new(compacting), 2).await;
-            assert_eq!((locked(report), report.skipped, report.deleted), ((0, 1, segments), 0, 0));
-            assert!(made.len() > idle.len(), "{made:?}");
-            let (report, made) = pass(Collector::new(compacting), 3).await;
-            let skipped =
-                Report { skipped: 1, locked: 1, uncompacted: segments, ..Report::default() };
-            assert_eq!((report, made), (skipped, idle.clone()));
-            assert_eq!(encrypted.calls(), (0, 0));
-
-            // Revoked: skipped still, each pass asking the KMS one wrap, refused.
-            encrypted.counted.inner().revoke(layout::TEST_CELL.tenant).unwrap();
-            for holder in [4, 5] {
-                let (report, made) = pass(encrypted.collector(compacting), holder).await;
-                assert_eq!((report, made), (skipped, idle.clone()));
-            }
-            assert_eq!(encrypted.calls(), (2, 0));
-            assert_eq!(keys(&*encrypted.bucket).await, after);
-            // Written to: in full, its unwrap refused, left again, deleting what the write left
-            // behind; the next in full too, the cell changed by that; then skipped again.
-            encrypted.checkpointed().await;
-            let full = |report: Report| (locked(report), report.skipped, report.deleted);
-            let (report, made) = pass(encrypted.collector(compacting), 6).await;
-            assert_eq!(full(report), ((0, 1, segments), 0, 1));
-            assert!(made.len() > idle.len(), "{made:?}");
-            let (report, _) = pass(encrypted.collector(compacting), 7).await;
-            assert_eq!(full(report), ((0, 1, segments), 0, 0));
-            assert_eq!(encrypted.calls(), (2, 2));
-            let (report, made) = pass(encrypted.collector(compacting), 8).await;
-            assert_eq!((report, made), (skipped, idle.clone()));
-            assert_eq!(encrypted.calls(), (3, 2));
-
-            // Given back: the KMS wraps, the cell gone over in full, compacted.
-            encrypted.counted.inner().unrevoke(layout::TEST_CELL.tenant).unwrap();
-            let (report, _) = pass(encrypted.collector(compacting), 9).await;
-            assert_eq!(full(report), ((segments, 0, 0), 0, 0));
-            assert_eq!(encrypted.calls(), (4, 3));
-            for (n, (extent, _)) in kept_at.iter().enumerate() {
-                let at = encrypted.writer.location(*extent).unwrap();
-                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
-                assert_eq!(read, Ok(kept(n as u64)));
-            }
-            // Compacted, the next deletes what was, recording nothing left; then skipped, asking
-            // the KMS nothing.
-            let (report, _) = pass(encrypted.collector(compacting), 10).await;
-            assert_eq!(full(report), ((0, 0, 0), 0, segments));
-            let (report, _) = pass(encrypted.collector(compacting), 11).await;
-            assert_eq!(full(report), ((0, 0, 0), 0, 0));
-            let (report, made) = pass(encrypted.collector(compacting), 12).await;
-            assert_eq!((report, made), (Report { skipped: 1, ..Report::default() }, idle));
-            assert_eq!(encrypted.calls(), (4, 3));
-        });
-    }
-
-    /// TASK-411.13: what a sweep's passes heard of a tenant's KEK, asked of the KMS once however
-    /// many ask, each tenant apart; none without a KMS.
-    #[test]
-    fn tenants_keks_are_asked_for_once_a_sweep() {
-        let dir = tempfile::tempdir().unwrap();
-        let local = LocalKms::open(dir.path().join("kms")).unwrap();
-        local.create(1).unwrap();
-        local.create(2).unwrap();
-        local.revoke(2).unwrap();
-        let counted = Arc::new(Counted::new(local));
-        let kmses: Arc<dyn keys::Kmses> = Arc::new(keys::OneKms(counted.clone()));
-        let heard = Heard::new();
-        let asked = |tenant| block_on(heard.to_be_had(Some(&kmses), CellId { tenant, id: 1 }));
-        assert_eq!(
-            [asked(1), asked(1), asked(2), asked(2), asked(3)],
-            [true, true, false, false, false]
-        );
-        assert_eq!((counted.wraps(), counted.unwraps()), (3, 0));
-        assert!(!block_on(Heard::new().to_be_had(None, CellId { tenant: 1, id: 1 })));
-        assert_eq!(counted.wraps(), 3);
-    }
-
-    /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's
-    /// moves of its cell, are refused there, by readers holding the cell's keys and by those
-    /// holding none: their footer, which its MAC covers, names the object they are the moves of
-    /// (TASK-411.3). Their footer made to name the other, framed anew under a key not the cell's,
-    /// is refused by readers holding the keys, by its MAC (none can be framed in the clear,
-    /// TASK-411.28).
-    #[test]
-    fn encrypted_moves_copied_to_another_key_of_their_cell_are_refused() {
-        block_on(async {
-            let encrypted = Encrypted::new().await;
-            let kept_at = encrypted.mostly_freed().await;
-            let mut collector = encrypted.collector(Options { compact_below: 0.5, grace: 0 });
-            collector.collect(&*encrypted.bucket, 1).await.unwrap();
-            collector.collect(&*encrypted.bucket, 2).await.unwrap();
-            encrypted.checkpointed().await;
-            let [(_, of_one), (other, of_other), ..] = &kept_at[..] else { panic!() };
-            let moves_one = moves_at(&*encrypted.bucket, of_one).await.unwrap();
-            let moves_other = moves_at(&*encrypted.bucket, of_other).await.unwrap();
-            let at = encrypted.writer.location(*other).unwrap();
-            assert_eq!(at.key, moves_other);
-            let read = read_holding(&encrypted.bucket, &encrypted.ring, *other, &at).await;
-            assert_eq!(read, Ok(kept(1)));
-
-            let copied = bucket::get(&*encrypted.bucket, &moves_one).await.unwrap().unwrap().bytes;
-            let put = encrypted.bucket.put(&moves_other, copied.clone().into(), PutMode::Overwrite);
-            put.await.unwrap();
-            let refused = Error::Corrupt(format!("{moves_other} holds the moves of {of_one}"));
-            for ring in [encrypted.ring.clone(), Ring::keyless()] {
-                let read = read_holding(&encrypted.bucket, &ring, *other, &at).await;
-                assert_eq!(read, Err(refused.clone()));
-            }
-
-            // Made to name the other and its extent, framed under another key of its name.
-            let view = keys::of_key(&encrypted.ring, &moves_one);
-            let data = layout::data_under(&copied, &view).unwrap();
-            let mut footer: Moves = layout::footer_under(&copied, &view).unwrap();
-            assert_eq!(footer.of, *of_one);
-            footer.of = of_other.clone();
-            for (extent, to) in &mut footer.extents {
-                (*extent, to.key) = (*other, moves_other.clone());
-            }
-            let id = encrypted.ring.encrypting().1;
-            let forged = layout::with_footer(&data, &footer, (crate::testing::dek(), id));
-            encrypted.bucket.put(&moves_other, forged.into(), PutMode::Overwrite).await.unwrap();
-            let read = read_holding(&encrypted.bucket, &encrypted.ring, *other, &at).await;
-            assert_eq!(read, Err(Error::Corrupt("an object's table, by its MAC".into())));
-        });
     }
 }

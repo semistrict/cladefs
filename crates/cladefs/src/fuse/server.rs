@@ -42,6 +42,7 @@ use event_listener::Event;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerocopy::{FromBytes, IntoBytes};
@@ -79,6 +80,32 @@ pub struct Server {
     dirs: Mutex<OpenDirs>,
     /// Notified as the kernel forgets a node: for detaches waiting for it to forget a cell's.
     forgotten: Event,
+    /// cladefs: what it did, for the extent daemon's metrics of its mount (board 8565).
+    counters: Counters,
+}
+
+/// cladefs: what a server did since it was made ([`Server::counts`]), for the extent daemon's
+/// metrics of its mount of cells (board 8565).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// The kernel's requests it handled.
+    pub requests: u64,
+    /// Those it answered with an error but `ENOENT`, a name not there, and `ENOSYS`, an operation
+    /// it has not, which the kernel asks of every filesystem: what a filesystem failing answers.
+    pub errors: u64,
+    /// The cells it attached.
+    pub attaches: u64,
+    /// The cells it detached.
+    pub detaches: u64,
+}
+
+/// cladefs: [`Counts`], as a server counts them.
+#[derive(Default)]
+struct Counters {
+    requests: AtomicU64,
+    errors: AtomicU64,
+    attaches: AtomicU64,
+    detaches: AtomicU64,
 }
 
 /// What the mount's root is.
@@ -362,6 +389,19 @@ impl Server {
             nodes: Mutex::default(),
             dirs: Mutex::default(),
             forgotten: Event::new(),
+            counters: Counters::default(),
+        }
+    }
+
+    /// cladefs: what it did since it was made (board 8565).
+    pub fn counts(&self) -> Counts {
+        let Counters { requests, errors, attaches, detaches } = &self.counters;
+        let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
+        Counts {
+            requests: load(requests),
+            errors: load(errors),
+            attaches: load(attaches),
+            detaches: load(detaches),
         }
     }
 
@@ -406,7 +446,10 @@ impl Server {
         let reserved = self.reserve(name)?;
         let fs = Arc::new(open.await?);
         match reserved.attach(fs.clone()) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.counters.attaches.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
             Err(errno) => {
                 // The server closed meanwhile.
                 fs.unmount().await?;
@@ -494,6 +537,7 @@ impl Server {
         drop(fs);
         self.cells.lock().unwrap().remove(slot);
         self.nodes.lock().unwrap().detaching.remove(&slot);
+        self.counters.detaches.fetch_add(1, Ordering::Relaxed);
         unmounted
     }
 
@@ -606,6 +650,7 @@ impl Server {
     pub async fn handle(&self, request: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let (header, rest) = InHeader::read_from_prefix(request)
             .map_err(|_| Error::msg("the request is shorter than its header"))?;
+        self.counters.requests.fetch_add(1, Ordering::Relaxed);
         let reply = Reply { unique: header.unique };
         let body_len = (header.len as usize).checked_sub(size_of::<InHeader>());
         let Some(body) = body_len.and_then(|len| rest.get(..len)) else {
@@ -664,7 +709,12 @@ impl Server {
         };
         Ok(Some(match payload {
             Ok(payload) => reply.ok(&payload),
-            Err(errno) => reply.error(errno),
+            Err(errno) => {
+                if errno != Errno::ENOENT && errno != Errno::ENOSYS {
+                    self.counters.errors.fetch_add(1, Ordering::Relaxed);
+                }
+                reply.error(errno)
+            }
         }))
     }
 

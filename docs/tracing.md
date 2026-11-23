@@ -19,8 +19,35 @@ The code is `crates/bucket_cell/src/trace.rs`, which makes the spans,
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | OpenTelemetry's standard sampler variables. | see Sampling |
 
 The other `OTEL_EXPORTER_OTLP_*` variables (headers, timeout, compression) work as the
-OpenTelemetry SDK documents them. Spans are exported in batches. When SIGTERM drains the daemon,
-it exports what it has left before it exits.
+OpenTelemetry SDK documents them. Spans are exported in batches, by a processor of the daemon's
+(`otel/batch.rs`) that `OTEL_BSP_MAX_QUEUE_SIZE` (2048), `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` (512)
+and `OTEL_BSP_SCHEDULE_DELAY` (5000 ms) configure as they do the SDK's; unlike the SDK's, it
+counts the spans it exports, drops (its queue full) and fails to export
+(`cladefsd_otel_spans_exported_total`, `_dropped_total`, `_failed_total`; board 8565), which the
+SDK's dropped unsaid. When SIGTERM drains the daemon, it exports what it has left before it
+exits, within what is left of `CLADEFSD_DRAIN` once the cells are drained: a collector that never
+answers holds the exit no longer than that bound (board 8569), and the spans it did not take are
+lost.
+
+An `https://` endpoint is reached over TLS, rustls's (the `reqwest-rustls` feature
+`crates/cladefs/Cargo.toml` names, board 8569), the collector's certificate checked against the
+host's roots, or the PEM file `SSL_CERT_FILE` names (a private CA's).
+
+### Trace context of gRPC calls
+
+The gRPC calls the daemon serves, of the control API, its Mount service and the peer service,
+and those it makes of its peers, carry W3C trace context (`traceparent`, `tracestate`; board
+8569), whichever `CLADEFSD_TRACES` says but `off`. A call served is a span named as OpenTelemetry
+names gRPC's, `PACKAGE.SERVICE/METHOD` (`cladefs.cladefsd.v1.Cladefsd/CreateCell`), of kind
+server, a child of the span its caller's `traceparent` names, so that a VM manager's trace goes
+on into the daemon: the spans of what the call does (`store.create`, `bucket.*`) are its
+children. Its attributes are `rpc.system` (`grpc`), `rpc.service`, `rpc.method` and
+`rpc.grpc.status_code`; a status other than OK is an error. A call the daemon makes of a peer is a
+span of kind client, a child of whatever span made it, whose context it sends: the peer's span of
+the call is its child, on the same trace. A caller's `traceparent` sampled is recorded, and
+exported with `CLADEFSD_TRACES=otlp`, whatever the ratio (`parentbased_traceidratio`); one sent
+unsampled is not. The layer is `crates/cladefs/src/cladefsd/grpc.rs`, around each service and the
+peers' channels, so that every method is traced, those added later too.
 
 ### Sampling
 
@@ -199,7 +226,13 @@ cargo run --release -p cladefs-examples --example span-bench
   that nothing is exported while tracing is off.
 - `crates/cladefs/tests/tracing.rs` runs the `cladefsd` binary against an OTLP/HTTP collector
   in the test. It checks that the spans arrive at `/v1/traces` and that nothing is sent without
-  `CLADEFSD_TRACES`.
+  `CLADEFSD_TRACES`; that they arrive at a collector over HTTPS, its certificate of a CA of the
+  test's own (`tests/otlp-tls`); that a daemon whose collector never answers exits within its
+  drain's bound; and that a control call's `traceparent` is the parent of the daemon's span of it.
+- `crates/cladefs/src/cladefsd/otel/batch.rs` checks the processor's counts of spans dropped,
+  failed and exported, and that its shutdown waits no longer than it is given.
+- `crates/cladefs/src/cladefsd/tests/otel.rs` also checks that a peer call made within a span is
+  served as its child, on its trace, and counted in the gRPC metrics on both sides.
 - `crates/cladefs/src/cladefsd/tests/otel.rs` also checks that spans are recorded without export,
   and that a fork restored from the bucket reads with `cladefs.source=bucket` and a backtrace that
   `/z/tracez` resolves to `bring_in`.

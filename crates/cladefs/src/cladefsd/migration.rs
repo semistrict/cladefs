@@ -45,7 +45,6 @@
 //! The target serves one request of a cell's migrations at a time, each run to its end however
 //! its asker goes, its bucket calls bounded (board 5732).
 
-use super::peers::proto::peer_client::PeerClient;
 use super::peers::proto::{
     FileDigest, MigrateAbortRequest, MigrateFileRequest, MigrateHandOverRequest,
     MigratePrepareRequest, MigratePrepareResponse, MigrateReleaseRequest, MigrateRenewRequest,
@@ -58,6 +57,7 @@ use host_fs::FileExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::Status;
@@ -70,7 +70,7 @@ pub(crate) const MARKER: &str = "migrating";
 const MARKER_STAGED: &str = "migrating.new";
 
 /// How much of a file a request carries at most.
-const PIECE: usize = 4 << 20;
+pub(super) const PIECE: usize = 4 << 20;
 
 /// How long a round of the source waits for the next.
 const ROUND: Duration = Duration::from_millis(500);
@@ -110,7 +110,7 @@ struct Outgoing {
     peer: String,
     incarnation: u64,
     token: u64,
-    client: PeerClient<tonic::transport::Channel>,
+    client: super::peers::Client,
     sent: tokio::sync::Mutex<HashMap<String, (u64, u64)>>,
     stopped: std::sync::atomic::AtomicBool,
 }
@@ -118,7 +118,7 @@ struct Outgoing {
 impl Outgoing {
     fn new(
         Marker { migration, peer, incarnation, token }: Marker,
-        client: PeerClient<tonic::transport::Channel>,
+        client: super::peers::Client,
     ) -> Self {
         let sent = tokio::sync::Mutex::default();
         let stopped = std::sync::atomic::AtomicBool::new(false);
@@ -149,6 +149,50 @@ enum Underway {
 node_local::node_local! {
     /// The migrations from this host, by their cells' paths.
     static OUTGOING: Mutex<BTreeMap<PathBuf, Underway>> = Mutex::new(BTreeMap::new());
+}
+
+/// cladefs: what migrations did since the daemon started, for its metrics (board 8565): as a source,
+/// those prepared at their targets, those whose prepare failed, aborted, their rounds, the bytes they
+/// sent, their hand-overs accepted and refused, and those their targets gave up; as a target, the
+/// bytes taken, and the migrations given up, aborted by their sources or idle.
+#[derive(Default)]
+pub(super) struct Counts {
+    pub prepared: AtomicU64,
+    pub aborted: AtomicU64,
+    pub rounds: AtomicU64,
+    pub sent_bytes: AtomicU64,
+    pub accepted: AtomicU64,
+    pub refused: AtomicU64,
+    pub given_up: AtomicU64,
+    pub taken_bytes: AtomicU64,
+    pub taken_given_up: AtomicU64,
+}
+
+/// cladefs: [`Counts`]' of the daemon.
+// The process's counts, every simulated host's together, as a process's metrics are.
+pub(super) static COUNTS: Counts = Counts {
+    prepared: AtomicU64::new(0),
+    aborted: AtomicU64::new(0),
+    rounds: AtomicU64::new(0),
+    sent_bytes: AtomicU64::new(0),
+    accepted: AtomicU64::new(0),
+    refused: AtomicU64::new(0),
+    given_up: AtomicU64::new(0),
+    taken_bytes: AtomicU64::new(0),
+    taken_given_up: AtomicU64::new(0),
+};
+
+/// cladefs: counts `n` more in `count` ([`COUNTS`]).
+fn count(count: &AtomicU64, n: u64) {
+    count.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// cladefs: the migrations under way here, for the daemon's metrics (board 8565): from this host,
+/// being prepared and moving (rounds, then their hand-overs); and to it, being taken.
+pub(super) fn under_way() -> (usize, usize, usize) {
+    let outgoing = OUTGOING.get().lock().unwrap();
+    let preparing = outgoing.values().filter(|under| matches!(under, Underway::Preparing)).count();
+    (preparing, outgoing.len() - preparing, target::being_taken())
 }
 
 /// The path of a cell whose migration is being prepared, held in [`OUTGOING`] from before the
@@ -188,7 +232,7 @@ fn status(what: impl std::fmt::Display, err: impl std::fmt::Display) -> Status {
 }
 
 /// A client of the peer at `address`.
-fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno> {
+fn client(address: &str) -> Result<super::peers::Client, Errno> {
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
     super::peers::member(&runtime, address).map_err(|err| {
         log::warn!("cladefsd: migrating to {address}: {err}");
@@ -271,9 +315,11 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
                 if let Err(err) = client.migrate_abort(abort).await {
                     log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
                 }
+                count(&COUNTS.aborted, 1);
                 return Err(refusal(&refused));
             }
         };
+    count(&COUNTS.prepared, 1);
     let marker = Marker { migration, peer, incarnation, token };
     let outgoing = Arc::new(Outgoing::new(marker, client));
     reserved.begin(outgoing.clone());
@@ -284,6 +330,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
             if let Err(err) = round(&outgoing, &path).await {
                 log::warn!("cladefsd: migration {:x}'s round: {err}", outgoing.migration);
             }
+            count(&COUNTS.rounds, 1);
             if renewed.elapsed() >= RENEW {
                 renew(&outgoing).await;
                 renewed = tokio::time::Instant::now();
@@ -298,7 +345,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
 /// is lost, [`PREPARE_TRIES`] times at most (board 5734): the target's answer, or the last
 /// failure.
 async fn prepare_retrying(
-    client: &mut PeerClient<tonic::transport::Channel>,
+    client: &mut super::peers::Client,
     prepare: MigratePrepareRequest,
 ) -> Result<MigratePrepareResponse, Status> {
     let mut tries = 0;
@@ -374,6 +421,7 @@ async fn renew(outgoing: &Outgoing) {
         Err(gone) if gone.code() == tonic::Code::NotFound => {
             log::warn!("cladefsd: migration {:x} given up by its target", outgoing.migration);
             outgoing.stopped.store(true, std::sync::atomic::Ordering::Release);
+            count(&COUNTS.given_up, 1);
         }
         Err(err) => log::info!("cladefsd: renewing migration {:x}: {err}", outgoing.migration),
     }
@@ -468,6 +516,7 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
             .map_err(|err| status(relative, err))?
             .map_err(|err| status(relative, err))?
         };
+        let sent = bytes.len() as u64;
         let request = MigrateFileRequest {
             migration: outgoing.migration,
             path: relative.to_owned(),
@@ -477,6 +526,7 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
             holes: if piece == last { holes.clone() } else { Vec::new() },
         };
         client.migrate_file(request).await?;
+        count(&COUNTS.sent_bytes, sent);
     }
     Ok(allocated)
 }
@@ -630,9 +680,11 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
             Errno::EIO
         })?;
         OUTGOING.get().lock().unwrap().remove(&path);
+        count(&COUNTS.refused, 1);
         return Err(Errno::EAGAIN);
     }
     OUTGOING.get().lock().unwrap().remove(&path);
+    count(&COUNTS.accepted, 1);
     // Accepted: noted so in the cell's entry, durably, then let go of, as asking again, or the
     // daemon starting again, finds it noted (board 5730).
     let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
@@ -860,6 +912,39 @@ pub(super) mod target {
         static PREPARED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
     }
 
+    node_local::node_local! {
+        /// cladefs: the staging directories of the migrations being taken here, each open, its
+        /// files counted in its footprint as they are written, so that the disk governor admits
+        /// what a peer stages (board 8451). Like [`PREPARED`] and [`HEARD`], of migrations the
+        /// journal names being taken alone: each goes as its migration does.
+        static STAGING: Mutex<HashMap<u64, local_cell::HostDir>> = Mutex::new(HashMap::new());
+    }
+
+    /// cladefs: how many migrations this daemon takes, prepared and not yet gone (board 8565).
+    pub(super) fn being_taken() -> usize {
+        PREPARED.get().lock().unwrap().len()
+    }
+
+    /// cladefs: forgets migration `migration`, being taken here no more (board 8451): what
+    /// [`PREPARED`], [`HEARD`] and [`STAGING`] keep of it.
+    fn forget(migration: u64) {
+        PREPARED.get().lock().unwrap().remove(&migration);
+        HEARD.get().lock().unwrap().remove(&migration);
+        STAGING.get().lock().unwrap().remove(&migration);
+    }
+
+    /// cladefs: migration `migration`'s staging directory at `staged`, open: the one open, or
+    /// opened now, counted as its files are written.
+    fn staging_dir(migration: u64, staged: &Path) -> std::io::Result<local_cell::HostDir> {
+        let mut open = STAGING.get().lock().unwrap();
+        if let Some(dir) = open.get(&migration) {
+            return Ok(dir.clone());
+        }
+        let dir = local_cell::HostDir::new(staged)?;
+        open.insert(migration, dir.clone());
+        Ok(dir)
+    }
+
     /// The host's ephemeral cells' directory, for a peer: `FAILED_PRECONDITION` if it keeps none.
     fn host() -> Result<Arc<ephemeral_host::Host>, Status> {
         ephemeral_host::host().map_err(|_| {
@@ -948,7 +1033,8 @@ pub(super) mod target {
         work: impl std::future::Future<Output = Result<T, Status>> + Send + 'static,
     ) -> Result<T, Status> {
         let runtime = crate::bucket::bucket_runtime().map_err(|err| status("its runtime", err))?;
-        let done = runtime.spawn(work).await;
+        // cladefs: in the call's trace context, the parent of its spans (board 8569).
+        let done = runtime.spawn(bucket_cell::trace::Parent::current().around(work)).await;
         done.unwrap_or_else(|err| Err(status("serving it", err)))
     }
 
@@ -1112,7 +1198,7 @@ pub(super) mod target {
             Some((found, Some(Migrating::Receiving { id: older, .. }))) if found.epoch < epoch => {
                 log::info!("cladefsd: migration {older:x} of {child} superseded by {migration:x}");
                 supersede(&host, found, origin, &bucket).await?;
-                superseded = Some(staging(&found.path, *older));
+                superseded = Some((*older, staging(&found.path, *older)));
                 None
             }
             Some((found, Some(Migrating::Receiving { id: newer, .. }))) => {
@@ -1149,10 +1235,11 @@ pub(super) mod target {
         heard(migration);
         // The older migration's files dropped once no entry names it: dropped part way, a staging
         // an entry names is one a retry of its migration may take for whole (board 5721).
-        if let Some(older) = superseded
-            && let Err(err) = drop_staged(&older)
-        {
-            log::warn!("cladefsd: dropping {}, superseded: {err}", older.display());
+        if let Some((older_id, older)) = superseded {
+            forget(older_id);
+            if let Err(err) = drop_staged(&older) {
+                log::warn!("cladefsd: dropping {}, superseded: {err}", older.display());
+            }
         }
         let incarnation = host.incarnation();
         let referring =
@@ -1232,55 +1319,108 @@ pub(super) mod target {
         };
         heard(migration);
         let staged = staging(&entry.path, migration);
-        let written = super::super::run::off_the_runtime(move || write(&staged, request));
+        let written = super::super::run::off_the_runtime(move || {
+            // Dropped, as the migration was given up as this request came: not made again.
+            if !host_fs::is_dir(&staged) {
+                return Err(Status::not_found(format!("migration {migration:x} given up")));
+            }
+            let dir = staging_dir(migration, &staged).map_err(|err| status("staging", err))?;
+            write(&dir, request)
+        });
         written.await.map_err(|err| status("writing", err))?
     }
 
-    /// Writes the piece of a file `request` carries into `staged`, its migration's staging
-    /// directory.
-    fn write(staged: &Path, request: MigrateFileRequest) -> Result<(), Status> {
+    /// Writes the piece of a file `request` carries into `staging`, its migration's staging
+    /// directory: what it adds to the disk admitted by the disk governor first (board 8451),
+    /// `RESOURCE_EXHAUSTED` if it has no room, and counted in the directory's footprint as it is
+    /// written: its bytes, and the length it gives the file, holes and all, as a peer's length may
+    /// be any.
+    fn write(staging: &local_cell::HostDir, request: MigrateFileRequest) -> Result<(), Status> {
+        use local_cell::{Dir as _, File as _};
         let MigrateFileRequest { migration, path, offset, bytes, len, holes } = request;
-        // Dropped, as the migration was given up as this request came: not made again.
-        if !host_fs::is_dir(staged) {
-            return Err(Status::not_found(format!("migration {migration:x} given up")));
-        }
+        let staged = staging.path();
         // A directory, empty or not, its path ending with `/`.
         let left = || Status::invalid_argument(format!("{path:?} leaves the cell"));
         if let Some(dir) = path.strip_suffix('/') {
-            let dir = within(staged, dir).ok_or_else(left)?;
-            return host_fs::create_dir_all(dir).map_err(|err| status(&path, err));
+            within(staged, dir).ok_or_else(left)?;
+            return made_dirs(staging, dir).map_err(|err| status(&path, err));
         }
-        let file_path = within(staged, &path).ok_or_else(left)?;
+        within(staged, &path).ok_or_else(left)?;
         // Validate untrusted peer offset and length before `direct::write_at` rounds end up to
         // `DIRECT_BLOCK` (4096) and writes at `offset` (board 5997 / AGENTS.md trust boundary).
-        let valid_end = offset
-            .checked_add(bytes.len() as u64)
+        // cladefs: and its piece within the file's length (board 8451).
+        let end = offset.checked_add(bytes.len() as u64);
+        let valid_end = end
             .and_then(|end| end.checked_next_multiple_of(bucket_cell::direct::DIRECT_BLOCK))
             .is_some_and(|end| end <= i64::MAX as u64);
-        if !valid_end || len > i64::MAX as u64 {
+        if !valid_end || len > i64::MAX as u64 || end.is_none_or(|end| end > len) {
             return Err(Status::invalid_argument(format!(
                 "{path:?}: offset {offset} or len {len} out of range"
             )));
         }
-        if let Some(dir) = file_path.parent() {
-            host_fs::create_dir_all(dir).map_err(|err| status(&path, err))?;
+        let failed = |err: std::io::Error| status(&path, err);
+        if let Some((dir, _)) = path.rsplit_once('/') {
+            made_dirs(staging, dir).map_err(failed)?;
         }
-        let file = host_fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&file_path)
-            .map_err(|err| status(&path, err))?;
-        bucket_cell::direct::bypass(&file, &file_path).map_err(|err| status(&path, err))?;
-        let mut tail = bucket_cell::direct::Tail::default();
-        bucket_cell::direct::write_at(&file, &mut tail, &bytes, offset)
-            .map_err(|err| status(&path, err))?;
-        if file.metadata().map_err(|err| status(&path, err))?.len() != len {
-            file.set_len(len).map_err(|err| status(&path, err))?;
+        // The file staged so far, if any: a file not there yet is made once admitted.
+        let file = match staging.open(&path, false) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            opened => Some(opened.map_err(failed)?),
+        };
+        let size = file.as_ref().map_or(Ok(0), |file| file.size()).map_err(failed)?;
+        // Sent again shorter than before, from its start: made anew, as no file shrinks in place.
+        let (file, size) = match size > len {
+            false => (file, size),
+            true if offset == 0 => {
+                drop(file);
+                staging.remove(&path).map_err(failed)?;
+                (None, 0)
+            }
+            true => {
+                return Err(Status::invalid_argument(format!(
+                    "{path:?}: {len} bytes long, {size} staged, sent at {offset}"
+                )));
+            }
+        };
+        let grows = len.saturating_sub(size);
+        let admitted = staging.footprint().admit(bytes.len() as u64, grows);
+        let _pledge = admitted.map_err(|full| {
+            Status::resource_exhausted(format!(
+                "migration {migration:x}: {path:?}: no room on the disk: {full}"
+            ))
+        })?;
+        let file = match file {
+            Some(file) => file,
+            None => staging.create(&path, false).map_err(failed)?,
+        };
+        if !bytes.is_empty() {
+            file.write_at(&bytes, offset).map_err(failed)?;
+            count(&COUNTS.taken_bytes, bytes.len() as u64);
+        }
+        // Its length, past its last data a hole, which its holes' punching gives back.
+        if len > file.size().map_err(failed)? {
+            file.write_at(&[0], len - 1).map_err(failed)?;
         }
         for Range { offset, len } in holes {
-            punch(&file, offset, len).map_err(|err| status(&path, err))?;
+            file.punch(offset, len).map_err(failed)?;
+        }
+        Ok(())
+    }
+
+    /// cladefs: makes the directory `dir` of `staging` and those it is in, those there already
+    /// left as they are, each counted in its footprint as it is made.
+    fn made_dirs(staging: &local_cell::HostDir, dir: &str) -> std::io::Result<()> {
+        use local_cell::Dir as _;
+        let mut at = String::new();
+        for name in dir.split('/') {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(name);
+            match staging.create_dir(&at) {
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                made => made?,
+            }
         }
         Ok(())
     }
@@ -1353,6 +1493,8 @@ pub(super) mod target {
             return Ok(false);
         }
         let into = entry.path.clone();
+        // Its staging directory closed before it goes into place, its footprint the cell's.
+        STAGING.get().lock().unwrap().remove(&migration);
         let moved = move || -> std::io::Result<()> {
             if !moved_before {
                 sync_tree(&staged)?;
@@ -1382,7 +1524,7 @@ pub(super) mod target {
             host.note(&taken).map_err(|err| status("noting the cell", err))
         })
         .await?;
-        HEARD.get().lock().unwrap().remove(&migration);
+        forget(migration);
         Ok(true)
     }
 
@@ -1410,7 +1552,9 @@ pub(super) mod target {
             return Ok(());
         }
         let Some((_taking, entry)) = held(&host, migration).await? else { return Ok(()) };
-        refuse(&host, &entry).await
+        refuse(&host, &entry).await?;
+        count(&COUNTS.taken_given_up, 1);
+        Ok(())
     }
 
     /// Gives up the migration taking `entry`'s cell: its cell, if taken into place, then its
@@ -1422,21 +1566,22 @@ pub(super) mod target {
         retire(host, entry).await?;
         if let Some((migration, _)) = entry.receiving() {
             let staged = staging(&entry.path, migration);
+            forget(migration);
             if let Err(err) = drop_staged(&staged) {
                 log::warn!("cladefsd: dropping {}, refused: {err}", staged.display());
             }
-            HEARD.get().lock().unwrap().remove(&migration);
         }
         Ok(())
     }
 
-    /// Removes the directory `staged`, if there, durably: no crash brings it back.
+    /// Removes the directory `staged`, if there, durably: no crash brings it back. cladefs: as a
+    /// cell directory goes (`local_cell::remove_cell_dir`), so that what its files took of the
+    /// disk, counted as they were staged, goes with them (board 8451).
     fn drop_staged(staged: &Path) -> std::io::Result<()> {
         if !host_fs::exists(staged) {
             return Ok(());
         }
-        host_fs::remove_dir_all(staged)?;
-        host_fs::sync_dir(staged.parent().unwrap_or(Path::new(".")))
+        local_cell::remove_cell_dir(staged).map_err(std::io::Error::other)
     }
 
     /// Notes migration `migration` goes on, its source there still: `NOT_FOUND` if this host
@@ -1478,6 +1623,9 @@ pub(super) mod target {
             .filter_map(Entry::receiving)
             .map(|(id, _)| id)
             .collect();
+        // cladefs: what is kept of migrations the journal names being taken no more (board 8451).
+        PREPARED.get().lock().unwrap().retain(|migration| taken.contains(migration));
+        STAGING.get().lock().unwrap().retain(|migration, _| taken.contains(migration));
         let idle_ones: Vec<u64> = {
             let mut heard = HEARD.get().lock().unwrap();
             heard.retain(|migration, _| taken.contains(migration));
@@ -1497,6 +1645,7 @@ pub(super) mod target {
                 entry.child
             );
             refuse(&host, &entry).await?;
+            count(&COUNTS.taken_given_up, 1);
         }
         Ok(())
     }
@@ -1545,9 +1694,6 @@ pub(super) mod target {
     }
 
     /// Gives back the `len` bytes at `offset` of `file`, keeping its size.
-    fn punch(file: &host_fs::File, offset: u64, len: u64) -> std::io::Result<()> {
-        host_fs::punch_hole(file, offset, len)
-    }
 
     #[cfg(test)]
     mod tests {
@@ -1600,6 +1746,49 @@ pub(super) mod target {
             ] {
                 assert_eq!(cell_path(root, to), None, "{to:?}");
             }
+        }
+
+        /// Board 8451: what a peer stages is counted in its staging directory's footprint as it is
+        /// written, 10,000 files of it, and admitted by the disk governor first: a file whose
+        /// length the disk has no room for, a peer's terabyte of holes, refused
+        /// (`RESOURCE_EXHAUSTED`) before it is made; dropping the staging gives its count back.
+        #[test]
+        fn what_peers_stage_is_counted_and_admitted() {
+            use bucket_cell::host_disk::GRANULE;
+            use tonic::Code;
+            let dir = tempfile::tempdir().unwrap();
+            let staged = dir.path().join("cell.migrating-1");
+            host_fs::create_dir(&staged).unwrap();
+            let staging = local_cell::HostDir::new(&staged).unwrap();
+            let footprint = staging.footprint().clone();
+            let disk = footprint.disk().unwrap().clone();
+            let before = disk.cells.bytes();
+            let piece = |path: String, len: u64| MigrateFileRequest {
+                migration: 1,
+                path,
+                offset: 0,
+                bytes: vec![7; 100],
+                len,
+                holes: Vec::new(),
+            };
+            const FILES: u64 = 10_000;
+            for file in 0..FILES {
+                write(&staging, piece(format!("extents/{file}"), 100)).unwrap();
+            }
+            // Each file a granule, and its directory.
+            assert_eq!(footprint.bytes(), (FILES + 1) * GRANULE);
+            assert_eq!(disk.cells.bytes() - before, (FILES + 1) * GRANULE);
+            disk.govern(disk.cells.bytes() + (64 << 20), 0, false);
+            let refused = write(&staging, piece("huge".into(), 1 << 40)).unwrap_err();
+            assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+            assert!(!staged.join("huge").exists(), "a file refused made");
+            write(&staging, piece("small".into(), 1 << 20)).unwrap();
+            assert_eq!(std::fs::metadata(staged.join("small")).unwrap().len(), 1 << 20);
+            disk.govern(u64::MAX, 0, false);
+            drop(staging);
+            drop_staged(&staged).unwrap();
+            assert!(!staged.exists());
+            assert_eq!(disk.cells.bytes(), before);
         }
 
         /// The daemon's environment of a test of a target's prepares, in `dir`: its bucket in
@@ -1800,6 +1989,7 @@ pub(super) mod target {
         #[test]
         fn streaming_crc_and_direct_target_write() {
             let dir = tempfile::tempdir().unwrap();
+            let staging = local_cell::HostDir::new(dir.path()).unwrap();
             for len in [0usize, 13, 4096, 4097, CRC_CHUNK, CRC_CHUNK * 2 + 123] {
                 let data: Vec<u8> =
                     (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 5)) as u8).collect();
@@ -1812,7 +2002,7 @@ pub(super) mod target {
                     len: len as u64,
                     holes: Vec::new(),
                 };
-                write(dir.path(), request).unwrap();
+                write(&staging, request).unwrap();
                 let path = dir.path().join(&name);
                 assert_eq!(std::fs::read(&path).unwrap(), data, "len {len}");
                 assert_eq!(crc_of(&path).unwrap(), extent_frame::crc(&data), "crc len {len}");
@@ -1821,7 +2011,7 @@ pub(super) mod target {
             fail::cfg("direct::bypass", "return").unwrap();
             let err_crc = crc_of(&dir.path().join("f-13"));
             let err_write = write(
-                dir.path(),
+                &staging,
                 MigrateFileRequest {
                     migration: 1,
                     path: "refused".to_owned(),
@@ -1840,7 +2030,7 @@ pub(super) mod target {
                 [(u64::MAX, 1), (u64::MAX - 10, 1), (i64::MAX as u64, 1), (0, u64::MAX)]
             {
                 let status = write(
-                    dir.path(),
+                    &staging,
                     MigrateFileRequest {
                         migration: 1,
                         path: "bad-offset".to_owned(),

@@ -27,10 +27,10 @@
 //! 4. The parent's **head read in A**, naming the version, or the mirror is given up, its hold and
 //!    pin dropped (`mirrorChecks`): [`Mirrored::Unnamed`].
 //! 5. **Every object of the version under the parent's prefix copied** into B, create-only: the
-//!    checkpoint at the version, the objects its extents are in, along their moves, and the moves
-//!    objects, read where the router sends them. An object needed gone from A gives the mirror
-//!    up, whatever order the copies end in (board 8439). Its pin refreshed as it goes, by its
-//!    host's clock (board 8469), the mirror given up if it is no longer its own.
+//!    checkpoint at the version, what recovering it read and the objects its extents are in, read
+//!    where the router sends them. An object gone from A gives the mirror up, whatever order the
+//!    copies end in (board 8439). Its pin refreshed as it goes, by its host's clock (board 8469),
+//!    the mirror given up if it is no longer its own.
 //! 6. In B, the create-only **marker** ([`layout::mirror`]), once every object is copied
 //!    (`markerAfterCopy`), its pin refreshed right before, naming the epoch of the checkpoint it
 //!    copied, written while its pin is its own ([`PIN_HELD`]): from then on, reads of the version
@@ -58,7 +58,6 @@
 
 use crate::bucket::{self, Bucket, Created, Meta, PutMode, Refused, Updated, Version};
 use crate::layout::{self, CellId, Kind, Mirror, Reference};
-use crate::moves::{Moved, MovesMaps};
 use crate::recovery::{self, Checkpoints};
 use crate::{Error, head, lifecycle};
 use futures::future::BoxFuture;
@@ -496,11 +495,9 @@ enum Copied {
 /// Copies every object of `parent`'s version at `at` under its prefix into `own`, after reading
 /// its head (`mirrorChecks`), refreshing `pin` as it goes.
 ///
-/// What it must copy: the checkpoint at the version and what recovering it read, and each extent's
-/// object where its moves lead, with every moves object on the way. What it copies if it is there:
-/// where the extent was before its moves, which the parent's bucket's collector keeps for the
-/// version (doc-7, A pass over a cell) unless it compacted it away before the version was cut,
-/// its state naming the extent where it was sealed still; readers follow its moves, copied too.
+/// What it copies: the checkpoint at the version and what recovering it read, and the object each
+/// extent is in, which the parent's bucket's collector keeps for the version (doc-7, A pass over a
+/// cell): one gone gives the mirror up.
 async fn copy(
     bucket: &impl Bucket,
     own: &impl Bucket,
@@ -525,43 +522,19 @@ async fn copy(
     let ours = |key: &String| layout::owner(key) == Some(parent);
     let mut needed: BTreeSet<String> = touched.into_iter().filter(ours).collect();
     needed.insert(layout::checkpoint(parent, at, epoch));
-    let mut before = BTreeSet::new();
-    let mut maps = MovesMaps::default();
-    for (&extent, location) in state.extents.iter().filter(|(_, location)| ours(&location.key)) {
-        if !pin.refresh(own, false).await? {
-            return Ok(Copied::Taken);
-        }
-        let mut along = location.clone();
-        while let Moved::To(to) = maps.moved(bucket, extent, &along.key).await? {
-            before.insert(std::mem::replace(&mut along, to).key);
-        }
-        needed.insert(along.key);
-    }
-    let mut moves = Vec::new();
-    for key in needed.iter().chain(&before) {
-        if !pin.refresh(own, false).await? {
-            return Ok(Copied::Taken);
-        }
-        let prefix = layout::moves_of(key)?;
-        moves.extend(bucket::list(bucket, &prefix).await?.into_iter().map(|meta| meta.key));
-    }
-    needed.extend(moves);
-    before.retain(|key| !needed.contains(key));
-    let keys: Vec<(String, bool)> = (needed.into_iter().map(|key| (key, true)))
-        .chain(before.into_iter().map(|key| (key, false)))
-        .collect();
+    needed.extend(state.extents.values().map(|location| location.key.clone()).filter(ours));
+    let keys: Vec<String> = needed.into_iter().collect();
     copy_objects(bucket, own, pin, &keys).await
 }
 
-/// Copies the objects at `keys` into `own`, [`COPIES_AT_ONCE`] at once, each with whether it is
-/// needed, refreshing `pin` as each copy ends. Short of the first needed found gone, as each copy
-/// says so of its own key (board 8439): what it comes to never depends on the order the copies end
-/// in. Those not needed, gone, are not copied.
+/// Copies the objects at `keys` into `own`, [`COPIES_AT_ONCE`] at once, refreshing `pin` as each
+/// copy ends. Short of the first found gone, as each copy says so of its own key (board 8439): what
+/// it comes to never depends on the order the copies end in.
 async fn copy_objects(
     bucket: &impl Bucket,
     own: &impl Bucket,
     pin: &mut Pin,
-    keys: &[(String, bool)],
+    keys: &[String],
 ) -> Result<Copied, Error> {
     use futures::StreamExt as _;
     if !pin.refresh(own, false).await? {
@@ -569,17 +542,13 @@ async fn copy_objects(
     }
     // The copies' futures made first: a stream mapping them in holds the closure in its type,
     // which a future awaiting this one is then not seen to be `Send` with.
-    let copies: Vec<_> =
-        keys.iter().map(|(key, needed)| copy_one(bucket, own, key, *needed)).collect();
+    let copies: Vec<_> = keys.iter().map(|key| copy_one(bucket, own, key)).collect();
     let mut copies = futures::stream::iter(copies).buffer_unordered(COPIES_AT_ONCE);
     let mut count = 0;
     while let Some(copied) = copies.next().await {
         match copied? {
             One::Copied => count += 1,
-            One::Gone { key, needed: true } => {
-                return Ok(Copied::Short(format!("{key}: gone from its bucket")));
-            }
-            One::Gone { needed: false, .. } => {}
+            One::Gone(key) => return Ok(Copied::Short(format!("{key}: gone from its bucket"))),
         }
         if !pin.refresh(own, false).await? {
             return Ok(Copied::Taken);
@@ -593,11 +562,11 @@ async fn copy_objects(
 enum One<'a> {
     /// Copied, or there already.
     Copied,
-    /// Gone from where the mirror reads it: the object at `key`, needed or not.
-    Gone { key: &'a str, needed: bool },
+    /// Gone from where the mirror reads it: the object at its key.
+    Gone(&'a str),
 }
 
-/// Copies the object at `key`, `needed` or not, into `own`, unless it is there, which a HEAD tells
+/// Copies the object at `key` into `own`, unless it is there, which a HEAD tells
 /// (board 8435): none of its bytes read here. One there already, from an earlier copy, B's
 /// collector keeps while the parent's cell lives
 /// ([`crate::collector::Collector::collect_copy`]): no version of it this mirror copies outlives
@@ -606,13 +575,12 @@ async fn copy_one<'a>(
     bucket: &impl Bucket,
     own: &impl Bucket,
     key: &'a str,
-    needed: bool,
 ) -> Result<One<'a>, Refused> {
     if bucket::head(own, key).await?.is_some() {
         return Ok(One::Copied);
     }
     let Some(object) = bucket::get(bucket, key).await? else {
-        return Ok(One::Gone { key, needed });
+        return Ok(One::Gone(key));
     };
     bucket::create(own, key, object.bytes).await?;
     // A crash with some objects copied, others not (a test's).
@@ -712,54 +680,50 @@ mod tests {
         sim.served(Pin::take(own, PARENT, 3)).0.unwrap().expect("its pin another's")
     }
 
-    /// board 8439: what a mirror's copy comes to depends on which objects are gone, and whether
-    /// they are needed, alone, whatever order the copies end in: an object needed gone gives it
-    /// up, its copy ending first or last; one copied only if it is there, gone, never does, and the
-    /// rest are copied. board 8435: copied again into the same bucket, it reads none of the bytes
-    /// of what is there already, a HEAD telling it is.
+    /// board 8439: what a mirror's copy comes to depends on which objects are gone alone, whatever
+    /// order the copies end in: one gone gives it up, its copy ending first or last; none gone,
+    /// every one is copied. board 8435: copied again into the same bucket, it reads none of the
+    /// bytes of what is there already, a HEAD telling it is.
     #[test]
     fn copies_come_to_what_is_gone_whatever_order_they_end_in() {
         let key = |n| layout::segment(PARENT, n, 1);
-        // 1 and 2 needed, 3 and 4 copied if there; 2 or 4 gone.
-        let keys = [(key(1), true), (key(2), true), (key(3), false), (key(4), false)];
-        for (gone, first) in [(2, true), (2, false), (4, true), (4, false)] {
+        let keys = [key(1), key(2), key(3)];
+        for (gone, first) in [(Some(key(2)), true), (Some(key(2)), false), (None, true)] {
             let sim = SimBucket::new();
             let (bucket, own) = (sim.at(1), sim.at(1).own());
             let there: Vec<&String> =
-                keys.iter().map(|(key, _)| key).filter(|stored| **stored != key(gone)).collect();
+                keys.iter().filter(|stored| Some(*stored) != gone.as_ref()).collect();
             for stored in &there {
                 let bytes = bytes::Bytes::from(stored.as_bytes().to_vec());
                 block_on(Direct(sim.at(2)).put(stored, bytes, PutMode::Create)).unwrap();
             }
             let mut pin = pinned(&sim, &own);
             // The gone object's requests answered before any other's, or after every other's.
-            let gone_key = key(gone);
             let order = |waiting: &[String]| {
-                (waiting.iter().position(|asked| asked.contains(&gone_key) == first)).unwrap_or(0)
+                let Some(gone) = &gone else { return 0 };
+                (waiting.iter().position(|asked| asked.contains(gone) == first)).unwrap_or(0)
             };
             let copying = copy_objects(&*bucket, &*own, &mut pin, &keys);
             let (copied, _) = driven(&sim, copying, order);
-            let case =
-                format!("{gone_key} gone, answering {}", if first { "first" } else { "last" });
-            if gone == 2 {
-                let short = Copied::Short(format!("{gone_key}: gone from its bucket"));
+            if let Some(gone) = &gone {
+                let case =
+                    format!("{gone} gone, answering {}", if first { "first" } else { "last" });
+                let short = Copied::Short(format!("{gone}: gone from its bucket"));
                 assert_eq!(copied.unwrap(), short, "{case}");
                 continue;
             }
-            assert_eq!(copied.unwrap(), Copied::Whole { count: 3 }, "{case}");
+            assert_eq!(copied.unwrap(), Copied::Whole { count: 3 });
             let copies: Vec<String> = there.iter().map(|key| format!("@1/{key}")).collect();
             let stored = sim.stored();
-            assert!(copies.iter().all(|copy| stored.contains(copy)), "{case}: {stored:?}");
+            assert!(copies.iter().all(|copy| stored.contains(copy)), "{stored:?}");
 
             let again = copy_objects(&*bucket, &*own, &mut pin, &keys);
             let (copied, mut asked) = driven(&sim, again, |_| 0);
-            assert_eq!(copied.unwrap(), Copied::Whole { count: 3 }, "{case}, again");
+            assert_eq!(copied.unwrap(), Copied::Whole { count: 3 }, "again");
             asked.sort();
-            let mut heads: Vec<String> =
-                keys.iter().map(|(key, _)| format!("@1 head {key}")).collect();
-            heads.push(format!("@2 get {gone_key}"));
+            let mut heads: Vec<String> = keys.iter().map(|key| format!("@1 head {key}")).collect();
             heads.sort();
-            assert_eq!(asked, heads, "{case}, again");
+            assert_eq!(asked, heads, "again");
         }
     }
 
@@ -783,9 +747,8 @@ mod tests {
         assert_eq!(refresh(&mut pin), (Ok(true), vec![written.clone()]), "not refreshed on time");
 
         let bucket = sim.at(1);
-        let keys: Vec<(String, bool)> =
-            (1..=3).map(|n| (layout::segment(PARENT, n, 1), true)).collect();
-        for (key, _) in &keys {
+        let keys: Vec<String> = (1..=3).map(|n| layout::segment(PARENT, n, 1)).collect();
+        for key in &keys {
             let bytes = bytes::Bytes::from(key.as_bytes().to_vec());
             block_on(Direct(sim.at(2)).put(key, bytes, PutMode::Create)).unwrap();
         }

@@ -87,7 +87,7 @@ use test_fxfs_guest_snapshot::{
     TestFxfsGuestSnapshot, VOLUMES,
 };
 mod test_extent_guest;
-use test_extent_guest::{TestExtentGuest, TestExtentGuestOtherVersion};
+use test_extent_guest::{TestExtentGuest, TestExtentGuestBadConfig, TestExtentGuestOtherVersion};
 mod test_runner_deadlock;
 use test_runner_deadlock::TestRunnerDeadlock;
 
@@ -835,6 +835,55 @@ pub fn test_cases() -> Vec<TestCase> {
             "extent-guest-other-version",
             &[Tag::E2e, Tag::Kernel, Tag::Nightly],
             Box::new(TestExtentGuestOtherVersion),
+        ),
+        // cladefs board 8557: a configuration the driver refuses, a case for each field it checks.
+        TestCase::new(
+            "extent-guest-bad-block-size-zero",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestBadConfig {
+                fault: "block_size=0",
+                refusal: "block_size: the device says 0, not a power of two",
+            }),
+        ),
+        TestCase::new(
+            "extent-guest-bad-block-size-odd",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestBadConfig {
+                fault: "block_size=3000",
+                refusal: "block_size: the device says 3000, not a power of two",
+            }),
+        ),
+        TestCase::new(
+            "extent-guest-bad-map-alignment-zero",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestBadConfig {
+                fault: "map_alignment=0",
+                refusal: "map_alignment: the device says 0, not a power of two",
+            }),
+        ),
+        TestCase::new(
+            "extent-guest-bad-max-transfer",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestBadConfig {
+                fault: "max_transfer=2048",
+                refusal: "max_transfer: the device says 2048, less than a block",
+            }),
+        ),
+        TestCase::new(
+            "extent-guest-bad-max-segments",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestBadConfig {
+                fault: "max_segments=1",
+                refusal: "max_segments: the device says 1, fewer than a block takes, unaligned",
+            }),
+        ),
+        TestCase::new(
+            "extent-guest-bad-ring",
+            &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+            Box::new(TestExtentGuestBadConfig {
+                fault: "ring=5",
+                refusal: "ring: the request queues' rings hold 5 descriptors, fewer than a request of 2 data segments takes, 6",
+            }),
         ),
         #[cfg(any(feature = "host", target_os = "linux"))]
         TestCase::new(

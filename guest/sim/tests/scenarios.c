@@ -1866,6 +1866,76 @@ static void shared_reads_stay(void)
 	sim_munmap(first);
 }
 
+/*
+ * board 8555: the tests' knobs of the filesystem mounted last (cladefs.dax_stray, dax_rebind_now,
+ * dax_rebind_every) written in a loop as it unmounts and the next mounts, as a check's writes can
+ * meet an unmount: each finds a filesystem whole, or none (-EINVAL), never one freed (ASan) or half
+ * made. A knob holding the filesystem may sleep (cladefs_dax_delay), up to 50 ms, where the
+ * remounts, ready to run, go on: longer than an unmount waits for the worker its knobs kicked, so
+ * that the unmount ends in it (200 us ended before the unmount's kfree). Between rounds the knobs yield, ready to run beside the remounts
+ * wherever they are, and one round in 16 sleeps, for time to pass for an unmount's waits, which
+ * it alone doesn't while a task is ready (a knob that slept every round woke only as an unmount
+ * waited, its filesystem unpublished, and never found one). dax_stray's offset is
+ * past the window, so that it reads the filesystem's dax alone, not the window's pages, none
+ * mapped.
+ */
+#define KNOB_REMOUNTS 32
+static bool knobs_remounted;
+static unsigned int knobs_found, knobs_none;
+
+static void knob_set(const char *name, const char *value, int found)
+{
+	int err = sim_param_set(name, value);
+
+	if (err == found)
+		knobs_found++;
+	else if (err == -EINVAL)
+		knobs_none++;
+	else
+		check(false, "cladefs.%s=%s: %d", name, value, err);
+}
+
+static void knob_writer(void *arg)
+{
+	unsigned int round = 0;
+	char stray[32];
+
+	snprintf(stray, sizeof(stray), "load %lu", WINDOW_LEN);
+	while (!READ_ONCE(knobs_remounted)) {
+		knob_set("dax_rebind_now", "1", 0);
+		/* Refused whether or not a filesystem is mounted: it reads the window's length. */
+		check(sim_param_set("dax_stray", stray) == -EINVAL, "a stray load past the window");
+		check(!sim_param_set("dax_rebind_every", "1000"), "cladefs.dax_rebind_every=1000");
+		if (++round % 16)
+			cond_resched();
+		else
+			fsleep(10);
+	}
+	check(!sim_param_set("dax_rebind_every", "0"), "cladefs.dax_rebind_every=0");
+}
+
+static void knobs_against_unmount(void)
+{
+	struct task_struct *writer;
+	int round;
+
+	check(!sim_param_set("dax_delay_us", "50000"), "cladefs.dax_delay_us");
+	check(!sim_param_set("dax_delay_seed", "8555"), "cladefs.dax_delay_seed");
+	writer = sim_spawn("knobs", knob_writer, NULL);
+	for (round = 0; round < KNOB_REMOUNTS; round++) {
+		sim_mount_free(mount);
+		cond_resched();
+		mount = sim_mount_new();
+		cond_resched();
+	}
+	WRITE_ONCE(knobs_remounted, true);
+	wait_for(writer);
+	check(!sim_param_set("dax_delay_us", "0"), "cladefs.dax_delay_us");
+	/* That the knobs met both sides: a filesystem mounted, and none. */
+	check(knobs_found && knobs_none, "the knobs found a filesystem %u times, none %u times",
+	      knobs_found, knobs_none);
+}
+
 static const struct {
 	const char *name;
 	void (*run)(void);
@@ -1918,6 +1988,7 @@ static const struct {
 	SCENARIO(cow_rebinds_map_ranges_at_once),
 	SCENARIO(region_maps_at_once),
 	SCENARIO(shared_reads_stay),
+	SCENARIO(knobs_against_unmount),
 };
 
 static void scenario(void *arg)

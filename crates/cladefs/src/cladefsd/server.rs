@@ -1263,7 +1263,7 @@ impl Opening<'_> {
         }
         let key = cell_dir_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
-        self.0.report.opened(key, open_cell.cell().id);
+        self.0.report.opened(key, open_cell.cell());
         assert!(self.0.open_cell.set(open_cell).is_ok(), "a connection opened a second cell");
         let opened = Phase::Writing(Arc::new(hold));
         let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);

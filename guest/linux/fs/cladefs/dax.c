@@ -588,25 +588,28 @@ struct cladefs_dax_trace_event {
 static bool cladefs_dax_tracing;
 module_param_named(dax_trace, cladefs_dax_tracing, bool, 0444);
 MODULE_PARM_DESC(dax_trace, "Trace what happens to DAX pages (diagnostic), as the filesystem mounts");
+/* Allocated as the first filesystem traced mounts, and kept: never freed under a tracer. */
 static struct cladefs_dax_trace_event *cladefs_dax_trace_events;
 static atomic64_t cladefs_dax_trace_next;
-/* The device of the mount traced, the latest: it goes as the mount does (cladefs_dax_destroy). */
-static struct cladefs_device *cladefs_dax_trace_dev;
 /* The window's first page frame, which `pfn N` written to cladefs.dax_trace_dump is counted from. */
 static unsigned long cladefs_dax_trace_base;
 
-static void cladefs_dax_trace(u32 kind, u64 ino, u64 page, u64 window, u64 extent, u64 extent_offset,
-			   u32 flags)
+/*
+ * Traces an event of `dax`'s filesystem, its seal count its own device's: a tracer has its mount's
+ * dax, which outlives it. Before, the device of the filesystem mounted last, kept in a static,
+ * which another filesystem's tracer read as that one unmounted, its device freed (board 8555).
+ */
+static void cladefs_dax_trace(struct cladefs_dax *dax, u32 kind, u64 ino, u64 page, u64 window,
+			   u64 extent, u64 extent_offset, u32 flags)
 {
 	struct cladefs_dax_trace_event *events = READ_ONCE(cladefs_dax_trace_events);
-	struct cladefs_device *dev = READ_ONCE(cladefs_dax_trace_dev);
 	u64 at;
 
-	if (likely(!events) || !dev)
+	if (likely(!events))
 		return;
 	at = atomic64_inc_return(&cladefs_dax_trace_next) - 1;
 	events[at % CLADEFS_DAX_TRACE_EVENTS] = (struct cladefs_dax_trace_event) {
-		.time = ktime_get_ns(), .seals = cladefs_device_seals(dev), .ino = ino,
+		.time = ktime_get_ns(), .seals = cladefs_device_seals(dax->dev), .ino = ino,
 		.page = page, .window = window, .extent = extent, .extent_offset = extent_offset,
 		.kind = kind, .flags = flags,
 	};
@@ -724,7 +727,7 @@ static void cladefs_dax_dropped(struct cladefs_dax *dax, struct cladefs_dax_rang
 }
 
 /* cladefs: traces what `map`, of `range`'s pages, mapped: an extent's pages, or zeros. */
-static void cladefs_dax_trace_map(const struct cladefs_dax_range *range,
+static void cladefs_dax_trace_map(struct cladefs_dax *dax, const struct cladefs_dax_range *range,
 			       const struct cladefs_device_map *map)
 {
 	unsigned long page = (map->window_offset - range->window_offset) >> PAGE_SHIFT;
@@ -732,7 +735,7 @@ static void cladefs_dax_trace_map(const struct cladefs_dax_range *range,
 	u64 first = cladefs_dax_chunk_start(range) >> PAGE_SHIFT;
 
 	for (i = page; i < end; i++)
-		cladefs_dax_trace(CLADEFS_DAX_TRACE_MAPPED, range->file->ino, first + i,
+		cladefs_dax_trace(dax, CLADEFS_DAX_TRACE_MAPPED, range->file->ino, first + i,
 			       cladefs_dax_page_offset(range, i), map->zeros ? 0 : map->sequence,
 			       map->zeros ? 0 : map->offset + ((u64)(i - page) << PAGE_SHIFT),
 			       map->zeros);
@@ -753,7 +756,7 @@ static long cladefs_dax_mapped(struct cladefs_dax *dax, struct cladefs_dax_range
 	long rebound;
 
 	lockdep_assert_held_write(&range->file->sem);
-	cladefs_dax_trace_map(range, map);
+	cladefs_dax_trace_map(dax, range, map);
 	if (!rebind) {
 		cladefs_dax_pages_fill(range->state, page, n, map->zeros);
 		return 0;
@@ -2040,8 +2043,8 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 	iomap->length = length;
 	iomap->private = range;
 	if (fault) {
-		cladefs_dax_trace(CLADEFS_DAX_TRACE_READ, inode->i_ino, (start >> PAGE_SHIFT) + page, at, 0,
-			       length >> PAGE_SHIFT, 0);
+		cladefs_dax_trace(dax, CLADEFS_DAX_TRACE_READ, inode->i_ino,
+			       (start >> PAGE_SHIFT) + page, at, 0, length >> PAGE_SHIFT, 0);
 		if (length >= PMD_SIZE && IS_ALIGNED(at, PMD_SIZE))
 			atomic64_inc(&dax->huge_maps);
 		/*
@@ -2073,10 +2076,35 @@ static void *cladefs_dax_window_page(struct cladefs_dax *dax, u64 window_offset)
 }
 
 /*
- * cladefs: the window of the filesystem mounted last, for cladefs.dax_stray and the tests' knobs; it
- * goes as the mount does.
+ * cladefs: the filesystem mounted last, for the tests' knobs (cladefs.dax_stray, dax_rebind_now,
+ * dax_rebind_every), under cladefs_dax_last_lock: published once its dax is whole, at the end of
+ * cladefs_dax_create, and taken back first thing in cladefs_dax_destroy, which so waits for a knob
+ * using it. Before, a static read with READ_ONCE: a knob written as the filesystem unmounted used
+ * its dax freed, and one written as it mounted used a dax not yet whole, or freed as the mount
+ * failed (board 8555).
  */
-static struct cladefs_dax *cladefs_dax_stray_dax;
+static DEFINE_MUTEX(cladefs_dax_last_lock);
+static struct cladefs_dax *cladefs_dax_last;
+
+/*
+ * The filesystem mounted last, held until cladefs_dax_last_put, or NULL with none. The knob's work
+ * races its unmount: a delay may come (cladefs_dax_delay), which a test's unmounts meet.
+ */
+static struct cladefs_dax *cladefs_dax_last_get(void)
+{
+	mutex_lock(&cladefs_dax_last_lock);
+	if (!cladefs_dax_last) {
+		mutex_unlock(&cladefs_dax_last_lock);
+		return NULL;
+	}
+	cladefs_dax_delay();
+	return cladefs_dax_last;
+}
+
+static void cladefs_dax_last_put(void)
+{
+	mutex_unlock(&cladefs_dax_last_lock);
+}
 
 /*
  * cladefs: what a guest that keeps to no protocol does, for tests (TASK-77): `load N` or `store N`,
@@ -2084,14 +2112,19 @@ static struct cladefs_dax *cladefs_dax_stray_dax;
  */
 static int cladefs_dax_stray_set(const char *value, const struct kernel_param *kp)
 {
-	struct cladefs_dax *dax = READ_ONCE(cladefs_dax_stray_dax);
+	struct cladefs_dax *dax;
 	char op[6];
 	u64 offset;
 	u64 *at;
 	int id, err = -EINVAL;
 
-	if (!dax || sscanf(value, "%5s %llu", op, &offset) != 2 || offset >= dax->window_len)
+	if (sscanf(value, "%5s %llu", op, &offset) != 2)
 		return -EINVAL;
+	dax = cladefs_dax_last_get();
+	if (!dax)
+		return -EINVAL;
+	if (offset >= dax->window_len)
+		goto put;
 	id = dax_read_lock();
 	at = cladefs_dax_window_page(dax, offset);
 	if (at) {
@@ -2105,6 +2138,8 @@ static int cladefs_dax_stray_set(const char *value, const struct kernel_param *k
 		}
 	}
 	dax_read_unlock(id);
+put:
+	cladefs_dax_last_put();
 	return err;
 }
 
@@ -3017,7 +3052,7 @@ static int cladefs_dax_iomap_write(struct inode *inode, loff_t pos, loff_t lengt
 	WARN(iomap->addr >= dax->window_len,
 	     "cladefs: ino %lu page %lu written at %llx, past the window's %llx\n",
 	     inode->i_ino, first, iomap->addr, dax->window_len);
-	cladefs_dax_trace(fault ? CLADEFS_DAX_TRACE_FAULT : CLADEFS_DAX_TRACE_WRITE, inode->i_ino,
+	cladefs_dax_trace(dax, fault ? CLADEFS_DAX_TRACE_FAULT : CLADEFS_DAX_TRACE_WRITE, inode->i_ino,
 		       (start >> PAGE_SHIFT) + first, cladefs_dax_page_offset(range, first), 0, pages, 0);
 	/* Before the copy, its pages dirty, holding the semaphore shared (pause points). */
 	if (!fault && !zero)
@@ -3040,12 +3075,13 @@ put:
  */
 static int cladefs_dax_rebind_now_set(const char *val, const struct kernel_param *kp)
 {
-	struct cladefs_dax *dax = READ_ONCE(cladefs_dax_stray_dax);
+	struct cladefs_dax *dax = cladefs_dax_last_get();
 
 	if (!dax)
 		return -EINVAL;
 	atomic64_inc(&dax->rebinds_asked);
 	cladefs_dax_kick(dax, true);
+	cladefs_dax_last_put();
 	return 0;
 }
 
@@ -3056,12 +3092,18 @@ MODULE_PARM_DESC(dax_rebind_now, "Have the worker write back, seal and rebind ev
 /* cladefs: cladefs.dax_rebind_every, set, starts the worker's rounds on the filesystem mounted last. */
 static int cladefs_dax_rebind_every_set(const char *val, const struct kernel_param *kp)
 {
-	struct cladefs_dax *dax = READ_ONCE(cladefs_dax_stray_dax);
+	struct cladefs_dax *dax;
 	int err = param_set_uint(val, kp);
 
-	if (!err && dax && READ_ONCE(cladefs_dax_rebind_every))
+	/* Set with no filesystem mounted, it starts the rounds of the next to mount. */
+	if (err || !READ_ONCE(cladefs_dax_rebind_every))
+		return err;
+	dax = cladefs_dax_last_get();
+	if (dax) {
 		cladefs_dax_kick(dax, false);
-	return err;
+		cladefs_dax_last_put();
+	}
+	return 0;
 }
 
 static const struct kernel_param_ops cladefs_dax_rebind_every_ops = {
@@ -3916,6 +3958,39 @@ static void cladefs_dax_destroy_pools(struct cladefs_dax *dax)
 		cladefs_dax_destroy_pool(dax->pool);
 }
 
+/*
+ * cladefs: `dax`, whole, is the filesystem mounted last, for the tests' knobs (cladefs_dax_last),
+ * and the trace's, if asked for (TASK-121): its window's first page frame, and the events, made
+ * once, under the lock as two mounts may make them at once.
+ */
+static void cladefs_dax_publish(struct cladefs_dax *dax)
+{
+	mutex_lock(&cladefs_dax_last_lock);
+	cladefs_dax_last = dax;
+	if (cladefs_dax_tracing) {
+		void *kaddr;
+		int id = dax_read_lock();
+
+		if (dax_direct_access(dax->dax_dev, 0, 1, DAX_ACCESS, &kaddr,
+				      &cladefs_dax_trace_base) < 1)
+			cladefs_dax_trace_base = 0;
+		dax_read_unlock(id);
+		if (!cladefs_dax_trace_events)
+			WRITE_ONCE(cladefs_dax_trace_events,
+				   vzalloc(sizeof(*cladefs_dax_trace_events) * CLADEFS_DAX_TRACE_EVENTS));
+	}
+	mutex_unlock(&cladefs_dax_last_lock);
+}
+
+/* cladefs: `dax` is no longer the knobs', once the knob using it, if one does, returns. */
+static void cladefs_dax_unpublish(struct cladefs_dax *dax)
+{
+	mutex_lock(&cladefs_dax_last_lock);
+	if (cladefs_dax_last == dax)
+		cladefs_dax_last = NULL;
+	mutex_unlock(&cladefs_dax_last_lock);
+}
+
 struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 {
 	struct cladefs_device *dev = cladefs_dax_device(filesystem);
@@ -3956,20 +4031,6 @@ struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 	}
 	dax->filesystem = filesystem;
 	dax->dev = dev;
-	WRITE_ONCE(cladefs_dax_stray_dax, dax);
-	/* cladefs: the trace, if asked for, of the filesystem mounted last (TASK-121). */
-	if (cladefs_dax_tracing) {
-		void *kaddr;
-		int id = dax_read_lock();
-
-		if (dax_direct_access(dax_dev, 0, 1, DAX_ACCESS, &kaddr, &cladefs_dax_trace_base) < 1)
-			cladefs_dax_trace_base = 0;
-		dax_read_unlock(id);
-		WRITE_ONCE(cladefs_dax_trace_dev, dev);
-		if (!cladefs_dax_trace_events)
-			WRITE_ONCE(cladefs_dax_trace_events,
-				   vzalloc(sizeof(*cladefs_dax_trace_events) * CLADEFS_DAX_TRACE_EVENTS));
-	}
 	dax->dax_dev = dax_dev;
 	INIT_LIST_HEAD(&dax->volumes);
 	mutex_init(&dax->files_lock);
@@ -3991,6 +4052,7 @@ struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 	dax->private_max = min_t(u64, cladefs_device_private_max(dev), LONG_MAX);
 	dax->iomap_pages = clamp_t(unsigned long, dax->private_max / 8, 1, CLADEFS_DAX_PRIVATE_PAGES);
 	cladefs_device_set_sealed(dev, cladefs_dax_sealed, dax);
+	cladefs_dax_publish(dax);
 	return dax;
 }
 
@@ -4145,13 +4207,10 @@ void cladefs_dax_destroy(struct cladefs_dax *dax)
 	unsigned long ino;
 	int bucket;
 
+	/* cladefs: first, so that no knob kicks the worker once it stops (board 8555). */
+	cladefs_dax_unpublish(dax);
 	/* As cladefs_dax_quiesce, where mounting failed. */
 	cladefs_dax_stop(dax);
-	/* cladefs: no longer traced: the device goes with the mount. */
-	if (READ_ONCE(cladefs_dax_trace_dev) == dax->dev)
-		WRITE_ONCE(cladefs_dax_trace_dev, NULL);
-	if (READ_ONCE(cladefs_dax_stray_dax) == dax)
-		WRITE_ONCE(cladefs_dax_stray_dax, NULL);
 	list_for_each_entry_safe(range, next, &dax->used, list) {
 		xa_erase(&range->file->ranges, range->chunk);
 		list_del(&range->list);

@@ -117,8 +117,8 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(sealed, "cladefs.extents"), Some(Value::I64(1)));
 
     // The commit's segment, created, the commit's small extents in it; then the cell's
-    // checkpoint, which follows its forks' moves, created, then named by a swap of the cell's
-    // head (TASK-407).
+    // checkpoint, created, then named by a swap of the cell's head (TASK-407): it lists nothing,
+    // the collector moving nothing (doc-27).
     let upload = the(&spans, "upload.segment");
     assert_eq!(attribute(upload, "cladefs.cell"), Some(named.clone()));
     assert_eq!(attribute(upload, "cladefs.extents"), Some(Value::I64(0)));
@@ -127,7 +127,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(checkpoint, "cladefs.cell"), Some(named));
     assert_eq!(
         children(&spans, checkpoint),
-        ["bucket.create", "bucket.list", "bucket.update"].map(str::to_owned).into()
+        ["bucket.create", "bucket.update"].map(str::to_owned).into()
     );
 }
 
@@ -165,4 +165,30 @@ fn spans_are_recorded_unexported() {
     let commits = recorder.samples("cladefsd.commit", None);
     let names: BTreeSet<String> = names(commits[0].trace.spans.iter()).into_iter().collect();
     assert!(names.contains("store.commit"), "{names:?}");
+}
+
+/// board 8571: a record logged while a span is current names it, `trace_id` and `span_id`, where
+/// it is to be found in its trace; one logged within none, nothing.
+#[test]
+fn records_logged_within_spans_name_them() {
+    let lines = crate::cladefsd::logging::capture();
+    host();
+    let exporter = InMemorySpanExporter::default();
+    let export =
+        Export::new(SimpleSpanProcessor::new(exporter.clone()), Box::new(Sampler::AlwaysOn));
+    otel::install(Sampler::AlwaysOn, Some(export));
+    let span = bucket_cell::trace::Span::start("test.logged");
+    let entered = span.enter();
+    log::info!("cladefsd: within a span");
+    drop(entered);
+    drop(span);
+    log::info!("cladefsd: within none");
+    let spans = exporter.get_finished_spans().unwrap();
+    let logged = &the(&spans, "test.logged").span_context;
+    let lines = lines.lock().unwrap();
+    let line = |what: &str| lines.iter().find(|line| line.contains(what)).cloned().unwrap();
+    let ids = format!(" trace_id={} span_id={}", logged.trace_id(), logged.span_id());
+    let within = line("within a span");
+    assert!(within.ends_with(&ids), "{within}");
+    assert!(!line("within none").contains("trace_id="));
 }

@@ -13,6 +13,7 @@
 use super::cells;
 use super::disk;
 use super::grants::Grants;
+use super::grpc::Served;
 use super::memory;
 use crate::Errno;
 use bucket_cell::cell::Kind;
@@ -109,12 +110,14 @@ pub fn serve_control(
         tonic::transport::Server::builder()
             .add_service(health)
             // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
-            // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's.
-            .add_service(Drained(
+            // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's. Its
+            // calls counted and traced, refusals as the daemon drains among them (board 8565,
+            // board 8569).
+            .add_service(Served::new(Drained(
                 CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
-            ))
+            )))
             // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
-            .add_optional_service(super::mount::service().map(Drained))
+            .add_optional_service(super::mount::service().map(|mount| Served::new(Drained(mount))))
             .serve_with_incoming(incoming)
             .await
             .map_err(std::io::Error::other)
@@ -141,9 +144,9 @@ pub async fn serve_control(
     });
     CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
     tonic::transport::Server::builder()
-        .add_service(Drained(
+        .add_service(Served::new(Drained(
             CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
-        ))
+        )))
         .serve(address)
         .await
         .map_err(std::io::Error::other)
@@ -195,7 +198,7 @@ fn stats_response(
     };
     let vms = stats.vms.into_iter().map(|vm| VmStats {
         connection: vm.connection,
-        cell: vm.cell,
+        cell: vm.cell.id,
         path: vm.path.to_string_lossy().into_owned(),
         build: vm.build.clone().unwrap_or_default(),
         counters: named(&vm.counters()),
@@ -284,8 +287,10 @@ where
         };
         // cladefs: in a task of its own, which runs to its end, counted until then, whether or not
         // its caller waits for the answer (board 5599): a caller's deadline, or its stream reset,
-        // drops what awaits it, which stops at whatever await it was in otherwise.
-        let answered = self.0.call(request);
+        // drops what awaits it, which stops at whatever await it was in otherwise. Its span, the
+        // one current as it is called (`grpc::Served`), current as the task runs, the parent of
+        // what the call does (board 8569).
+        let answered = bucket_cell::trace::Parent::current().around(self.0.call(request));
         let detached = crate::caller::detached(async move {
             let answered = answered.await;
             drop(call);
@@ -1117,6 +1122,35 @@ impl Cladefsd for Control {
             forgotten: Some(forgotten_of(forgotten)),
         }))
     }
+
+    async fn reload_kms(
+        &self,
+        request: Request<ReloadKmsRequest>,
+    ) -> Result<Response<ReloadKmsResponse>, Status> {
+        use bucket_cell::bucket_kms::Unreloaded;
+        let ReloadKmsRequest {} = request.into_inner();
+        let reloaded = crate::bucket::reload_kms().await.map_err(|refused| {
+            let errno = match &refused {
+                Unreloaded::Malformed(_) => Errno::EINVAL,
+                Unreloaded::InUse(_) => Errno::EBUSY,
+                Unreloaded::Unreached(_) => Errno::EIO,
+                Unreloaded::Unsupported(_) => Errno::ENOTSUP,
+            };
+            log::error!("cladefsd: reloading the KMS: {refused}");
+            saying(errno, format!("reloading the KMS: {refused}"))
+        })?;
+        let ids = |ids: Vec<extent_keys::kms::master::MasterKeyId>| {
+            ids.iter().map(ToString::to_string).collect()
+        };
+        let master_keys = (reloaded.master_keys.into_iter())
+            .map(|changed| MasterKeysReloaded {
+                bucket: changed.bucket.into(),
+                added: ids(changed.added),
+                removed: ids(changed.removed),
+            })
+            .collect();
+        Ok(Response::new(ReloadKmsResponse { renamed: reloaded.renamed, master_keys }))
+    }
 }
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, as the API has it (TASK-411.7).
@@ -1541,6 +1575,13 @@ impl Client {
         let what = format!("shredding tenant {tenant}");
         let response = self.call(what, |mut c| async move { c.shred_tenant(request).await })?;
         Ok((response.shredded_now, response.forgotten.unwrap_or_default()))
+    }
+
+    /// cladefs: reloads what of the daemon's KMS configuration reloads live (`ReloadKms`, board
+    /// 8487): the tenants renamed, and the bucket KMSes whose master keys changed.
+    pub fn reload_kms(&self) -> Result<ReloadKmsResponse, crate::Error> {
+        let what = "reloading the daemon's KMS".to_owned();
+        self.call(what, |mut c| async move { c.reload_kms(ReloadKmsRequest {}).await })
     }
 
     /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,

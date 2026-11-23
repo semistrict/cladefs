@@ -1041,6 +1041,7 @@ dependencies = [
  "fxfs",
  "fxfs-posix",
  "host_fs",
+ "http-body",
  "humantime",
  "hyper-util",
  "libc",
@@ -1063,6 +1064,7 @@ dependencies = [
  "prost 0.14.4",
  "protox",
  "rand 0.10.3",
+ "rustls",
  "seccompiler",
  "serde",
  "serde_json",
@@ -4002,6 +4004,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
@@ -4915,6 +4918,7 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",

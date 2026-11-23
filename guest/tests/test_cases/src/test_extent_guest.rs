@@ -23,6 +23,20 @@ pub struct TestExtentGuest;
 /// build served it.
 pub struct TestExtentGuestOtherVersion;
 
+/// cladefs board 8557: the driver refuses, at probe, -EINVAL and the field named, a device whose
+/// configuration would have it or the filesystem divide by zero, round to nothing or wait for
+/// good: here the device is this build's, and the driver is told it said `fault`
+/// (`virtio_extent.config_fault`), as a VMM's bug would have it say. No device is bound, the kernel
+/// says why, and nothing oopses (an oops fails the case). Before, a block size of 0 divided by zero
+/// as Fxfs mounted, and a ring of fewer than 3 entries wrapped the clamp of its segments.
+pub struct TestExtentGuestBadConfig {
+    /// `FIELD=N`, as `virtio_extent.config_fault` takes it.
+    pub fault: &'static str,
+    /// What the driver's refusal says after the device's name.
+    #[cfg_attr(feature = "host", allow(dead_code))]
+    pub refusal: &'static str,
+}
+
 /// The version the driver is told it speaks: the device's, this build's, and one more.
 const OTHER_VERSION: (u32, u32) = (2, 3);
 
@@ -100,6 +114,30 @@ mod host {
             TestOutcome::Pass
         }
     }
+
+    impl Test for TestExtentGuestBadConfig {
+        fn should_run(&self) -> ShouldRun {
+            cladefs_guest_should_run()
+        }
+
+        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
+            let cell_dir = test_setup.tmp_dir.join("extents");
+            let mut vm = Vm::new(2, 512)?;
+            vm.guest_kernel()?;
+            vm.cell("extents", &cell_dir, 64 << 20, 64 << 20)?;
+            let param = format!("virtio_extent.config_fault={}", self.fault);
+            vm.module_param(&std::ffi::CString::new(param)?);
+            vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
+        }
+
+        fn check(self: Box<Self>, stdout: Vec<u8>, _test_setup: TestSetup) -> TestOutcome {
+            let output = String::from_utf8(stdout).unwrap();
+            if output != "OK\n" {
+                return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
+            }
+            TestOutcome::Pass
+        }
+    }
 }
 
 #[guest]
@@ -144,6 +182,33 @@ mod guest {
             let records = crate::kernel_log::records();
             let said: Vec<_> = records.iter().filter(|record| record.contains(&refused)).collect();
             assert_eq!(said.len(), 1, "the kernel's log: {records:#?}");
+            println!("OK");
+        }
+    }
+
+    impl Test for TestExtentGuestBadConfig {
+        fn in_guest(self: Box<Self>) {
+            let bound: Vec<_> = fs::read_dir(DRIVER)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name.starts_with("virtio"))
+                .collect();
+            assert_eq!(
+                bound,
+                Vec::<String>::new(),
+                "the driver took a device saying {}",
+                self.fault
+            );
+            let records = crate::kernel_log::records();
+            for said in [
+                format!("{}: refused", self.refusal),
+                // The driver core's, with the probe's error: -EINVAL.
+                "probe with driver virtio_extent failed with error -22".to_owned(),
+            ] {
+                let found: Vec<_> =
+                    records.iter().filter(|record| record.contains(&said)).collect();
+                assert_eq!(found.len(), 1, "{said:?} in the kernel's log: {records:#?}");
+            }
             println!("OK");
         }
     }

@@ -59,24 +59,22 @@ async fn keeps_what_it_recovered_after_a_kill_through_a_power_loss() {
 /// which leave nothing they should have collected (TASK-390).
 #[tokio::test(flavor = "multi_thread")]
 async fn recovers_from_its_bucket_with_and_without_its_disk() {
-    let (mut uploaded, mut ahead, mut cut, mut compacted, mut deleted) = (0, 0, 0, 0, 0);
+    let (mut uploaded, mut ahead, mut cut, mut deleted) = (0, 0, 0, 0);
     for round in 0..KEPT_ROUNDS {
         let found = kept(round).await;
         uploaded += found.acknowledged as u64;
         ahead += found.ahead as u64;
         cut += found.cut as u64;
-        compacted += found.compacted as u64;
         deleted += found.deleted as u64;
     }
     // The crashes hit uploads under way, and cells whose disks held more than the bucket; the
-    // collector's cuts, passes under way; and its passes compacted and deleted what the cells
-    // had uploaded. cladefs: each round waits for an upload early in its workload, so that most
+    // collector's cuts, passes under way; and its passes deleted what the cells had uploaded.
+    // cladefs: each round waits for an upload early in its workload, so that most
     // acknowledge a commit whatever the build's speed (board 1738): 82 to 88 of 100 did on the
     // Mac, debug or optimized.
     assert!(uploaded > KEPT_ROUNDS / 2, "{uploaded} rounds acknowledged a commit");
     assert!(ahead > KEPT_ROUNDS / 10, "{ahead} rounds held commits the bucket lacked");
     assert!(cut > KEPT_ROUNDS / 4, "{cut} rounds cut a pass before the crash");
-    assert!(compacted > KEPT_ROUNDS / 10, "{compacted} rounds' passes compacted");
     assert!(deleted > KEPT_ROUNDS / 3, "{deleted} rounds' passes deleted");
     // cladefs: and commits spanning segments uploaded, acknowledged with the segments ending them,
     // and recovered (TASK-92.41): each round's waited-for commit spans segments by construction,

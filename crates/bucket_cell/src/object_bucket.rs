@@ -349,22 +349,18 @@ pub enum Upload {
     /// Extents stored on their own.
     Extents,
     Checkpoints,
-    /// The collector's moves of what it compacted.
-    Moves,
     /// Cells' records and heads, and whatever else.
     Other,
 }
 
 impl Upload {
-    pub const ALL: [Self; 5] =
-        [Self::Segments, Self::Extents, Self::Checkpoints, Self::Moves, Self::Other];
+    pub const ALL: [Self; 4] = [Self::Segments, Self::Extents, Self::Checkpoints, Self::Other];
 
     fn of(key: &str) -> Self {
         match layout::kind(key) {
             Kind::Segment { .. } => Self::Segments,
             Kind::Extent { .. } => Self::Extents,
             Kind::Checkpoint { .. } => Self::Checkpoints,
-            Kind::Moves { .. } => Self::Moves,
             _ => Self::Other,
         }
     }
@@ -375,7 +371,6 @@ impl Upload {
             Self::Segments => "segments",
             Self::Extents => "extents",
             Self::Checkpoints => "checkpoints",
-            Self::Moves => "moves",
             Self::Other => "other",
         }
     }
@@ -1906,7 +1901,7 @@ pub(crate) mod tests {
     /// then while the child refers to it, and deletes it, the hold with it, once neither does.
     #[test]
     fn versions_forked_into_another_bucket_are_mirrored_there() {
-        use crate::collector::{Collector, Options};
+        use crate::collector::Collector;
         use crate::mirror::{Mirrored, mirror};
         use crate::testing::{VERSION, fork_version_given, ring_of};
         futures::executor::block_on(async {
@@ -1962,8 +1957,7 @@ pub(crate) mod tests {
             let read = crate::fetch::read(&fresh, &ring, extent, &inherited.extents[&extent]);
             assert_eq!(read.await.unwrap(), b"versioned");
 
-            let (pass, fresh_own) =
-                (Collector::new(Options { compact_below: 0.5, grace: 0 }), fresh.own());
+            let (pass, fresh_own) = (Collector::new(), fresh.own());
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
             assert_eq!(report.deleted, 0, "the parent's cell alive");
             lifecycle::delete(&*fresh, parent, 1, u64::MAX).await.unwrap();
@@ -1978,8 +1972,7 @@ pub(crate) mod tests {
             );
             // The child's own passes: its cell dead, its reference retired here.
             for holder in [8, 9] {
-                let options = Options { compact_below: 0.5, grace: 0 };
-                crate::collector::collect_cell(&*fresh, child, holder, &options).await.unwrap();
+                crate::collector::collect_cell(&*fresh, child, holder).await.unwrap();
             }
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
             // Its copy and its marker.
@@ -2175,74 +2168,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// TASK-633.8: a version cut after the parent's bucket's collector compacted a segment holding
-    /// one of its extents, mirrored: what its state names of it, along the extent's moves, copied
-    /// with the moves, so that the child reads the extent here, the parent's bucket's objects gone.
-    #[test]
-    fn versions_cut_after_compactions_are_mirrored_with_their_moves() {
-        use crate::batch::Commit;
-        use crate::collector::{Options, collect_cell};
-        use crate::mirror::{Mirrored, mirror};
-        use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
-        futures::executor::block_on(async {
-            let dir = tempfile::tempdir().unwrap();
-            let two = Two::new(dir.path()).await;
-            let bucket = two.routed();
-            let parent = test_cell(2 << 48 | 1);
-            lifecycle::create(&*bucket, parent, 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
-            let first = writer.chain().next_sequence();
-            let (small, large) =
-                (ExtentId::new(parent.id, first), ExtentId::new(parent.id, first + 1));
-            let large_bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
-            let extents = vec![(small, b"small".to_vec()), (large, large_bytes)];
-            async fn commit(writer: &Writer<RoutedBucket>, commit: Commit) {
-                let objects = crate::batch::SegmentBuilder::from(commit).close(&mut writer.chain());
-                let segment =
-                    writer.add_segment(objects.frame(writer.keys().encrypting())).unwrap();
-                writer.upload(segment).await.unwrap();
-                writer.acknowledge().await.unwrap();
-            }
-            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-            let segment = writer.location(small).unwrap().key;
-            commit(&writer, Commit { tag: 2, frees: vec![large], ..Commit::default() }).await;
-            writer.checkpoint().await.unwrap();
-            let compacting = Options { compact_below: 0.5, grace: 0 };
-            for holder in [8, 9] {
-                collect_cell(&*bucket, parent, holder, &compacting).await.unwrap();
-            }
-            let moves = two.other.object_list(&layout::moves_of(&segment).unwrap()).await.unwrap();
-            assert_eq!(moves.len(), 1, "{segment} not compacted");
-
-            let later = ExtentId::new(parent.id, writer.chain().next_sequence());
-            let at = versioned_by(&writer, vec![(later, b"later".to_vec())], VERSION).await;
-            let origin = Origin { parent, at, epoch: writer.epoch() };
-            let child = test_cell(1 << 48 | 2);
-            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
-            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
-            assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
-
-            let listed = two.other.object_list(&parent.prefix()).await.unwrap();
-            for meta in listed.into_iter().filter(|meta| crate::peer::served(&meta.key)) {
-                two.other.object_delete(&meta.key).await.unwrap();
-            }
-            let fresh = two.routed();
-            let inherited = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
-            let ring = ring_of(&*fresh, child).await.unwrap();
-            for (extent, bytes) in [(small, &b"small"[..]), (later, &b"later"[..])] {
-                let read = crate::fetch::read(&fresh, &ring, extent, &inherited.extents[&extent]);
-                assert_eq!(read.await.unwrap(), bytes);
-            }
-        });
-    }
-
     /// TASK-633.8: a mirror's hold keeps, in the parent's bucket, what the version inherits from
     /// other cells there, which the mirror does not copy: the parent, itself a fork of a cell
     /// there, mirrored, then both deleted and their bucket's collector passing over them, the
     /// child here reads what the version inherited still (`mirrorHolds`).
     #[test]
     fn holds_keep_what_mirrored_versions_inherit_from_other_cells() {
-        use crate::collector::{Options, collect_cell};
+        use crate::collector::collect_cell;
         use crate::mirror::{Mirrored, mirror};
         use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
         futures::executor::block_on(async {
@@ -2268,10 +2200,9 @@ pub(crate) mod tests {
             for cell in [parent, grand] {
                 lifecycle::delete(&*bucket, cell, 1, u64::MAX).await.unwrap();
             }
-            let options = Options { compact_below: 0.5, grace: 0 };
             for holder in 8..12 {
                 for cell in [parent, grand] {
-                    collect_cell(&*bucket, cell, holder, &options).await.unwrap();
+                    collect_cell(&*bucket, cell, holder).await.unwrap();
                 }
             }
             let fresh = two.routed();
@@ -2290,7 +2221,7 @@ pub(crate) mod tests {
     /// collector passing, the grandchild reads what it inherited from both.
     #[test]
     fn references_here_hold_while_their_childrens_cells_hold_references() {
-        use crate::collector::{Collector, Options, collect_cell};
+        use crate::collector::{Collector, collect_cell};
         use crate::mirror::{Mirrored, mirror};
         use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
         futures::executor::block_on(async {
@@ -2318,11 +2249,10 @@ pub(crate) mod tests {
             for cell in [child, parent] {
                 lifecycle::delete(&*bucket, cell, 1, u64::MAX).await.unwrap();
             }
-            let options = Options { compact_below: 0.5, grace: 0 };
-            let copies = Collector::new(options);
+            let copies = Collector::new();
             for holder in 8..12 {
                 for cell in [child, parent] {
-                    collect_cell(&*bucket, cell, holder, &options).await.unwrap();
+                    collect_cell(&*bucket, cell, holder).await.unwrap();
                 }
                 copies.collect_copy(&*bucket, &*bucket.own(), 1, parent).await.unwrap();
             }
@@ -2476,7 +2406,7 @@ pub(crate) mod tests {
     /// takes it over and is done.
     #[test]
     fn mirrors_hold_their_pins_alone() {
-        use crate::collector::{Collector, Options};
+        use crate::collector::Collector;
         use crate::mirror::{Mirrored, PIN_STALE, mirror};
         futures::executor::block_on(async {
             let dir = tempfile::tempdir().unwrap();
@@ -2506,8 +2436,7 @@ pub(crate) mod tests {
             assert_eq!(two.home.object_get(&pin).await.unwrap().bytes, another, "the pin taken");
 
             let later = Watched::new(own.clone(), PIN_STALE + 1, None);
-            let options = Options { compact_below: 0.5, grace: 0 };
-            let report = Collector::new(options).collect_copy(&*bucket, &later, 1, parent).await;
+            let report = Collector::new().collect_copy(&*bucket, &later, 1, parent).await;
             assert_eq!(report.unwrap().deleted, 0);
             assert!(two.home.object_get(&marker).await.is_ok(), "not marked, begun again");
             assert!(two.home.object_get(&pin).await.is_err(), "the pin stands");
@@ -2526,9 +2455,8 @@ pub(crate) mod tests {
     /// TASK-633.8 (AC #4): a version mirrored here, its children here live with its bucket out of
     /// reach: a host started since, which knows nothing of the version but what this bucket holds,
     /// recovers a child and reads what it inherited, takes it, commits, and forks its own version
-    /// into another child, which reads both; it asks the version's bucket nothing but listings of
-    /// moves (a mirrored cell's are listed in both buckets, those of the other skipped when it
-    /// fails). board 5528: found as a host finds it, by the registry, out of reach at once.
+    /// into another child, which reads both; it asks the version's bucket nothing. board 5528:
+    /// found as a host finds it, by the registry, out of reach at once.
     #[test]
     fn children_of_a_mirrored_version_live_with_its_bucket_out_of_reach() {
         use crate::mirror::{Mirrored, mirror};
@@ -2580,58 +2508,9 @@ pub(crate) mod tests {
 
             let there = cut.stats_by_bucket().into_iter().find(|(number, _)| *number == 2);
             let asked: Vec<Request> = there.map_or_else(Vec::new, |(_, stats)| {
-                (Request::ALL.into_iter())
-                    .filter(|&request| request != Request::List && stats.requests(request) > 0)
-                    .collect()
+                (Request::ALL.into_iter()).filter(|&request| stats.requests(request) > 0).collect()
             });
             assert_eq!(asked, [], "asked of the version's bucket, out of reach");
-        });
-    }
-
-    /// Board 5526: a listing of an object's moves, of a cell mirrored here, its bucket out of
-    /// reach: answered here for an object the mirror copied, as its children read it here; failed
-    /// for one it did not copy, whose moves its bucket alone holds, never taken for none; and
-    /// answered with them once that bucket is back.
-    #[test]
-    fn moves_of_objects_not_mirrored_wait_for_their_bucket() {
-        use crate::mirror::{Mirrored, mirror};
-        use crate::testing::{VERSION, fork_version_given};
-        futures::executor::block_on(async {
-            let dir = tempfile::tempdir().unwrap();
-            let two = Two::new(dir.path()).await;
-            let bucket = two.routed();
-            let parent = test_cell(2 << 48 | 1);
-            let (at, epoch, _) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at, epoch };
-            let child = test_cell(1 << 48 | 2);
-            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
-            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
-            assert!(matches!(mirrored, Mirrored::Done { .. }), "{mirrored:?}");
-            let here = two.home.object_list(&parent.prefix()).await.unwrap();
-            let copied = (here.into_iter().map(|meta| meta.key))
-                .find(|key| matches!(layout::kind(key), layout::Kind::Segment { .. }))
-                .unwrap();
-            // A segment of the parent's written since, compacted in its own bucket alone.
-            let later = layout::segment(parent, at + 1, epoch);
-            let moved = layout::moves(&later, 1).unwrap();
-            two.other.object_put(&moved, b"moves".to_vec().into(), PutMode::Create).await.unwrap();
-
-            let home = ObjectBucket::from_url(&two.home_url).unwrap();
-            let faults = dir.path().join("faults");
-            std::fs::write(&faults, "failing=unavailable").unwrap();
-            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
-            // read the environment.
-            unsafe { std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults) };
-            let cut = home.routed(Arc::new(Registered::new(Vec::<(String, String)>::new())));
-            let keys = |listed: Vec<Meta>| -> Vec<String> {
-                listed.into_iter().map(|meta| meta.key).collect()
-            };
-            let moves_of = |key: &str| layout::moves_of(key).unwrap();
-            assert_eq!(cut.list(&moves_of(&copied)).await.map(keys), Ok(vec![]));
-            assert_eq!(cut.list(&moves_of(&later)).await.map(keys), Err(Error::Unavailable));
-            std::fs::write(&faults, "").unwrap();
-            std::thread::sleep(crate::faults::READ_EVERY);
-            assert_eq!(cut.list(&moves_of(&later)).await.map(keys), Ok(vec![moved]));
         });
     }
 
@@ -2646,7 +2525,7 @@ pub(crate) mod tests {
     /// child's reference keeps the version there.
     #[test]
     fn mirrors_dying_at_each_step_leave_nothing_needed_gone() {
-        use crate::collector::{Collector, Options};
+        use crate::collector::Collector;
         use crate::mirror::{Mirrored, PIN_STALE, mirror};
         use crate::testing::{VERSION, fork_version, read};
         use futures::executor::block_on;
@@ -2692,7 +2571,7 @@ pub(crate) mod tests {
 
             block_on(async {
                 lifecycle::delete(&*bucket, parent, 1, u64::MAX).await.unwrap();
-                let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
+                let pass = || Collector::new();
                 pass().collect_copy(&*bucket, &*own, 1, parent).await.unwrap();
                 let later = Watched::new(own.clone(), PIN_STALE + 1, None);
                 for _ in 0..2 {
@@ -2737,7 +2616,7 @@ pub(crate) mod tests {
     /// there.
     #[test]
     fn copies_of_other_buckets_versions_are_kept_while_needed() {
-        use crate::collector::{Collector, Options};
+        use crate::collector::Collector;
         use crate::layout::{Head, Mirror, Version};
         use crate::record::Made;
         futures::executor::block_on(async {
@@ -2771,7 +2650,7 @@ pub(crate) mod tests {
             let (marker, hold) = (layout::mirror(parent, 3), layout::hold(parent, 3, 1));
             put(home, &marker, layout::encode(&Mirror::NOW)).await;
             put(other, &hold, layout::encode(&layout::Reference::of(0))).await;
-            let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
+            let pass = || Collector::new();
             let all = listed(home, parent).await;
 
             put_head(other, parent, Head::of(Made::Root, 4)).await;
@@ -2832,7 +2711,7 @@ pub(crate) mod tests {
     /// deleting deletes it, nothing needing it, as a collector's pass over every cell does.
     #[test]
     fn sweeps_pass_over_copies_as_copies() {
-        use crate::collector::{Collector, Options};
+        use crate::collector::Collector;
         use crate::layout::{Head, Mirror};
         use crate::record::Made;
         use crate::sweep::{Mode, Sweep};
@@ -2854,16 +2733,8 @@ pub(crate) mod tests {
             };
             let left = || async { home.object_list(&parent.prefix()).await.unwrap().len() };
             copy().await;
-            let options = Options { compact_below: 0.5, grace: 0 };
-            let sweep = |mode| Sweep {
-                options,
-                mode,
-                at_once: 1,
-                lease: 60_000,
-                slowest: 1,
-                spawned: false,
-                kms: None,
-            };
+            let sweep =
+                |mode| Sweep { mode, at_once: 1, lease: 60_000, slowest: 1, spawned: false };
             let marking = sweep(Mode::MarkOnly).run_with_own(&routed, Some(&own), |_| {}).await;
             assert_eq!((marking.report.deleted, left().await), (0, 2), "marked");
             let there = other.object_list(&parent.prefix()).await.unwrap();
@@ -2873,8 +2744,7 @@ pub(crate) mod tests {
             // Its copy and its marker.
             assert_eq!((swept.report.deleted, left().await), (2, 0), "swept");
             copy().await;
-            let collected =
-                Collector::new(options).collect_with_own(&*routed, Some(&*own), 9).await;
+            let collected = Collector::new().collect_with_own(&*routed, Some(&*own), 9).await;
             assert_eq!((collected.unwrap().deleted, left().await), (2, 0), "collected");
         });
     }
@@ -3267,10 +3137,10 @@ pub(crate) mod tests {
                 version: None,
                 modified: 0,
             };
-            let (older, newest) = (Marks { epoch: 6, grace: 0, marked: vec![at(&old)] }, 7);
-            let marks = Marks { epoch: newest, grace: 0, marked: vec![at(&marked)] };
+            let (older, newest) = (Marks { epoch: 6, marked: vec![at(&old)] }, 7);
+            let marks = Marks { epoch: newest, marked: vec![at(&marked)] };
             let put = |marks: &Marks| layout::encode(marks);
-            let theirs_marks = Marks { epoch: 3, grace: 0, marked: vec![at(&theirs)] };
+            let theirs_marks = Marks { epoch: 3, marked: vec![at(&theirs)] };
             for (cell, epoch, marks) in
                 [(TEST_CELL, 6, &older), (TEST_CELL, newest, &marks), (other, 3, &theirs_marks)]
             {
@@ -3533,8 +3403,7 @@ pub(crate) mod tests {
             // TASK-633.7: the child deleted, the collector of its bucket retires its reference in
             // its parent's bucket (unmarked: its fork was made by its restore alone).
             lifecycle::delete(&*routed, child, 13, u64::MAX).await.unwrap();
-            let options = collector::Options { compact_below: 0.5, grace: 0 };
-            crate::testing::collect_until_quiet(&*routed, &options).await.unwrap();
+            crate::testing::collect_until_quiet(&*routed).await.unwrap();
             let reference = layout::reference(parent, fork, child);
             assert!(!at(&other, reference).await, "the reference stands in the parent's bucket");
         });
@@ -3597,8 +3466,7 @@ pub(crate) mod tests {
         assert_eq!(inherited.extents.keys().copied().collect::<Vec<_>>(), [small, large]);
 
         // The collector keeps what the child inherited, though the parent freed it.
-        let options = collector::Options { compact_below: 0.5, grace: 0 };
-        collector::collect(&*bucket, 20, &options).await.unwrap();
+        collector::collect(&*bucket, 20).await.unwrap();
         let location = &inherited.extents[&small];
         assert_eq!(crate::testing::read(&bucket, small, location).await.unwrap(), b"small");
         let location = &inherited.extents[&large];
@@ -3618,7 +3486,7 @@ pub(crate) mod tests {
         heir.checkpoint().await.unwrap();
         drop(heir);
         lifecycle::delete(&*bucket, test_cell(child), 13, u64::MAX).await.unwrap();
-        crate::testing::collect_until_quiet(&*bucket, &options).await.unwrap();
+        crate::testing::collect_until_quiet(&*bucket).await.unwrap();
         for extent in [small, large] {
             let key = &inherited.extents[&extent].key;
             assert_eq!(bucket.head(key).await.map(|_| ()), Err(Error::NotFound), "{extent:?}");
@@ -3891,15 +3759,8 @@ pub(crate) mod tests {
         let cell = test_cell(1);
         serving.block_on(lifecycle::create(&*bucket, cell, 1)).unwrap();
         server.answering(Some(403));
-        let sweep = Sweep {
-            options: collector::Options { compact_below: 0.5, grace: 0 },
-            mode: Mode::Delete,
-            at_once: 1,
-            lease: 60_000,
-            slowest: 0,
-            spawned: false,
-            kms: Some(crate::keys::testing::kms()),
-        };
+        let sweep =
+            Sweep { mode: Mode::Delete, at_once: 1, lease: 60_000, slowest: 0, spawned: false };
         // cladefs: the listing's refusal its own outcome, no pass's (board 8509).
         let swept = serving.block_on(sweep.run(&bucket, |_| {}));
         assert_eq!((swept.visited, swept.failed), (0, 0));

@@ -95,6 +95,12 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
         vars.extend([
             ("CLADEFSD_PEER_ADDRESS", peer(host).to_string()),
             ("CLADEFSD_PEERS", peers.join(",")),
+            // The tests' peer credentials (board 8437), read as a host's are: the simulated
+            // network has no TLS.
+            (
+                "CLADEFSD_PEER_TLS",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/peer-tls").to_owned(),
+            ),
             ("CLADEFSD_PART_CACHE", root.join("cache").display().to_string()),
         ]);
     }
@@ -649,8 +655,8 @@ async fn versions_made_through_attrition_hold_what_came_before() {
 }
 
 /// TASK-685.7: the attrition profile, its writers freeing blocks told uploaded as they go, versions
-/// made among them, the collector passing over the bucket meanwhile and at the end, compacting
-/// what frees left sparse: every block told uploaded and not freed reads back as written, none
+/// made among them, the collector passing over the bucket meanwhile and at the end, and writers
+/// relocating out of what frees left sparse: every block told uploaded and not freed reads back as written, none
 /// freed does, and each version holds what came before it.
 #[madsim::test]
 async fn frees_and_collection_through_attrition_keep_what_is_live() {
@@ -861,6 +867,132 @@ async fn create_replicated(host: u8, path: &Path, token: u64) -> u64 {
     panic!("host {host} never made a replicated cell");
 }
 
+/// Board 8579: a member of a replicated cell's configuration, of f 1 on three hosts of four, that its
+/// writer's host's peers name no more (SetPeers), its host up still, is replaced at once, not once
+/// it is gone for `replace_after`: two others picked, the removed host not among them, and the cell
+/// never degraded meanwhile; a SetPeers removing so many that no replacement is to be had leaves
+/// the configuration as it is, degraded not. Every commit told replicated, before and after, reads
+/// back once the writer's host is lost and the removed host takes the cell.
+#[madsim::test]
+async fn members_removed_from_the_peers_are_replaced_at_once() {
+    use cladefs::cladefsd::control::proto::SetPeersRequest;
+    const WRITES: u64 = 4;
+    let (bucket, faults) = world();
+    faults.set(bucket_cell::faults::Odds::NONE);
+    let (nodes, roots) = hosts_keeping(4, &bucket, Kept::replicas(4));
+    let handle = madsim::runtime::Handle::current();
+    let manager = manager();
+    let path = roots[0].join("store");
+    let at = path.clone();
+    let cell = manager.spawn(async move { create_replicated(1, &at, 10).await }).await.unwrap();
+    let id = bucket_cell::layout::CellId { tenant: 0, id: cell };
+    // The writer: its commits told replicated (`Commit::Uploaded` returns once they are, doc-21),
+    // a round before the peers change, one after.
+    let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
+    let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
+    let at = path.clone();
+    let writer = nodes[0].spawn(async move {
+        let guest = guest().await;
+        let cell = guest.open(&at, 64 << 20).await.unwrap();
+        let mut told = Blocks::new();
+        for round in 0..2 {
+            let first = guest.next_sequence().await.unwrap();
+            for sequence in first..first + WRITES {
+                let block = block_of(round, sequence);
+                guest.write(cladefs::ExtentId { cell, sequence }, 0, &block).await.unwrap();
+                guest.commit(cladefs::Commit::Uploaded).await.unwrap();
+                told.insert(sequence, block);
+            }
+            if round == 0 {
+                ready.send(()).await.unwrap();
+                going.recv().await.unwrap();
+            }
+        }
+        told
+    });
+    readied.recv().await.unwrap();
+    let members = || {
+        let bucket = bucket.clone();
+        async move {
+            let head = bucket_cell::head::get(&*bucket, id).await.unwrap().unwrap();
+            let configuration = head.replication.unwrap().configuration.unwrap();
+            let addresses = configuration.members.iter().map(|member| member.address.clone());
+            (configuration.number, addresses.collect::<Vec<_>>())
+        }
+    };
+    let (before, named) = members().await;
+    assert_eq!(named.len(), 3, "{named:?}");
+    assert_eq!(named[0], peer(1).to_string());
+    let removed = named[1].clone();
+    let at = path.clone();
+    let stat = move || {
+        let path = at.display().to_string();
+        async move {
+            let mut daemon = connect(1).await;
+            daemon.stat_cell(StatCellRequest { path }).await.unwrap().into_inner()
+        }
+    };
+    // Its host up still, the member is removed from the writer's host's peers.
+    let peers: Vec<String> = (1..=4).map(|host| peer(host).to_string()).collect();
+    let others: Vec<String> = peers.iter().filter(|at| **at != removed).cloned().collect();
+    let told = others.clone();
+    let set = manager.spawn(async move {
+        let mut daemon = connect(1).await;
+        daemon.set_peers(SetPeersRequest { addresses: told }).await.unwrap();
+    });
+    set.await.unwrap();
+    let watching = stat.clone();
+    let replaced = manager.spawn(async move {
+        let started = madsim::time::Instant::now();
+        loop {
+            let status = watching().await;
+            assert!(!status.degraded, "degraded {:?} after the peers changed", started.elapsed());
+            if status.configuration > before {
+                return started.elapsed();
+            }
+            // Well within `replace_after` (30 s): a removal replaces it, not its loss.
+            assert!(started.elapsed() < Duration::from_secs(10), "never replaced");
+            madsim::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    replaced.await.unwrap();
+    let (after, named) = members().await;
+    assert!(after > before, "{after} after {before}");
+    assert_eq!(named.len(), 3, "{named:?}");
+    assert!(!named.contains(&removed), "{removed} a member still: {named:?}");
+
+    // Peers so few that no configuration of f 1 is to be had: it is left as it is.
+    let kept = vec![peer(1).to_string(), named[1].clone()];
+    let set = manager.spawn(async move {
+        let mut daemon = connect(1).await;
+        daemon.set_peers(SetPeersRequest { addresses: kept }).await.unwrap();
+    });
+    set.await.unwrap();
+    let watching = stat.clone();
+    let left = manager.spawn(async move {
+        for _ in 0..30 {
+            let status = watching().await;
+            assert!(!status.degraded, "degraded with too few peers");
+            assert_eq!(status.configuration, after, "replaced with too few peers");
+            madsim::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    left.await.unwrap();
+    go.send(()).await.unwrap();
+    let told = writer.await.unwrap();
+
+    // The writer's host lost; the removed host takes the cell, and reads every block told.
+    node_local::kill(nodes[0].id()).await;
+    let host: u8 =
+        removed.trim_end_matches(&format!(":{PEERS}")).rsplit('.').next().unwrap().parse().unwrap();
+    let taken = roots[usize::from(host) - 1].join("taken");
+    let at = taken.clone();
+    manager.spawn(async move { take(host, &at, cell, 20, false).await }).await.unwrap();
+    let node = handle.get_node(nodes[usize::from(host) - 1].id()).unwrap();
+    let lost = node.spawn(lost_in(taken, cell, told, Blocks::new())).await.unwrap();
+    assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated lost");
+}
+
 /// How a profile cuts its hosts off the network a while, at each round, as the seed says (doc-24,
 /// FoundationDB's partitions and swizzle).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -905,8 +1037,8 @@ struct Profile {
     /// Whether a base is made each round, a version of it forked on another host, then deleted
     /// ([`base_round`]): each fork read at the end.
     bases: bool,
-    /// Whether the collector passes over the bucket meanwhile, and twice once the bucket heals,
-    /// its grace gone between ([`collect_pass`]).
+    /// Whether the collector passes over the bucket meanwhile, and twice once the bucket heals
+    /// ([`collect_pass`]).
     collector: bool,
     /// Whether a host's memory and disk are limited a while at each round, as the seed says
     /// ([`press`]).
@@ -934,8 +1066,8 @@ impl Profile {
         gcs_slots: false,
     };
 
-    /// What the collector's rules need: frees leaving objects sparse, which it compacts, moving
-    /// their extents, versions it keeps, and passes meanwhile and at the end.
+    /// What the collector's rules need: frees leaving objects sparse, which writers relocate out
+    /// of, versions it keeps, and passes meanwhile and at the end.
     const COLLECTED: Self = Self { frees: true, versions: true, collector: true, ..Self::PLAIN };
 
     /// What forks' and references' rules need: bases forked and deleted, collected.
@@ -1117,16 +1249,10 @@ fn collector(bucket: &Arc<RoutedBucket>) -> madsim::runtime::NodeHandle {
     .build()
 }
 
-/// How long the collector keeps what it compacted, by the bucket's clock, in milliseconds: short,
-/// so that the passes once the bucket heals delete it.
-const GRACE: u64 = 2_000;
-
-/// A pass of the collector over `bucket`, as `holder`, which no other pass is, under the hosts' KMS
-/// (TASK-411.28): what it did, logged.
+/// A pass of the collector over `bucket`, as `holder`, which no other pass is: what it did,
+/// logged. It holds no key (doc-27).
 async fn collect_pass(bucket: &RoutedBucket, holder: u64) {
-    let options = bucket_cell::collector::Options { compact_below: 0.5, grace: GRACE };
-    let kmses = cladefs::bucket::kms().ok().map(|kms| kms.kmses().clone());
-    let mut collector = bucket_cell::collector::Collector::new(options).kmses(kmses);
+    let mut collector = bucket_cell::collector::Collector::new();
     match collector.collect(bucket, holder).await {
         Ok(report) => log::info!("collector pass {holder}: {report:?}"),
         Err(err) => log::info!("collector pass {holder}: {err:?}"),
@@ -1292,13 +1418,15 @@ async fn attrition(profile: Profile) -> Result<(), String> {
             node_local::restart(node.id()).await;
         }
     };
-    // The collector's passes meanwhile, each its own holder.
+    // The collector's passes meanwhile, each its own holder: often, so that passes straddle the
+    // writers' commits, as the races its rules close need (`collection_needs_candidates_first`);
+    // a pass compacting nothing is short (doc-27).
     let collector = profile.collector.then(|| collector(&bucket));
     let passes = collector.as_ref().map(|collector| {
         let bucket = bucket.clone();
         collector.spawn(async move {
             for holder in 1.. {
-                let after = madsim::rand::thread_rng().gen_range(500..3000);
+                let after = madsim::rand::thread_rng().gen_range(100..1000);
                 madsim::time::sleep(Duration::from_millis(after)).await;
                 collect_pass(&bucket, holder).await;
             }
@@ -1419,13 +1547,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     let last = path(ROUNDS, 0);
     let at = last.clone();
     manager.spawn(async move { take(1, &at, cell, ROUNDS + 10, false).await }).await.unwrap();
-    // The collector's last passes, its grace gone before each: what it compacted is deleted.
+    // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();
         let bucket = bucket.clone();
         let last = collector.spawn(async move {
             for holder in [u64::MAX - 1, u64::MAX] {
-                madsim::time::sleep(Duration::from_millis(GRACE + 1000)).await;
                 collect_pass(&bucket, holder).await;
             }
         });

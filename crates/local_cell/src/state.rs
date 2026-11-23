@@ -259,16 +259,6 @@ impl<F: File> State<F> {
         }
     }
 
-    /// cladefs: the extents `moved` says the collector moved, from where to where, held or kept,
-    /// named where they went, if they are named on their way there
-    /// ([`LocalCell::moved`](crate::LocalCell::moved)).
-    pub fn moved(&mut self, moved: &[(ExtentId, Location, Location)]) {
-        for (extent, _, to) in moved {
-            self.extents.follow(extent, to);
-            self.kept.moved(*extent, to);
-        }
-    }
-
     /// cladefs: segment `segment`, closed, is acknowledged in the bucket, at `key`, and the extents
     /// stored on their own its footer names are at `own` there (TASK-165.8): its extents sealed in
     /// it, and those stored on their own, held or kept, are the bucket's from now on, read there,

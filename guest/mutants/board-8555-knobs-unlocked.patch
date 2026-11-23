@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2026 The cladefs Authors.
+#
+# Kernel: sim
+# Killer: scenarios knobs_against_unmount
+#
+# board 8555: the tests' knobs (cladefs.dax_stray, dax_rebind_now, dax_rebind_every) read the
+# filesystem mounted last without cladefs_dax_last_lock, as they read a static with READ_ONCE
+# before: one written as the filesystem unmounts uses its dax after cladefs_dax_destroy freed it.
+# Found by an adversarial review of dax.c (PRR 2026-11-22); no test wrote a knob across an
+# unmount. knobs_against_unmount writes them in a loop across 32 remounts, a delay where a knob
+# holds the filesystem: ASan's use after free, in a second.
+
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
+@@ -2109,18 +2109,16 @@
+  */
+ static struct cladefs_dax *cladefs_dax_last_get(void)
+ {
+-	mutex_lock(&cladefs_dax_last_lock);
+-	if (!cladefs_dax_last) {
+-		mutex_unlock(&cladefs_dax_last_lock);
+-		return NULL;
+-	}
++	struct cladefs_dax *dax = READ_ONCE(cladefs_dax_last);
++
++	if (!dax)
++		return NULL;
+ 	cladefs_dax_delay();
+-	return cladefs_dax_last;
++	return dax;
+ }
+ 
+ static void cladefs_dax_last_put(void)
+ {
+-	mutex_unlock(&cladefs_dax_last_lock);
+ }
+ 
+ /*

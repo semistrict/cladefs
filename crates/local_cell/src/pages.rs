@@ -123,6 +123,14 @@ pub struct Usage {
     pub peak: u64,
     /// The most bytes dirty at once so far.
     pub peak_dirty: u64,
+    /// cladefs: the writers held back so far, past [`Options::hard`] dirty, waiting for write-back
+    /// ([`PageCache::throttle`]): flush stalls (board 8565).
+    pub stalls: u64,
+    /// cladefs: how long those writers were held, their nanoseconds together.
+    pub stalled_ns: u64,
+    /// cladefs: bytes dirty of files whose write-back is failing, which no wait writes back
+    /// (board 8553).
+    pub stuck: u64,
 }
 
 /// A process's page cache: its files' pages, accounted together, written back by one flusher
@@ -145,6 +153,9 @@ pub struct PageCache {
     dirty: AtomicU64,
     peak_dirty: AtomicU64,
     writing: AtomicU64,
+    /// cladefs: [`Usage::stalls`] and [`Usage::stalled_ns`].
+    stalls: AtomicU64,
+    stalled_ns: AtomicU64,
     /// Each write's number, in order: what a sync covers, the writes before it.
     writes: AtomicU64,
     /// Each use's number, which says which files were used least recently.
@@ -234,6 +245,8 @@ impl PageCache {
             dirty: AtomicU64::new(0),
             peak_dirty: AtomicU64::new(0),
             writing: AtomicU64::new(0),
+            stalls: AtomicU64::new(0),
+            stalled_ns: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             uses: AtomicU64::new(0),
             files: Mutex::default(),
@@ -256,6 +269,9 @@ impl PageCache {
             writing: self.writing.load(Ordering::Relaxed),
             peak: self.peak.load(Ordering::Relaxed),
             peak_dirty: self.peak_dirty.load(Ordering::Relaxed),
+            stalls: self.stalls.load(Ordering::Relaxed),
+            stalled_ns: self.stalled_ns.load(Ordering::Relaxed),
+            stuck: self.stuck.load(Ordering::Relaxed),
         }
     }
 
@@ -414,26 +430,35 @@ impl PageCache {
         if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
             return Ok(());
         }
-        loop {
+        // cladefs: when it began to wait, if it waited: a stall, counted with its time as it ends
+        // (board 8565).
+        let mut waited = None;
+        let held = loop {
             assert!(
                 !self.flusher_died(),
                 "the page cache's flusher died: nothing writes back for a writer held at its bound"
             );
             // Not under `holding`: a file's pages' lock goes before it.
             if let Some(error) = failing() {
-                return Err(error);
+                break Err(error);
             }
             let holding = self.holding.lock().unwrap();
             let dirty = self.dirty.load(Ordering::Relaxed);
             let unstuck = dirty.saturating_sub(self.stuck.load(Ordering::Relaxed));
             if dirty <= self.hard() || unstuck <= self.hard() {
-                return Ok(());
+                break Ok(());
             }
             self.wake();
+            waited.get_or_insert_with(std::time::Instant::now);
             // Woken as pages go clean, or go, and after each of the flusher's passes, whose
             // failures change what is stuck.
             drop(self.drained.wait(holding).unwrap());
+        };
+        if let Some(began) = waited {
+            self.stalls.fetch_add(1, Ordering::Relaxed);
+            self.stalled_ns.fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
+        held
     }
 
     /// Pages became clean, or went: writers held back may go on.
@@ -1576,6 +1601,37 @@ mod tests {
                 "the page cache's flusher died: nothing writes back for a writer held at its bound"
             )
         );
+        cache.dirty.store(0, Ordering::Relaxed);
+    }
+
+    /// cladefs: a writer held back past [`Options::hard`] dirty is a flush stall, counted with how
+    /// long it waited, which the daemon's metrics say (board 8565); one let through, as under the
+    /// bound, none. The writer here waits until the second look at its disk finds it failing.
+    #[test]
+    fn writers_held_back_are_stalls_counted_with_their_time() {
+        let cache = cache(Options { background: PAGE, hard: 2 * PAGE, ..Options::default() });
+        cache.throttle(|| None).unwrap();
+        assert_eq!((cache.usage().stalls, cache.usage().stalled_ns), (0, 0), "none held");
+        cache.dirty.store(cache.hard() + 1, Ordering::Relaxed);
+        let looks = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            let held = scope.spawn(|| {
+                let failing = || match looks.fetch_add(1, Ordering::Relaxed) {
+                    0 => None,
+                    _ => Some(io::Error::other("its disk failing")),
+                };
+                cache.throttle(failing)
+            });
+            // Woken again and again until it gives up, its second look.
+            while !held.is_finished() {
+                cache.drained();
+                std::thread::yield_now();
+            }
+            assert_eq!(held.join().unwrap().unwrap_err().to_string(), "its disk failing");
+        });
+        let usage = cache.usage();
+        assert_eq!(usage.stalls, 1);
+        assert!(usage.stalled_ns > 0, "{usage:?}");
         cache.dirty.store(0, Ordering::Relaxed);
     }
 

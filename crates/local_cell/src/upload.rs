@@ -376,8 +376,8 @@ pub struct Options {
     /// 10149e8e3). Else each round's own ([`relocations`]).
     pub fetching: Option<Fetching>,
     /// cladefs: whether its checkpoint rounds relocate out of the cell's sparse segments
-    /// ([`relocations`], doc-27): not where a collector compacts them, its moves and relocations
-    /// a combination no spec checks (doc-27 step 1).
+    /// ([`relocations`], doc-27), the only way they shrink: always, but where a caller runs the
+    /// rounds itself, as the simulation and tests that count a round's work do.
     pub relocate: bool,
     /// cladefs: the replication a taking of the cell gives it (doc-21, TASK-537.3.1):
     /// a cell made, or taken, by the control API, as its call asked; none keeps what the cell's
@@ -454,6 +454,13 @@ pub trait Members: Send + Sync + 'static {
     /// a task of its own, as the daemon's are.
     fn drives(&self, _: &Arc<crate::replicate::Replicator>) -> bool {
         false
+    }
+    /// cladefs: whether the host at `address` is among those this host's configurations are picked
+    /// from now (board 8579): a member the host's peers name no more, `SetPeers` having removed it,
+    /// is replaced as one lost is, at once, while it serves still. Every host is, unless these
+    /// members say otherwise.
+    fn is_peer(&self, _address: &str) -> bool {
+        true
     }
 }
 
@@ -2345,14 +2352,29 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
             }
             let replace_after = self.options.replace_after;
-            let replace = configuration.f != wish.f || replicator.lost(replace_after);
+            // cladefs: members the host's peers name no more, replaced while they serve still,
+            // rather than once they are gone for `replace_after` (board 8579).
+            let removed = self.removed(&configuration);
+            let replace =
+                configuration.f != wish.f || replicator.lost(replace_after) || !removed.is_empty();
             if !replace || skip > 0 {
                 continue;
             }
+            if !removed.is_empty() {
+                log::info!(
+                    "cladefs: {cell:?}: configuration {}'s members {removed:?} are no peers of \
+                     this host's any more: replacing them",
+                    configuration.number
+                );
+            }
             let refusing = replicator.refusing().into_iter();
-            avoid.extend(
-                refusing.filter_map(|m| Some(configuration.members.get(m + 1)?.address.clone())),
-            );
+            let refusing =
+                refusing.filter_map(|m| Some(configuration.members.get(m + 1)?.address.clone()));
+            for address in refusing.chain(removed) {
+                if !avoid.contains(&address) {
+                    avoid.push(address);
+                }
+            }
             number = number.max(configuration.number + 1);
             let replacing = (&configuration, &mut number, wish.f);
             let mut new = self.replace(&writer, &replicator, replacing, &mut avoid).await;
@@ -2384,6 +2406,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
             }
         }
+    }
+
+    /// cladefs: the members of `configuration`, its writer aside, that the host's members are
+    /// picked from no more ([`Members::is_peer`], board 8579).
+    fn removed(&self, configuration: &bucket_cell::layout::Configuration) -> Vec<String> {
+        // No members: a configuration of no peers, none to say removed.
+        let Ok(members) = self.members() else { return Vec::new() };
+        let others = configuration.members.iter().skip(1);
+        others
+            .filter(|member| !members.is_peer(&member.address))
+            .map(|m| m.address.clone())
+            .collect()
     }
 
     /// cladefs: the head names the writer's configuration `number`, as its status says from now.
@@ -2693,18 +2727,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         Ok((logs, holding))
     }
 
-    /// `writer` took the cell, with the fencing token `token`: the cell names what it reads in
-    /// the bucket where the writer's checkpoints move it, as the writer does (TASK-195); the
-    /// cell's commits are uploaded, its forks made, and what the cell's write-ahead log holds
-    /// after them is the uploader's to upload.
+    /// `writer` took the cell, with the fencing token `token`: the cell's commits are uploaded,
+    /// its forks made, and what the cell's write-ahead log holds after them is the uploader's to
+    /// upload.
     fn took(&self, writer: &Arc<Writer<B>>, token: u64) {
-        let following = Arc::downgrade(self.cell());
-        writer.following(move |moved| {
-            let Some(cell) = following.upgrade() else { return };
-            if let Err(err) = cell.moved(moved) {
-                log::warn!("cladefs: following the collector's moves: {err:#}");
-            }
-        });
         *self.writer.lock().unwrap() = Some(writer.clone());
         let replication = writer.taken().head.replication.as_ref().map(Replicated::of);
         let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now(), replication };
@@ -3333,6 +3359,73 @@ mod tests {
         assert_eq!(cell.cell.sparse(|_| false).unwrap(), []);
     }
 
+    /// cladefs: doc-27 (board 6214, AC #2): a cell freeing and writing at random holds less than
+    /// twice its live bytes in the bucket once its writer's rounds relocated out of its sparse
+    /// segments and the collector, which compacts nothing, deleted what no state reads: no segment
+    /// left under half live ([`LocalCell::sparse`]). Without relocations it held three times as
+    /// much by the end, its first segment never freed whole.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cells_freeing_and_writing_at_random_hold_under_twice_their_live_bytes() {
+        use rand::{RngExt as _, SeedableRng as _};
+        // Extents live, of a block each; freed and written at random each round, in a segment.
+        const LIVE: u64 = 256;
+        const CHURN: usize = 32;
+        const ROUNDS: usize = 16;
+        let interval = Duration::from_millis(20);
+        let cell =
+            Doc27::open(Options { interval, checkpoint_every: 1, ..Options::default() }).await;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x6214);
+        // Noise of its number, so that what the bucket holds is what the segments' data says,
+        // not compressed.
+        let noise = |sequence: u64| -> Vec<u8> {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(sequence);
+            (0..BLOCK).map(|_| rng.random()).collect()
+        };
+        let write = async |sequences: std::ops::Range<u64>| {
+            for sequence in sequences {
+                cell.cell.write(Doc27::extent(sequence), 0, &noise(sequence)).await.unwrap();
+            }
+        };
+        write(0..LIVE).await;
+        cell.cell.commit(None).await.unwrap();
+        let mut live: Vec<u64> = (0..LIVE).collect();
+        let mut next = LIVE;
+        let prefix = CELL.prefix();
+        for round in 0..ROUNDS {
+            for _ in 0..CHURN {
+                let freed = live.swap_remove(rng.random_range(0..live.len()));
+                cell.cell.free(Doc27::extent(freed)).unwrap();
+            }
+            write(next..next + CHURN as u64).await;
+            live.extend(next..next + CHURN as u64);
+            next += CHURN as u64;
+            cell.cell.commit(None).await.unwrap();
+            cell.uploader.uploaded(cell.cell.last_commit().unwrap()).await.unwrap();
+            // The rounds relocated what the frees left sparse, and a checkpoint names where.
+            cell.until("relocated", |cell| cell.cell.sparse(|_| false).unwrap().is_empty()).await;
+            cell.uploader.uploaded(cell.cell.last_commit().unwrap()).await.unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let head = bucket_cell::head::get(&*cell.bucket, CELL).await.unwrap().unwrap();
+                if head.checkpoint.is_some_and(|(at, _)| at + 1 == head.end) {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "round {round}: no checkpoint");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            bucket_cell::testing::collect_until_quiet(&*cell.bucket).await.unwrap();
+            let listed = bucket_cell::Bucket::list(&*cell.bucket, &prefix).await.unwrap();
+            let held: u64 = listed.iter().map(|meta| meta.size).sum();
+            let keys: Vec<&str> = listed.iter().map(|meta| meta.key.as_str()).collect();
+            let bound = 2 * LIVE * BLOCK as u64;
+            assert!(held < bound, "round {round}: {held} bytes held, of {bound} at most: {keys:?}");
+        }
+        // Each extent live reads as written, wherever the rounds put it.
+        for &sequence in &live {
+            assert_eq!(cell.read_in_bucket(sequence).await, noise(sequence), "{sequence}");
+        }
+    }
+
     /// cladefs: doc-27 (board 6214; the reviews of d33a6c360): a round whose relocation waits for
     /// a guest's write in progress, holding the cell's commits back, holds back no upload: the
     /// uploader, gathering what the guest commits after, waits for it in its own task, which goes
@@ -3636,9 +3729,6 @@ mod shuttle_tests {
         held_most: 2 * BLOCK as u64,
     };
 
-    /// The collector's passes compact what is mostly dead, and delete at once.
-    const COLLECTING: collector::Options = collector::Options { compact_below: 0.9, grace: 0 };
-
     /// The schedules each test runs, randomly and by PCT; `SHUTTLE_SOAK` multiplies them.
     fn runs() -> usize {
         let soak: usize = std::env::var("SHUTTLE_SOAK").map_or(1, |soak| soak.parse().unwrap());
@@ -3824,8 +3914,7 @@ mod shuttle_tests {
             // Its interval never runs out: the writer asks for what it commits.
             let never: Clock = Arc::new(|_| futures::future::pending().boxed());
             let spawn: Spawn = Arc::new(|task| drop(shuttle::future::spawn(task)));
-            // cladefs: no relocations where the collector compacts (doc-27 step 1).
-            let options = Options { token: holder, relocate: false, ..Options::default() };
+            let options = Options { token: holder, ..Options::default() };
             let uploader = Shared::new(
                 options,
                 Budget::new(Limits::UNBOUNDED),
@@ -3894,7 +3983,7 @@ mod shuttle_tests {
             let (bucket, writing) = (bucket.clone(), writing.clone());
             shuttle::thread::spawn(move || {
                 for holder in 100.. {
-                    let pass = collector::collect(&*bucket, holder, &COLLECTING);
+                    let pass = collector::collect(&*bucket, holder);
                     shuttle::future::block_on(pass)
                         .map_err(|err| format!("pass {holder}: {err}"))?;
                     if !writing.load(SeqCst) {
@@ -3929,7 +4018,7 @@ mod shuttle_tests {
         let parent = parent.end()?;
         writing.store(false, SeqCst);
         collecting.join().unwrap()?;
-        let pass = collector::collect(&*bucket, 200, &COLLECTING);
+        let pass = collector::collect(&*bucket, 200);
         shuttle::future::block_on(pass).map_err(|err| format!("the last pass: {err}"))?;
         differs(&bucket, CELL, &parent)
     }
@@ -3969,7 +4058,7 @@ mod shuttle_tests {
         let passing = {
             let bucket = bucket.clone();
             shuttle::thread::spawn(move || {
-                let pass = collector::collect(&*bucket, 100, &COLLECTING);
+                let pass = collector::collect(&*bucket, 100);
                 shuttle::future::block_on(pass).map_err(|err| format!("the pass: {err}"))
             })
         };
@@ -3983,7 +4072,7 @@ mod shuttle_tests {
         bucket.gate.open();
         passing.join().unwrap()?;
         let parent = parent.end()?;
-        let pass = collector::collect(&*bucket, 200, &COLLECTING);
+        let pass = collector::collect(&*bucket, 200);
         shuttle::future::block_on(pass).map_err(|err| format!("the last pass: {err}"))?;
         differs(&bucket, CELL, &parent)
     }

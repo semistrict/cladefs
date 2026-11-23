@@ -30,7 +30,3 @@ e27792aef7c3a7084bd014469edf0eedd60cc0a0 e103560286ee3e1255ecc93077de118acfa5726
 # submission: the dependency backport, the general fixes, the PCI transport's shared memory regions and
 # device IDs, and the cladefs feature; its tree r10's less bac96b047 (the old `extent` key refused).
 99b3b968ac2a42a141ffe7c769598583cd6e5389 35d9ba276aa564516e90c4a3a5947c816607e0c2
-# board 8237: cladefs-v1.16.1-r12 (branch cladefs-v1.16.1-r12), r11 with live followers gone from the
-# cladefs feature's commit: the extent device's `read_only`, in its configuration, the API's and its
-# tests, removed; the three commits before it r11's.
-35d9ba276aa564516e90c4a3a5947c816607e0c2 b770f3799163323594577ae46937765fb378b5b5

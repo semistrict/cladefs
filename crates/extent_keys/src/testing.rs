@@ -77,6 +77,10 @@ impl<K: Kms> Kms for Counted<K> {
     fn forget(&self, tenant: u64) {
         self.inner.forget(tenant)
     }
+
+    fn names(&self) -> Option<&crate::kms::KeyNames> {
+        self.inner.names()
+    }
 }
 
 /// cladefs: the tests' KMS by default (TASK-411.28: every cell encrypted, every test too): each
@@ -214,6 +218,10 @@ impl<K: Kms> Kms for Forgetting<K> {
 
     fn forget(&self, tenant: u64) {
         self.inner.forget(tenant)
+    }
+
+    fn names(&self) -> Option<&crate::kms::KeyNames> {
+        self.inner.names()
     }
 }
 

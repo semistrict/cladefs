@@ -9,17 +9,17 @@
 # tenants (100) of CLADEFS_GC_CELLS cells (100) of a cell of CLADEFS_GC_SEGMENTS segments (95), the
 # largest cell's CLADEFS_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
 # files at most; then, for each count of CLADEFS_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
-# (hard links on Linux, clones on macOS) CLADEFS_GC_SWEEPS times (2): the first deleting and
-# compacting half of every cell, the second deleting what the first compacted, and little else,
-# those after skipping every cell unchanged since.
+# (hard links on Linux, clones on macOS) CLADEFS_GC_SWEEPS times (2): the first deleting half of
+# every cell; the second going over each live cell in full again, as a pass that deleted recorded
+# its listing from before its deletes; those after skipping every cell unchanged since.
 #
 # CLADEFS_GC_FILL is what else the filling is told, the cells' kind (cladefs-gc-fill: `--deleted`,
 # cells whose cells are all deleted; `--clones EXTENTS`, sandboxes made and deleted, clones of a
 # version of their tenant's base, the tenant's first cell; TASK-443.4). With CLADEFS_GC_CELL, a cell
 # as cladefs-gc names it (`1/1`, a base's), each bucket swept is then passed over at that cell
-# alone, twice, each pass a process of its own: with the sweeps' options, which skips the cell if
-# nothing changed it since its last pass; and with another grace period, which no pass before
-# decided by, so that it goes in full, as it does once a clone was made or retired since.
+# alone, twice, each pass a process of its own: as the sweeps, which skips the cell if nothing
+# changed it since its last pass; and with the cell's lease removed first, and with it what the last
+# pass recorded, so that it goes in full, as it does once a clone was made or retired since.
 #
 # Each SIDE=TREE is a tree whose cladefs-gc and cladefs-gc-fill are built (in WORK/target-SIDE) and
 # measured, each with a bucket its own fill made, for an A/B of commits (TASK-395.17); with none,
@@ -44,8 +44,8 @@
 #
 #   scripts/gc-sweep.sh [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]
 set -euo pipefail
-# cladefs: cladefs-gc-fill encrypts the cells it fills, which cladefs-gc compacts, under the bucket KMS of a
-# test master key, unless the environment names a KMS (TASK-411.28).
+# cladefs: cladefs-gc-fill encrypts the cells it fills under the bucket KMS of a test master key,
+# unless the environment names a KMS (TASK-411.28).
 source "$(dirname "${BASH_SOURCE[0]}")/lib/test-kms.sh"
 test_master_key
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -180,16 +180,15 @@ objects() {
 # unchanged since its last pass and then in full, each a process of BIN's cladefs-gc, into NAME's
 # files and the cell's table.
 pass_cell() {
-    local swept=$1 bin=$2 name=$3 listed pass grace
+    local swept=$1 bin=$2 name=$3 listed pass
     (cd "$swept/$cell_dir" && find . -type f | awk -F/ '{ print (NF > 2 ? $2 : "(the cell)") }' |
         sort | uniq -c) > "$name-objects.txt"
     listed=$(objects "$swept/$cell_dir")
     for pass in unchanged full; do
-        # Another grace period than the sweeps' is another decision: no pass skips by it.
-        grace=0
-        if [[ $pass == full ]]; then grace=1; fi
+        # The lease holds what the last pass recorded: gone, no pass skips the cell.
+        if [[ $pass == full ]]; then rm -- "$swept/$cell_dir/gc/lease"; fi
         echo "== $4, $5 at once, round $6, cell $cell $pass" >&2
-        "$bin/cladefs-gc" "file://$swept/" --cell "$cell" --grace "$grace" \
+        "$bin/cladefs-gc" "file://$swept/" --cell "$cell" \
             --metrics "$name-$pass.prom" 2> "$name-$pass.log"
         {
             printf '| %s | %s | %s | %s | %s | %s | %s |' "$4" "$5" "$6" "$pass" \
@@ -222,8 +221,8 @@ fi
 {
     echo "Bucket: $(cat "$work/bucket-${sides[0]}.fill") (tenants $tenants, cells $cells, segments $segments, largest $largest)."
     echo
-    echo "| side | at once | round | sweep | seconds | cells | deleted | compacted | requests | peak MiB |"
-    echo "|---|---|---|---|---|---|---|---|---|---|"
+    echo "| side | at once | round | sweep | seconds | cells | deleted | requests | peak MiB |"
+    echo "|---|---|---|---|---|---|---|---|---|"
 } > "$table"
 : > "$times"
 for (( round = 1; round <= rounds; round++ )); do
@@ -242,17 +241,16 @@ for (( round = 1; round <= rounds; round++ )); do
             for (( sweep = 1; sweep <= sweeps; sweep++ )); do
                 echo "== $side, $n at once, round $round, sweep $sweep" >&2
                 name=$results/sweep-$side-$n-r$round-$sweep
-                "${bins[i]}/cladefs-gc" "file://$swept/" --grace 0 --at-once "$n" \
+                "${bins[i]}/cladefs-gc" "file://$swept/" --at-once "$n" \
                     --metrics "$name.prom" 2> "$name.log"
                 tail -n 2 "$name.log" >&2
                 seconds=$(metric "$name.prom" cladefs_gc_sweep_seconds)
                 requests=$(awk '$1 ~ /^cladefs_gc_sweep_requests/ { sum += $2 } END { print sum }' \
                     "$name.prom")
-                printf '| %s | %s | %s | %s | %.1f | %s | %s | %s | %s | %.0f |\n' \
+                printf '| %s | %s | %s | %s | %.1f | %s | %s | %s | %.0f |\n' \
                     "$side" "$n" "$round" "$sweep" "$seconds" \
                     "$(metric "$name.prom" 'cladefs_gc_sweep_cells{outcome="passed"}')" \
                     "$(metric "$name.prom" 'cladefs_gc_sweep_objects{action="deleted"}')" \
-                    "$(metric "$name.prom" 'cladefs_gc_sweep_objects{action="compacted"}')" \
                     "$requests" "$(peak "$name.prom")" >> "$table"
                 {
                     printf '| %s | %s | %s | %s | %.1f | %s | %s |' \

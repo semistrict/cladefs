@@ -395,11 +395,11 @@ ephemeral cell's is a **local checkpoint**, in its directory.
 _Avoid_: checkpoint for Fxfs's (say **journal checkpoint**)
 
 **Relocation**:
-A writer's commit copying live extents of its own cell's sparse segments into its open segment, which the head names as any: compaction, done by writers (doc-27; not in the code yet).
+A writer's commit copying live extents of its own cell's sparse segments into its open segment, which the head names as any: compaction, done by writers alone (doc-27; `local_cell::relocations`).
 _Avoid_: moves (the collector's, which relocations replace), cleaning
 
 **Collector**:
-The only thing that deletes from the bucket; **gc** is its short name, in its binary (`cladefs-gc`), keys and metrics.
+The only thing that deletes from the bucket; it copies nothing and holds no key (doc-27). **gc** is its short name, in its binary (`cladefs-gc`), keys and metrics.
 _Avoid_: cleaner
 
 **Pass**:

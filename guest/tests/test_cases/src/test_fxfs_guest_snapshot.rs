@@ -52,7 +52,12 @@
 //! fxfs-guest-snapshot-memory-cell-dax: as fxfs-guest-snapshot-dax, the snapshot's memory then
 //! imported into a memory cell (`Memory::Cell`, TASK-456.3), its zero pages holes, a
 //! version made of it; the two VMs restored from the version, each its memory a fork of it, as a
-//! copy-on-write window the extent daemon serves, their pages shared but those each writes.
+//! copy-on-write window the extent daemon serves, their pages shared but those each writes. The
+//! second's guest writes all the memory it has free, each page a private copy, gives it back, and
+//! the host inflates its balloon over it (free page reporting off): the private pages' memory,
+//! the VM process's memory object, gives back at least half of what the balloon took, then the
+//! balloon deflates and the guest writes the memory again (board 8497: the balloon's
+//! `madvise(MADV_DONTNEED)` freed none of it).
 //!
 //! The VMs run in Firecracker driven through its API. Their root filesystem's disk is read-only,
 //! as the restored VMs share it. The guest tells the host it is frozen over vsock, and each
@@ -155,6 +160,13 @@ const GROWN: u64 = CAPACITY * 2;
 /// The vsock port the guest says it is frozen on, and asks its name on once restored.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const PORT: u32 = 5051;
+/// The vsock port a guest restored from a memory cell gives back its memory on, which the host
+/// inflates the VM's balloon over (board 8497).
+#[cfg_attr(feature = "guest", allow(dead_code))]
+const BALLOON_PORT: u32 = 5052;
+/// The restore whose guest gives back its memory, of a memory cell's (board 8497).
+#[cfg_attr(feature = "guest", allow(dead_code))]
+const GIVES_BACK: &str = "b";
 /// What the guest writes before the snapshot.
 const BEFORE: &[u8] = b"written before the snapshot\n";
 /// The file the guest maps, with a DAX window, before the snapshot, and reads after: a pattern.
@@ -229,9 +241,88 @@ mod host {
 
     /// Reads a line from the guest on the vsock port the VM at `uds` forwards to the host.
     fn listen(uds: &Path) -> anyhow::Result<UnixListener> {
-        let path = format!("{}_{PORT}", uds.display());
+        listen_on(uds, PORT)
+    }
+
+    /// Listens for the guest's connections on vsock port `port`, which the VM at `uds` forwards
+    /// to the host.
+    fn listen_on(uds: &Path, port: u32) -> anyhow::Result<UnixListener> {
+        let path = format!("{}_{port}", uds.display());
         let _ = std::fs::remove_file(&path);
         UnixListener::bind(&path).with_context(|| format!("binding {path}"))
+    }
+
+    /// The bytes of host memory the private pages of the VM process `pid` hold, of its memory of
+    /// `size` bytes, restored from a memory cell: its window's private memory's blocks, the one
+    /// memory object of the process so named of that size (the DAX window's is of another).
+    fn private_memory_held(pid: u32, size: u64) -> anyhow::Result<u64> {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut held = Vec::new();
+        for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
+            let path = entry?.path();
+            // A descriptor closed since it was listed: not the private memory's, which stays.
+            let Ok(link) = std::fs::read_link(&path) else { continue };
+            if !link.to_string_lossy().starts_with("/memfd:cladefs-private-pages") {
+                continue;
+            }
+            let metadata = std::fs::metadata(&path)?;
+            if metadata.len() == size {
+                held.push(metadata.blocks() * 512);
+            }
+        }
+        anyhow::ensure!(held.len() == 1, "the memory's private memory: {held:?}");
+        Ok(held[0])
+    }
+
+    /// The guest of `firecracker`, restored from a memory cell, of `size` bytes of memory, gives
+    /// back the memory it wrote, on `listener`: the host inflates the VM's balloon over it, and
+    /// the private pages' memory gives back at least half of what the balloon took, within a
+    /// minute; then it deflates the balloon, and the guest writes its memory again (board 8497).
+    fn inflate_over_private_pages(
+        firecracker: &mut Firecracker,
+        listener: &UnixListener,
+        size: u64,
+    ) -> anyhow::Result<()> {
+        let stream =
+            firecracker.accept_within(listener, Some(std::time::Duration::from_secs(120)))?;
+        let mut guest = BufReader::new(stream.try_clone()?);
+        let mut told = |expected: &str| -> anyhow::Result<String> {
+            let mut said = String::new();
+            guest.read_line(&mut said)?;
+            let rest = said.strip_prefix(expected).map(str::trim_end).map(str::to_owned);
+            rest.with_context(|| format!("the guest said {said:?}, not {expected:?}"))
+        };
+        let mut tell = stream;
+        let written: u64 = told("written ")?.parse()?;
+        let held = || private_memory_held(firecracker.pid(), size);
+        let before = held()?;
+        anyhow::ensure!(
+            before >= written << 20,
+            "the guest wrote {written} MiB, its private memory holds {before} bytes"
+        );
+        writeln!(tell, "free")?;
+        told("freed")?;
+        let amount = written * 3 / 4;
+        let start = std::time::Instant::now();
+        firecracker.request("PATCH", "/balloon", &serde_json::json!({ "amount_mib": amount }))?;
+        let mut after = held()?;
+        while before.saturating_sub(after) < (amount << 20) / 2 {
+            anyhow::ensure!(
+                start.elapsed() < std::time::Duration::from_secs(60),
+                "the private memory held {before} bytes, {after} a minute after the balloon \
+                 took {amount} MiB: the balloon reclaimed less than half of what it took"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            after = held()?;
+        }
+        eprintln!(
+            "{GIVES_BACK}: the balloon took {amount} MiB, the private memory held {before} bytes, \
+             then {after}, {:?} after",
+            start.elapsed()
+        );
+        firecracker.request("PATCH", "/balloon", &serde_json::json!({ "amount_mib": 0 }))?;
+        writeln!(tell, "deflated")?;
+        Ok(())
     }
 
     /// The cell directory the test's restore `name` opens.
@@ -349,6 +440,11 @@ mod host {
                 }
                 let mut vm = Vm::new(2, 512)?;
                 vm.guest_kernel()?;
+                // A balloon inflated over a memory cell's private pages, which free page
+                // reporting would give back before it (board 8497).
+                if self.memory == Memory::Cell {
+                    vm.balloon(false);
+                }
                 let window = if self.dax {
                     crate::common::dax_window(crate::common::Window::Large)?
                 } else {
@@ -410,6 +506,8 @@ mod host {
             // Restored, told its name: each into its own cell, but resuming.
             let mut restored = Vec::new();
             let mut loads = Vec::new();
+            // Where the guest restored from a memory cell gives back its memory (board 8497).
+            let mut gives_back = None;
             // Each restore's tenant, of an ID of its own (TASK-364), where it has one.
             for (&name, id) in self.restores(phase).iter().zip(1..) {
                 let elsewhere = dir.join(format!("elsewhere-{name}"));
@@ -443,6 +541,9 @@ mod host {
                 };
                 let uds = uds(name);
                 let listener = listen(&uds)?;
+                if self.memory == Memory::Cell && name == GIVES_BACK {
+                    gives_back = Some(listen_on(&uds, BALLOON_PORT)?);
+                }
                 let firecracker = Firecracker::spawn(dir, name, &Vm::api_socket(name), None, &[])?;
                 let mut load = serde_json::json!({
                     "snapshot_path": snapshot,
@@ -482,7 +583,7 @@ mod host {
                 let control = crate::common::control(&cladefsd)?;
                 let held = || control.shrink_memory(None, u64::MAX);
                 let mut grew = Vec::new();
-                for ((firecracker, load), name) in
+                for ((mut firecracker, load), name) in
                     restored.into_iter().zip(&loads).zip(self.restores(phase))
                 {
                     let before = held()?;
@@ -509,6 +610,11 @@ mod host {
                     let start = std::time::Instant::now();
                     firecracker.request("PUT", "/snapshot/load", load)?;
                     eprintln!("{name}: restored in {:?}", start.elapsed());
+                    if *name == GIVES_BACK {
+                        let listener = gives_back.as_ref().context("no balloon port")?;
+                        let size = std::fs::metadata(&memory)?.len();
+                        inflate_over_private_pages(&mut firecracker, listener, size)?;
+                    }
                     let (status, console) = firecracker.wait()?;
                     stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     let (pages, private) = sampling.join().expect("the sampling")?;
@@ -591,7 +697,12 @@ mod host {
         }
 
         fn timeout_secs(&self) -> u64 {
-            if self.volumes > 0 { 600 } else { 120 }
+            match (self.volumes, self.memory) {
+                (1.., _) => 600,
+                // A guest writing its memory twice, and its balloon inflated between (board 8497).
+                (0, Memory::Cell) => 300,
+                (0, Memory::File) => 120,
+            }
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -780,11 +891,21 @@ mod guest {
 
     /// A connection to the host on `PORT`, or why not.
     fn try_connect() -> std::io::Result<fs::File> {
+        try_connect_to(PORT)
+    }
+
+    /// A connection to the host on `port`.
+    fn connect_to(port: u32) -> fs::File {
+        try_connect_to(port).unwrap_or_else(|err| panic!("connecting to the host on {port}: {err}"))
+    }
+
+    /// A connection to the host on `port`, or why not.
+    fn try_connect_to(port: u32) -> std::io::Result<fs::File> {
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, VsockAddr, connect, socket};
         use std::os::fd::{FromRawFd as _, IntoRawFd as _};
         let fd = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
             .expect("a vsock socket");
-        connect(fd.as_raw_fd(), &VsockAddr::new(2, PORT))?;
+        connect(fd.as_raw_fd(), &VsockAddr::new(2, port))?;
         // SAFETY: the socket's descriptor, which the file owns from here on.
         Ok(unsafe { fs::File::from_raw_fd(fd.into_raw_fd()) })
     }
@@ -992,16 +1113,48 @@ mod guest {
             // Restored from a memory cell, the second restore's guest writes all the memory it
             // has free, each of its pages a private copy of its window's: it holds as many as the
             // guest has pages (TASK-456.3). The first's reads and writes no more than the case's,
-            // whose pages its window shares.
-            if self.memory == Memory::Cell && name == "b" {
+            // whose pages its window shares. The second's then gives it back, the host inflating
+            // its balloon over it, and writes it again once the balloon deflates (board 8497).
+            if self.memory == Memory::Cell && name == GIVES_BACK {
+                give_back_free_memory(&name);
                 write_free_memory(&name);
             }
             println!("OK {name}");
         }
     }
 
+    /// Writes every page of what memory the guest has available but a margin, as
+    /// [`write_free_memory`] does, keeping it, and tells the host on `BALLOON_PORT` how much; once
+    /// the host says, frees it, and says so: the host inflates the balloon over it, and says once
+    /// it deflated it again (board 8497).
+    fn give_back_free_memory(name: &str) {
+        let (memory, len) = written_free_memory(name);
+        let mut host = connect_to(BALLOON_PORT);
+        writeln!(host, "written {}", len >> 20).unwrap();
+        let mut reader = BufReader::new(host.try_clone().unwrap());
+        let mut said = String::new();
+        reader.read_line(&mut said).unwrap();
+        assert_eq!(said, "free\n", "{name}: the host said");
+        // SAFETY: the mapping, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.cast(), len) }, 0);
+        host.write_all(b"freed\n").unwrap();
+        said.clear();
+        reader.read_line(&mut said).unwrap();
+        assert_eq!(said, "deflated\n", "{name}: the host said");
+        eprintln!("{name}: gave back {} MiB of memory", len >> 20);
+    }
+
     /// Writes every page of what memory the guest has available but a margin, and reads it back.
     fn write_free_memory(name: &str) {
+        let (memory, len) = written_free_memory(name);
+        // SAFETY: the mapping, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.cast(), len) }, 0);
+        eprintln!("{name}: wrote {} MiB of memory", len >> 20);
+    }
+
+    /// Maps what memory the guest has available but a margin, writes every page of it, reads it
+    /// back, and returns it, mapped, and its length.
+    fn written_free_memory(name: &str) -> (*mut u8, usize) {
         let meminfo = fs::read_to_string("/proc/meminfo").unwrap();
         let line = meminfo.lines().find(|line| line.starts_with("MemAvailable:")).unwrap();
         let kib: usize = line.split_whitespace().nth(1).unwrap().parse().unwrap();
@@ -1029,8 +1182,6 @@ mod guest {
             // SAFETY: within the mapping.
             assert_eq!(unsafe { memory.add(at).read_volatile() }, byte(at), "{name}: page {at:#x}");
         }
-        // SAFETY: the mapping, which nothing uses any more.
-        assert_eq!(unsafe { libc::munmap(memory.cast(), len) }, 0);
-        eprintln!("{name}: wrote {} MiB of memory", len >> 20);
+        (memory, len)
     }
 }

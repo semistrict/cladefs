@@ -28,7 +28,9 @@
 //! All of it within a bound, `CLADEFSD_DRAIN` seconds ([`bound`]): past it, what is left is
 //! logged, and the daemon exits anyway, failing; its cells' commits that weren't durable are
 //! lost, as at a crash, and those durable that weren't uploaded are uploaded by the next daemon to
-//! open their cells.
+//! open their cells. cladefs: the daemon's last spans, if it exports them, are exported in what is
+//! left of the bound once the drain is done, or not at all (`super::otel::shutdown`, board 8569):
+//! a collector that never answers holds its exit no longer.
 
 use std::time::Duration;
 use tokio::sync::watch;

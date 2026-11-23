@@ -35,7 +35,7 @@ tail and drop it as the head acknowledges it.
 | Authority | The bucket. The epoch and the replica set change only by conditional writes of the head. The commit path never touches the bucket, and the peers run no consensus. |
 | Placement | The writer picks its peers itself, from a pool: any other hosts of its cloud region, those sharing the cell's bucket (the user, 2026-11-19: no failure-domain rule; see Decisions: the pool is the existing peer list). |
 | No quorum | Degrade to Uploaded: a commit waiting for Replicated is released by Uploaded too, and the writer replaces its peers in the background. |
-| Wire | The existing peer network (`cladefs.peer.v1`, TASK-406.2): gRPC over TCP between daemons, unauthenticated on the hosts' network. No mTLS for now. |
+| Wire | The existing peer network (`cladefs.peer.v1`, TASK-406.2): gRPC over TCP between daemons, authenticated both ways by mutual TLS with the hosts' CA (`CLADEFSD_PEER_TLS`, board 8437); each replication call admitted only if its cell's head in the bucket could have asked it (board 8445). |
 | Who recovers | The VM manager's take of the cell on another host, as today. |
 
 ## Prior art, and what each would mean here
@@ -113,8 +113,14 @@ replica directory before its daemon starts, which makes it a new member (`docs/o
 A member therefore holds what the bucket holds and no more: data in ciphertext, and commit metadata
 (`Contents`: extent IDs, offsets, the root) in the clear but MACed, as framed footers are in the bucket
 (doc-16). It can verify nothing and needs no key. Recovery checks the MACs with the cell's key, so a
-host that injects or alters records on the unauthenticated network makes recovery refuse them rather
-than take them.
+host that injects or alters records makes recovery refuse them rather than take them. Peers
+authenticate each other (board 8437), and a member admits a call only if the cell's head could have
+asked it (board 8445): an append to the head's active configuration or one after it of its epoch, a
+fence of the active one at no later epoch than the head's, a drop of the logs of a configuration its
+writer appends to, or of configurations before the active one (a log is named by its writer's cell's
+segment, which no head names: a drop's last log is its writer's word).
+A member holds at most so many configurations of a cell, every byte admitted by the disk governor
+(board 8451).
 
 ### RPCs (added to `service Peer`)
 

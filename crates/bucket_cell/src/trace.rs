@@ -24,7 +24,7 @@
 use crate::layout::CellId;
 use futures::future::Either;
 use opentelemetry::context::{FutureExt as _, WithContext};
-use opentelemetry::trace::{Status, TraceContextExt as _, Tracer as _};
+use opentelemetry::trace::{SpanKind, Status, TraceContextExt as _, Tracer as _};
 use opentelemetry::{Context, KeyValue, Value, global};
 use std::fmt::Write as _;
 use std::future::Future;
@@ -124,9 +124,35 @@ impl Span {
         Self::start_in(name, &Context::current())
     }
 
+    /// cladefs: a span named `name`, of `kind`, a child of `parent`, the context a caller in another
+    /// process sent with its call (W3C trace context, `cladefs::cladefsd::grpc`), or of the context
+    /// current on this thread if none; nothing while spans are off (board 8569).
+    pub fn start_of(name: &'static str, kind: SpanKind, parent: Option<&Context>) -> Self {
+        if !enabled() {
+            return Self(None);
+        }
+        let Some(tracer) = TRACER.get() else { return Self(None) };
+        let current;
+        let parent = match parent {
+            Some(parent) => parent,
+            None => {
+                current = Context::current();
+                &current
+            }
+        };
+        let span = tracer.span_builder(name).with_kind(kind).start_with_context(tracer, parent);
+        Self(Some(parent.with_span(span)))
+    }
+
     /// Nothing, as a span is while spans are off: of an operation that isn't traced.
     pub const fn none() -> Self {
         Self(None)
+    }
+
+    /// cladefs: its context, if it is a span: what a call made within it carries to the process
+    /// it calls, as its trace's (board 8569).
+    pub fn context(&self) -> Option<&Context> {
+        self.0.as_ref()
     }
 
     #[cold]
@@ -250,6 +276,14 @@ impl Parent {
             Some(context) => Either::Right(future.with_context(context)),
             None => Either::Left(future),
         }
+    }
+
+    /// cladefs: runs `work` with the span as the context current on this thread meanwhile: the
+    /// parent of the spans it starts, on a thread another task hands it to, as a blocking one
+    /// (board 8569).
+    pub fn run<T>(self, work: impl FnOnce() -> T) -> T {
+        let _attached = self.0.map(Context::attach);
+        work()
     }
 }
 

@@ -8,7 +8,6 @@
 //! (TASK-41).
 
 use crate::layout::Extent;
-use extent_frame::segment::Location;
 use std::collections::{BTreeSet, HashMap};
 use storage_device::ExtentId;
 
@@ -47,14 +46,6 @@ pub(crate) struct KeptExtents {
 impl KeptExtents {
     pub fn get(&self, extent: &ExtentId) -> Option<&Kept> {
         self.kept.get(extent)
-    }
-
-    /// `extent`, if kept, its data in the bucket, named at `to`, where the collector moved it, if
-    /// it is named on its way there.
-    pub fn moved(&mut self, extent: ExtentId, to: &Location) {
-        if let Some(kept) = self.kept.get_mut(&extent) {
-            kept.entry.data.follow(to);
-        }
     }
 
     /// The bytes of the data of the extents kept.

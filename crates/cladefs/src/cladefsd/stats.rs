@@ -49,13 +49,13 @@ pub(crate) struct HostStats {
 }
 
 /// A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Vm {
     /// Its connection's number, which the daemon gives each in turn: what tells a cell's writers
     /// over time apart.
     pub connection: u64,
-    /// Its cell.
-    pub cell: u64,
+    /// Its cell, its tenant's and its ID (board 8563: the metrics label it `TENANT/CELL`).
+    pub cell: crate::CellId,
     /// Its cell's directory, as the daemon has it: without symbolic links.
     pub path: PathBuf,
     /// The commit it said it was built of, if it did ([`super::wire::BUILD`]).
@@ -212,7 +212,7 @@ pub(super) fn vms() -> Vec<Vm> {
 /// The builds the VM processes connected said, by their cells, each with how many said
 /// it (`metrics`, TASK-111.7). In order of cell and
 /// commit.
-pub(super) fn vm_builds() -> Vec<((u64, String), usize)> {
+pub(super) fn vm_builds() -> Vec<((crate::CellId, String), usize)> {
     let mut counted = BTreeMap::new();
     for vm in vms() {
         if let Some(build) = vm.build {
@@ -254,7 +254,7 @@ pub(super) struct Report {
 struct Opened {
     /// Its directory, without symbolic links.
     path: PathBuf,
-    cell: u64,
+    cell: crate::CellId,
 }
 
 /// An ask a VM process has yet to answer ([`Report::ask`]): its number, when it was made, and
@@ -308,7 +308,7 @@ impl Report {
     }
 
     /// The connection opened the cell of `cell` at `path`, once for good.
-    pub fn opened(&self, path: PathBuf, cell: u64) {
+    pub fn opened(&self, path: PathBuf, cell: crate::CellId) {
         let opened = self.opened.set(Opened { path, cell });
         assert!(opened.is_ok(), "a connection opened a second cell");
     }

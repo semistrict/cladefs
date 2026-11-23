@@ -42,7 +42,7 @@ use crate::keys::{KmsKey, Kmses};
 use crate::layout;
 use crate::object_bucket::{ObjectBucket, RoutedBucket};
 use extent_keys::kms::bucket::{self as formats, KekObject, TenantKek};
-use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
+use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeyId, MasterKeys};
 use extent_keys::kms::{self, Error, Kms, Origin, Trust, Vars};
 use extent_keys::{Secret, Unauthentic, Wrapped};
 use futures::StreamExt as _;
@@ -63,7 +63,14 @@ pub const FRESH_FOR: Duration = Duration::from_secs(60);
 /// A KMS over a bucket: tenants' KEKs kept in it, each wrapped by a master key (see the module).
 pub struct BucketKms<B> {
     bucket: Arc<B>,
-    keys: MasterKeys,
+    /// Its master keys: as given, or as a reload gave them since ([`ByBucket::reload`], board
+    /// 8487).
+    keys: Mutex<Arc<MasterKeys>>,
+    /// Held shared by each KEK object's making, from its master key taken until its create is
+    /// answered, and whole by a reload removing master keys from its checks until its keys are
+    /// in use ([`BucketKms::fenced`]): so that no object sealed under a key removed lands unseen
+    /// by the check (board 8487, hotbed review 79).
+    sealing: Arc<tokio::sync::RwLock<()>>,
     /// Each tenant's KEK as last read, and when.
     held: Mutex<HashMap<u64, Held>>,
     fresh_for: Duration,
@@ -83,7 +90,8 @@ impl<B: Bucket> BucketKms<B> {
     pub fn new(bucket: Arc<B>, keys: MasterKeys) -> Self {
         Self {
             bucket,
-            keys,
+            keys: Mutex::new(Arc::new(keys)),
+            sealing: Arc::default(),
             held: Mutex::default(),
             fresh_for: FRESH_FOR,
             identity: Mutex::default(),
@@ -122,9 +130,41 @@ impl<B: Bucket> BucketKms<B> {
         &self.bucket
     }
 
-    /// Its master keys.
-    pub fn keys(&self) -> &MasterKeys {
-        &self.keys
+    /// Its master keys, as now.
+    pub fn keys(&self) -> Arc<MasterKeys> {
+        self.keys.lock().unwrap().clone()
+    }
+
+    /// cladefs: has it use `keys` from its next KEK object on (board 8487): its KEKs held stay, as
+    /// they are the same whatever key wraps their objects.
+    fn set_keys(&self, keys: Arc<MasterKeys>) {
+        *self.keys.lock().unwrap() = keys;
+    }
+
+    /// cladefs: once every KEK object being made is answered, none made more until the guard
+    /// returned is dropped (`sealing`).
+    async fn fenced(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.sealing.clone().write_owned().await
+    }
+
+    /// cladefs: refuses removing `removed`, of its master keys, its bucket numbered `number`, while
+    /// a KEK object in it is under one (its tenant would open no cell here once its KEK was read
+    /// again); else fenced ([`BucketKms::fenced`]), from before the check, so that none is made
+    /// under one unseen by it: the fence its caller holds until its keys are in use.
+    async fn unsealed(
+        &self,
+        number: u16,
+        removed: &[MasterKeyId],
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, Unreloaded> {
+        let name = format!("bucket {number}");
+        let fence = within(format!("{name}'s KEK objects being made"), self.fenced()).await?;
+        match sealed_under(&*self.bucket, removed, &name).await? {
+            None => Ok(fence),
+            Some((tenant, id)) => Err(Unreloaded::InUse(format!(
+                "{name}: tenant {tenant}'s KEK object is under master key {id}: rotate them under \
+                 another first (cladefs-gc --rotate-master-key), then remove it"
+            ))),
+        }
     }
 
     /// Shreds `tenant` ([`destroy`]), and forgets its KEK here.
@@ -172,7 +212,10 @@ impl<B: Bucket> BucketKms<B> {
             return Err(Error::Destroyed { tenant });
         }
         let kek = TenantKek::random();
-        let newest = self.keys.newest();
+        // Held until its create is answered: no reload removes its key meanwhile.
+        let _sealing = self.sealing.read().await;
+        let keys = self.keys();
+        let newest = keys.newest();
         let sealed = KekObject::seal(newest, tenant, &kek);
         match bucket::create(&*self.bucket, &key, sealed).await.map_err(refused)? {
             Created::Created(_) => {
@@ -188,7 +231,7 @@ impl<B: Bucket> BucketKms<B> {
 
     /// The KEK of `bytes`, `tenant`'s KEK object, unwrapped by one of its master keys.
     fn opened(&self, tenant: u64, bytes: &[u8]) -> Result<Arc<TenantKek>, Error> {
-        KekObject::decode(tenant, bytes)?.open(&self.keys).map(Arc::new)
+        KekObject::decode(tenant, bytes)?.open(&self.keys()).map(Arc::new)
     }
 }
 
@@ -449,11 +492,11 @@ pub fn no_kms() -> String {
 }
 
 /// The KMS a host's environment chooses, the one place every process that opens cells asks
-/// (cladefsd, cladefsctl, the cladefs CLI's mounts through `cladefs::bucket::kms`; `cladefs-gc`):
-/// the KMS [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
-/// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else refused
-/// ([`no_kms`]), as every cell is encrypted (TASK-411.28). A KMS named, or master keys given, that
-/// can't be had is refused, saying why, never what a key holds.
+/// (cladefsd, cladefsctl, the cladefs CLI's mounts through `cladefs::bucket::kms`;
+/// `cladefs-gc-fill`): the KMS [`KMS_VAR`] names, if it names one; else, given master keys
+/// (`CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's
+/// bucket; else refused ([`no_kms`]), as every cell is encrypted (TASK-411.28). A KMS named, or
+/// master keys given, that can't be had is refused, saying why, never what a key holds.
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
@@ -542,6 +585,9 @@ pub struct ByBucket {
     buckets: Mutex<BTreeMap<u16, Arc<BucketKms<ObjectBucket>>>>,
     /// How long [`ByBucket::shred`] waits for each other bucket: [`SHRED_WITHIN`], but in tests.
     shred_within: std::time::Duration,
+    /// Held by a reload ([`ByBucket::reload`]): one at a time, so that what one checked is what it
+    /// applies.
+    reloading: tokio::sync::Mutex<()>,
 }
 
 impl ByBucket {
@@ -561,6 +607,7 @@ impl ByBucket {
             named: Mutex::new(named),
             buckets: Mutex::default(),
             shred_within: SHRED_WITHIN,
+            reloading: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -658,6 +705,192 @@ impl ByBucket {
         Ok(own)
     }
 
+    /// cladefs: reloads the host's KMS configuration that reloads live (board 8487; doc-16, What
+    /// reloads): the `keys` file of every KMS it holds that is named by a URL, and the master keys
+    /// of every bucket KMS it holds, `CLADEFS_MASTER_KEY_FILE`'s (`CLADEFSD_BUCKET_<N>_`'s for
+    /// bucket N's), each read again as at the start. Applied whole or not at all: refused, changing
+    /// nothing, if a file is not to be read or holds what is not one ([`Unreloaded::Malformed`],
+    /// naming it and its line); if it would lose what is in use ([`Unreloaded::InUse`]): a
+    /// tenant's KEK renamed (an override added, changed or removed) while the tenant has cells in
+    /// a bucket under that KMS, which would no longer open (board 2062), or a master key removed
+    /// while the registry of buckets records it as its bucket's or a KEK object is under it; or if
+    /// a bucket to check is out of reach ([`Unreloaded::Unreached`]). Its URLs, credentials and
+    /// choice of KMS a bucket stay as they are: those are the process's for its life.
+    ///
+    /// What a host holds of what it renamed (its pools of new cell KEKs, wrapped under the old
+    /// names) is its caller's to drop ([`crate::keys::CachingKms::renamed`]). The tenants' cells
+    /// it checks are those of the buckets it reaches under each KMS so far: the host's own and
+    /// those it asked for; every host reloads, and checks its own.
+    pub async fn reload(&self) -> Result<Reloaded, Unreloaded> {
+        let _one = self.reloading.lock().await;
+        let mut staged = Vec::new();
+        let named: Vec<(KmsKey, kms::Shared)> = self
+            .named
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, kms)| (key.clone(), kms.clone()))
+            .collect();
+        for (key, kms) in &named {
+            let Some(names) = kms.names_dyn() else { continue };
+            let reread =
+                names.reread().map_err(|why| Unreloaded::Malformed(format!("{key}: {why}")))?;
+            staged.extend(reread.map(|reread| (key.clone(), reread)));
+        }
+        let mut keys = Vec::new();
+        for (number, kms, own) in self.bucket_kmses_held().await? {
+            let source = format!("bucket {number}'s bucket KMS");
+            let numbered;
+            let vars = match own {
+                true => &*self.vars,
+                false => {
+                    numbered = self.vars.numbered(number);
+                    &numbered
+                }
+            };
+            let given = MasterKeys::from_vars(vars)
+                .map_err(|why| Unreloaded::Malformed(format!("{source}: {why}")))?
+                .ok_or_else(|| {
+                    Unreloaded::Malformed(format!("{source}: no master key given any more"))
+                })?;
+            let held = kms.keys();
+            if given.ids() == held.ids() {
+                continue;
+            }
+            let (given_ids, held_ids) = (given.ids(), held.ids());
+            let added: Vec<_> =
+                given_ids.iter().filter(|id| !held_ids.contains(id)).copied().collect();
+            let removed: Vec<_> =
+                held_ids.iter().filter(|id| !given_ids.contains(id)).copied().collect();
+            // Removing keys: no KEK object made under one from the check until the keys are in use.
+            let fence = match removed.is_empty() {
+                true => None,
+                false => {
+                    self.unrecorded(number, &removed).await?;
+                    Some(kms.unsealed(number, &removed).await?)
+                }
+            };
+            keys.push((
+                kms,
+                Arc::new(given),
+                fence,
+                MasterKeysReloaded { bucket: number, added, removed },
+            ));
+        }
+        for (key, staged) in &staged {
+            for &tenant in staged.renamed() {
+                self.cell_less(key, tenant).await?;
+            }
+        }
+        let mut reloaded = Reloaded::default();
+        for (_, staged) in staged {
+            reloaded.renamed.extend_from_slice(staged.renamed());
+            // One reload at a time (`reloading`), and only a reload swaps the overrides.
+            staged.apply().expect("reloads are one at a time");
+        }
+        reloaded.renamed.sort_unstable();
+        reloaded.renamed.dedup();
+        for (kms, given, fence, changed) in keys {
+            kms.set_keys(given);
+            drop(fence);
+            log::warn!(
+                "cladefs: bucket {}'s bucket KMS: master keys reloaded, now {}",
+                changed.bucket,
+                kms.keys().named_ids()
+            );
+            reloaded.master_keys.push(changed);
+        }
+        if !reloaded.renamed.is_empty() {
+            log::warn!(
+                "cladefs: the KMS's key overrides reloaded, renaming tenants {:?}",
+                reloaded.renamed
+            );
+        }
+        Ok(reloaded)
+    }
+
+    /// Every bucket KMS it holds, by its bucket's number (the host's own's, or [`NAMED`] if it has
+    /// none yet), and whether it is the host's own, its master keys the host's variables' rather
+    /// than its bucket's ([`Vars::numbered`]).
+    async fn bucket_kmses_held(
+        &self,
+    ) -> Result<Vec<(u16, Arc<BucketKms<ObjectBucket>>, bool)>, Unreloaded> {
+        let mut all = Vec::new();
+        if let HostKms::Bucket(kms) = &self.own {
+            let identity = "the host's bucket's identity".to_owned();
+            let own = within(identity.clone(), self.own_number())
+                .await?
+                .map_err(|why| Unreloaded::Unreached(format!("{identity}: {why}")))?;
+            all.push((own.unwrap_or(NAMED), kms.clone(), true));
+        }
+        let others: Vec<_> =
+            self.buckets.lock().unwrap().iter().map(|(n, kms)| (*n, kms.clone(), false)).collect();
+        all.extend(others);
+        Ok(all)
+    }
+
+    /// Refuses removing `removed`, master keys of bucket `number`'s bucket KMS, while the registry
+    /// of buckets records one as the bucket's (board 8483: hosts of other buckets choose it by
+    /// that, and would refuse its cells).
+    async fn unrecorded(&self, number: u16, removed: &[MasterKeyId]) -> Result<(), Unreloaded> {
+        if number == NAMED {
+            return Ok(());
+        }
+        let entry = match within(format!("bucket {number}"), self.entry(number)).await? {
+            Ok(entry) => Some(entry),
+            // Unrecorded: none to keep.
+            Err(crate::Error::NoBucket(_)) => None,
+            Err(err) => {
+                let why = format!("bucket {number}: its entry in the registry: {err}");
+                return Err(Unreloaded::Unreached(why));
+            }
+        };
+        let recorded = entry.and_then(|entry| entry.details.master_key_id);
+        match recorded.filter(|id| removed.iter().any(|key| key.to_string() == *id)) {
+            None => Ok(()),
+            Some(id) => Err(Unreloaded::InUse(format!(
+                "bucket {number}: the registry of buckets records master key {id} as its tenants' \
+                 KEKs': rotate them under another first (cladefs-gc --rotate-master-key), then \
+                 remove it"
+            ))),
+        }
+    }
+
+    /// Refuses renaming `tenant`'s KEK in the KMS named `key` if the tenant has a cell in a bucket
+    /// it reached under that KMS: the host's own, or another it asked for.
+    async fn cell_less(&self, key: &KmsKey, tenant: u64) -> Result<(), Unreloaded> {
+        let mut buckets = Vec::new();
+        if matches!(&self.own, HostKms::Named(url, _) if *url == *key.0) {
+            buckets.push(("the host's bucket".to_owned(), Ok(self.home.own())));
+        }
+        let others: Vec<u16> = (self.chosen.lock().unwrap().iter())
+            .filter(|(_, (of, _))| of == key)
+            .map(|(number, _)| *number)
+            .collect();
+        for number in others {
+            let name = format!("bucket {number}");
+            buckets.push((name.clone(), within(name, self.home.numbered(number)).await?));
+        }
+        for (bucket_name, bucket) in buckets {
+            let unreached = |why: String| Unreloaded::Unreached(format!("{bucket_name}: {why}"));
+            let bucket = bucket.map_err(|err| unreached(err.to_string()))?;
+            let first =
+                async { std::pin::pin!(crate::cell::of_tenant(&*bucket, tenant)).next().await };
+            match within(bucket_name.clone(), first).await? {
+                None => {}
+                Some(Err(refused)) => return Err(unreached(refused.to_string())),
+                Some(Ok(cell)) => {
+                    return Err(Unreloaded::InUse(format!(
+                        "{key}: tenant {tenant}'s KEK would be renamed, and it has cells in \
+                         {bucket_name} ({cell} among them), whose KEKs are wrapped under its \
+                         name now and would open no more (board 2062): keep its name"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The host's own KMS, and its name.
     fn own(&self) -> (KmsKey, kms::Shared) {
         match &self.own {
@@ -734,6 +967,82 @@ impl ByBucket {
 /// cladefs: how long [`ByBucket::shred`] waits for each other bucket's shredding before it says
 /// it failed, the bucket out of reach: shredding again finishes it (board 5528).
 pub const SHRED_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// cladefs: how long [`ByBucket::reload`] waits for each bucket it checks before it refuses, the
+/// bucket out of reach: reloading again does it.
+pub const RELOAD_WITHIN: Duration = Duration::from_secs(30);
+
+/// cladefs: what `future` gives, within [`RELOAD_WITHIN`]; or, `what` not answered by then,
+/// [`Unreloaded::Unreached`] (hotbed review 79): a bucket's requests are asked again until it
+/// answers.
+async fn within<T>(what: String, future: impl Future<Output = T>) -> Result<T, Unreloaded> {
+    tokio::time::timeout(RELOAD_WITHIN, future)
+        .await
+        .map_err(|_| Unreloaded::Unreached(format!("{what}: no answer within {RELOAD_WITHIN:?}")))
+}
+
+/// cladefs: what [`ByBucket::reload`] changed (board 8487).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reloaded {
+    /// The tenants whose KEK's name changed, in order, in any KMS: an override added, changed or
+    /// removed.
+    pub renamed: Vec<u64>,
+    /// The bucket KMSes whose master keys changed.
+    pub master_keys: Vec<MasterKeysReloaded>,
+}
+
+/// cladefs: a bucket KMS's master keys reloaded ([`ByBucket::reload`]).
+#[derive(Debug, PartialEq, Eq)]
+pub struct MasterKeysReloaded {
+    /// Its bucket's number: [`NAMED`] for the host's own, numbered none yet.
+    pub bucket: u16,
+    /// The keys added, the newest first.
+    pub added: Vec<MasterKeyId>,
+    /// The keys removed.
+    pub removed: Vec<MasterKeyId>,
+}
+
+/// cladefs: why [`ByBucket::reload`] refused, changing nothing.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Unreloaded {
+    /// A file not to be read, or holding what is not one: naming it, and its line.
+    #[error("{0}")]
+    Malformed(String),
+    /// What it would change is in use: a tenant's KEK renamed while it has cells, a master key
+    /// removed while it is held.
+    #[error("{0}")]
+    InUse(String),
+    /// A bucket to check is out of reach.
+    #[error("{0}")]
+    Unreached(String),
+    /// The host has no KMSes by bucket to reload: no bucket of its own to check against.
+    #[error("{0}")]
+    Unsupported(String),
+}
+
+/// cladefs: the first tenant whose KEK object in `bucket`, `name`d so, is under one of `keys`, and
+/// that key, if any: a listing of every tenant's, as [`rotate`] lists them, each request answered
+/// within [`RELOAD_WITHIN`], however many tenants (hotbed review 78).
+async fn sealed_under<B: Bucket>(
+    bucket: &B,
+    keys: &[MasterKeyId],
+    name: &str,
+) -> Result<Option<(u64, MasterKeyId)>, Unreloaded> {
+    let refused = |refused: bucket::Refused| Unreloaded::Unreached(format!("{name}: {refused}"));
+    let mut tenants = std::pin::pin!(bucket::prefixes(bucket, layout::TENANTS.to_owned()));
+    while let Some(prefix) = within(name.to_owned(), tenants.next()).await? {
+        let Some(tenant) = layout::tenant_of_prefix(&prefix.map_err(refused)?) else { continue };
+        let got = within(name.to_owned(), bucket::get(bucket, &layout::kek(tenant))).await?;
+        let Some(object) = got.map_err(refused)? else { continue };
+        // An object that is no KEK object is opened by no key, removed or kept: none to keep.
+        if let Ok(KekObject::Kek { master, .. }) = KekObject::decode(tenant, &object.bytes)
+            && keys.contains(&master)
+        {
+            return Ok(Some((tenant, master)));
+        }
+    }
+    Ok(None)
+}
 
 /// What shredding a tenant in a bucket did ([`ByBucket::shredding`]).
 enum Shred {
@@ -821,6 +1130,50 @@ mod tests {
     /// A host's bucket KMS over `bucket`, given `keys`.
     fn host<B: Bucket>(bucket: &Arc<B>, keys: &[&Secret]) -> BucketKms<B> {
         BucketKms::new(bucket.clone(), keys_of(keys))
+    }
+
+    /// board 8487 (hotbed reviews 78, 79): a reload removing a master key waits for the KEK objects
+    /// being made, and checks them: a new tenant's KEK object sealed under the key as the reload
+    /// begins, its create not yet answered, refuses the removal once it lands, never missed by a
+    /// listing made before it.
+    #[test]
+    fn removing_master_keys_waits_for_kek_objects_being_made_under_them() {
+        use crate::testing::{Fault, SimBucket};
+        use std::task::{Context, Poll};
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _entered = runtime.enter();
+        let (newest, older) = (Secret::random(), Secret::random());
+        let bucket = SimBucket::new();
+        let kms = host(&bucket, &[&newest, &older]);
+        let removed = [kms.keys().newest().id()];
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        let key = Secret::random();
+        let mut wrapping = std::pin::pin!(kms.wrap(5, &key));
+        // Its requests answered until its KEK object's create waits.
+        loop {
+            assert!(wrapping.as_mut().poll(&mut context).is_pending());
+            if bucket.position("put ").is_some() {
+                break;
+            }
+            bucket.complete(0, Fault::None);
+        }
+        let mut checking = std::pin::pin!(kms.unsealed(1, &removed));
+        // Every request but the create answered, a listing among them if one was made.
+        loop {
+            assert!(checking.as_mut().poll(&mut context).is_pending(), "checked before the create");
+            let others = (0..bucket.waiting()).find(|&at| !bucket.describe(at).starts_with("put "));
+            let Some(at) = others else { break };
+            bucket.complete(at, Fault::None);
+        }
+        bucket.complete(bucket.position("put ").unwrap(), Fault::None);
+        assert!(matches!(wrapping.as_mut().poll(&mut context), Poll::Ready(Ok(_))));
+        let (checked, _) = bucket.served(checking);
+        let why = format!(
+            "bucket 1: tenant 5's KEK object is under master key {}: rotate them under another \
+             first (cladefs-gc --rotate-master-key), then remove it",
+            removed[0]
+        );
+        assert_eq!(checked.map(drop), Err(Unreloaded::InUse(why)));
     }
 
     fn wrap(kms: &impl Kms, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
@@ -1068,7 +1421,7 @@ mod tests {
             }
         }
         for (tenant, bytes) in (1..=2).zip(&objects) {
-            let kek = KekObject::decode(tenant, bytes).unwrap().open(both.keys()).unwrap();
+            let kek = KekObject::decode(tenant, bytes).unwrap().open(&both.keys()).unwrap();
             let wrapped_again = formats::wrap(tenant, 0, &kek, &key);
             assert_eq!(wrapped_again, wrapped[tenant as usize - 1]);
         }

@@ -11,7 +11,8 @@
 //! so a read of a key the newest marks name is a bug in the collector, which a pass that deleted
 //! would have turned into data lost; unless the reader is one the protocol lets find it gone, and
 //! start again: a recovery that, finding a segment missing, finds a newer checkpoint covering it,
-//! or a reader within the grace period of an object compacted. Each such read is logged, at `warn`,
+//! or a reader of an extent its cell's writer relocated since it looked it up, which looks it up
+//! again (doc-27). Each such read is logged, at `warn`,
 //! with the key, its kind (which names its cell), the request, the marks' epoch, and the IDs of
 //! the span current if spans are on; in the extent daemon, its log names the guest request it is
 //! for too (`request_id`, `cladefs::request::current`).
@@ -333,7 +334,7 @@ mod tests {
         let segment = layout::segment(test_cell(1), 2, 1);
         let of = meta(&layout::marks(TEST_CELL, 7), "a");
         let marked = vec![Marked::of(&meta(&segment, "s"))];
-        watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, grace: 0, marked })));
+        watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, marked })));
         assert!(watch.any.load(Ordering::Relaxed));
         watch.hold_marking(true);
         assert_eq!(watch.cells.read().unwrap().len(), 1, "read just now");
@@ -351,7 +352,7 @@ mod tests {
         let segment = layout::segment(test_cell(1), 2, 1);
         let of = meta(&layout::marks(TEST_CELL, 7), "a");
         let marked = vec![Marked::of(&meta(&segment, "s"))];
-        watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, grace: 0, marked })));
+        watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, marked })));
         assert!(watch.any.load(Ordering::Relaxed));
         let held = |key: &str| {
             let cells = watch.cells.read().unwrap();

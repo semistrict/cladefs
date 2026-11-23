@@ -65,17 +65,17 @@ pub struct AnonBudget {
     /// as it bounds the parts held (`local_cell::pages`, TASK-433).
     pub pages: u64,
     /// The cells' maps of their extents: the most they held at once so far (TASK-453). Of each
-    /// decoded state the cells open share, its map once, however many share it, the bucket's
-    /// layer of each of them (`crate::host_cell::decoded_held`); and of each cell, what it holds
-    /// of its own, its writes, frees and moves, with its writer's entries for them, and a bucket's
-    /// layer that shares no decoded state, and what its writer's map, the bucket's layer's
-    /// shared, copies of it as it changes it (`local_cell::own_held`). Each entry at its bound
+    /// decoded state the cells open share, its map once, however many share it, the bucket's layer
+    /// of each of them (`crate::host_cell::decoded_held`); and of each cell, what it holds of its
+    /// own, its writes, frees and relocations, with its writer's entries for them, and a bucket's
+    /// layer that shares no decoded state, and what its writer's map, the bucket's layer's shared,
+    /// copies of it as it changes it (`local_cell::own_held`). Each entry at its bound
     /// (`bucket_cell::recovery::ENTRY_BYTES`, `local_cell::OWN_ENTRY_BYTES`), and each run of
     /// changes to a shared map, a path of its nodes copied, at its
-    /// (`bucket_cell::recovery::RUN_BYTES`), which `bucket::tests::bench_fork_extent_memory`
-    /// holds them to. Not bounded otherwise: a host's
-    /// cells' extents, as many as their guests write, are its density's limit, which the budget
-    /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
+    /// (`bucket_cell::recovery::RUN_BYTES`), which `bucket::tests::bench_fork_extent_memory` holds
+    /// them to. Not bounded otherwise: a host's cells' extents, as many as their guests write, are
+    /// its density's limit, which the budget shows rather than hides, an idle fork adding what it
+    /// writes, not its base (TASK-443.2).
     pub extents: u64,
     /// Its page-ins' buffers, which a part is read into before it is written into its slab, as
     /// the daemon maps no slab (doc-26): [`PAGE_INS`].

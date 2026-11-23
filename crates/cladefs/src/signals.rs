@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! cladefs: signals a process takes on a thread of its own, which waits for them (`sigwait`), rather
-//! than in a handler, which may do next to nothing: the extent daemon's SIGTERM, which drains it
-//! (TASK-141.4), any process's SIGQUIT, which logs its threads' stacks (`crate::stacks`,
+//! than in a handler, which may do next to nothing: the extent daemon's SIGTERM, SIGINT and
+//! SIGHUP, which drain it (TASK-141.4, board 8567), any process's SIGQUIT, which logs its threads' stacks (`crate::stacks`,
 //! TASK-44.13), and `cladefs-mount`'s SIGINT and SIGTERM, which unmount it (TASK-222).
 //!
 //! A signal a thread doesn't block may be delivered to it, which ends the process by the signal's

@@ -16,7 +16,7 @@
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
-use bucket_cell::bucket_kms::{BucketKms, ByBucket};
+use bucket_cell::bucket_kms::{BucketKms, ByBucket, Unreloaded};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
 use bucket_cell::identity::{Asked, Details, Identity, Registry};
@@ -530,6 +530,27 @@ pub async fn shred_tenant(
     Ok((destroyed, forgotten))
 }
 
+/// cladefs: reloads what of the host's KMS configuration reloads live (board 8487; doc-16, What
+/// reloads), as [`ByBucket::reload`] does, whole or not at all; then has its pools of new cell KEKs
+/// of each tenant renamed dropped, wrapped under the old name as they are
+/// ([`keys::CachingKms::renamed`]). Refused, changing nothing, by a host with no KMSes by bucket
+/// (no `CLADEFSD_BUCKET`, or no KMS at all), which has no bucket to check renames against.
+pub async fn reload_kms() -> Result<bucket_cell::bucket_kms::Reloaded, Unreloaded> {
+    let unsupported = |why: String| Unreloaded::Unsupported(format!("the host's KMS: {why}"));
+    let keys = host_keys().as_ref().map_err(|why| unsupported(why.clone()))?;
+    let by_bucket = keys.by_bucket.as_ref().ok_or_else(|| {
+        unsupported("reloads with a bucket of the host's own alone (CLADEFSD_BUCKET)".to_owned())
+    })?;
+    let reloaded = by_bucket.reload().await?;
+    // Its KMS, if it made it: one not made yet pooled nothing.
+    if let Some(kms) = POOLED.get().get() {
+        for &tenant in &reloaded.renamed {
+            kms.renamed(tenant);
+        }
+    }
+    Ok(reloaded)
+}
+
 /// cladefs: a KMS the environment chose that can't be had (a bad `CLADEFS_KMS`, master keys
 /// unreadable or with no host's bucket, TASK-411.27), or none chosen (TASK-411.28): every call
 /// refused, saying why.
@@ -862,10 +883,13 @@ impl Serving {
     /// fetched from the bucket once, however many ask, on the bucket runtime.
     pub async fn part(&self, asked: peers::Asked) -> Result<Option<Arc<[u8]>>, Failure> {
         let parts = self.parts.clone();
-        let serving = self.runtime.spawn(async move {
-            let peers::Asked { key, part } = asked;
-            Ok(parts.stored_part(&key, part).await?)
-        });
+        // cladefs: in the trace context current, the peer's call's, the parent of its bucket
+        // requests' spans (board 8569, hotbed review 80).
+        let serving =
+            self.runtime.spawn(bucket_cell::trace::Parent::current().around(async move {
+                let peers::Asked { key, part } = asked;
+                Ok(parts.stored_part(&key, part).await?)
+            }));
         serving.await.map_err(|err| Failure::local(err, "serving a peer"))?
     }
 }
@@ -886,10 +910,8 @@ mod write_budgets;
 
 #[cfg(test)]
 mod tests {
-    use crate::test_checkpoints::checkpointed;
     use crate::test_data::noise;
     use crate::{ExtentId, OpenCell, VolatileSlice};
-    use bucket_cell::cache::Cache;
     use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
     use bucket_cell::testing::read;
     use bucket_cell::{lifecycle, recover};
@@ -951,13 +973,10 @@ mod tests {
 
     /// Uploads only when a commit waits.
     /// How this process's open cells keep their cells ([`crate::host_cell::keeping`]), but
-    /// uploading nothing until a commit waits for it, or the hour is up. cladefs: and relocating
-    /// nothing, as the tests' collectors compact, which relocations must not run beside (doc-27
-    /// step 1).
+    /// uploading nothing until a commit waits for it, or the hour is up.
     pub(super) fn idle() -> local_cell::upload::Options {
         let keeping = crate::host_cell::keeping().unwrap();
-        let (interval, relocate) = (Duration::from_secs(3600), false);
-        local_cell::upload::Options { interval, relocate, ..keeping }
+        local_cell::upload::Options { interval: Duration::from_secs(3600), ..keeping }
     }
 
     pub(super) fn pattern(seed: u8, len: usize) -> Vec<u8> {
@@ -1106,250 +1125,6 @@ mod tests {
         assert_eq!(uploader.status().unwrap().taking.unwrap().epoch, epoch);
         let after = (vec![(1, pattern(1, BLOCK))], Some(b"after".to_vec()));
         assert_eq!(uploaded(&bucket, cell), after);
-    }
-
-    /// TASK-195: an open cell reads what it holds after the collector compacted it twice, its
-    /// writer checkpointing between, with the host's cache and without. It names an extent where
-    /// the writer's checkpoints move it, as the writer does (`Writer::following`), from where the
-    /// collector keeps the moves: compacted from its segment into moves, and from those into moves
-    /// of moves, the segment goes, and the first moves. Before, the open cell named it in the
-    /// segment as long as it held it: gone, and its moves gone, the guest's read failed (`EIO`) on
-    /// a live cell, which a recovery read through the moves of moves.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn extents_compacted_twice_read_where_the_cell_names_them() {
-        compacted_twice(false).await;
-        compacted_twice(true).await;
-    }
-
-    /// TASK-217: an open cell whose host died, its disk as the death left it and the host's cache
-    /// lost with it, opens and reads what it holds after the collector compacted its segment and
-    /// took it, the writer's checkpoint having followed the moves: opening names its extents as the
-    /// cell's newest checkpoint does, in the moves. Before (GCE r757, round 40, a soak's daemon
-    /// killed and its cache lost), the open cell opened from its own index, which named the extent
-    /// in the segment the collector had taken, and the checking VM's reads failed EIO (`lost: ...
-    /// in segments/<cell>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
-    /// cell.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn extents_compacted_read_once_their_host_died_and_its_cache_went() {
-        const EXTENT: usize = 64 * BLOCK;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store");
-        let objects: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        // The dying host's way to the objects, and what reaches them after it.
-        let gated = Arc::new(Gated::over(objects.clone()));
-        let reached = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
-        let bucket = Arc::new(ObjectBucket::new(objects, "").unrouted());
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
-        let collect = |holder| {
-            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
-            futures::executor::block_on(pass).unwrap()
-        };
-        let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
-        let keeping = local_cell::upload::Options { cache, ..idle() };
-        // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
-        let open_cell =
-            kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).await.unwrap();
-        let cell = open_cell.cell();
-        for sequence in 1..=16 {
-            write(&open_cell, sequence, &noise(sequence, EXTENT)).await;
-        }
-        open_cell.commit(None).await.unwrap();
-        for sequence in 4..=16 {
-            open_cell.free(ExtentId { cell: cell.id, sequence }).unwrap();
-        }
-        checkpointed(&open_cell, &bucket).await;
-        // The segment compacted, 1 to 3 into its moves; the writer's checkpoint follows them; the
-        // segment goes.
-        assert_eq!(collect(1).compacted, 1);
-        checkpointed(&open_cell, &bucket).await;
-        collect(2);
-        let keys: Vec<String> =
-            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
-                .unwrap()
-                .into_iter()
-                .map(|meta| meta.key)
-                .collect();
-        let moves = bucket_cell::layout::moves_under(&bucket_cell::layout::segments(cell)).unwrap();
-        let first = bucket_cell::layout::segment(cell, 0, 1);
-        assert!(keys.iter().any(|key| key.starts_with(&moves)), "{keys:?}");
-        assert!(!keys.contains(&first), "{keys:?}");
-        // The host dies: its disk copied as it is, its cache not, its open cell cut off.
-        let restarted = dir.path().join("restarted");
-        restart(&path, &restarted);
-        gated.sever();
-        naming(&restarted, &bucket);
-        let opened = reopened(&restarted, idle()).await.unwrap();
-        let mut data = vec![0; EXTENT];
-        let read = opened
-            .read(
-                ExtentId { cell: cell.id, sequence: 1 },
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut data[..])],
-            )
-            .await;
-        assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
-        drop(open_cell);
-    }
-
-    /// TASK-195: so does a fork's open cell read what it inherited, its parent deleted: it names
-    /// the extents where its own writer's checkpoints move them, from the parent's segment,
-    /// compacted into moves, the segment gone. TASK-395.4: the fork in a cell of its own, as every
-    /// fork a host makes, its parent's cell keeps the parent's state at the origin whole for as
-    /// long as the fork lives, by its reference, what the fork frees of it since no matter: the
-    /// moves, which hold that state's extents, are compacted no further, as they were when the
-    /// collector went by the fork's state (`extents_compacted_twice_read_where_the_cell_names_them`
-    /// shows a cell's own compacted twice).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn forks_read_what_they_inherited_compacted_twice() {
-        inherited_compacted_twice().await;
-    }
-
-    /// TASK-339: [`forks_read_what_they_inherited_compacted_twice`] with the fork's checkpoint
-    /// landing a second after the commits it covers returned, as on a loaded CI runner: it is what
-    /// the collector frees the segment and the first moves by, and the collections waited for
-    /// nothing of it (moves/segments/ still listed after collect(4), main's macOS CI); now they
-    /// wait for it ([`checkpointed`](crate::test_checkpoints::checkpointed)).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn forks_read_what_they_inherited_compacted_twice_their_checkpoint_late() {
-        let scenario = fail::FailScenario::setup();
-        fail::cfg("upload::checkpointing", "sleep(1000)").unwrap();
-        inherited_compacted_twice().await;
-        scenario.teardown();
-    }
-
-    async fn inherited_compacted_twice() {
-        const EXTENT: usize = 64 * BLOCK;
-        let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
-        let collect = |holder| {
-            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
-            futures::executor::block_on(pass).unwrap()
-        };
-        // The parent's segment, of extents 1 to 16, which don't compress, freed but 1 to 3; its
-        // fork, which inherits them there; and the parent deleted.
-        let path = dir.path().join("parent");
-        let parent = kept_in(&path, (16 * EXTENT as u64, None), &bucket, idle()).await.unwrap();
-        let cell = parent.cell();
-        for sequence in 1..=16 {
-            write(&parent, sequence, &noise(sequence, EXTENT)).await;
-        }
-        parent.commit(None).await.unwrap();
-        for sequence in 4..=16 {
-            parent.free(ExtentId { cell: cell.id, sequence }).unwrap();
-        }
-        parent.commit(None).await.unwrap();
-        let child = dir.path().join("child");
-        let forked = crate::host_cell::fork_child(cell);
-        assert_ne!(forked, cell, "a fork in a cell of its own");
-        parent.fork_to(&child, forked).await.unwrap();
-        drop(parent);
-        crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token).await.unwrap();
-        // The fork's open cell, open all along: the segment compacted, 1 to 3 in its moves.
-        let child = reopened(&child, idle()).await.unwrap();
-        assert_eq!(collect(1).compacted, 1);
-        // It frees 2 and 3, and its writer checkpoints, naming 1 in the moves.
-        child.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
-        child.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
-        checkpointed(&child, &bucket).await;
-        // The segment goes, no state naming it there; the moves stay as they are, the origin
-        // holding 1 to 3 in them.
-        collect(3);
-        collect(4);
-        let keys: Vec<String> =
-            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
-                .unwrap()
-                .into_iter()
-                .map(|meta| meta.key)
-                .filter(|key| {
-                    matches!(
-                        bucket_cell::layout::kind(key),
-                        bucket_cell::layout::Kind::Moves { .. }
-                            | bucket_cell::layout::Kind::Segment { .. }
-                    ) && key.starts_with(&cell.prefix())
-                })
-                .collect();
-        let sealed = bucket_cell::layout::segments(cell);
-        let once = bucket_cell::layout::moves_under(&sealed).unwrap();
-        let twice = bucket_cell::layout::moves_under(&once).unwrap();
-        let compacted: Vec<String> = (keys.iter())
-            .filter(|key| key.starts_with(&once))
-            .filter_map(|key| bucket_cell::layout::moved_from(key))
-            .collect();
-        assert_eq!(compacted.len(), 1, "{keys:?}");
-        assert!(!keys.contains(&compacted[0]), "{keys:?}");
-        assert!(!keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
-        let mut data = vec![0; EXTENT];
-        let extent = ExtentId { cell: cell.id, sequence: 1 };
-        let read = child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await;
-        assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
-    }
-
-    /// [`extents_compacted_twice_read_where_the_cell_names_them`], with the host's cache if
-    /// `cached`.
-    async fn compacted_twice(cached: bool) {
-        const EXTENT: usize = 64 * BLOCK;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store");
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
-        let collect = |holder| {
-            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
-            futures::executor::block_on(pass).unwrap()
-        };
-        let cache =
-            cached.then(|| Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
-        let keeping = local_cell::upload::Options { cache, ..idle() };
-        // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
-        let open_cell = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).await.unwrap();
-        let open_cell = Arc::new(open_cell);
-        let cell = open_cell.cell();
-        for sequence in 1..=16 {
-            write(&open_cell, sequence, &noise(sequence, EXTENT)).await;
-        }
-        open_cell.commit(None).await.unwrap();
-        for sequence in 4..=16 {
-            open_cell.free(ExtentId { cell: cell.id, sequence }).unwrap();
-        }
-        // Its writer checkpoints, as every so many segments, each commit here one.
-        checkpointed(&open_cell, &bucket).await;
-        // The segment compacted: 1 to 3 in its moves.
-        assert_eq!(collect(1).compacted, 1);
-        // The open cell frees 2 and 3, and its writer checkpoints, as every so many segments,
-        // naming 1 in the moves, which hold a third of what they did.
-        open_cell.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
-        open_cell.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
-        checkpointed(&open_cell, &bucket).await;
-        // The segment goes, no state naming it there; the moves are compacted, then go too.
-        collect(3);
-        collect(4);
-        let keys: Vec<String> =
-            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
-                .unwrap()
-                .into_iter()
-                .map(|meta| meta.key)
-                .filter(|key| {
-                    matches!(
-                        bucket_cell::layout::kind(key),
-                        bucket_cell::layout::Kind::Moves { .. }
-                            | bucket_cell::layout::Kind::Segment { .. }
-                    )
-                })
-                .collect();
-        let once = bucket_cell::layout::moves_under(&bucket_cell::layout::segments(cell)).unwrap();
-        let twice = bucket_cell::layout::moves_under(&once).unwrap();
-        assert!(keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
-        assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
-        // The open cell, open all along, reads it there.
-        let extent = ExtentId { cell: cell.id, sequence: 1 };
-        let reads = async |open_cell: &OpenCell| {
-            let mut data = vec![0; EXTENT];
-            let read = open_cell
-                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])])
-                .await;
-            read.map(|()| data == noise(1, EXTENT))
-        };
-        assert_eq!(reads(&open_cell).await, Ok(true), "cached: {cached}");
     }
 
     /// The footers of `cell`'s segments in `bucket`, in order.
@@ -3378,7 +3153,9 @@ mod tests {
         assert_eq!(data, pattern(1, BLOCK));
         // Each request of the bucket the read made: its kind, and the request it names.
         let mut made: Vec<(String, String)> = (lines.lock().unwrap().iter())
-            .filter_map(|line| {
+            // cladefs: after the record's time (board 8571).
+            .filter_map(|line| line.split_once(' '))
+            .filter_map(|(_, line)| {
                 line.strip_prefix("DEBUG bucket_cell::object_bucket: object storage: ")
             })
             .map(|line| {
@@ -3564,9 +3341,8 @@ mod tests {
         delete(&dir.path().join("ours")).await;
         delete(&path).await;
         source.drop_versions(&[version].into()).await.unwrap();
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         for holder in 1..=2 {
-            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder);
             futures::executor::block_on(pass).unwrap();
         }
         // What this process cached of the extents goes: the fork reads them from the bucket.
@@ -3580,10 +3356,9 @@ mod tests {
 
     /// TASK-411.4: `points_fork_into_other_tenants_cells_while_shared`, both tenants' KEKs in the
     /// host's KMS: the version's fork into the other tenant's cell keeps the DEK it inherits
-    /// rewrapped under its own cell's KEK. The version dropped, the collector run (compacting
-    /// nothing: compaction of encrypted objects is TASK-411.6's), and the version's tenant's KEK
-    /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
-    /// no more.
+    /// rewrapped under its own cell's KEK. The version dropped, the collector run, and the
+    /// version's tenant's KEK destroyed, the host told so: the clone still reads all it inherited,
+    /// and the source forks no more.
     #[tokio::test(flavor = "multi_thread")]
     async fn encrypted_versions_fork_into_other_tenants_cells_while_shared() {
         let keys = tempfile::tempdir().unwrap();
@@ -3627,9 +3402,8 @@ mod tests {
         delete(&dir.path().join("ours")).await;
         delete(&path).await;
         source.drop_versions(&[version].into()).await.unwrap();
-        let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
         for holder in 1..=2 {
-            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder);
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();

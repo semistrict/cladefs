@@ -16,7 +16,7 @@
 //!
 //! N defaults to 0 1 4 16 64 256 (`bucket_cell::layout::MAX_VERSIONS`).
 
-use bucket_cell::collector::{Collector, Options};
+use bucket_cell::collector::Collector;
 use bucket_cell::keys::CachingKms;
 use bucket_cell::layout::{CellId, NewVersion};
 use bucket_cell::object_bucket::{ObjectBucket, Request, Stats};
@@ -58,7 +58,7 @@ fn main() {
 fn bench(versions: usize) {
     let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
     let segments = block_on(fill(&bucket, versions));
-    let collector = Collector::new(Options { compact_below: 0.0, grace: 3_600_000 });
+    let collector = Collector::new();
     let mut took = Vec::with_capacity(PASSES);
     let mut stats = None;
     for _ in 0..PASSES {

@@ -14,8 +14,8 @@
 //! SEGMENTS segments and a checkpoint covering them all: SEGMENTS + 5 objects a cell, but the first
 //! cell of tenant 1, the largest, whose cell has LARGEST segments (SEGMENTS by default). Each
 //! segment holds four extents of 1 KiB, and the next frees three of them, every other one all
-//! four: so a pass deletes about half of each cell's segments, those freed whole, and compacts
-//! the rest, a quarter live, once it compacts what is less than half live.
+//! four: so a pass deletes about half of each cell's segments, those freed whole, and keeps the
+//! rest, a quarter live, which writers would relocate out of (doc-27; the fill has none).
 //!
 //! With `--vm`, the largest cell is a running VM's, snapshotted many times (TASK-395.12): each of
 //! its segments seals EXTENTS extents of 16 to 112 bytes and frees none, a disk filling, its checkpoints
@@ -42,7 +42,7 @@
 //! a thread; a sandbox's memory starting from its base's objects, which it reads.
 //! Encrypted, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process chooses
 //! it (`bucket_cell::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR given
-//! `CLADEFS_MASTER_KEY`), which the collector compacts it under; none chosen, it refuses to start.
+//! `CLADEFS_MASTER_KEY`); none chosen, it refuses to start.
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share.
 
@@ -465,7 +465,6 @@ fn version_at(shape: Shape, n: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bucket_cell::collector::Options;
     use bucket_cell::layout::{self, Kind as Key};
     use bucket_cell::object_bucket::Request;
     use bucket_cell::sweep::{Mode, Sweep, Swept};
@@ -527,15 +526,8 @@ mod tests {
 
     /// A sweep of every cell of `bucket`, a pass at a time, deleting what is free at once.
     fn sweep(bucket: &Arc<ObjectBucket>) -> Swept {
-        let sweep = Sweep {
-            options: Options { compact_below: 0.5, grace: 0 },
-            mode: Mode::Delete,
-            at_once: 1,
-            lease: 600_000,
-            slowest: 0,
-            spawned: false,
-            kms: Some(known()),
-        };
+        let sweep =
+            Sweep { mode: Mode::Delete, at_once: 1, lease: 600_000, slowest: 0, spawned: false };
         futures::executor::block_on(sweep.run(bucket, |_| {}))
     }
 
@@ -598,9 +590,8 @@ mod tests {
         let base = CellId { tenant: 1, id: 1 };
         let of_base = |bucket: &ObjectBucket| {
             let keys = keys(bucket, &base.prefix());
-            let count = |kind: fn(&Key<'_>) -> bool| {
-                keys.iter().filter(|key| kind(&layout::kind(key))).count()
-            };
+            let count =
+                |kind: fn(&Key) -> bool| keys.iter().filter(|key| kind(&layout::kind(key))).count();
             [
                 count(|kind| matches!(kind, Key::Reference { .. })),
                 count(|kind| matches!(kind, Key::Retired { .. })),

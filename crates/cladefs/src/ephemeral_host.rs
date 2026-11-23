@@ -472,6 +472,7 @@ fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Error> {
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     let mut lines = bytes.splitn(2, |&byte| byte == b'\n');
     let found = lines.next().unwrap_or_default();
+    // Not UTF-8, or no number: no version, refused below, naming what was found.
     let version = std::str::from_utf8(found)
         .ok()
         .and_then(|line| line.strip_prefix(HEADER))

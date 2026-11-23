@@ -135,6 +135,20 @@ pub fn start(config: &Config, _: String) -> Result<(), Error> {
     )))
 }
 
+/// cladefs: what the daemon's mount of cells holds and did, for its metrics (board 8565): its cells
+/// attached, those being detached, and its server's counts; nothing, all 0, without a mount, or
+/// once it closed, as under madsim, where a simulated host mounts none.
+pub(super) fn counts() -> (usize, usize, crate::fuse::Counts) {
+    #[cfg(not(madsim))]
+    if let Some((mount, _)) = MOUNT.lock().unwrap().as_ref() {
+        let server = mount.server();
+        let attached = server.attached();
+        let detaching = attached.iter().filter(|cell| cell.detaching).count();
+        return (attached.len() - detaching, detaching, server.counts());
+    }
+    (0, 0, crate::fuse::Counts::default())
+}
+
 /// Whether the daemon mounted its cells and has not closed them, as [`close`] does, or failed to:
 /// what a drain past its bound left.
 pub(super) fn left() -> bool {

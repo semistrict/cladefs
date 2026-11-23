@@ -36,7 +36,7 @@
 
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
 use crate::bucket::{PutMode, Refused, Version};
-use crate::collector::{Budget, Collector, Heard, Holding, Marking, Options, Report};
+use crate::collector::{Budget, Collector, Holding, Marking, Report};
 use crate::layout::CellId;
 use crate::object_bucket::Request;
 use crate::{Error, Left};
@@ -51,15 +51,13 @@ use std::time::{Duration, Instant};
 pub enum Mode {
     /// Delete it ([`Collector::collect_cell`]).
     Delete,
-    /// Mark it, deleting nothing, compacting as a pass that deletes does
-    /// ([`Collector::mark_cell`], TASK-264).
+    /// Mark it, deleting nothing ([`Collector::mark_cell`], TASK-264).
     MarkOnly,
 }
 
 /// A sweep over every cell of a bucket. See the module docs.
 #[derive(Clone)]
 pub struct Sweep {
-    pub options: Options,
     pub mode: Mode,
     /// How many passes it runs at once, each over a cell of its own: at least 1.
     pub at_once: usize,
@@ -74,10 +72,6 @@ pub struct Sweep {
     /// or all of them the sweep's own task's, one at a time between their requests (tests, a
     /// runtime of one thread).
     pub spawned: bool,
-    /// cladefs: the KMS its passes unwrap their cells' KEKs through to compact what is encrypted,
-    /// if any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not
-    /// to be had at a pass before is now ([`Heard`], TASK-411.13).
-    pub kms: Option<extent_keys::kms::Shared>,
 }
 
 /// cladefs: what bounds a sweep besides its passes at once (boards 8529, 8513): nothing, by
@@ -310,8 +304,7 @@ pub struct Swept {
     /// cladefs: why it stopped before it went over every cell, if it did (boards 8509, 8529,
     /// 8513).
     pub stopped: Option<Stopped>,
-    /// What the passes that went through did: what mark-only passes compacted, which deleted
-    /// nothing.
+    /// What the passes that went through did: mark-only passes deleted nothing.
     pub report: Report,
     /// What mark-only passes marked, and its bytes, as listed; and what they found resurrected,
     /// each a bug, warned of ([`Marking::resurrected`]).
@@ -462,9 +455,6 @@ impl Sweep {
         // What another pass did after this, it leaves be: by the backend's clock, as every pass
         // ends by it (board 8471).
         let since = bucket.now();
-        // cladefs: what its passes hear of their tenants' KEKs, the KMS asked once a tenant
-        // (TASK-411.13).
-        let heard = Heard::new();
         let mut swept = Swept::default();
         // cladefs: the listing refused, the sweep ends there, failed, saying why (board 5861).
         let refused = std::sync::Mutex::new(None);
@@ -493,12 +483,12 @@ impl Sweep {
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
-            let (sweep, bucket, heard) = (self.clone(), bucket.clone(), heard.clone());
+            let (sweep, bucket) = (self.clone(), bucket.clone());
             let copies = copies.clone();
             let (budget, pacer) = (bounds.budget.clone(), bounds.pacer.clone());
             let pass = async move {
                 let bounded = (budget, pacer);
-                sweep.pass(&bucket, copies, cell, since, heard, bounded).await
+                sweep.pass(&bucket, copies, cell, since, bounded).await
             };
             match self.spawned {
                 false => pass.boxed(),
@@ -542,16 +532,15 @@ impl Sweep {
         swept
     }
 
-    /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own, hearing of
-    /// its tenant's KEK by `heard`, the sweep's; deleting no more than its `budget` gives, and
-    /// making its requests in their turns, as its `pacer` gives them, if given (board 8529).
+    /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own, deleting no
+    /// more than its `budget` gives, and making its requests in their turns, as its `pacer` gives
+    /// them, if given (board 8529).
     async fn pass<B: Bucket, O: Bucket>(
         &self,
         bucket: &Arc<B>,
         copies: Option<(Arc<O>, u16)>,
         cell: CellId,
         since: u64,
-        heard: Arc<Heard>,
         (budget, pacer): (Option<Arc<Budget>>, Option<Arc<Pacer>>),
     ) -> Ran {
         let counted = Counted::new(bucket.clone(), pacer.clone());
@@ -560,7 +549,7 @@ impl Sweep {
             && crate::layout::routed_to(&cell.prefix()).is_some_and(|of| of != number)
         {
             let started = Instant::now();
-            let collector = Collector::new(self.options).budget(budget);
+            let collector = Collector::new().budget(budget);
             // Its requests of its own bucket, counted and paced as those of this one.
             let own = Counted::new(own, pacer);
             let outcome = match self.mode {
@@ -568,7 +557,7 @@ impl Sweep {
                     Ok(report) => Outcome::Collected(report),
                     Err(error) => Outcome::failed(error),
                 },
-                // A mark-only pass marks nothing of a copy, which nothing compacts.
+                // A mark-only pass marks nothing of a copy.
                 Mode::MarkOnly => Outcome::Collected(Report::default()),
             };
             let mut requests = counted.requests();
@@ -576,8 +565,7 @@ impl Sweep {
             return Ran { cell, outcome, requests, took: started.elapsed() };
         }
         let holding = Holding { lease: self.lease, since: Some(since) };
-        let collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
-        let mut collector = collector.heard(heard).budget(budget);
+        let collector = Collector::new().holding(holding).budget(budget);
         let holder = rand::random();
         let started = Instant::now();
         let outcome = match self.mode {
@@ -771,7 +759,6 @@ mod tests {
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::{self, CellId};
     use crate::object_bucket::ObjectBucket;
-    use crate::passed::Passed;
     use crate::testing::{Direct, Fault, SimBucket};
     use crate::{Writer, lifecycle};
     use futures::executor::block_on;
@@ -780,9 +767,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::task::{Context, Poll};
     use storage_device::ExtentId;
-
-    /// Deletes at once what goes, compacting nothing.
-    const NOW: Options = Options { compact_below: 0.0, grace: 0 };
 
     /// A minute: longer than any pass of these tests.
     const LEASE: u64 = 60_000;
@@ -795,26 +779,17 @@ mod tests {
     }
 
     /// Fills each of `cells` of `bucket` with a cell whose checkpoint covers what a pass deletes:
-    /// two segments, one holding what the other freed, beside the fence it keeps; and, if
-    /// `compacted`, a segment holding a small extent live and a large one freed, which a pass
-    /// compacting what is less than half live compacts.
-    async fn fill<B: Bucket>(bucket: &Arc<B>, cells: &[CellId], compacted: bool) {
+    /// two segments, one holding what the other freed, beside the fence it keeps.
+    async fn fill<B: Bucket>(bucket: &Arc<B>, cells: &[CellId]) {
         for &cell in cells {
             lifecycle::create(&**bucket, cell, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), cell, 10, 1).await.unwrap();
             let first = writer.chain().next_sequence();
-            let (dead, small, large) =
-                (ExtentId::new(1, first), ExtentId::new(1, first + 1), ExtentId::new(1, first + 2));
-            let mut commits = vec![
+            let dead = ExtentId::new(1, first);
+            let commits = [
                 Commit { tag: 1, extents: vec![(dead, vec![7; 4096])], ..Commit::default() },
                 Commit { tag: 2, frees: vec![dead], ..Commit::default() },
             ];
-            if compacted {
-                let large_bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
-                let extents = vec![(small, b"small".to_vec()), (large, large_bytes)];
-                commits.push(Commit { tag: 3, extents, ..Commit::default() });
-                commits.push(Commit { tag: 4, frees: vec![large], ..Commit::default() });
-            }
             for commit in commits {
                 let framed = SegmentBuilder::from(commit)
                     .close(&mut writer.chain())
@@ -881,15 +856,7 @@ mod tests {
     }
 
     fn sweep(at_once: usize) -> Sweep {
-        Sweep {
-            options: NOW,
-            mode: Mode::Delete,
-            at_once,
-            lease: LEASE,
-            slowest: 3,
-            spawned: false,
-            kms: Some(crate::keys::testing::kms()),
-        }
+        Sweep { mode: Mode::Delete, at_once, lease: LEASE, slowest: 3, spawned: false }
     }
 
     /// Two processes sweeping one bucket at once split its cells: each cell passed over once, by
@@ -900,7 +867,7 @@ mod tests {
         let cells = cells(24);
         for seed in 0..8 {
             let bucket = SimBucket::new();
-            block_on(fill(&Arc::new(Direct(bucket.clone())), &cells, false));
+            block_on(fill(&Arc::new(Direct(bucket.clone())), &cells));
             let passes = RefCell::new(Vec::new());
             let swept = served_at_random(
                 &bucket,
@@ -934,7 +901,7 @@ mod tests {
     fn sweeps_run_so_many_passes_at_once() {
         for at_once in [1, 4] {
             let bucket = SimBucket::new();
-            block_on(fill(&Arc::new(Direct(bucket.clone())), &cells(20), false));
+            block_on(fill(&Arc::new(Direct(bucket.clone())), &cells(20)));
             let sweeping = sweep(at_once);
             let mut future = std::pin::pin!(sweeping.run(&bucket, |_| {}));
             let mut context = Context::from_waker(futures::task::noop_waker_ref());
@@ -1122,7 +1089,7 @@ mod tests {
                 }
             };
             let bucket = Arc::new(Noting { bucket: memory.clone(), note });
-            runtime.block_on(fill(&memory, &cells, false));
+            runtime.block_on(fill(&memory, &cells));
             let sweep = Sweep { spawned, ..sweep(4) };
             let swept =
                 runtime.block_on(runtime.spawn(async move { sweep.run(&bucket, |_| {}).await }));
@@ -1149,7 +1116,7 @@ mod tests {
         let cells = cells(12);
         let sim = SimBucket::new();
         let bucket = Arc::new(Direct(sim.clone()));
-        block_on(fill(&bucket, &cells, false));
+        block_on(fill(&bucket, &cells));
         let before = block_on(sizes(&*bucket));
         // Its passes, three at once, each stuck deleting: then it is gone.
         let gone = Arc::new(Gone(Direct(sim.clone())));
@@ -1178,7 +1145,7 @@ mod tests {
     }
 
     /// A sweep reports what its passes did as the bucket counts it: the objects gone and their
-    /// bytes, the moves written and the bytes of what they are of, and every request of each kind
+    /// bytes, and every request of each kind
     /// the bucket made, its passes' and its listings' of the cells; each pass's adding up to the
     /// whole; and its slowest passes, slowest first.
     #[test]
@@ -1189,11 +1156,10 @@ mod tests {
         // Formatted, as a host's bucket is: its head slots read once (board 5534).
         let (details, asked) = Default::default();
         block_on(crate::identity::format(&*bucket, &details, asked)).unwrap();
-        block_on(fill(&bucket, &cells, true));
+        block_on(fill(&bucket, &cells));
         let before = block_on(sizes(&*bucket));
         let counted = bucket.stats();
-        let compacting = Options { compact_below: 0.5, grace: 0 };
-        let sweep = Sweep { options: compacting, at_once: 4, ..sweep(1) };
+        let sweep = Sweep { at_once: 4, ..sweep(1) };
         let mut passes = Vec::new();
         let swept = block_on(sweep.run(&bucket, |passed| passes.push(passed.clone())));
         let stats = bucket.stats();
@@ -1201,27 +1167,16 @@ mod tests {
 
         let gone: Vec<(&String, &u64)> =
             before.iter().filter(|(key, _)| !after.contains_key(*key)).collect();
-        let moves: Vec<&String> = (after.keys())
-            .filter(|key| matches!(layout::kind(key), layout::Kind::Moves { .. }))
-            .filter(|key| !before.contains_key(*key))
-            .collect();
-        let compacted_bytes: u64 =
-            moves.iter().map(|key| before[&layout::moved_from(key).unwrap()]).sum();
         let expected = Report {
             deleted: gone.len(),
-            compacted: moves.len(),
             retired: 0,
             deleted_bytes: gone.iter().map(|(_, size)| **size).sum(),
-            compacted_bytes,
             skipped: 0,
-            locked: 0,
-            uncompacted: 0,
             removed: 0,
         };
         assert_eq!(swept.report, expected);
-        // Of each cell: the segment holding what the next freed, that one, and the one freeing
-        // what the one before it holds mostly, compacted.
-        assert_eq!((expected.deleted, expected.compacted), (30, 10));
+        // Of each cell: the segment holding what the next freed, and that one.
+        assert_eq!(expected.deleted, 20);
         assert_eq!((swept.visited, swept.held, swept.swept, swept.failed), (10, 0, 0, 0));
         let mut made = Requests::default();
         for request in Request::ALL {
@@ -1257,7 +1212,7 @@ mod tests {
         let sim = SimBucket::new();
         let bucket = Arc::new(Direct(sim.clone()));
         let cell = cells(1)[0];
-        block_on(fill(&bucket, &[cell], false));
+        block_on(fill(&bucket, &[cell]));
         // Who holds the lease, at what epoch, until when, and when the last pass to go through
         // ended.
         let lease = |bucket: &Direct| {
@@ -1266,16 +1221,13 @@ mod tests {
         };
         let holding = |lease, since| Holding { lease, since };
         let pass = |holding: Holding, holder| {
-            let mut collector =
-                Collector::new(NOW).kms(Some(crate::keys::testing::kms())).holding(holding);
+            let collector = Collector::new().holding(holding);
             block_on(collector.collect_cell(&*bucket, cell, holder))
         };
         sim.advance(10);
         // Gone mid-pass: its lease held till 10 + LEASE.
         let gone = Arc::new(Gone(Direct(sim.clone())));
-        let mut collector = Collector::new(NOW)
-            .kms(Some(crate::keys::testing::kms()))
-            .holding(holding(LEASE, None));
+        let collector = Collector::new().holding(holding(LEASE, None));
         stalled(collector.collect_cell(&*gone, cell, 0x51));
         let held = (1, 0x51, 10 + LEASE, 0);
         assert_eq!(lease(&bucket), held);
@@ -1372,14 +1324,13 @@ mod tests {
     /// what holds and lets go of the lease is outside the listing's digest. A skipping pass is a
     /// look: the lease's read (a GET) and one LIST, writing nothing (TASK-455), so that a sweep
     /// begun before it, after the pass in full, looks too. A write to the
-    /// cell makes the next pass, either process's, go in full, and the other's skip after it. A
-    /// process of other options decides anew, as does the next of the first's after it.
+    /// cell makes the next pass, either process's, go in full, and the other's skip after it.
     #[test]
     fn processes_by_turns_skip_an_idle_cell_by_each_others_records() {
         let sim = SimBucket::new();
         let bucket = Arc::new(Direct(sim.clone()));
         let cell = cells(1)[0];
-        block_on(fill(&bucket, &[cell], false));
+        block_on(fill(&bucket, &[cell]));
         let recorded = || block_on(crate::passed::read(&*bucket, cell)).unwrap().unwrap().passed;
         let (first, second) = (sweep(1), sweep(1));
         let run = |process: &Sweep| {
@@ -1405,9 +1356,7 @@ mod tests {
         // A sweep that began before the last look, after the pass in full, looks too: a look
         // records nothing, ending nothing (TASK-455).
         let began = bucket.now() - 1;
-        let mut late = Collector::new(NOW)
-            .kms(Some(crate::keys::testing::kms()))
-            .holding(Holding { lease: LEASE, since: Some(began) });
+        let late = Collector::new().holding(Holding { lease: LEASE, since: Some(began) });
         assert_eq!(block_on(late.collect_cell(&*bucket, cell, 0x77)), Ok(skipped));
 
         // A reference written in the cell: the next pass, either's, goes over it in full.
@@ -1418,16 +1367,7 @@ mod tests {
         let rewritten = recorded().unwrap();
         assert_ne!(rewritten.listing, settled.listing);
         assert_eq!(run(&second).report, skipped);
-        assert_eq!(recorded(), Some(rewritten.clone()));
-
-        // A process of other options goes over it in full, and records; the first's, after it,
-        // too, by its own; then the other skips by that.
-        let other = Sweep { options: Options { compact_below: 0.5, grace: 0 }, ..sweep(1) };
-        assert_eq!(run(&other).report, Report::default());
-        assert_eq!(run(&first).report, Report::default());
-        let decided = |passed: Passed| (passed.listing, passed.decided);
-        assert_eq!(recorded().map(decided), Some(decided(rewritten)));
-        assert_eq!(run(&second).report, skipped);
+        assert_eq!(recorded(), Some(rewritten));
     }
 
     /// A bucket that refuses every request but listings by delimiter, as one whose credentials
@@ -1515,7 +1455,7 @@ mod tests {
         ];
         for (limits, visited, deleted) in cases {
             let bucket = Arc::new(Direct(SimBucket::new()));
-            block_on(fill(&bucket, &cells, false));
+            block_on(fill(&bucket, &cells));
             // The cells' objects, their leases, the collector's, aside.
             let objects = || {
                 let lease = |key: &&String| {
@@ -1542,7 +1482,7 @@ mod tests {
     fn sweeps_stop_after_passes_in_a_row_refused() {
         let cells = cells(12);
         let direct = Direct(SimBucket::new());
-        block_on(fill(&Arc::new(Direct(direct.0.clone())), &cells, false));
+        block_on(fill(&Arc::new(Direct(direct.0.clone())), &cells));
         let bucket = Arc::new(Refusing(direct));
         let limits = Limits { refused_in_a_row: Some(3), ..Limits::default() };
         let own = None::<&Arc<Refusing>>;
@@ -1560,7 +1500,7 @@ mod tests {
     #[test]
     fn sweeps_fail_on_their_buckets_identity_unread() {
         let bucket = Arc::new(Direct(SimBucket::new()));
-        block_on(fill(&bucket, &cells(2), false));
+        block_on(fill(&bucket, &cells(2)));
         let own = Arc::new(Refusing(Direct(SimBucket::new())));
         let swept = block_on(sweep(1).run_with_own(&bucket, Some(&own), |_| {}));
         assert_eq!((swept.visited, swept.failed), (0, 0));
@@ -1576,7 +1516,7 @@ mod tests {
     #[test]
     fn sweeps_asked_to_stop_start_no_more_passes() {
         let bucket = Arc::new(Direct(SimBucket::new()));
-        block_on(fill(&bucket, &cells(6), false));
+        block_on(fill(&bucket, &cells(6)));
         let stop = Arc::new(Stop::default());
         let limits = Limits { stop: Some(stop.clone()), ..Limits::default() };
         let run = |observe: &dyn Fn(&Ran)| {
@@ -1601,7 +1541,7 @@ mod tests {
             .unwrap();
         let memory =
             Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
-        runtime.block_on(fill(&memory, &cells(4), false));
+        runtime.block_on(fill(&memory, &cells(4)));
         let made: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>> = Arc::default();
         let noted = made.clone();
         let note = move |_: &str| noted.lock().unwrap().push(tokio::time::Instant::now());

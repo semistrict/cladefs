@@ -5,8 +5,12 @@
 // What the extent daemons of hosts sharing a bucket serve each other (TASK-406.2): parts of the
 // bucket's objects, each owned by one of them, which a host asks its owner for before the bucket,
 // so that a part many hosts read comes from the bucket about once for them all. Served over TCP at
-// each daemon's CLADEFSD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
-// every host can read the whole bucket already. A part is asked for by its object's key and its
+// each daemon's CLADEFSD_PEER_ADDRESS, the service and its clients authenticating each other by
+// mutual TLS, each certificate the hosts' CA's, for cladefs-peer (CLADEFSD_PEER_TLS, board 8437):
+// no call of an unauthenticated peer's is served, GetPart's neither, each a fetch from the bucket
+// this host makes for it. A host holds so many connections of a peer, so many streams on each, and
+// each call's messages to what it needs (OUT_OF_RANGE past it). A refusal names nothing of this
+// host's bucket. A part is asked for by its object's key and its
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
 // the bucket on any failure.
@@ -84,7 +88,8 @@ type PeerClient interface {
 	// the end answered. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of
 	// a later epoch fenced the cell (its promise said), or a segment's log is not of this host's log
 	// format (board 8457); RESOURCE_EXHAUSTED past the bytes, or the logs, a member holds for a
-	// configuration. Messages are 64 MiB at most.
+	// configuration, past the configurations it holds of a cell, or past what the disk governor
+	// admits (board 8451). Messages are a writer's piece of a log, 4 MiB, and 64 KiB more, at most.
 	Append(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AppendRequest, AppendResponse], error)
 	// A take fences the cell at its epoch, durably, before this answers: appends of older epochs
 	// refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
@@ -112,7 +117,9 @@ type PeerClient interface {
 	// (ABORTED); one it takes it gives up for a newer (supersedes), unless that one goes to another
 	// path (FAILED_PRECONDITION). UNAVAILABLE if its bucket calls timed out, what it noted undone.
 	MigratePrepare(ctx context.Context, in *MigratePrepareRequest, opts ...grpc.CallOption) (*MigratePrepareResponse, error)
-	// A piece of a file of the cell being migrated, or its holes.
+	// A piece of a file of the cell being migrated, or its holes: 4 MiB of it, and 12 MiB of holes,
+	// at most. What it adds to the disk admitted by the disk governor first (RESOURCE_EXHAUSTED if
+	// there is no room, board 8451), its length, holes and all, among it.
 	MigrateFile(ctx context.Context, in *MigrateFileRequest, opts ...grpc.CallOption) (*MigrateFileResponse, error)
 	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed), and the
 	// cell they make opens as the cell prepared, of this build's format, its origin and bucket the
@@ -293,7 +300,8 @@ type PeerServer interface {
 	// the end answered. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of
 	// a later epoch fenced the cell (its promise said), or a segment's log is not of this host's log
 	// format (board 8457); RESOURCE_EXHAUSTED past the bytes, or the logs, a member holds for a
-	// configuration. Messages are 64 MiB at most.
+	// configuration, past the configurations it holds of a cell, or past what the disk governor
+	// admits (board 8451). Messages are a writer's piece of a log, 4 MiB, and 64 KiB more, at most.
 	Append(grpc.BidiStreamingServer[AppendRequest, AppendResponse]) error
 	// A take fences the cell at its epoch, durably, before this answers: appends of older epochs
 	// refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
@@ -321,7 +329,9 @@ type PeerServer interface {
 	// (ABORTED); one it takes it gives up for a newer (supersedes), unless that one goes to another
 	// path (FAILED_PRECONDITION). UNAVAILABLE if its bucket calls timed out, what it noted undone.
 	MigratePrepare(context.Context, *MigratePrepareRequest) (*MigratePrepareResponse, error)
-	// A piece of a file of the cell being migrated, or its holes.
+	// A piece of a file of the cell being migrated, or its holes: 4 MiB of it, and 12 MiB of holes,
+	// at most. What it adds to the disk admitted by the disk governor first (RESOURCE_EXHAUSTED if
+	// there is no room, board 8451), its length, holes and all, among it.
 	MigrateFile(context.Context, *MigrateFileRequest) (*MigrateFileResponse, error)
 	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed), and the
 	// cell they make opens as the cell prepared, of this build's format, its origin and bucket the

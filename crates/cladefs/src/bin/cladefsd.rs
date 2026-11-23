@@ -47,7 +47,11 @@
 //! (`grpc.health.v1.Health`, TASK-48): SERVING while the daemon accepts VM processes, NOT_SERVING
 //! as it starts and as it stops.
 //!
-//! SIGTERM drains it, and it exits (`cladefs::cladefsd::drain`, TASK-141.4): once the health
+//! SIGTERM drains it, and it exits (`cladefs::cladefsd::drain`, TASK-141.4); cladefs: and so do
+//! SIGINT, as Ctrl-C in its terminal sends, and SIGHUP, as its terminal or ssh session closing
+//! does, which ended it at once before, a crash for every cell (board 8567; hotbed question
+//! 502). A second signal, its drain under way, changes nothing: SIGKILL ends it at once.
+//! Once the health
 //! service reports NOT_SERVING, it takes no more VM processes nor control calls (`UNAVAILABLE`),
 //! closes every VM process's connection, whose VM goes as at the daemon's exit, and closes their
 //! cells, durable, and the rest it has open, and waits for their uploads: within `CLADEFSD_DRAIN`
@@ -71,9 +75,12 @@
 //!
 //! With `CLADEFSD_METRICS` naming an address (`HOST:PORT`), the daemon serves its metrics
 //! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::cladefsd::metrics`,
-//! TASK-47); cladefs: and its z-pages under `/z/`, its spans by latency and CPU profiles
-//! (`cladefs::cladefsd::zpages`, TASK-672): an address to bind to localhost, or a network only
-//! operators reach.
+//! TASK-47); cladefs: and its z-pages under `/z/`, its spans by latency, CPU profiles and what it
+//! logs, which `POST /z/log?level=LEVELS` changes while it runs (`cladefs::cladefsd::zpages`,
+//! TASK-672, board 8571): an address to bind to localhost, or a network only operators reach.
+//! `CLADEFSD_ZPAGES` serves the z-pages elsewhere: `off`, nowhere; an address, there alone, the
+//! metrics' address serving `/metrics` alone, for a scraper that may not profile the daemon nor
+//! change its log (board 8559).
 //!
 //! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
 //! `az://container/prefix`) each cell it opens keeps its cell in (backlog doc-7), with credentials
@@ -98,8 +105,12 @@
 //! owns a part, by rendezvous hashing over them, before the bucket (TASK-406.2): a part many hosts
 //! read comes from the bucket about once for them all. `CLADEFSD_PEERS` names them at start,
 //! comma-separated, each spelled as it names itself; the control API's `SetPeers` replaces them.
-//! The network is trusted: peers are unauthenticated, as every host reads the whole bucket anyway,
-//! and what a peer gives is checked against the CRCs of the asker's own tail of the object; on any
+//! cladefs: peers authenticate each other by mutual TLS (board 8437): `CLADEFSD_PEER_TLS` names a
+//! directory of the hosts' credentials, `ca.crt` (the hosts' CA), `peer.crt` and `peer.key` (this
+//! host's certificate, for `cladefs-peer`, and its key, PEM), without which a daemon serving peers
+//! refuses to start; every call, served or made, is of a peer whose certificate the CA signed. A
+//! replication call is admitted only if its cell's head in the bucket could have asked it (board
+//! 8445). What a peer gives is checked against the CRCs of the asker's own tail of the object; on any
 //! failure a part comes from the bucket, and the peer is asked nothing for 30 seconds. cladefs:
 //! peers are of one cloud region (TASK-633.4, backlog doc-23): a host's region is its home
 //! bucket, and a peer refuses one of another region, or another system of buckets, which then
@@ -133,9 +144,11 @@
 //! to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names, OpenTelemetry's variables configuring
 //! them (`cladefs::cladefsd::otel`, TASK-258; `docs/tracing.md`): off otherwise.
 //!
-//! It logs to standard error, a line a record (`cladefs::cladefsd::logging`): text by default, or,
-//! with `CLADEFS_LOG_FORMAT=json`, a JSON object a line, of the record's `timestamp`, `level`,
-//! `target`, `message` and key-values (TASK-259). `CLADEFS_LOG_LEVEL` says how much, `info` by
+//! It logs to standard error, a line a record (`cladefs::cladefsd::logging`): text by default, its
+//! time first and its control characters escaped (board 8571), or, with `CLADEFS_LOG_FORMAT=json`,
+//! a JSON object a line, of the record's `timestamp`, `level`, `target`, `message` and key-values
+//! (TASK-259), and its span's `trace_id` and `span_id`. SIGQUIT logs its threads' stacks
+//! (`cladefs::stacks`). `CLADEFS_LOG_LEVEL` says how much, `info` by
 //! default, by target too: `info,bucket_cell::object_bucket=debug` logs each request of object
 //! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
 //! its `store` (TASK-260).
@@ -157,10 +170,10 @@ fn main() -> anyhow::Result<()> {
     // cladefs: before any thread is started, which SIGQUIT would end otherwise (TASK-44.13).
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
     let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
-    drain_on_sigterm(drain).context("handling SIGTERM")?;
+    drain_on_signals(drain).context("handling SIGTERM, SIGINT and SIGHUP")?;
     // cladefs: its spans, recorded for /z/tracez (TASK-672.1), and over OTLP too, or not made at
-    // all, as CLADEFSD_TRACES says (TASK-258, TASK-707): its exporter's threads made after SIGTERM
-    // is blocked, as every thread but the drain's.
+    // all, as CLADEFSD_TRACES says (TASK-258, TASK-707): its exporter's threads made after the
+    // signals that drain it are blocked, as every thread but the drain's.
     use cladefs::cladefsd::otel::Tracing;
     match cladefs::cladefsd::otel::from_env().map_err(anyhow::Error::msg)? {
         Tracing::Off => log::info!("cladefsd: spans off (CLADEFSD_TRACES=off)"),
@@ -175,30 +188,43 @@ fn main() -> anyhow::Result<()> {
     // cladefs: its boot awaited at its outermost entry, the one place it blocks (doc-24).
     local_cell::upload::wait_on(cladefs::cladefsd::boot(std::path::Path::new(&socket), memory))?;
     // Serving stops only as the daemon drains, whose thread exits the process once it has
-    // (`drain_on_sigterm`): not here, its cells still closing.
+    // (`drain_on_signals`): not here, its cells still closing.
     loop {
         std::thread::park();
     }
 }
 
 /// Drains the daemon on SIGTERM, as an orchestrator stops it, within `bound`, and exits
-/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound. SIGTERM is
-/// blocked in every thread but one, made here first, which waits for it (`cladefs::signals`).
+/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound; cladefs: its last
+/// spans exported within the bound too, as much as it leaves (board 8569). cladefs: on
+/// SIGINT and SIGHUP too, whose default action ended it at once, a crash for every cell (board
+/// 8567). They are blocked in every thread but one, made here first, which waits for them
+/// (`cladefs::signals`), and, once draining, for none again.
 #[cfg(target_os = "linux")]
-fn drain_on_sigterm(bound: std::time::Duration) -> std::io::Result<()> {
-    let sigterm = cladefs::signals::Signals::block(&[libc::SIGTERM])?;
+fn drain_on_signals(bound: std::time::Duration) -> std::io::Result<()> {
+    let signals = cladefs::signals::Signals::block(&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP])?;
     cladefs::signals::spawn_taking_no_signals("cladefsd signal", move || {
         // cladefs: its panic, as its drain's, aborts the daemon, which could drain no more
         // (board 8501).
         let _supervised = cladefs::cladefsd::supervised("cladefsd signal");
-        if let Err(error) = sigterm.wait() {
-            log::error!("cladefsd: waiting for SIGTERM: {error}");
-            return;
-        }
-        log::info!("cladefsd: draining, on SIGTERM, within {}s", bound.as_secs());
+        let signal = match signals.wait() {
+            Ok(signal) => signal,
+            Err(error) => {
+                log::error!("cladefsd: waiting for SIGTERM, SIGINT or SIGHUP: {error}");
+                return;
+            }
+        };
+        let name = match signal {
+            libc::SIGINT => "SIGINT",
+            libc::SIGHUP => "SIGHUP",
+            _ => "SIGTERM",
+        };
+        log::info!("cladefsd: draining, on {name}, within {}s", bound.as_secs());
         let began = std::time::Instant::now();
         let drained = local_cell::upload::wait_on(cladefs::cladefsd::drain::drain(bound));
-        cladefs::cladefsd::otel::shutdown();
+        // cladefs: the last spans exported within what is left of the bound, never past it,
+        // whatever the collector (board 8569).
+        cladefs::cladefsd::otel::shutdown(bound.saturating_sub(began.elapsed()));
         match drained {
             Ok(()) => {
                 log::info!("cladefsd: drained in {:.1?}: every cell closed", began.elapsed());

@@ -6,15 +6,14 @@
 //! kept in the image's own bucket, among passes of the bucket's collector, checked against a model
 //! of their files (TASK-291.4). fxfs-posix's model holds Fxfs to a model on a device of memory,
 //! under which no bucket is: this one holds the images' extents, in their cells and their
-//! bucket, to what their files were written, as the collector compacts and deletes under them.
+//! bucket, to what their files were written, as the collector deletes under them.
 //!
 //! Files are made, written over and past their ends, truncated, removed and synced; images are
 //! forked, and remounted; and the bucket collected, as an operation of the sequence's, a pass
-//! alone with no grace period, and after each commit, as often as passes end, compacting what is
-//! half freed and deleting it at once ([`BUSY`]). Each operation reads back what it changed; a
-//! remount compares every file of the image, and the sequence's end every file of every image,
-//! then again opened anew after passes alone, which leave nothing they should have collected
-//! (TASK-390).
+//! alone, and after each commit, as often as passes end ([`BUSY`]). Each operation reads back what
+//! it changed; a remount compares every file of the image, and the sequence's end every file of
+//! every image, then again opened anew after passes alone, which leave nothing they should have
+//! collected (TASK-390).
 //!
 //! Seeded by proptest, which says the sequence if one fails, shrunk. CLADEFS_COLLECT_MODEL_CASES
 //! asks for more sequences than 4: each takes seconds, in remounts and forks, which wait for the
@@ -40,12 +39,8 @@ const FILES: usize = 4;
 /// How many forks a sequence may make.
 const FORKS: usize = 2;
 
-/// Passes as often as one ends, after commits, compacting what is half freed and deleting it
-/// at once.
-pub(super) const BUSY: Pace = Pace {
-    every: Duration::ZERO,
-    options: bucket_cell::collector::Options { compact_below: 0.5, grace: 0 },
-};
+/// Passes as often as one ends, after commits.
+pub(super) const BUSY: Pace = Pace { every: Duration::ZERO };
 
 /// The files of a filesystem, by their names: what they hold.
 pub(super) type Files = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -111,7 +106,7 @@ enum Op {
     Remount {
         on: usize,
     },
-    /// A pass of the bucket's collector, alone, with no grace period.
+    /// A pass of the bucket's collector, alone.
     Collect,
 }
 

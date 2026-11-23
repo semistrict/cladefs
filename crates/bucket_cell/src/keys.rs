@@ -391,15 +391,12 @@ impl Keys for RingView<'_> {
     }
 }
 
-/// The cell the object at `key` is of, by its key: the moves of an object are of that object's
-/// cell, as the collector encrypts them under the DEK it was encrypted under (TASK-411.6). None
-/// for one of no cell's.
+/// The cell the object at `key` is of, by its key. None for one of no cell's.
 pub fn cell_of(key: &str) -> Option<u64> {
     match layout::kind(key) {
         Key::Segment { cell, .. } | Key::Extent { cell, .. } | Key::Checkpoint { cell, .. } => {
             Some(cell.id)
         }
-        Key::Moves { .. } => cell_of(&layout::moved_from(key)?),
         _ => None,
     }
 }
@@ -851,6 +848,18 @@ impl CachingKms {
         self.takings.lock().unwrap().retain(|(cell, _), _| cell.tenant != tenant);
     }
 
+    /// cladefs: `tenant`'s KEK is named anew in a KMS, its overrides reloaded (board 8487): its pools
+    /// of new cell KEKs, wrapped under the old name, are dropped, of every KMS, a refill going adding
+    /// nothing; and those given out are taken off, as no longer to be given back, so that its next
+    /// cell's KEK is wrapped under the new name. Its cells' KEKs unwrapped stay: the same keys
+    /// whatever their tenant's KEK is named.
+    pub fn renamed(&self, tenant: u64) {
+        let known = self.known();
+        let mut ledger = self.ledger.lock().unwrap();
+        ledger.drop_pools(tenant, known.keys().cloned());
+        ledger.issued.retain(|_, ((_, of), _)| *of != tenant);
+    }
+
     /// Forgets what it holds of `scope`, as a host told so does (TASK-411.7): a tenant's, its KEK
     /// revoked or destroyed, as `why` says ([`CachingKms::revoked`]); a cell's, shredded, its KEKs
     /// unwrapped dropped and refused from then on, whatever object of the cell its asker read
@@ -1271,7 +1280,7 @@ impl CellKeys {
 }
 
 /// The refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its cells
-/// opening no more (`EACCES`), and the collector leaving its encrypted objects uncompacted.
+/// opening no more (`EACCES`).
 pub fn shredded(cell: CellId) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
@@ -1583,17 +1592,6 @@ pub async fn ring(
         }
         ring.take(&CellKeys::of(parent, &found, keys.kms.clone()), parent, &found).await?;
     }
-    Ok(Arc::new(ring))
-}
-
-/// The ring the collector compacts `cell`'s objects under (TASK-411.6): its head's DEKs and those
-/// it keeps of ancestors of other cells ([`Ring::take`]), unwrapped under the generations of
-/// `keys`, the cell's, KEK they name, each unwrapped once ([`CellKeys`] keeps what it unwrapped).
-/// It encrypts nothing of its own: the collector encrypts what it compacts under the key its source
-/// was encrypted under.
-pub async fn compacting(cell: CellId, head: &Head, keys: &CellKeys) -> Result<Arc<Ring>, Error> {
-    let mut ring = Ring::default();
-    ring.take(keys, cell, head).await?;
     Ok(Arc::new(ring))
 }
 
@@ -1971,6 +1969,37 @@ mod tests {
         let taken = runtime.block_on(inheriting(&kms, &source, child));
         assert_eq!(kms.in_pool(2), 0);
         drop(taken);
+    }
+
+    /// board 8487: a tenant's KEK renamed by a reload of the overrides, its pool goes, wrapped under
+    /// the old name, and a KEK given out before goes back to no pool: its next cell's KEK is
+    /// wrapped by the KMS now, under the new name; other tenants' pools stay.
+    #[test]
+    fn pools_go_with_their_tenants_renamed_keks() {
+        let (_dir, counted, _) = kms();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let shared: kms::Shared = counted.clone();
+        let pooling = Pooling { low: 2, batch: 3, handle: runtime.handle().clone() };
+        let kms = CachingKms::pooled(shared, pooling);
+        let (tenant, other) = (TEST_CELL.tenant, CellId { tenant: 2, id: 8 });
+        counted.inner().create(other.tenant).unwrap();
+        for cell in [TEST_CELL, other] {
+            runtime.block_on(kms.new_kek(cell)).unwrap();
+            runtime.block_on(kms.filled(cell.tenant));
+        }
+        let given = runtime.block_on(kms.new_kek(TEST_CELL)).unwrap();
+        assert_eq!((kms.in_pool(tenant), kms.in_pool(other.tenant)), (2, 3));
+        counted.reset();
+
+        kms.renamed(tenant);
+        assert_eq!((kms.in_pool(tenant), kms.in_pool(other.tenant)), (0, 3));
+        kms.give_back(TEST_CELL, given);
+        assert_eq!(kms.in_pool(tenant), 0);
+        // Wrapped now, then its pool refilled: 1 + 3 wraps (pooled, 3 alone, the given back's
+        // taken, or one of the old pool's).
+        runtime.block_on(kms.new_kek(TEST_CELL)).unwrap();
+        runtime.block_on(kms.filled(tenant));
+        assert_eq!((counted.wraps(), kms.in_pool(tenant)), (1 + 3, 3));
     }
 
     /// TASK-633.6: a host's KMSes, a bucket's each: bucket 2's cells under the second, every other

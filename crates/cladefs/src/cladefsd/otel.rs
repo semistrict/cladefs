@@ -21,14 +21,23 @@
 //! spans with it (`parentbased_traceidratio`), `OTEL_TRACES_SAMPLER_ARG`, if given, the ratio:
 //! decided by each trace's ID, as a root's sampler decides. A span of a trace not sampled records
 //! nothing.
+//!
+//! cladefs: exported in batches by a processor of the daemon's ([`batch`]), as OpenTelemetry's
+//! `OTEL_BSP_*` variables configure it, which counts the spans exported, dropped and failed, for the
+//! daemon's metrics (board 8565); over HTTPS if the endpoint says `https://`, rustls's, the
+//! certificates of the host's roots, or of `SSL_CERT_FILE`, trusted (board 8569). Exported or not,
+//! the trace context of the gRPC calls the daemon serves and makes is W3C's (`traceparent`,
+//! `tracestate`, `super::grpc`): a call served goes on its caller's trace.
+
+pub mod batch;
 
 use super::wire::Header;
 use super::zpages::tracez::{Export, Processor};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::{
-    BatchSpanProcessor, Config, Sampler, SdkTracerProvider, ShouldSample,
-};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::{Config, Sampler, SdkTracerProvider, ShouldSample};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// The variable that says what the daemon does with its spans ([`Tracing`]): `otlp`, `off`, or
 /// nothing.
@@ -80,8 +89,9 @@ pub fn from_env() -> Result<Tracing, String> {
                 .with_http()
                 .build()
                 .map_err(|err| format!("making the OTLP exporter: {err}"))?;
+            let processor = batch::Batch::new(exporter, batch::Config::from_env()?, &SPANS)
+                .map_err(|err| format!("starting the OTLP exporter's thread: {err}"))?;
             // Every trace recorded: the sampler chose them.
-            let processor = BatchSpanProcessor::builder(exporter).build();
             Some(Export::new(processor, Box::new(Sampler::AlwaysOn)))
         }
         other => return Err(format!("{OPTION} must be `otlp`, `off` or unset, not `{other}`")),
@@ -105,15 +115,35 @@ pub fn install(sampler: impl Into<Box<dyn ShouldSample>>, export: Option<Export>
         return;
     }
     opentelemetry::global::set_tracer_provider(provider);
+    // cladefs: the trace context of the gRPC calls served and made, W3C's (board 8569).
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     bucket_cell::trace::enable(true);
 }
 
-/// Stops the daemon's spans, and exports those it made and didn't export yet, as it exits.
-pub fn shutdown() {
+/// What the daemon's exporter did with the spans it was given ([`spans`]).
+// The process's counts, as its tracer provider is the process's: every simulated host's spans go
+// to it.
+static SPANS: batch::Counts = batch::Counts::new();
+
+/// cladefs: the spans the daemon exported, dropped and failed to export, so far: all 0 unless it
+/// exports them (board 8565).
+pub fn spans() -> (u64, u64, u64) {
+    SPANS.read()
+}
+
+/// Stops the daemon's spans, and exports those it made and didn't export yet, as it exits:
+/// `within` that at most, what is left of its drain's bound, past which those not exported are
+/// lost, as a collector that never answers would have them (board 8569). Before, the SDK's own
+/// timeouts held the daemon past its drain, which an orchestrator's patience is set by.
+pub fn shutdown(within: Duration) {
     let Some(provider) = PROVIDER.get() else { return };
     bucket_cell::trace::enable(false);
-    if let Err(err) = provider.shutdown() {
-        log::warn!("cladefsd: exporting the last spans: {err}");
+    if within.is_zero() {
+        log::warn!("cladefsd: no time left of the drain to export the last spans");
+        return;
+    }
+    if let Err(err) = provider.shutdown_with_timeout(within) {
+        log::warn!("cladefsd: exporting the last spans within {within:?}: {err}");
     }
 }
 
@@ -212,7 +242,7 @@ mod tests {
         set("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://localhost:4318"));
         assert_eq!(from_env(), Ok(Tracing::Exported));
         assert!(bucket_cell::trace::enabled());
-        shutdown();
+        shutdown(Duration::from_secs(5));
         assert!(!bucket_cell::trace::enabled());
     }
 }

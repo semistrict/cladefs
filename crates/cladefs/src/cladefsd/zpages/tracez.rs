@@ -29,7 +29,8 @@ use opentelemetry_sdk::trace::{SamplingDecision, ShouldSample, Span, SpanData, S
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
+use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
 
 /// The lower bounds of Census's latency buckets: a span is counted in the last whose bound its
@@ -192,15 +193,15 @@ impl Recorder {
 
     /// The counts and samples of spans named `name`, made if none ended yet.
     fn named(&self, name: &Cow<'static, str>) -> Arc<Named> {
-        if let Some(named) = self.names.read().unwrap().get(name) {
+        if let Some(named) = read(&self.names).get(name) {
             return named.clone();
         }
-        self.names.write().unwrap().entry(name.clone()).or_default().clone()
+        write(&self.names).entry(name.clone()).or_default().clone()
     }
 
     /// Holds `running`, which started, as running, in its trace.
     pub fn started(&self, running: Running) {
-        let mut shard = self.shard(running.trace).lock().unwrap();
+        let mut shard = locked(self.shard(running.trace));
         let shard = &mut *shard;
         let open = match shard.open.get_mut(&running.trace) {
             Some(open) => open,
@@ -229,7 +230,7 @@ impl Recorder {
         }
         let trace = span.span_context.trace_id();
         let closed = {
-            let mut shard = self.shard(trace).lock().unwrap();
+            let mut shard = locked(self.shard(trace));
             // One its start was not held of, as its trace was dropped: held alone.
             let open = shard.open.entry(trace).or_default();
             open.running.remove(&span.span_context.span_id());
@@ -256,7 +257,7 @@ impl Recorder {
             let sample = Sample { trace: trace.clone(), at: index };
             let latency = span.end_time.duration_since(span.start_time).unwrap_or_default();
             let named = self.named(&span.name);
-            let mut samples = named.samples.lock().unwrap();
+            let mut samples = locked(&named.samples);
             let push = |kept: &mut VecDeque<Sample>| {
                 kept.push_front(sample.clone());
                 kept.truncate(SAMPLES);
@@ -272,13 +273,13 @@ impl Recorder {
     pub fn counts(&self) -> Vec<Counts> {
         let mut running = HashMap::<String, u64>::new();
         for shard in &self.shards {
-            for open in shard.lock().unwrap().open.values() {
+            for open in locked(shard).open.values() {
                 for span in open.running.values() {
                     *running.entry(span.name.to_string()).or_default() += 1;
                 }
             }
         }
-        let names = self.names.read().unwrap();
+        let names = read(&self.names);
         let mut counts: Vec<Counts> = (names.iter())
             .map(|(name, named)| Counts {
                 name: name.to_string(),
@@ -301,8 +302,8 @@ impl Recorder {
     /// The samples of spans named `name`, the latest first: of `which`, or of every latency bucket,
     /// the slowest first.
     pub fn samples(&self, name: &str, which: Option<Which>) -> Vec<Sample> {
-        let Some(named) = self.names.read().unwrap().get(name).cloned() else { return Vec::new() };
-        let samples = named.samples.lock().unwrap();
+        let Some(named) = read(&self.names).get(name).cloned() else { return Vec::new() };
+        let samples = locked(&named.samples);
         match which {
             Some(Which::Latency(bucket)) => samples
                 .latency
@@ -317,7 +318,7 @@ impl Recorder {
     pub fn running(&self, name: &str) -> Vec<Running> {
         let mut running: Vec<Running> = (self.shards.iter())
             .flat_map(|shard| {
-                let shard = shard.lock().unwrap();
+                let shard = locked(shard);
                 let of = shard.open.values().flat_map(|open| open.running.values());
                 of.filter(|span| span.name == name).cloned().collect::<Vec<_>>()
             })
@@ -411,6 +412,23 @@ impl SpanProcessor for Processor {
             export.processor.set_resource(resource);
         }
     }
+}
+
+/// cladefs: `lock`, taken poisoned too (board 8559): every traced span of every thread takes the
+/// recorder's locks, whose holders leave what they hold whole however they end, so that a panic
+/// while one held one, poisoning it, would have every span after panic too.
+fn locked<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// cladefs: `lock` read, taken poisoned too ([`locked`]).
+fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// cladefs: `lock` written, taken poisoned too ([`locked`]).
+fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

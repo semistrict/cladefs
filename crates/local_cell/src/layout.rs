@@ -363,18 +363,6 @@ pub(crate) enum Data {
     Bucket(Location),
 }
 
-impl Data {
-    /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on
-    /// its way there (`bucket_cell::layout::further`, TASK-195).
-    pub fn follow(&mut self, to: &Location) {
-        if let Data::Bucket(at) = self
-            && bucket_cell::layout::further(&at.key, &to.key)
-        {
-            *at = to.clone();
-        }
-    }
-}
-
 /// An extent: its length, the end of its furthest write, and where its data is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Extent {

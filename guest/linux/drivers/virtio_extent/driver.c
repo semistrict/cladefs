@@ -431,10 +431,19 @@ static bool vext_has(const struct vext_request *req, u32 flag)
 	return !flag || req->flags & flag;
 }
 
+/*
+ * cladefs: the most scatterlists a request has besides its data's pages: its header, arguments,
+ * root and response, a descriptor each (virtio_extent_submit). A queue's ring holds them and
+ * max_segments data pages (vext_check_rings). Before, 3, the root uncounted: a WRITE with its root
+ * over max_segments unaligned pages needed a descriptor more than the ring has, which
+ * virtqueue_add_sgs refused for good, and its writer waited for room that never came (board 10314).
+ */
+#define VEXT_FIXED_SGS 4
+
 int virtio_extent_submit(struct virtio_extent *vext, struct vext_request *req)
 {
 	const struct vext_type *type = vext_type(req);
-	struct scatterlist hdr, args, root, resp, *sgs[5];
+	struct scatterlist hdr, args, root, resp, *sgs[VEXT_FIXED_SGS + 1];
 	unsigned int out_sgs = 0, in_sgs = 0, descs;
 	u32 args_len, data_len, root_len;
 	struct vext_queue *queue;
@@ -696,6 +705,108 @@ module_param_named(max_queues, vext_max_queues, uint, 0444);
 MODULE_PARM_DESC(max_queues, "The most request queues the driver uses, 0 for the device's all");
 
 /*
+ * cladefs: for tests (board 8557): `FIELD=N` has the driver take FIELD of the device's
+ * configuration, or the size of its queues' rings (`ring`), as N, whatever the device says: what a
+ * VMM's bug would offer, which the driver refuses (vext_read_config, vext_check_rings).
+ */
+enum vext_fault_field {
+	VEXT_FAULT_NONE,
+	VEXT_FAULT_BLOCK_SIZE,
+	VEXT_FAULT_MAP_ALIGNMENT,
+	VEXT_FAULT_MAX_TRANSFER,
+	VEXT_FAULT_MAX_SEGMENTS,
+	VEXT_FAULT_RING,
+};
+
+static const char *const vext_fault_fields[] = {
+	[VEXT_FAULT_BLOCK_SIZE] = "block_size",
+	[VEXT_FAULT_MAP_ALIGNMENT] = "map_alignment",
+	[VEXT_FAULT_MAX_TRANSFER] = "max_transfer",
+	[VEXT_FAULT_MAX_SEGMENTS] = "max_segments",
+	[VEXT_FAULT_RING] = "ring",
+};
+
+static struct {
+	enum vext_fault_field field;
+	u32 value;
+} vext_config_fault;
+
+/* `FIELD=N`, FIELD one of vext_fault_fields: anything else is refused, as a typo would be. */
+static int vext_config_fault_set(const char *val, const struct kernel_param *kp)
+{
+	const char *equals = strchr(val, '=');
+	enum vext_fault_field field;
+	size_t len;
+	u32 value;
+	int err;
+
+	if (!equals)
+		return -EINVAL;
+	len = equals - val;
+	err = kstrtou32(equals + 1, 0, &value);
+	if (err)
+		return err;
+	for (field = VEXT_FAULT_BLOCK_SIZE; field < ARRAY_SIZE(vext_fault_fields); field++) {
+		if (strlen(vext_fault_fields[field]) == len &&
+		    !strncmp(val, vext_fault_fields[field], len)) {
+			vext_config_fault.field = field;
+			vext_config_fault.value = value;
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+
+static const struct kernel_param_ops vext_config_fault_ops = { .set = vext_config_fault_set };
+/* Set on the kernel's command line alone: no file in sysfs. */
+module_param_cb(config_fault, &vext_config_fault_ops, NULL, 0);
+MODULE_PARM_DESC(config_fault, "`FIELD=N`: take the device's FIELD (block_size, map_alignment, max_transfer, max_segments, ring) as N: for tests alone");
+
+/* `value`, what the device said of `field`, or what virtio_extent.config_fault says instead. */
+static u32 vext_faulted(enum vext_fault_field field, u32 value)
+{
+	return vext_config_fault.field == field ? vext_config_fault.value : value;
+}
+
+/*
+ * cladefs: the fewest data segments a request of one block takes: memory not aligned to pages
+ * spans one more page than its length needs (cladefs_device_find's max_io).
+ */
+static u32 vext_min_segments(const struct vext_config *config)
+{
+	return 1 + DIV_ROUND_UP(config->block_size, PAGE_SIZE);
+}
+
+/*
+ * cladefs: 0 if each of the `n` queues' rings holds a request of max_segments data pages and
+ * VEXT_FIXED_SGS more, max_segments lowered to fit them when the device is probed (`probing`) but
+ * never as its queues are found again, the filesystem's requests sized by it. Else -EINVAL,
+ * logged: with a ring too small for a request of one block, a request would wait for room that
+ * never comes (board 8557), and before, the ring's size less 3 wrapped below 3 entries.
+ */
+static int vext_check_rings(struct virtio_extent *vext, struct virtqueue **vqs, unsigned int n,
+			    bool probing)
+{
+	struct vext_config *config = &vext->config;
+	u32 ring = U32_MAX, fits, needs;
+	unsigned int i;
+
+	for (i = 0; i < n; i++)
+		ring = min(ring, virtqueue_get_vring_size(vqs[i]));
+	ring = vext_faulted(VEXT_FAULT_RING, ring);
+	fits = ring > VEXT_FIXED_SGS ? ring - VEXT_FIXED_SGS : 0;
+	needs = probing ? vext_min_segments(config) : config->max_segments;
+	if (fits < needs) {
+		dev_err(&vext->vdev->dev,
+			"ring: the request queues' rings hold %u descriptors, fewer than a request of %u data segments takes, %u: refused\n",
+			ring, needs, needs + VEXT_FIXED_SGS);
+		return -EINVAL;
+	}
+	config->max_segments = min(config->max_segments, fits);
+	return 0;
+}
+
+/*
  * cladefs: maps each CPU to the queue whose interrupt the transport made affine to it, as
  * blk_mq_virtio_map_queues does (TASK-276): a request then completes on the CPU that queued it,
  * whose caller is woken there, rather than by an interrupt between CPUs, and finds its request in
@@ -738,6 +849,7 @@ static int vext_find_queues(struct virtio_extent *vext)
 	struct virtqueue_info *infos;
 	struct virtqueue **vqs;
 	unsigned int i, offered;
+	bool probing = !vext->queues;
 	int err;
 
 	virtio_cread_le(vdev, struct virtio_extent_config, num_request_queues, &offered);
@@ -765,6 +877,13 @@ static int vext_find_queues(struct virtio_extent *vext)
 	err = virtio_find_vqs(vdev, vext->nr_queues, vqs, infos, vext_affine ? &affinity : NULL);
 	if (err)
 		goto out;
+	/* Before any is open to requests: one that wouldn't fit them is let go of unused. */
+	err = vext_check_rings(vext, vqs, vext->nr_queues, probing);
+	if (err) {
+		virtio_reset_device(vdev);
+		vdev->config->del_vqs(vdev);
+		goto out;
+	}
 	vext_map_queues(vext);
 	for (i = 0; i < vext->nr_queues; i++) {
 		struct vext_queue *queue = &vext->queues[i];
@@ -917,7 +1036,21 @@ static int vext_check_version(struct virtio_device *vdev)
 	return -EPROTONOSUPPORT;
 }
 
-static void vext_read_config(struct virtio_extent *vext)
+/* cladefs: -EINVAL, the device refused, its configuration's `field` named with why. */
+static int vext_refuse(struct virtio_device *vdev, const char *field, u32 value, const char *why)
+{
+	dev_err(&vdev->dev, "%s: the device says %u, %s: refused\n", field, value, why);
+	return -EINVAL;
+}
+
+/*
+ * Reads the device's configuration. cladefs: refusing (-EINVAL, the field named) what the driver
+ * or the filesystem would divide by zero by, round to nothing or wrap on: the host is trusted, but
+ * a VMM's bug is to be told of, not oopsed on (board 8557). Before, a block size of 0 divided by
+ * zero as the filesystem mounted (cladefs_device_find's rounddown), and a max_io of 0, of too few
+ * segments or too small a transfer, divided by zero in its Rust (Device::read's div_ceil).
+ */
+static int vext_read_config(struct virtio_extent *vext)
 {
 	struct virtio_device *vdev = vext->vdev;
 	struct vext_config *config = &vext->config;
@@ -936,6 +1069,23 @@ static void vext_read_config(struct virtio_extent *vext)
 	config->private_max = 0;
 	if (virtio_has_feature(vdev, VIRTIO_EXTENT_F_DAX))
 		virtio_cread_le(vdev, struct virtio_extent_config, private_max, &config->private_max);
+
+	config->block_size = vext_faulted(VEXT_FAULT_BLOCK_SIZE, config->block_size);
+	config->map_alignment = vext_faulted(VEXT_FAULT_MAP_ALIGNMENT, config->map_alignment);
+	config->max_transfer = vext_faulted(VEXT_FAULT_MAX_TRANSFER, config->max_transfer);
+	config->max_segments = vext_faulted(VEXT_FAULT_MAX_SEGMENTS, config->max_segments);
+	if (!is_power_of_2(config->block_size))
+		return vext_refuse(vdev, "block_size", config->block_size, "not a power of two");
+	/* What a MAP's length is aligned to (the self-test's ALIGN), and DAX's pages counted in. */
+	if (!is_power_of_2(config->map_alignment))
+		return vext_refuse(vdev, "map_alignment", config->map_alignment, "not a power of two");
+	if (config->max_transfer < config->block_size)
+		return vext_refuse(vdev, "max_transfer", config->max_transfer,
+				   "less than a block");
+	if (config->max_segments < vext_min_segments(config))
+		return vext_refuse(vdev, "max_segments", config->max_segments,
+				   "fewer than a block takes, unaligned");
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_FS_DAX)
@@ -1134,7 +1284,9 @@ static int vext_probe(struct virtio_device *vdev)
 	spin_lock_init(&vext->busy_lock);
 	mutex_init(&vext->stats_lock);
 	INIT_WORK(&vext->stats_work, vext_stats_work);
-	vext_read_config(vext);
+	err = vext_read_config(vext);
+	if (err)
+		return err;
 #if IS_ENABLED(CONFIG_FS_DAX)
 	err = vext_map_window(vext);
 	if (err)
@@ -1143,9 +1295,6 @@ static int vext_probe(struct virtio_device *vdev)
 	err = vext_find_queues(vext);
 	if (err)
 		return err;
-	/* A request's data pages, beside its header, arguments and response, fit a queue. */
-	vext->config.max_segments = min(vext->config.max_segments,
-					virtqueue_get_vring_size(vext->queues[0].vq) - 3);
 	virtio_device_ready(vdev);
 	/*
 	 * cladefs: the device activates as it takes DRIVER_OK, and asks for a reset if it can't: as it

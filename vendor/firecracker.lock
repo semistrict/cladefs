@@ -1108,6 +1108,7 @@ dependencies = [
  "fxfs",
  "fxfs-posix",
  "host_fs",
+ "http-body",
  "humantime",
  "hyper-util",
  "libc",
@@ -4212,6 +4213,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
@@ -5014,6 +5016,7 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",

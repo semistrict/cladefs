@@ -528,7 +528,10 @@ fn stacks_on_sigquit(child: &mut std::process::Child, waiting: &str) -> String {
             Ok(line) => line,
             Err(err) => panic!("no stack naming {waiting} ({err}); it wrote:\n{printed}"),
         };
-        if heading.is_none() && line.starts_with(HEADING) {
+        // cladefs: a record of the log, after its time and level (board 8567).
+        // cladefs: eu-stack killed past its bound, which no waiting would see past (board 8567).
+        assert!(!line.contains("killed: no stacks"), "{line}\n{printed}");
+        if heading.is_none() && line.contains(HEADING) {
             heading = Some(printed.len());
         }
         printed += &line;
@@ -540,13 +543,21 @@ fn stacks_on_sigquit(child: &mut std::process::Child, waiting: &str) -> String {
 }
 
 /// TASK-44.13: SIGQUIT has the daemon write its threads' stacks, naming where they wait: here, the
-/// thread that waits for SIGTERM. It goes on running, and SIGTERM still stops it, successfully.
+/// thread that waits for SIGTERM (and SIGINT and SIGHUP). It goes on running, and SIGTERM still
+/// stops it, successfully. cladefs: board 8567: through its log, which, JSON, is a JSON object a
+/// line all through them, as it was not, the dump written past the log.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_writes_its_stacks_on_sigquit() {
     let dir = tempfile::tempdir().unwrap();
-    let (_, mut child) = daemon(dir.path(), &[], std::process::Stdio::piped());
-    let stacks = stacks_on_sigquit(&mut child.0, "drain_on_sigterm");
+    let json = [("CLADEFS_LOG_FORMAT", "json")];
+    let (_, mut child) = daemon(dir.path(), &json, std::process::Stdio::piped());
+    let stacks = stacks_on_sigquit(&mut child.0, "drain_on_signals");
+    for line in stacks.lines() {
+        let record: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|err| panic!("{err}: a line not JSON: {line}\n{stacks}"));
+        assert_eq!(record["level"], "WARN", "{line}");
+    }
     assert_eq!(child.0.try_wait().unwrap(), None, "SIGQUIT stopped the daemon:\n{stacks}");
     // SAFETY: Signals the daemon this test started.
     assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
@@ -644,17 +655,21 @@ fn grants_need_the_daemon() {
     }
 }
 
-/// TASK-48: SIGTERM stops the daemon: it exits, successfully.
+/// TASK-48: SIGTERM stops the daemon: it exits, successfully. cladefs: board 8567: and so do SIGINT
+/// (Ctrl-C) and SIGHUP (its terminal closing), drained as SIGTERM drains it, where their default
+/// action killed it, every cell crashed.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_stops_on_sigterm() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
-    let (_, child) = cladefsctl.daemon.as_mut().unwrap();
-    // SAFETY: Signals the daemon this test started.
-    assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
-    let status = child.0.wait().unwrap();
-    assert!(status.success(), "{status}");
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
+        let (_, child) = cladefsctl.daemon.as_mut().unwrap();
+        // SAFETY: Signals the daemon this test started.
+        assert_eq!(unsafe { libc::kill(child.0.id() as i32, signal) }, 0);
+        let status = child.0.wait().unwrap();
+        assert!(status.success(), "signal {signal}: {status}");
+    }
 }
 
 /// TASK-45: without a daemon, cladefsctl changes no existing cell unless it has the bucket

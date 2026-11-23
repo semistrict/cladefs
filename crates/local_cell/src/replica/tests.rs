@@ -424,3 +424,231 @@ fn members_hold_at_most_so_many_logs_of_a_configuration() {
     let next = (CELL, key(2, 5), replicas.incarnation());
     assert_eq!(replicas.append(next, own_of(0), 0, &frame).unwrap(), frame.len() as u64);
 }
+
+/// Board 8445: a call is admitted only if the cell's head, as the bucket holds it, could have asked
+/// it, the edges of configuration numbers, epochs and logs drawn (0, 1, the head's own and their
+/// neighbours, `u64::MAX` and its): no fence past the head's epoch (`u64::MAX` among them), so
+/// that its writer appends still; no drop of a log of a segment the head names not; no append to
+/// a configuration its writer, or a take, makes not, nor a drop of one; nothing of a cell with no
+/// live replicated head. Every call admitted but a drop of its writer's own configuration's logs
+/// (which the head, naming the bucket's segments and not the writer's cell's, can't bound),
+/// applied, leaves the writer appending, and every log it appended.
+#[test]
+fn calls_the_head_could_not_have_asked_are_refused() {
+    const MAX: u64 = u64::MAX;
+    // The head: its writer of epoch 5, configuration 3 of it active, segments 0 to 10 named.
+    let head = Seen { epoch: 5, end: 10, active: Some(key(3, 5)) };
+    let unasked = |result: Result<(), Refused>| match result {
+        Err(Refused::Unasked { .. }) => {}
+        other => panic!("not refused as unasked: {other:?}"),
+    };
+    let admitted = |asked| admit(CELL, Some(&head), asked);
+    assert_eq!(admitted(Asked::Fence(key(3, 5), 5)), Ok(()));
+    assert_eq!(admitted(Asked::Fence(key(3, 5), 0)), Ok(()));
+    for at in [6, MAX / 2, MAX - 1, MAX] {
+        unasked(admitted(Asked::Fence(key(3, 5), at)));
+    }
+    unasked(admitted(Asked::Fence(key(3, 4), 5)));
+    unasked(admitted(Asked::Fence(key(4, 5), 5)));
+    for through in [0, 19, 20, MAX] {
+        assert_eq!(admitted(Asked::Drop(key(3, 5), Some(through))), Ok(()));
+        assert_eq!(admitted(Asked::Drop(key(4, 5), Some(through))), Ok(()));
+        for dropped in [key(3, 4), key(3, 6), key(2, 5), key(4, 6), key(MAX, MAX)] {
+            unasked(admitted(Asked::Drop(dropped, Some(through))));
+        }
+    }
+    assert_eq!(admitted(Asked::Drop(key(3, 5), None)), Ok(()));
+    assert_eq!(admitted(Asked::Drop(key(2, MAX), None)), Ok(()));
+    unasked(admitted(Asked::Drop(key(3, 6), None)));
+    unasked(admitted(Asked::Drop(key(4, 0), None)));
+    for appended in [key(3, 5), key(4, 5), key(MAX, 5)] {
+        assert_eq!(admitted(Asked::Append(appended)), Ok(()), "{appended:?}");
+    }
+    for appended in [key(3, 4), key(3, 6), key(2, 5), key(4, 6), key(4, 4), key(MAX, MAX)] {
+        unasked(admitted(Asked::Append(appended)));
+    }
+    // Noted before the bucket went out of reach: a writer taking the cell since, of a later
+    // epoch, appends to its configuration after the active one, and drops its logs; no fence past
+    // the noted epoch, nor of another configuration, nor drops before one past the active.
+    let noted = |asked| admit_noted(CELL, &head, asked);
+    for appended in [key(3, 5), key(4, 5), key(4, 6), key(5, 9), key(2, 6), key(2, MAX)] {
+        assert_eq!(noted(Asked::Append(appended)), Ok(()), "{appended:?}");
+        assert_eq!(noted(Asked::Drop(appended, Some(MAX))), Ok(()), "{appended:?}");
+    }
+    for appended in [key(2, 5), key(3, 4), key(0, 0), key(2, 4)] {
+        unasked(noted(Asked::Append(appended)));
+        unasked(noted(Asked::Drop(appended, Some(0))));
+    }
+    assert_eq!(noted(Asked::Fence(key(3, 5), 5)), Ok(()));
+    for at in [6, MAX] {
+        unasked(noted(Asked::Fence(key(3, 5), at)));
+        unasked(noted(Asked::Fence(key(4, 6), at)));
+    }
+    unasked(noted(Asked::Drop(key(4, 6), None)));
+    // None active yet: its writer installs its first, of its epoch; nothing fenced or dropped
+    // before.
+    let first = Seen { epoch: 5, end: 0, active: None };
+    assert_eq!(admit(CELL, Some(&first), Asked::Append(key(1, 5))), Ok(()));
+    unasked(admit(CELL, Some(&first), Asked::Append(key(1, 4))));
+    unasked(admit(CELL, Some(&first), Asked::Fence(key(1, 5), 5)));
+    unasked(admit(CELL, Some(&first), Asked::Drop(key(1, 5), None)));
+    unasked(admit(CELL, Some(&first), Asked::Drop(key(1, 4), Some(0))));
+
+    // Every edge drawn, what is admitted applied to a member holding the writer's logs of
+    // segments 8 to 11, the bucket holding 8 and 9.
+    let numbers = [0, 1, 2, 3, 4, MAX / 2, MAX - 1, MAX];
+    let epochs = [0, 1, 4, 5, 6, MAX / 2, MAX - 1, MAX];
+    let logs = [0, 1, 18, 19, 20, 21, MAX / 2, MAX - 1, MAX];
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir, MOST).unwrap();
+    let writer = (CELL, key(3, 5), replicas.incarnation());
+    let frame = own_frame(1, b"told");
+    for segment in 8..12 {
+        replicas.append(writer, own_of(segment), 0, &frame).unwrap();
+    }
+    let mut applied = 0;
+    for number in numbers {
+        for epoch in epochs {
+            let of = (CELL, key(number, epoch), replicas.incarnation());
+            assert_eq!(
+                admit(CELL, None, Asked::Fence(key(number, epoch), epoch)),
+                Err(Refused::Unheaded { cell: CELL })
+            );
+            for at in epochs {
+                if admit(CELL, Some(&head), Asked::Fence(key(number, epoch), at)).is_ok() {
+                    replicas.fence(of, at).unwrap();
+                    applied += 1;
+                }
+            }
+            // Its writer's own configuration's drops aside: the head can't bound them.
+            if key(number, epoch) == key(3, 5) {
+                continue;
+            }
+            for through in logs.map(Some).into_iter().chain([None]) {
+                if admit(CELL, Some(&head), Asked::Drop(key(number, epoch), through)).is_ok() {
+                    replicas.drop_logs(of, through).unwrap();
+                    applied += 1;
+                }
+            }
+        }
+    }
+    assert!(applied > 0);
+    // Its writer appends still; what the bucket holds not is there still.
+    let more = own_frame(2, b"more");
+    let end = frame.len() as u64;
+    assert_eq!(replicas.append(writer, own_of(11), end, &more).unwrap(), end + more.len() as u64);
+    for segment in 8..12 {
+        let read = replicas.read(writer, own_of(segment), 0, end).unwrap();
+        assert_eq!(read, frame, "segment {segment}");
+    }
+}
+
+/// Board 8451: calls of 100,000 cells holding nothing, a peer's (fences at the earliest epoch,
+/// appends of nothing, reads, drops), leave nothing kept in memory, no file made, and nothing
+/// for a sweep to read the heads of.
+#[test]
+fn calls_of_cells_holding_nothing_leave_nothing() {
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    for id in 0..100_000 {
+        let of = (CellId { tenant: 3, id }, key(1, 0), replicas.incarnation());
+        assert_eq!(replicas.fence(of, 0).unwrap(), []);
+        assert_eq!(replicas.append(of, own_of(0), 0, b"").unwrap(), 0);
+        assert_eq!(replicas.read(of, own_of(0), 0, 10).unwrap(), b"");
+        replicas.drop_logs(of, None).unwrap();
+        replicas.trim(of, None).unwrap();
+    }
+    assert_eq!(replicas.cells_kept(), 0);
+    assert_eq!(replicas.cells().unwrap(), []);
+    assert_eq!(dir.list("").unwrap(), [INCARNATION]);
+    // A cell holding something is kept, until a sweep finds it gone.
+    let held = (CELL, key(1, 4), replicas.incarnation());
+    replicas.append(held, own_of(0), 0, &own_frame(1, b"x")).unwrap();
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![key(1, 4)])]);
+    replicas.sweep(CELL, Swept::Gone).unwrap();
+    assert_eq!(replicas.cells_kept(), 0);
+}
+
+/// Board 8451: the directory is listed once, as it opens: its cells' files read as each is first
+/// asked of, the others' not, and the sweep's cells as that listing found them.
+#[test]
+fn directories_are_listed_once_as_they_open() {
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let other = CellId { tenant: 3, id: 10 };
+    let frame = own_frame(1, b"x");
+    for (cell, number) in [(CELL, 1), (CELL, 2), (other, 1)] {
+        replicas.append((cell, key(number, 4), replicas.incarnation()), 1, 0, &frame).unwrap();
+    }
+    replicas.fence((other, key(1, 4), replicas.incarnation()), 4).unwrap();
+    let reopened = Replicas::open(dir, MOST).unwrap();
+    assert_eq!(reopened.cells_kept(), 2);
+    assert_eq!(
+        reopened.cells().unwrap(),
+        [(CELL, vec![key(1, 4), key(2, 4)]), (other, vec![key(1, 4)])]
+    );
+    let of = (CELL, key(2, 4), reopened.incarnation());
+    assert_eq!(reopened.fence(of, 4).unwrap(), [(1, frame.len() as u64)]);
+    assert_eq!(
+        refused(reopened.append((other, key(1, 3), reopened.incarnation()), 1, 0, &frame)),
+        Refused::Fenced { promise: 4 }
+    );
+}
+
+/// Board 8451: an append the disk governor has no room for is refused, nothing of it written, and
+/// taken once it has room.
+#[test]
+fn appends_past_the_disk_governor_are_refused() {
+    const LEN: usize = 64 << 10;
+    let dir = MemDir::new();
+    let disk = Dir::disk(&dir).unwrap().clone();
+    disk.govern(1 << 20, 0, false);
+    let replicas = Replicas::open(dir, MOST).unwrap();
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    let mut end = 0;
+    let refusal = loop {
+        let frame = own_frame(end, &[7; LEN]);
+        match replicas.append(me, own_of(0), end, &frame) {
+            Ok(now) => end = now,
+            Err(err) => break err,
+        }
+        assert!(end < 1 << 20, "appended past the disk's allowance");
+    };
+    let frame = own_frame(end, &[7; LEN]);
+    let Error::Refused(refusal) = refusal else { panic!("failed: {refusal:?}") };
+    let full = "its disk's allowance".to_owned();
+    assert_eq!(refusal, Refused::Disk { bytes: frame.len() as u64, full });
+    assert_eq!(replicas.fence(me, 4).unwrap(), [(own_of(0), end)]);
+    disk.govern(u64::MAX, 0, false);
+    assert_eq!(replicas.append(me, own_of(0), end, &frame).unwrap(), end + frame.len() as u64);
+}
+
+/// Board 8451: a writer's stream of appends to a configuration trims those it left behind: its own
+/// given up before it, and an earlier writer's not active; the active one, which a take reads, and
+/// a racing taker's of a later epoch, kept. A cell holds logs of at most `CONFIGURATIONS_MOST`
+/// configurations: a new one past them refused.
+#[test]
+fn streams_trim_the_configurations_they_leave_behind() {
+    let replicas = Replicas::open(MemDir::new(), MOST).unwrap();
+    let ours = replicas.incarnation();
+    let frame = own_frame(1, b"x");
+    for (number, epoch) in [(1, 4), (2, 5), (3, 5), (3, 6), (4, 5)] {
+        replicas.append((CELL, key(number, epoch), ours), 1, 0, &frame).unwrap();
+    }
+    replicas.trim((CELL, key(4, 5), ours), Some(key(2, 5))).unwrap();
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![key(2, 5), key(3, 6), key(4, 5)])]);
+
+    let replicas = Replicas::open(MemDir::new(), MOST).unwrap();
+    let ours = replicas.incarnation();
+    for number in 0..CONFIGURATIONS_MOST as u64 {
+        replicas.append((CELL, key(number, 4), ours), 1, 0, &frame).unwrap();
+    }
+    let past = (CELL, key(CONFIGURATIONS_MOST as u64, 4), ours);
+    assert_eq!(
+        refused(replicas.append(past, 1, 0, &frame)),
+        Refused::Configurations { cell: CELL, most: CONFIGURATIONS_MOST }
+    );
+    let held = (CELL, key(0, 4), ours);
+    let end = frame.len() as u64;
+    assert_eq!(replicas.append(held, 1, end, &frame).unwrap(), 2 * end);
+}

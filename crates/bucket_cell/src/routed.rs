@@ -144,8 +144,7 @@ impl<B: Bucket> RoutedBucket<B> {
     }
 
     /// Whether this bucket holds a mirror of any version of `cell`, a cell of another bucket. Its
-    /// markers' listing failing fails it: taken for none, it would leave a mirror's moves out of
-    /// the cell's listings for as long as it is kept (board 5526).
+    /// markers' listing failing fails it (board 5526).
     async fn mirrored(&self, cell: layout::CellId) -> Result<bool, Error> {
         if let Some(&(held, listed)) = self.mirrored.lock().unwrap().get(&cell)
             && listed.elapsed() < MIRRORED_FOR
@@ -169,41 +168,6 @@ impl<B: Bucket> RoutedBucket<B> {
         }
         let Some(cell) = layout::cell_of(key) else { return Ok(false) };
         self.mirrored(cell).await
-    }
-
-    async fn lists_here_too(&self, prefix: &str) -> Result<bool, Error> {
-        let Some(route) = &self.route else { return Ok(false) };
-        let (Some(number), Some(cell)) = (layout::routed_to(prefix), layout::cell_of(prefix))
-        else {
-            return Ok(false);
-        };
-        if !prefix.starts_with(&layout::moves_prefix(cell))
-            || self.own_number(route).await? == Some(number)
-        {
-            return Ok(false);
-        }
-        self.mirrored(cell).await
-    }
-
-    /// Whether a listing of moves at `prefix` of a cell mirrored here, `here` what this bucket
-    /// listed, is whole without what the cell's bucket holds, which failed to list: the mirror's
-    /// copies answer for an object it copied, which the children here read here, with the cell's
-    /// bucket out of reach (TASK-633.8, AC #4); for one it did not copy, the cell's bucket alone
-    /// can, and its failure fails the listing, which [`crate::bucket::list`] asks again: the moves
-    /// made there since taken for none, its reads would find the object gone, lost (board 5526).
-    /// A listing of the moves of several objects, [`crate::moves::MovesMaps::read`]'s, a
-    /// checkpoint's, is whole of those the mirror copied: what it misses of the others it misses
-    /// as it would moves written after it, which readers follow from the object's older location.
-    async fn answered_by_the_mirror(&self, prefix: &str, here: &[Meta]) -> Result<bool, Error> {
-        let Some(object) = layout::moved_object(prefix) else { return Ok(true) };
-        if !here.is_empty() {
-            return Ok(true);
-        }
-        match self.home.head(&object).await {
-            Ok(_) => Ok(true),
-            Err(Error::NotFound) => Ok(false),
-            Err(err) => Err(err),
-        }
     }
 
     async fn member(&self, key: &str) -> Result<Option<Arc<B>>, Error> {
@@ -360,25 +324,6 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
-        if self.lists_here_too(prefix).await? {
-            let mut listed = self.home.list(prefix).await?;
-            let there = match self.member(prefix).await {
-                Ok(Some(member)) => member.list(prefix).await,
-                Ok(None) => Ok(Vec::new()),
-                Err(err) => Err(err),
-            };
-            let there = match there {
-                Ok(there) => there,
-                Err(err) => {
-                    self.answered_by_the_mirror(prefix, &listed).await?.then_some(()).ok_or(err)?;
-                    Vec::new()
-                }
-            };
-            let here: BTreeSet<String> = listed.iter().map(|meta| meta.key.clone()).collect();
-            listed.extend(there.into_iter().filter(|meta| !here.contains(&meta.key)));
-            listed.sort_by(|a, b| a.key.cmp(&b.key));
-            return Ok(listed);
-        }
         match self.member(prefix).await? {
             Some(member) => member.list(prefix).await,
             None => self.home.list(prefix).await,

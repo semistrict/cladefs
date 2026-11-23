@@ -211,7 +211,6 @@ fn one() {
             "marks_kept" => rules.marks_kept = false,
             "epoch_keys" => rules.epoch_keys = false,
             "collector_epochs" => rules.collector_epochs = false,
-            "moves_by_pass" => rules.moves_by_pass = false,
             "epoch_sequences" => rules.epoch_sequences = false,
             "candidates_first" => rules.candidates_first = false,
             "tokens" => rules.tokens = false,
@@ -219,9 +218,6 @@ fn one() {
             "forks_check_versions" => rules.forks_check_versions = false,
             "forks_pending" => rules.forks_pending = false,
             "collector_abandons" => rules.collector_abandons = false,
-            "ways_from_seals" => rules.ways_from_seals = false,
-            "moves_taken_first" => rules.moves_taken_first = false,
-            "hosts_follow_moves" => rules.hosts_follow_moves = false,
             "wal_follows" => rules.wal_follows = false,
             "references" => rules.references = false,
             "clones_refer_first" => rules.clones_refer_first = false,
@@ -412,12 +408,12 @@ fn forks() -> Profile {
 
 test_holds!(forks_and_frees, forks());
 
-/// cladefs: doc-27 (board 6214): writers relocate out of their cells' sparse segments, the
-/// collector compacting nothing, as guests free and write, versions are cut, restored and dropped,
-/// checkpoints land, and cells are taken over and crash: what recoveries need stays
-/// (`NothingNeededGone`), and every commit reads as committed.
+/// cladefs: doc-27 (board 6214): writers relocate out of their cells' sparse segments as guests
+/// free and write, versions are cut, restored and dropped, checkpoints land, and cells are taken
+/// over and crash: what recoveries need stays (`NothingNeededGone`), and every commit reads as
+/// committed.
 fn relocations() -> Profile {
-    let mut profile = weights(|weights| {
+    weights(|weights| {
         weights.relocate = 4;
         weights.version = 2;
         weights.drop_version = 1;
@@ -425,9 +421,7 @@ fn relocations() -> Profile {
         weights.checkpoint = 4;
         weights.collect = 3;
         weights.open = 4;
-    });
-    profile.options.compact_below = 0.0;
-    profile
+    })
 }
 
 /// cladefs: [`relocations`] holds, its seeds relocating: not a property of rounds that never
@@ -533,18 +527,16 @@ test_needs!(fencing_needs_tokens, tokens, stale_placements());
 
 test_needs!(deletes_need_tokens, delete_tokens, stale_placements());
 
-/// Case 3: restores racing collection and compaction.
+/// Case 3: restores racing collection.
 fn collected() -> Profile {
-    let mut profile = weights(|weights| {
+    weights(|weights| {
         weights.version = 2;
         weights.restore_version = 3;
         weights.open = 6;
         weights.collect = 8;
         weights.checkpoint = 6;
         weights.tick = 6;
-    });
-    profile.options.compact_below = 0.9;
-    profile
+    })
 }
 
 test_holds!(forks_racing_collection, collected());
@@ -589,10 +581,6 @@ test_holds!(forks_with_children_opening, children());
 // NoCandidatesFirst shows it needed.
 test_holds!(passes_over_cells_being_made, fresh_cells());
 
-// A host's cell naming what it reads where it was acknowledged, the collector deleting that and
-// the moves after, compacted again, which its writer's checkpoints followed (TASK-195).
-test_needs!(hosts_need_to_follow_moves, hosts_follow_moves, collected());
-
 /// Case 4: takeovers while the writer before is still uploading. Case 9: a stale writer
 /// recreating what the collector deleted.
 fn takeovers() -> Profile {
@@ -618,8 +606,8 @@ test_needs!(takeovers_need_head_swaps, head_swap, takeovers());
 test_needs!(takeovers_need_epoch_keys, epoch_keys, takeovers());
 
 /// Case 9: a stale writer's create of a segment in flight while a later writer's takes its place,
-/// which the collector compacts and deletes, landing then: it recreates the segment, holding other
-/// extents than readers whose indexes are older than the compaction look for there (TASK-79.18).
+/// which the collector deletes, landing then: it recreates the segment, holding other extents than
+/// readers whose indexes are older look for there (TASK-79.18).
 /// Takeovers hold the creates of the writers they take cells from ([`Profile::hold`]), and
 /// requests complete often, so that passes of the collector finish while a cell's writer lives.
 fn recreated() -> Profile {
@@ -636,8 +624,7 @@ fn recreated() -> Profile {
     // cladefs: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases
     // with passes over every cell, none in 20,000 seeds with half the passes over one cell.
     profile.one_cell = 0.0;
-    profile.options.compact_below = 0.9;
-    profile.options.grace = 1;
+    profile.ticks = 1;
     profile
 }
 
@@ -651,8 +638,7 @@ test_holds!(stale_creates_landing_past_deletions, recreated(), [453]);
 test_needs!(collection_needs_epochs, collector_epochs, recreated());
 
 /// Writers checkpointing often, taken over with their checkpoints in flight, which land late, past
-/// where the next writer recovered from, while collectors compact what the checkpoints name and
-/// delete what they cover (TASK-175).
+/// where the next writer recovered from, while collectors delete what they cover (TASK-175).
 fn late_checkpoints() -> Profile {
     let mut profile = weights(|weights| {
         weights.complete = 80;
@@ -670,19 +656,11 @@ fn late_checkpoints() -> Profile {
         weights.stale_checkpoint = 6;
         weights.tick = 8;
     });
-    profile.options.compact_below = 0.9;
-    profile.options.grace = 1;
+    profile.ticks = 1;
     profile
 }
 
 test_holds!(late_checkpoints_landing_past_takeovers, late_checkpoints());
-
-// The rule `ways_from_seals` (TASK-175), a writer taken over checkpointing late past where the
-// next recovered from, has no search here: bucket_cell's simulation reached its case at one seed
-// of 20,000 of `recreated` (677, where it was found), and this one, its writers the cells', at
-// none of 40,000 of `recreated` or of `late_checkpoints` (TASK-88). The collector's
-// `writers_reading_past_checkpoints_landing_after_they_took_over_need_ways_from_seals` shows it
-// needed, and specs/bucket's mutation NoWaysFromSeals.
 
 /// Takeovers while collectors run: an extent of the writer taken over, uploaded, its segment not
 /// yet.
@@ -794,8 +772,7 @@ fn restores() -> Profile {
         weights.tick = 4;
     });
     profile.fail_after = 0.1;
-    profile.options.compact_below = 0.9;
-    profile.options.grace = 1;
+    profile.ticks = 1;
     profile
 }
 
@@ -867,17 +844,14 @@ fn whole_restores() -> Profile {
     profile
 }
 
-/// Case 7: collectors stopping midway, two at once, one fenced by another. Case 8: writers' indexes
-/// older than compactions.
+/// Case 7: collectors stopping midway, two at once, one fenced by another.
 fn collectors() -> Profile {
-    let mut profile = weights(|weights| {
+    weights(|weights| {
         weights.collect = 10;
         weights.stop_collector = 4;
         weights.checkpoint = 4;
         weights.tick = 8;
-    });
-    profile.options.compact_below = 0.9;
-    profile
+    })
 }
 
 test_holds!(collectors_stopping_and_racing, collectors());
@@ -895,8 +869,7 @@ fn recovering() -> Profile {
         weights.tick = 6;
     });
     profile.steps = 800;
-    profile.options.compact_below = 0.9;
-    profile.options.grace = 1;
+    profile.ticks = 1;
     profile
 }
 
@@ -922,8 +895,7 @@ fn versions() -> Profile {
         weights.tick = 4;
     });
     profile.fail_after = 0.1;
-    profile.options.compact_below = 0.9;
-    profile.options.grace = 1;
+    profile.ticks = 1;
     profile
 }
 

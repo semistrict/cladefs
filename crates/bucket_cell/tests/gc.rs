@@ -3,17 +3,14 @@
 // found in the LICENSE file.
 
 //! cladefs-gc, the program: a pass over a bucket, and its usage. cladefs: every cell encrypted
-//! (TASK-411.28), the program given a master key, its bucket KMS keeping the tests' tenants' KEKs
-//! in the bucket ([`MASTER_KEY`]), as their writers' are ([`host_kms`]).
+//! (TASK-411.28) by writers holding the bucket KMS over the tests' master key ([`host_kms`]), and
+//! the program given no key: it collects by metadata alone (doc-27).
 
 use std::process::Command;
 use std::sync::Arc;
 
-/// The master key the program and the tests' writers are given, in hexadecimal.
-const MASTER_KEY: &str = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
-
-/// A host's KMS over `bucket`, as the program's environment chooses it: the bucket KMS, given
-/// [`MASTER_KEY`], which the tests' writers encrypt under.
+/// A host's KMS over `bucket`: the bucket KMS, given the tests' master key, which the tests'
+/// writers encrypt under.
 fn host_kms<B: bucket_cell::Bucket>(bucket: &Arc<B>) -> Arc<bucket_cell::keys::CachingKms> {
     use extent_keys::kms::master::MasterKeys;
     let key = extent_keys::Secret::from_bytes(&[0x7e; 32]);
@@ -74,10 +71,11 @@ fn objects(url: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
     })
 }
 
+/// The program, run with `args`, given no KMS nor master key.
 fn gc(args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
-    command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY_FILE");
-    command.env("CLADEFS_MASTER_KEY", MASTER_KEY).args(args).output().unwrap()
+    command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY");
+    command.env_remove("CLADEFS_MASTER_KEY_FILE").args(args).output().unwrap()
 }
 
 /// What `out` said on standard error, its times, which vary, as `T`, and the requests it says it
@@ -104,8 +102,7 @@ fn said(out: &std::process::Output) -> String {
 /// took, and its slowest, `slowest`.
 fn swept(deleted: usize, bytes: u64, cells: usize, slowest: &str) -> String {
     format!(
-        "cladefs-gc: deleted {deleted} ({bytes} bytes), compacted 0 (0 bytes), retired 0 references, \
-         over {cells} cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
+        "cladefs-gc: deleted {deleted} ({bytes} bytes), retired 0 references, over {cells} cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
          failed; requests: R\ncladefs-gc: took T s; slowest: {slowest}\n"
     )
 }
@@ -113,37 +110,27 @@ fn swept(deleted: usize, bytes: u64, cells: usize, slowest: &str) -> String {
 /// A pass over a bucket (in memory: empty) reports what it did, over no cell, and exits.
 #[test]
 fn collects_a_bucket_once() {
-    let out = gc(&["memory:///", "--grace", "1"]);
+    let out = gc(&["memory:///"]);
     assert_eq!(said(&out), swept(0, 0, 0, "none"));
     assert!(out.status.success());
 }
 
-/// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect,
-/// before it touches the bucket, naming both variables: every cell is encrypted, and compacting
-/// needs its KEK. What reads no data, a dry run, `--cells`, `--usage`, a deletion, and clearing
-/// marks, needs none.
+/// doc-27 step 3 (board 6218's AC #2): with no KMS, neither `CLADEFS_KMS` nor a master key given,
+/// it collects, marks, dry runs, lists, says usage and deletes cells: nothing it does reads data,
+/// every cell's metadata authenticated, not encrypted (doc-16). The tests below collect encrypted
+/// cells so.
 #[test]
-fn refuses_to_collect_without_a_kms() {
-    let keyless = |args: &[&str]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
-        command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY");
-        command.env_remove("CLADEFS_MASTER_KEY_FILE").args(args).output().unwrap()
-    };
-    let refused = format!("Error: {:?}\n", bucket_cell::bucket_kms::no_kms());
-    for args in [&["memory:///"][..], &["memory:///", "--mark-only"]] {
-        let out = keyless(args);
-        assert_eq!(String::from_utf8_lossy(&out.stderr), refused, "{args:?}");
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-    }
-    assert!(refused.contains("CLADEFS_KMS") && refused.contains("CLADEFS_MASTER_KEY"));
+fn collects_without_a_kms() {
     for args in [
-        &["memory:///", "--dry-run"][..],
+        &["memory:///"][..],
+        &["memory:///", "--mark-only"],
+        &["memory:///", "--dry-run"],
         &["memory:///", "--cells"],
         &["memory:///", "--usage"],
         &["memory:///", "--delete-cell", "1/1", "--force-missing"],
         &["memory:///", "--clear-marks"],
     ] {
-        assert!(keyless(args).status.success(), "{args:?}");
+        assert!(gc(args).status.success(), "{args:?}");
     }
 }
 
@@ -211,7 +198,9 @@ fn lists_and_deletes_cells() {
 
 /// cladefs: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
 /// it reclaims the cell's segments its checkpoint covers, which hold no live extent (the one
-/// holding what it freed, the one freeing it), and lists the cell.
+/// holding what it freed, the one freeing it), and lists the cell. board 6218's AC #1: the cell
+/// encrypted, the process given no KMS nor master key ([`gc`]), it deletes those two, as a pass
+/// holding the cell's keys did before doc-27.
 #[test]
 fn collects_a_file_bucket() {
     use bucket_cell::lifecycle;
@@ -233,15 +222,15 @@ fn collects_a_file_bucket() {
         listed.iter().filter(|meta| doomed.contains(&meta.key)).map(|meta| meta.size).sum()
     });
     // TASK-395.4: a pass over another cell, named, leaves this one be.
-    let out = gc(&[&url, "--cell", "1/2", "--grace", "0"]);
+    let out = gc(&[&url, "--cell", "1/2"]);
     assert_eq!(said(&out), swept(0, 0, 1, "1/2 T s"));
     // Over the one cell there: the other's pass, of a cell holding nothing, took no lease there.
-    let out = gc(&[&url, "--grace", "0"]);
+    let out = gc(&[&url]);
     assert_eq!(
         said(&out),
         format!(
-            "cladefs-gc: cell 1/1: deleted 2 ({bytes} bytes), compacted 0 (0 bytes), retired 0 \
-             references, in T s; requests: R\n{}",
+            "cladefs-gc: cell 1/1: deleted 2 ({bytes} bytes), retired 0 references, in T s; \
+             requests: R\n{}",
             swept(2, bytes, 1, "1/1 T s")
         )
     );
@@ -302,7 +291,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         files
     };
     let before = files();
-    let out = gc(&[&url, "--dry-run", "--grace", "0"]);
+    let out = gc(&[&url, "--dry-run"]);
     let cell = "0000000000001";
     let segment = |number: u64| {
         format!(
@@ -323,24 +312,22 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         format!(
-            "cladefs-gc: dry run: a pass would delete 2 objects ({bytes} bytes), and more: it would \
-             compact 0 (0 bytes), and delete what it compacts a grace period after, which a dry \
-             run, compacting nothing, doesn't count; and retire 0 references\n"
+            "cladefs-gc: dry run: a pass would delete 2 objects ({bytes} bytes), and retire 0 \
+             references\n"
         )
     );
     assert!(out.status.success());
     assert_eq!(files(), before);
 
-    let out = gc(&[&url, "--mark-only", "--grace", "0"]);
+    let out = gc(&[&url, "--mark-only"]);
     let at = "tenants/0000000000001/cells/0000000000001";
     let marks = format!("{at}/gc/marks/0000000000001");
     assert_eq!(
         said(&out),
         format!(
-            "cladefs-gc: cell 1/1: marked 2 ({bytes} bytes) in {marks}, deleted 0, compacted 0, \
-             resurrected 0, in T s; requests: R\n\
-             cladefs-gc: marked 2 ({bytes} bytes), compacted 0 (0 bytes), resurrected 0, over 1 \
-             cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 failed; \
+            "cladefs-gc: cell 1/1: marked 2 ({bytes} bytes) in {marks}, deleted 0, resurrected 0, \
+             in T s; requests: R\n\
+             cladefs-gc: marked 2 ({bytes} bytes), resurrected 0, over 1 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 failed; \
              requests: R\n\
              cladefs-gc: took T s; slowest: 1/1 T s\n"
         )
@@ -351,12 +338,12 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     }
     assert!(names.contains(&marks), "{names:?}");
 
-    let out = gc(&[&url, "--grace", "0"]);
+    let out = gc(&[&url]);
     assert_eq!(
         said(&out),
         format!(
-            "cladefs-gc: cell 1/1: deleted 2 ({bytes} bytes), compacted 0 (0 bytes), retired 0 \
-             references, in T s; requests: R\n{}",
+            "cladefs-gc: cell 1/1: deleted 2 ({bytes} bytes), retired 0 references, in T s; \
+             requests: R\n{}",
             swept(2, bytes, 1, "1/1 T s")
         )
     );
@@ -429,16 +416,15 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     write_and_free(&url, cells[0]);
     let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let before = now().as_millis() as u64;
-    let out = gc(&[&url, "--grace", "0"]);
+    let out = gc(&[&url]);
     let said = said(&out);
     // The slowest passes, last, in an order of their times.
     let (did, slowest) = said.split_at(said.find("cladefs-gc: took").unwrap());
     assert_eq!(
         did,
-        "cladefs-gc: cell 1/1: deleted 2 (580 bytes), compacted 0 (0 bytes), retired 0 references, \
-         in T s; requests: R\ncladefs-gc: deleted 2 (580 bytes), compacted 0 (0 bytes), retired 0 \
-         references, over 3 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
-         failed; requests: R\n"
+        "cladefs-gc: cell 1/1: deleted 2 (580 bytes), retired 0 references, in T s; requests: \
+         R\ncladefs-gc: deleted 2 (580 bytes), retired 0 references, over 3 cells (0 unchanged), \
+         0 held by other passes, 0 swept by them since, 0 failed; requests: R\n"
     );
     assert!(slowest.starts_with("cladefs-gc: took T s; slowest: "), "{slowest}");
     let after = now().as_millis() as u64;
@@ -639,17 +625,15 @@ fn rotates_master_keys_rewrapping_every_tenants_kek() {
 fn without_a_bucket_prints_its_usage() {
     let out = gc(&[]);
     let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
-                 [--grace SECONDS] [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] \
-                 [--metrics FILE] [--max-delete-objects N] [--max-delete-bytes N] \
-                 [--max-requests-per-second N] [--max-refused-passes N] | cladefs-gc URL [--cell \
-                 TENANT/CELL] --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc \
-                 URL --cells [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell \
-                 TENANT/CELL [--force-missing] | cladefs-gc URL --clear-marks [--cell \
-                 TENANT/CELL] | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc URL \
-                 --rotate-master-key (every cell, or the one --cell names; SECONDS from 0 to a \
-                 year, --every's and --lease's more than 0; --mark-only deletes nothing, writing \
-                 each cell's gc/marks/EPOCH: the bucket grows; --dry-run writes nothing, and finds \
-                 less than a pass deletes)";
+                 [--at-once PASSES] [--lease SECONDS] [--metrics FILE] [--max-delete-objects N] \
+                 [--max-delete-bytes N] [--max-requests-per-second N] [--max-refused-passes N] | \
+                 cladefs-gc URL [--cell TENANT/CELL] --dry-run | cladefs-gc URL --cells [--cell \
+                 TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell TENANT/CELL \
+                 [--force-missing] | cladefs-gc URL --clear-marks [--cell TENANT/CELL] | cladefs-gc \
+                 URL --usage [--tenant TENANT] | cladefs-gc URL --rotate-master-key (every cell, or \
+                 the one --cell names; SECONDS from a millisecond to a year; --mark-only deletes \
+                 nothing, writing each cell's gc/marks/EPOCH: the bucket grows; --dry-run writes \
+                 nothing)";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {usage:?}\n"));
     assert_eq!(out.status.code(), Some(1));
 }
@@ -677,13 +661,13 @@ fn sweeps_run_once_that_fail_fail_the_run() {
     futures::executor::block_on(corrupt).unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     let file = elsewhere.path().join("gc.prom");
-    let out = gc(&[&url, "--grace", "0", "--metrics", file.to_str().unwrap()]);
+    let out = gc(&[&url, "--metrics", file.to_str().unwrap()]);
     let said = said(&out);
     let (failed, rest) = said.split_once('\n').unwrap();
     assert!(failed.starts_with("cladefs-gc: collecting cell 1/1: "), "{said}");
     assert_eq!(
         rest,
-        "cladefs-gc: deleted 0 (0 bytes), compacted 0 (0 bytes), retired 0 references, over 1 \
+        "cladefs-gc: deleted 0 (0 bytes), retired 0 references, over 1 \
          cells (0 unchanged), 0 held by other passes, 0 swept by them since, 1 failed; requests: \
          R\ncladefs-gc: took T s; slowest: 1/1 T s\nError: \"the sweep did not go through: 1 \
          passes failed\"\n"
@@ -709,7 +693,7 @@ fn sweeps_past_their_bounds_delete_nothing_and_fail_the_run() {
     write_and_free(&url, test_cell(1));
     let before = cells_objects(&url);
     for bound in ["--max-delete-objects", "--max-delete-bytes"] {
-        let out = gc(&[&url, "--grace", "0", bound, "1"]);
+        let out = gc(&[&url, bound, "1"]);
         let stopped = "a pass would have deleted past the sweep's bounds";
         assert_eq!(
             said(&out),
@@ -723,7 +707,7 @@ fn sweeps_past_their_bounds_delete_nothing_and_fail_the_run() {
         assert_eq!(out.status.code(), Some(1), "{bound}");
         assert_eq!(cells_objects(&url), before, "{bound}");
     }
-    let out = gc(&[&url, "--grace", "0"]);
+    let out = gc(&[&url]);
     assert!(out.status.success());
     assert_eq!(cells_objects(&url).len(), before.len() - 2);
 }
@@ -750,7 +734,7 @@ fn cleared_marks_let_dead_cells_go_whole() {
         lifecycle::delete(&bucket, cells[0], 11, 1).await.unwrap();
         (cells[0], cells[1])
     });
-    let out = gc(&[&url, "--mark-only", "--grace", "0"]);
+    let out = gc(&[&url, "--mark-only"]);
     assert!(out.status.success(), "{}", said(&out));
     let marks = |cell: CellId| -> Vec<(String, usize)> {
         let objects = objects(&url);
@@ -766,7 +750,7 @@ fn cleared_marks_let_dead_cells_go_whole() {
     assert!(marking());
     let of_dead =
         || objects(&url).into_keys().filter(|key| key.starts_with(&dead.prefix())).count();
-    let out = gc(&[&url, "--grace", "0"]);
+    let out = gc(&[&url]);
     assert!(out.status.success(), "{}", said(&out));
     assert!(of_dead() > 0, "kept by its marks");
 
@@ -792,7 +776,7 @@ fn cleared_marks_let_dead_cells_go_whole() {
     assert!(out.status.success());
     assert_eq!((marks(dead).len(), marks(live).len(), marking()), (0, 0, false));
 
-    let out = gc(&[&url, "--grace", "0"]);
+    let out = gc(&[&url]);
     assert!(said(&out).contains(", removed 1 dead cells"), "{}", said(&out));
     assert_eq!(of_dead(), 0);
 }
@@ -807,7 +791,7 @@ fn sigterm_ends_sweeping() {
     let file = elsewhere.path().join("gc.prom");
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
     command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY_FILE");
-    command.env("CLADEFS_MASTER_KEY", MASTER_KEY);
+    command.env_remove("CLADEFS_MASTER_KEY");
     command.args(["memory:///", "--every", "3600", "--metrics", file.to_str().unwrap()]);
     let mut child = command.stderr(std::process::Stdio::piped()).spawn().unwrap();
     let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());

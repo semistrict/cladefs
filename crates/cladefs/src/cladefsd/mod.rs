@@ -99,6 +99,7 @@ pub mod disk;
 pub mod drain;
 pub mod governor;
 mod grants;
+mod grpc;
 /// cladefs: a simulated guest's connection, under madsim (doc-24, TASK-685.6).
 #[cfg(madsim)]
 pub mod guest;
@@ -138,7 +139,7 @@ pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
 #[cfg(target_os = "linux")]
 pub use device::DaemonDevice;
-pub use http::serve_http;
+pub use http::{Pages, serve_http};
 pub use run::supervised;
 pub use server::{Tenant, serve, serve_tenant};
 

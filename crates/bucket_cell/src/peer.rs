@@ -42,6 +42,6 @@ pub trait Peer: Send + Sync {
 pub fn served(key: &str) -> bool {
     matches!(
         layout::kind(key),
-        Kind::Segment { .. } | Kind::Extent { .. } | Kind::Checkpoint { .. } | Kind::Moves { .. }
+        Kind::Segment { .. } | Kind::Extent { .. } | Kind::Checkpoint { .. }
     )
 }
