@@ -24,7 +24,7 @@
 # A measurement's run is two jobs of the same work directory (scripts/lib/host.sh's
 # host_job), each a run of the host script, which CLADEFS_TEST_HOST_PHASE tells apart,
 # host_phase here: `build`, as work, its builds alone, into the work directory; then
-# `measure`, alone, under fxjob --bench, against what the build made there, building
+# `measure`, alone, under hotbed run --bench, against what the build made there, building
 # nothing (host_artifacts, host_prebuilt), which scripts/lib/measurement.sh's guard
 # refuses there (host_cargo, host_kernel). Unset, `all`: one job does both.
 
@@ -229,13 +229,13 @@ host_tree() {
 # toolchain, not the host's. On an x86-64 host alone: the guests' kernel is x86-64's (a driver
 # whose run boots guests refuses another host first, scripts/lib/host.sh's host_need_arch).
 #
-# With CLADEFS_TEST_HOST_KERNELS naming a cache of kernels, as on a test host whose runs' work
-# directories come and go (scripts/lib/host.sh), it takes the kernel of KIND built from the same
-# sources (host_kernel_key) from there, if one was, a copy in WORK; else it builds it in the cache's
-# work directory of KIND, which keeps the last kernel's build, so that only what changed since
-# builds, and keeps it, with the last few others. One build of a KIND at a time. A coverage kernel
-# builds in WORK alone, as its counts are read against its build's notes
-# (scripts/guest-coverage.py).
+# With CLADEFS_TEST_HOST_KERNELS naming a cache of kernels, as a hotbed workspace's runs do, whose
+# work directories come and go (scripts/lib/host.sh: the checkout's target/guest-kernels, which
+# scripts/guest-kernel.sh fills too), it takes the kernel of KIND built from the same sources
+# (host_kernel_key) from there, if one was; else it builds it in the cache's work directory of
+# KIND, which keeps the last kernel's build, so that only what changed since builds, and keeps it,
+# with the last few others. One build of a KIND at a time. A coverage kernel builds in WORK alone,
+# as its counts are read against its build's notes (scripts/guest-coverage.py).
 host_kernel() {
     local kind=$1 kernel_work=${2:-$work/guest-kernel-$1} channel key cache built old
     local log=${host_kernel_log:-$results/guest-kernel.log}
@@ -263,7 +263,7 @@ host_kernel() {
     key=$(host_kernel_key "$kind") || return
     cache=$CLADEFS_TEST_HOST_KERNELS/$kind
     built=$cache/built/$key/vmlinux
-    mkdir -p "$cache/built" "$kernel_work" || return
+    mkdir -p "$cache/built" || return
     exec 7> "$cache.lock"
     flock 7 || return
     if [[ -f $built ]]; then
@@ -277,10 +277,9 @@ host_kernel() {
             rm -r -- "${cache:?}/built/$old" || return
         done < <(ls -1t "$cache/built" | sed -n '5,$p')
     fi
-    cp "$built" "$kernel_work/vmlinux" || return
     exec 7>&-
     # shellcheck disable=SC2034 # The sourcing scripts read them.
-    host_kernel_work=$cache/work host_kernel_image=$kernel_work/vmlinux
+    host_kernel_work=$cache/work host_kernel_image=$built
 }
 
 # host_kernel_build WORK builds host_kernel's kernel in the work directory WORK.

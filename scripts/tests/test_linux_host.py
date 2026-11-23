@@ -609,21 +609,23 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/clade
                                          "fs\nfxfs\n"))
 
     def test_a_kernel_of_the_same_sources_is_built_once(self):
+        # The kernel is the cache's own, by its sources' key: no copy of it in a run's directory.
         first = self.kernel("release", "w1")
         self.assertEqual(first[:3], (0, "", ["built work debug=0 coverage=0"]))
-        self.assertEqual(first[3:], (self.directory / "w1/guest-kernel-release/vmlinux", "fs\nfxfs\n"))
+        self.assertEqual((first[3].parent.parent, first[3].name, first[4]),
+                         (self.cache / "release" / "built", "vmlinux", "fs\nfxfs\n"))
         # Another run's: the same sources, but for what the kernel isn't built of.
         (self.repo / "crates" / "cladefs" / "lib.rs").write_text("another vmm\n")
         second = self.kernel("release", "w2")
-        self.assertEqual(second[:3], (0, "", []))
-        self.assertEqual(second[3:], (self.directory / "w2/guest-kernel-release/vmlinux", "fs\nfxfs\n"))
+        self.assertEqual(second, (0, "", [], first[3], "fs\nfxfs\n"))
         # A change to its Rust, of a package of the workspace's own: built again, in the cache's
-        # work directory, as the last was.
+        # work directory, as the last was, a kernel of its own.
         (self.repo / "crates" / "fxfs" / "lib.rs").write_text("fxfs changed\n")
         third = self.kernel("release", "w3")
-        self.assertEqual(third[2:], (["built work debug=0 coverage=0"],
-                                     self.directory / "w3/guest-kernel-release/vmlinux",
-                                     "fs\nfxfs changed\n"))
+        self.assertEqual((third[2], third[3].parent.parent, third[4]),
+                         (["built work debug=0 coverage=0"], self.cache / "release" / "built",
+                          "fs\nfxfs changed\n"))
+        self.assertNotEqual(third[3], first[3])
 
     def test_each_kind_is_a_kernel_of_its_own(self):
         self.assertEqual(self.kernel("release", "w1")[2], ["built work debug=0 coverage=0"])
