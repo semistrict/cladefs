@@ -314,6 +314,12 @@ impl SimBucket {
         self.inner.lock().unwrap().clock += ticks;
     }
 
+    /// cladefs: steps its clock back `ticks`, as NTP steps a host's (board 8469).
+    pub fn step_back(&self, ticks: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.clock = inner.clock.checked_sub(ticks).expect("a clock stepped back past its start");
+    }
+
     /// The keys of every object, of every region's bucket, as its bucket has it, in order.
     pub fn keys(&self) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
