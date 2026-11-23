@@ -49,11 +49,13 @@ pub(crate) const SPARSE_KEPT: usize = 16;
 /// The most dying extents a root names itself: more are listed in an extent of their own.
 pub(crate) const DYING_KEPT: usize = 64;
 
-/// The most dying extents a list names: an extent of 64 MiB, the extent daemon's largest (doc-4's
-/// `max_extent`), which a flush leaving more dying fails before it writes anything, and a root
-/// read back naming more is refused (board 8549). A flush of 4 KiB blocks in extents of 1024
-/// leaves that many dying having discarded 32 TiB.
-pub(crate) const MAX_LISTED: u64 = (64 << 20) / 16;
+/// The most dying extents a list names: 16 MiB of them, which a flush leaving more dying fails
+/// before it writes anything, and a root read back naming more is refused (board 8549). Within
+/// the extent daemon's largest extent (doc-4's `max_extent`, 64 MiB), and within a daemon
+/// device's transfer buffers (`cladefs::DaemonDevice`'s 32 MiB), whose allocation of more panics
+/// (hotbed review 57). A flush of 4 KiB blocks in extents of 1024 leaves that many dying having
+/// discarded 4 TiB.
+pub(crate) const MAX_LISTED: u64 = (16 << 20) / 16;
 
 /// The bytes of the largest root: [`DYING_KEPT`] dying extents and [`SPARSE_KEPT`] to compact.
 pub(crate) const MAX_ROOT_BYTES: usize = ROOT_MAGIC.len()
