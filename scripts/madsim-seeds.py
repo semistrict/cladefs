@@ -148,7 +148,7 @@ def run(seed, args, checked=False):
     compared if `checked`: their failures' JUnit report, or None if all passed. Exits as nextest
     did if it failed but for tests failing."""
     JUNIT.unlink(missing_ok=True)
-    command = ["cargo", "nextest", "run", "--manifest-path", str(ROOT / "Cargo.toml"),
+    command = ["cargo", "nextest", "run", "--locked", "--manifest-path", str(ROOT / "Cargo.toml"),
                "--profile", PROFILE, *SIMULATED, *args]
     env = {**os.environ, "MADSIM_TEST_SEED": str(seed)}
     if checked:

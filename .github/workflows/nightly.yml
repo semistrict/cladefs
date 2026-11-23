@@ -195,7 +195,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/sim-kernel
-          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
+          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'scripts/lib/guest-kernel-release.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
       - name: Fetch the kernel's sources
         run: guest/sim/kernel-tree.sh "$KERNEL"
       - name: The mutants apply
@@ -224,7 +224,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/sim-kernel
-          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
+          key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'scripts/lib/guest-kernel-release.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
       - name: Fetch the kernel's sources
         run: guest/sim/kernel-tree.sh "$KERNEL"
       - name: Fail each call of every run of one in turn

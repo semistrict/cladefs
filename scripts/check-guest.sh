@@ -15,7 +15,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=${CLADEFS_GUEST_KERNEL_WORK:-$HOME/cladefs-guest-kernel}
-kernel_tag=kernel6.18-6.18.54-121.166.amzn2023
+source "$root/scripts/lib/guest-kernel-release.sh"
 
 arch=${1:-$(uname -m)}
 case "$arch" in
@@ -39,7 +39,7 @@ python3 "$root/scripts/cocci-guest.py"
 # The Rust, against the sysroot a build uses, its target directory too: no code.
 rustflags=$("$root/scripts/build-guest-sysroot.sh" "$target" "$work/rust-$arch")
 (cd "$root/guest/rust" && RUSTFLAGS="$rustflags" CARGO_TARGET_DIR="$work/rust-$arch/target" \
-    cargo check --release -p cladefs-linux --target "$target")
+    cargo check --locked --release -p cladefs-linux --target "$target")
 
 # guest/linux's files over the tree's, as the series adds them (build-guest-kernel.sh), and their
 # objects compiled.

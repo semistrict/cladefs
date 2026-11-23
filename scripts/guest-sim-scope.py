@@ -29,6 +29,7 @@ TESTED = (
     "guest/linux/patches/",
     "guest/sim/",
     "scripts/build-guest-kernel.sh",
+    "scripts/lib/guest-kernel-release.sh",
 )
 NO_COMMIT = "0" * 40
 

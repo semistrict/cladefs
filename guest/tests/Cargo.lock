@@ -771,18 +771,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blob_metadata"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fprint",
- "fuchsia_merkle",
- "serde",
- "static_assertions",
- "zerocopy",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -801,15 +789,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-padding"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "710f1dd022ef4e93f8a438b4ba958de7f64308434fa6a87104481645cc30068b"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "block_device"
 version = "0.1.0"
 dependencies = [
@@ -818,14 +797,6 @@ dependencies = [
  "log",
  "storage_device",
  "thiserror",
-]
-
-[[package]]
-name = "block_protocol"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "zerocopy",
 ]
 
 [[package]]
@@ -853,23 +824,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bssl-crypto"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "bstr"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
-dependencies = [
- "memchr",
- "serde_core",
-]
-
-[[package]]
 name = "bucket_cell"
 version = "0.1.0"
 dependencies = [
@@ -878,6 +832,7 @@ dependencies = [
  "base32_id",
  "bincode",
  "bytes",
+ "chrono",
  "extent_frame",
  "extent_keys",
  "fail",
@@ -892,6 +847,7 @@ dependencies = [
  "node_local",
  "object_store",
  "opentelemetry",
+ "percent-encoding",
  "rand 0.10.3",
  "reqwest",
  "rustc-hash",
@@ -935,15 +891,6 @@ checksum = "7dafe3a8757b027e2be6e4e5601ed563c55989fcf1546e933c66c8eb3a058d35"
 dependencies = [
  "bytes",
  "either",
-]
-
-[[package]]
-name = "cbc"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2dc9ee5f88d11e0beb842c88b33c8a5cf0d1329c4b19494af42b07dbfe8896"
-dependencies = [
- "cipher",
 ]
 
 [[package]]
@@ -1021,6 +968,7 @@ dependencies = [
  "extent_keys",
  "fail",
  "flate2",
+ "formats",
  "fuchsia-async",
  "futures",
  "fxfs",
@@ -1028,7 +976,6 @@ dependencies = [
  "host_fs",
  "humantime",
  "hyper-util",
- "io-uring",
  "libc",
  "local_cell",
  "log",
@@ -1433,6 +1380,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "crc-fast",
+ "futures",
  "libc",
  "object_store",
  "reqwest",
@@ -1464,29 +1412,6 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-
-[[package]]
-name = "fidl"
-version = "0.1.0"
-dependencies = [
- "zx",
- "zx-status",
-]
-
-[[package]]
-name = "fidl-fuchsia-fxfs"
-version = "0.1.0"
-
-[[package]]
-name = "fidl-fuchsia-io"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "fidl",
- "futures",
- "tokio",
- "zx",
-]
 
 [[package]]
 name = "filetime"
@@ -1564,6 +1489,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "formats"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "fprint"
 version = "0.1.0"
 dependencies = [
@@ -1587,38 +1519,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
-name = "fscrypt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "fxfs-unicode",
- "hex",
- "hmac",
- "sha2 0.11.0",
- "siphasher",
- "zerocopy",
-]
-
-[[package]]
-name = "fsverity_merkle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fidl-fuchsia-io",
- "hex",
- "mundane",
- "storage_ptr_slice",
- "zerocopy",
- "zx-status",
-]
-
-[[package]]
 name = "fuchsia-async"
 version = "0.1.0"
 dependencies = [
  "fuchsia-async-macro",
- "fuchsia-emulated-handle",
  "fuchsia-sync",
  "futures",
  "futures-lite",
@@ -1645,53 +1549,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 
 [[package]]
-name = "fuchsia-emulated-handle"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "fuchsia-sync",
- "futures",
- "tokio",
- "zx-status",
- "zx-status-ext",
- "zx-types",
-]
-
-[[package]]
-name = "fuchsia-hash"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "fuchsia-inspect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
-]
-
-[[package]]
 name = "fuchsia-sync"
 version = "0.1.0"
 dependencies = [
  "lock_api",
  "parking_lot_core",
  "shuttle-parking_lot",
-]
-
-[[package]]
-name = "fuchsia_merkle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bssl-crypto",
- "fuchsia-hash",
- "storage_ptr_slice",
- "zx-status",
 ]
 
 [[package]]
@@ -1805,28 +1668,21 @@ dependencies = [
  "async-trait",
  "bincode",
  "bit-vec",
- "blob_metadata",
  "byteorder",
  "either",
  "event-listener",
- "fidl-fuchsia-io",
  "fprint",
- "fscrypt",
- "fsverity_merkle",
  "fuchsia-async",
- "fuchsia-inspect",
  "fuchsia-sync",
- "fuchsia_merkle",
  "futures",
- "fxfs-crypto",
  "fxfs-unicode",
  "fxfs_macros",
  "fxfs_trace",
+ "getrandom 0.4.3",
  "linked-hash-map",
  "log",
  "num-traits",
  "pin-project",
- "rand 0.10.3",
  "rapidhash",
  "rustc-hash",
  "scopeguard",
@@ -1838,8 +1694,6 @@ dependencies = [
  "thiserror",
  "uuid",
  "zerocopy",
- "zx",
- "zx-status",
 ]
 
 [[package]]
@@ -1851,36 +1705,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxfs-crypto"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "arbitrary",
- "async-trait",
- "byteorder",
- "cbc",
- "fidl-fuchsia-fxfs",
- "fprint",
- "fscrypt",
- "futures",
- "fxfs_trace",
- "log",
- "serde",
- "siphasher",
- "storage_ptr_slice",
- "storage_xts",
- "zerocopy",
- "zx-status",
-]
-
-[[package]]
 name = "fxfs-posix"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "event-listener",
- "fidl-fuchsia-io",
  "fuchsia-async",
  "futures",
  "fxfs",
@@ -2052,9 +1881,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "hmac"
@@ -2400,19 +2226,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
- "block-padding",
  "hybrid-array",
-]
-
-[[package]]
-name = "io-uring"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3bd0ecfbb87805f538bb7b32e5239ca0763890c623e349860ecba69469f2bb"
-dependencies = [
- "bitflags 2.13.2",
- "cfg-if",
- "libc",
 ]
 
 [[package]]
@@ -2846,13 +2660,6 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
-name = "mundane"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
-]
 
 [[package]]
 name = "naive-timer"
@@ -4264,7 +4071,7 @@ dependencies = [
  "anyhow",
  "arbitrary",
  "async-trait",
- "block_protocol",
+ "bitflags 2.13.2",
  "event-listener",
  "fprint",
  "fuchsia-sync",
@@ -4276,7 +4083,6 @@ dependencies = [
  "serde",
  "storage_ptr_slice",
  "thiserror",
- "zx",
 ]
 
 [[package]]
@@ -4293,9 +4099,6 @@ version = "0.1.0"
 [[package]]
 name = "storage_units"
 version = "0.1.0"
-dependencies = [
- "zx",
-]
 
 [[package]]
 name = "storage_xts"
@@ -5447,46 +5250,4 @@ checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",
-]
-
-[[package]]
-name = "zx"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "bstr",
- "libc",
- "static_assertions",
- "zerocopy",
- "zx-status",
- "zx-status-ext",
- "zx-sys",
-]
-
-[[package]]
-name = "zx-status"
-version = "0.1.0"
-dependencies = [
- "zx-types",
-]
-
-[[package]]
-name = "zx-status-ext"
-version = "0.1.0"
-dependencies = [
- "zx-status",
-]
-
-[[package]]
-name = "zx-sys"
-version = "0.1.0"
-dependencies = [
- "zx-types",
-]
-
-[[package]]
-name = "zx-types"
-version = "0.1.0"
-dependencies = [
- "zerocopy",
 ]

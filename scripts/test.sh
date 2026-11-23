@@ -17,6 +17,9 @@
 #
 # Unicode tests compare against the Unicode Character Database, which is
 # downloaded and checksummed on first use.
+#
+# Every cargo call is --locked: a lock file that is not as Cargo resolves its manifests fails the
+# part, rather than being rewritten under it (board 8601).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,17 +60,17 @@ echo "$SHA256  $zip" | shasum -a 256 -c - >/dev/null
 if part clippy; then
     # In $root: `cargo fmt --manifest-path` finds no targets in a virtual manifest.
     (cd "$root" && cargo fmt --check)
-    UCD_ZIP="$zip" cargo clippy --manifest-path "$root/Cargo.toml" --workspace --tests -- \
+    UCD_ZIP="$zip" cargo clippy --locked --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p local_cell -p cladefs \
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" -p local_cell -p cladefs \
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p cladefs -p virtio_extent \
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
     env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
-        cargo clippy --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
+        cargo clippy --locked --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
         -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- -A clippy::all -D warnings
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
@@ -77,15 +80,16 @@ fi
 # CI's workspace job out of time (TASK-188).
 sim='package(local_cell) & test(/^sim::/)'
 if part workspace; then
-    UCD_ZIP="$zip" cargo nextest run --manifest-path "$root/Cargo.toml" --workspace \
+    UCD_ZIP="$zip" cargo nextest run --locked --manifest-path "$root/Cargo.toml" --workspace \
         -E "not ($sim)" "$@"
 fi
 if part unit; then
-    UCD_ZIP="$zip" cargo nextest run --manifest-path "$root/Cargo.toml" --workspace --profile unit "$@"
+    UCD_ZIP="$zip" cargo nextest run --locked --manifest-path "$root/Cargo.toml" --workspace \
+        --profile unit "$@"
 fi
 if part sim; then
-    cargo nextest run --manifest-path "$root/Cargo.toml" --cargo-profile sim -p local_cell \
-        -E "$sim" "$@"
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" --cargo-profile sim \
+        -p local_cell -E "$sim" "$@"
 fi
 # The build under madsim, the daemon's deterministic simulation (doc-24, TASK-685.12): the crates
 # the simulation runs, built with `--cfg madsim`, its target a directory of its own, as every crate
@@ -94,8 +98,8 @@ fi
 # part.
 if part madsim; then
     madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
-    "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs
+    "${madsim[@]}" cargo check --locked --manifest-path "$root/Cargo.toml" -p node_local \
+        -p host_fs -p bucket_cell -p local_cell -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said, after the regression seeds, those that once failed (crates/cladefs/tests/madsim-seeds,
     # TASK-685.8): each seed a process of its own, as what a simulation's hosts held in memory,
@@ -106,28 +110,29 @@ if part madsim; then
     "${madsim[@]}" "$root/scripts/madsim-seeds.py" --first "${MADSIM_TEST_SEED:-1}" \
         --count "${CLADEFS_MADSIM_SEEDS:-20}" "$@"
     # A rule search, `*_needs_*`, runs its own seeds, once.
-    "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' \
+    "${madsim[@]}" cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p node_local \
+        -p host_fs -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' \
         --no-tests=pass "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).
 if part shuttle; then
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle \
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle \
         --test shuttle
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle --lib \
-        shuttle_tests::
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p cladefs --features shuttle --lib \
-        shuttle_tests::
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle \
+        --lib shuttle_tests::
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p cladefs --features shuttle \
+        --lib shuttle_tests::
     # The followers' concurrency protocol, under Shuttle (TASK-42.5).
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p follower --features shuttle
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p follower --features shuttle
     # The followers' simulation: Fxfs as writer and followers on an extent store (TASK-42.1).
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p follower_sim --features shuttle
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p follower_sim --features shuttle
     # The protocols of atomics under loom, each crate's `loom` feature, whose every interleaving
     # and weak ordering Shuttle, seeing every atomic as SeqCst, can't run (docs/memory-ordering.md,
     # TASK-444.2).
     for crate in cladefs virtio_extent; do
-        cargo nextest run --manifest-path "$root/Cargo.toml" -p "$crate" --features loom --lib loom::
+        cargo nextest run --locked --manifest-path "$root/Cargo.toml" -p "$crate" --features loom \
+            --lib loom::
     done
 fi
 # The scripts' own tests, and that each hand mutant's patch or edits apply as they are: one that
@@ -158,7 +163,7 @@ if part go; then
     [[ -z $unformatted ]] || { echo "not gofmt'd: $unformatted" >&2; exit 1; }
     go -C "$root/go" vet -tags cladefsd ./...
     if [[ $(uname) == Linux ]]; then
-        cargo build --manifest-path "$root/Cargo.toml" -p cladefs --bin cladefsd
+        cargo build --locked --manifest-path "$root/Cargo.toml" -p cladefs --bin cladefsd
         # No headroom, as cargo's tests' daemons have (.cargo/config.toml): a cell refused only
         # once the host's memory is really full (board 5662).
         CLADEFSD="${CARGO_TARGET_DIR:-$root/target}/debug/cladefsd" \
@@ -180,7 +185,7 @@ if part guest; then
     else
         echo "scripts/test.sh: the guest part's tests that loop-mount a filesystem need root, and are left out: run it as root to include them" >&2
     fi
-    harness=(cargo nextest run --manifest-path "$root/guest/tests/Cargo.toml"
+    harness=(cargo nextest run --locked --manifest-path "$root/guest/tests/Cargo.toml"
         ${as_root[@]+"${as_root[@]}"})
     "${harness[@]}" -p test_cases --features host
     "${harness[@]}" -p test_cases --features guest

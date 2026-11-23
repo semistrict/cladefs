@@ -32,5 +32,6 @@ for package in json.load(sys.stdin)["packages"]:
 # Each file of them, by its path and content; not what builds leave there.
 # shellcheck disable=SC2086 # The crates are paths, a line each.
 find Cargo.toml guest/linux guest/rust scripts/build-guest-kernel.sh scripts/build-guest-sysroot.sh \
+    scripts/lib/guest-kernel-release.sh \
     $crates \( -name target -o -name '*.o' -o -name '.*.cmd' -o -name '*.a' \) -prune -o \
     -type f -print0 | LC_ALL=C sort -zu | xargs -0 sha256sum | sha256sum | cut -c1-32
