@@ -29,6 +29,15 @@
 //! log formats refuses the directory as it opens it rather than read its logs as empty, which
 //! forgot appends it had acked; a writer's segment log whose first bytes are not this build's
 //! `wal::LOG_MAGIC` is refused as it is appended, before any ack, and as it is read back.
+//!
+//! What a peer asks is untrusted (AGENTS.md, Trust boundaries; board 8445): a call is admitted only
+//! if the cell's head in the bucket could have asked it ([`admit`]), which the peer service reads
+//! for each call before it reaches the directory, so that no peer fences a cell past its head's
+//! epoch, at `u64::MAX` for good, nor drops the logs of a configuration its writer appends to not. What a peer's calls hold is
+//! bounded (board 8451): every byte appended admitted by the disk governor (the directory's
+//! footprint), refused past it; at most [`CONFIGURATIONS_MOST`] configurations of a cell, those its
+//! writer gave up trimmed as its next begins ([`Replicas::trim`]); and nothing in memory of a cell
+//! holding nothing, the directory listed once, as it opens.
 
 use crate::dir::{Dir, File};
 use anyhow::{Context as _, anyhow};
@@ -60,6 +69,14 @@ pub(crate) fn magic() -> String {
 /// bucket, whose segments' logs are dropped as it holds them: twice that, doubled again. A take
 /// refuses a fence answer naming more, as a member answering so is no member of this build.
 pub const LOGS_MOST: usize = 16 << 10;
+
+/// cladefs: the most configurations of a cell a member holds logs of (board 8451): its active one,
+/// the next its writer installs (a replacement's, or a take's), a racing taker's of a later epoch,
+/// and those given up, which the next one's stream trims ([`Replicas::trim`]); twice as many. A
+/// new one past it is refused, so that no peer makes a cell's logs grow without bound, each
+/// configuration to the lag bound.
+pub const CONFIGURATIONS_MOST: usize = 8;
+
 /// Maximum open replica log file handles cached across all cells (board 6902): keeps sequential
 /// append handles (`DiskFile` direct-I/O tail) warm without allowing tiny logs to exhaust
 /// `RLIMIT_NOFILE`.
@@ -97,6 +114,111 @@ pub enum Refused {
         expected = crate::wal::LOG_MAGIC.escape_ascii()
     )]
     Format { log: String, found: String },
+    /// cladefs: the bucket holds no live head of the cell, replicated (board 8445): no writer or
+    /// take of it asks a member anything.
+    #[error("{cell}: the bucket holds no live replicated head of it: refused")]
+    Unheaded { cell: CellId },
+    /// cladefs: the cell's head, as the bucket holds it, could not have asked it (board 8445):
+    /// its writer appends to its active configuration or one after it of its epoch, a take fences
+    /// the active one at no later epoch than the head's, and drops are of its writer's
+    /// configurations.
+    #[error(
+        "{asked} of {cell}, its head being of epoch {epoch}, segments to {end}, {active}: refused"
+    )]
+    Unasked { cell: CellId, asked: String, epoch: u64, end: u64, active: String },
+    /// cladefs: the disk governor allows the append no room (board 8451).
+    #[error("no room on the disk for {bytes} bytes: {full}")]
+    Disk { bytes: u64, full: String },
+    /// cladefs: the cell would have more configurations' logs here than [`CONFIGURATIONS_MOST`]
+    /// (board 8451).
+    #[error("{cell} would have logs of more than {most} configurations here")]
+    Configurations { cell: CellId, most: usize },
+}
+
+/// cladefs: what a cell's head in the bucket says, as a member checks a peer's call against it
+/// (board 8445): the epoch of its newest taking, the segments it names (0 to `end`), and its active
+/// configuration, if it names one. Each only grows as the cell goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    pub epoch: u64,
+    pub end: u64,
+    pub active: Option<Key>,
+}
+
+/// cladefs: a call a peer asks of a member, as [`admit`] checks it against the cell's head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// Appends to configuration `0`'s logs ([`Replicas::append`]).
+    Append(Key),
+    /// A fence of configuration `0`'s cell at epoch `1` ([`Replicas::fence`]).
+    Fence(Key, u64),
+    /// Drops ([`Replicas::drop_logs`]) of configuration `0`'s logs through `1`, or of those of
+    /// every configuration before it.
+    Drop(Key, Option<u64>),
+}
+
+/// cladefs: whether the head of `cell`, as `head` says it (none if the bucket holds no live head of
+/// it, or none replicated), could have asked `asked` (board 8445): Unheaded or Unasked if not.
+///
+/// - Appends go to the active configuration, or one after it made at the head's epoch, which its
+///   writer's replacement, or a take, installs before the head names it (doc-21); with none
+///   active, one of the head's epoch.
+/// - A take fences the active configuration, once it took the head, at the head's epoch: none at a
+///   later one, so that no promise is past what a writer of the cell holds, and its writer's
+///   appends go on.
+/// - Drops through a log are of a configuration its writer appends to, as appends are; those of
+///   every configuration before one, of no later one than the active. A log is named by its
+///   segment's number in its writer's cell ([`crate::replicate::log_of`]), not the bucket's, which
+///   the head names: no head says which logs the bucket holds, and a drop through any log of its
+///   writer's configuration is its writer's to ask (hotbed question 499, board 10095).
+///
+/// What it admits under a head it admits under any later one: each of its fields only grows.
+pub fn admit(cell: CellId, head: Option<&Seen>, asked: Asked) -> Result<(), Refused> {
+    let Some(head) = head else { return Err(Refused::Unheaded { cell }) };
+    admitting(cell, head, asked, false)
+}
+
+/// cladefs: whether a head of `cell` the bucket held once, `noted`, read for an earlier call, the
+/// bucket out of reach now, admits `asked` (board 8445): as [`admit`] does, but that its writer
+/// may have been taken since by a writer of a later epoch, its active configuration one after
+/// `noted`'s, which a take installs and the head names before the bucket goes out of reach. So
+/// appends, and drops through a log, go to a configuration no earlier than `noted`'s active one,
+/// or of a later epoch than `noted`'s; what else it admits, a later head admits too. What
+/// none of a head since would have asked harms none of its writers: a promise is no later than
+/// `noted`'s epoch, and no take reads a configuration not its head's active one.
+pub fn admit_noted(cell: CellId, noted: &Seen, asked: Asked) -> Result<(), Refused> {
+    admitting(cell, noted, asked, true)
+}
+
+/// cladefs: [`admit`]'s, or, `noted`, [`admit_noted`]'s.
+fn admitting(cell: CellId, head: &Seen, asked: Asked, noted: bool) -> Result<(), Refused> {
+    let Seen { epoch, end, active } = *head;
+    let appended = |key: Key| match (active, noted) {
+        (Some(active), false) => {
+            key == active || (key.number > active.number && key.epoch == epoch)
+        }
+        (None, false) => key.epoch == epoch,
+        (Some(active), true) => key >= active || key.epoch > epoch,
+        (None, true) => key.epoch >= epoch,
+    };
+    let admitted = match asked {
+        Asked::Append(key) | Asked::Drop(key, Some(_)) => appended(key),
+        Asked::Fence(key, at) => active == Some(key) && at <= epoch,
+        Asked::Drop(key, None) => active.is_some_and(|active| key <= active),
+    };
+    if admitted {
+        return Ok(());
+    }
+    let asked = match asked {
+        Asked::Append(key) => format!("appends to configuration {key:?}"),
+        Asked::Fence(key, at) => format!("a fence at epoch {at} of configuration {key:?}"),
+        Asked::Drop(key, Some(through)) => {
+            format!("a drop of configuration {key:?}'s logs through {through}")
+        }
+        Asked::Drop(key, None) => format!("a drop of the configurations before {key:?}"),
+    };
+    let active = active.map_or("no configuration".to_owned(), |key| format!("{key:?} active"));
+    Err(Refused::Unasked { cell, asked, epoch, end, active })
 }
 
 impl Refused {
@@ -134,6 +256,9 @@ pub struct Replicas<D: Dir> {
     most: u64,
     /// The most logs a configuration has here: [`LOGS_MOST`], or fewer in a test.
     logs_most: usize,
+    /// cladefs: the cells it holds files of, each as the directory's one listing, as it opened,
+    /// found them, read as it is first asked of (board 8451); and, while a call of it is served, a
+    /// cell holding nothing, which goes from here as its last call ends ([`Holding`]).
     cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
     /// Bounded LRU of open log file handles across all cells (board 6902).
     files: Mutex<FileCache<D::File>>,
@@ -143,6 +268,10 @@ pub struct Replicas<D: Dir> {
 /// so that a fence answered leaves no append of an older epoch in flight.
 #[derive(Default)]
 struct Held {
+    /// cladefs: the names of its files the directory's listing found as it opened, until they are
+    /// read into the rest: by the first call of the cell, under its lock alone (board 8451; each
+    /// new cell's call listed the whole directory, under the lock of every cell).
+    unread: Option<Vec<String>>,
     /// Its promise, as on the disk: the greatest of `promises`.
     promise: u64,
     /// The epochs of its promises' files on the disk: the promise's, and those before it that a
@@ -150,6 +279,9 @@ struct Held {
     promises: BTreeSet<u64>,
     /// Its logs, by configuration and log.
     logs: BTreeMap<(Key, u64), Log>,
+    /// cladefs: the newest of its head the peer service read for its calls, which admits them
+    /// while the bucket is out of reach ([`Replicas::saw`], board 8445). Kept while it holds files.
+    seen: Option<Seen>,
 }
 
 impl Held {
@@ -161,6 +293,24 @@ impl Held {
     /// How many logs of configuration `key` it holds.
     fn logs_of(&self, key: Key) -> usize {
         self.logs.range((key, 0)..=(key, u64::MAX)).count()
+    }
+
+    /// The configurations it holds logs of, in order: each found past the one before's last log.
+    fn configurations(&self) -> Vec<Key> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut keys = Vec::new();
+        let mut next = self.logs.keys().next().map(|&(key, _)| key);
+        while let Some(key) = next {
+            keys.push(key);
+            let after = self.logs.range((Excluded((key, u64::MAX)), Unbounded)).next();
+            next = after.map(|(&(key, _), _)| key);
+        }
+        keys
+    }
+
+    /// Whether it holds nothing: no file, read or not.
+    fn is_empty(&self) -> bool {
+        self.unread.is_none() && self.promises.is_empty() && self.logs.is_empty()
     }
 }
 
@@ -244,12 +394,26 @@ impl<D: Dir> Replicas<D> {
             write_text(&dir, INCARNATION, &format!("{}\nincarnation {incarnation}\n", magic()))?;
             incarnation
         };
+        // cladefs: each cell's files, as this one listing found them, read as the cell is first
+        // asked of (board 8451).
+        let mut found: HashMap<CellId, Vec<String>> = HashMap::new();
+        for name in names {
+            if let Some((cell, _)) = parse_name(&name) {
+                found.entry(cell).or_default().push(name);
+            }
+        }
+        let cells = (found.into_iter())
+            .map(|(cell, names)| {
+                let held = Held { unread: Some(names), ..Held::default() };
+                (cell, Arc::new(Mutex::new(held)))
+            })
+            .collect();
         Ok(Self {
             dir,
             incarnation,
             most,
             logs_most: LOGS_MOST,
-            cells: Mutex::default(),
+            cells: Mutex::new(cells),
             files: Mutex::new(bucket_cell::lru::LruMap::new()),
         })
     }
@@ -308,8 +472,8 @@ impl<D: Dir> Replicas<D> {
         bytes: &[u8],
     ) -> Result<u64, Error> {
         self.check(incarnation)?;
-        let held = self.held(cell)?;
-        let mut held = held.lock().unwrap();
+        let holding = self.holding(cell);
+        let mut held = holding.lock()?;
         if key.epoch < held.promise {
             return Err(Refused::Fenced { promise: held.promise }.into());
         }
@@ -345,6 +509,13 @@ impl<D: Dir> Replicas<D> {
         if !held.logs.contains_key(&(key, log)) && held.logs_of(key) >= self.logs_most {
             return Err(Refused::Logs { most: self.logs_most }.into());
         }
+        // cladefs: a configuration new here, past those a cell's logs are of (board 8451).
+        if held.logs_of(key) == 0 && held.configurations().len() >= CONFIGURATIONS_MOST {
+            return Err(Refused::Configurations { cell, most: CONFIGURATIONS_MOST }.into());
+        }
+        // cladefs: what it adds, admitted by the disk governor before any file is made, held
+        // until written (board 8451).
+        let _pledge = self.admit(offset + bytes.len() as u64 - end)?;
         let mut created_file = None;
         if !held.logs.contains_key(&(key, log)) {
             // Its file made, it is held at once, empty, however its first append ends: a failure
@@ -368,6 +539,7 @@ impl<D: Dir> Replicas<D> {
                     if found_end != 0 {
                         drop(file);
                         drop(held);
+                        drop(holding);
                         return self.append((cell, key, incarnation), log, offset, bytes);
                     }
                     let file = Arc::new(file);
@@ -400,8 +572,8 @@ impl<D: Dir> Replicas<D> {
         epoch: u64,
     ) -> Result<Vec<(u64, u64)>, Error> {
         self.check(incarnation)?;
-        let held = self.held(cell)?;
-        let mut held = held.lock().unwrap();
+        let holding = self.holding(cell);
+        let mut held = holding.lock()?;
         if epoch < held.promise {
             return Err(Refused::Fenced { promise: held.promise }.into());
         }
@@ -443,8 +615,8 @@ impl<D: Dir> Replicas<D> {
         len: u64,
     ) -> Result<Vec<u8>, Error> {
         self.check(incarnation)?;
-        let held = self.held(cell)?;
-        let held = held.lock().unwrap();
+        let holding = self.holding(cell);
+        let held = holding.lock()?;
         let Some(state) = held.logs.get(&(key, log)) else { return Ok(Vec::new()) };
         let available = state.end.saturating_sub(offset).min(len) as usize;
         if available == 0 {
@@ -469,8 +641,8 @@ impl<D: Dir> Replicas<D> {
         through: Option<u64>,
     ) -> Result<(), Error> {
         self.check(incarnation)?;
-        let held = self.held(cell)?;
-        let mut held = held.lock().unwrap();
+        let holding = self.holding(cell);
+        let mut held = holding.lock()?;
         let gone: Vec<(Key, u64)> = (held.logs.keys())
             .filter(|&&(of, log)| match through {
                 Some(last) => of == key && log <= last,
@@ -483,21 +655,32 @@ impl<D: Dir> Replicas<D> {
 
     /// The cells the directory holds logs or a promise of, and the configurations it holds logs
     /// of: what [`Replicas::sweep`] looks at, against each cell's head.
+    /// cladefs: as it keeps them in memory, its directory listed once, as it opened (board 8451).
     pub fn cells(&self) -> Result<Vec<(CellId, Vec<Key>)>, Error> {
+        let kept: Vec<(CellId, Arc<Mutex<Held>>)> =
+            self.cells.lock().unwrap().iter().map(|(&cell, held)| (cell, held.clone())).collect();
         let mut cells: BTreeMap<(u64, u64), Vec<Key>> = BTreeMap::new();
-        for name in self.dir.list("").context("listing the replica directory")? {
-            if let Some((cell, key)) = parse_name(&name) {
-                let keys = cells.entry((cell.tenant, cell.id)).or_default();
-                keys.extend(key.filter(|key| !keys.contains(key)));
+        for (cell, held) in kept {
+            let held = held.lock().unwrap();
+            if held.is_empty() {
+                continue;
             }
+            let keys = match &held.unread {
+                Some(names) => {
+                    let keys = names.iter().filter_map(|name| parse_name(name)?.1);
+                    keys.collect::<BTreeSet<Key>>().into_iter().collect()
+                }
+                None => held.configurations(),
+            };
+            cells.insert((cell.tenant, cell.id), keys);
         }
         Ok(cells.into_iter().map(|((tenant, id), keys)| (CellId { tenant, id }, keys)).collect())
     }
 
     /// Drops what the directory holds of `cell` that its head names no more ([`Swept`]).
     pub fn sweep(&self, cell: CellId, swept: Swept) -> Result<(), Error> {
-        let held = self.held(cell)?;
-        let mut held = held.lock().unwrap();
+        let holding = self.holding(cell);
+        let mut held = holding.lock()?;
         let gone: Vec<(Key, u64)> = match swept {
             // A replicated cell whose head names no configuration yet: its first may be being
             // installed, or active since the head was read. Nothing goes (the spec sweeps only
@@ -564,37 +747,150 @@ impl<D: Dir> Replicas<D> {
         }
     }
 
-    /// What the directory holds of `cell`, read from the disk the first time it is asked.
-    fn held(&self, cell: CellId) -> Result<Arc<Mutex<Held>>, Error> {
-        let mut cells = self.cells.lock().unwrap();
-        if let Some(held) = cells.get(&cell) {
-            return Ok(held.clone());
-        }
-        let mut held = Held::default();
-        for name in self.dir.list("").context("listing the replica directory")? {
-            match parse_name(&name) {
-                Some((of, None)) if of == cell => {
-                    // Not a number: the error below names the file.
-                    let epoch = name.rsplit('.').next().and_then(|epoch| epoch.parse().ok());
-                    let epoch = epoch.ok_or_else(|| anyhow!("bad promise {name:?}"))?;
-                    // A crash between a promise and the removal of the one before leaves both.
-                    held.promise = held.promise.max(epoch);
-                    held.promises.insert(epoch);
+    /// What the directory holds of `cell`, held for a call of it ([`Holding`]): its entry, or one
+    /// made, empty, so that calls of a cell new here are served one at a time too.
+    fn holding(&self, cell: CellId) -> Holding<'_, D> {
+        let held = self.cells.lock().unwrap().entry(cell).or_default().clone();
+        Holding { replicas: self, cell, held }
+    }
+
+    /// Reads the files `held` names unread ([`Held::unread`]), `cell`'s, from the disk: kept unread
+    /// if any fails to be, to be read again by the next call.
+    fn read_held(&self, cell: CellId, held: &mut Held) -> Result<(), Error> {
+        let Some(names) = held.unread.take() else { return Ok(()) };
+        let mut read = Held::default();
+        let reading = (|| {
+            for name in &names {
+                match parse_name(name) {
+                    Some((_, None)) => {
+                        // Not a number: the error below names the file.
+                        let epoch = name.rsplit('.').next().and_then(|epoch| epoch.parse().ok());
+                        let epoch = epoch.ok_or_else(|| anyhow!("bad promise {name:?}"))?;
+                        // A crash between a promise and the removal of the one before leaves both.
+                        read.promise = read.promise.max(epoch);
+                        read.promises.insert(epoch);
+                    }
+                    Some((_, Some(key))) => {
+                        // Not a number: the error below names the file.
+                        let log = name.rsplit('.').next().and_then(|log| log.parse().ok());
+                        let log = log.ok_or_else(|| anyhow!("bad log name {name:?}"))?;
+                        let file = (self.dir.open(name, false))
+                            .with_context(|| format!("opening {name}"))?;
+                        read.logs.insert((key, log), Log::read(cell, log, &file, name)?);
+                    }
+                    None => {}
                 }
-                Some((of, Some(key))) if of == cell => {
-                    // Not a number: the error below names the file.
-                    let log = name.rsplit('.').next().and_then(|log| log.parse().ok());
-                    let log = log.ok_or_else(|| anyhow!("bad log name {name:?}"))?;
-                    let file =
-                        self.dir.open(&name, false).with_context(|| format!("opening {name}"))?;
-                    held.logs.insert((key, log), Log::read(cell, log, &file, &name)?);
-                }
-                _ => {}
+            }
+            Ok::<_, Error>(())
+        })();
+        match reading {
+            Ok(()) => {
+                *held = read;
+                Ok(())
+            }
+            Err(err) => {
+                held.unread = Some(names);
+                Err(err)
             }
         }
-        let held = Arc::new(Mutex::new(held));
-        cells.insert(cell, held.clone());
+    }
+
+    /// cladefs: drops the logs of `cell`'s configurations that a writer's stream of appends to
+    /// `key`, its head's active configuration being `active`, leaves behind (board 8451): those
+    /// before `key` of its epoch or an earlier one, but `active`. Its writer moves to a configuration
+    /// only past those it gave up; and a configuration of an earlier epoch, not active, no writer
+    /// appends to again, nor a take reads (a take reads the active one). One of a later epoch, a
+    /// racing taker's, is kept. Called as the stream begins, `active` read from the bucket then,
+    /// once its call is admitted ([`admit`]): never with an older head, whose active configuration
+    /// may be one the head names no more, for one it names since.
+    pub fn trim(
+        &self,
+        (cell, key, incarnation): (CellId, Key, u64),
+        active: Option<Key>,
+    ) -> Result<(), Error> {
+        self.check(incarnation)?;
+        let holding = self.holding(cell);
+        let mut held = holding.lock()?;
+        let left = |of: &Key| of.epoch <= key.epoch && *of < key && Some(*of) != active;
+        let gone: Vec<(Key, u64)> =
+            held.logs.range(..(key, 0)).map(|(&at, _)| at).filter(|(of, _)| left(of)).collect();
+        if !gone.is_empty() {
+            log::info!(
+                "replicas: {cell}'s configurations before {key:?} left behind: {:?}",
+                gone.iter().map(|&(of, _)| of).collect::<BTreeSet<_>>()
+            );
+        }
+        self.remove(cell, &mut held, &gone)
+    }
+
+    /// cladefs: notes that `cell`'s head, read from the bucket, said `seen` (board 8445): kept while
+    /// the cell holds files here, the newest of what was read, to admit its calls by while the bucket
+    /// is out of reach ([`Replicas::seen`]). Each of a head's fields only grows.
+    pub fn saw(&self, cell: CellId, seen: Seen) -> Result<(), Error> {
+        let holding = self.holding(cell);
+        let mut held = holding.lock()?;
+        let newest =
+            |was: Seen| (was.epoch, was.end, was.active) < (seen.epoch, seen.end, seen.active);
+        if held.seen.is_none_or(newest) {
+            held.seen = Some(seen);
+        }
+        Ok(())
+    }
+
+    /// cladefs: the newest of `cell`'s head the directory noted ([`Replicas::saw`]), if it holds
+    /// files of the cell: a head the bucket held once, by which what is admitted harms no writer or
+    /// take of the head since (board 8445): a promise no later than its epoch, no later than any
+    /// head's since; appends and drops of a configuration superseded since, which no take reads.
+    pub fn seen(&self, cell: CellId) -> Result<Option<Seen>, Error> {
+        let holding = self.holding(cell);
+        let held = holding.lock()?;
+        Ok(held.seen)
+    }
+
+    /// cladefs: admits `bytes` more appended, if the directory's disk has room for them, as the
+    /// disk governor says (board 8451): what the returned pledge holds until it goes, the bytes
+    /// written, counted in the directory's footprint as they are.
+    fn admit(&self, bytes: u64) -> Result<Option<crate::footprint::Pledge>, Refused> {
+        let Some(footprint) = self.dir.footprint() else { return Ok(None) };
+        let admitted = footprint.admit(bytes, 0);
+        admitted.map(Some).map_err(|full| Refused::Disk { bytes, full: full.to_string() })
+    }
+
+    /// cladefs: how many cells it keeps in memory, read or not.
+    #[cfg(test)]
+    fn cells_kept(&self) -> usize {
+        self.cells.lock().unwrap().len()
+    }
+}
+
+/// cladefs: what the directory holds of a cell, held for a call of it: its entry dropped as the
+/// last call ends, if it holds nothing then (board 8451), so that calls of cells holding nothing,
+/// a peer's by the hundred thousand, leave nothing in memory.
+struct Holding<'a, D: Dir> {
+    replicas: &'a Replicas<D>,
+    cell: CellId,
+    held: Arc<Mutex<Held>>,
+}
+
+impl<D: Dir> Holding<'_, D> {
+    /// What the directory holds of the cell, under its lock, its files read if they were not.
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Held>, Error> {
+        let mut held = self.held.lock().unwrap();
+        self.replicas.read_held(self.cell, &mut held)?;
         Ok(held)
+    }
+}
+
+impl<D: Dir> Drop for Holding<'_, D> {
+    fn drop(&mut self) {
+        let mut cells = self.replicas.cells.lock().unwrap();
+        // Held by the map and this alone: no other call holds it, or waits for it; none takes it
+        // from the map while the map is locked.
+        let alone = Arc::strong_count(&self.held) == 2
+            && cells.get(&self.cell).is_some_and(|held| Arc::ptr_eq(held, &self.held));
+        if alone && self.held.lock().unwrap().is_empty() {
+            cells.remove(&self.cell);
+        }
     }
 }
 
