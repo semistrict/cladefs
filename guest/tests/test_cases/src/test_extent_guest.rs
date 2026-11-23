@@ -24,7 +24,7 @@ pub struct TestExtentGuest;
 pub struct TestExtentGuestOtherVersion;
 
 /// The version the driver is told it speaks: the device's, this build's, and one more.
-const OTHER_VERSION: (u32, u32) = (1, 2);
+const OTHER_VERSION: (u32, u32) = (2, 3);
 
 /// The root the driver's self-test commits.
 #[cfg_attr(feature = "guest", allow(dead_code))]
