@@ -78,11 +78,18 @@ pub fn serve_control(
         // Its first status reported before it serves: the reporter starts with the server's, "",
         // SERVING, which a check served before a task of its own reported otherwise saw.
         let mut serving = super::SERVING.get().subscribe();
-        let now = *serving.borrow_and_update();
+        let mut now = *serving.borrow_and_update();
         report_health(&reporter, now).await;
         tokio::spawn(async move {
-            while serving.changed().await.is_ok() {
-                let now = *serving.borrow_and_update();
+            loop {
+                // cladefs: a test's reporter gone once it reported SERVING, as no panic but its
+                // runtime's going leaves it, which a drain bounds (board 8503).
+                fail::fail_point!("cladefsd::health_reporter_gone", now, |_| ());
+                // The sender lives as long as the process.
+                if serving.changed().await.is_err() {
+                    return;
+                }
+                now = *serving.borrow_and_update();
                 report_health(&reporter, now).await;
             }
         });

@@ -169,12 +169,13 @@ pub fn serving() -> bool {
 
 /// Says the daemon stops serving, as it is about to exit: once the control API's health service, if
 /// it serves, reports so to its callers. cladefs: the first of a drain's steps ([`drain::drain`]),
-/// awaited, holding no thread (doc-24 step 12).
+/// awaited, holding no thread (doc-24 step 12), within a bound of its own there: its health
+/// reporter gone, which says SERVING no more, it would wait for ever (board 8503).
 pub async fn stop_serving() {
     SERVING.get().send_replace(false);
     if control::is_serving() {
         let mut reported = REPORTED.get().subscribe();
-        // The health service gone: nothing left to report to.
+        // The sender lives as long as the process: this ends once the reporter reports.
         let _ = reported.wait_for(|serving| !*serving).await;
     }
 }
