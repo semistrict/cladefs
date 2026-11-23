@@ -500,6 +500,117 @@ fn an_image_must_be_named_and_its_blobs_whole() {
     })
 }
 
+/// Board 8541: a layer's blob is applied as it was hashed, opened once: a blob replaced in the
+/// layout once hashed, before it is applied, as one who can write the layout as it is imported
+/// may, is not what is applied. Until then the import opened it again by its path, and applied
+/// whatever was there, its digest unchecked.
+#[test]
+fn a_layer_swapped_once_hashed_is_not_applied() {
+    use cladefs::import::testing::import_hashed;
+    let dir = tempfile::tempdir().unwrap();
+    let layout = dir.path().join("image");
+    let hashed = layer(&[Entry::new("hashed", Kind::File(b"as hashed"))]).unwrap();
+    oci_layout(&layout, "sample:1", &[hashed]).unwrap();
+    let swapped = layer(&[Entry::new("swapped", Kind::File(b"swapped in"))]).unwrap();
+    let names = block_on(async {
+        let image = OciImage::open(&layout, None).unwrap();
+        let fs = Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap();
+        let mut importer = Importer::new(&fs);
+        let swap = |path: &Path| {
+            let beside = path.with_extension("swapped");
+            std::fs::write(&beside, &swapped).unwrap();
+            std::fs::rename(&beside, path).unwrap();
+        };
+        import_hashed(&image, &mut importer, swap).await.unwrap();
+        importer.finish().await.unwrap();
+        let names = manifest(&fs).await;
+        close(fs).await;
+        names
+    });
+    assert_eq!(names.len(), 1, "{names:#?}");
+    assert!(names[0].starts_with("/hashed File"), "{names:#?}");
+}
+
+/// Board 8541: what an image's layout holds is opened as it is, never through a symlink, which
+/// may name any file of the host, and `index.json`, a manifest and an index are refused past
+/// what registries take (4 MiB) before they are read whole: each `EINVAL`, as a bad image is.
+#[test]
+fn linked_or_oversized_layout_files_are_refused_with_einval() {
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = |name: &str| {
+        let layout = dir.path().join(name);
+        oci_layout(&layout, "sample:1", &sample_layers()).unwrap();
+        layout
+    };
+    let blobs = |layout: &Path| -> Vec<std::path::PathBuf> {
+        let listed = std::fs::read_dir(layout.join("blobs/sha256")).unwrap();
+        listed.map(|entry| entry.unwrap().path()).collect()
+    };
+    // `path` a symlink to a copy of what it held, beside it.
+    let linked = |path: &Path| {
+        let copy = path.with_extension("copy");
+        std::fs::rename(path, &copy).unwrap();
+        std::os::unix::fs::symlink(&copy, path).unwrap();
+    };
+    let opening = |layout: &Path, expected: &str| {
+        let error = OciImage::open(layout, None).err().expect("opened");
+        let said = format!("{error:#}");
+        assert!(said.contains(expected), "{expected:?} is not in {said:?}");
+        assert_eq!(error.errno(), Some(Errno::EINVAL), "{said}");
+    };
+
+    let layout = fresh("linked-index");
+    linked(&layout.join("index.json"));
+    opening(&layout, "index.json is a symlink");
+
+    // The manifest: its config names its layers' type, `"layers"`, too.
+    let layout = fresh("linked-manifest");
+    let manifest = blobs(&layout)
+        .into_iter()
+        .find(|blob| std::fs::read_to_string(blob).is_ok_and(|text| text.contains("\"layers\":")));
+    let manifest = manifest.expect("a manifest");
+    linked(&manifest);
+    opening(&layout, "is a symlink");
+
+    let layout = fresh("large-index");
+    let mut index = std::fs::read(layout.join("index.json")).unwrap();
+    index.resize((4 << 20) + 1, b' ');
+    std::fs::write(layout.join("index.json"), index).unwrap();
+    opening(&layout, "index.json is larger than 4194304 bytes");
+
+    // A manifest whose digest is its own, larger than 4 MiB.
+    let layout = fresh("large-manifest");
+    let mut large = vec![b' '; 4 << 20];
+    large.extend_from_slice(b"{}");
+    let hex: String = {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(&large).iter().map(|byte| format!("{byte:02x}")).collect()
+    };
+    std::fs::write(layout.join("blobs/sha256").join(&hex), &large).unwrap();
+    let index = format!(r#"{{"manifests":[{{"digest":"sha256:{hex}"}}]}}"#);
+    std::fs::write(layout.join("index.json"), index).unwrap();
+    opening(&layout, "is larger than 4194304 bytes");
+
+    // A layer's blob: refused as it is imported.
+    let layout = fresh("linked-layer");
+    let image = OciImage::open(&layout, None).unwrap();
+    for blob in blobs(&layout) {
+        if std::fs::read(&blob).unwrap().starts_with(&[0x1f, 0x8b]) {
+            linked(&blob);
+        }
+    }
+    block_on(async {
+        let fs = Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap();
+        let mut importer = Importer::new(&fs);
+        let error = image.import(&mut importer).await.expect_err("imported a linked layer");
+        let said = format!("{error:#}");
+        assert!(said.contains("is a symlink"), "{said}");
+        assert_eq!(error.errno(), Some(Errno::EINVAL), "{said}");
+        drop(importer);
+        close(fs).await;
+    });
+}
+
 /// A layer compressed with zstd is refused, saying so.
 #[test]
 fn zstd_layers_are_refused() {

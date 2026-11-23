@@ -895,7 +895,7 @@ impl OciImage {
     }
 
     fn open_layout(layout: &Path, reference: Option<&str>) -> anyhow::Result<Self> {
-        let index = std::fs::read(layout.join("index.json")).context("reading index.json")?;
+        let index = read_small(&layout.join("index.json")).context("reading index.json")?;
         let index: Blob = serde_json::from_slice(&index).context("parsing index.json")?;
         let manifests = index.manifests.context("index.json lists no manifests")?;
         let names = |descriptor: &Descriptor| -> Vec<String> {
@@ -936,13 +936,22 @@ impl OciImage {
     /// Applies the image's layers to `importer`'s filesystem, checking each against its digest
     /// first.
     pub async fn import(&self, importer: &mut Importer) -> Result<(), Error> {
+        self.import_hashed(importer, |_| {}).await
+    }
+
+    /// [`OciImage::import`], `hashed` called with each layer's blob's path once it is hashed,
+    /// before it is applied: a test's, to change the layout between the two.
+    pub(crate) async fn import_hashed(
+        &self,
+        importer: &mut Importer,
+        mut hashed: impl FnMut(&Path),
+    ) -> Result<(), Error> {
         for layer in &self.layers {
-            // cladefs: its whole blob hashed, off the runtime's other tasks (board 5614).
+            // cladefs: its whole blob hashed, off the runtime's other tasks (board 5614); what is
+            // applied is what was hashed, the file opened once (board 8541).
             let verified = || verified_blob(&self.layout, &layer.digest);
-            let path = local_cell::upload::blocking(verified).map_err(Error::new)?;
-            let file = std::fs::File::open(&path)
-                .with_context(|| format!("opening {}", path.display()))
-                .map_err(Error::new)?;
+            let (path, file) = local_cell::upload::blocking(verified).map_err(Error::new)?;
+            hashed(&path);
             importer.apply_layer(file).await.context(layer.digest.clone()).map_err(Error::new)?;
         }
         Ok(())
@@ -976,19 +985,64 @@ fn blob_path(layout: &Path, digest: &str) -> anyhow::Result<PathBuf> {
     Ok(layout.join("blobs/sha256").join(hex))
 }
 
-/// The blob `digest` names in `layout`, checked against it.
+/// The most bytes `index.json`, a manifest or an index holds: what registries take
+/// (distribution-spec's 4 MiB), past which one is refused before it is read (board 8541).
+const MAX_MANIFEST: u64 = 4 << 20;
+
+/// The file at `path` in an image's layout, opened once, for what is read of it to be what is
+/// checked of it, whatever the layout holds there after (board 8541): refused (`EINVAL`) if a
+/// symlink, which may name any file of the host, or anything but a regular file.
+fn open_regular(path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let opened = std::fs::File::options().read(true).custom_flags(libc::O_NOFOLLOW).open(path);
+    let file = match opened {
+        Ok(file) => file,
+        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(refused(format!("{} is a symlink", path.display())));
+        }
+        Err(err) => {
+            return Err(anyhow::Error::new(err).context(format!("opening {}", path.display())));
+        }
+    };
+    let metadata = file.metadata().with_context(|| format!("reading {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(refused(format!("{} is not a regular file", path.display())));
+    }
+    Ok(file)
+}
+
+/// The file at `path` in an image's layout, as [`open_regular`] opens it, read whole: refused
+/// (`EINVAL`) past [`MAX_MANIFEST`], before it is read, or as it is if it grows meanwhile.
+fn read_small(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let file = open_regular(path)?;
+    let len = file.metadata().with_context(|| format!("reading {}", path.display()))?.len();
+    let too_large = || refused(format!("{} is larger than {MAX_MANIFEST} bytes", path.display()));
+    if len > MAX_MANIFEST {
+        return Err(too_large());
+    }
+    let mut read = Vec::with_capacity(len as usize);
+    file.take(MAX_MANIFEST + 1)
+        .read_to_end(&mut read)
+        .with_context(|| format!("reading {}", path.display()))?;
+    if read.len() as u64 > MAX_MANIFEST {
+        return Err(too_large());
+    }
+    Ok(read)
+}
+
+/// The blob `digest` names in `layout`, a manifest or an index, checked against it.
 fn read_blob(layout: &Path, digest: &str) -> anyhow::Result<Vec<u8>> {
-    let path = blob_path(layout, digest)?;
-    let blob = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let blob = read_small(&blob_path(layout, digest)?)?;
     check_digest(digest, Sha256::digest(&blob).as_slice())?;
     Ok(blob)
 }
 
-/// The path of the blob `digest` names in `layout`, whose contents are checked against it.
-fn verified_blob(layout: &Path, digest: &str) -> anyhow::Result<PathBuf> {
+/// The blob `digest` names in `layout`, a layer, opened once, its contents checked against it,
+/// and rewound: what is applied (board 8541). Its path too, which is no longer what is read.
+fn verified_blob(layout: &Path, digest: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
+    use std::io::Seek as _;
     let path = blob_path(layout, digest)?;
-    let mut file =
-        std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    let mut file = open_regular(&path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0; CHUNK];
     loop {
@@ -1000,7 +1054,8 @@ fn verified_blob(layout: &Path, digest: &str) -> anyhow::Result<PathBuf> {
         hasher.update(&buf[..len]);
     }
     check_digest(digest, hasher.finalize().as_slice())?;
-    Ok(path)
+    file.rewind().with_context(|| format!("rewinding {}", path.display()))?;
+    Ok((path, file))
 }
 
 fn check_digest(digest: &str, sha256: &[u8]) -> anyhow::Result<()> {
