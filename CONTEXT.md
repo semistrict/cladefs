@@ -176,6 +176,9 @@ Eviction of cached pages for an arena starved at its cap.
 **Quarantine**:
 Where a freed page waits until no VM process may still map it: since doc-26, a slab, until each VM process it was staged to acknowledged what took it away, or died.
 
+**Wedged** (a VM process):
+One the daemon killed that has not exited `KILLED_EXITING` after, as in uninterruptible sleep or a frozen cgroup (board 8535): what the quarantine holds for it comes back only once it exits, if ever, so shrinks and relief count it held, not on its way.
+
 **Governor**:
 What bounds the daemon's one memory budget, which every cache of its holds under; and, the disk
 governor, what bounds each host disk's: the open cells first, the part cache what they leave.

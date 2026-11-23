@@ -707,7 +707,45 @@ pub(crate) fn stream_bytes(header: &Header) -> u64 {
         }
         FREE_MANY => header.len.saturating_mul(2),
         MAP_MANY => header.len.saturating_mul(MAP_MANY_HELD),
+        // cladefs: its reply's root, as a READ's reply, counted as it is admitted: uncounted, queued
+        // replies of roots passed every tenant's bytes in flight (the Codex review of board 8465).
+        ROOT => header.len.saturating_add(crate::protocol::MAX_ROOT as u64),
         _ => header.len,
+    }
+}
+
+/// cladefs: the most bytes a path a request names has, as [`path`] takes it: shorter than
+/// `PATH_MAX`.
+const MOST_PATH: u64 = libc::PATH_MAX as u64 - 1;
+
+/// cladefs: the most bytes of payload a message of `header` carries, as its kind and flags decode
+/// one, [`REQUEST_BYTES`] more if it says its guest request (board 8459): of the header alone, as
+/// the daemon admits a message before it reads its payload, which one past it, refused, the daemon
+/// never reads, nor holds any of. None for a kind no request is of, and for an [`ACK`], a
+/// [`STAGE_COUNTS`] or a [`STAGE_PRIVATE_COUNTS`] (TASK-581). One limit per kind, as
+/// [`known_flags`] has one mask per kind; [`Request::decode`] refuses what it holds within them
+/// that means nothing.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+pub(crate) fn most_payload(header: &Header) -> u64 {
+    const PATH: u64 = MOST_PATH;
+    const ROOT: u64 = crate::protocol::MAX_ROOT as u64;
+    let has = |flag: u32| header.flags & flag != 0;
+    let most = match header.kind {
+        OPEN => PATH,
+        FORK if has(FORK_QUIESCENT) || has(FORK_DROP) => 0,
+        FORK => PATH,
+        // Its data and its root after it; or, through the transfer area, its root alone.
+        WRITE if has(WRITE_TRANSFER) => ROOT,
+        WRITE => MAX_PAYLOAD.saturating_add(ROOT),
+        COMMIT if has(COMMIT_ROOT) => ROOT,
+        FREE_MANY | MAP_MANY => MAX_PAYLOAD,
+        BUILD => MAX_BUILD as u64,
+        STATS if has(STATS_GUEST) => crate::protocol::MAX_STATS as u64,
+        _ => 0,
+    };
+    match has(REQUEST) && known_flags(header.kind).is_ok() {
+        true => most.saturating_add(REQUEST_BYTES as u64),
+        false => most,
     }
 }
 
@@ -1597,6 +1635,7 @@ mod tests {
             saying.payload.splice(0..0, request_bytes(guest));
             saying.header.len += REQUEST_BYTES as u64;
             assert_eq!(guest_request(&saying).map(|(guest, _)| guest), Ok(Some(guest)));
+            assert!(saying.header.len <= most_payload(&saying.header), "{request:?}");
             assert_eq!(Request::decode(&saying).as_ref(), Ok(&request), "{request:?}");
             let mut zero = sent(&request, 1);
             zero.header.flags |= REQUEST;
@@ -1607,6 +1646,60 @@ mod tests {
         short.header.flags |= REQUEST;
         short.payload = vec![1; REQUEST_BYTES - 1];
         assert_eq!(Request::decode(&short).err(), Some(Errno::EINVAL));
+    }
+
+    /// Board 8459: the most payload each kind's header is admitted with ([`most_payload`]) is the
+    /// most it decodes, at the edges: a root, a path, a build and a guest's stats each as long as
+    /// they may be, with a guest request's bytes before them or not, decode, and a byte more is
+    /// refused as it is decoded too. So the refusal at the header refuses nothing a request holds,
+    /// and admits nothing it doesn't. Red with a kind's limit a byte short, or long.
+    #[test]
+    fn requests_payloads_reach_their_kinds_most_and_no_more() {
+        let open = || {
+            let body = OpenBody { version: VERSION, ..Default::default() };
+            Header::new(OPEN, 1).with_body(&body)
+        };
+        let root = |flags| Header::new(COMMIT, 1).with_flags(flags);
+        let stats =
+            || Header::new(STATS, 1).with_flags(STATS_GUEST).with_body(&StatsBody::default());
+        let cases: [(Header, u8, usize); 5] = [
+            (open(), b'a', MOST_PATH as usize),
+            (Header::new(FORK, 1), b'a', MOST_PATH as usize),
+            (root(COMMIT_ROOT), b'r', MAX_ROOT),
+            (Header::new(BUILD, 1), b'b', MAX_BUILD),
+            (stats(), b's', MAX_STATS),
+        ];
+        let decoded = |mut header: Header, saying: bool, payload: Vec<u8>| {
+            let payload = match saying {
+                true => {
+                    header.flags |= REQUEST;
+                    [request_bytes(NonZeroU64::new(9).unwrap()).to_vec(), payload].concat()
+                }
+                false => payload,
+            };
+            header.len = payload.len() as u64;
+            let admitted = header.len <= most_payload(&header);
+            (admitted, Request::decode(&Message { header, payload, fds: vec![] }).is_ok())
+        };
+        for (header, byte, most) in cases {
+            for saying in [false, true] {
+                let at = decoded(header, saying, vec![byte; most]);
+                assert_eq!(at, (true, true), "{header:?} of {most} bytes, saying {saying}");
+                let past = decoded(header, saying, vec![byte; most + 1]);
+                assert_eq!(
+                    past,
+                    (false, false),
+                    "{header:?} of {} bytes, saying {saying}",
+                    most + 1
+                );
+            }
+        }
+        // Kinds that carry nothing: a byte is past their most, and refused decoded.
+        for kind in [READ, FREE, MAP, UNMAP, ROOT, INFO, WINDOW, FAULT, ACK, STAGE_COUNTS, 0xffff] {
+            let mut header = Header::new(kind, 1);
+            header.len = 1;
+            assert_eq!(most_payload(&header), 0, "kind {kind}");
+        }
     }
 
     /// A transfer area's descriptor, for requests to carry.
@@ -1628,6 +1721,8 @@ mod tests {
             for request in requests {
                 let message = sent(&request, id);
                 prop_assert_eq!(message.header.kind, request.kind());
+                // cladefs: admitted at its header (board 8459).
+                prop_assert!(message.header.len <= most_payload(&message.header), "{request:?}");
                 prop_assert_eq!(Request::decode(&message), Ok(request));
             }
         });
@@ -2279,7 +2374,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (14, 0xd329aff7f4e6c6e8);
+        const WIRE: (u64, u64) = (15, 0x7feb8d3138ddab9d);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -2385,6 +2480,8 @@ mod tests {
             MAPPING_BYTES,
             EXTENT_ID_BYTES as u64,
             STAGE_COUNTS_EVERY.as_nanos() as u64,
+            STALL.as_nanos() as u64,
+            MOST_PATH,
         ];
         hashed(&bounds.iter().flat_map(|bound| bound.to_le_bytes()).collect::<Vec<_>>());
         hash

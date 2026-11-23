@@ -151,6 +151,9 @@ pub(super) struct ArenaState {
     /// they were staged to has made the changes taking them away: relief exhausts it not while any
     /// is to come back, as each makes it room (TASK-106).
     pub quarantined: u64,
+    /// cladefs: of those, the pages held for wedged VM processes, which come back only once they
+    /// exit, if ever: relief exhausts it in spite of them (board 8535).
+    pub wedged: u64,
     /// Whether it was removed: it gives no run from then on.
     pub retired: bool,
 }
@@ -189,6 +192,7 @@ impl ArenaState {
             cap: None,
             relief: Relief::default(),
             quarantined: 0,
+            wedged: 0,
             retired: false,
         }
     }

@@ -18,8 +18,12 @@ pub(super) struct Object {
 }
 
 impl Object {
-    /// A new object, of no bytes.
+    /// A new object, of no bytes. cladefs: the failpoint `slabs::memory_object` fails it as a
+    /// process with as many files open as it may would (`EMFILE`), for tests (board 8491).
     pub(super) fn new() -> io::Result<Self> {
+        fail::fail_point!("slabs::memory_object", |_| Err(io::Error::from_raw_os_error(
+            libc::EMFILE
+        )));
         Ok(Self { fd: std::sync::Arc::new(create()?) })
     }
 

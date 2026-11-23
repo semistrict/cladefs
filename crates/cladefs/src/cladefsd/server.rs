@@ -254,11 +254,13 @@ impl Memory {
     /// An arena of its own, and the default one, each read-only.
     fn new() -> std::io::Result<Self> {
         use std::os::fd::AsFd;
-        let public = reopen_read_only(crate::pages::physical_memory().as_fd())?;
-        let arena = crate::pages::Arena::new();
+        let public = reopen_read_only(crate::pages::physical_memory()?.as_fd())?;
+        let arena = crate::pages::Arena::new()?;
         let memory =
             reopen_read_only(crate::pages::arena_memory(arena.id()).expect("a new arena").as_fd())?;
-        let (connections, in_flight) = Default::default();
+        let connections = Default::default();
+        // cladefs: within every tenant's together (board 8465).
+        let in_flight = Arc::new(super::memory::InFlight::of_a_tenant());
         Ok(Self { arena, memory, public, connections, in_flight })
     }
 }
@@ -270,24 +272,97 @@ impl Memory {
 /// 16 GiB holding 497 with 3.9 GiB to spare (board 7084).
 pub(super) const MAX_CONNECTIONS: usize = 4096;
 
-/// cladefs: a tenant's connection counted among its connections, until dropped.
+/// cladefs: how many of the daemon's open files a connection takes, as [`most_connections`]
+/// counts them (board 8465): its socket, the socket again for its sender, its VM process's pidfd,
+/// and one for what its cell opens beside the cells of others.
+const FILES_PER_CONNECTION: usize = 4;
+
+/// cladefs: how many connections each tenant alive keeps, whatever the others have (board 8465): a
+/// tenant with fewer is refused none while the daemon has room for any, however many the others
+/// have taken; those past it take what all of them leave. A VM restored from a zygote has two
+/// (hotbed question 483).
+const RESERVED_CONNECTIONS: usize = 64;
+
+/// cladefs: the most connections the daemon serves at once, every tenant's together (board 8465):
+/// what its open files leave, [`FILES_PER_CONNECTION`] each, a quarter of its limit kept for the
+/// rest (its cells' files, its part cache, its control API). Past it, an accept that failed for
+/// files held every tenant's new VM processes, retried every [`ACCEPT_AGAIN`], whichever tenant had
+/// taken them.
+fn most_connections() -> usize {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: Reads the process's limit into `limit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        let err = std::io::Error::last_os_error();
+        // A call with a valid resource and buffer, which never fails: none served if it does.
+        log::error!("cladefsd: reading the limit of open files: {err}: serving no connection");
+        return 0;
+    }
+    // Unlimited, RLIM_INFINITY, as many as a usize counts.
+    let files = usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX);
+    (files - files / 4) / FILES_PER_CONNECTION
+}
+
+/// cladefs: the connections the daemon serves at once, of the most ([`most_connections`]), and how
+/// many each tenant keeps ([`RESERVED_CONNECTIONS`]): as a test gives them, if it does.
+fn connection_limits() -> (usize, usize) {
+    #[cfg(test)]
+    if let Some(&given) = CONNECTION_LIMITS_GIVEN.get() {
+        return given;
+    }
+    (most_connections(), RESERVED_CONNECTIONS)
+}
+
+/// cladefs: the limits of connections in a test, in place of the daemon's ([`connection_limits`]):
+/// the process's, a test's, which runs in a process of its own.
+#[cfg(test)]
+pub(super) static CONNECTION_LIMITS_GIVEN: OnceLock<(usize, usize)> = OnceLock::new();
+
+node_local::node_local! {
+    /// cladefs: the connections every tenant's VM processes have together ([`Counted`]).
+    static CONNECTED: Mutex<usize> = Mutex::new(0);
+}
+
+/// cladefs: a tenant's connection counted among its connections, and every tenant's, until
+/// dropped.
 struct Counted(Arc<std::sync::atomic::AtomicUsize>);
 
 impl Counted {
-    /// A connection of the tenant whose memory is `memory`, counted: none past
-    /// [`MAX_CONNECTIONS`].
-    fn new(memory: &Memory) -> Option<Self> {
-        let connections = memory.connections.clone();
-        if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
-            connections.fetch_sub(1, Ordering::AcqRel);
-            return None;
+    /// A connection of `tenant`, counted: none past its [`MAX_CONNECTIONS`], nor past the most the
+    /// daemon serves at once ([`connection_limits`]) but for the share each tenant alive keeps of
+    /// them ([`RESERVED_CONNECTIONS`]), so that tenants at their own limit, or together at the
+    /// daemon's, refuse no other's VM processes (board 8465). Why not, if refused.
+    fn new(tenant: &Tenant) -> Result<Self, String> {
+        let (most, reserved) = connection_limits();
+        let mut total = CONNECTED.get().lock().unwrap();
+        let connections = &tenant.memory.connections;
+        let own = connections.load(Ordering::Acquire);
+        if own >= MAX_CONNECTIONS {
+            return Err(format!("its tenant has {MAX_CONNECTIONS}"));
         }
-        Some(Self(connections))
+        // Of the others' shares, what their VM processes leave, which this one takes none of.
+        let kept = super::memory::reserved_connections_left(reserved);
+        let room = match own < reserved {
+            // Its own share's, which the others leave it.
+            true => *total < most,
+            false => total.saturating_add(kept) < most,
+        };
+        if !room {
+            return Err(format!(
+                "the daemon serves {} of the {most} it serves at once, {kept} kept for tenants with \
+                 fewer than {reserved}",
+                *total
+            ));
+        }
+        *total += 1;
+        connections.fetch_add(1, Ordering::AcqRel);
+        Ok(Self(connections.clone()))
     }
 }
 
 impl Drop for Counted {
     fn drop(&mut self) {
+        let mut total = CONNECTED.get().lock().unwrap();
+        *total -= 1;
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -380,6 +455,11 @@ impl Tenant {
         &self.memory.in_flight
     }
 
+    /// cladefs: how many connections its VM processes have ([`Counted`], board 8465).
+    pub(super) fn connections(&self) -> usize {
+        self.memory.connections.load(Ordering::Acquire)
+    }
+
     /// cladefs: the host's disk its directory takes, a granted tenant's (TASK-94): the default
     /// tenant has none.
     pub fn disk(&self) -> Option<&Arc<super::disk::Disk>> {
@@ -443,15 +523,20 @@ pub(crate) fn connect_in_memory(tenant: Arc<Tenant>) -> super::wire::Stream {
 
 /// Starts serving the VM process at the other end of `stream`, as [`serve_connection`] does, on
 /// the daemon's runtime: no thread of its own. What it returns says when it is done.
-/// cladefs: one of a tenant past [`MAX_CONNECTIONS`] it closes at once.
+/// cladefs: one of a tenant past [`MAX_CONNECTIONS`], or past the daemon's most, it closes at once
+/// ([`Counted::new`]).
 /// cladefs: one coming as the daemon drains it closes at once (TASK-141.4).
 fn start_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) -> mpsc::Receiver<()> {
     let (done, finished) = mpsc::channel();
-    let Some(counted) = Counted::new(&tenant.memory) else {
-        log::error!(
-            "cladefsd: refusing a VM process's connection: its tenant has {MAX_CONNECTIONS}"
-        );
-        return finished;
+    let counted = match Counted::new(&tenant) {
+        Ok(counted) => counted,
+        Err(why) => {
+            log::error!(
+                "cladefsd: refusing a VM process's connection of tenant {}: {why}",
+                tenant.id
+            );
+            return finished;
+        }
     };
     let Some(connected) = CONNECTIONS.begin() else {
         log::warn!("cladefsd: refusing a VM process's connection: the daemon drains");
@@ -491,7 +576,7 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
     };
     // cladefs: one the daemon could not let go of, once it stopped answering, it refuses
     // (TASK-79.9).
-    let peer = match Peer::connected(&stream, sender) {
+    let peer = match Peer::connected(&stream, sender, tenant.id) {
         Ok(peer) => peer,
         Err(err) => {
             log::error!("cladefsd: refusing a VM process's connection: {err}");
@@ -628,7 +713,15 @@ fn receive(
                     match Made::decode(&message) {
                         Ok(Made::Ack { id, counts }) => {
                             connection.report.stage_counted(counts);
-                            connection.peer.acks.acked(id)
+                            // cladefs: of an operation never sent, which would have every one
+                            // sent after taken for made, its pages freed while it may map them
+                            // and the watchdog never finding it silent: a breach (board 8463).
+                            if let Err(sent) = connection.peer.acks.acked(id) {
+                                connection.peer.let_go(format_args!(
+                                    "acknowledged stage operation {id}, the last sent it {sent}"
+                                ));
+                                break;
+                            }
                         }
                         Ok(Made::Counts(counts)) => connection.report.stage_counted(counts),
                         Ok(Made::PrivateCounts(counts)) => {
@@ -1283,13 +1376,18 @@ impl Connection {
     /// waiting, before its payload is read, until what they hold leaves enough for it (TASK-149.35,
     /// [`super::memory::InFlight`]).
     async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<Charge> {
-        // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16): of no
-        // payload, which one past their kinds' would have the daemon hold uncounted (TASK-581).
+        // cladefs: no payload past what its kind holds, refused at its header, before any byte of
+        // it is held or reserved (board 8459, TASK-581): none for a kind no request is of.
+        let most = codec::most_payload(&header);
+        if header.len > most {
+            let what = format!(
+                "a payload of {} bytes on a {}, of {most} at most",
+                header.len, header.kind
+            );
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, what));
+        }
+        // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16).
         if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
-            if header.len > 0 {
-                let what = format!("a payload of {} bytes on a {}", header.len, header.kind);
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, what));
-            }
             return Ok(Charge::none(&self));
         }
         // cladefs: one `MAPPINGS` at a time, the next waiting for the last's reply, as the credit
@@ -2371,10 +2469,12 @@ struct AckState {
     acked: u64,
     /// The VM process is gone, and nothing it acknowledges is waited for.
     closed: bool,
+    /// cladefs: the VM process is wedged: killed, it has not exited ([`Peer::gone`], board 8535).
+    wedged: bool,
     /// cladefs: what is kept until stage operations are acknowledged ([`Acks::park`]), by their
     /// IDs: what an acknowledgement lets go of taken off at once, however
     /// much waits for those after it.
-    kept: std::collections::BTreeMap<u64, Vec<Box<dyn Send>>>,
+    kept: std::collections::BTreeMap<u64, Vec<Arc<Parked>>>,
     /// cladefs: what the watchdog found unacknowledged ([`Acks::unanswered`]).
     watched: Option<Watched>,
 }
@@ -2416,9 +2516,15 @@ impl Acks {
         self.state.lock().unwrap().next(op.taking())
     }
 
-    fn acked(&self, id: u64) {
+    /// The VM process made stage operation `id`, and those before it; or, `id` past the last sent,
+    /// the last sent, as it can't have (board 8463): `acked` never passes `sent`, which the rest
+    /// of the quarantine and the watchdog take it for.
+    fn acked(&self, id: u64) -> Result<(), u64> {
         let released = {
             let mut state = self.state.lock().unwrap();
+            if id > state.sent {
+                return Err(state.sent);
+            }
             state.acked = state.acked.max(id);
             let after = state.acked.saturating_add(1);
             let kept = state.kept.split_off(&after);
@@ -2426,16 +2532,36 @@ impl Acks {
         };
         // What the VM process no longer reaches, dropped without holding the lock.
         drop(released);
+        Ok(())
     }
 
     /// cladefs: keeps `pages`, freed, until the VM process has made the stage operations sent it so
-    /// far that take access to pages away, any of which may have been of them (TASK-79.9).
-    fn park(&self, pages: &Arc<dyn Send + Sync>) {
+    /// far that take access to pages away, any of which may have been of them (TASK-79.9). Held
+    /// for a wedged VM process, if it is one (board 8535).
+    fn park(&self, pages: &Arc<Parked>) {
         let mut state = self.state.lock().unwrap();
         if state.acked < state.last_taking && !state.closed {
+            if state.wedged {
+                pages.wedged();
+            }
             let id = state.last_taking;
-            state.kept.entry(id).or_default().push(Box::new(pages.clone()));
+            state.kept.entry(id).or_default().push(pages.clone());
         }
+    }
+
+    /// cladefs: the VM process is wedged (board 8535): what is kept for it, and kept from now on,
+    /// is held for it, which comes back only once it exits, if ever ([`Parked::wedged`]). The
+    /// bytes kept for it.
+    fn wedged(&self) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        state.wedged = true;
+        let pages: u64 = (state.kept.values().flatten())
+            .map(|parked| {
+                parked.wedged();
+                parked.pages()
+            })
+            .sum();
+        pages * crate::pages::page_size()
     }
 
     /// cladefs: whether the VM process has left an operation taking access away unacknowledged.
@@ -2619,6 +2745,8 @@ struct Peer {
     /// The bytes a reply to `MAPPINGS` of its window takes at most, once it has one (TASK-79.43):
     /// a mapping a page of it ([`Peer::credit`]).
     mappings: std::sync::atomic::AtomicU64,
+    /// cladefs: its tenant's ID, which what is said of it names.
+    tenant: u64,
 }
 
 node_local::node_local! {
@@ -2643,6 +2771,7 @@ impl Peer {
     fn connected(
         stream: &super::wire::Stream,
         sender: Arc<AsyncSender>,
+        tenant: u64,
     ) -> std::io::Result<Arc<Self>> {
         node_local::node_local! {
             static WATCHING: std::sync::Once = std::sync::Once::new();
@@ -2668,6 +2797,7 @@ impl Peer {
             process,
             let_go: AtomicBool::new(false),
             mappings: Default::default(),
+            tenant,
         });
         PEERS.get().lock().unwrap().push(peer.clone());
         Ok(peer)
@@ -2721,7 +2851,10 @@ impl Peer {
 
     /// Its connection is gone, the process perhaps not: `reaching` pages, which go back once it
     /// is, it has [`EXITING`] to go, as it would were it exiting, and is let go otherwise. If the
-    /// daemon let it go, kills it and returns once it has exited ([`Peer::exited`]).
+    /// daemon let it go, kills it and returns once it has exited ([`Peer::exited`]). cladefs: one
+    /// not exited [`KILLED_EXITING`] after, wedged, is said once, with its tenant and what is held
+    /// for it, and counted ([`wedged`]) until it exits; what is held for it, waited for still, is no
+    /// room on its way from then on, which shrinks and relief wait for (board 8535).
     async fn gone(&self, reaching: bool) {
         let Some(process) = &self.process else { return };
         if reaching && !self.let_go.load(Ordering::Acquire) {
@@ -2740,30 +2873,95 @@ impl Peer {
         if let Err(err) = process.signal(libc::SIGKILL) {
             log::error!("cladefsd: killing a VM process: {err}");
         }
-        if let Err(err) = self.exited().await {
+        let exited = match tokio::time::timeout(KILLED_EXITING, self.exited()).await {
+            Ok(exited) => exited,
+            // Not exited within the bound, the timeout's error: it is wedged, waited for still.
+            Err(_) => {
+                let held = self.acks.wedged();
+                let _wedged = Wedged::begin();
+                log::error!(
+                    "cladefsd: a VM process of tenant {} has not exited {KILLED_EXITING:?} after the \
+                     daemon killed it, as one in uninterruptible sleep or a frozen cgroup would not: \
+                     {held} bytes of memory are held for it until it does",
+                    self.tenant
+                );
+                self.exited().await
+            }
+        };
+        if let Err(err) = exited {
             log::error!("cladefsd: waiting for a VM process to exit: {err}");
         }
     }
+}
+
+/// cladefs: how long a VM process the daemon killed has to exit before it counts as wedged, as in
+/// uninterruptible sleep, or a frozen cgroup, where `SIGKILL` waits (board 8535): long past what
+/// tearing down a large guest's memory takes (hotbed question 484).
+pub(super) const KILLED_EXITING: std::time::Duration = std::time::Duration::from_secs(10);
+
+node_local::node_local! {
+    /// cladefs: how many VM processes are wedged ([`Wedged`]).
+    static WEDGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+}
+
+/// cladefs: a wedged VM process, counted until dropped, as it exits at last ([`Peer::gone`]).
+struct Wedged;
+
+impl Wedged {
+    fn begin() -> Self {
+        WEDGED.get().fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for Wedged {
+    fn drop(&mut self) {
+        WEDGED.get().fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// cladefs: how many VM processes the daemon killed have not exited [`KILLED_EXITING`] after
+/// (board 8535): what the metrics show, with the memory held for them
+/// (`crate::slabs::wedged_bytes`).
+pub(super) fn wedged() -> u64 {
+    WEDGED.get().load(Ordering::Relaxed)
 }
 
 /// cladefs: a VM process, other than this one, as a pidfd. Under madsim, none: a simulated
 /// guest is in the simulation's process ([`peer_process`]), so the type has no values, and a
 /// simulated host, macOS's too, has no pidfds (doc-24, board 2912).
 #[cfg(not(madsim))]
-struct VmProcess(std::os::fd::OwnedFd);
+enum VmProcess {
+    Pidfd(std::os::fd::OwnedFd),
+    /// cladefs: in a test, this process, as one that never exits, however it is killed: as one in
+    /// uninterruptible sleep, or a frozen cgroup, which no test can make (board 8535,
+    /// [`UNKILLABLE`]).
+    #[cfg(test)]
+    Unkillable,
+}
 #[cfg(madsim)]
 enum VmProcess {}
+
+/// cladefs: whether a test's VM processes connecting, this process's, are [`VmProcess::Unkillable`]:
+/// the process's, a test's, which runs in a process of its own.
+#[cfg(test)]
+pub(super) static UNKILLABLE: AtomicBool = AtomicBool::new(false);
 
 impl VmProcess {
     /// Sends it `signal`: 0 sends none, but checks that this process may signal it.
     #[cfg(not(madsim))]
     fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
+        let pidfd = match self {
+            Self::Pidfd(pidfd) => pidfd,
+            #[cfg(test)]
+            Self::Unkillable => return Ok(()),
+        };
         // SAFETY: Signals the process the pidfd, which it keeps open, names.
         let sent = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
-                self.0.as_raw_fd(),
+                pidfd.as_raw_fd(),
                 signal,
                 std::ptr::null::<libc::siginfo_t>(),
                 0,
@@ -2779,9 +2977,14 @@ impl VmProcess {
     #[cfg(not(madsim))]
     async fn exited(&self) -> std::io::Result<()> {
         use std::os::fd::AsFd;
+        let pidfd = match self {
+            Self::Pidfd(pidfd) => pidfd,
+            #[cfg(test)]
+            Self::Unkillable => return std::future::pending().await,
+        };
         // A pidfd is readable once its process has exited.
         let exited =
-            tokio::io::unix::AsyncFd::with_interest(self.0.as_fd(), tokio::io::Interest::READABLE);
+            tokio::io::unix::AsyncFd::with_interest(pidfd.as_fd(), tokio::io::Interest::READABLE);
         exited?.readable().await.map(drop)
     }
 
@@ -2829,6 +3032,11 @@ fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProces
         return Err(std::io::Error::last_os_error());
     }
     if credentials.pid == std::process::id() as libc::pid_t {
+        // cladefs: or, as a test asks, one that never exits (board 8535).
+        #[cfg(test)]
+        if UNKILLABLE.load(Ordering::Relaxed) {
+            return Ok(Some(VmProcess::Unkillable));
+        }
         return Ok(None);
     }
     let mut pidfd: libc::c_int = -1;
@@ -2845,7 +3053,7 @@ fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProces
     };
     if read == 0 {
         // SAFETY: A new descriptor, which the call gave this process.
-        return Ok(Some(VmProcess(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })));
+        return Ok(Some(VmProcess::Pidfd(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })));
     }
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() != Some(libc::ENOPROTOOPT) {
@@ -2864,7 +3072,7 @@ fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProces
             "the VM process went as it connected",
         ));
     }
-    Ok(Some(VmProcess(process)))
+    Ok(Some(VmProcess::Pidfd(process)))
 }
 
 /// cladefs: what of the guest's access a fault the window resolved as `faulted` refused, if it
@@ -2914,26 +3122,52 @@ fn quarantine(freed: crate::slabs::Quarantined) {
         waiting.parked.fetch_add(1, Ordering::SeqCst);
     }
     let staged = freed.staged().to_vec();
-    let freed: Arc<dyn Send + Sync> = Arc::new(Parked { freed: Some(freed), waiting });
+    let counted = AtomicBool::new(waiting.is_some());
+    let freed = Arc::new(Parked { freed: Some(freed), waiting, counted });
     for peer in PEERS.get().lock().unwrap().iter().filter(|peer| staged.contains(&peer.id)) {
         peer.acks.park(&freed);
     }
 }
 
 /// cladefs: a run quarantined ([`quarantine`]), freed as it is dropped; and, if it was freed by
-/// what counts what it frees, what it waits on ([`Parking`]).
+/// what counts what it frees, what it waits on ([`Parking`]), and whether that counts it still.
 struct Parked {
     freed: Option<crate::slabs::Quarantined>,
     waiting: Option<Arc<Waiting>>,
+    counted: AtomicBool,
+}
+
+impl Parked {
+    /// cladefs: it is held for a wedged VM process (board 8535): no room on its way, for relief
+    /// ([`crate::slabs::Quarantined::wedged`]), nor for the shrink that freed it, which waits for
+    /// it no more.
+    fn wedged(&self) {
+        if let Some(freed) = &self.freed {
+            freed.wedged();
+        }
+        self.uncount();
+    }
+
+    /// cladefs: its pages.
+    fn pages(&self) -> u64 {
+        self.freed.as_ref().map_or(0, crate::slabs::Quarantined::pages)
+    }
+
+    /// cladefs: what it waits on counts it no more, if it did.
+    fn uncount(&self) {
+        if let Some(waiting) = &self.waiting
+            && self.counted.swap(false, Ordering::SeqCst)
+        {
+            waiting.parked.fetch_sub(1, Ordering::SeqCst);
+            waiting.freed.notify(usize::MAX);
+        }
+    }
 }
 
 impl Drop for Parked {
     fn drop(&mut self) {
         drop(self.freed.take());
-        if let Some(waiting) = &self.waiting {
-            waiting.parked.fetch_sub(1, Ordering::SeqCst);
-            waiting.freed.notify(usize::MAX);
-        }
+        self.uncount();
     }
 }
 
@@ -2986,8 +3220,10 @@ impl Parking {
 
     /// Waits until the pages it counted are free: once every VM process that may reach them has
     /// made the stage operations taking them away, or the daemon let it go, which it does once it
-    /// has stopped answering ([`Peer::unresponsive`]). cladefs: holding no thread (board 2946): it
-    /// listens before it looks again, so that a batch freed between the two wakes it.
+    /// has stopped answering ([`Peer::unresponsive`]), and it exited. cladefs: holding no thread
+    /// (board 2946): it listens before it looks again, so that a batch freed between the two wakes
+    /// it. cladefs: or until those left are held for wedged VM processes, which may never exit
+    /// ([`Parked::wedged`], board 8535); its callers bound it besides (`memory::evict_until`).
     pub(super) async fn wait(&self) {
         while self.parked() {
             let freed = self.0.freed.listen();
@@ -3006,21 +3242,40 @@ pub(super) fn most_queued() -> u64 {
     PEERS.get().lock().unwrap().iter().map(|peer| peer.sender.queued()).max().unwrap_or(0)
 }
 
-/// cladefs: lets the VM processes that stopped answering go ([`Peer::watch`]), looking every
+/// cladefs: lets the VM processes that stopped answering go ([`Peer::unresponsive`]), or reading
+/// what the daemon sends them ([`AsyncSender::stalled`], board 8459), looking every
 /// [`WATCH_EVERY`], for as long as the daemon runs.
 async fn watch() {
     let mut every = tokio::time::interval(WATCH_EVERY);
     loop {
         every.tick().await;
         let now = std::time::Instant::now();
-        let unresponsive: Vec<_> = (PEERS.get().lock().unwrap().iter())
-            .filter_map(|peer| Some((peer.clone(), peer.unresponsive(now)?)))
-            .collect();
+        let (unresponsive, stalled): (Vec<_>, Vec<_>) = {
+            let peers = PEERS.get().lock().unwrap();
+            let unresponsive = (peers.iter())
+                .filter_map(|peer| Some((peer.clone(), peer.unresponsive(now)?)))
+                .collect();
+            // cladefs: and those whose sockets took nothing of what is queued for them for
+            // [`STALL`], which their tenant's bytes in flight held for good, whatever else they
+            // said (board 8459).
+            let stalled = (peers.iter())
+                .map(|peer| (peer.clone(), peer.sender.stalled(now)))
+                .filter(|(_, stalled)| *stalled >= STALL)
+                .collect();
+            (unresponsive, stalled)
+        };
         // Let go without holding the VM processes connected, which every page freed takes.
         for (peer, silence) in unresponsive {
             let queued = peer.sender.queued();
             peer.let_go(format_args!(
                 "stopped answering stage operations: {silence}, {queued} bytes queued for it"
+            ));
+        }
+        for (peer, stalled) in stalled {
+            let queued = peer.sender.queued();
+            peer.let_go(format_args!(
+                "read nothing of the {queued} bytes queued for it for {stalled:?}, of {STALL:?} \
+                 allowed"
             ));
         }
     }
@@ -3120,7 +3375,11 @@ mod acks_tests {
     #[test]
     fn parked_until_what_takes_access_away_is_acknowledged() {
         let acks = Acks::default();
-        let pages: Arc<dyn Send + Sync> = Arc::new(());
+        let pages = Arc::new(super::Parked {
+            freed: None,
+            waiting: None,
+            counted: std::sync::atomic::AtomicBool::new(false),
+        });
         let mapped = next(&acks, false);
         acks.park(&pages);
         assert_eq!(Arc::strong_count(&pages), 1, "parked behind a map");
@@ -3128,9 +3387,9 @@ mod acks_tests {
         acks.park(&pages);
         let after = next(&acks, true);
         assert_eq!(Arc::strong_count(&pages), 2);
-        acks.acked(mapped);
+        acks.acked(mapped).unwrap();
         assert_eq!(Arc::strong_count(&pages), 2);
-        acks.acked(unmapped);
+        acks.acked(unmapped).unwrap();
         assert_eq!(Arc::strong_count(&pages), 1, "parked behind what came after");
         acks.park(&pages);
         assert_eq!(Arc::strong_count(&pages), 2);
@@ -3155,7 +3414,7 @@ mod acks_tests {
         });
         assert_eq!(acks.unanswered(at(0)), std::time::Duration::ZERO);
         for second in 1..=20 {
-            acks.acked(first + second * 1000);
+            acks.acked(first + second * 1000).unwrap();
             assert_eq!(acks.unanswered(at(second)), std::time::Duration::ZERO);
         }
         assert_eq!(acks.unanswered(at(25)), std::time::Duration::from_secs(5));
@@ -3173,16 +3432,16 @@ mod acks_tests {
         assert_eq!(acks.behind(at(0)), std::time::Duration::ZERO);
         acks.unanswered(at(0));
         for second in 1..=60 {
-            acks.acked(first + second);
+            acks.acked(first + second).unwrap();
             assert_eq!(acks.unanswered(at(second)), std::time::Duration::ZERO);
         }
         assert_eq!(acks.behind(at(60)), BEHIND);
         // Cleared, what comes after counts on its own.
-        acks.acked(last);
+        acks.acked(last).unwrap();
         let next = next(&acks, true);
         assert_eq!(acks.unanswered(at(61)), std::time::Duration::ZERO);
         assert_eq!(acks.behind(at(61)), std::time::Duration::ZERO);
-        acks.acked(next);
+        acks.acked(next).unwrap();
     }
 
     /// TASK-249: a VM process that acknowledges at the pace a slow host lets it, behind a backlog
@@ -3205,7 +3464,7 @@ mod acks_tests {
             (0..100).for_each(|_| {
                 next(&acks, true);
             });
-            acks.acked(first + second * 300);
+            acks.acked(first + second * 300).unwrap();
             let silence = acks.look(at(second));
             assert!(!silence.unresponsive(), "at {second} s: {silence}");
         }
@@ -3234,11 +3493,11 @@ mod acks_tests {
         });
         assert!(!acks.look(at(0)).unresponsive());
         for second in 1..60 {
-            acks.acked(first + second / 4);
+            acks.acked(first + second / 4).unwrap();
             let silence = acks.look(at(second));
             assert!(!silence.unresponsive(), "at {second} s: {silence}");
         }
-        acks.acked(first + 15);
+        acks.acked(first + 15).unwrap();
         let stalled = acks.look(at(60));
         assert!(stalled.unresponsive());
         assert_eq!(
@@ -3274,10 +3533,10 @@ mod acks_tests {
              pace measured yet (a pace clearing them within 600s allowed)"
         );
         for second in 1..60 {
-            acks.acked(first + second);
+            acks.acked(first + second).unwrap();
             assert!(!acks.look(at(second)).unresponsive());
         }
-        acks.acked(first + 60);
+        acks.acked(first + 60).unwrap();
         let behind = acks.look(at(60));
         assert!(behind.unresponsive());
         assert_eq!(
@@ -3306,10 +3565,10 @@ mod acks_tests {
         assert_eq!(acks.unanswered(at(1)), std::time::Duration::ZERO);
         assert_eq!(acks.unanswered(at(3)), std::time::Duration::from_secs(2));
         let second = next(&acks, true);
-        acks.acked(first);
+        acks.acked(first).unwrap();
         assert_eq!(acks.unanswered(at(4)), std::time::Duration::ZERO);
         assert_eq!(acks.unanswered(at(9)), std::time::Duration::from_secs(5));
-        acks.acked(second);
+        acks.acked(second).unwrap();
         assert_eq!(acks.unanswered(at(10)), std::time::Duration::ZERO);
     }
 }

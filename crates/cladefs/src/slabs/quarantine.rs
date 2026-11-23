@@ -17,6 +17,7 @@
 use super::sync::rules;
 use super::{Arena, Held, VmProcessId, relief};
 use smallvec::SmallVec;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// A run freed that VM processes were staged, which goes back to its arena once dropped.
@@ -28,6 +29,8 @@ pub struct Quarantined {
     /// The arena relief's pass evicted it for, freed on its thread, which is owed it until it
     /// comes back (TASK-161).
     relieving: Option<Arc<Arena>>,
+    /// cladefs: whether it is held for a wedged VM process ([`Quarantined::wedged`]).
+    wedged: AtomicBool,
 }
 
 impl Quarantined {
@@ -36,12 +39,37 @@ impl Quarantined {
     fn new(held: Held, staged: SmallVec<[VmProcessId; 4]>) -> Self {
         let pages = u64::from(held.run.pages);
         held.arena.state.lock().unwrap().quarantined += pages;
-        held.arena.node.quarantined.fetch_add(pages, std::sync::atomic::Ordering::Relaxed);
+        held.arena.node.quarantined.fetch_add(pages, Ordering::Relaxed);
         let relieving = relief::relieving().and_then(|arena| held.arena.node.arena(arena));
         if let Some(arena) = &relieving {
             arena.state.lock().unwrap().relief.owed += pages;
         }
-        Self { held: Some(held), staged, relieving }
+        Self { held: Some(held), staged, relieving, wedged: AtomicBool::new(false) }
+    }
+
+    /// cladefs: it is held for a wedged VM process (board 8535): one the daemon killed that has not
+    /// exited a bound after, as in uninterruptible sleep or a frozen cgroup, which may still map it.
+    /// It comes back only once that VM process exits, if ever: counted so by its arena, and by
+    /// every arena's, it is no room on its way, which relief exhausts a starved arena in spite of;
+    /// nor owed to the arena relief evicted it for, whose passes waited for it (TASK-161), so that
+    /// they evict for it again (the Codex review of board 8535). Once, however many times it is
+    /// told.
+    pub fn wedged(&self) {
+        if self.wedged.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let held = self.held();
+        let pages = u64::from(held.run.pages);
+        held.arena.state.lock().unwrap().wedged += pages;
+        held.arena.node.wedged.fetch_add(pages, Ordering::Relaxed);
+        if let Some(arena) = &self.relieving {
+            repay(arena, pages);
+        }
+    }
+
+    /// cladefs: its pages.
+    pub fn pages(&self) -> u64 {
+        u64::from(self.held().run.pages)
     }
 
     /// The VM processes it was staged to, each once: those it waits for.
@@ -77,25 +105,40 @@ impl Drop for Quarantined {
     fn drop(&mut self) {
         let held = self.held.take().expect("a run quarantined once");
         let pages = u64::from(held.run.pages);
+        let wedged = *self.wedged.get_mut();
         {
             let mut state = held.arena.state.lock().unwrap();
             state.quarantined = (state.quarantined.checked_sub(pages))
                 .expect("a run came back from quarantine its arena didn't count");
-        }
-        held.arena.node.quarantined.fetch_sub(pages, std::sync::atomic::Ordering::Relaxed);
-        // The arena relief evicted it for owed none now, its allocations waiting ask again.
-        if let Some(arena) = &self.relieving {
-            let repaid = {
-                let mut state = arena.state.lock().unwrap();
-                let owed = &mut state.relief.owed;
-                *owed = owed.checked_sub(pages).expect("a run came back relief wasn't owed");
-                *owed == 0
-            };
-            if repaid {
-                arena.node.pulse();
+            if wedged {
+                state.wedged = (state.wedged.checked_sub(pages))
+                    .expect("a run came back wedged its arena didn't count");
             }
         }
+        held.arena.node.quarantined.fetch_sub(pages, Ordering::Relaxed);
+        if wedged {
+            held.arena.node.wedged.fetch_sub(pages, Ordering::Relaxed);
+        }
+        // The arena relief evicted it for owed none now, its allocations waiting ask again: but
+        // repaid as it was wedged, if it was.
+        if let Some(arena) = self.relieving.as_ref().filter(|_| !wedged) {
+            repay(arena, pages);
+        }
         drop(held);
+    }
+}
+
+/// `pages` relief evicted for `arena` owed no more: once it is owed none, its allocations waiting
+/// ask again.
+fn repay(arena: &Arena, pages: u64) {
+    let repaid = {
+        let mut state = arena.state.lock().unwrap();
+        let owed = &mut state.relief.owed;
+        *owed = owed.checked_sub(pages).expect("a run came back relief wasn't owed");
+        *owed == 0
+    };
+    if repaid {
+        arena.node.pulse();
     }
 }
 

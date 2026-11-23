@@ -25,7 +25,7 @@ async fn cells_hold_their_arenas() {
     open.commit(None).await.unwrap();
     drop(open);
 
-    let held = Arena::new();
+    let held = Arena::new().unwrap();
     let arena = held.id();
     let open = OpenCell::open_in(&path, Some(held.clone())).await.unwrap();
     // What made it lets go of it, as a tenant's going does.

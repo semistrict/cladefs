@@ -52,8 +52,9 @@ pub fn configure(config: Config) -> Result<(), Error> {
 
 /// The physical memory of the default arena: a shared memory object (a memfd on Linux), which the
 /// pages of everything but tenants' extents are of (TASK-43), and which a process sharing it maps
-/// them from.
-pub fn physical_memory() -> std::sync::Arc<std::os::fd::OwnedFd> {
+/// them from. cladefs: or why it couldn't be made, as with as many files open as the process may
+/// (board 8491).
+pub fn physical_memory() -> std::io::Result<std::sync::Arc<std::os::fd::OwnedFd>> {
     crate::slabs::default_fd()
 }
 
@@ -72,9 +73,10 @@ pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedF
 pub struct Arena(ArenaId);
 
 impl Arena {
-    /// A new arena, which holds no page.
-    pub fn new() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self(crate::slabs::create_arena()))
+    /// A new arena, which holds no page. cladefs: or why its memory object couldn't be made, as
+    /// with as many files open as the process may (board 8491).
+    pub fn new() -> std::io::Result<std::sync::Arc<Self>> {
+        Ok(std::sync::Arc::new(Self(crate::slabs::create_arena()?)))
     }
 
     /// Its id, which its pages' locations name ([`PhysLocation`]).

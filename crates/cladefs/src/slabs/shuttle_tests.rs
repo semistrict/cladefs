@@ -34,7 +34,7 @@ fn whole() -> u64 {
 /// takes one, or fails, as nothing makes a removed arena room. The arena goes once the runs it
 /// gave are freed, and its memory with them.
 fn allocating_races_removing_the_arena() {
-    let arena = create_arena();
+    let arena = create_arena().unwrap();
     let held = alloc(arena, 1, Wait::No).unwrap();
     let allocator = thread::spawn(move || alloc(arena, whole(), Wait::Yes).ok());
     remove_arena(arena);
@@ -57,7 +57,7 @@ fn allocating_races_removing_the_arena_in_any_order() {
 /// the run being punched. Of a small slab, and of a whole one.
 fn allocating_races_a_punch() {
     keep_spare_slabs(false);
-    let arena = create_arena();
+    let arena = create_arena().unwrap();
     for pages in [whole(), 3] {
         let held = alloc(arena, pages, Wait::No).unwrap();
         set_arena_cap(arena, Some(arena_bytes(arena)));
@@ -95,7 +95,7 @@ fn needs_allocations_to_wait_for_punches() {
 /// are its own while it is held, each page written its holder's mark reads it back, and, all
 /// freed and spares given back, the arena holds no memory.
 fn small_runs_race() {
-    let arena = create_arena();
+    let arena = create_arena().unwrap();
     let workers: Vec<_> = (0..2u8)
         .map(|worker| {
             thread::spawn(move || {
@@ -233,7 +233,7 @@ const REUSED: u8 = 0x0e;
 fn freeing_races_the_second_stage() {
     let stage = Arc::new(LaggingStage::default());
     *LAGGING.lock().unwrap() = Some(stage.clone());
-    let arena = create_arena();
+    let arena = create_arena().unwrap();
     // A run of the small slab the next is of, which keeps it small as the next is freed, and so
     // that run's pages the next allocated.
     let keeper = alloc(arena, 1, Wait::No).unwrap();

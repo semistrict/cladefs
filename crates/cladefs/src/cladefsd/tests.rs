@@ -2461,7 +2461,11 @@ async fn requests_attach_nothing() {
     {
         for (cell, sequence) in [(extent.cell, 1), (0, 0)] {
             let header = Header::new(kind, 0).with_body(&[cell, sequence, 0u64, 4096]);
-            let _ = vm.call(header, base.as_os_str().as_bytes(), &[]);
+            // cladefs: named in a payload where its kind has one: past what a kind holds, the
+            // daemon refuses it at its header, ending the connection (board 8459).
+            let path = base.as_os_str().as_bytes();
+            let fits = path.len() as u64 <= super::codec::most_payload(&header);
+            let _ = vm.call(header, if fits { path } else { &[] }, &[]);
         }
     }
     let mut data = vec![0; 4096];
@@ -4514,8 +4518,9 @@ impl HandVm {
     }
 
     /// Maps `extent` again over its window's first `len` bytes, as its guest rebinding it does,
-    /// acknowledging nothing it is sent: then frozen, an unmap unacknowledged.
-    fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) {
+    /// acknowledging nothing it is sent: then frozen, an unmap unacknowledged. The last stage
+    /// operation it was sent.
+    fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) -> u64 {
         use super::wire::*;
         let (cell, sequence) = (extent.cell, extent.sequence);
         let (_, staged) = self.call(
@@ -4525,7 +4530,98 @@ impl HandVm {
             false,
         );
         assert!(staged.iter().any(|header| header.kind == STAGE_UNMAP), "{staged:?}");
+        staged.iter().map(|header| header.id).max().unwrap()
     }
+}
+
+/// Board 8535: a VM process that never exits once killed, as one in uninterruptible sleep or a
+/// frozen cgroup, holds up no shrink, nor the governor's next look: frozen with an unmap
+/// unacknowledged, then let go and killed, its pages wait for it still; but a shrink of its
+/// tenant's memory returns within [`super::memory::PARKED_WAIT`], counting them held, and the next
+/// at once. And once it has not exited [`super::server::KILLED_EXITING`] after it was killed, it
+/// is counted wedged, with the memory held for it, which relief no longer waits for. Before, the
+/// shrink waited for it for good, and with it every later look of the governor, every tenant's.
+#[tokio::test(flavor = "multi_thread")]
+async fn vm_processes_that_never_exit_hold_up_no_shrink() {
+    use std::sync::atomic::Ordering;
+    const EXTENT: u64 = 2 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = serve_tenant_at(dir.path(), 1);
+    super::server::UNKILLABLE.store(true, Ordering::Relaxed);
+    let mut frozen = HandVm::open(&socket, &dir.path().join("1").join("store"));
+    super::server::UNKILLABLE.store(false, Ordering::Relaxed);
+    let its = frozen.write_an_extent(EXTENT);
+    frozen.map_an_extent(its, EXTENT);
+    frozen.freeze_with_an_unmap(its, EXTENT);
+
+    let (bound, slack) = (super::memory::PARKED_WAIT, std::time::Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let shrunk = tokio::time::timeout(bound + slack, super::memory::shrink(Some(1), 0)).await;
+    let took = started.elapsed();
+    // Held still, as the VM process may map them: the extent's pages, quarantined.
+    assert_eq!(shrunk, Ok(Ok(EXTENT)), "the shrink, after {took:?}");
+    let next = tokio::time::timeout(slack, super::memory::shrink(Some(1), 0)).await;
+    assert_eq!(next, Ok(Ok(EXTENT)), "the next shrink");
+    // Let go as silent, killed, and not exited: wedged.
+    let wedged = super::server::UNRESPONSIVE + super::server::KILLED_EXITING + slack;
+    let deadline = std::time::Instant::now() + wedged;
+    while super::server::wedged() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let gauge = |name: &str| {
+        let gauges = super::metrics::gauges();
+        gauges.into_iter().find(|(gauge, _, _)| *gauge == name).map(|(_, _, value)| value)
+    };
+    assert_eq!(
+        (gauge("vm_processes_wedged"), gauge("memory_wedged_bytes")),
+        (Some(1), Some(EXTENT)),
+        "the wedged VM process, and what is held for it"
+    );
+    assert_eq!(crate::slabs::quarantined_bytes(), EXTENT, "held for it still");
+}
+
+/// Board 8491: an arena whose memory object can't be made, as with as many files open as the
+/// daemon may (the `slabs::memory_object` failpoint: `EMFILE`), fails its tenant's grant with that
+/// error, and panics nothing: before, it panicked holding the arenas' lock, at which every later
+/// allocation, of every tenant's, panicked. Another tenant's VM process is served meanwhile, its
+/// writes allocating in its arena; and once memory objects can be made again, the grant
+/// succeeds, and its VM process is served.
+#[test]
+fn arenas_failing_to_be_made_fail_their_grant_alone() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let alice = serve_tenant_at(dir.path(), 1);
+    let (sender, mut receiver, _stream, cell) =
+        raw_connection(&alice, &dir.path().join("1").join("store"), 1 << 24);
+    let mut written = |id: u64, sequence: u64| {
+        let header = Header::new(WRITE, id).with_body(&WriteBody {
+            cell,
+            sequence,
+            data_len: 1 << 20,
+            ..Default::default()
+        });
+        call(&sender, &mut receiver, header, &pattern(sequence as u8, 1 << 20)).header.status
+    };
+    fail::cfg("slabs::memory_object", "return").unwrap();
+    let cells = dir.path().join("2");
+    std::fs::create_dir_all(&cells).unwrap();
+    let refused = super::server::Tenant::new(2, &cells).err().map(|err| err.raw_os_error());
+    assert_eq!(refused, Some(Some(libc::EMFILE)), "the grant, its arena unmade");
+    assert_eq!(written(2, 1), 0, "another tenant's write, meanwhile");
+    fail::remove("slabs::memory_object");
+    let bob = serve_tenant_at(dir.path(), 2);
+    let (bob_sender, mut bob_receiver, _bob_stream, bob_cell) =
+        raw_connection(&bob, &cells.join("store"), 1 << 24);
+    let header = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell: bob_cell,
+        sequence: 1,
+        data_len: 1 << 20,
+        ..Default::default()
+    });
+    let status = call(&bob_sender, &mut bob_receiver, header, &pattern(3, 1 << 20)).header.status;
+    assert_eq!((status, written(3, 2)), (0, 0), "the grant's write, and the other's, after");
 }
 
 /// The socket of a daemon serving tenant `id`, whose cells are in `dir`'s directory `id`.
@@ -5122,8 +5218,11 @@ fn whatever_a_vm_process_says_harms_no_other() {
         other_path.clone(),
         std::path::PathBuf::from("relative"),
     ];
+    // cladefs: none as often as some, as most kinds carry none, and a payload past what its kind
+    // holds ends the connection at its header (board 8459): every case ended at its first.
     let payload = prop_oneof![
-        4 => proptest::collection::vec(any::<u8>(), 0..64),
+        8 => Just(Vec::new()),
+        3 => proptest::collection::vec(any::<u8>(), 0..64),
         1 => (0..paths.len()).prop_map(move |path| {
             std::os::unix::ffi::OsStrExt::as_bytes(paths[path].as_os_str()).to_vec()
         }),

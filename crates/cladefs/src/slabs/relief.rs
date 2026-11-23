@@ -131,13 +131,21 @@ fn wants_relief(arena: &Arena, starved: Starved, pages: u16) -> bool {
 /// Relief's pass for `arena`, for a run of `pages`, freed `freed` bytes: something, and it is not
 /// exhausted; nothing, and it is, if it is starved still, but while runs that would make it room
 /// are quarantined, as they make it room once they come back (TASK-106): its own, starved at its
-/// own cap; any arena's, at the total's, which relief evicts any arena's for (TASK-132).
+/// own cap; any arena's, at the total's, which relief evicts any arena's for (TASK-132). cladefs:
+/// but those held for wedged VM processes, which come back only once they exit, if ever: they kept
+/// a starved arena's allocations waiting for good, where they would fail (board 8535).
 fn relieved(arena: &Arena, freed: u64, pages: u16) {
     let starved = arena.starved(pages);
     let coming_back = match starved {
         // Any arena's, a removed one's too.
-        Some(Starved::Total) => arena.node.quarantined.load(Ordering::Relaxed) > 0,
-        _ => arena.state.lock().unwrap().quarantined > 0,
+        Some(Starved::Total) => {
+            let node = arena.node;
+            node.quarantined.load(Ordering::Relaxed) > node.wedged.load(Ordering::Relaxed)
+        }
+        _ => {
+            let state = arena.state.lock().unwrap();
+            state.quarantined > state.wedged
+        }
     };
     let mut state = arena.state.lock().unwrap();
     if freed > 0 {
@@ -205,7 +213,7 @@ mod tests {
         quarantine_with(|freed| PARKED.lock().unwrap().push(freed));
         let whole = (SLAB / page_size()) as u16;
         set_total_cap(Some(2 * SLAB));
-        let removed = create_arena();
+        let removed = create_arena().unwrap();
         for _ in 0..2 {
             let slab = alloc(removed, u64::from(whole), Wait::No).unwrap();
             slab.stage_to(VmProcessId(1));
@@ -216,6 +224,47 @@ mod tests {
         relieved(&default, 0, whole);
         assert!(!default.state.lock().unwrap().relief.exhausted, "exhausted, its room on its way");
         PARKED.lock().unwrap().clear();
+        assert_eq!(default.starved(whole), None, "room once the runs came back");
+    }
+
+    /// Board 8535: runs held for a wedged VM process, one killed that has not exited, are no room
+    /// on their way: an arena starved at the total cap is exhausted by a pass that frees nothing
+    /// while only they are quarantined, its allocations failing rather than waiting for good; and
+    /// not while any other is to come back. Red with every run quarantined counted on its way.
+    #[test]
+    fn runs_held_for_wedged_vm_processes_exhaust_starved_arenas() {
+        static PARKED: std::sync::Mutex<Vec<Quarantined>> = std::sync::Mutex::new(Vec::new());
+        quarantine_with(|freed| PARKED.lock().unwrap().push(freed));
+        let whole = (SLAB / page_size()) as u16;
+        set_total_cap(Some(2 * SLAB));
+        let arena = create_arena().unwrap();
+        let default = node().arena(ArenaId::DEFAULT).unwrap();
+        for _ in 0..2 {
+            let slab = alloc(arena, u64::from(whole), Wait::No).unwrap();
+            slab.stage_to(VmProcessId(1));
+            // Freed by relief's pass for the default arena, which is owed it.
+            RELIEVING.set(Some(ArenaId::DEFAULT));
+            drop(slab);
+            RELIEVING.set(None);
+        }
+        assert_eq!(default.state.lock().unwrap().relief.owed, 2 * u64::from(whole));
+        assert_eq!(default.starved(whole), Some(Starved::Total));
+        // One of the two wedged: the other is on its way still.
+        PARKED.lock().unwrap()[0].wedged();
+        relieved(&default, 0, whole);
+        assert!(!default.state.lock().unwrap().relief.exhausted, "exhausted, a run on its way");
+        // Both, told twice: none is, nor owed to relief, whose passes waited for them.
+        PARKED.lock().unwrap().iter().for_each(Quarantined::wedged);
+        PARKED.lock().unwrap()[0].wedged();
+        assert_eq!(crate::slabs::wedged_bytes(), 2 * SLAB);
+        assert_eq!(default.state.lock().unwrap().relief.owed, 0, "owed what never comes");
+        assert!(wants_relief(&default, Starved::Total, whole), "no pass for what never comes");
+        relieved(&default, 0, whole);
+        assert!(default.state.lock().unwrap().relief.exhausted, "waits for runs that never come");
+        // Its arena gone, the runs, as they come back, are punched, not kept spare.
+        remove_arena(arena);
+        PARKED.lock().unwrap().clear();
+        assert_eq!((crate::slabs::wedged_bytes(), crate::slabs::quarantined_bytes()), (0, 0));
         assert_eq!(default.starved(whole), None, "room once the runs came back");
     }
 }

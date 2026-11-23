@@ -3426,7 +3426,7 @@ mod tests {
     async fn capped_arenas_evict_their_least_used_extents() {
         let chunk = 2u64 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let held = Arena::new();
+        let held = Arena::new().unwrap();
         let arena = held.id();
         crate::slabs::set_arena_cap(arena, Some(4 * chunk));
         let (cell, window) = mapped_extents(&dir.path().join("store"), 16, &held).await;
@@ -3453,7 +3453,7 @@ mod tests {
     async fn maps_over_an_extents_own_range_put_its_window_on_it_once() {
         const EXTENT: u64 = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let held = Arena::new();
+        let held = Arena::new().unwrap();
         let (cell, window) = mapped_extents(&dir.path().join("store"), 2, &held).await;
         for _ in 0..1000 {
             cell.map(id(&cell, 1), 0, EXTENT, 0).await.unwrap();
@@ -3477,7 +3477,7 @@ mod tests {
     async fn relief_evicts_what_no_window_maps_first() {
         const EXTENT: u64 = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let held = Arena::new();
+        let held = Arena::new().unwrap();
         let (cell, window) = mapped_extents(&dir.path().join("store"), 2, &held).await;
         let cached = |sequence| cache::find(held.id(), id(&cell, sequence)).expect("cached");
         for sequence in 1..=2 {
@@ -3502,7 +3502,7 @@ mod tests {
     async fn relief_evicts_what_was_faulted_on_longest_ago_first() {
         const EXTENT: u64 = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let held = Arena::new();
+        let held = Arena::new().unwrap();
         let (cell, window) = mapped_extents(&dir.path().join("store"), 2, &held).await;
         let cached = |sequence| cache::find(held.id(), id(&cell, sequence)).expect("cached");
         for sequence in [2, 1] {
@@ -3522,7 +3522,8 @@ mod tests {
         let memory = 48u64 << 20;
         crate::pages::configure(crate::pages::Config::with_memory(memory)).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let (_cell, window) = mapped_extents(&dir.path().join("store"), 64, &Arena::new()).await;
+        let (_cell, window) =
+            mapped_extents(&dir.path().join("store"), 64, &Arena::new().unwrap()).await;
         read_twice(&window, 64, |_, _| ()).await;
         let peak = crate::slabs::arenas_peak_bytes();
         assert!(peak + crate::slabs::SLAB > memory, "memory never ran out: {peak} bytes at most");
@@ -4484,7 +4485,7 @@ mod tests {
         publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).await.unwrap();
         drop(publisher);
         OpenCell::open(&base).await.unwrap().make_public_attach_only().unwrap();
-        let tenant = Arena::new();
+        let tenant = Arena::new().unwrap();
         let publisher = OpenCell::open_in(&publisher_path, Some(tenant.clone())).await.unwrap();
         // The publisher's VM maps its first page, from the tenant's copy.
         let window = publisher.create_dax_window(len as u64, None).unwrap();
@@ -4537,7 +4538,7 @@ mod tests {
         publisher.commit(None).await.unwrap();
         publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).await.unwrap();
         drop(publisher);
-        let tenant = Arena::new();
+        let tenant = Arena::new().unwrap();
         let publisher = OpenCell::open_in(&publisher_path, Some(tenant.clone())).await.unwrap();
         assert_eq!(read(&publisher, extent, 0, len).await, Ok(data.clone()));
         let pages = len as u64 / ps;
