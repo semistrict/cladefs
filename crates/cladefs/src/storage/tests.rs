@@ -290,8 +290,9 @@ async fn churn(fs: &Filesystem, files: &mut Files, seed: u64, rounds: usize) {
 
 /// TASK-291.3: an image and its fork, each written from a thread of its own, commit while
 /// passes of their bucket's collector start after their commits, as often as one ends, and
-/// compact and delete at once: after each round each holds what was written to it, the fork
-/// what it inherited too; and opened again, after a pass alone, the same.
+/// delete at once: after each round each holds what was written to it, the fork what it
+/// inherited too; and opened again, after passes alone that find nothing left to collect, the
+/// same.
 #[tokio::test(flavor = "multi_thread")]
 async fn passes_run_among_an_image_and_its_forks_commits() {
     quicken(BUSY);
@@ -320,8 +321,12 @@ async fn passes_run_among_an_image_and_its_forks_commits() {
     assert!(passes > 4, "{passes} passes");
     assert!(collected.deleted > 0, "{collected:?}, {passes} passes");
     drop(collecting);
-    let report = Storage::open(&path).await.unwrap().collecting().unwrap().pass_now();
-    assert!(report.deleted > 0, "{report:?}");
+    // Passes alone leave nothing the passes among the commits should have collected: those
+    // delete at once, with no grace to leave a pass alone anything (b5664c64b), and its cell
+    // unchanged since the last of them, a pass alone skips it (board 10508).
+    let collecting = Storage::open(&path).await.unwrap().collecting().unwrap().clone();
+    assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
+    drop(collecting);
     block_on(async {
         for (path, files) in [(&path, &files), (&fork_path, &forked)] {
             let fs = Filesystem::mount(Storage::open(path).await.unwrap()).await.unwrap();
