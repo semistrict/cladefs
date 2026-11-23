@@ -19,7 +19,7 @@ export const anchors = {
   posix_fsync: { path: "crates/fxfs-posix/src/lib.rs", snippet: "pub async fn fsync(&self) -> Result<(), Error> {", note: "Group commit: an fsync a sync already covers needs none of its own." },
   platform: { path: "crates/fxfs-posix/src/lib.rs", snippet: "pub trait Platform: Send + Sync + Sized + 'static", note: "What differs between the guest kernel and the host's tools, behind one POSIX layer." },
   journal_commit: { path: "crates/fxfs/src/object_store/journal.rs", snippet: "pub async fn commit(&self, transaction: &mut Transaction<'_>) -> Result<u64, Error>", note: "Fuchsia's journal: a transaction's mutations committed as a group." },
-  commit_root_barrier: { path: "crates/fxfs/src/object_store/journal.rs", snippet: "device.commit_root(&root).await.map(|()| true)", note: "cladefs's change to Fuchsia's journal: its flush commits the root on the extent device." },
+  commit_root_barrier: { path: "crates/fxfs/src/object_store/journal.rs", snippet: "let barrier = async |root: Vec<u8>| device.commit_root(&root).await.map(|()| true);", note: "cladefs's change to Fuchsia's journal: its flush commits the root on the extent device." },
   transaction: { path: "crates/fxfs/src/object_store/transaction.rs", snippet: "pub struct Transaction<'a>", note: "Fuchsia's Transaction: mutation records committed together." },
   lsm: { path: "crates/fxfs/src/lsm_tree.rs", snippet: "pub struct LSMTree<K, V>", note: "Fuchsia's LSM tree, Fxfs's key/value store of layers." },
   object_store: { path: "crates/fxfs/src/object_store.rs", snippet: "pub struct ObjectStore", note: "Fuchsia's ObjectStore: files as objects." },
