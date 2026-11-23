@@ -129,7 +129,8 @@
 (*   its pin taken over, is of another version. Nothing bounds how long a  *)
 (*   deletion waits in flight: its host stopped as it lets go, the next    *)
 (*   mirror takes its pin over and writes the hold again, and a deletion   *)
-(*   it sent lands after (LateLand); unconditional, the next mirror marks  *)
+(*   it sent lands after (LateLand, in BucketsLate and NoReleasesOwn, whose *)
+(*   steps include "late"); unconditional, the next mirror marks           *)
 (*   with no hold in A (TLC, 2026-11-22, MarkedHeld; board 8441). A        *)
 (*   mirror gives up, deleting its hold, as it fails too (MirFail), its    *)
 (*   version still named: the next mirror does not. A lease alone, its     *)
@@ -228,8 +229,14 @@ GcIdle == [pc |-> "idle", kind |-> None, c |-> None, alive |-> FALSE, vs |-> {},
 
 MirIdle == [pc |-> "idle", kids |-> {}, copied |-> {}, run |-> 0, pinBy |-> 0, holdBy |-> 0]
 
+\* Whether the model lets a stopped mirror's deletions land late ("late"): it tells the runs of v's
+\* mirror apart, and whose writes its pin and hold are, only then, its other models none the
+\* larger for them (BucketsLate checks it, and NoReleasesOwn).
+Late == "late" \in Can
+
 \* v's mirror begun again, as its run `run`: what its pin and hold are of kept.
-MirAnew(v, run) == [mir[v] EXCEPT !.pc = "pin", !.kids = {}, !.copied = {}, !.run = run]
+MirAnew(v, run) ==
+    [mir[v] EXCEPT !.pc = "pin", !.kids = {}, !.copied = {}, !.run = IF Late THEN run ELSE 0]
 
 \* P's head and writer.
 UNCH == <<vers, cut, parts, ended>>
@@ -387,7 +394,7 @@ MirPin(v) ==
                                        [] v \in marker /\ R("mirrorResumesMarked") -> Resume(v)
                                        [] OTHER -> "hold",
                               !.kids = early,
-                              !.pinBy = IF R("mirrorPins") THEN @.run ELSE @.pinBy]]
+                              !.pinBy = IF R("mirrorPins") /\ Late THEN mir[v].run ELSE @]]
        /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts,
                       late>>
 
@@ -398,7 +405,7 @@ MirHold(v) ==
     /\ refs' = [refs EXCEPT !["A"] = @ \cup {Hold(v)}]
     /\ mir' = [mir EXCEPT ![v] =
                 [@ EXCEPT !.pc = IF R("mirrorHoldsUnmarked") THEN Resume(v) ELSE "read",
-                          !.holdBy = @.run]]
+                          !.holdBy = IF Late THEN mir[v].run ELSE @]]
     /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* Without mirrorHoldsUnmarked, its marker read in B after its hold.
@@ -502,13 +509,14 @@ Releasing(v, pc) ==
 \* Its host dies, or stops past its lease: it starts again from its pin, as a run of its own, what
 \* it wrote kept, the next mirror taking its pin over once stale. Stopped as it lets go, it sent
 \* its deletions, retried while their buckets were down: in flight for however long, they land
-\* later (LateLand), the next mirror's hold and pin there by then.
+\* later (LateLand), the next mirror's hold and pin there by then; in a model without "late", each
+\* landed before it stopped, or was never sent.
 MirRestart(v) ==
     /\ "crash" \in Can /\ restarts < MaxRestarts
     /\ mir[v].pc \notin {"idle", "pin", "done"}
     /\ mir' = [mir EXCEPT ![v] = MirAnew(v, restarts + 1)]
     /\ restarts' = restarts + 1
-    /\ late' = late \cup Releasing(v, mir[v].pc)
+    /\ late' = IF Late THEN late \cup Releasing(v, mir[v].pc) ELSE late
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs>>
 
 \* The run whose write the reference r, a pin or a hold, is.
