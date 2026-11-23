@@ -102,6 +102,7 @@ class ReviewChangeTest(unittest.TestCase):
             **os.environ,
             "PATH": f"{self.fake / 'bin'}:{os.environ['PATH']}",
             "FAKE": str(self.fake),
+            "CODEX_MODEL": "test-model",
         }
         env.pop("HOTBED_SESSION", None)
         if extra_env:
@@ -142,13 +143,16 @@ class ReviewChangeTest(unittest.TestCase):
             "--instructions verifying-reviewer instructions; what HEAD brings beyond origin/main "
             "(`git diff origin/main...HEAD`, `git log origin/main..HEAD`), serving board 6902 "
             "--base origin/main --head HEAD --json",
-            "review start -s test-sess 77",
+            "review start -s test-sess 77 --model test-model",
             f"review findings -s test-sess 77 --file {findings}",
             "review finish -s test-sess 77 --summary Codex review, 1 finding(s): "
             "One finding survives review.",
             "review link 77 --json",
         ])
         self.assertIn("This is hotbed review 77.", (self.fake / "stdin").read_text())
+        # Codex runs on the model the review records.
+        args = (self.fake / "args").read_text().splitlines()
+        self.assertEqual(args[:5], ["exec", "-m", "test-model", "--sandbox", "read-only"])
         self.assertIn("hotbed review 77, http://hotbed.local/reviews/77", done.stderr)
         recorded = json.loads((self.fake / "findings.json").read_text())
         self.assertEqual([f["file"] for f in recorded["findings"]], ["src/lib.rs"])
@@ -159,7 +163,7 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.stdout, "no findings\n")
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
             "session current --json",
-            "review start -s test-sess 77",
+            "review start -s test-sess 77 --model test-model",
             "review fail -s test-sess 77 --reason Codex's report carries no findings for hotbed "
             f"(see {self.fake / 'review.md'})",
         ])
@@ -169,7 +173,7 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
             "session current --json",
-            "review start -s test-sess 77",
+            "review start -s test-sess 77 --model test-model",
             "review finish -s test-sess 77 --summary Codex review, 0 finding(s): no findings",
             "review link 77 --json",
         ])
@@ -180,7 +184,7 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         log = (self.fake / "hotbed.log").read_text().splitlines()
         self.assertEqual(log[:3], ["session current --json", "session start --json",
-                                   "review start -s new-sess 77"])
+                                   "review start -s new-sess 77 --model test-model"])
         self.assertEqual(log[-1], "session end -s new-sess")
 
     def test_no_change_named_fails(self):
