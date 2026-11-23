@@ -679,3 +679,126 @@ fn cells_are_made_replicated_through_the_control_api() {
         assert!(!path.exists());
     }
 }
+
+/// What a guest of today says of its stats, as its Fxfs and its driver write them: its device's
+/// and its window's requests timed (a count, nanoseconds, a histogram of 24 buckets each), and the
+/// rest of its counters, some 50 lines and 12 histograms in all.
+fn todays_guest() -> String {
+    let mut text = String::new();
+    for (n, timed) in ["device_reads", "device_writes", "device_commits", "seal_waits", "seals"]
+        .into_iter()
+        .chain(["writes_held_by_seals", "window_map_requests", "window_faults", "window_unmaps"])
+        .chain(["window_shrinks", "window_prefaults", "window_private_requests"])
+        .enumerate()
+    {
+        let count = 1_000 * (n as u64 + 1);
+        text += &format!("{timed} {count}\n{timed}_ns {}\n{timed}_hist ", count * 45_000);
+        let buckets: Vec<String> =
+            (0..24).map(|bucket| ((count >> bucket) % 900).to_string()).collect();
+        text += &(buckets.join(",") + "\n");
+    }
+    for n in 0..26 {
+        text += &format!("vfs_counter_{n} {}\n", 12_345 * n);
+    }
+    text + "commit 0123456789abcdef0123456789abcdef01234567\n"
+}
+
+/// What a guest says of its stats near the most it may (`MAX_STATS`, 64 KiB): 2,000 counters, and
+/// 100 histograms of 24 buckets.
+fn full_guest() -> String {
+    let mut text = String::new();
+    for n in 0..2_000 {
+        text += &format!("c{n:04} {}\n", 1_234_567_890_123u64 + n);
+    }
+    for n in 0..100 {
+        let buckets: Vec<String> = (0..24).map(|bucket| (1_234_567 + bucket).to_string()).collect();
+        text += &format!("h{n:03}_hist {}\n", buckets.join(","));
+    }
+    assert!(text.len() < 64 << 10, "{}", text.len());
+    text
+}
+
+/// board 8581: GetStats of VM processes past gRPC's default limit of a message, 4 MiB, which the
+/// clients failed with OUT_OF_RANGE as a host was busiest, is taken through `control::Client`, each
+/// VM process's size measured: one of today's guest's some 2 KiB (1,960 bytes), one near the most
+/// a guest says some 40 KiB (40,568), as the .proto says. Past the most the daemon sends, here lowered to 2 MiB, it is
+/// refused, RESOURCE_EXHAUSTED (EMSGSIZE), saying what to leave out, until enough is.
+#[test]
+fn stats_of_many_vms_are_taken_and_bounded() {
+    use std::sync::Arc;
+    const VMS: usize = 120;
+    // Each VM process's cell and connection hold files open, past the usual 1,024 (board 8595).
+    cladefs::cladefsd::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let (today, full) = (todays_guest(), full_guest());
+    let vms: Vec<Arc<cladefs::CellClient>> = (0..=VMS)
+        .map(|n| {
+            let vm = Arc::new(daemon.open(&dir.path().join(format!("vm{n:03}")), CAPACITY));
+            let guest = if n == 0 { today.clone() } else { full.clone() };
+            // Its guest answers each ask, off the thread the ask comes on.
+            let answering = Arc::downgrade(&vm);
+            vm.on_stats_asked(move |ask| {
+                let (vm, guest) = (answering.clone(), guest.clone());
+                std::thread::spawn(move || {
+                    if let Some(vm) = vm.upgrade() {
+                        vm.answer_stats(ask, Some(&guest)).unwrap();
+                    }
+                });
+                true
+            });
+            vm
+        })
+        .collect();
+    let client = cladefs::cladefsd::control::Client::connect(dir.path().join("control.sock"));
+    let client = client.unwrap();
+    let asking = GetStatsRequest { wait_ms: 30_000, ..GetStatsRequest::default() };
+
+    let stats = client.get_stats(asking.clone()).unwrap();
+    assert_eq!(stats.vms.len(), VMS + 1);
+    assert!(stats.vms.iter().all(|vm| vm.answered), "a VM process not answering");
+    let bytes = prost::Message::encoded_len(&stats);
+    assert!(bytes > 4 << 20 && bytes < cladefs::cladefsd::control::MAX_MESSAGE_BYTES, "{bytes}");
+    let (todays, fullest) =
+        (prost::Message::encoded_len(&stats.vms[0]), prost::Message::encoded_len(&stats.vms[1]));
+    eprintln!(
+        "GetStats: {bytes} bytes; a VM process of today's guest {todays}, of a full one {fullest}"
+    );
+    assert!((1 << 10..3 << 10).contains(&todays), "today's guest's VM process: {todays} bytes");
+    assert!((32 << 10..48 << 10).contains(&fullest), "a full guest's VM process: {fullest} bytes");
+    assert_eq!(client.list_cells().unwrap().len(), VMS + 1);
+
+    fail::cfg("cladefsd::most_answer", "return(2097152)").unwrap();
+    let mut asked = |leave_out: [bool; 3]| {
+        let [leave_out_histograms, leave_out_guests, leave_out_vms] = leave_out;
+        let request = GetStatsRequest {
+            leave_out_histograms,
+            leave_out_guests,
+            leave_out_vms,
+            ..asking.clone()
+        };
+        let answered = daemon.runtime.block_on(daemon.client.get_stats(request));
+        answered.map(tonic::Response::into_inner)
+    };
+    for (leave_out, said) in [
+        ([false; 3], "leave out the guests' histograms (leave_out_histograms)"),
+        ([true, false, false], "leave out the guests' stats (leave_out_guests)"),
+    ] {
+        let refused = asked(leave_out).unwrap_err();
+        assert_eq!(failure::<()>(Err(refused.clone())), (Code::ResourceExhausted, Errno::EMSGSIZE));
+        assert!(refused.message().starts_with("GetStats's answer would be "), "{refused:?}");
+        assert!(
+            refused
+                .message()
+                .ends_with(&format!(" past the most the control API sends, 2097152: {said}")),
+            "{refused:?}"
+        );
+    }
+    let without = asked([false, true, false]).unwrap();
+    assert_eq!(without.vms.len(), VMS + 1);
+    assert!(without.vms.iter().all(|vm| vm.guest.is_none() && vm.answered));
+    let without = asked([false, false, true]).unwrap();
+    assert_eq!((without.vms.len(), without.build.as_str()), (0, cladefs::BUILD_COMMIT));
+    fail::remove("cladefsd::most_answer");
+    drop(vms);
+}

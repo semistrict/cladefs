@@ -49,6 +49,15 @@ const THREADS: usize = 2;
 /// many calls waiting, for uploads or guests, leave them to the others' I/O.
 pub const BLOCKING_THREADS: usize = 32;
 
+/// cladefs: the most bytes an answer of the API is, encoded, as its .proto says (board 8581): the
+/// daemon refuses to send a larger one ([`bounded`]), and its clients, this module's and the Go
+/// one's, take one of this size, where gRPC's default, 4 MiB, failed `GetStats` at some hundreds
+/// of VMs at the most (each VM process some 2 KiB of it, 40 KiB with a guest saying near the most
+/// it may, as `GetStats` says). 64 MiB is some 30,000 VMs at what a guest says today, 1,600 at the
+/// most each may say; past it, `GetStats` leaves out what its caller chooses. The client holds an
+/// answer whole, once.
+pub const MAX_MESSAGE_BYTES: usize = 64 << 20;
+
 /// Serves the control API to the callers that connect to `listener`, until accepting fails; the
 /// sockets of the tenants it grants go in the directory `tenants`. cladefs: and the Mount service
 /// of the daemon's FUSE mount of cells, if it has one ([`super::mount`], TASK-475.2): its calls,
@@ -99,7 +108,11 @@ pub fn serve_control(
         CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
         tonic::transport::Server::builder()
             .add_service(health)
-            .add_service(Drained(CladefsdServer::new(control)))
+            // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
+            // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's.
+            .add_service(Drained(
+                CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
+            ))
             // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
             .add_optional_service(super::mount::service().map(Drained))
             .serve_with_incoming(incoming)
@@ -128,14 +141,55 @@ pub async fn serve_control(
     });
     CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
     tonic::transport::Server::builder()
-        .add_service(Drained(CladefsdServer::new(control)))
+        .add_service(Drained(
+            CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
+        ))
         .serve(address)
         .await
         .map_err(std::io::Error::other)
 }
 
-/// cladefs: `stats`, as the API has it (TASK-111.4).
-fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
+/// cladefs: a client of the API over `channel`, which takes answers as large as the daemon sends
+/// ([`MAX_MESSAGE_BYTES`], board 8581).
+fn client(channel: tonic::transport::Channel) -> CladefsdClient<tonic::transport::Channel> {
+    CladefsdClient::new(channel).max_decoding_message_size(MAX_MESSAGE_BYTES)
+}
+
+/// cladefs: `answer`, the answer of the API's call `call`, unless it is past [`MAX_MESSAGE_BYTES`]
+/// encoded: refused then, RESOURCE_EXHAUSTED (EMSGSIZE), saying its size, and `smaller`, what the
+/// caller may ask for instead (board 8581).
+fn bounded<T: prost::Message>(call: &str, answer: T, smaller: &str) -> Result<Response<T>, Status> {
+    let (bytes, most) = (answer.encoded_len(), most_answer());
+    if bytes <= most {
+        return Ok(Response::new(answer));
+    }
+    log::warn!("cladefsd: refusing {call}'s answer of {bytes} bytes, past {most}");
+    Err(saying(
+        Errno::EMSGSIZE,
+        format!(
+            "{call}'s answer would be {bytes} bytes, past the most the control API sends, {most}: \
+             {smaller}"
+        ),
+    ))
+}
+
+/// cladefs: the most bytes an answer is: [`MAX_MESSAGE_BYTES`], or in a test, what the
+/// `cladefsd::most_answer` failpoint says, so that one refuses an answer of a few VMs' stats rather
+/// than of a thousand's.
+fn most_answer() -> usize {
+    fail::fail_point!("cladefsd::most_answer", |most: Option<String>| {
+        // Not a number: the test's configuration wrong, which the panic says.
+        most.and_then(|most| most.parse().ok()).expect("cladefsd::most_answer=return(BYTES)")
+    });
+    MAX_MESSAGE_BYTES
+}
+
+/// cladefs: `stats`, as the API has it (TASK-111.4), the guests' histograms left out if
+/// `leave_out_histograms`, and their stats if `leave_out_guests` (board 8581).
+fn stats_response(
+    stats: super::stats::HostStats,
+    (leave_out_histograms, leave_out_guests): (bool, bool),
+) -> GetStatsResponse {
     let named = |pairs: &[(&str, u64)]| -> std::collections::HashMap<String, u64> {
         pairs.iter().map(|(name, value)| ((*name).to_owned(), *value)).collect()
     };
@@ -150,10 +204,11 @@ fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
         window: vm.window().map_or_else(Default::default, |window| named(&window)),
         answered: vm.answered.is_some(),
         answer_ns: vm.answered.map_or(0, |took| took.as_nanos() as u64),
-        guest: vm.guest.map(|guest| GuestStats {
+        guest: vm.guest.filter(|_| !leave_out_guests).map(|guest| GuestStats {
             build: guest.build.unwrap_or_default(),
             counters: guest.counters.into_iter().collect(),
             histograms: (guest.histograms.into_iter())
+                .filter(|_| !leave_out_histograms)
                 .map(|(name, buckets)| (name, Histogram { buckets }))
                 .collect(),
         }),
@@ -317,15 +372,16 @@ pub(crate) async fn channel_socket(
 async fn connect_socket(
     socket: &Path,
 ) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
-    Ok(CladefsdClient::new(channel_socket(socket).await?))
+    Ok(client(channel_socket(socket).await?))
 }
 
-/// A client of the control API of the daemon listening at `socket`.
+/// A client of the control API of the daemon listening at `socket`, which takes answers as large
+/// as the daemon sends ([`MAX_MESSAGE_BYTES`]).
 #[cfg(not(madsim))]
 pub async fn connect(
     socket: impl AsRef<Path>,
 ) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
-    Ok(CladefsdClient::new(channel(socket).await?))
+    Ok(client(channel(socket).await?))
 }
 
 /// cladefs: a client of the control API of the daemon serving it at `address` on the simulated
@@ -334,7 +390,7 @@ pub async fn connect(
 pub async fn connect(
     address: std::net::SocketAddr,
 ) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
-    Ok(CladefsdClient::new(channel(address).await?))
+    Ok(client(channel(address).await?))
 }
 
 /// The errno a call failed with, as its status's [`ERRNO`] entry has it, if it has one.
@@ -383,8 +439,9 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
         Errno::EEXIST => Code::AlreadyExists,
         Errno::EACCES | Errno::EPERM => Code::PermissionDenied,
         Errno::EINVAL => Code::InvalidArgument,
-        // cladefs: ENOMEM, the host's memory full (board 5662).
-        Errno::ENOSPC | Errno::ENOMEM => Code::ResourceExhausted,
+        // cladefs: ENOMEM, the host's memory full (board 5662); EMSGSIZE, an answer past the
+        // most the API sends (board 8581).
+        Errno::ENOSPC | Errno::ENOMEM | Errno::EMSGSIZE => Code::ResourceExhausted,
         Errno::ETIMEDOUT => Code::DeadlineExceeded,
         Errno::EBUSY | Errno::ESTALE | Errno::ENOTSUP | Errno::EROFS => Code::FailedPrecondition,
         _ => Code::Internal,
@@ -665,7 +722,8 @@ impl Cladefsd for Control {
             });
             Ok(ListEphemeralHostsResponse { hosts: hosts.collect() })
         };
-        reply(listed.await)
+        let listed = listed.await.map_err(status)?;
+        bounded("ListEphemeralHosts", listed, "decommission hosts gone for good")
     }
 
     async fn delete_cell(
@@ -727,17 +785,13 @@ impl Cladefsd for Control {
         request: Request<ListVersionsRequest>,
     ) -> Result<Response<ListVersionsResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(cells::versions(cell_dir).await.map(|versions| {
-            ListVersionsResponse {
-                versions: (versions.into_iter())
-                    .map(|crate::VersionInfo { id, uploaded, shared }| Version {
-                        id,
-                        uploaded,
-                        shared,
-                    })
-                    .collect(),
-            }
-        }))
+        let versions = cells::versions(cell_dir).await.map_err(status)?;
+        let listed = ListVersionsResponse {
+            versions: (versions.into_iter())
+                .map(|crate::VersionInfo { id, uploaded, shared }| Version { id, uploaded, shared })
+                .collect(),
+        };
+        bounded("ListVersions", listed, "drop versions (DropVersions)")
     }
 
     async fn drop_versions(
@@ -791,14 +845,12 @@ impl Cladefsd for Control {
         &self,
         _request: Request<ListCellsRequest>,
     ) -> Result<Response<ListCellsResponse>, Status> {
-        let listed = cells::list().map(|cells| {
-            let cells = cells.into_iter().map(|(path, state)| ListedCell {
-                path: path.to_string_lossy().into_owned(),
-                stat: Some(stat_response(state)),
-            });
-            ListCellsResponse { stores: cells.collect() }
+        let cells = cells::list().map_err(status)?.into_iter().map(|(path, state)| ListedCell {
+            path: path.to_string_lossy().into_owned(),
+            stat: Some(stat_response(state)),
         });
-        reply(listed)
+        let listed = ListCellsResponse { stores: cells.collect() };
+        bounded("ListCells", listed, "StatCell each cell instead")
     }
 
     async fn get_counters(
@@ -898,11 +950,20 @@ impl Cladefsd for Control {
         &self,
         request: Request<GetStatsRequest>,
     ) -> Result<Response<GetStatsResponse>, Status> {
-        let wait = match request.into_inner().wait_ms {
+        let GetStatsRequest { wait_ms, leave_out_histograms, leave_out_guests, leave_out_vms } =
+            request.into_inner();
+        let wait = match wait_ms {
             0 => super::stats::WAIT,
             ms => std::time::Duration::from_millis(ms.into()),
         };
-        Ok(Response::new(stats_response(super::stats::take(wait).await)))
+        let stats = super::stats::take(wait, !leave_out_vms).await;
+        let answer = stats_response(stats, (leave_out_histograms, leave_out_guests));
+        let smaller = match (leave_out_histograms, leave_out_guests, leave_out_vms) {
+            (false, false, _) => "leave out the guests' histograms (leave_out_histograms)",
+            (true, false, _) => "leave out the guests' stats (leave_out_guests)",
+            (_, true, _) => "leave out the VM processes (leave_out_vms)",
+        };
+        bounded("GetStats", answer, smaller)
     }
 
     async fn grant(
@@ -1485,17 +1546,28 @@ impl Client {
         wait: Option<std::time::Duration>,
     ) -> Result<GetStatsResponse, crate::Error> {
         let wait_ms = wait.map_or(0, |wait| u32::try_from(wait.as_millis()).unwrap_or(u32::MAX));
+        self.get_stats(GetStatsRequest { wait_ms, ..GetStatsRequest::default() })
+    }
+
+    /// cladefs: what the daemon, its VM processes and their guests counted, as `request` asks
+    /// (`GetStats`): what to wait for, and what to leave out (board 8581).
+    pub fn get_stats(&self, request: GetStatsRequest) -> Result<GetStatsResponse, crate::Error> {
         self.call("asking the extent daemon for its stats".to_owned(), |mut c| async move {
-            c.get_stats(GetStatsRequest { wait_ms }).await
+            c.get_stats(request).await
+        })
+    }
+
+    /// cladefs: the daemon's counters, as `GetCounters` answers, its bucket's with them (board
+    /// 8585).
+    pub fn get_counters(&self) -> Result<GetCountersResponse, crate::Error> {
+        self.call("asking the extent daemon for its counters".to_owned(), |mut c| async move {
+            c.get_counters(GetCountersRequest {}).await
         })
     }
 
     /// The daemon's counters (`GetCounters`).
     pub fn counters(&self) -> Result<crate::stats::Stats, crate::Error> {
-        let response = self
-            .call("asking the extent daemon for its counters".to_owned(), |mut c| async move {
-                c.get_counters(GetCountersRequest {}).await
-            })?;
+        let response = self.get_counters()?;
         Ok(crate::stats::Stats {
             maps: response.maps,
             map_ns: response.map_ns,

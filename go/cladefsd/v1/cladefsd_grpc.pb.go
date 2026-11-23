@@ -41,13 +41,19 @@
 //
 // Errors are gRPC statuses whose code follows the errno the daemon failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
-// EEXIST ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
-// RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
-// FAILED_PRECONDITION, EIO and others INTERNAL.
+// EEXIST ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC,
+// ENOMEM and EMSGSIZE RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and
+// EROFS FAILED_PRECONDITION, EIO and others INTERNAL.
 //
 // Calls block for as long as their work takes: a sync until the cell's commits are in object
 // storage, an import for minutes. A caller bounds them with deadlines; one that gives up does not
 // stop the work, which completes, or fails, on its own.
+//
+// No answer is larger than 64 MiB (board 8581): one that would be, as GetStats's and ListCells's
+// grow with a host's VMs and cells, fails with RESOURCE_EXHAUSTED (EMSGSIZE), saying its size, and
+// GetStats says what of it to leave out. A caller takes answers of that size: gRPC's own default,
+// 4 MiB, which the Rust client (cladefs::cladefsd::control) and the Go client (go/cladefsd/v1)
+// raise to it, failed GetStats at some hundreds of VMs. Requests are 4 MiB at most.
 //
 // Compatibility (TASK-50.5): v1 only grows. Calls and fields are added; none is removed,
 // renamed, renumbered or given another meaning or type, and no field number is used twice (a
@@ -198,7 +204,12 @@ type CladefsdClient interface {
 	GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error)
 	// What the daemon, its VM processes and their guests counted, as of one moment, each with the
 	// commit it was built of (TASK-111.4): the daemon asks every VM process that opened a cell, each
-	// its guest, waits for their answers, a while at most, and reads its own counters then.
+	// its guest, waits for their answers, a while at most, and reads its own counters then. Each VM
+	// process is some 2 KiB of the answer with today's guests (some 50 counters and 12 histograms),
+	// some 40 KiB with a guest saying near the most it may, 64 KiB (tests/control.rs measures both,
+	// 1,960 and 40,568 bytes): 4 MiB, gRPC's default, is some hundreds of VMs at the most. Past
+	// the most an answer is (64 MiB, above), RESOURCE_EXHAUSTED (EMSGSIZE), and the request's
+	// `leave_out_*` choose what to leave out.
 	GetStats(ctx context.Context, in *GetStatsRequest, opts ...grpc.CallOption) (*GetStatsResponse, error)
 	// Grants a tenant, by its ID, a VM socket, making the tenant if it is new: the path of a socket
 	// for the caller to bind-mount into the tenant's jails, through which VM processes open cells in
@@ -745,7 +756,12 @@ type CladefsdServer interface {
 	GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error)
 	// What the daemon, its VM processes and their guests counted, as of one moment, each with the
 	// commit it was built of (TASK-111.4): the daemon asks every VM process that opened a cell, each
-	// its guest, waits for their answers, a while at most, and reads its own counters then.
+	// its guest, waits for their answers, a while at most, and reads its own counters then. Each VM
+	// process is some 2 KiB of the answer with today's guests (some 50 counters and 12 histograms),
+	// some 40 KiB with a guest saying near the most it may, 64 KiB (tests/control.rs measures both,
+	// 1,960 and 40,568 bytes): 4 MiB, gRPC's default, is some hundreds of VMs at the most. Past
+	// the most an answer is (64 MiB, above), RESOURCE_EXHAUSTED (EMSGSIZE), and the request's
+	// `leave_out_*` choose what to leave out.
 	GetStats(context.Context, *GetStatsRequest) (*GetStatsResponse, error)
 	// Grants a tenant, by its ID, a VM socket, making the tenant if it is new: the path of a socket
 	// for the caller to bind-mount into the tenant's jails, through which VM processes open cells in

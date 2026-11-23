@@ -92,6 +92,9 @@ errnos! {
     /// Value too large for defined data type: an object ID too large for the inode numbers of a
     /// host FUSE mount of many stores, which keep its high bits for the store's.
     EOVERFLOW = 75,
+    /// Message too long: cladefs, an answer of the extent daemon's control API past the most it
+    /// sends (board 8581).
+    EMSGSIZE = 90,
     /// Protocol not supported.
     EPROTONOSUPPORT = 93,
     /// Operation not supported.

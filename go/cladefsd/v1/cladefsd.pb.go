@@ -41,13 +41,19 @@
 //
 // Errors are gRPC statuses whose code follows the errno the daemon failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
-// EEXIST ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
-// RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
-// FAILED_PRECONDITION, EIO and others INTERNAL.
+// EEXIST ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC,
+// ENOMEM and EMSGSIZE RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and
+// EROFS FAILED_PRECONDITION, EIO and others INTERNAL.
 //
 // Calls block for as long as their work takes: a sync until the cell's commits are in object
 // storage, an import for minutes. A caller bounds them with deadlines; one that gives up does not
 // stop the work, which completes, or fails, on its own.
+//
+// No answer is larger than 64 MiB (board 8581): one that would be, as GetStats's and ListCells's
+// grow with a host's VMs and cells, fails with RESOURCE_EXHAUSTED (EMSGSIZE), saying its size, and
+// GetStats says what of it to leave out. A caller takes answers of that size: gRPC's own default,
+// 4 MiB, which the Rust client (cladefs::cladefsd::control) and the Go client (go/cladefsd/v1)
+// raise to it, failed GetStats at some hundreds of VMs. Requests are 4 MiB at most.
 //
 // Compatibility (TASK-50.5): v1 only grows. Calls and fields are added; none is removed,
 // renamed, renumbered or given another meaning or type, and no field number is used twice (a
@@ -2929,7 +2935,15 @@ func (x *GetCountersResponse) GetSegmentCloseNs() uint64 {
 type GetStatsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// How long to wait for the VM processes' answers, in milliseconds: 0 for 2,000; 60,000 at most.
-	WaitMs        uint32 `protobuf:"varint,1,opt,name=wait_ms,json=waitMs,proto3" json:"wait_ms,omitempty"`
+	WaitMs uint32 `protobuf:"varint,1,opt,name=wait_ms,json=waitMs,proto3" json:"wait_ms,omitempty"`
+	// Whether to leave out the guests' histograms, every GuestStats's `histograms` empty (board
+	// 8581): the larger part of a guest's stats.
+	LeaveOutHistograms bool `protobuf:"varint,2,opt,name=leave_out_histograms,json=leaveOutHistograms,proto3" json:"leave_out_histograms,omitempty"`
+	// Whether to leave out the guests' stats, every VmStats's `guest` unset.
+	LeaveOutGuests bool `protobuf:"varint,3,opt,name=leave_out_guests,json=leaveOutGuests,proto3" json:"leave_out_guests,omitempty"`
+	// Whether to leave out the VM processes, `vms` empty, the daemon's own stats alone: no VM
+	// process is asked, and nothing waited for.
+	LeaveOutVms   bool `protobuf:"varint,4,opt,name=leave_out_vms,json=leaveOutVms,proto3" json:"leave_out_vms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2969,6 +2983,27 @@ func (x *GetStatsRequest) GetWaitMs() uint32 {
 		return x.WaitMs
 	}
 	return 0
+}
+
+func (x *GetStatsRequest) GetLeaveOutHistograms() bool {
+	if x != nil {
+		return x.LeaveOutHistograms
+	}
+	return false
+}
+
+func (x *GetStatsRequest) GetLeaveOutGuests() bool {
+	if x != nil {
+		return x.LeaveOutGuests
+	}
+	return false
+}
+
+func (x *GetStatsRequest) GetLeaveOutVms() bool {
+	if x != nil {
+		return x.LeaveOutVms
+	}
+	return false
 }
 
 // What the daemon, its VM processes and their guests counted, by the names its metrics give them.
@@ -4943,9 +4978,12 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x0ecommit_wait_ns\x18\x14 \x01(\x04R\fcommitWaitNs\x12%\n" +
 	"\x0esegment_closes\x18\x15 \x01(\x04R\rsegmentCloses\x12(\n" +
 	"\x10segment_close_ns\x18\x16 \x01(\x04R\x0esegmentCloseNsB\x11\n" +
-	"\x0f_object_storageJ\x04\b\x10\x10\x11J\x04\b\x11\x10\x12J\x04\b\x13\x10\x14R\x0fcommit_write_nsR\x14commit_written_bytesR\x0ecommit_seal_ns\"*\n" +
+	"\x0f_object_storageJ\x04\b\x10\x10\x11J\x04\b\x11\x10\x12J\x04\b\x13\x10\x14R\x0fcommit_write_nsR\x14commit_written_bytesR\x0ecommit_seal_ns\"\xaa\x01\n" +
 	"\x0fGetStatsRequest\x12\x17\n" +
-	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\xb2\x03\n" +
+	"\await_ms\x18\x01 \x01(\rR\x06waitMs\x120\n" +
+	"\x14leave_out_histograms\x18\x02 \x01(\bR\x12leaveOutHistograms\x12(\n" +
+	"\x10leave_out_guests\x18\x03 \x01(\bR\x0eleaveOutGuests\x12\"\n" +
+	"\rleave_out_vms\x18\x04 \x01(\bR\vleaveOutVms\"\xb2\x03\n" +
 	"\x10GetStatsResponse\x12\"\n" +
 	"\rtaken_unix_ns\x18\x01 \x01(\x04R\vtakenUnixNs\x12\x14\n" +
 	"\x05build\x18\x02 \x01(\tR\x05build\x12O\n" +

@@ -921,7 +921,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// its own, which they answer meanwhile (TASK-111.4).
 fn take_stats(wait: std::time::Duration) -> JoinHandle<super::stats::HostStats> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    std::thread::spawn(move || runtime.block_on(super::stats::take(wait)))
+    std::thread::spawn(move || runtime.block_on(super::stats::take(wait, true)))
 }
 
 /// The environment a child process of [`two_processes_map_the_same_pages`] is told what to map in;
