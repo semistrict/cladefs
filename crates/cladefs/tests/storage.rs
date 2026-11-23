@@ -70,12 +70,11 @@ fn fork_closed_storage() {
         let storage = image_with(&path, b"file", b"original").await;
         let before = allocated(&path);
         let fork = storage.fork_to(&fork_path).await.expect("fork failed");
-        // The fork's cell directory holds its cell's records (its description, ancestry,
-        // write-ahead log, and an open log and segment), each a block of the host's or less:
-        // what the image holds stays in the image's cell, which the fork's inherits. How many
-        // records, and so their sum, is the cell directory's layout's to say (board 9392).
-        let files = files(&fork_path);
-        assert!(files.iter().all(|&(_, bytes)| bytes <= 4 << 10), "{files:?}");
+        // The fork's cell directory holds its cell's records, of a 4 KiB block each or less: its
+        // description, ancestry, open log and open segment, and the write-ahead log's start, two
+        // blocks, a slot each. What the image holds stays in the image's cell, which the fork's
+        // inherits (board 9392).
+        assert!(allocated(&fork_path) <= 6 * (4 << 10), "{:?}", files(&fork_path));
         assert!(allocated(&path) <= before + (64 << 10), "{} > {before}", allocated(&path));
         assert!(storage.fork_to(&fork_path).await.is_err(), "forked over an image");
 
