@@ -15,8 +15,8 @@
 //! fenced deletes nothing, and writes nothing to the lease.
 //!
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
-//! records, as it lets the lease go, the digest of its listing of the cell, but the collector's own
-//! objects (`<C>gc/`); the options it decided by; what it found no live cell needs but for the
+//! records, as it lets the lease go, the digest of its listing of the cell, but the collector's
+//! lease (`<C>gc/lease`); the options it decided by; what it found no live cell needs but for the
 //! time since an object was written, each with when it may go ([`Deferred`]); the cell's objects
 //! and bytes, by kind, as of its listing ([`Usage`]); and how many objects encrypted it left
 //! uncompacted, its cell's KEK not to be had ([`Passed::uncompacted`]).
@@ -27,8 +27,10 @@
 //! ([`Passed::listing`]). It deletes what was deferred once due, and nothing else (doc-7 has why
 //! that is as safe as a pass in full). cladefs: one recorded leaving objects encrypted uncompacted
 //! holds only while their cell's tenant's KEK is still not to be had (TASK-411.13). Who recorded
-//! it, of what process, is of no matter: the lease's holders and times are under `<C>gc/`, outside
-//! the digest, and a pass of other options decides anew.
+//! it, of what process, is of no matter: the lease's holders and times are in the lease, outside
+//! the digest, and a pass of other options decides anew. cladefs: the marks of mark-only passes
+//! (`<C>gc/marks/`) are in it (board 8515): they keep a dead cell from being removed whole, and a
+//! pass skipping by a digest without them never removed one whose marks an operator cleared.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::collector::{Holding, Options};
@@ -107,8 +109,8 @@ const GC_LEASE: &str = "gc-lease";
 /// What a pass over a cell that ran to its end recorded ([`CollectorLease::passed`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Passed {
-    /// The digest of the listing of the cell it decided by, but the collector's own objects under
-    /// it ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
+    /// The digest of the listing of the cell it decided by, but the collector's lease
+    /// ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
     /// by more than the cell holds, which may change with no object of the cell's changing: a
     /// version of another cell's record, read for a clone of it being made; an origin found lost; a
     /// cell's recovery that found what it needs lost, and then nothing lost. Or if it deleted only
@@ -268,13 +270,15 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Result<Listed, b
 }
 
 /// The digest of a listing of `cell`, `listed`, in the order of their keys ([`Listed::digest`]):
-/// of every object but the collector's own (`<C>gc/`) and the read evidence of the cell's versions
-/// (`<C>reads/`, TASK-702.2), which forks' hosts write as often as they open them, and every pass
-/// trims, skipping the cell or not ([`crate::evidence::doomed`]).
+/// of every object but the collector's lease (`<C>gc/lease`), which every pass writes, and the read
+/// evidence of the cell's versions (`<C>reads/`, TASK-702.2), which forks' hosts write as often as
+/// they open them, and every pass trims, skipping the cell or not ([`crate::evidence::doomed`]).
+/// cladefs: mark-only passes' marks in it, as passes decide by them: they keep a dead cell
+/// (`collector::Pass::removal`, board 8515).
 pub(crate) fn digest<'a>(cell: CellId, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
-    let (own, evidence) = (layout::collectors(cell), layout::evidence_of_cell(cell));
+    let (lease, evidence) = (layout::collector_lease(cell), layout::evidence_of_cell(cell));
     let mut digest = Sha256::new();
-    let decided = |meta: &&Meta| !meta.key.starts_with(&own) && !meta.key.starts_with(&evidence);
+    let decided = |meta: &&Meta| meta.key != lease && !meta.key.starts_with(&evidence);
     for meta in listed.into_iter().filter(decided) {
         digest_of(&mut digest, meta);
     }

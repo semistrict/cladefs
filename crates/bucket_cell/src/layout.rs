@@ -320,13 +320,6 @@ pub fn collector_lease(cell: CellId) -> String {
     format!("{}{GC_LEASE}", cell.prefix())
 }
 
-/// cladefs: the prefix of the collector's own objects under `cell`: its lease, which holds what its
-/// passes record ([`crate::passed`]), and its marks; never a pass's candidate, nor what a pass
-/// decides by but its lease.
-pub fn collectors(cell: CellId) -> String {
-    format!("{}{GC}", cell.prefix())
-}
-
 /// cladefs: the prefix of the marks of the mark-only passes over `cell` ([`marks`]).
 pub fn marks_of(cell: CellId) -> String {
     format!("{}{GC_MARKS}", cell.prefix())
