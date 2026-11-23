@@ -482,6 +482,22 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     assert_eq!(line("vms.0.guest.histograms.seals.1"), Some("2"), "{lines}");
     assert_eq!(line("cladefsd.build"), Some(cladefs::BUILD_COMMIT), "{lines}");
 
+    // board 8581: what the caller leaves out, as a host of many VMs needs.
+    let json = |args: &[&str]| -> serde_json::Value { serde_json::from_str(&run(args)).unwrap() };
+    let without = json(&["stats", "--json", "--leave-out", "histograms", "--wait", "5"]);
+    assert_eq!(without["vms"][0]["guest"]["counters"], serde_json::json!({ "seals": 3 }));
+    assert_eq!(without["vms"][0]["guest"]["histograms"], serde_json::json!({}));
+    let without = json(&["stats", "--leave-out", "guests", "--json"]);
+    assert_eq!(without["vms"][0]["guest"], serde_json::Value::Null);
+    assert_eq!(without["vms"][0]["answered"], true);
+    let without = json(&["stats", "--json", "--leave-out", "vms"]);
+    assert_eq!(without["vms"], serde_json::json!([]));
+    assert_eq!(without["cladefsd"]["gauges"]["connections"], 1);
+    for wrong in [["stats", "--leave-out", "cells"], ["stats", "--wait", "0"]] {
+        let wrong: Vec<&Path> = wrong.iter().map(Path::new).collect();
+        assert!(cladefsctl.run(&wrong).is_err(), "{wrong:?} taken");
+    }
+
     drop(client);
     let refused = Cladefsctl::local().run(&[Path::new("stats"), Path::new("--json")]);
     assert!(refused.unwrap_err().contains("CLADEFSD_GRPC"));
@@ -728,6 +744,214 @@ async fn cells_grow_here_and_shrink_only_through_the_daemon() {
     let error = resize(1 << 24).expect_err("shrank a cell here");
     assert!(error.contains("shrinking a store needs its guest to agree"), "{error}");
     assert_eq!(capacity().await, 1 << 25);
+}
+
+/// board 8585: `cells` lists the cells VM processes have open, each with what StatCell says of it,
+/// and `counters` the daemon's counters, its bucket's with them; as lines of a path and a value, or
+/// with `--json` as one JSON object.
+#[cfg(target_os = "linux")]
+#[test]
+fn cells_and_counters_through_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
+    let run = |args: &[&str]| {
+        let args: Vec<&Path> = args.iter().map(Path::new).collect();
+        cladefsctl.run(&args).unwrap()
+    };
+    assert_eq!(run(&["cells"]), "");
+    let path = dir.path().join("store");
+    let vm = cladefs::CellClient::connect(dir.path().join("vms.sock"), &path, 1 << 24).unwrap();
+    let canonical = path.canonicalize().unwrap();
+
+    let lines = run(&["cells"]);
+    let line = |at: &str| lines.lines().find_map(|line| line.strip_prefix(&format!("{at} ")));
+    assert_eq!(line("cells.0.path"), canonical.to_str(), "{lines}");
+    assert_eq!(line("cells.0.stat.cell"), Some(&*base32_id::Short(vm.cell()).to_string()));
+    assert_eq!(line("cells.0.stat.open"), Some("true"), "{lines}");
+    assert_eq!(line("cells.0.stat.capacity"), Some("16777216"), "{lines}");
+    assert_eq!(line("cells.0.stat.fsync"), Some("FSYNC_LEVEL_ORDERED"), "{lines}");
+    assert_eq!(line("cells.0.stat.forced_after"), Some("null"), "{lines}");
+    assert_eq!(line("cells.1.path"), None, "{lines}");
+    let json: serde_json::Value = serde_json::from_str(&run(&["cells", "--json"])).unwrap();
+    assert_eq!(json["cells"][0]["path"], canonical.to_str().unwrap());
+    assert_eq!(json["cells"][0]["stat"]["tenant"], "0");
+
+    let lines = run(&["counters"]);
+    let line = |at: &str| lines.lines().find_map(|line| line.strip_prefix(&format!("{at} ")));
+    // No guest mapped or faulted.
+    assert_eq!(line("maps"), Some("0"), "{lines}");
+    assert_eq!(line("faults"), Some("0"), "{lines}");
+    let json: serde_json::Value = serde_json::from_str(&run(&["counters", "--json"])).unwrap();
+    assert_eq!(json["maps"], 0);
+    assert!(json["object_storage"]["requests"]["create"].is_u64(), "{json}");
+    drop(vm);
+}
+
+/// board 8585: the memory's and the disks' calls through cladefsctl, of a tenant granted and of
+/// every tenant: what each answers printed, nothing for those answering nothing, and a refusal
+/// said with its errno.
+#[cfg(target_os = "linux")]
+#[test]
+fn memory_and_disks_through_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
+    let run = |args: &[&str]| {
+        let args: Vec<&Path> = args.iter().map(Path::new).collect();
+        cladefsctl.run(&args)
+    };
+    let acme = dir.path().join("acme");
+    std::fs::create_dir(&acme).unwrap();
+    run(&["grant", "a", acme.to_str().unwrap()]).unwrap();
+    let vm =
+        cladefs::CellClient::connect(dir.path().join("tenants/a.sock"), acme.join("vm"), 1 << 24);
+    let vm = vm.unwrap();
+
+    for args in [
+        ["memory-limit", "--tenant", "a", "16777216"].as_slice(),
+        &["memory-limit", "--tenant", "a", "none"],
+        &["memory-limit", "1073741824"],
+        &["memory-limit", "none"],
+        &["memory-weight", "a", "3"],
+        &["in-flight", "--tenant", "a", "134217728"],
+        &["in-flight", "default"],
+        &["disk-limit", "--tenant", "a", "1073741824"],
+        &["disk-limit", "none"],
+        &["disk-weight", "a", "2"],
+    ] {
+        assert_eq!(run(args), Ok(String::new()), "{args:?}");
+    }
+    let disk = run(&["tenant-disk", "--tenant", "a"]).unwrap();
+    assert!(
+        disk.contains(
+            "limit_bytes 1073741824
+"
+        ),
+        "{disk}"
+    );
+    assert!(disk.starts_with("bytes "), "{disk}");
+    let json: serde_json::Value =
+        serde_json::from_str(&run(&["tenant-disk", "--json"]).unwrap()).unwrap();
+    assert_eq!(json["limit_bytes"], serde_json::Value::Null, "{json}");
+    let shrunk = run(&["shrink-memory", "--tenant", "a", "0"]).unwrap();
+    assert!(shrunk.strip_prefix("bytes ").is_some_and(|bytes| bytes.trim().parse::<u64>().is_ok()));
+
+    // Under a slab (1 MiB), and of a tenant no daemon has.
+    let refused = run(&["memory-limit", "4096"]).unwrap_err();
+    assert!(refused.contains("limiting the memory of every tenant"), "{refused}");
+    assert!(refused.contains("EINVAL"), "{refused}");
+    let refused = run(&["tenant-disk", "--tenant", "b"]).unwrap_err();
+    assert!(refused.contains("counting the disk of tenant b"), "{refused}");
+    assert!(refused.contains("ENOENT"), "{refused}");
+    for wrong in [
+        ["memory-limit", "--tenant", "a"].as_slice(),
+        &["memory-weight", "a", "heavy"],
+        &["in-flight", "none"],
+        &["tenant-disk", "--tenant"],
+    ] {
+        assert!(run(wrong).is_err(), "{wrong:?} taken");
+    }
+    drop(vm);
+}
+
+/// board 8585: `set-peers`, `migrate` and `hand-over` reach the daemon's calls, which say what they
+/// refuse: no peers, a cell no migration's, a migration of none.
+#[cfg(target_os = "linux")]
+#[test]
+fn peers_and_migrations_through_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let address = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    let cache = dir.path().join("cache");
+    let env = [
+        ("CLADEFSD_PEER_ADDRESS", address.as_str()),
+        ("CLADEFSD_PART_CACHE", cache.to_str().unwrap()),
+    ];
+    let cladefsctl = Cladefsctl::through_daemon(dir.path(), &env);
+    let run = |args: &[&str]| {
+        let args: Vec<&Path> = args.iter().map(Path::new).collect();
+        cladefsctl.run(&args)
+    };
+    assert_eq!(run(&["set-peers", &address, "127.0.0.1:1"]), Ok(String::new()));
+    assert_eq!(run(&["set-peers"]), Ok(String::new()));
+    let refused = run(&["set-peers", "nowhere"]).unwrap_err();
+    assert!(refused.contains("setting the daemon's peers"), "{refused}");
+    assert!(refused.contains("EINVAL"), "{refused}");
+
+    let path = dir.path().join("store");
+    run(&["create", path.to_str().unwrap(), "16777216"]).unwrap();
+    let to = dir.path().join("there");
+    let refused = run(&["migrate", path.to_str().unwrap(), "127.0.0.1:1", to.to_str().unwrap()]);
+    let refused = refused.unwrap_err();
+    assert!(refused.contains(&format!("migrating the cell at {}", path.display())), "{refused}");
+    let refused = run(&["hand-over", path.to_str().unwrap()]).unwrap_err();
+    assert!(refused.contains(&format!("handing the cell at {} over", path.display())), "{refused}");
+}
+
+/// board 8585: `--timeout`, or CLADEFSCTL_TIMEOUT, bounds a call the daemon holds, here a GetStats
+/// waiting for a guest that never answers: it fails in about the time given, `ETIMEDOUT`, saying
+/// the daemon may still complete it.
+#[cfg(target_os = "linux")]
+#[test]
+fn calls_end_at_their_timeouts() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let mut cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
+    let path = dir.path().join("store");
+    let vm = cladefs::CellClient::connect(dir.path().join("vms.sock"), &path, 1 << 24).unwrap();
+    // Its guest asked, and never answering.
+    vm.on_stats_asked(|_| true);
+    let timed = |cladefsctl: &Cladefsctl, args: &[&str]| {
+        let args: Vec<&Path> = args.iter().map(Path::new).collect();
+        let start = Instant::now();
+        let refused = cladefsctl.run(&args).unwrap_err();
+        (refused, start.elapsed())
+    };
+    let (refused, took) = timed(&cladefsctl, &["--timeout", "1", "stats", "--wait", "30"]);
+    assert!(refused.contains("ETIMEDOUT"), "{refused}");
+    assert!(
+        refused.contains("no answer within 1s: the extent daemon may still complete"),
+        "{refused}"
+    );
+    assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(10), "{took:?}");
+
+    cladefsctl.env.push(("CLADEFSCTL_TIMEOUT", "1".to_owned()));
+    let (refused, took) = timed(&cladefsctl, &["stats", "--wait", "30"]);
+    assert!(refused.contains("ETIMEDOUT"), "{refused}");
+    assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(10), "{took:?}");
+    // A timeout that is none.
+    let (refused, _) = timed(&cladefsctl, &["--timeout", "soon", "stats"]);
+    assert!(refused.contains("--timeout must be a positive number of seconds"), "{refused}");
+    drop(vm);
+}
+
+/// board 8585: the control API's calls cladefsctl makes are the daemon's: without one, refused,
+/// saying so.
+#[test]
+fn calls_of_the_daemon_need_it() {
+    let cladefsctl = Cladefsctl::local();
+    for args in [
+        ["cells"].as_slice(),
+        &["counters", "--json"],
+        &["set-peers", "a:1"],
+        &["migrate", "d", "a:1", "e"],
+        &["hand-over", "d"],
+        &["memory-limit", "none"],
+        &["memory-weight", "a", "1"],
+        &["in-flight", "default"],
+        &["shrink-memory", "0"],
+        &["disk-limit", "none"],
+        &["disk-weight", "a", "1"],
+        &["tenant-disk"],
+    ] {
+        let paths: Vec<&Path> = args.iter().map(Path::new).collect();
+        let error = cladefsctl.run(&paths).expect_err("called without a daemon");
+        assert!(
+            error.contains("the extent daemon's: name its control socket (CLADEFSD_GRPC)"),
+            "{error}"
+        );
+    }
 }
 
 /// TASK-45: the daemon refuses to start without the bucket and its placement token, saying why.

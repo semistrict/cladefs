@@ -1133,25 +1133,40 @@ fn forgotten_of(forgotten: crate::bucket::Forgotten) -> Forgotten {
 pub struct Client {
     runtime: tokio::runtime::Runtime,
     client: CladefsdClient<tonic::transport::Channel>,
+    /// cladefs: how long each call, and the connecting, may take, if bounded (board 8585).
+    timeout: Option<std::time::Duration>,
 }
 
 impl Client {
     /// A client of the daemon whose control socket is at `socket`.
     pub fn connect(socket: impl AsRef<Path>) -> Result<Self, crate::Error> {
+        Self::connect_within(socket, None)
+    }
+
+    /// cladefs: a client of the daemon whose control socket is at `socket`, connecting, and then
+    /// each of its calls, within `timeout` if given (board 8585): one that takes longer fails with
+    /// `ETIMEDOUT`, the call's work going on in the daemon, which may still complete it, as the
+    /// API's calls run to their end whether or not their callers wait.
+    pub fn connect_within(
+        socket: impl AsRef<Path>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Self, crate::Error> {
         let socket = socket.as_ref();
         // cladefs: outside the simulation: a blocking client, cladefsctl's, at its entry.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(crate::Error::new)?;
+        let what =
+            format!("connecting to the extent daemon's control socket at {}", socket.display());
         // cladefs: outside the simulation, as above.
-        let client = runtime.block_on(connect_socket(socket)).map_err(|err| {
-            crate::Error::new(anyhow::Error::new(err).context(format!(
-                "connecting to the extent daemon's control socket at {}",
-                socket.display()
-            )))
-        })?;
-        Ok(Self { runtime, client })
+        let connected = runtime.block_on(within(timeout, connect_socket(socket)));
+        let client = match connected {
+            Ok(Ok(client)) => client,
+            Ok(Err(err)) => return Err(crate::Error::new(anyhow::Error::new(err).context(what))),
+            Err(timeout) => return Err(timed_out(what, timeout)),
+        };
+        Ok(Self { runtime, client, timeout })
     }
 
     /// Makes an empty cell at `path` of `capacity` bytes, of `cell`, an Fxfs cell:
@@ -1532,10 +1547,28 @@ impl Client {
     /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,
     /// counted now, in bytes, and its limit, if it has one (`GetTenantDisk`, TASK-94).
     pub fn tenant_disk(&self, tenant: Option<u64>) -> Result<(u64, Option<u64>), crate::Error> {
+        let response = self.get_tenant_disk(tenant)?;
+        Ok((response.bytes, response.limit_bytes))
+    }
+
+    /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,
+    /// counted now, its limit and what is reserved of it, as `GetTenantDisk` answers (board 8585).
+    pub fn get_tenant_disk(
+        &self,
+        tenant: Option<u64>,
+    ) -> Result<GetTenantDiskResponse, crate::Error> {
         let request = GetTenantDiskRequest { tenant };
         let what = format!("counting the disk of {}", whom(tenant, "every tenant"));
-        let response = self.call(what, |mut c| async move { c.get_tenant_disk(request).await })?;
-        Ok((response.bytes, response.limit_bytes))
+        self.call(what, |mut c| async move { c.get_tenant_disk(request).await })
+    }
+
+    /// cladefs: weighs the disk of the tenant `tenant` against the others' (`SetDiskWeight`, board
+    /// 8585).
+    pub fn set_disk_weight(&self, tenant: u64, weight: u64) -> Result<(), crate::Error> {
+        let request = SetDiskWeightRequest { tenant, weight };
+        let what =
+            format!("weighing the disk of tenant {tenant}", tenant = base32_id::Short(tenant));
+        self.call(what, |mut c| async move { c.set_disk_weight(request).await }).map(drop)
     }
 
     /// cladefs: what the daemon, its VM processes and their guests counted, as of one moment, each
@@ -1625,11 +1658,35 @@ impl Client {
         F: Future<Output = Result<Response<T>, Status>>,
     {
         // cladefs: outside the simulation: the blocking client's call.
-        match self.runtime.block_on(call(self.client.clone())) {
-            Ok(response) => Ok(response.into_inner()),
-            Err(status) => Err(failed(what, status)),
+        match self.runtime.block_on(within(self.timeout, call(self.client.clone()))) {
+            Ok(Ok(response)) => Ok(response.into_inner()),
+            Ok(Err(status)) => Err(failed(what, status)),
+            Err(timeout) => Err(timed_out(what, timeout)),
         }
     }
+}
+
+/// cladefs: what `future` gives, within `timeout` if given; or, once that is over, the timeout
+/// (board 8585).
+async fn within<T>(
+    timeout: Option<std::time::Duration>,
+    future: impl Future<Output = T>,
+) -> Result<T, std::time::Duration> {
+    match timeout {
+        // The timeout's error says no more than that it is over.
+        Some(timeout) => tokio::time::timeout(timeout, future).await.map_err(|_| timeout),
+        None => Ok(future.await),
+    }
+}
+
+/// cladefs: the error of a call, `what`, that took longer than `timeout` (board 8585):
+/// `ETIMEDOUT`, saying that the daemon may still complete it, as it runs its calls to their end.
+fn timed_out(what: String, timeout: std::time::Duration) -> crate::Error {
+    let said = format!(
+        "no answer within {timeout:?}: the extent daemon may still complete the call, as it \
+         completes every call whether or not its caller waits"
+    );
+    crate::Error::new(anyhow::Error::new(Errno::ETIMEDOUT).context(said).context(what))
 }
 
 /// The error of a call that failed with `status`, saying it was `what`: with the errno it failed

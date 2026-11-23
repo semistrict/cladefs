@@ -24,7 +24,19 @@
 //! cladefsctl resize DIR CAPACITY
 //! cladefsctl public DIR
 //! cladefsctl stat DIR
-//! cladefsctl stats [--json]
+//! cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]...
+//! cladefsctl cells [--json]
+//! cladefsctl counters [--json]
+//! cladefsctl set-peers [ADDRESS...]
+//! cladefsctl migrate DIR PEER TO
+//! cladefsctl hand-over DIR
+//! cladefsctl memory-limit [--tenant TENANT] BYTES|none
+//! cladefsctl memory-weight TENANT WEIGHT
+//! cladefsctl in-flight [--tenant TENANT] BYTES|default
+//! cladefsctl shrink-memory [--tenant TENANT] TARGET
+//! cladefsctl disk-limit [--tenant TENANT] BYTES|none
+//! cladefsctl disk-weight TENANT WEIGHT
+//! cladefsctl tenant-disk [--tenant TENANT] [--json]
 //! cladefsctl grant TENANT DIR [UID [GID]]
 //! cladefsctl revoke TENANT
 //! cladefsctl shred-cell TENANT/CELL
@@ -41,6 +53,13 @@
 //! cladefsctl buckets URL
 //! cladefsctl --version
 //! ```
+//!
+//! Any command may be preceded by `--timeout SECONDS` (or `CLADEFSCTL_TIMEOUT` set to SECONDS),
+//! which bounds connecting to the daemon and its call as a deadline (board 8585): one that takes
+//! longer fails with `ETIMEDOUT`, the daemon going on with it, which may still complete it, as it
+//! completes every call whether or not its caller waits. No command has one unless given, `sync`,
+//! `import` and `fork` taking minutes, others as long as their cells or VMs take. It bounds the
+//! control API's calls alone: not `mount`'s, nor what cladefsctl does without the daemon.
 //!
 //! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), every
 //! command goes through its control API (`cladefs::cladefsd::control`), and acts on cells as the
@@ -115,7 +134,30 @@
 //! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
 //! path through that object and a value, `vms.0.guest.counters.seals 12`. Counters only grow: a
-//! measurement is the difference of two.
+//! measurement is the difference of two. `--wait` waits for the VM processes' answers SECONDS at
+//! most (2 unless given, 60 at most); `--leave-out` leaves the guests' histograms out, or their
+//! stats, or the VM processes, the daemon's own stats alone, as a host of many VMs needs once its
+//! stats are past the most the daemon answers (board 8581).
+//!
+//! The commands below, through the daemon alone too, are the control API's calls of the same
+//! names (board 8585), for operators and scripts; each prints what its call answers, as `stats`
+//! does, one `name value` a line, or with `--json` where it takes it, one JSON object; those that
+//! answer nothing print nothing. TENANT is in base 32; `--tenant` names one, its absence every
+//! tenant, or, for `shrink-memory`, the daemon's memory whole. `cells` lists the cells VM processes
+//! have open (`ListCells`), each's `path` and what `StatCell` says of it, by path, under `cells`
+//! (`cells.0.path`). `counters` prints the daemon's counters since it started (`GetCounters`),
+//! with its bucket's under `object_storage`. `set-peers` has the hosts sharing the daemon's bucket
+//! be those at the ADDRESSes, each `HOST:PORT`, none without any (`SetPeers`). `migrate` begins the
+//! live migration of the ephemeral cell at DIR to the daemon whose peer address is PEER, its cell
+//! going at TO there, and prints `migration ID` (`MigrateCell`); `hand-over` hands it over to its
+//! target (`HandOverCell`). `memory-limit` limits the memory the daemon holds extents' pages in to
+//! BYTES, or lifts the limit with `none` (`SetMemoryLimit`); `memory-weight` weighs a tenant's
+//! memory against the others' (`SetMemoryWeight`); `in-flight` sets the bytes in flight a tenant's
+//! connections share, or the default with `default` (`SetTenantInFlight`); `shrink-memory` evicts
+//! pages down to TARGET bytes, and prints `bytes`, what is held then (`ShrinkMemory`).
+//! `disk-limit`, `disk-weight` and `tenant-disk` are the disk's (`SetDiskLimit`, `SetDiskWeight`,
+//! `GetTenantDisk`): `tenant-disk` prints `bytes`, `limit_bytes` (null without one) and
+//! `reserved_bytes`.
 //!
 //! `grant` and `revoke`, through the daemon alone, are the control API's `Grant` and `Revoke`
 //! (TASK-43.4), for tests and operators (TASK-71): `grant` gives the tenant TENANT, its ID in the
@@ -218,6 +260,66 @@ fn ephemeral_hosts_lines(hosts: &[cladefs::cladefsd::control::proto::EphemeralHo
     hosts.iter().map(line).collect()
 }
 
+/// cladefs: the number `given` writes, in decimal: `what`, as a refusal names it.
+fn number(what: &str, given: &str) -> anyhow::Result<u64> {
+    given.parse().with_context(|| format!("{what} must be a number"))
+}
+
+/// cladefs: the tenant `args` name, `--tenant TENANT` first, if they do, and the one word after
+/// (board 8585).
+fn of_tenant<'a>(args: &[&'a str]) -> anyhow::Result<(Option<u64>, &'a str)> {
+    match *args {
+        ["--tenant", tenant, word] => Ok((Some(id("TENANT", tenant)?), word)),
+        [word] => Ok((None, word)),
+        _ => bail!(usage()),
+    }
+}
+
+/// cladefs: the bytes `given` writes, or none if it is `word` (board 8585).
+fn bytes_or(given: &str, word: &str) -> anyhow::Result<Option<u64>> {
+    match given == word {
+        true => Ok(None),
+        false => number(&format!("BYTES (or {word})"), given).map(Some),
+    }
+}
+
+/// cladefs: the `stats` command `args` say, the words after `stats` (TASK-111.4, board 8581).
+fn stats(args: &[&str]) -> anyhow::Result<Command> {
+    let (mut json, mut wait, mut leave_out) = (false, None, [false; 3]);
+    let mut rest = args;
+    loop {
+        rest = match *rest {
+            [] => break,
+            ["--json", ref rest @ ..] => {
+                json = true;
+                rest
+            }
+            ["--wait", given, ref rest @ ..] => {
+                wait = Some(seconds("--wait", given)?);
+                rest
+            }
+            ["--leave-out", what, ref rest @ ..] => {
+                let named = ["histograms", "guests", "vms"].iter().position(|&named| named == what);
+                let Some(left_out) = named else { bail!(usage()) };
+                leave_out[left_out] = true;
+                rest
+            }
+            _ => bail!(usage()),
+        };
+    }
+    Ok(Command::Stats { json, wait, leave_out })
+}
+
+/// cladefs: the time `given` writes, a positive number of seconds: `what`, as a refusal names it
+/// (board 8585).
+fn seconds(what: &str, given: &str) -> anyhow::Result<std::time::Duration> {
+    // Not a number, or not one a time is: refused below.
+    let seconds = given.parse::<f64>().ok().filter(|seconds| *seconds > 0.0);
+    // Past what a time holds: refused below.
+    let duration = seconds.and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok());
+    duration.with_context(|| format!("{what} must be a positive number of seconds: {given:?}"))
+}
+
 /// A version's ID, in hexadecimal, as `version` prints it.
 fn version(id: &str) -> anyhow::Result<u64> {
     u64::from_str_radix(id, 16).map_err(|_| anyhow::anyhow!("bad version {id:?}: hexadecimal"))
@@ -243,7 +345,16 @@ fn usage() -> anyhow::Error {
          cladefsctl delete DIR | cladefsctl drop DIR | \
          cladefsctl resize DIR CAPACITY | cladefsctl public DIR | \
          cladefsctl public-attach-only DIR | cladefsctl attach DIR BASE | cladefsctl stat DIR | \
-         cladefsctl stats [--json] | cladefsctl grant TENANT DIR [UID [GID]] | \
+         cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]... | \
+         cladefsctl cells [--json] | cladefsctl counters [--json] | \
+         cladefsctl set-peers [ADDRESS...] | cladefsctl migrate DIR PEER TO | \
+         cladefsctl hand-over DIR | cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
+         cladefsctl memory-weight TENANT WEIGHT | \
+         cladefsctl in-flight [--tenant TENANT] BYTES|default | \
+         cladefsctl shrink-memory [--tenant TENANT] TARGET | \
+         cladefsctl disk-limit [--tenant TENANT] BYTES|none | cladefsctl disk-weight TENANT WEIGHT | \
+         cladefsctl tenant-disk [--tenant TENANT] [--json] | \
+         cladefsctl grant TENANT DIR [UID [GID]] | \
          cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
          cladefsctl forget-tenant-keys TENANT | cladefsctl shred-tenant TENANT | \
          cladefsctl decommission-host [--none-ok] INCARNATION | cladefsctl ephemeral-hosts | \
@@ -251,7 +362,8 @@ fn usage() -> anyhow::Error {
          cladefsctl mount create TENANT CAPACITY [TOKEN] | \
          cladefsctl mount detach [--force] TENANT CELL | cladefsctl mount list | \
          cladefsctl format-bucket URL [DETAILS] | cladefsctl add-bucket ROOT URL [DETAILS] | \
-         cladefsctl buckets URL | cladefsctl --version"
+         cladefsctl buckets URL | cladefsctl --version; \
+         any command after --timeout SECONDS"
     )
 }
 
@@ -267,7 +379,9 @@ fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> 
     )
 }
 
-/// What cladefsctl was asked to do.
+/// What cladefsctl was asked to do. cladefs: what only the daemon does is read by `through`
+/// alone, which is Linux's alone.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Command {
     /// cladefs: a new cell of a new cell, its ID its bucket's to give (TASK-364).
     Create {
@@ -345,15 +459,78 @@ enum Command {
         dir: PathBuf,
     },
     /// cladefs: the stats of the daemon, its VM processes and their guests, as JSON if `json`
-    /// (TASK-111.4). Read by `through`, which is Linux's alone.
+    /// (TASK-111.4), the VM processes' answers waited for `wait` at most, the daemon's default
+    /// without, and what `leave_out` says left out: the guests' histograms, their stats, the VM
+    /// processes (board 8581).
     Stats {
-        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        json: bool,
+        wait: Option<std::time::Duration>,
+        leave_out: [bool; 3],
+    },
+    /// cladefs: the cells VM processes have open, and what each is and holds (board 8585).
+    Cells {
+        json: bool,
+    },
+    /// cladefs: the daemon's counters (board 8585).
+    Counters {
+        json: bool,
+    },
+    /// cladefs: the hosts sharing the daemon's bucket (board 8585).
+    SetPeers {
+        addresses: Vec<String>,
+    },
+    /// cladefs: an ephemeral cell's live migration begun, to `peer`, at `to` there (board 8585).
+    Migrate {
+        dir: PathBuf,
+        peer: String,
+        to: PathBuf,
+    },
+    /// cladefs: an ephemeral cell migrating handed over to its target (board 8585).
+    HandOver {
+        dir: PathBuf,
+    },
+    /// cladefs: a tenant's memory limited, or every tenant's without one, or lifted without
+    /// `bytes` (board 8585).
+    MemoryLimit {
+        tenant: Option<u64>,
+        bytes: Option<u64>,
+    },
+    /// cladefs: a tenant's memory weighed against the others' (board 8585).
+    MemoryWeight {
+        tenant: u64,
+        weight: u64,
+    },
+    /// cladefs: the bytes in flight a tenant's connections share, or every tenant's without one,
+    /// the default without `bytes` (board 8585).
+    InFlight {
+        tenant: Option<u64>,
+        bytes: Option<u64>,
+    },
+    /// cladefs: a tenant's pages evicted, or the daemon's without one, down to `target` bytes
+    /// (board 8585).
+    ShrinkMemory {
+        tenant: Option<u64>,
+        target: u64,
+    },
+    /// cladefs: a tenant's disk limited, or every tenant's without one, or lifted without `bytes`
+    /// (board 8585).
+    DiskLimit {
+        tenant: Option<u64>,
+        bytes: Option<u64>,
+    },
+    /// cladefs: a tenant's disk weighed against the others' (board 8585).
+    DiskWeight {
+        tenant: u64,
+        weight: u64,
+    },
+    /// cladefs: what a tenant's disk takes, or every tenant's without one (board 8585).
+    TenantDisk {
+        tenant: Option<u64>,
         json: bool,
     },
     /// cladefs: a tenant, of the ID `tenant` in the bucket (TASK-364), granted a VM socket of its
     /// own, for its cells in `dir`, given to `uid` and `gid` if named (TASK-71). Read by
     /// `through`, which is Linux's alone.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Grant {
         tenant: u64,
         dir: PathBuf,
@@ -361,28 +538,23 @@ enum Command {
         gid: Option<u32>,
     },
     /// cladefs: a tenant's grant revoked (TASK-71).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Revoke {
         tenant: u64,
     },
     /// cladefs: a cell shredded (TASK-411.7).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ShredCell {
         cell: cladefs::CellId,
     },
     /// cladefs: a tenant's keys forgotten, its KEK revoked or destroyed (TASK-411.7).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ForgetTenantKeys {
         tenant: u64,
     },
     /// cladefs: a tenant shredded under the bucket KMS (TASK-411.27).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ShredTenant {
         tenant: u64,
     },
     /// cladefs: a host of incarnation `incarnation` decommissioned, retiring none refused unless
     /// `none_ok` (boards 8519, 8521).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     DecommissionHost {
         incarnation: u64,
         none_ok: bool,
@@ -390,7 +562,6 @@ enum Command {
     /// cladefs: the incarnations of hosts with ephemeral cells' references (board 8521).
     EphemeralHosts,
     /// cladefs: the daemon's FUSE mount of cells (TASK-475.2).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Mount(Mount),
     /// cladefs: a bucket formatted, a root of its own unless formatted or added (TASK-633.9).
     FormatBucket {
@@ -544,8 +715,52 @@ impl Command {
             ["public-attach-only", dir] => Self::PublicAttachOnly { dir: dir.into() },
             ["attach", dir, base] => Self::Attach { dir: dir.into(), base: base.into() },
             ["stat", dir] => Self::Stat { dir: dir.into() },
-            ["stats"] => Self::Stats { json: false },
-            ["stats", "--json"] => Self::Stats { json: true },
+            ["stats", ref rest @ ..] => stats(rest)?,
+            ["cells"] => Self::Cells { json: false },
+            ["cells", "--json"] => Self::Cells { json: true },
+            ["counters"] => Self::Counters { json: false },
+            ["counters", "--json"] => Self::Counters { json: true },
+            ["set-peers", ref addresses @ ..] => Self::SetPeers {
+                addresses: addresses.iter().map(|&address| address.into()).collect(),
+            },
+            ["migrate", dir, peer, to] => {
+                Self::Migrate { dir: dir.into(), peer: peer.to_owned(), to: to.into() }
+            }
+            ["hand-over", dir] => Self::HandOver { dir: dir.into() },
+            ["memory-limit", ref rest @ ..] => {
+                let (tenant, bytes) = of_tenant(rest)?;
+                Self::MemoryLimit { tenant, bytes: bytes_or(bytes, "none")? }
+            }
+            ["memory-weight", given, weight] => {
+                Self::MemoryWeight { tenant: tenant(given)?, weight: number("WEIGHT", weight)? }
+            }
+            ["in-flight", ref rest @ ..] => {
+                let (tenant, bytes) = of_tenant(rest)?;
+                Self::InFlight { tenant, bytes: bytes_or(bytes, "default")? }
+            }
+            ["shrink-memory", ref rest @ ..] => {
+                let (tenant, target) = of_tenant(rest)?;
+                Self::ShrinkMemory { tenant, target: number("TARGET", target)? }
+            }
+            ["disk-limit", ref rest @ ..] => {
+                let (tenant, bytes) = of_tenant(rest)?;
+                Self::DiskLimit { tenant, bytes: bytes_or(bytes, "none")? }
+            }
+            ["disk-weight", given, weight] => {
+                Self::DiskWeight { tenant: tenant(given)?, weight: number("WEIGHT", weight)? }
+            }
+            ["tenant-disk", ref rest @ ..] => {
+                let (json, rest) = match rest {
+                    [rest @ .., "--json"] => (true, rest),
+                    rest => (false, rest),
+                };
+                let tenant = match rest {
+                    [] => None,
+                    ["--tenant", given] => Some(tenant(given)?),
+                    _ => bail!(usage()),
+                };
+                Self::TenantDisk { tenant, json }
+            }
             ["grant", given, dir, ref ids @ ..] if ids.len() <= 2 => Self::Grant {
                 tenant: tenant(given)?,
                 dir: dir.into(),
@@ -584,16 +799,17 @@ impl Command {
         })
     }
 
-    /// Does it through the control API of the daemon whose control socket is at `socket`.
+    /// Does it through the control API of the daemon whose control socket is at `socket`, within
+    /// `timeout` if given (board 8585).
     #[cfg(target_os = "linux")]
-    fn through(self, socket: &Path) -> anyhow::Result<()> {
+    fn through(self, socket: &Path, timeout: Option<std::time::Duration>) -> anyhow::Result<()> {
         if self.is_on_buckets() {
             return self.on_buckets();
         }
         if let Self::Mount(mount) = self {
             return mount.through(socket);
         }
-        let daemon = cladefs::cladefsd::control::Client::connect(socket)?;
+        let daemon = cladefs::cladefsd::control::Client::connect_within(socket, timeout)?;
         match self {
             Self::Create { dir, capacity } => {
                 let new = cladefs::CellId { tenant: 0, id: 0 };
@@ -639,12 +855,54 @@ impl Command {
                     }
                 );
             }
-            Self::Stats { json } => {
-                let stats = stats_json(&daemon.stats(None)?);
-                match json {
-                    true => println!("{}", serde_json::to_string_pretty(&stats)?),
-                    false => print!("{}", flattened(&stats)),
-                }
+            Self::Stats { json, wait, leave_out } => {
+                use cladefs::cladefsd::control::proto::GetStatsRequest;
+                let wait_ms = wait.map_or(Ok(0), |wait| u32::try_from(wait.as_millis()));
+                let [leave_out_histograms, leave_out_guests, leave_out_vms] = leave_out;
+                let request = GetStatsRequest {
+                    wait_ms: wait_ms.context("--wait: past what the daemon waits")?,
+                    leave_out_histograms,
+                    leave_out_guests,
+                    leave_out_vms,
+                };
+                print_value(&stats_json(&daemon.get_stats(request)?), json)?;
+            }
+            Self::Cells { json } => {
+                let mut cells = daemon.list_cells()?;
+                cells.sort_by(|one, other| one.path.cmp(&other.path));
+                let cells = cells.iter().map(|cell| {
+                    let mut listed = serde_json::json!({ "path": cell.path });
+                    if let Some(stat) = &cell.stat {
+                        listed["stat"] = stat_json(stat);
+                    }
+                    listed
+                });
+                print_value(&serde_json::json!({ "cells": cells.collect::<Vec<_>>() }), json)?;
+            }
+            Self::Counters { json } => print_value(&counters_json(&daemon.get_counters()?), json)?,
+            Self::SetPeers { addresses } => {
+                daemon.set_peers(&addresses.iter().map(String::as_str).collect::<Vec<_>>())?;
+            }
+            Self::Migrate { dir, peer, to } => {
+                println!("migration {}", daemon.migrate_cell(&dir, &peer, &to)?);
+            }
+            Self::HandOver { dir } => daemon.hand_over_cell(&dir)?,
+            Self::MemoryLimit { tenant, bytes } => daemon.set_memory_limit(tenant, bytes)?,
+            Self::MemoryWeight { tenant, weight } => daemon.set_memory_weight(tenant, weight)?,
+            Self::InFlight { tenant, bytes } => daemon.set_tenant_in_flight(tenant, bytes)?,
+            Self::ShrinkMemory { tenant, target } => {
+                println!("bytes {}", daemon.shrink_memory(tenant, target)?);
+            }
+            Self::DiskLimit { tenant, bytes } => daemon.set_disk_limit(tenant, bytes)?,
+            Self::DiskWeight { tenant, weight } => daemon.set_disk_weight(tenant, weight)?,
+            Self::TenantDisk { tenant, json } => {
+                let disk = daemon.get_tenant_disk(tenant)?;
+                let disk = serde_json::json!({
+                    "bytes": disk.bytes,
+                    "limit_bytes": disk.limit_bytes,
+                    "reserved_bytes": disk.reserved_bytes,
+                });
+                print_value(&disk, json)?;
             }
             Self::Grant { tenant, dir, uid, gid } => {
                 println!("{}", daemon.grant(tenant, &dir, uid, gid)?.display());
@@ -699,7 +957,7 @@ impl Command {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn through(self, _socket: &Path) -> anyhow::Result<()> {
+    fn through(self, _socket: &Path, _timeout: Option<std::time::Duration>) -> anyhow::Result<()> {
         if self.is_on_buckets() {
             return self.on_buckets();
         }
@@ -754,6 +1012,17 @@ impl Command {
                 Some("decommissioning hosts, and listing them, are")
             }
             Self::Mount(_) => Some("its FUSE mount of cells is"),
+            Self::Cells { .. } => Some("the cells VM processes have open are"),
+            Self::Counters { .. } => Some("its counters are"),
+            Self::SetPeers { .. } => Some("its peers are"),
+            Self::Migrate { .. } | Self::HandOver { .. } => Some("migrations are"),
+            Self::MemoryLimit { .. }
+            | Self::MemoryWeight { .. }
+            | Self::InFlight { .. }
+            | Self::ShrinkMemory { .. } => Some("its memory is"),
+            Self::DiskLimit { .. } | Self::DiskWeight { .. } | Self::TenantDisk { .. } => {
+                Some("its disks are")
+            }
             _ => None,
         };
         if let Some(what) = daemons {
@@ -893,6 +1162,18 @@ impl Command {
                 attached?;
             }
             Self::Stats { .. }
+            | Self::Cells { .. }
+            | Self::Counters { .. }
+            | Self::SetPeers { .. }
+            | Self::Migrate { .. }
+            | Self::HandOver { .. }
+            | Self::MemoryLimit { .. }
+            | Self::MemoryWeight { .. }
+            | Self::InFlight { .. }
+            | Self::ShrinkMemory { .. }
+            | Self::DiskLimit { .. }
+            | Self::DiskWeight { .. }
+            | Self::TenantDisk { .. }
             | Self::Grant { .. }
             | Self::Revoke { .. }
             | Self::ShredCell { .. }
@@ -1058,6 +1339,143 @@ fn stats_json(stats: &cladefs::cladefsd::control::proto::GetStatsResponse) -> se
     })
 }
 
+/// cladefs: prints `value`, as one JSON object if `json`, otherwise as its lines ([`flattened`]):
+/// as `stats` and the API's other answers print (board 8585).
+#[cfg(target_os = "linux")]
+fn print_value(value: &serde_json::Value, json: bool) -> anyhow::Result<()> {
+    match json {
+        true => println!("{}", serde_json::to_string_pretty(value)?),
+        false => print!("{}", flattened(value)),
+    }
+    Ok(())
+}
+
+/// cladefs: what `StatCell` says of a cell, `stat`, every field by its name, as `cells` prints it
+/// (board 8585): its tenant and cell in base 32, its fsync level by name, `forced_after` null
+/// without one.
+#[cfg(target_os = "linux")]
+fn stat_json(stat: &cladefs::cladefsd::control::proto::StatCellResponse) -> serde_json::Value {
+    let cladefs::cladefsd::control::proto::StatCellResponse {
+        tenant,
+        cell,
+        capacity,
+        used,
+        available,
+        public,
+        open,
+        own,
+        inherited,
+        own_extents,
+        inherited_extents,
+        committed,
+        uploading,
+        taken_token,
+        taken_epoch,
+        taken_unix_ms,
+        uploaded,
+        pending_upload_bytes,
+        oldest_pending_ms,
+        replicas,
+        fsync: _,
+        configuration,
+        degraded,
+        members_up,
+        active_replicas,
+        forced_after,
+    } = stat;
+    serde_json::json!({
+        "tenant": base32_id::Short(*tenant).to_string(),
+        "cell": base32_id::Short(*cell).to_string(),
+        "capacity": capacity,
+        "used": used,
+        "available": available,
+        "public": public,
+        "open": open,
+        "own": own,
+        "inherited": inherited,
+        "own_extents": own_extents,
+        "inherited_extents": inherited_extents,
+        "committed": committed,
+        "uploading": uploading,
+        "taken_token": taken_token,
+        "taken_epoch": taken_epoch,
+        "taken_unix_ms": taken_unix_ms,
+        "uploaded": uploaded,
+        "pending_upload_bytes": pending_upload_bytes,
+        "oldest_pending_ms": oldest_pending_ms,
+        "replicas": replicas,
+        "fsync": stat.fsync().as_str_name(),
+        "configuration": configuration,
+        "degraded": degraded,
+        "members_up": members_up,
+        "active_replicas": active_replicas,
+        "forced_after": forced_after,
+    })
+}
+
+/// cladefs: what `GetCounters` answers, `counters`, every field by its name, its bucket's under
+/// `object_storage`, as `counters` prints it (board 8585).
+#[cfg(target_os = "linux")]
+fn counters_json(
+    counters: &cladefs::cladefsd::control::proto::GetCountersResponse,
+) -> serde_json::Value {
+    let cladefs::cladefsd::control::proto::GetCountersResponse {
+        maps,
+        map_ns,
+        faults,
+        fault_ns,
+        page_ins,
+        page_in_bytes,
+        fetched_bytes,
+        reads,
+        read_bytes,
+        read_stored_bytes,
+        prefetches,
+        unpacks,
+        object_storage,
+        commits,
+        commit_ns,
+        commit_store_ns,
+        commit_wait_ns,
+        segment_closes,
+        segment_close_ns,
+    } = counters;
+    fn ordered(
+        map: &std::collections::HashMap<String, u64>,
+    ) -> std::collections::BTreeMap<&str, u64> {
+        map.iter().map(|(name, value)| (name.as_str(), *value)).collect()
+    }
+    let object_storage = object_storage.as_ref().map(|storage| {
+        serde_json::json!({
+            "requests": ordered(&storage.requests),
+            "uploaded_bytes": ordered(&storage.uploaded_bytes),
+            "downloaded_bytes": storage.downloaded_bytes,
+            "failures": ordered(&storage.failures),
+        })
+    });
+    serde_json::json!({
+        "maps": maps,
+        "map_ns": map_ns,
+        "faults": faults,
+        "fault_ns": fault_ns,
+        "page_ins": page_ins,
+        "page_in_bytes": page_in_bytes,
+        "fetched_bytes": fetched_bytes,
+        "reads": reads,
+        "read_bytes": read_bytes,
+        "read_stored_bytes": read_stored_bytes,
+        "prefetches": prefetches,
+        "unpacks": unpacks,
+        "object_storage": object_storage,
+        "commits": commits,
+        "commit_ns": commit_ns,
+        "commit_store_ns": commit_store_ns,
+        "commit_wait_ns": commit_wait_ns,
+        "segment_closes": segment_closes,
+        "segment_close_ns": segment_close_ns,
+    })
+}
+
 /// cladefs: `value`, as lines of a path through it, its keys and indices joined by dots, and a
 /// value there that holds no other: what `stats` prints without `--json`.
 #[cfg(target_os = "linux")]
@@ -1099,9 +1517,23 @@ fn main() -> anyhow::Result<()> {
         println!("cladefsctl {}", cladefs::BUILD_COMMIT);
         return Ok(());
     }
-    let command = Command::parse(&args)?;
+    // cladefs: its calls' deadline, if any: `--timeout`, or CLADEFSCTL_TIMEOUT (board 8585).
+    let (timeout, args) = match &args[..] {
+        [flag, given, rest @ ..] if flag == "--timeout" => {
+            (Some(seconds("--timeout", given)?), rest)
+        }
+        args => match std::env::var("CLADEFSCTL_TIMEOUT") {
+            Ok(given) if !given.is_empty() => (Some(seconds("CLADEFSCTL_TIMEOUT", &given)?), args),
+            // Unset, or empty: none. Not UTF-8: refused.
+            Err(std::env::VarError::NotUnicode(given)) => {
+                bail!("CLADEFSCTL_TIMEOUT must be a number of seconds: {given:?}")
+            }
+            _ => (None, args),
+        },
+    };
+    let command = Command::parse(args)?;
     match std::env::var_os("CLADEFSD_GRPC").filter(|socket| !socket.is_empty()) {
-        Some(socket) => command.through(socket.as_ref()),
+        Some(socket) => command.through(socket.as_ref(), timeout),
         None => command.locally(),
     }
 }
