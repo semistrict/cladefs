@@ -115,9 +115,10 @@ fn collects_a_bucket_once() {
     assert!(out.status.success());
 }
 
-/// doc-27 step 3: with no KMS, neither `CLADEFS_KMS` nor a master key given, it collects, marks,
-/// dry runs, lists, says usage and deletes cells: nothing it does reads data, every cell's
-/// metadata authenticated, not encrypted (doc-16). The tests below collect encrypted cells so.
+/// doc-27 step 3 (board 6218's AC #2): with no KMS, neither `CLADEFS_KMS` nor a master key given,
+/// it collects, marks, dry runs, lists, says usage and deletes cells: nothing it does reads data,
+/// every cell's metadata authenticated, not encrypted (doc-16). The tests below collect encrypted
+/// cells so.
 #[test]
 fn collects_without_a_kms() {
     for args in [
@@ -197,7 +198,9 @@ fn lists_and_deletes_cells() {
 
 /// cladefs: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
 /// it reclaims the cell's segments its checkpoint covers, which hold no live extent (the one
-/// holding what it freed, the one freeing it), and lists the cell.
+/// holding what it freed, the one freeing it), and lists the cell. board 6218's AC #1: the cell
+/// encrypted, the process given no KMS nor master key ([`gc`]), it deletes those two, as a pass
+/// holding the cell's keys did before doc-27.
 #[test]
 fn collects_a_file_bucket() {
     use bucket_cell::lifecycle;
