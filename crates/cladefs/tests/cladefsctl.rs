@@ -920,6 +920,11 @@ fn calls_end_at_their_timeouts() {
     let (refused, took) = timed(&cladefsctl, &["stats", "--wait", "30"]);
     assert!(refused.contains("ETIMEDOUT"), "{refused}");
     assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(10), "{took:?}");
+    // A wait under a millisecond is one, not the daemon's default, 2 s, past the timeout
+    // (hotbed review 67).
+    let args: Vec<&Path> = ["stats", "--json", "--wait", "0.0005"].iter().map(Path::new).collect();
+    let json: serde_json::Value = serde_json::from_str(&cladefsctl.run(&args).unwrap()).unwrap();
+    assert_eq!(json["vms"][0]["answered"], false, "{json}");
     // A timeout that is none.
     let (refused, _) = timed(&cladefsctl, &["--timeout", "soon", "stats"]);
     assert!(refused.contains("--timeout must be a positive number of seconds"), "{refused}");
@@ -999,10 +1004,22 @@ fn refused_to_start(dir: &Path, env: &[(&str, &str)], limit: Option<u64>) -> Str
             });
         }
     }
-    let output = command.output().unwrap();
-    assert!(!output.status.success(), "the daemon started");
+    let child = command.stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut child = KillOnDrop(child);
+    // One that started serves until killed: a deadline, not a hang (killed as this drops).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline, "the daemon started, and served");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(!status.success(), "the daemon started");
     assert!(!dir.join("vms.sock").exists(), "it listened");
-    String::from_utf8_lossy(&output.stderr).into_owned()
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.0.stderr.take().unwrap(), &mut stderr).unwrap();
+    stderr
 }
 
 /// board 8595: a root of CLADEFSD_ROOTS that is no directory stops the daemon at its start, naming

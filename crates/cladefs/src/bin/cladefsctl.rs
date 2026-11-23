@@ -857,7 +857,8 @@ impl Command {
             }
             Self::Stats { json, wait, leave_out } => {
                 use cladefs::cladefsd::control::proto::GetStatsRequest;
-                let wait_ms = wait.map_or(Ok(0), |wait| u32::try_from(wait.as_millis()));
+                // At least a millisecond: 0 asks for the daemon's default (hotbed review 67).
+                let wait_ms = wait.map_or(Ok(0), |wait| u32::try_from(wait.as_millis().max(1)));
                 let [leave_out_histograms, leave_out_guests, leave_out_vms] = leave_out;
                 let request = GetStatsRequest {
                     wait_ms: wait_ms.context("--wait: past what the daemon waits")?,
