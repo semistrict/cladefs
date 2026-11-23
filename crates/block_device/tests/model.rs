@@ -373,3 +373,46 @@ fn a_failed_map_leaves_the_window_while_pages_are_held() {
     assert!(unsafe { std::slice::from_raw_parts(fetched, PAGE) } == &a[4 * PAGE..5 * PAGE]);
     blocks.unfetch();
 }
+
+/// Board 8549: a map that fails with no page held leaves what it was for read from the extent
+/// device, counted, and the next read or fetch reaching it maps it again, once maps work: the
+/// window is never given up on. Until then the first failure unmapped the whole window and read
+/// every page from the extent device for the rest of the block device's life, saying so once.
+#[test]
+fn a_failed_map_gives_up_on_nothing_for_good() {
+    let device = DeviceHolder::new(FakeDevice::new(1 << 18, PAGE as u32));
+    let window = CopyingWindow::new(WINDOW, PAGE as u32);
+    let failing = window.failing();
+    let blocks = BlockDevice::open_mapped(device, Box::new(window), OPTIONS).unwrap();
+    let a = bytes(1, 0, 8 * PAGE);
+    blocks.write(0, &a).unwrap();
+    blocks.flush().unwrap();
+    let mut read = vec![0; 8 * PAGE];
+    blocks.read(0, &mut read).unwrap();
+    assert!(read == a);
+    // Flushed anew, its first pages stale in the window, which maps them as before.
+    let b = bytes(2, 0, 2 * PAGE);
+    blocks.write(0, &b).unwrap();
+    blocks.flush().unwrap();
+
+    // The fetch maps what the flush changed, which fails, then the page, which fails too: none
+    // is mapped, and reads go to the extent device, reading the flush.
+    failing.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(blocks.fetch(0, PAGE as u64).unwrap(), None);
+    assert_eq!(blocks.map_failures(), 2);
+    blocks.read(0, &mut read).unwrap();
+    assert!(read[..2 * PAGE] == b && read[2 * PAGE..] == a[2 * PAGE..]);
+    assert_eq!(blocks.map_failures(), 3, "the read's map of what it reached");
+    failing.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Maps working again, the next fetch maps the page, and reads it in place.
+    let fetched = blocks.fetch(0, PAGE as u64).unwrap().expect("mapped again");
+    // SAFETY: fetched, until given back.
+    assert!(unsafe { std::slice::from_raw_parts(fetched, PAGE) } == &b[..PAGE]);
+    blocks.unfetch();
+    let fetched = blocks.fetch(5 * PAGE as u64, PAGE as u64).unwrap().expect("mapped still");
+    // SAFETY: fetched, until given back.
+    assert!(unsafe { std::slice::from_raw_parts(fetched, PAGE) } == &a[5 * PAGE..6 * PAGE]);
+    blocks.unfetch();
+    assert_eq!(blocks.map_failures(), 3);
+}
