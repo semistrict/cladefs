@@ -3585,8 +3585,13 @@ impl<D: Dir> LocalCell<D> {
         // A cell that failed makes nothing more durable.
         drop(self.state()?);
         // cladefs: its durability deferred, all of it made durable first, before anything of the
-        // flush: no commit is durable before its cell is (board 7420).
-        self.dir.settle().context("making the cell durable, its durability deferred")?;
+        // flush: no commit is durable before its cell is (board 7420). Failing, the cell fails, as
+        // any flush's failure fails it.
+        if let Err(err) = self.dir.settle() {
+            let error = Error::new(err).context("making the cell durable, its durability deferred");
+            self.lock().fail(&error);
+            return Err(error);
+        }
         let batch = self.durability.with(Mutex::lock).take();
         let appended = batch.is_some();
         let durable = match batch {

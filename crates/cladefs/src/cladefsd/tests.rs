@@ -2684,8 +2684,11 @@ fn restores_forks_are_made_durable_by_their_first_flush_or_their_close() {
     let version = client.make_version().unwrap();
     let unmade = |path: &Path| path.join("unmade").exists();
 
+    // Restored by a path of another spelling: the directory's deferral, however it is named.
     let restored = dir.path().join("restored");
-    let vm = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
+    std::fs::create_dir(dir.path().join("x")).unwrap();
+    let spelled = dir.path().join("x/../restored");
+    let vm = CellClient::connect_forked(&socket, &spelled, version, 0).unwrap();
     assert!(unmade(&restored), "made durable as it was restored");
     assert!(!crate::host_cell::unmade(&restored), "unmade here");
     assert_eq!(read(&vm, extent, 0, 512), Ok(pattern(3, BLOCK)[..512].to_vec()));
@@ -2703,6 +2706,32 @@ fn restores_forks_are_made_durable_by_their_first_flush_or_their_close() {
     assert!(!unmade(&closed), "its close left it unmade");
     assert_eq!(read(&again, extent, 0, 512), Ok(pattern(3, BLOCK)[..512].to_vec()));
     drop((again, vm, client));
+}
+
+/// Board 7420: a restore's fork whose settling fails fails its cell, as a flush's failure does:
+/// its commit is refused, then and after, and it stays unmade on the disk, for deleting.
+#[test]
+fn restores_forks_whose_settling_fails_fail_their_cells() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, BLOCK)).unwrap();
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
+    let restored = dir.path().join("restored");
+    let vm = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
+    fail::cfg("deferral::settle", "return").unwrap();
+    let own = ExtentId { cell: vm.cell(), sequence: 1 };
+    write(&vm, own, 0, &pattern(4, BLOCK)).unwrap();
+    assert_eq!(vm.commit(None), Err(Errno::EIO));
+    fail::remove("deferral::settle");
+    assert_eq!(vm.commit(None), Err(Errno::EIO));
+    assert!(restored.join("unmade").exists(), "made durable, its settling failed");
+    drop((vm, client));
 }
 
 /// Board 6589: a host whose temporary directory is on another filesystem than its part cache and

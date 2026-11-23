@@ -335,6 +335,14 @@ impl DiskDir {
         Ok(Self { path: path.to_owned(), handle, disk, deferral })
     }
 
+    /// cladefs: waits for its settling in flight, if its durability is deferred: what renames a
+    /// file in it does first ([`crate::defer_durability`]).
+    fn wait_settling(&self) {
+        if let Some(deferral) = &self.deferral {
+            deferral.wait_settling();
+        }
+    }
+
     /// cladefs: whether a sync of its, or of a file of its, is skipped now
     /// ([`crate::defer_durability`]).
     fn skips(deferral: &Option<Arc<crate::deferral::Deferral>>) -> bool {
@@ -376,10 +384,12 @@ impl Dir for DiskDir {
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.wait_settling();
         host_fs::rename(self.path.join(from), self.path.join(to))
     }
 
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
+        self.wait_settling();
         host_fs::hard_link(self.path.join(from), self.path.join(to))
     }
 
@@ -418,6 +428,7 @@ impl Dir for DiskDir {
         let file = self.create(&new, false)?;
         file.write_at(bytes, 0)?;
         file.sync()?;
+        self.wait_settling();
         host_fs::rename(self.path.join(&new), self.path.join(path))
     }
 

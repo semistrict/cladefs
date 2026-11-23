@@ -1936,9 +1936,12 @@ impl Connection {
                 // cladefs: a restore's fork, made and opened syncing nothing: durable by its first
                 // flush or its close, before any commit of its VM is (board 7420, the user's
                 // call). A host crash before leaves it unmade, as if the restore never was.
-                let _deferring = local_cell::defer_durability(path);
+                // cladefs: a crash of the daemon's too, its VM processes going with it.
+                let deferring = local_cell::defer_durability(path);
                 cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
-                Arc::new(open_cell_at(path, None, Some(arena)).await?)
+                let open_cell = open_cell_at(path, None, Some(arena)).await?;
+                deferring.opened();
+                Arc::new(open_cell)
             }
             (None, codec::Opening::Create(capacity, kind)) => {
                 let new = cells::New { capacity: *capacity, kind: *kind, tenant: self.tenant.id };
