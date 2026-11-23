@@ -3870,10 +3870,11 @@ mod tests {
     fn passes_read_a_cells_footers_once_for_all_its_versions() {
         let (segments, ranged, gets) = block_on(pass_over_versions(16));
         assert_eq!(segments, 33);
-        // cladefs: its four reads of the cell's head, each of every slot (TASK-691).
+        // cladefs: its three reads of the cell's head, each of every slot (TASK-691); the walk to
+        // its versions reads none again, going by the one its recovery read (board 8543).
         assert_eq!(
             (ranged, gets),
-            (2 * segments, 16 + 6 + 4 * (crate::identity::DEFAULT_HEAD_SLOTS - 1))
+            (2 * segments, 16 + 5 + 3 * (crate::identity::DEFAULT_HEAD_SLOTS - 1))
         );
     }
 

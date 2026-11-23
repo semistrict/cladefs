@@ -1203,11 +1203,15 @@ fn states_at<'a, B: Bucket>(
         let bucket = checkpoints.bucket;
         let mut walked = Walked::default();
         let mut unread: Vec<u64> = ats.iter().copied().collect();
-        let head = head::get(bucket, cell).await?;
+        // cladefs: no head, no segment named, whatever is kept (board 8543): the cell removed, or
+        // being removed, its checkpoints listed still.
+        let Some(head) = head::get(bucket, cell).await? else {
+            return Err(Attempt::Failed(Error::Lost(layout::heads(cell))));
+        };
         if kept {
             let mut keys = Vec::with_capacity(unread.len());
             for &at in &unread {
-                let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
+                let Some(epoch) = head.epoch_of(at) else {
                     return Err(Attempt::Failed(Error::Lost(format!(
                         "segment {at} of {cell}",
                         at = base32_id::Short(at)
@@ -1252,7 +1256,7 @@ fn states_at<'a, B: Bucket>(
             }
         }
         for (start, ats) in walks {
-            walk(checkpoints, cell, head.as_ref(), start, &ats, touched, &mut walked).await?;
+            walk(checkpoints, cell, &head, start, &ats, touched, &mut walked).await?;
         }
         Ok(walked)
     })
@@ -1264,7 +1268,7 @@ fn states_at<'a, B: Bucket>(
 async fn walk<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
     cell: CellId,
-    head: Option<&Head>,
+    head: &Head,
     start: Option<&Meta>,
     ats: &[u64],
     touched: &mut BTreeSet<String>,
@@ -1294,18 +1298,11 @@ async fn walk<B: Bucket>(
         }
         None => {
             // cladefs: its slots, every one (TASK-691).
-            let inherited = match crate::head::get(bucket, cell).await? {
-                None => Err(Attempt::Failed(Error::Lost(layout::heads(cell)))),
-                Some(head) => {
-                    let n = bucket.head_slots(cell).await?;
-                    touched.extend((0..n).map(|slot| layout::head(cell, slot)));
-                    match head.origin() {
-                        None => Ok(None),
-                        Some(origin) => {
-                            state_of_origin(checkpoints, origin, cell, touched).await.map(Some)
-                        }
-                    }
-                }
+            let n = bucket.head_slots(cell).await?;
+            touched.extend((0..n).map(|slot| layout::head(cell, slot)));
+            let inherited = match head.origin() {
+                None => Ok(None),
+                Some(origin) => state_of_origin(checkpoints, origin, cell, touched).await.map(Some),
             };
             match inherited {
                 Ok(None) => Layered::of(State::new(cell)),
@@ -1315,9 +1312,8 @@ async fn walk<B: Bucket>(
         }
     };
     let from = state.through.map_or(0, |segment| segment + 1);
-    let named = head.expect("a head naming the segment at");
     let mut footers =
-        futures::stream::iter(named.segments(from).take_while(|&(segment, _)| segment <= last))
+        futures::stream::iter(head.segments(from).take_while(|&(segment, _)| segment <= last))
             .map(|(segment, epoch)| async move {
                 let key = layout::segment(cell, segment, epoch);
                 Ok::<_, Error>((
@@ -1859,6 +1855,33 @@ mod tests {
                 recover(&other, test_cell(2), origin).await.unwrap_err(),
                 Error::Corrupt(corrupt)
             );
+        });
+    }
+
+    /// board 8543: a version recovered as a copy holds it, its cell's head gone (removed, or being
+    /// removed, its checkpoints listed still) and a checkpoint older than the version's segment
+    /// standing, is lost: never a walk from that checkpoint on with no head to name the segments,
+    /// which panicked.
+    #[test]
+    fn versions_of_cells_whose_head_is_gone_are_lost() {
+        futures::executor::block_on(async {
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+            let cell = test_cell(1);
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+            let extent = || ExtentId::new(cell.id, writer.chain().next_sequence());
+            let first = crate::testing::versioned_by(&writer, vec![(extent(), vec![1])], 1).await;
+            assert_eq!(writer.checkpoint().await, Ok(Some(first)));
+            let at = crate::testing::versioned_by(&writer, vec![(extent(), vec![2])], 2).await;
+            assert!(at > first);
+            let ring = writer.keys().clone();
+            recover_version(&*bucket, cell, at, &ring).await.unwrap();
+            let slots = bucket.head_slots(cell).await.unwrap();
+            for slot in 0..slots {
+                bucket.delete(&layout::head(cell, slot)).await.unwrap();
+            }
+            let lost = recover_version(&*bucket, cell, at, &ring).await.map(|_| ());
+            assert_eq!(lost, Err(Error::Lost(layout::heads(cell))));
         });
     }
 }
