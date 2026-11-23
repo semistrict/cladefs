@@ -173,7 +173,7 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>extents/<branch>/<epoch>.<segment>.<sequence>` | an extent of 4 MiB or more, raw, uploaded by the writer of `epoch` before its segment `segment`, which names it: the key is the writer's declaration of what may yet name it, which the collector goes by (Garbage collection) | create-only, before the segment naming it |
 | `<C>checkpoints/<branch>/<epoch>.<segment>` | the branch's state as of segment `segment`, by the writer of `epoch`; at a fork point to another cell, by whoever records the fork, of the epoch of the segment there (Forks) | create-only |
 | `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, or made, and whether another than its host resumed it, whether a failed fork's claim | create; updated with a condition |
-| `<C>head/<slot>` | the cell's head, in its bucket's count of slots (Head slots, TASK-691), each slot a whole head, or a mark failing a half-made head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407); its versions, each its ID, the segment it is at and its cell's cut (Versions, TASK-476) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
+| `<C>head` | the cell's head, one object (doc-27; Head slots, TASK-691, retired): its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407); its versions, each its ID, the segment it is at and its cell's cut (Versions, TASK-476) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
 | `<C>gc/lease` | the collector's epoch over the cell, which its passes take, and what the last pass over the cell to end recorded: its listing's digest, what it deferred, what the cell takes (Garbage collection, Passes that skip; TASK-395.2, TASK-395.6, TASK-395.8) | likewise |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted, each object's key, size, version and time as listed (Garbage collection) | create-only, by the collector; removed by an operator |
 | `<C>moves/<rest>/<pass>` | the live extents of the object at `<C><rest>`, compacted by the cell's pass of epoch `pass`, and where in it each is; `<C>moves/moves/<rest>/<pass>/<pass>` those moves' (Garbage collection, TASK-407.1) | create-only, by the collector |
@@ -517,7 +517,10 @@ it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
   (`marks_fail`, `Error::Unmade`), so its creator's remaining creates find their keys taken. The
   collector deletes a failed head's slots, its marks only once a day old (`MARKS_KEPT`,
   `marks_kept`), past any creator still at work. specs/head-slots (HeadSlots.tla: `FencedWrites`,
-  `SlotsNewest`, `OneHead`, `DeletedStays`, `FailedStays`) models it; specs/bucket keeps one head.
+  `SlotsNewest`, `OneHead`, `DeletedStays`, `FailedStays`) modelled it; specs/bucket keeps one head.
+  *Retired 2026-11-23 (doc-27 step 4, board 6220, format 29)*: the head is one object, `<C>head`,
+  swapped in place, its swaps spaced as TASK-690 spaces them; slots, marks, `head_slots` and
+  specs/head-slots are gone.
 - **Startup** probes that the cell honours conditional creates and updates, and refuses to run if
   not.
 

@@ -1206,7 +1206,7 @@ fn states_at<'a, B: Bucket>(
         // cladefs: no head, no segment named, whatever is kept (board 8543): the cell removed, or
         // being removed, its checkpoints listed still.
         let Some(head) = head::get(bucket, cell).await? else {
-            return Err(Attempt::Failed(Error::Lost(layout::heads(cell))));
+            return Err(Attempt::Failed(Error::Lost(layout::head(cell))));
         };
         if kept {
             let mut keys = Vec::with_capacity(unread.len());
@@ -1297,9 +1297,7 @@ async fn walk<B: Bucket>(
             Layered::of(Arc::unwrap_or_clone(state))
         }
         None => {
-            // cladefs: its slots, every one (TASK-691).
-            let n = bucket.head_slots(cell).await?;
-            touched.extend((0..n).map(|slot| layout::head(cell, slot)));
+            touched.insert(layout::head(cell));
             let inherited = match head.origin() {
                 None => Ok(None),
                 Some(origin) => state_of_origin(checkpoints, origin, cell, touched).await.map(Some),
@@ -1598,10 +1596,7 @@ mod tests {
                 })
                 .collect()
         };
-        // cladefs: every slot of it, at once (TASK-691).
-        let head: Vec<_> = (0..crate::identity::DEFAULT_HEAD_SLOTS)
-            .map(|slot| format!("get {}", layout::head(test_cell(1), slot)))
-            .collect();
+        let head = vec![format!("get {}", layout::head(test_cell(1)))];
         let (recovered, rounds) = bucket.served_in_rounds(recover(&*bucket, test_cell(1), None));
         let recovered = recovered.unwrap();
         assert_eq!((recovered.end(), recovered.state.last_commit), (5, Some(5)));
@@ -1876,12 +1871,9 @@ mod tests {
             assert!(at > first);
             let ring = writer.keys().clone();
             recover_version(&*bucket, cell, at, &ring).await.unwrap();
-            let slots = bucket.head_slots(cell).await.unwrap();
-            for slot in 0..slots {
-                bucket.delete(&layout::head(cell, slot)).await.unwrap();
-            }
+            bucket.delete(&layout::head(cell)).await.unwrap();
             let lost = recover_version(&*bucket, cell, at, &ring).await.map(|_| ());
-            assert_eq!(lost, Err(Error::Lost(layout::heads(cell))));
+            assert_eq!(lost, Err(Error::Lost(layout::head(cell))));
         });
     }
 }

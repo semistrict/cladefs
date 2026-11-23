@@ -417,7 +417,7 @@ async fn learn_taken(
     cell: CellId,
 ) -> Result<Option<bucket_cell::head::Read>, Failure> {
     let read = bucket_cell::head::read(bucket, cell).await?;
-    Ok(read.head(cell)?.is_some().then_some(read))
+    Ok(read.head()?.is_some().then_some(read))
 }
 
 /// Opens the cell directory at `path` as of its last commit, with the bucket it names: its
@@ -988,19 +988,9 @@ mod tests {
         let (root, home, other, late) = (url("root"), url("home"), url("other"), url("late"));
         let number =
             async |bucket: &ObjectBucket| identity::get(bucket).await.unwrap().unwrap().number;
-        crate::bucket::format_bucket(&root, Details::default(), Default::default()).unwrap();
-        assert_eq!(
-            crate::bucket::add_bucket(&root, &home, Details::default(), Default::default())
-                .unwrap()
-                .number,
-            2
-        );
-        assert_eq!(
-            crate::bucket::add_bucket(&root, &other, Details::default(), Default::default())
-                .unwrap()
-                .number,
-            3
-        );
+        crate::bucket::format_bucket(&root, Details::default()).unwrap();
+        assert_eq!(crate::bucket::add_bucket(&root, &home, Details::default()).unwrap().number, 2);
+        assert_eq!(crate::bucket::add_bucket(&root, &other, Details::default()).unwrap().number, 3);
         assert_eq!(number(&bucket_numbered(&home, 2).await.unwrap()).await, 2);
         assert_eq!(number(&bucket_numbered(&home, 3).await.unwrap()).await, 3);
         assert_eq!(number(&bucket_numbered(&home, 1).await.unwrap()).await, 1);
@@ -1008,15 +998,10 @@ mod tests {
         // Added, its registry copied to the root and to it alone: home's copy lacks it.
         let (root_bucket, late_bucket) = (bucket(&root).unwrap(), bucket(&late).unwrap());
         let late_details = Details { url: Some(late.clone()), ..Details::default() };
-        let (_, registry) = identity::add(
-            &*root_bucket,
-            &Details::default(),
-            &*late_bucket,
-            late_details,
-            bucket_cell::identity::Asked::default(),
-        )
-        .await
-        .unwrap();
+        let (_, registry) =
+            identity::add(&*root_bucket, &Details::default(), &*late_bucket, late_details)
+                .await
+                .unwrap();
         identity::spread(&registry, &*late_bucket).await.unwrap();
         assert_eq!(number(&bucket_numbered(&home, 4).await.unwrap()).await, 4);
 
@@ -1024,12 +1009,7 @@ mod tests {
         let mut wrong = registry.clone();
         wrong.version += 1;
         let at_other = Details { url: Some(other.clone()), ..Details::default() };
-        wrong.buckets.push(Entry {
-            number: 5,
-            id: 99,
-            details: at_other,
-            settings: Default::default(),
-        });
+        wrong.buckets.push(Entry { number: 5, id: 99, details: at_other });
         identity::spread(&wrong, &*bucket(&home).unwrap()).await.unwrap();
         let refused = bucket_numbered(&home, 5).await.map(drop);
         assert_eq!(

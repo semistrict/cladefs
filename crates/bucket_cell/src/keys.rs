@@ -1359,7 +1359,7 @@ pub async fn taking(
     taking: head::Taking,
 ) -> Result<(head::Held, CellKeys), Error> {
     loop {
-        let basis = read.head(cell)?.ok_or(Error::NoCell)?;
+        let basis = read.head()?.ok_or(Error::NoCell)?;
         let kek = match basis.keks.is_empty() {
             true => Some(new_cell_kek(kms, cell).await?),
             false => None,
@@ -1585,7 +1585,7 @@ pub async fn ring(
             return Err(Error::Corrupt(format!("cell {cell}'s origins go round at {parent}")));
         }
         let found = head::get(bucket, parent).await?;
-        let found = found.ok_or_else(|| Error::Lost(layout::heads(parent)))?;
+        let found = found.ok_or_else(|| Error::Lost(layout::head(parent)))?;
         origin = found.origin();
         if found.deks.is_empty() || ring.holds(parent) {
             continue;
@@ -1627,7 +1627,7 @@ impl Parents<'_> {
             Self::Kms(kms, Some(head)) => writing(bucket, kms, parent, head).await,
             Self::Kms(kms, None) => {
                 let head = head::get(bucket, parent).await?;
-                let head = head.ok_or_else(|| Error::Lost(layout::heads(parent)))?;
+                let head = head.ok_or_else(|| Error::Lost(layout::head(parent)))?;
                 writing(bucket, kms, parent, &head).await
             }
         }
@@ -1902,9 +1902,7 @@ mod tests {
         // The parent's tenant shredded, and its head out of reach (TASK-633.5): the child's ring,
         // on a host unwrapping anew, needs its own KEK alone, and reads no ancestor's head.
         counted.inner().destroy(TEST_CELL.tenant).unwrap();
-        for slot in 0..crate::identity::DEFAULT_HEAD_SLOTS {
-            block_on(crate::bucket::delete(&bucket, &layout::head(parent, slot))).unwrap();
-        }
+        block_on(crate::bucket::delete(&bucket, &layout::head(parent))).unwrap();
         counted.reset();
         let (_, fresh) = kms_over(&counted);
         let keys = CellKeys::of(child, &head(child), fresh.clone());

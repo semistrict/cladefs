@@ -312,24 +312,6 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(())
     }
 
-    /// cladefs: how many slots the heads of `cell` are kept in (TASK-691): the setting of the
-    /// bucket `cell` is of ([`crate::identity::Settings::head_slots`]), as its identity says; the
-    /// default for a bucket never formatted, as tests' are. Refused where that bucket, or its
-    /// identity, can't say: never a count guessed (boards 5522, 5534).
-    fn head_slots(
-        &self,
-        cell: crate::layout::CellId,
-    ) -> impl Future<Output = Result<u64, Refused>> + Send {
-        let _ = cell;
-        std::future::ready(Ok(crate::identity::DEFAULT_HEAD_SLOTS))
-    }
-
-    /// cladefs: default head slots when formatting this bucket without an explicit provider or
-    /// `--head-slots` override (board 6020): 10 for GCS (`rewriting_every` set), 1 otherwise.
-    fn default_head_slots(&self) -> u64 {
-        crate::identity::DEFAULT_HEAD_SLOTS
-    }
-
     /// The backend's clock, which [`Meta::modified`] is in, in milliseconds since the Unix epoch,
     /// never the host's own (board 8467): its time now, at least, and never ahead of it, so that a
     /// window measured from an object's date by it closes late, never early, and a lease taken by

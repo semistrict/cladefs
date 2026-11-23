@@ -20,9 +20,6 @@
 //! bucket before it takes its first block, so that every bucket holding a cell has a number.
 //! Numbers 0 ([`NAMED`], the IDs tests name) and 65535 ([`NONE`], as `u64::MAX` names no cell) are
 //! no bucket's.
-//!
-//! cladefs: a bucket's identity holds its settings too ([`Settings`], TASK-691), fixed as it is
-//! formatted or added, for good, as its number is; the registry records each bucket's.
 
 use crate::bucket::{self, Bucket, Created, Updated};
 use crate::{Error, layout};
@@ -37,107 +34,6 @@ pub const NONE: u16 = u16::MAX;
 /// The root bucket's number: the first bucket's, which keeps the record of every bucket.
 pub const ROOT: u16 = 1;
 
-/// cladefs: how many slots a cell's head is kept in by default on S3/Azure/file/memory buckets
-/// ([`Settings::head_slots`], board 6020).
-pub const DEFAULT_HEAD_SLOTS: u64 = 1;
-
-/// cladefs: how many slots a cell's head is kept in by default on GCS buckets, where a single
-/// object accepts at most ~1 write/s (TASK-690, TASK-691, board 6020).
-pub const GCS_HEAD_SLOTS: u64 = 10;
-
-/// cladefs: default `head_slots` for a bucket's provider (`10` for GCS, `1` elsewhere).
-pub fn default_head_slots(provider: Option<&str>) -> u64 {
-    match provider {
-        Some("gcs") => GCS_HEAD_SLOTS,
-        _ => DEFAULT_HEAD_SLOTS,
-    }
-}
-
-/// cladefs: what a bucket is formatted or added with, its settings, fixed for good in its identity
-/// (TASK-691): every host reads them as it opens the bucket, and goes by them for as long as the
-/// bucket is, so that none may change; one more is a format of its own ([`layout::FORMAT`]), with
-/// no migration while no bucket is kept. Each is of one of two scopes, which its documentation
-/// says:
-///
-/// - **per bucket**: buckets may differ. A bucket added takes the root's unless its addition asks
-///   another ([`Settings::added`]).
-/// - **clade-wide**: every bucket the root's. An addition asking another is refused, and a host
-///   refuses a bucket whose differs from the registry's root's. None yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Settings {
-    /// Per bucket. How many objects each cell's head is kept in, its slots ([`crate::head`]), each
-    /// written in turn, so that the head is swapped as many times a second as the backend takes
-    /// writes of one object (GCS, about one a second). Each cell's maker creates them all, and
-    /// each read of a head reads them all. 1 to [`layout::MAX_HEAD_SLOTS`]; [`DEFAULT_HEAD_SLOTS`]
-    /// by default.
-    pub head_slots: u64,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { head_slots: DEFAULT_HEAD_SLOTS }
-    }
-}
-
-/// cladefs: the settings a formatting or an addition is asked for ([`Settings`]): each none for
-/// the default, at a formatting, or the root's, at an addition.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Asked {
-    pub head_slots: Option<u64>,
-}
-
-impl Settings {
-    /// Default settings for a bucket of `provider` (`Some("gcs")` gets 10 head slots, others 1).
-    pub fn for_provider(provider: Option<&str>) -> Self {
-        Self { head_slots: default_head_slots(provider) }
-    }
-
-    /// What a formatting asked `asked` makes: each the default for `provider`, but those asked;
-    /// refused out of range ([`Error::Settings`]).
-    pub fn formatted(asked: Asked) -> Result<Self, Error> {
-        Self::formatted_for(asked, None)
-    }
-
-    /// What a formatting of a bucket of `provider` asked `asked` makes.
-    pub fn formatted_for(asked: Asked, provider: Option<&str>) -> Result<Self, Error> {
-        Self::formatted_with_default(asked, default_head_slots(provider))
-    }
-
-    /// What a formatting with fallback `default_slots` asked `asked` makes.
-    fn formatted_with_default(asked: Asked, default_slots: u64) -> Result<Self, Error> {
-        Self { head_slots: asked.head_slots.unwrap_or(default_slots) }.checked()
-    }
-
-    /// What an addition to the buckets of a root of `root` asked `asked` makes: each per-bucket
-    /// setting the root's (or `GCS_HEAD_SLOTS` when adding a GCS bucket without an explicit ask),
-    /// but those asked; each clade-wide one the root's, an ask of another refused
-    /// ([`Error::Settings`]).
-    pub fn added(root: Settings, asked: Asked) -> Result<Self, Error> {
-        Self::added_for(root, asked, None)
-    }
-
-    /// What an addition of a bucket of `provider` to a root of `root` asked `asked` makes.
-    pub fn added_for(root: Settings, asked: Asked, provider: Option<&str>) -> Result<Self, Error> {
-        let fallback = match provider {
-            Some("gcs") => root.head_slots.max(GCS_HEAD_SLOTS),
-            _ => root.head_slots,
-        };
-        Self { head_slots: asked.head_slots.unwrap_or(fallback) }.checked()
-    }
-
-    /// These, if each is in its range.
-    fn checked(self) -> Result<Self, Error> {
-        if !(1..=layout::MAX_HEAD_SLOTS).contains(&self.head_slots) {
-            let most = layout::MAX_HEAD_SLOTS;
-            return Err(Error::Settings(format!(
-                "head slots {}, not 1 to {most}",
-                self.head_slots
-            )));
-        }
-        Ok(self)
-    }
-}
-
 /// What a bucket's identity object holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
@@ -148,8 +44,6 @@ pub struct Identity {
     pub number: u16,
     /// A random number its formatting or its addition chose: which bucket of that number this is.
     pub id: u64,
-    /// cladefs: its settings, fixed for good (TASK-691).
-    pub settings: Settings,
 }
 
 /// What the registry says of a bucket, as its formatting or its addition was told: none of it a
@@ -192,9 +86,6 @@ pub struct Entry {
     /// Its identity's random ID ([`Identity::id`]).
     pub id: u64,
     pub details: Details,
-    /// cladefs: its identity's settings ([`Identity::settings`], TASK-691), as tools read them
-    /// without opening every bucket; its identity says, a host's opening of it.
-    pub settings: Settings,
 }
 
 /// The record of every bucket, the root's or a copy of it ([`layout::BUCKETS`]).
@@ -309,23 +200,11 @@ async fn registry_versioned(
 /// Formats `bucket`, unless it was formatted or added: the root of buckets of its own, number
 /// [`ROOT`], its registry recording it alone, with `details`. Its identity either way. Formattings
 /// at once agree on the one that landed first; one that stopped short of the registry is finished.
-/// cladefs: its settings as `asked` says ([`Settings::formatted`], TASK-691); of one formatted
-/// before, as they were.
-pub async fn format(
-    bucket: &impl Bucket,
-    details: &Details,
-    asked: Asked,
-) -> Result<Identity, Error> {
+pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity, Error> {
     let identity = match get(bucket).await? {
         Some(found) => found,
         None => {
-            let default_slots = match details.provider.as_deref() {
-                Some(provider) => default_head_slots(Some(provider)),
-                None => bucket.default_head_slots(),
-            };
-            let settings = Settings::formatted_with_default(asked, default_slots)?;
-            let made =
-                Identity { format: layout::FORMAT, number: ROOT, id: rand::random(), settings };
+            let made = Identity { format: layout::FORMAT, number: ROOT, id: rand::random() };
             match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
                 Created::Created(_) => made,
                 // Another formatting's, or addition's, first.
@@ -334,12 +213,7 @@ pub async fn format(
         }
     };
     if identity.number == ROOT && registry_versioned(bucket).await?.is_none() {
-        let entry = Entry {
-            number: ROOT,
-            id: identity.id,
-            details: details.clone(),
-            settings: identity.settings,
-        };
+        let entry = Entry { number: ROOT, id: identity.id, details: details.clone() };
         let registry = Registry { format: layout::FORMAT, version: 1, buckets: vec![entry] };
         // Another formatting's, first, if it exists: of the same identity.
         bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await?;
@@ -353,26 +227,17 @@ pub async fn format(
 /// which the caller copies to every bucket ([`spread`]). An addition that stopped short of `new`'s
 /// identity is finished by another of the same URL. `root` unformatted is formatted, the root;
 /// refused if it is another bucket ([`Error::NotRoot`]), as is `new` if it is a bucket already
-/// ([`Error::Formatted`]), or if no number is left ([`Error::NoNumbers`]). cladefs: its settings
-/// the root's, but what `asked` asks of the per-bucket ones ([`Settings::added`], TASK-691).
+/// ([`Error::Formatted`]), or if no number is left ([`Error::NoNumbers`]).
 pub async fn add(
     root: &impl Bucket,
     root_details: &Details,
     new: &impl Bucket,
     details: Details,
-    asked: Asked,
 ) -> Result<(Identity, Registry), Error> {
-    let ours = format(root, root_details, Asked::default()).await?;
+    let ours = format(root, root_details).await?;
     if ours.number != ROOT {
         return Err(Error::NotRoot(ours.number));
     }
-    let settings = match details.provider.as_deref() {
-        Some(provider) => Settings::added_for(ours.settings, asked, Some(provider))?,
-        None => {
-            let fallback = ours.settings.head_slots.max(new.default_head_slots());
-            Settings { head_slots: asked.head_slots.unwrap_or(fallback) }.checked()?
-        }
-    };
     let found = get(new).await?;
     let (entry, registry) = loop {
         let (registry, version) = registry_versioned(root)
@@ -391,7 +256,7 @@ pub async fn add(
             return Err(Error::Formatted(found.number));
         }
         let number = registry.next()?;
-        let entry = Entry { number, id: rand::random(), details: details.clone(), settings };
+        let entry = Entry { number, id: rand::random(), details: details.clone() };
         let mut changed = registry.clone();
         changed.version += 1;
         for root_entry in changed.buckets.iter_mut().filter(|entry| entry.number == ROOT) {
@@ -405,12 +270,7 @@ pub async fn add(
             Updated::Changed => {}
         }
     };
-    let identity = Identity {
-        format: layout::FORMAT,
-        number: entry.number,
-        id: entry.id,
-        settings: entry.settings,
-    };
+    let identity = Identity { format: layout::FORMAT, number: entry.number, id: entry.id };
     match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await? {
         Created::Created(_) => Ok((identity, registry)),
         Created::Exists(object) => match decode::<Identity>(&object.bytes)? {
@@ -518,65 +378,13 @@ mod tests {
             let bucket = memory();
             assert_eq!(get(&bucket).await, Ok(None));
             let details = at("memory:///root", "here");
-            let made = format(&bucket, &details, Asked::default()).await.unwrap();
+            let made = format(&bucket, &details).await.unwrap();
             assert_eq!((made.format, made.number), (layout::FORMAT, ROOT));
-            let entry = Entry {
-                number: ROOT,
-                id: made.id,
-                details: details.clone(),
-                settings: Settings::default(),
-            };
+            let entry = Entry { number: ROOT, id: made.id, details: details.clone() };
             let expected = Registry { format: layout::FORMAT, version: 1, buckets: vec![entry] };
             assert_eq!(registry(&bucket).await, Ok(Some(expected.clone())));
-            assert_eq!(
-                format(&bucket, &at("memory:///other", "there"), Asked::default()).await,
-                Ok(made)
-            );
+            assert_eq!(format(&bucket, &at("memory:///other", "there")).await, Ok(made));
             assert_eq!(registry(&bucket).await, Ok(Some(expected)));
-        });
-    }
-
-    /// TASK-691: a bucket's settings are what its formatting asked, each else its default; a bucket
-    /// added takes the root's, but those its addition asks; out of their ranges, refused, nothing
-    /// written. Formatted or added, they stay as they were, whatever is asked after. The registry
-    /// records each bucket's.
-    #[test]
-    fn settings_are_formatted_and_added_with_the_roots() {
-        futures::executor::block_on(async {
-            let (root, second, third) = (memory(), memory(), memory());
-            let wide = Asked { head_slots: Some(65) };
-            assert!(matches!(
-                format(&root, &Details::default(), wide).await,
-                Err(Error::Settings(_))
-            ));
-            assert_eq!(get(&root).await, Ok(None));
-            let seven = Asked { head_slots: Some(7) };
-            let made = format(&root, &Details::default(), seven).await.unwrap();
-            assert_eq!(made.settings, Settings { head_slots: 7 });
-            let again = format(&root, &Details::default(), Asked { head_slots: Some(3) }).await;
-            assert_eq!(again.map(|identity| identity.settings.head_slots), Ok(7));
-            let at2 = at("memory:///2", "east");
-            let (added, _) =
-                add(&root, &Details::default(), &second, at2, Asked::default()).await.unwrap();
-            assert_eq!(added.settings.head_slots, 7, "the root's");
-            let none = Asked { head_slots: Some(0) };
-            let refused =
-                add(&root, &Details::default(), &third, at("memory:///3", "x"), none).await;
-            assert!(matches!(refused, Err(Error::Settings(_))));
-            let two = Asked { head_slots: Some(2) };
-            let at3 = at("memory:///3", "west");
-            let (added, registry) =
-                add(&root, &Details::default(), &third, at3, two).await.unwrap();
-            assert_eq!(
-                get(&third).await.map(|found| found.map(|found| found.settings)),
-                Ok(Some(added.settings))
-            );
-            let recorded: Vec<_> = registry
-                .buckets
-                .iter()
-                .map(|entry| (entry.number, entry.settings.head_slots))
-                .collect();
-            assert_eq!(recorded, [(ROOT, 7), (2, 7), (3, 2)]);
         });
     }
 
@@ -586,15 +394,10 @@ mod tests {
     fn formattings_stopped_short_of_the_registry_are_finished() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let left = Identity {
-                format: layout::FORMAT,
-                number: ROOT,
-                id: 0x51,
-                settings: Settings::default(),
-            };
+            let left = Identity { format: layout::FORMAT, number: ROOT, id: 0x51 };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&left)).await.unwrap();
             assert_eq!(registry(&bucket).await, Ok(None));
-            assert_eq!(format(&bucket, &Details::default(), Asked::default()).await, Ok(left));
+            assert_eq!(format(&bucket, &Details::default()).await, Ok(left));
             let registry = registry(&bucket).await.unwrap().unwrap();
             assert_eq!(registry.bucket(ROOT).map(|entry| entry.id), Some(0x51));
         });
@@ -606,16 +409,12 @@ mod tests {
     fn buckets_added_take_the_next_numbers() {
         futures::executor::block_on(async {
             let (root, second, third) = (memory(), memory(), memory());
-            format(&root, &Details::default(), Asked::default()).await.unwrap();
+            format(&root, &Details::default()).await.unwrap();
             let root_details = at("memory:///root", "here");
             let (two, _) =
-                add(&root, &root_details, &second, at("memory:///2", "east"), Asked::default())
-                    .await
-                    .unwrap();
+                add(&root, &root_details, &second, at("memory:///2", "east")).await.unwrap();
             let (three, registry) =
-                add(&root, &root_details, &third, at("memory:///3", "west"), Asked::default())
-                    .await
-                    .unwrap();
+                add(&root, &root_details, &third, at("memory:///3", "west")).await.unwrap();
             assert_eq!((two.number, three.number), (2, 3));
             assert_eq!(get(&second).await, Ok(Some(two)));
             assert_eq!(get(&third).await, Ok(Some(three)));
@@ -709,23 +508,11 @@ mod tests {
     #[test]
     fn additions_at_once_take_numbers_in_turn() {
         futures::executor::block_on(async {
-            let rival = Entry {
-                number: 2,
-                id: 0x99,
-                details: at("memory:///rival", "north"),
-                settings: Settings::default(),
-            };
+            let rival = Entry { number: 2, id: 0x99, details: at("memory:///rival", "north") };
             let root = Preempted { bucket: memory(), rival: std::sync::Mutex::new(Some(rival)) };
             let new = memory();
-            let (added, registry) = add(
-                &root,
-                &Details::default(),
-                &new,
-                at("memory:///new", "south"),
-                Asked::default(),
-            )
-            .await
-            .unwrap();
+            let (added, registry) =
+                add(&root, &Details::default(), &new, at("memory:///new", "south")).await.unwrap();
             assert_eq!(added.number, 3);
             let numbers: Vec<_> = registry.buckets.iter().map(|entry| entry.number).collect();
             assert_eq!((registry.version, numbers), (3, vec![1, 2, 3]));
@@ -741,24 +528,16 @@ mod tests {
         futures::executor::block_on(async {
             let (root, new) = (memory(), memory());
             let details = at("memory:///new", "east");
-            let (added, _) =
-                add(&root, &Details::default(), &new, details.clone(), Asked::default())
-                    .await
-                    .unwrap();
+            let (added, _) = add(&root, &Details::default(), &new, details.clone()).await.unwrap();
             bucket::delete(&new, layout::IDENTITY).await.unwrap();
             let (again, registry) =
-                add(&root, &Details::default(), &new, details.clone(), Asked::default())
-                    .await
-                    .unwrap();
+                add(&root, &Details::default(), &new, details.clone()).await.unwrap();
             assert_eq!(again, added);
             assert_eq!(get(&new).await, Ok(Some(added)));
             let numbers: Vec<_> = registry.buckets.iter().map(|entry| entry.number).collect();
             assert_eq!(numbers, vec![1, 2]);
             // Added again, it is as it was.
-            assert_eq!(
-                add(&root, &Details::default(), &new, details, Asked::default()).await.unwrap().0,
-                added
-            );
+            assert_eq!(add(&root, &Details::default(), &new, details).await.unwrap().0, added);
         });
     }
 
@@ -768,49 +547,21 @@ mod tests {
     fn additions_are_refused_where_they_would_number_twice() {
         futures::executor::block_on(async {
             let (root, formatted, added) = (memory(), memory(), memory());
-            format(&formatted, &Details::default(), Asked::default()).await.unwrap();
-            let refused = add(
-                &root,
-                &Details::default(),
-                &formatted,
-                at("memory:///f", "x"),
-                Asked::default(),
-            )
-            .await;
+            format(&formatted, &Details::default()).await.unwrap();
+            let refused = add(&root, &Details::default(), &formatted, at("memory:///f", "x")).await;
             assert_eq!(refused, Err(Error::Formatted(ROOT)));
-            add(&root, &Details::default(), &added, at("memory:///a", "x"), Asked::default())
-                .await
-                .unwrap();
-            let refused = add(
-                &added,
-                &Details::default(),
-                &memory(),
-                at("memory:///b", "x"),
-                Asked::default(),
-            )
-            .await;
+            add(&root, &Details::default(), &added, at("memory:///a", "x")).await.unwrap();
+            let refused = add(&added, &Details::default(), &memory(), at("memory:///b", "x")).await;
             assert_eq!(refused, Err(Error::NotRoot(2)));
 
             let full = memory();
-            format(&full, &Details::default(), Asked::default()).await.unwrap();
+            format(&full, &Details::default()).await.unwrap();
             let (mut registry, version) = registry_versioned(&full).await.unwrap().unwrap();
-            registry.buckets.push(Entry {
-                number: NONE - 1,
-                id: 1,
-                details: Details::default(),
-                settings: Settings::default(),
-            });
+            registry.buckets.push(Entry { number: NONE - 1, id: 1, details: Details::default() });
             bucket::update(&full, layout::BUCKETS, layout::encode(&registry), &version)
                 .await
                 .unwrap();
-            let refused = add(
-                &full,
-                &Details::default(),
-                &memory(),
-                at("memory:///c", "x"),
-                Asked::default(),
-            )
-            .await;
+            let refused = add(&full, &Details::default(), &memory(), at("memory:///c", "x")).await;
             assert_eq!(refused, Err(Error::NoNumbers));
         });
     }
@@ -821,13 +572,9 @@ mod tests {
         futures::executor::block_on(async {
             let (root, second, third, copy) = (memory(), memory(), memory(), memory());
             let (_, older) =
-                add(&root, &Details::default(), &second, at("memory:///2", "x"), Asked::default())
-                    .await
-                    .unwrap();
+                add(&root, &Details::default(), &second, at("memory:///2", "x")).await.unwrap();
             let (_, newer) =
-                add(&root, &Details::default(), &third, at("memory:///3", "x"), Asked::default())
-                    .await
-                    .unwrap();
+                add(&root, &Details::default(), &third, at("memory:///3", "x")).await.unwrap();
             spread(&newer, &copy).await.unwrap();
             spread(&older, &copy).await.unwrap();
             assert_eq!(registry(&copy).await, Ok(Some(newer)));
@@ -839,16 +586,11 @@ mod tests {
     fn a_bucket_of_another_format_is_refused() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let other = Identity {
-                format: layout::FORMAT - 1,
-                number: 3,
-                id: 1,
-                settings: Settings::default(),
-            };
+            let other = Identity { format: layout::FORMAT - 1, number: 3, id: 1 };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
             let refused = Error::BucketFormat(layout::FORMAT - 1);
             assert_eq!(get(&bucket).await, Err(refused.clone()));
-            assert_eq!(format(&bucket, &Details::default(), Asked::default()).await, Err(refused));
+            assert_eq!(format(&bucket, &Details::default()).await, Err(refused));
         });
     }
 }

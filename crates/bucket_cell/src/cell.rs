@@ -108,7 +108,7 @@ mod tests {
         let mut cells: Vec<CellId> = (0..many).map(|id| CellId { tenant: 2, id }).collect();
         cells.extend([CellId { tenant: 1, id: 7 }, CellId { tenant: 3, id: 1 }]);
         for &cell in &cells {
-            let key = layout::head(cell, 0);
+            let key = layout::head(cell);
             block_on(bucket.put(&key, vec![1].into(), PutMode::Create)).unwrap();
         }
         cells.sort();

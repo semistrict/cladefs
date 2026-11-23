@@ -830,13 +830,8 @@ async fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
         format!("file://{}", dir.path().join(name).display())
     };
     let (url_a, url_b) = (url("a"), url("b"));
-    crate::bucket::format_bucket(&url_a, Details::default(), Default::default()).unwrap();
-    assert_eq!(
-        crate::bucket::add_bucket(&url_a, &url_b, Details::default(), Default::default())
-            .unwrap()
-            .number,
-        2
-    );
+    crate::bucket::format_bucket(&url_a, Details::default()).unwrap();
+    assert_eq!(crate::bucket::add_bucket(&url_a, &url_b, Details::default()).unwrap().number, 2);
     let (bucket_a, bucket_b) =
         (host_cell::bucket(&url_a).unwrap(), host_cell::bucket(&url_b).unwrap());
     let capacity = 1 << 30;

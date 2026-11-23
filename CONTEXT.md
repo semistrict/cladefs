@@ -246,10 +246,6 @@ Giving a bucket never formatted the next number, by a conditional write of the r
 The time by the bucket's backend, which dates its objects, as a host reads it: from the dates of the backend's responses, never the host's own clock (a bucket of files or memory dates by the host's, its own). Never ahead of the backend's, so that a window measured from an object's date closes late, never early; every collector lease and grace period is by it.
 _Avoid_: now, wall clock, host time (the host's own)
 
-**Bucket settings**:
-What a bucket is formatted or added with, fixed for good in its identity: each per bucket (a bucket added takes the root's unless asked otherwise) or clade-wide (every bucket the root's). The head slots are one.
-_Avoid_: config, options (a process's), parameters
-
 **Cell**:
 A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique across buckets, given by its bucket and carrying its bucket number; no caller names a new one. On a host, a cell is kept in its cell directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
 _Avoid_: volume, disk, store
@@ -321,15 +317,7 @@ _Avoid_: working set, boot profile (TASK-38's per-host file, which it replaces)
 What a version's next fork will read, as its tenant's newest recordings say: every unit any of them read, the earliest read first. A host fetches it into its part cache as the fork opens, behind the guest's reads, then reads it from there into the extent cache, as the guest's page-ins would (board 6225), and counts how well each boot was predicted (TASK-702.3). One read of no recordings is not kept: the next fork reads it again (board 5337).
 
 **Head**:
-A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, kept in its head slots. Taking it is taking the cell.
-
-**Head slot**:
-One of the objects a head is kept in, its bucket's setting of them, 10 by default: version k in slot k mod N, each swap conditional on its slot, so that the head is swapped as often as the bucket takes writes of N objects. doc-27 retires them: one head object everywhere, its swaps coalesced.
-_Avoid_: shard, replica, copy
-
-**Mark** (of a head):
-What fails a head left unmade, its maker dead or slow: one in each slot it left empty, so that no read finds a head there and the maker's late creates fail. The collector deletes marks a day on.
-_Avoid_: tombstone (a deletion's head is the head's final version)
+A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, one object swapped in place, conditional on the version its writer last saw (doc-27). Taking it is taking the cell.
 
 **Writer**:
 The one holder of a cell's head, which alone commits to it and makes and drops its versions.

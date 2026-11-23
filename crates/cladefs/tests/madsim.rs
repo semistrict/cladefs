@@ -162,12 +162,6 @@ const ROOTS: &str = "/hosts";
 /// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
 /// its requests delayed and failed as the seed says, and what heals it.
 fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
-    world_with_slots(false)
-}
-
-/// Like [`world`], using GCS-style multi-slot heads (`GCS_HEAD_SLOTS`) when `gcs_slots` is set
-/// (board 6020).
-fn world_with_slots(gcs_slots: bool) -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     // SAFETY: the simulation's one thread, before any node reads the environment.
@@ -182,10 +176,7 @@ fn world_with_slots(gcs_slots: bool) -> (Arc<RoutedBucket>, Arc<bucket_cell::fau
     let objects = Arc::new(object_store::memory::InMemory::new());
     let seeded = Arc::new(bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds));
     let backend = bucket_cell::faults::SeededBackend(seeded.clone());
-    let mut bucket = ObjectBucket::new(Arc::new(backend), "");
-    if gcs_slots {
-        bucket = bucket.rewriting_every(Duration::from_nanos(1));
-    }
+    let bucket = ObjectBucket::new(Arc::new(backend), "");
     (Arc::new(bucket.unrouted()), seeded)
 }
 
@@ -813,9 +804,7 @@ fn needed(name: &str, off: fn(), profile: Profile, seeds: u64) {
 
 // The searches that find their rule needed within [`SEARCHED`] seeds (2026-11-21, 2000 seeds of
 // each rule's profile, each rule of bucket_cell::Rules and of local_cell::Rules that the profiles
-// reach, board 2830). `slots_at_birth` found its in Linux's seeds (92) but in none of 2000 of
-// macOS's, whose schedules differ: no search, as a search that one platform's seeds miss fails
-// scripts/test.sh there. The rest of bucket_cell::Rules found none: local_cell::sim's searches find
+// reach, board 2830). The rest of bucket_cell::Rules found none: local_cell::sim's searches find
 // each, its steps aimed at the protocol's races with 20,000 seeds, where a full-stack seed reaches
 // them seldom. local_cell::Rules' framings, flushes and frees found none either; its views' rules
 // are a follower's, and its writes' a writer's racing its own commits, which one simulated guest,
@@ -826,17 +815,9 @@ fn needed(name: &str, off: fn(), profile: Profile, seeds: u64) {
 needs!(attrition_needs_head_swaps, head_swap, Profile::PLAIN);
 // The collector deletes, of a live cell, objects of the head's epoch it may yet name.
 needs!(collection_needs_epochs, collector_epochs, Profile::COLLECTED);
-// The collector lists objects after it read what cells need: what a writer made between, deleted.
-// Uses GCS multi-slot heads (board 6020): with 1-slot heads `head/0` is atomic so a single-cell
-// pass never reads a partial head before `passed::list`. Linux's alone, as the next: since
-// 975a7dc7e's crash models macOS's seeds reach it seldom, one in 2,900 on an M-series Mac (seed
-// 2883), none of CI's 2000, where Linux's find it within 1,000 (board 6866).
-#[cfg(not(target_os = "macos"))]
-needs!(
-    collection_needs_candidates_first,
-    candidates_first,
-    Profile { gcs_slots: true, ..Profile::COLLECTED }
-);
+// `candidates_first` has no search since a head is one object (doc-27 step 4): its search found
+// what a writer made between a pass's reads deleted only through a head's slots, read one by one,
+// and a pass reading one head reads it whole. specs/bucket's NoCandidatesFirst shows it needed.
 // A fork of a version, its base deleted, without a reference its base's passes keep it by.
 needs!(forking_needs_references, references, Profile::BASES);
 // A pass lists its cell's references with its candidates, missing a fork's made since. Linux's
@@ -1043,8 +1024,6 @@ struct Profile {
     /// Whether a host's memory and disk are limited a while at each round, as the seed says
     /// ([`press`]).
     pressure: bool,
-    /// Whether the bucket uses GCS-style 10-slot heads (board 6020).
-    gcs_slots: bool,
 }
 
 impl Profile {
@@ -1063,7 +1042,6 @@ impl Profile {
         bases: false,
         collector: false,
         pressure: false,
-        gcs_slots: false,
     };
 
     /// What the collector's rules need: frees leaving objects sparse, which writers relocate out
@@ -1103,7 +1081,6 @@ impl Profile {
             bases: rng.gen_bool(0.3),
             collector: rng.gen_bool(0.5),
             pressure: rng.gen_bool(0.3),
-            gcs_slots: false,
         };
         eprintln!("swarm: {profile:?}");
         profile
@@ -1380,7 +1357,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     const WRITES: u64 = 6;
     let Profile { kept, net, loss, versions, disk, forced, peers, drains, frees, bases, .. } =
         profile;
-    let (bucket, faults) = world_with_slots(profile.gcs_slots);
+    let (bucket, faults) = world();
     let (nodes, roots) = hosts_keeping(3, &bucket, kept);
     let handle = madsim::runtime::Handle::current();
     let told = Arc::new(Told {
@@ -1419,7 +1396,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         }
     };
     // The collector's passes meanwhile, each its own holder: often, so that passes straddle the
-    // writers' commits, as the races its rules close need (`collection_needs_candidates_first`);
+    // writers' commits, as the races its rules close need (`collection_needs_epochs`);
     // a pass compacting nothing is short (doc-27).
     let collector = profile.collector.then(|| collector(&bucket));
     let passes = collector.as_ref().map(|collector| {

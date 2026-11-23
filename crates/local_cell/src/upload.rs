@@ -1893,7 +1893,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let kms = &self.keys.kms;
         let read = first_read(&**bucket, cell, initial_head).await?;
         // A cell with no head is none: its maker makes it before its cell first opens.
-        let Some(found) = read.head(cell)? else {
+        let Some(found) = read.head()? else {
             return Err(match recovering.version() {
                 Some(_) => Failure::VersionDropped,
                 None => bucket_cell::Error::NoCell.into(),
@@ -2889,8 +2889,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
 /// What an opening of the cell of `cell` reads first (TASK-165.11, board 6020): its head, which
 /// the taking goes on from and its recovery starts from. A fork of a version whose restore never
-/// finished (still `Forking`, not deleted) is refused as unmade: its caller retries with a fresh
-/// child ID instead of resuming in place.
+/// finished (still `Forking`, not deleted) is refused as no cell ([`bucket_cell::Error::NoCell`]):
+/// its caller retries with a fresh child ID instead of resuming in place.
 async fn first_read<B: bucket_cell::Bucket>(
     bucket: &B,
     cell: CellId,
@@ -2900,8 +2900,8 @@ async fn first_read<B: bucket_cell::Bucket>(
         Some(read) => read,
         None => head::read(bucket, cell).await?,
     };
-    if read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
-        return Err(bucket_cell::Error::Unmade(cell).into());
+    if read.head()?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
+        return Err(bucket_cell::Error::NoCell.into());
     }
     Ok(read)
 }
@@ -3617,8 +3617,8 @@ mod tests {
     /// TASK-690: a cell's uploader swaps its cell's head no faster than a bucket of GCS's object
     /// store takes it, however fast the cell commits: a guest waiting for each commit's upload,
     /// then one closing segment after segment. Each swap names all uploaded since the last, the
-    /// uploads going on as it waits; the cell refuses no write of the head. TASK-691: each slot of
-    /// the head a second apart, the head many times a second.
+    /// uploads going on as it waits; the cell refuses no write of the head. doc-27 step 4 (board
+    /// 6220's AC #2): the head one object, swapped about once a second, as often as GCS takes it.
     #[tokio::test(flavor = "multi_thread")]
     async fn heads_are_swapped_as_fast_as_gcs_takes_them() {
         use bucket_cell::faults::{Fault, Faults, Faulty};
@@ -3678,13 +3678,14 @@ mod tests {
         let elapsed = started.elapsed();
         let stats = bucket.stats();
         assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
-        // Each slot's a second after its last, of HEAD_SLOTS; more than one a second in all.
+        // Each swap a second after the last, and none of those seconds idle: the guest's commits
+        // keep one waiting.
         let swaps = updates() - opened;
-        let most = bucket_cell::identity::GCS_HEAD_SLOTS * (elapsed.as_secs() + 1);
-        assert!(swaps <= most, "{swaps} swaps of the head in {elapsed:?}");
-        assert!(swaps > 2 * (elapsed.as_secs() + 1), "{swaps} swaps of the head in {elapsed:?}");
-        // A commit waits for its swap's turn: a part of a second, as long as the guest syncs no
-        // faster than HEAD_SLOTS a second; up to a second for one past that, as this guest is.
+        let seconds = elapsed.as_secs();
+        assert!(swaps <= seconds + 1, "{swaps} swaps of the head in {elapsed:?}");
+        assert!(swaps + 1 >= seconds, "{swaps} swaps of the head in {elapsed:?}");
+        // A commit waits for its swap's turn: up to a second, as this guest syncs faster than
+        // one a second.
         let longest = waits.iter().max().unwrap();
         assert!(*longest < second + second / 2, "a commit waited {longest:?}: {waits:?}");
         drop(uploader);

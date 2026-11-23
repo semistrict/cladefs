@@ -612,8 +612,8 @@ mod tests {
             sandbox,
             Some(&filled.bases[0]),
         ));
-        // Its head, every slot of it (TASK-691), two segments, a checkpoint, and its reference.
-        assert_eq!(sum.unwrap().objects, bucket_cell::identity::DEFAULT_HEAD_SLOTS + 4);
+        // Its head, two segments, a checkpoint, and its reference.
+        assert_eq!(sum.unwrap().objects, 5);
         assert_eq!(of_base(&bucket), [1, 0]);
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [1, 0, 0]);

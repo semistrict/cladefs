@@ -59,8 +59,6 @@ struct Request {
 
 #[derive(Default)]
 struct Inner {
-    /// cladefs: how many slots its cells' heads are kept in, if not the default (TASK-691).
-    head_slots: Option<u64>,
     objects: BTreeMap<String, Stored>,
     versions: u64,
     clock: u64,
@@ -123,18 +121,6 @@ impl SimBucket {
     /// cladefs: its host's bucket's number.
     pub fn home(&self) -> u16 {
         self.home
-    }
-
-    /// cladefs: keeps its cells' heads in `n` slots, its every region's, as a bucket formatted so
-    /// keeps them (TASK-691): the simulation's few, which every slot's case comes to as often in
-    /// fewer requests.
-    pub fn keep_heads_in(&self, n: u64) {
-        self.inner.lock().unwrap().head_slots = Some(n);
-    }
-
-    /// cladefs: how many slots its cells' heads are kept in.
-    pub fn slots(&self) -> u64 {
-        self.inner.lock().unwrap().head_slots.unwrap_or(crate::identity::DEFAULT_HEAD_SLOTS)
     }
 
     /// cladefs: has bucket `region` be down, or up again: a request to it completed then fails
@@ -561,13 +547,6 @@ macro_rules! reply {
 }
 
 impl Bucket for SimBucket {
-    fn head_slots(
-        &self,
-        _: CellId,
-    ) -> impl Future<Output = Result<u64, crate::bucket::Refused>> + Send {
-        std::future::ready(Ok(self.slots()))
-    }
-
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
         reply!(self.request(Op::Get(key.to_owned())), Object)
     }
@@ -709,13 +688,6 @@ impl Direct {
 }
 
 impl Bucket for Direct {
-    fn head_slots(
-        &self,
-        _: CellId,
-    ) -> impl Future<Output = Result<u64, crate::bucket::Refused>> + Send {
-        std::future::ready(Ok(self.0.slots()))
-    }
-
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
         reply!(std::future::ready(self.apply(Op::Get(key.to_owned()))), Object)
     }
@@ -838,13 +810,13 @@ pub async fn forked_at(bucket: &impl Bucket, child: CellId, origin: layout::Orig
     make_head(bucket, child, head).await;
 }
 
-/// cladefs: makes `cell`'s head `head`, every slot of it ([`crate::head::birth`], TASK-691), as a
-/// test's maker does: unless a head is there already. Its slots.
+/// cladefs: makes `cell`'s head `head` ([`crate::head::birth`]), as a test's maker does: unless a
+/// head is there already. The head as it made it.
 pub async fn make_head(
     bucket: &impl Bucket,
     cell: CellId,
     head: layout::Head,
-) -> Option<crate::head::Slots> {
+) -> Option<crate::head::Held> {
     crate::head::birth(bucket, cell, head).await.ok()
 }
 
@@ -868,15 +840,9 @@ pub async fn live(bucket: &impl Bucket) -> Result<BTreeMap<CellId, layout::Head>
     let mut cells = std::pin::pin!(crate::cell::listed(bucket));
     while let Some(cell) = cells.next().await {
         let cell = cell?;
-        let read = crate::head::read(bucket, cell).await?.slots();
-        read.head(cell)?;
-        // cladefs: and a head being made, or its maker dead making it, as a fork being made is
-        // live: an orphan to delete, which fails it (TASK-691).
-        match read.found() {
-            crate::head::Found::Head(head) if !head.deleted() => live.insert(cell, head.clone()),
-            crate::head::Found::Unmade(first) => live.insert(cell, first.clone()),
-            _ => None,
-        };
+        if let Some(head) = crate::head::get(bucket, cell).await?.filter(|head| !head.deleted()) {
+            live.insert(cell, head);
+        }
     }
     Ok(live)
 }
@@ -976,15 +942,14 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
     for (&cell, record) in &records {
         // Every cell's head stays, a deleted one's final, which fences its writers (TASK-174,
         // TASK-407): but that of a cell that goes whole (TASK-455).
-        let n = bucket.head_slots(cell).await.expect("its head slots");
-        let slots = (0..n).map(|slot| layout::head(cell, slot));
+        let head = layout::head(cell);
         if record.deleted() {
             if !removed(cell) {
-                needed.extend(slots);
+                needed.insert(head);
             }
             continue;
         }
-        needed.extend(slots);
+        needed.insert(head);
         let origin = record.origin();
         let Ok(recovered) = crate::recovery::recover(bucket, cell, origin).await else {
             continue;
@@ -1069,25 +1034,6 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             // cladefs: as its mirror's copy says ([`uncollected_copies`]).
             Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
-            // cladefs: a failed head's marks, a day, and a head its maker left unmade, an hour,
-            // till the collector fails it (TASK-691).
-            Kind::Head { cell, .. } => {
-                let found = crate::head::read(bucket, cell).await.unwrap().slots();
-                match (crate::bucket::get(bucket, key).await.unwrap(), found.found()) {
-                    (Some(object), crate::head::Found::Failed) => {
-                        let mark = Head::decode(cell, &object.bytes).is_ok_and(|head| head.failed);
-                        mark && object.meta.modified + crate::head::MARKS_KEPT > bucket.now()
-                    }
-                    (Some(_), crate::head::Found::Unmade(_)) => {
-                        let first =
-                            crate::bucket::get(bucket, &layout::head(cell, 0)).await.unwrap();
-                        first.is_some_and(|first| {
-                            first.meta.modified + crate::head::UNMADE_FOR > bucket.now()
-                        })
-                    }
-                    _ => false,
-                }
-            }
             _ => false,
         };
         if !kept && !needed.contains(key) {
@@ -1359,21 +1305,18 @@ mod tests {
             let bytes = bytes::Bytes::from_static(b"x");
             bucket.served(bucket.put(key, bytes, PutMode::Create)).1
         };
-        let head = layout::head(theirs, 0);
+        let head = layout::head(theirs);
         assert_eq!(put(&first, &head), [format!("@2 put {head}")]);
         assert_eq!(put(&first, layout::IDENTITY), ["@1 put identity"]);
         assert_eq!(put(&second, layout::IDENTITY), ["@2 put identity"]);
-        assert_eq!(
-            put(&first, &layout::head(named, 0)),
-            [format!("@1 put {}", layout::head(named, 0))]
-        );
+        assert_eq!(put(&first, &layout::head(named)), [format!("@1 put {}", layout::head(named))]);
         let listed = second.served(second.list(&theirs.prefix())).0.unwrap();
         assert_eq!(listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(), [head.clone()]);
         assert_eq!(
             sim.stored(),
             [
                 "@1/identity".to_owned(),
-                format!("@1/{}", layout::head(named, 0)),
+                format!("@1/{}", layout::head(named)),
                 "@2/identity".into(),
                 format!("@2/{head}"),
             ]

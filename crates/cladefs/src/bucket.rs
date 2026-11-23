@@ -19,7 +19,7 @@ use crate::Errno;
 use bucket_cell::bucket_kms::{BucketKms, ByBucket, Unreloaded};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
-use bucket_cell::identity::{Asked, Details, Identity, Registry};
+use bucket_cell::identity::{Details, Identity, Registry};
 use bucket_cell::keys;
 use bucket_cell::layout::Location;
 use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
@@ -89,29 +89,22 @@ fn on_buckets<T>(
 
 /// cladefs: formats the bucket at `url` (`cladefsctl format-bucket`; `bucket_cell::identity`,
 /// TASK-633.9): unless it was formatted or added, the root of buckets of its own, number 1, its
-/// registry recording it, with `details`. Its identity either way. cladefs: its settings as
-/// `asked` says (TASK-691).
-pub fn format_bucket(url: &str, details: Details, asked: Asked) -> Result<Identity, crate::Error> {
+/// registry recording it, with `details`. Its identity either way.
+pub fn format_bucket(url: &str, details: Details) -> Result<Identity, crate::Error> {
     let details = located(url, details)?;
     let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
-    on_buckets(bucket_cell::identity::format(&*bucket, &details, asked))
+    on_buckets(bucket_cell::identity::format(&*bucket, &details))
 }
 
 /// cladefs: adds the bucket at `url`, with `details`, to the buckets of the root bucket at
 /// `root_url` (`cladefsctl add-bucket`, TASK-633.9): the next number, by a conditional write of the
 /// root's registry, which then goes to every bucket's root. Its identity: refused if it is a
 /// bucket already (`EEXIST`), or the root is another bucket (`EINVAL`), or no number is left
-/// (`ENOSPC`), or it is a memory bucket, its process's alone (`EINVAL`). cladefs: its settings the
-/// root's, but those `asked` (TASK-691); refused out of range (`EINVAL`). cladefs: each bucket
+/// (`ENOSPC`), or it is a memory bucket, its process's alone (`EINVAL`). cladefs: each bucket
 /// opened with its own number's options, its credentials (`CLADEFSD_BUCKET_<N>_*`), the new one
 /// with the number it is to get (board 5550); `EAGAIN` if another addition took that number
 /// first, added under the next, which an addition again finishes.
-pub fn add_bucket(
-    root_url: &str,
-    url: &str,
-    details: Details,
-    asked: Asked,
-) -> Result<Identity, crate::Error> {
+pub fn add_bucket(root_url: &str, url: &str, details: Details) -> Result<Identity, crate::Error> {
     let (root_details, details) = (located(root_url, Details::default())?, located(url, details)?);
     // A memory bucket is its process's alone: no other host, nor a later process, reaches it at
     // its URL, as the registry records it (TASK-633.3).
@@ -126,8 +119,7 @@ pub fn add_bucket(
     let found = on_buckets(identity::registry(&*root))?;
     let number = identity::number_for(found.as_ref(), url).map_err(Failure::from)?;
     let new = open(url, number)?;
-    let (identity, registry) =
-        on_buckets(identity::add(&*root, &root_details, &*new, details, asked))?;
+    let (identity, registry) = on_buckets(identity::add(&*root, &root_details, &*new, details))?;
     if identity.number != number {
         let raced = anyhow::anyhow!(
             "{url}: added as bucket {}, another addition taking {number} first: give it its \
@@ -179,9 +171,6 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Fenced | Error::Deleted) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
         Failure::Bucket(Error::NoCell) | Failure::VersionDropped => Some(Errno::ENOENT),
-        // cladefs: a cell whose head is being made, its maker's, or was left unmade, or is being
-        // removed with its dead cell: no cell to open, yet or any more (TASK-691).
-        Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: an ephemeral fork of a host decommissioned, its incarnation's references
@@ -210,8 +199,6 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         // and no bucket number left (TASK-633.9).
         Failure::Bucket(Error::Formatted(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotRoot(_)) => Some(Errno::EINVAL),
-        // cladefs: settings asked out of their ranges (TASK-691).
-        Failure::Bucket(Error::Settings(_)) => Some(Errno::EINVAL),
         Failure::Bucket(Error::NoNumbers) => Some(Errno::ENOSPC),
         // cladefs: a bucket no registry records, or one other than the registry says (TASK-633.3).
         Failure::Bucket(Error::NoBucket(_)) => Some(Errno::ENOENT),
@@ -2136,10 +2123,10 @@ mod tests {
         SegmentsFrom(u64),
         /// The write of the object at this key.
         Key(String),
-        /// cladefs: the writes of the cell's head, any slot of it (TASK-691).
+        /// cladefs: the writes of the cell's head.
         Head(crate::CellId),
-        /// The first write of the cell's head, any slot of it, those after it while it waits
-        /// going on: a takeover's, its writer's swaps of it meanwhile not (TASK-407, TASK-691).
+        /// The first write of the cell's head, those after it while it waits going on: a
+        /// takeover's, its writer's swaps of it meanwhile not (TASK-407).
         FirstOfHead(crate::CellId),
     }
 
@@ -2908,9 +2895,8 @@ mod tests {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
-        // Formatted, as a host's bucket is: its head slots read once (board 5534).
-        let (details, asked) = Default::default();
-        bucket_cell::identity::format(&*bucket.own(), &details, asked).await.unwrap();
+        // Formatted, as a host's bucket is.
+        bucket_cell::identity::format(&*bucket.own(), &Default::default()).await.unwrap();
         let lost = kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -2949,14 +2935,14 @@ mod tests {
         let tails: u64 = (0..4)
             .map(|segment| sizes[&layout::segment(cell, segment, 1)].min(bucket_cell::object::TAIL))
             .sum();
-        // Its head, read once, every slot of it (TASK-691), the recovery starting from it, then
+        // Its head, read once, the recovery starting from it, then
         // swapped to take it (TASK-449, TASK-515). The segments' tails it names, all at once: no
         // listing (TASK-407).
         assert_eq!(
             (asked, after.downloaded - before.downloaded),
             (
                 vec![
-                    ("get", bucket_cell::identity::DEFAULT_HEAD_SLOTS),
+                    ("get", 1),
                     ("get-range", 4),
                     ("head", 0),
                     ("list", 0),
@@ -3571,8 +3557,7 @@ mod tests {
         }
         let url = |name: &str| format!("s3://{BUCKET}/{name}");
         let add = |new: &str| {
-            let added =
-                super::add_bucket(&url("one"), &url(new), Details::default(), Default::default());
+            let added = super::add_bucket(&url("one"), &url(new), Details::default());
             added.unwrap().number
         };
         assert_eq!((add("two"), add("three")), (2, 3));
@@ -3901,7 +3886,7 @@ mod tests {
         // read.
         let mut newer = (bucket_cell::layout::FORMAT + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
-        let (key, overwrite) = (bucket_cell::layout::head(cell, 0), PutMode::Overwrite);
+        let (key, overwrite) = (bucket_cell::layout::head(cell), PutMode::Overwrite);
         futures::executor::block_on(bucket.put(&key, newer.into(), overwrite)).unwrap();
         let listed = || {
             let listed = futures::executor::block_on(bucket.list("")).unwrap();

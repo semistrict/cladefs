@@ -462,10 +462,9 @@ impl<B: Bucket> Writer<B> {
             return Ok(self.inner().state.through);
         }
         failpoint!("writer::acknowledge");
-        // Waited for before the head is held, which its other changes and readers wait for: the
-        // slot its next swap writes (TASK-691).
-        let next = self.held.lock().await.next_key(self.cell);
-        self.bucket.rewritable(&next).await;
+        // Waited for before the head is held, which its other changes and readers wait for: its
+        // store's turn for a write of the head (TASK-690).
+        self.bucket.rewritable(&layout::head(self.cell)).await;
         let through = {
             let mut held = self.held.lock().await;
             let Some(Naming { through, cuts, switch }) = self.naming()? else {
@@ -945,21 +944,14 @@ mod tests {
                 crate::object::TAIL
             )
         };
-        // cladefs: every slot read, at once, the one after the newest's written (TASK-691).
-        let next = layout::head(
-            test_cell(1),
-            bucket.served(second.head()).0.swaps % crate::identity::DEFAULT_HEAD_SLOTS,
+        // cladefs: the head read, then written in place.
+        let head = layout::head(test_cell(1));
+        assert_eq!(
+            rounds,
+            [vec![format!("get {head}")], vec![format!("put {head}")], vec![tail(1)]]
         );
-        assert_eq!(rounds, [slots_read(test_cell(1)), vec![format!("put {next}")], vec![tail(1)]]);
         let anew = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
         assert_eq!(second.state(), anew.state);
-    }
-
-    /// cladefs: the GETs of a read of `cell`'s head, of every slot (TASK-691).
-    fn slots_read(cell: CellId) -> Vec<String> {
-        (0..crate::identity::DEFAULT_HEAD_SLOTS)
-            .map(|slot| format!("get {}", layout::head(cell, slot)))
-            .collect()
     }
 
     /// The taking of `holder`, of token 0, giving the head nothing.
@@ -980,11 +972,6 @@ mod tests {
             Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         assert_eq!(first.epoch(), 1);
-        // cladefs: the slot of the swap after the newest a read found (TASK-691).
-        let after = |read: &head::Read, more| {
-            let swaps = read.head(test_cell(1)).unwrap().unwrap().swaps + more;
-            layout::head(test_cell(1), swaps % crate::identity::DEFAULT_HEAD_SLOTS)
-        };
         let found = || {
             let before = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
             let read = bucket.served(head::read(&*bucket, test_cell(1))).0.unwrap();
@@ -997,23 +984,21 @@ mod tests {
                 Writer::holding(bucket, test_cell(1), held, Some(before), keys).await
             }
         };
+        let head = layout::head(test_cell(1));
         let read = found();
-        let next = after(&read.1, 1);
         let (second, rounds) = bucket.served_in_rounds(opening(read, 11));
         let second = second.unwrap();
         assert_eq!(second.epoch(), 2);
-        assert_eq!(rounds[0], [format!("put {next}")]);
+        assert_eq!(rounds[0], [format!("put {head}")]);
         // A read of the head, then another writer's taking of it, then the opening.
         let read = found();
-        let (stale, anew) = (after(&read.1, 1), after(&read.1, 2));
         let (third, _) = bucket.served(Writer::open(bucket.clone(), test_cell(1), 12, 0));
         assert_eq!(third.unwrap().epoch(), 3);
         let (fourth, rounds) = bucket.served_in_rounds(opening(read, 13));
         assert_eq!(fourth.unwrap().epoch(), 4);
         // Its update refused, its answer read back, as an update whose answer was lost is told
-        // apart; then the head read again, every slot (TASK-691), and taken.
-        let (put, get) = (vec![format!("put {stale}")], vec![format!("get {stale}")]);
-        let taken = vec![format!("put {anew}")];
-        assert_eq!(rounds[..4], [put, get, slots_read(test_cell(1)), taken]);
+        // apart; then the head read again, and taken.
+        let (put, get) = (vec![format!("put {head}")], vec![format!("get {head}")]);
+        assert_eq!(rounds[..4], [put.clone(), get.clone(), get, put]);
     }
 }

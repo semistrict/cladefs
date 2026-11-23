@@ -344,28 +344,6 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         }
     }
 
-    async fn head_slots(&self, cell: layout::CellId) -> Result<u64, Refused> {
-        let key = layout::heads(cell);
-        let mut failures = 0u32;
-        loop {
-            match self.member(&key).await {
-                Ok(Some(member)) => return member.head_slots(cell).await,
-                Ok(None) => return self.home.head_slots(cell).await,
-                Err(Error::Refused(refusal)) => return Err(Refused::of(&key, refusal)),
-                // cladefs: its bucket out of reach: asked again, never another bucket's count
-                // taken for it (board 5522).
-                Err(_) => {
-                    failures = failures.saturating_add(1);
-                    self.pause(failures).await;
-                }
-            }
-        }
-    }
-
-    fn default_head_slots(&self) -> u64 {
-        self.home.default_head_slots()
-    }
-
     async fn rewritable(&self, key: &str) {
         match self.member(key).await {
             Ok(Some(member)) => member.rewritable(key).await,
@@ -609,7 +587,7 @@ mod tests {
         let (home, member) = (Arc::new(Scripted::new(&key)), Arc::new(Scripted::new(&key)));
         block_on(async {
             let details = crate::identity::Details::default();
-            crate::identity::format(&home.objects, &details, Default::default()).await.unwrap();
+            crate::identity::format(&home.objects, &details).await.unwrap();
             let marker = layout::encode(&layout::Mirror::NOW);
             home.objects
                 .put(&layout::mirror(PARENT, 3), marker.into(), PutMode::Create)
@@ -652,7 +630,7 @@ mod tests {
         let reference = layout::reference(PARENT, 3, child);
         block_on(async {
             let details = crate::identity::Details::default();
-            crate::identity::format(&home.objects, &details, Default::default()).await.unwrap();
+            crate::identity::format(&home.objects, &details).await.unwrap();
             let bytes = layout::encode(&layout::Reference::of(1));
             home.objects.put(&reference, bytes.into(), PutMode::Create).await.unwrap();
         });
@@ -712,17 +690,11 @@ mod tests {
             block_on(async {
                 let details = crate::identity::Details::default();
                 let root = &buckets[&1].objects;
-                crate::identity::format(root, &details, Default::default()).await.unwrap();
+                crate::identity::format(root, &details).await.unwrap();
                 let mut registry = None;
                 for number in [2, 3] {
                     let new = &buckets[&number].objects;
-                    let added = crate::identity::add(
-                        root,
-                        &details,
-                        new,
-                        details.clone(),
-                        Default::default(),
-                    );
+                    let added = crate::identity::add(root, &details, new, details.clone());
                     let (identity, added) = added.await.unwrap();
                     assert_eq!(identity.number, number);
                     registry = Some(added);
