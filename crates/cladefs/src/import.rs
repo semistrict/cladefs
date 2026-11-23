@@ -950,9 +950,20 @@ impl OciImage {
             // cladefs: its whole blob hashed, off the runtime's other tasks (board 5614); what is
             // applied is what was hashed, the file opened once (board 8541).
             let verified = || verified_blob(&self.layout, &layer.digest);
-            let (path, file) = local_cell::upload::blocking(verified).map_err(Error::new)?;
-            hashed(&path);
-            importer.apply_layer(file).await.context(layer.digest.clone()).map_err(Error::new)?;
+            let blob = local_cell::upload::blocking(verified).map_err(Error::new)?;
+            hashed(&blob.path);
+            let held = blob.file.try_clone();
+            let held = held.with_context(|| format!("opening {}", blob.path.display()));
+            let held = held.map_err(Error::new)?;
+            let applied = importer.apply_layer(blob.file).await;
+            applied.context(layer.digest.clone()).map_err(Error::new)?;
+            // Written in place since it was opened, what was applied may not be what was hashed:
+            // refused (hotbed review 57).
+            let now = held.metadata().with_context(|| format!("reading {}", blob.path.display()));
+            if stamp(&now.map_err(Error::new)?) != blob.stamp {
+                let changed = format!("{} changed as it was imported", blob.path.display());
+                return Err(Error::new(refused(changed)));
+            }
         }
         Ok(())
     }
@@ -991,10 +1002,13 @@ const MAX_MANIFEST: u64 = 4 << 20;
 
 /// The file at `path` in an image's layout, opened once, for what is read of it to be what is
 /// checked of it, whatever the layout holds there after (board 8541): refused (`EINVAL`) if a
-/// symlink, which may name any file of the host, or anything but a regular file.
+/// symlink, which may name any file of the host, or anything but a regular file. Opened without
+/// waiting, as a FIFO's opening would for a writer (hotbed review 57): reads of a regular file
+/// wait as ever.
 fn open_regular(path: &Path) -> anyhow::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    let opened = std::fs::File::options().read(true).custom_flags(libc::O_NOFOLLOW).open(path);
+    let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    let opened = std::fs::File::options().read(true).custom_flags(flags).open(path);
     let file = match opened {
         Ok(file) => file,
         Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
@@ -1037,12 +1051,31 @@ fn read_blob(layout: &Path, digest: &str) -> anyhow::Result<Vec<u8>> {
     Ok(blob)
 }
 
+/// What says a file was changed: its size, and its modification and change times, to the
+/// nanosecond.
+fn stamp(metadata: &std::fs::Metadata) -> (u64, i64, i64, i64, i64) {
+    use std::os::unix::fs::MetadataExt as _;
+    let times = (metadata.mtime(), metadata.mtime_nsec(), metadata.ctime(), metadata.ctime_nsec());
+    (metadata.len(), times.0, times.1, times.2, times.3)
+}
+
+/// A layer's blob, opened once and checked against its digest ([`verified_blob`]).
+struct Verified {
+    /// Where it is in the layout: no longer what is read.
+    path: PathBuf,
+    /// The blob, rewound: what is applied.
+    file: std::fs::File,
+    /// What said it was unchanged as it was opened ([`stamp`]).
+    stamp: (u64, i64, i64, i64, i64),
+}
+
 /// The blob `digest` names in `layout`, a layer, opened once, its contents checked against it,
-/// and rewound: what is applied (board 8541). Its path too, which is no longer what is read.
-fn verified_blob(layout: &Path, digest: &str) -> anyhow::Result<(PathBuf, std::fs::File)> {
+/// and rewound: what is applied (board 8541).
+fn verified_blob(layout: &Path, digest: &str) -> anyhow::Result<Verified> {
     use std::io::Seek as _;
     let path = blob_path(layout, digest)?;
     let mut file = open_regular(&path)?;
+    let opened = stamp(&file.metadata().with_context(|| format!("reading {}", path.display()))?);
     let mut hasher = Sha256::new();
     let mut buf = vec![0; CHUNK];
     loop {
@@ -1055,7 +1088,7 @@ fn verified_blob(layout: &Path, digest: &str) -> anyhow::Result<(PathBuf, std::f
     }
     check_digest(digest, hasher.finalize().as_slice())?;
     file.rewind().with_context(|| format!("rewinding {}", path.display()))?;
-    Ok((path, file))
+    Ok(Verified { path, file, stamp: opened })
 }
 
 fn check_digest(digest: &str, sha256: &[u8]) -> anyhow::Result<()> {

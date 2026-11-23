@@ -9,6 +9,7 @@ use cladefs::import::{Importer, OciImage};
 use cladefs::{Attr, Errno, FileType, Filesystem, Node, Storage};
 use futures::executor::block_on;
 use std::future::poll_fn;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::Path;
 use std::pin::pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -531,6 +532,34 @@ fn a_layer_swapped_once_hashed_is_not_applied() {
     assert!(names[0].starts_with("/hashed File"), "{names:#?}");
 }
 
+/// Hotbed review 57 (board 8541): a layer's blob written in place once hashed, the file the
+/// import holds open changed under it, is refused, `EINVAL`, never applied as if it were what was
+/// hashed.
+#[test]
+fn a_layer_written_in_place_once_hashed_is_refused() {
+    use cladefs::import::testing::import_hashed;
+    let dir = tempfile::tempdir().unwrap();
+    let layout = dir.path().join("image");
+    let hashed = layer(&[Entry::new("hashed", Kind::File(b"as hashed"))]).unwrap();
+    oci_layout(&layout, "sample:1", &[hashed]).unwrap();
+    // Of another size than what was hashed: a change time is a clock tick's, which a write of
+    // the same size within the tick leaves as it was (board 9703).
+    let longer = vec![b'w'; 64 << 10];
+    let written = layer(&[Entry::new("written", Kind::File(&longer))]).unwrap();
+    block_on(async {
+        let image = OciImage::open(&layout, None).unwrap();
+        let fs = Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap();
+        let mut importer = Importer::new(&fs);
+        let write = |path: &Path| std::fs::write(path, &written).unwrap();
+        let error = import_hashed(&image, &mut importer, write).await.expect_err("imported");
+        let said = format!("{error:#}");
+        assert!(said.contains("changed as it was imported"), "{said}");
+        assert_eq!(error.errno(), Some(Errno::EINVAL), "{said}");
+        drop(importer);
+        close(fs).await;
+    });
+}
+
 /// Board 8541: what an image's layout holds is opened as it is, never through a symlink, which
 /// may name any file of the host, and `index.json`, a manifest and an index are refused past
 /// what registries take (4 MiB) before they are read whole: each `EINVAL`, as a bad image is.
@@ -571,6 +600,15 @@ fn linked_or_oversized_layout_files_are_refused_with_einval() {
     let manifest = manifest.expect("a manifest");
     linked(&manifest);
     opening(&layout, "is a symlink");
+
+    // A FIFO, which nothing writes: refused at once, never waited on for a writer (hotbed
+    // review 57).
+    let layout = fresh("fifo-index");
+    std::fs::remove_file(layout.join("index.json")).unwrap();
+    let fifo = std::ffi::CString::new(layout.join("index.json").into_os_string().into_vec());
+    // SAFETY: mkfifo(3), with a NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo.unwrap().as_ptr(), 0o644) }, 0);
+    opening(&layout, "index.json is not a regular file");
 
     let layout = fresh("large-index");
     let mut index = std::fs::read(layout.join("index.json")).unwrap();
