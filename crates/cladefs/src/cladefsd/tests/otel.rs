@@ -117,8 +117,8 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(sealed, "cladefs.extents"), Some(Value::I64(1)));
 
     // The commit's segment, created, the commit's small extents in it; then the cell's
-    // checkpoint, which follows its forks' moves, created, then named by a swap of the cell's
-    // head (TASK-407).
+    // checkpoint, created, then named by a swap of the cell's head (TASK-407): it lists nothing,
+    // the collector moving nothing (doc-27).
     let upload = the(&spans, "upload.segment");
     assert_eq!(attribute(upload, "cladefs.cell"), Some(named.clone()));
     assert_eq!(attribute(upload, "cladefs.extents"), Some(Value::I64(0)));
@@ -127,7 +127,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(checkpoint, "cladefs.cell"), Some(named));
     assert_eq!(
         children(&spans, checkpoint),
-        ["bucket.create", "bucket.list", "bucket.update"].map(str::to_owned).into()
+        ["bucket.create", "bucket.update"].map(str::to_owned).into()
     );
 }
 

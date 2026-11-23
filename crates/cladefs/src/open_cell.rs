@@ -3226,14 +3226,10 @@ mod tests {
             cell.commit(None).await.unwrap();
         })
         .await;
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
-        let collected = bucket_cell::collector::collect(&**cell.bucket(), 1, &options);
+        let collected = bucket_cell::collector::collect(&**cell.bucket(), 1);
         let report = futures::executor::block_on(collected).unwrap();
         // All the checkpoint covers but the writer's fence, which the collector keeps (TASK-371).
-        assert_eq!(
-            report,
-            bucket_cell::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
-        );
+        assert_eq!(report, bucket_cell::collector::Report { deleted: 64, retired: 0, ..report });
         assert_eq!(read(&follower, a, 0, BLOCK).await, Err(Errno::ESTALE));
     }
 

@@ -391,15 +391,12 @@ impl Keys for RingView<'_> {
     }
 }
 
-/// The cell the object at `key` is of, by its key: the moves of an object are of that object's
-/// cell, as the collector encrypts them under the DEK it was encrypted under (TASK-411.6). None
-/// for one of no cell's.
+/// The cell the object at `key` is of, by its key. None for one of no cell's.
 pub fn cell_of(key: &str) -> Option<u64> {
     match layout::kind(key) {
         Key::Segment { cell, .. } | Key::Extent { cell, .. } | Key::Checkpoint { cell, .. } => {
             Some(cell.id)
         }
-        Key::Moves { .. } => cell_of(&layout::moved_from(key)?),
         _ => None,
     }
 }
@@ -1271,7 +1268,7 @@ impl CellKeys {
 }
 
 /// The refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its cells
-/// opening no more (`EACCES`), and the collector leaving its encrypted objects uncompacted.
+/// opening no more (`EACCES`).
 pub fn shredded(cell: CellId) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
@@ -1583,17 +1580,6 @@ pub async fn ring(
         }
         ring.take(&CellKeys::of(parent, &found, keys.kms.clone()), parent, &found).await?;
     }
-    Ok(Arc::new(ring))
-}
-
-/// The ring the collector compacts `cell`'s objects under (TASK-411.6): its head's DEKs and those
-/// it keeps of ancestors of other cells ([`Ring::take`]), unwrapped under the generations of
-/// `keys`, the cell's, KEK they name, each unwrapped once ([`CellKeys`] keeps what it unwrapped).
-/// It encrypts nothing of its own: the collector encrypts what it compacts under the key its source
-/// was encrypted under.
-pub async fn compacting(cell: CellId, head: &Head, keys: &CellKeys) -> Result<Arc<Ring>, Error> {
-    let mut ring = Ring::default();
-    ring.take(keys, cell, head).await?;
     Ok(Arc::new(ring))
 }
 

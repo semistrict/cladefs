@@ -7,7 +7,7 @@
 //! cell, a persistent map (`bucket_cell::recovery::Extents`) shared, never changed here, with the
 //! cell's writer and with every other cell open on the host that started from the same decoded
 //! state, as a base's forks do (`bucket_cell::recovery::Decoded`). Over it, the cell's own:
-//! what it wrote, encrypted, acknowledged or followed where the collector moved it since, and the
+//! what it wrote, encrypted, acknowledged or relocated since, and the
 //! extents of the bucket's layer it holds no more there, freed or overlaid. A lookup reads its own
 //! layer, then the bucket's. So a cell's memory grows with what it does, not with what it
 //! inherited: each fork's copy of its base's map in a cell's own was 220-470 bytes an extent of
@@ -416,24 +416,6 @@ impl Extents {
         })
     }
 
-    /// Names `extent`, if it holds it in the bucket, at `to`, where the collector moved it, if it
-    /// names it on its way there ([`Data::follow`]): in its own layer, if the bucket's places it.
-    pub fn follow(&mut self, extent: &ExtentId, to: &Location) {
-        if let Some(entry) = self.own.get(extent) {
-            if let Data::Bucket(at) = &entry.data
-                && bucket_cell::layout::further(&at.key, &to.key)
-            {
-                self.place(extent, Data::Bucket(to.clone()));
-            }
-            return;
-        }
-        let Some(at) = self.in_bucket(extent) else { return };
-        if bucket_cell::layout::further(&at.key, &to.key) {
-            let len = at.len;
-            self.insert(*extent, Extent { len, data: Data::Bucket(to.clone()) });
-        }
-    }
-
     /// Its extents, with their entries, in no order.
     pub fn iter(&self) -> impl Iterator<Item = (ExtentId, Entry<'_>)> {
         let own = self.own.iter().map(|(extent, entry)| (*extent, Entry::Own(entry)));
@@ -604,18 +586,14 @@ mod tests {
         assert_eq!(one.len(), 10);
         assert_eq!(one.get(&extent(3)).map(Entry::to_extent), Some(remote(&at(30))));
 
-        // Its own: written, freed, overlaid, followed.
+        // Its own: written, freed, overlaid, relocated.
         one.written(extent(20), || pieces(1)).len = 8;
         assert_eq!(one.remove(&extent(4)), Some(remote(&at(40))));
         assert_eq!(one.remove(&extent(4)), None);
         one.insert(extent(5), pieces(2));
-        let key = bucket_cell::layout::moves(&at(60).key, 1).unwrap();
+        let key = bucket_cell::layout::segment(bucket_cell::layout::test_cell(1), 3, 1);
         let moved = Location { key, offset: 0, len: 4096 };
-        one.follow(&extent(6), &moved);
-        let elsewhere = bucket_cell::layout::segment(bucket_cell::layout::test_cell(1), 2, 1);
-        let unrelated = Location { key: elsewhere, offset: 0, len: 4096 };
-        one.follow(&extent(7), &unrelated);
-        one.follow(&extent(4), &moved);
+        one.place(&extent(6), Data::Bucket(moved.clone()));
         assert_eq!(one.remove(&extent(20)), Some(pieces(1)));
 
         assert_eq!(one.len(), 9);

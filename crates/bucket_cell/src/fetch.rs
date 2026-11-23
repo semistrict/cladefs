@@ -6,8 +6,9 @@
 //! a GET of its stored bytes, which the object's table says where are, checked against its CRC
 //! and decompressed; one GET for a part however many reads want it at once; GETs in flight
 //! bounded in number and bytes, by a [`Budget`] a host's fetchers share, where reads waiting for
-//! their data go before read-ahead. An extent the collector moved is read where it went. Every
-//! read of an extent's data is a fetcher's: a host's, or one of its own ([`read`]).
+//! their data go before read-ahead. An extent is read where its cell names it, or not at all: the
+//! collector moves nothing (doc-27). Every read of an extent's data is a fetcher's: a host's, or
+//! one of its own ([`read`]).
 //!
 //! A host's fetcher keeps the parts it fetches in the host's cache, as stored, and those it
 //! fetched last in memory too, as fetched, which the first read that wants one unpacks: a part
@@ -26,9 +27,10 @@
 //! index does: keys of segments name no writer, so a writer taken over, its create landing late,
 //! can create an object at a key the collector deleted, holding extents of its own. Neither CRCs
 //! nor keys tell such an object from the one deleted; its footer, which names what it holds, does,
-//! and an object that holds no longer what a reader's index says is read as one gone: where its
-//! moves say. The footer and the table are tied to one version of an object by their CRCs, which
-//! the trailer and the table hold, and the parts by theirs, which the table holds.
+//! and an object that holds no longer what a reader's index says is read as one gone: lost there,
+//! as its cell's writer may have relocated the extent since (doc-27). The footer and the table are
+//! tied to one version of an object by their CRCs, which the trailer and the table hold, and the
+//! parts by theirs, which the table holds.
 //!
 //! cladefs: what a host's fetchers keep, they keep as stored, encrypted, as a reader holding no key
 //! reads it, and open with the keys of every cell the host serves ([`Memory::keys`],
@@ -36,16 +38,15 @@
 //! its key, and a part unpacked by the tail so opened; a part encrypted under a key the host
 //! doesn't hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear is
 //! corrupt (TASK-411.28); and an extent's own object whose footer names another extent than its
-//! key, or a moves' that names another object than its key's, is no object of theirs.
+//! key is no object of its.
 
 use crate::Error;
 use crate::bucket::{self, Bucket, ByteRange};
 use crate::cache::Cache;
 use crate::checkpoint::Table;
 use crate::keys::{self, HostRing};
-use crate::layout::{self, Footer, Kind, Location, Moves, PART};
+use crate::layout::{self, Footer, Kind, Location, PART};
 use crate::lru::LruMap;
-use crate::moves::MOVES;
 use crate::object::{self, TAIL};
 use crate::peer::{Peer, Peers};
 use crate::trace::{self, Source};
@@ -76,11 +77,11 @@ impl Limits {
     pub const UNBOUNDED: Self = Self { requests: usize::MAX, bytes: u64::MAX };
 }
 
-/// The bytes of `extent`, at `location` in `bucket` or where the collector moved it from there,
-/// read once, by a fetcher of its own that keeps nothing and bounds no GET: a ranged read of its
-/// object's tail, and of each part it is in, checked and decompressed. A host reads through its
-/// [`Fetcher`], which keeps the parts it fetches, under its budget. cladefs: holding `keys`, its
-/// cell's ring: every object's data is encrypted (TASK-411.28).
+/// The bytes of `extent`, at `location` in `bucket`, read once, by a fetcher of its own that keeps
+/// nothing and bounds no GET: a ranged read of its object's tail, and of each part it is in,
+/// checked and decompressed. A host reads through its [`Fetcher`], which keeps the parts it
+/// fetches, under its budget. cladefs: holding `keys`, its cell's ring: every object's data is
+/// encrypted (TASK-411.28).
 pub async fn read<B: Bucket>(
     bucket: &Arc<B>,
     keys: &Arc<keys::Ring>,
@@ -266,10 +267,10 @@ struct Tail {
 
 impl Tail {
     /// The tail of the object at `key`, as read, `tail`: a segment's footer names the extents
-    /// sealed in it, and moves' those the collector moved there; an extent stored on its own is its
+    /// sealed in it; an extent stored on its own is its
     /// object's whole data, which its key names; a checkpoint's footer is its table. Other objects
-    /// hold no extents. cladefs: an extent's footer names it, and moves' the object they are of:
-    /// one naming another is refused, a whole object copied to another key (TASK-411.3).
+    /// hold no extents. cladefs: an extent's footer names it: one naming another is refused, a
+    /// whole object copied to another key (TASK-411.3).
     fn of(key: &str, tail: object::Tail) -> Result<Self, Error> {
         let parts = &tail.parts;
         let footer = tail.footer();
@@ -281,14 +282,6 @@ impl Tail {
                     .collect(),
                 None,
             ),
-            Kind::Moves { .. } => {
-                let moves = layout::decode::<Moves>(footer)?;
-                if Some(&moves.of) != layout::moved_from(key).as_ref() {
-                    return Err(Error::Corrupt(format!("{key} holds the moves of {}", moves.of)));
-                }
-                let extents = moves.extents.into_iter();
-                (extents.map(|(extent, to)| (extent, (to.offset, to.len))).collect(), None)
-            }
             Kind::Extent { cell, sequence, .. } => {
                 let extent = ExtentId::new(cell.id, sequence);
                 let named: ExtentId = layout::decode(footer)?;
@@ -942,10 +935,11 @@ impl<B: Bucket> Fetcher<B> {
         Self { spawn: Some(spawn), ..self }
     }
 
-    /// `len` bytes at `offset` in `extent`, at `location` or where the collector moved it from
-    /// there: as many as it holds. The object at a key holds the extent where its footer says; one
-    /// gone, the reader follows to its moves. One there that names it not, or whose parts fail the
-    /// CRCs its tail gives, is corrupt: a key names one object for good (TASK-407).
+    /// `len` bytes at `offset` in `extent`, at `location`: as many as it holds. The object at a key
+    /// holds the extent where its footer says. One there that names it not, or whose parts fail
+    /// the CRCs its tail gives, is corrupt: a key names one object for good (TASK-407). One gone
+    /// is [`Error::Lost`]: cladefs: its cell's writer may have relocated the extent since, which
+    /// its reader looks up again (doc-27).
     pub async fn read(
         &self,
         extent: ExtentId,
@@ -955,7 +949,7 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
     ) -> Result<Vec<u8>, Error> {
         let range = offset..offset.saturating_add(len);
-        self.followed(extent, location, range, priority, |key, tail, range| async move {
+        self.located(extent, location, range, priority, |key, tail, range| async move {
             if priority == Priority::Demand && !range.is_empty() {
                 self.read_ahead(&key, range.start / PART, (range.end - 1) / PART);
             }
@@ -973,8 +967,8 @@ impl<B: Bucket> Fetcher<B> {
         self.shared.cache.is_some()
     }
 
-    /// cladefs: fetches the parts that hold the `len` bytes at `offset` in `extent`, at `location`
-    /// or where the collector moved it from there, into the cache, as read-ahead: behind reads that
+    /// cladefs: fetches the parts that hold the `len` bytes at `offset` in `extent`, at `location`,
+    /// into the cache, as read-ahead: behind reads that
     /// wait for their data, its object's tail too, from the host that owns each first, if another
     /// does, and not unpacked (TASK-702.3). How many it fetched: by flights of its own, not those
     /// the cache or memory held, or reads in flight were fetching; none past the extent's end, or
@@ -989,7 +983,7 @@ impl<B: Bucket> Fetcher<B> {
         let Some(cache) = &self.shared.cache else { return Ok(0) };
         let range = offset..offset.saturating_add(len);
         let ahead = Priority::Ahead;
-        self.followed(extent, location, range, ahead, |key, tail, range| async move {
+        self.located(extent, location, range, ahead, |key, tail, range| async move {
             let mut fetched = 0;
             for part in tail.parts().frame.parts_of(range) {
                 if cache.holds(&key, part) || self.shared.recent_part(&key, part).is_some() {
@@ -1009,34 +1003,26 @@ impl<B: Bucket> Fetcher<B> {
         .await
     }
 
-    /// What `found` makes of the bytes `range` of `extent` (as many as it holds), at `location` or
-    /// where the collector moved it from there: given the key of the object holding it, the
-    /// object's tail, read at `priority`, and the bytes' range in its data; none if the object is
-    /// gone, which the extent's moves are followed from. The object at a key holds the extent
-    /// where its footer says; one that names it not is corrupt.
-    async fn followed<T, F: Future<Output = Result<Option<T>, Error>>>(
+    /// What `found` makes of the bytes `range` of `extent` (as many as it holds), at `location`:
+    /// given the key of the object holding it, the object's tail, read at `priority`, and the
+    /// bytes' range in its data; none if the object is gone, [`Error::Lost`] then. The object at a
+    /// key holds the extent where its footer says; one that names it not is corrupt.
+    async fn located<T, F: Future<Output = Result<Option<T>, Error>>>(
         &self,
         extent: ExtentId,
         location: &Location,
         range: Range<u64>,
         priority: Priority,
-        mut found: impl FnMut(String, Arc<Tail>, Range<u64>) -> F,
+        found: impl FnOnce(String, Arc<Tail>, Range<u64>) -> F,
     ) -> Result<T, Error> {
-        let mut key = location.key.clone();
-        for _ in 0..MOVES {
-            if let Some(tail) = land(self.shared.tail_at(&key, priority)).await? {
-                let Some(&(at, held)) = tail.extents.get(&extent) else {
-                    return Err(Error::Corrupt(format!("{key} holds no {extent:?}, named there")));
-                };
-                let held = at + range.start.min(held)..at + range.end.min(held);
-                if let Some(found) = found(key.clone(), tail, held).await? {
-                    return Ok(found);
-                }
-            }
-            let moved = self.moved(extent, &key).await?;
-            key = moved.ok_or_else(|| Error::Lost(format!("{extent:?} in {key}")))?;
-        }
-        Err(Error::Corrupt(format!("{extent:?} moved too often")))
+        let key = &location.key;
+        let lost = || Error::Lost(format!("{extent:?} in {key}"));
+        let tail = land(self.shared.tail_at(key, priority)).await?.ok_or_else(lost)?;
+        let Some(&(at, held)) = tail.extents.get(&extent) else {
+            return Err(Error::Corrupt(format!("{key} holds no {extent:?}, named there")));
+        };
+        let held = at + range.start.min(held)..at + range.end.min(held);
+        found(key.clone(), tail, held).await?.ok_or_else(lost)
     }
 
     /// Where `extent` is as of the checkpoint at `key`, if it holds it, looked up a block at a time
@@ -1116,22 +1102,6 @@ impl<B: Bucket> Fetcher<B> {
             bytes.extend_from_slice(&part[from..to]);
         }
         Ok(Found::Bytes(bytes))
-    }
-
-    /// The key of the moves of the object at `key` the collector moved `extent` to when it
-    /// compacted the object, if it did: of its moves listed, each a pass's, the latest whose footer
-    /// names it, as the collector and writers follow them ([`crate::moves::MovesMaps`],
-    /// TASK-407.1).
-    async fn moved(&self, extent: ExtentId, key: &str) -> Result<Option<String>, Error> {
-        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await?;
-        trace::note(Some(Source::Bucket));
-        for meta in listed.iter().rev() {
-            let tail = land(self.shared.tail(&meta.key)).await?;
-            if tail.is_some_and(|tail| tail.extents.contains_key(&extent)) {
-                return Ok(Some(meta.key.clone()));
-            }
-        }
-        Ok(None)
     }
 
     /// Reads ahead of a read of parts `first..=last` of the object at `key`: the part after them,
@@ -1547,7 +1517,7 @@ mod tests {
     use super::*;
     use crate::bucket::PutMode;
     use crate::layout::test_cell;
-    use crate::layout::{self, Frame, Moves};
+    use crate::layout::{self, Frame};
     use crate::object::TAIL;
     use crate::testing::{Direct, Fault, SimBucket};
     use futures::executor::{LocalPool, block_on};
@@ -2278,83 +2248,31 @@ mod tests {
         assert_eq!(reads.result(read), want);
     }
 
-    /// Where [`EXTENT`] is in the segment at [`KEY`] that the collector compacts in the tests of
-    /// moves: at this offset, of this length.
-    const MOVED: (u64, u64) = (1000, 1000);
+    /// Where [`EXTENT`] is in the segment at [`KEY`] in the tests of an object gone.
+    const HELD: (u64, u64) = (1000, 1000);
 
-    /// A bucket holding a segment of `data` at [`KEY`], whose footer names [`EXTENT`] at
-    /// [`MOVED`] in it.
-    fn holding_moved(data: &[u8]) -> Arc<SimBucket> {
-        holding(segment(data, vec![(EXTENT, MOVED.0, MOVED.1)]))
-    }
-
-    /// The collector moves [`EXTENT`] from the segment of `data` at [`KEY`] in `bucket`, compacting
-    /// it, then deletes it.
-    fn compacted(bucket: &Arc<SimBucket>, data: &[u8]) {
-        let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 10, len: MOVED.1 };
-        let mut moved = vec![0; 10];
-        moved.extend_from_slice(&data[MOVED.0 as usize..][..MOVED.1 as usize]);
-        let moves = layout::with_footer(
-            &moved,
-            &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] },
-            crate::testing::encrypting(layout::test_cell(1)),
-        );
-        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create))
-            .unwrap();
-        block_on(direct.delete(KEY)).unwrap();
-    }
-
-    /// A read of an extent whose object the collector compacted reads it where it moved.
+    /// cladefs: a read by a fetcher that kept the tail of an object deleted since, its extents
+    /// relocated by its cell's writer (doc-27), finds its part gone, and the extent lost there,
+    /// which its reader looks up again: as the object at a key is the one its tail is of, for good
+    /// (TASK-407), a tail kept is never another's.
     #[test]
-    fn reads_follow_moves() {
-        let data = pattern(3000);
-        let bucket = holding_moved(&data);
-        compacted(&bucket, &data);
-        let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), None));
-        assert_eq!(read_moved(&bucket, &fetcher), Some(Ok(data[1100..1150].to_vec())));
-    }
-
-    /// Reads 50 bytes at 100 in [`EXTENT`], at [`MOVED`] in the object at [`KEY`], with `fetcher`.
-    fn read_moved(bucket: &SimBucket, fetcher: &Rc<Fetcher<SimBucket>>) -> Option<Read> {
-        let mut reads = Reads::new();
-        let at = Location { key: KEY.into(), offset: MOVED.0, len: MOVED.1 };
-        let read = reads.read(fetcher, at, 100, 50, Priority::Demand);
-        complete_all(bucket, &mut reads);
-        reads.result(read)
-    }
-
-    /// A read by a fetcher that kept the tail of an object the collector compacted and deleted
-    /// since finds its part gone, and reads the extent where the collector moved it: as the object
-    /// at a key is the one its tail is of, for good (TASK-407), a tail kept is never another's.
-    #[test]
-    fn reads_by_tails_kept_follow_moves_of_objects_gone() {
+    fn reads_by_tails_kept_of_objects_gone_are_lost() {
         let data = noise(3000);
-        let bucket = holding_moved(&data);
+        let bucket = holding(segment(&data, vec![(EXTENT, HELD.0, HELD.1)]));
         let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), None));
-        assert_eq!(read_moved(&bucket, &fetcher), Some(Ok(data[1100..1150].to_vec())));
-        compacted(&bucket, &data);
+        let at = Location { key: KEY.into(), offset: HELD.0, len: HELD.1 };
         let mut reads = Reads::new();
-        let at = Location { key: KEY.into(), offset: MOVED.0, len: MOVED.1 };
-        let read = reads.read(&fetcher, at, 100, 50, Priority::Demand);
-        let moves = layout::moves(KEY, 1).unwrap();
-        let moved = block_on(Direct(bucket.clone()).get(&moves)).unwrap().bytes;
-        let moved = extent_frame::Parts::of(&moved, &extent_frame::NoKeys);
-        assert_eq!(
-            complete_all(&bucket, &mut reads),
-            [
-                format!("get {KEY} 0..3000"),
-                format!("list {}", layout::moves_of(KEY).unwrap()),
-                format!("get {moves} last {TAIL}"),
-                format!("get {moves} {:?}", moved.unwrap().stored[0].range()),
-            ]
-        );
+        let read = reads.read(&fetcher, at.clone(), 100, 50, Priority::Demand);
+        complete_all(&bucket, &mut reads);
         assert_eq!(reads.result(read), Some(Ok(data[1100..1150].to_vec())));
+        block_on(Direct(bucket.clone()).delete(KEY)).unwrap();
+        let read = reads.read(&fetcher, at, 100, 50, Priority::Demand);
+        assert_eq!(complete_all(&bucket, &mut reads), [format!("get {KEY} 0..3000")]);
+        assert_eq!(reads.result(read), Some(Err(Error::Lost(format!("{EXTENT:?} in {KEY}")))));
     }
 
     /// A read of an extent by a fetcher of its own ([`read`]) asks for its object's tail, then for
-    /// the parts the extent is in; with the object gone, moved nowhere, its moves listed, none
-    /// (TASK-407.1), the extent is lost.
+    /// the parts the extent is in; with the object gone, the extent is lost.
     #[test]
     fn reads_on_their_own_fetch_the_tail_then_the_parts() {
         let data = noise(PART + 300);
@@ -2368,8 +2286,7 @@ mod tests {
         block_on(Direct(bucket.clone()).delete(KEY)).unwrap();
         let (lost, asked) = bucket.served(read(&bucket, &ring(), EXTENT, &location));
         assert_eq!(lost, Err(Error::Lost(format!("{EXTENT:?} in {KEY}"))));
-        let moves = format!("list {}", layout::moves_of(KEY).unwrap());
-        assert_eq!(asked, [format!("get {KEY} last {TAIL}"), moves]);
+        assert_eq!(asked, [format!("get {KEY} last {TAIL}")]);
     }
 
     /// A range of an object's data is read from the parts it touches; an empty one reads none; one

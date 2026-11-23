@@ -315,10 +315,10 @@ async fn passes_run_among_an_image_and_its_forks_commits() {
         drop(fork.close().await.unwrap());
         drop(fs.close().await.unwrap());
     });
-    // The passes among the commits compacted and deleted.
+    // The passes among the commits deleted.
     let (passes, collected) = (collecting.passes(), collecting.collected());
     assert!(passes > 4, "{passes} passes");
-    assert!(collected.compacted > 0 && collected.deleted > 0, "{collected:?}, {passes} passes");
+    assert!(collected.deleted > 0, "{collected:?}, {passes} passes");
     drop(collecting);
     let report = Storage::open(&path).await.unwrap().collecting().unwrap().pass_now();
     assert!(report.deleted > 0, "{report:?}");

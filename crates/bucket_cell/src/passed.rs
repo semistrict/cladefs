@@ -16,24 +16,19 @@
 //!
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
 //! records, as it lets the lease go, the digest of its listing of the cell, but the collector's
-//! lease (`<C>gc/lease`); the options it decided by; what it found no live cell needs but for the
-//! time since an object was written, each with when it may go ([`Deferred`]); the cell's objects
-//! and bytes, by kind, as of its listing ([`Usage`]); and how many objects encrypted it left
-//! uncompacted, its cell's KEK not to be had ([`Passed::uncompacted`]).
+//! lease (`<C>gc/lease`), and the cell's objects and bytes, by kind, as of its listing ([`Usage`]).
 //!
-//! A pass whose listing has the digest recorded, of options the same, decides what the recorded
-//! one did: everything it decides by is under the cell's prefix, and an object there written,
-//! rewritten or deleted since changes the listing, or it was recorded with no digest
-//! ([`Passed::listing`]). It deletes what was deferred once due, and nothing else (doc-7 has why
-//! that is as safe as a pass in full). cladefs: one recorded leaving objects encrypted uncompacted
-//! holds only while their cell's tenant's KEK is still not to be had (TASK-411.13). Who recorded
-//! it, of what process, is of no matter: the lease's holders and times are in the lease, outside
-//! the digest, and a pass of other options decides anew. cladefs: the marks of mark-only passes
-//! (`<C>gc/marks/`) are in it (board 8515): they keep a dead cell from being removed whole, and a
-//! pass skipping by a digest without them never removed one whose marks an operator cleared.
+//! A pass whose listing has the digest recorded decides what the recorded one did: everything it
+//! decides by is under the cell's prefix, and an object there written, rewritten or deleted since
+//! changes the listing, or it was recorded with no digest ([`Passed::listing`]). It deletes nothing
+//! (doc-7 has why that is as safe as a pass in full). Who recorded it, of what process, is of no
+//! matter: the lease's holders and times are in the lease, outside the digest. cladefs: the marks
+//! of mark-only passes (`<C>gc/marks/`) are in it (board 8515): they keep a dead cell from being
+//! removed whole, and a pass skipping by a digest without them never removed one whose marks an
+//! operator cleared.
 
 use crate::bucket::{self, Bucket, Meta};
-use crate::collector::{Holding, Options};
+use crate::collector::Holding;
 use crate::layout::{self, CellId, FORMAT};
 use crate::{Error, Left, lifecycle};
 use serde::{Deserialize, Serialize};
@@ -113,53 +108,17 @@ pub struct Passed {
     /// ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
     /// by more than the cell holds, which may change with no object of the cell's changing: a
     /// version of another cell's record, read for a clone of it being made; an origin found lost; a
-    /// cell's recovery that found what it needs lost, and then nothing lost. Or if it deleted only
-    /// what a pass before deferred, without deciding anew what goes once that is gone.
+    /// cell's recovery that found what it needs lost, and then nothing lost.
     pub listing: Option<[u8; 32]>,
-    /// The options it decided by.
-    pub decided: Decided,
-    /// What it found no live cell needs, but that it was written too recently, each with when it
-    /// may go, by the backend's clock: in the order of their keys.
-    pub deferred: Vec<Deferred>,
-    /// The cell's objects and bytes, as of its listing, less what it deleted, and with what it
-    /// compacted to.
+    /// The cell's objects and bytes, as of its listing, less what it deleted.
     pub usage: Usage,
-    /// cladefs: the objects encrypted it would have compacted, and left, its cell's KEK not to be
-    /// had (TASK-411.13): the KMS refusing it, or the collector having none. A pass listing the
-    /// same skips the cell only while its tenant's KEK is still not to be had, as the KMS says once
-    /// a sweep ([`crate::collector::Heard`]), and goes over it in full, compacting them, once it
-    /// is.
-    pub uncompacted: u64,
 }
 
 impl Passed {
-    /// Whether a pass of `options` that listed the cell as `listed` decides as this one did.
-    pub(crate) fn holds_for(&self, listed: &Listed, options: &Options) -> bool {
-        self.listing == Some(listed.digest) && self.decided == Decided::by(options)
+    /// Whether a pass that listed the cell as `listed` decides as this one did.
+    pub(crate) fn holds_for(&self, listed: &Listed) -> bool {
+        self.listing == Some(listed.digest)
     }
-}
-
-/// The options a pass decided by ([`Options`]), as recorded: the fraction below which it compacts,
-/// by its bits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Decided {
-    pub compact_below: u64,
-    pub grace: u64,
-}
-
-impl Decided {
-    pub(crate) fn by(options: &Options) -> Self {
-        Self { compact_below: options.compact_below.to_bits(), grace: options.grace }
-    }
-}
-
-/// An object a pass found no live cell needs once a grace period went by since an object was
-/// written: one compacted, its moves too recent; moves of an object gone, or compacted in turn
-/// ([`crate::collector`]). Its key, and when it may go, by the backend's clock.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Deferred {
-    pub key: String,
-    pub due: u64,
 }
 
 /// What a cell takes in the bucket, as a pass's listing found it ([`Passed::usage`],
@@ -170,7 +129,7 @@ pub struct Usage {
     /// on a real backend.
     pub measured: u64,
     /// Objects, and their bytes as stored, by kind ([`layout::Kind::name`]): the cell's
-    /// objects, what the collector compacted of them, its lease and marks, and the references of
+    /// objects, its collector's lease and marks, and the references of
     /// forks of its cells; the garbage among them the collector has yet to reclaim too.
     pub kinds: BTreeMap<String, Sum>,
 }
@@ -521,15 +480,7 @@ mod tests {
     fn leases_count_themselves() {
         let mut usage = Usage { measured: 3, ..Usage::default() };
         usage.add(&layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 }, 0), 40);
-        let deferred = vec![Deferred { key: "k".into(), due: 9 }];
-        let passed = Passed {
-            listing: Some([7; 32]),
-            decided: Decided { compact_below: 0, grace: 0 },
-            deferred,
-            usage,
-            uncompacted: 3,
-        };
-        let passed = Some(passed);
+        let passed = Some(Passed { listing: Some([7; 32]), usage });
         let lease =
             CollectorLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };
         let lease = lease.counting_itself();

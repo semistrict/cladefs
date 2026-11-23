@@ -23,7 +23,7 @@ use crate::replicate::{LinkError, MemberLink, Replicator};
 use crate::upload::{self, Awaited, Clock, Failure, Members, MembersOf, Shared, Spawn};
 use crate::{Description, LocalCell, MemDir, Place, Recovering};
 use base32_id::Short;
-use bucket_cell::collector::{self, Options};
+use bucket_cell::collector;
 use bucket_cell::fetch::{Budget, Limits};
 use bucket_cell::layout::{self, Origin, epoch_of, writer_of};
 use bucket_cell::testing::{Direct, Fault, SimBucket, key_of};
@@ -142,7 +142,8 @@ pub struct Profile {
     /// mirrors, kept while their cells' children live, reached in every run (TASK-633.10).
     pub teardown: bool,
     pub weights: Weights,
-    pub options: Options,
+    /// The most the bucket's clock advances a tick ([`Weights::tick`]).
+    pub ticks: u64,
 }
 
 impl Weights {
@@ -234,7 +235,7 @@ impl Default for Profile {
                 partition: 0,
                 relocate: 0,
             },
-            options: Options { compact_below: 0.5, grace: 4 },
+            ticks: 4,
         }
     }
 }
@@ -940,10 +941,10 @@ impl Drop for Running {
 /// A sweep of the collector over every cell of `bucket`, as `id`. cladefs: of a region's bucket, by
 /// a collector of its region, its own cell's copies of other buckets' cells passed over as such
 /// (TASK-633.8).
-async fn sweep(bucket: &SimBucket, id: u64, options: &Options) -> Result<collector::Report, Error> {
+async fn sweep(bucket: &SimBucket, id: u64) -> Result<collector::Report, Error> {
     match bucket.home() {
-        0 => collector::collect(bucket, id, options).await,
-        _ => collector::collect_with_own(bucket, &*bucket.own(), id, options).await,
+        0 => collector::collect(bucket, id).await,
+        _ => collector::collect_with_own(bucket, &*bucket.own(), id).await,
     }
 }
 
@@ -1146,7 +1147,7 @@ impl World {
             18 => self.drop_version(),
             19 => self.restore_version(),
             20 => {
-                let ticks = self.rng.random_range(1..=self.profile.options.grace);
+                let ticks = self.rng.random_range(1..=self.profile.ticks);
                 self.bucket.advance(ticks);
             }
             21 => self.deliver(),
@@ -2655,8 +2656,7 @@ impl World {
             return;
         }
         let id = self.id();
-        let (bucket, events, options) =
-            (self.bucket.clone(), self.events.clone(), self.profile.options);
+        let (bucket, events) = (self.bucket.clone(), self.events.clone());
         // cladefs: a region's collector, of its own bucket (TASK-633.10).
         let bucket = match self.profile.regions {
             0 => bucket,
@@ -2668,8 +2668,8 @@ impl World {
             .then(|| sim_cell(cells[self.rng.random_range(0..cells.len())]));
         let handle = self.spawn(async move {
             let result = match cell {
-                Some(cell) => collector::collect_cell(&*bucket, cell, id, &options).await,
-                None => sweep(&bucket, id, &options).await,
+                Some(cell) => collector::collect_cell(&*bucket, cell, id).await,
+                None => sweep(&bucket, id).await,
             };
             events.borrow_mut().push(Event::Collected { id, result });
         });
@@ -2851,9 +2851,9 @@ impl World {
 
     /// Checks that a sweep of the collector that ran alone, the bucket holding `before` as it
     /// started, the objects' sizes by their keys, reports what it did (TASK-44.1): the objects it
-    /// deleted, and the moves it wrote. cladefs: and no more references gone than it retired,
-    /// whether or not they were there (TASK-395.4), and deleted marked (TASK-395.13); and the bytes
-    /// of what it deleted, and of what it compacted, as they were (TASK-395.5).
+    /// deleted. cladefs: and no more references gone than it retired, whether or not they were
+    /// there (TASK-395.4), and deleted marked (TASK-395.13); and the bytes of what it deleted, as
+    /// they were (TASK-395.5).
     fn check_report(
         &mut self,
         before: &BTreeMap<String, u64>,
@@ -2862,10 +2862,9 @@ impl World {
         // cladefs: by where each is kept ([`SimBucket::stored`]): a copy in one region's bucket and
         // its original in another's apart (TASK-633.8).
         let after: BTreeSet<String> = self.bucket.stored().into_iter().collect();
-        fn kind(stored: &str) -> layout::Kind<'_> {
+        fn kind(stored: &str) -> layout::Kind {
             layout::kind(key_of(stored))
         }
-        let moves = |key: &&String| matches!(kind(key), layout::Kind::Moves { .. });
         let reference = |key: &&String| matches!(kind(key), layout::Kind::Reference { .. });
         // The collector's leases, its own, which it reports not. cladefs: and the pins and holds of
         // mirrors, theirs, which a pass over a copy deletes, or a mirror it begins again lets go,
@@ -2883,31 +2882,15 @@ impl World {
             _ => false,
         };
         let gone = || before.keys().filter(|key| !after.contains(*key) && !lease(key));
-        let made = || after.iter().filter(|key| !before.contains_key(*key));
         let retired = gone().filter(reference).count();
         let markers = gone().filter(|key| matches!(kind(key), layout::Kind::Mirror { .. }));
         *self.mirrored.entry("collected").or_default() += markers.count();
-        // A pass over a copy compacts nothing: the moves a mirror it begins again copies there are
-        // copies (TASK-633.8).
-        let compacting = |key: &&String| moves(key) && !copy(key);
         let expected = |reported: &collector::Report| collector::Report {
             deleted: gone().filter(|key| !reference(key)).count(),
-            compacted: made().filter(compacting).count(),
             retired: reported.retired.max(retired),
             deleted_bytes: gone().filter(|key| !reference(key)).map(|key| before[key]).sum(),
-            // Each moves of what was there then, the object it is of.
-            compacted_bytes: (made().filter(compacting))
-                .filter_map(|moves| {
-                    let of = layout::moved_from(key_of(moves))?;
-                    before.get(&format!("{}{of}", &moves[..moves.len() - key_of(moves).len()]))
-                })
-                .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
-            // Its cells are encrypted under the tests' KMS, which its collectors hold: nothing is
-            // left locked (TASK-411.6, TASK-411.28).
-            locked: 0,
-            uncompacted: 0,
             // cladefs: the cells whose heads went, as only a dead cell's removal deletes them
             // (TASK-455): every slot of each (TASK-691).
             removed: gone()
@@ -3006,12 +2989,11 @@ impl World {
         text
     }
 
-    /// Checks that the bucket holds only what live cells need, compacted as the collectors
-    /// could (TASK-44.1): [`bucket_cell::testing::uncollected`], its live cells by their records.
+    /// Checks that the bucket holds only what live cells need (TASK-44.1):
+    /// [`bucket_cell::testing::uncollected`], its live cells by their records.
     fn check_collected(&mut self) {
         let direct = Direct(self.bucket.clone());
-        let compact_below = self.profile.options.compact_below;
-        for left in block_on(bucket_cell::testing::uncollected(&direct, compact_below)) {
+        for left in block_on(bucket_cell::testing::uncollected(&direct)) {
             self.violation(left);
         }
         // cladefs: and what each region's bucket keeps of other buckets' cells (TASK-633.8).
@@ -3221,7 +3203,7 @@ impl World {
                 };
             let state = &recovered.state;
             // Every acknowledged segment's objects exist: what recovering the cell read, and
-            // what holds each extent it names, or the moves that say where that went.
+            // what holds each extent it names.
             for key in &recovered.touched {
                 if !keys.contains(key) {
                     violations
@@ -3229,10 +3211,7 @@ impl World {
                 }
             }
             for (extent, location) in &state.extents {
-                // Its moves, any pass's (TASK-407.1).
-                let moves = layout::moves_of(&location.key).unwrap();
-                let moved = keys.iter().any(|key| key.starts_with(&moves));
-                if !keys.contains(&location.key) && !moved {
+                if !keys.contains(&location.key) {
                     violations.push(format!(
                         "{extent:?} of {id}: {} is gone",
                         location.key,
@@ -3515,16 +3494,15 @@ impl World {
 
     // The end.
 
-    /// Runs a sweep of the collector over every cell, alone, past the grace period, and checks what
+    /// Runs a sweep of the collector over every cell, alone, and checks what
     /// it reports it did ([`World::check_report`]): what it reported, if it did.
     /// cladefs: with regions, a sweep of each region's bucket in turn, by a collector of its own,
-    /// as each region runs its own (TASK-633.10): what they deleted and compacted, all told.
+    /// as each region runs its own (TASK-633.10): what they deleted, all told.
     fn sweep_alone(&mut self) -> Option<collector::Report> {
         let mut all = collector::Report::default();
         for bucket in self.region_buckets() {
             let report = self.sweep_alone_in(bucket)?;
             all.deleted += report.deleted;
-            all.compacted += report.compacted;
         }
         Some(all)
     }
@@ -3540,15 +3518,14 @@ impl World {
     /// A sweep of `bucket` alone ([`World::sweep_alone`]), checked against what every region's
     /// bucket holds before and after.
     fn sweep_alone_in(&mut self, bucket: Arc<SimBucket>) -> Option<collector::Report> {
-        self.bucket.advance(self.profile.options.grace + 1);
+        self.bucket.advance(self.profile.ticks + 1);
         let id = self.id();
-        let options = self.profile.options;
         let reported = Rc::new(RefCell::new(None));
         let report = reported.clone();
         // Every region's objects, by where each is kept.
         let before = self.bucket.sizes();
         self.spawn(async move {
-            *report.borrow_mut() = Some(sweep(&bucket, id, &options).await);
+            *report.borrow_mut() = Some(sweep(&bucket, id).await);
         });
         self.settle();
         let reported = reported.take();
@@ -3665,14 +3642,14 @@ impl World {
         }
     }
 
-    /// Sweeps until two in a row delete and compact nothing: a dead cell's pass retires the
+    /// Sweeps until two in a row delete nothing: a dead cell's pass retires the
     /// references its parents' cells keep origins for, which their next passes reclaim, a sweep a
     /// generation of a chain (TASK-395.4).
     fn sweep_until_quiet(&mut self) {
         let mut quiet = 0;
         for _ in 0..16 {
             let Some(report) = self.sweep_alone() else { break };
-            quiet = if report.deleted == 0 && report.compacted == 0 { quiet + 1 } else { 0 };
+            quiet = if report.deleted == 0 { quiet + 1 } else { 0 };
             if quiet == 2 {
                 break;
             }

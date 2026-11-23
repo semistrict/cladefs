@@ -257,8 +257,7 @@ impl World {
     /// delete nothing: a dead cell's pass retires the references its parent's cell keeps the fork
     /// version for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(&self, case: &str) {
-        let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
-        let collected = bucket_cell::testing::collect_until_quiet(&*self.bucket, &options);
+        let collected = bucket_cell::testing::collect_until_quiet(&*self.bucket);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 

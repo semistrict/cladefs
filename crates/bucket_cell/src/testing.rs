@@ -5,15 +5,13 @@
 //! cladefs: what tests of the protocol need (the `testing` feature, TASK-88): a bucket whose
 //! requests take effect when the test says ([`SimBucket`]): in any order, failing before or after
 //! taking effect, or after whoever made them has gone; a writer's creates of segments, if it says,
-//! only once an object at their keys was deleted; and the collector's moves, which a test follows
-//! as a reader does ([`MovesMaps`]). local_cell's simulation of doc-7's protocol runs on it, as
-//! this crate's own tests do. cladefs: and a DEK objects framed outside a writer are encrypted
-//! under, and a ring holding it ([`encrypting`], [`ring`]): nothing is framed in the clear
-//! (TASK-411.28).
+//! only once an object at their keys was deleted. local_cell's simulation of doc-7's protocol runs
+//! on it, as this crate's own tests do. cladefs: and a DEK objects framed outside a writer are
+//! encrypted under, and a ring holding it ([`encrypting`], [`ring`]): nothing is framed in the
+//! clear (TASK-411.28).
 
 use crate::bucket::{Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Version};
 use crate::layout::{self, CellId, Kind};
-pub use crate::moves::{Moved, MovesMaps};
 use futures::channel::oneshot;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -187,7 +185,7 @@ impl SimBucket {
     /// Holds the creates of segments of `cell` by its writers of epoch `epoch` and before,
     /// those waiting and those to come, each until a delete of an object at its key takes effect,
     /// when it waits again: a writer taken over, whose creates are in flight while the next one's
-    /// segments take their places, which the collector compacts and deletes, landing then
+    /// segments take their places, which the collector deletes, landing then
     /// (TASK-79.18).
     pub fn hold(&self, cell: CellId, epoch: u64) {
         let inner = &mut *self.inner.lock().unwrap();
@@ -883,23 +881,20 @@ pub async fn live(bucket: &impl Bucket) -> Result<BTreeMap<CellId, layout::Head>
     Ok(live)
 }
 
-/// cladefs: sweeps of the collector over every cell of `bucket`, of `options`, each as a holder of
-/// its own, until two in a row delete and compact nothing: their reports, summed. Two, as a pass
+/// cladefs: sweeps of the collector over every cell of `bucket`, each as a holder of its own,
+/// until two in a row delete nothing: their reports, summed. Two, as a pass
 /// over a dead cell retires the references that kept what its parents' cells reclaim at their next,
 /// and a pass retiring them again deletes nothing (TASK-395.4). It fails as a sweep fails, and
-/// panics after [`SWEEPS`]: passes that never settle are a bug. cladefs: compacting under the
-/// tests' KMS (`keys::testing`), which every test writer encrypts under (TASK-411.28).
+/// panics after [`SWEEPS`]: passes that never settle are a bug.
 pub async fn collect_until_quiet(
     bucket: &impl Bucket,
-    options: &crate::collector::Options,
 ) -> Result<crate::collector::Report, crate::Error> {
-    let kms = Some(crate::keys::testing::kms());
-    let mut collector = crate::collector::Collector::new(*options).kms(kms);
+    let mut collector = crate::collector::Collector::new();
     let (mut total, mut quiet) = (crate::collector::Report::default(), 0);
     for sweep in 0..SWEEPS {
         let report = collector.collect(bucket, 1 << 40 | sweep).await?;
         total += report;
-        quiet = if report.deleted == 0 && report.compacted == 0 { quiet + 1 } else { 0 };
+        quiet = if report.deleted == 0 { quiet + 1 } else { 0 };
         if quiet == 2 {
             return Ok(total);
         }
@@ -911,21 +906,18 @@ pub async fn collect_until_quiet(
 pub const SWEEPS: u64 = 32;
 
 /// cladefs: what the collector should have collected of `bucket` and left (TASK-390), once
-/// passes ran alone, of `compact_below`, past the grace period, the cells' writers all done:
-/// each a line, `garbage left: KEY`, an object no live cell needs, or `left uncompacted: KEY, ...`,
-/// one a live cell names whose live extents take less than `compact_below` of its data, its
-/// moves not written. The live cells are those whose records say so, recovered as their
+/// passes ran alone, the cells' writers all done: each a line, `garbage left: KEY`, an object no
+/// live cell needs. The live cells are those whose records say so, recovered as their
 /// records say they were made; one that fails to recover is passed over, as a claim's may.
 ///
 /// It works out what the live cells need as doc-7 says, not as the collector does, so that a
-/// collector that keeps or compacts too little of what is freed fails it, as one that loses what is
-/// live fails the tests' reads: the space a pass frees, not only what it keeps, is checked. It
-/// was the simulation's end checks; TASK-293's compressed segments, never compacted, went unseen
-/// by every test outside it.
+/// collector that keeps too much fails it, as one that loses what is live fails the tests' reads:
+/// the space a pass frees, not only what it keeps, is checked. It was the simulation's end
+/// checks.
 ///
 /// cladefs: per cell and conservatively, as doc-7 has the collector since TASK-395: each origin
 /// a reference names, or a live cell's fork to another cell, is needed whole, its state's extents
-/// along their ways from where they were sealed, and what recovering it reads, whatever its
+/// and what recovering it reads, whatever its
 /// children hold of it; a reference is garbage once its child is deleted, of that origin, in
 /// another cell holding no live cell and no reference; one whose child has no record is garbage
 /// at once, but a live cell's fork's, whose writers record it yet: no pass would ever retire it
@@ -934,10 +926,8 @@ pub const SWEEPS: u64 = 32;
 /// stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose head is a
 /// root's or a clone's made, deleted, of an ID an allocator gave, which goes whole, head and lease
 /// (TASK-455); and the lease of a cell of no head once nothing else is left.
-pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String> {
-    use crate::layout::Location;
+pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
     use layout::Head;
-    use storage_device::ExtentId;
     let keys: BTreeSet<String> =
         crate::bucket::list(bucket, "").await.unwrap().into_iter().map(|meta| meta.key).collect();
     let mut records: BTreeMap<CellId, Head> = BTreeMap::new();
@@ -980,17 +970,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             && held.all(|(_, record)| record.removable())
     };
     let recorded = |cell: layout::CellId| records.keys().any(|of| *of == cell);
-    // The moves of a location's object listed, every pass's (TASK-407.1): none of no cell's, which
-    // nothing compacts.
-    let moves_of = |key: &str| -> Vec<String> {
-        let Ok(prefix) = layout::moves_of(key) else { return Vec::new() };
-        let listed = keys.range(prefix.clone()..).take_while(|moves| moves.starts_with(&prefix));
-        listed.cloned().collect()
-    };
-    let mut maps = MovesMaps::default();
     let mut needed = BTreeSet::new();
-    let mut touched = BTreeSet::new();
-    let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
     let mut versions: BTreeSet<(CellId, u64)> = BTreeSet::new();
     let mut retirable = BTreeSet::new();
     for (&cell, record) in &records {
@@ -1015,11 +995,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         for version in recovered.head.iter().flat_map(|head| &head.versions) {
             versions.insert((cell, version.at));
         }
-        touched.extend(recovered.touched.iter().cloned());
         needed.extend(recovered.touched);
-        // Its writer may name its extents anywhere on their ways from where they were sealed,
-        // unless its state is from a checkpoint of the writer holding its head (TASK-175).
-        let behind = checkpoint.is_none_or(|(_, by)| by != epoch);
         // What its head may yet name: of its epoch, or a later one, its segments and extents of
         // their own at or past its end, and its checkpoints newer than its own (TASK-407).
         needed.extend(
@@ -1036,24 +1012,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
                 })
                 .cloned(),
         );
-        for (&extent, location) in &recovered.state.extents {
-            needed.insert(location.key.clone());
-            named.entry(location.key.clone()).or_default().insert(extent, location.len);
-            let mut key = location.key.clone();
-            while let Some(from) = layout::moved_from(&key).filter(|_| behind) {
-                needed.insert(key);
-                key = from;
-            }
-            // Its readers follow the moves of what its state names, until a checkpoint records
-            // where they went: a cell's whose writer has not checkpointed since.
-            let mut at: Location = location.clone();
-            while !moves_of(&at.key).is_empty() {
-                let Ok(Moved::To(to)) = maps.moved(bucket, extent, &at.key).await else { break };
-                needed.extend(moves_of(&at.key));
-                needed.insert(to.key.clone());
-                at = to;
-            }
-        }
+        needed.extend(recovered.state.extents.values().map(|location| location.key.clone()));
     }
     // A reference stays while its child's record names its origin, until its cell's pass may
     // retire it, or while a live cell's fork may yet name it or take it back; any other is one
@@ -1082,25 +1041,8 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         let Ok((state, read)) = crate::recovery::recover_at(&checkpoints, parent, at).await else {
             continue;
         };
-        touched.extend(read.iter().cloned());
         needed.extend(read);
-        for (&extent, location) in &state.extents {
-            needed.insert(location.key.clone());
-            named.entry(location.key.clone()).or_default().insert(extent, location.len);
-            let mut key = location.key.clone();
-            while let Some(from) = layout::moved_from(&key) {
-                needed.insert(key);
-                key = from;
-            }
-            let mut at: Location = location.clone();
-            while !moves_of(&at.key).is_empty() {
-                let Ok(Moved::To(to)) = maps.moved(bucket, extent, &at.key).await else { break };
-                needed.extend(moves_of(&at.key));
-                needed.insert(to.key.clone());
-                named.entry(to.key.clone()).or_default().insert(extent, to.len);
-                at = to;
-            }
-        }
+        needed.extend(state.extents.values().map(|location| location.key.clone()));
     }
     let mut left = Vec::new();
     for key in &keys {
@@ -1127,12 +1069,6 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             // cladefs: as its mirror's copy says ([`uncollected_copies`]).
             Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
-            // Moves naming nothing live stay while what they are of stays, as a pass deletes them
-            // only once it is gone (specs/bucket's doomedKey): of one a fork's ways from seals
-            // keep, for as long as it does (TASK-697).
-            Kind::Moves { .. } => {
-                layout::moved_from(key).is_some_and(|from| needed.contains(&from))
-            }
             // cladefs: a failed head's marks, a day, and a head its maker left unmade, an hour,
             // till the collector fails it (TASK-691).
             Kind::Head { cell, .. } => {
@@ -1158,22 +1094,6 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             left.push(format!("garbage left: {key}"));
         }
     }
-    for (key, extents) in named {
-        let compactable = matches!(layout::kind(&key), Kind::Segment { .. } | Kind::Moves { .. });
-        if !compactable || touched.contains(&key) || !moves_of(&key).is_empty() {
-            continue;
-        }
-        let Some(object) = crate::bucket::get(bucket, &key).await.unwrap() else { continue };
-        // cladefs: its data's length, as its trailer says, read holding no key (TASK-411.28).
-        let Ok(frame) = layout::Frame::of(&object.bytes) else { continue };
-        let used: u64 = extents.values().sum();
-        if (used as f64) < compact_below * frame.data_len as f64 {
-            left.push(format!(
-                "left uncompacted: {key}, {used} of its {} bytes live",
-                frame.data_len
-            ));
-        }
-    }
     left
 }
 
@@ -1189,8 +1109,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
 /// stale one's again. A hold of this bucket's in another stays while its version is marked here,
 /// and no longer; a marker is never without its hold (`HoldsMarked`, which keeps there what the
 /// version inherits), nor its copy short: the checkpoint at the version, what recovering it read
-/// of its cell, and each of its cell's extents its state names, where it is here or where its
-/// moves here lead. And a version marked here leaves no live child here depending on its cell's
+/// of its cell, and each of its cell's extents its state names, where it is here. And a version marked here leaves no live child here depending on its cell's
 /// bucket alone (specs/buckets): each refers here.
 pub async fn uncollected_copies(
     bucket: &impl Bucket,
@@ -1329,14 +1248,9 @@ async fn copied_whole(
     if !has_checkpoint {
         return Err(format!("checkpoint for {cell} at {at} not copied"));
     }
-    let mut maps = MovesMaps::default();
     for (&extent, location) in state.extents.iter().filter(|(_, location)| ours(&location.key)) {
-        let mut key = location.key.clone();
-        while !here.contains(&key) {
-            match maps.moved(own, extent, &key).await {
-                Ok(Moved::To(to)) => key = to.key,
-                _ => return Err(format!("{extent:?} at {} not copied", location.key)),
-            }
+        if !here.contains(&location.key) {
+            return Err(format!("{extent:?} at {} not copied", location.key));
         }
     }
     Ok(())
@@ -1368,13 +1282,12 @@ pub fn ring(cells: impl IntoIterator<Item = CellId>) -> Arc<crate::keys::Ring> {
     crate::keys::Ring::encrypting_for_tests(first.id, crate::keys::FIRST, dek, others)
 }
 
-/// cladefs: the cell whose object is at `key`, by its key: of a moves', the object's they are of.
+/// cladefs: the cell whose object is at `key`, by its key.
 fn cell_of_key(key: &str) -> Option<CellId> {
     match layout::kind(key) {
         Kind::Segment { cell, .. } | Kind::Extent { cell, .. } | Kind::Checkpoint { cell, .. } => {
             Some(cell)
         }
-        Kind::Moves { .. } => cell_of_key(&layout::moved_from(key)?),
         _ => None,
     }
 }

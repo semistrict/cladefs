@@ -649,8 +649,8 @@ async fn versions_made_through_attrition_hold_what_came_before() {
 }
 
 /// TASK-685.7: the attrition profile, its writers freeing blocks told uploaded as they go, versions
-/// made among them, the collector passing over the bucket meanwhile and at the end, compacting
-/// what frees left sparse: every block told uploaded and not freed reads back as written, none
+/// made among them, the collector passing over the bucket meanwhile and at the end, and writers
+/// relocating out of what frees left sparse: every block told uploaded and not freed reads back as written, none
 /// freed does, and each version holds what came before it.
 #[madsim::test]
 async fn frees_and_collection_through_attrition_keep_what_is_live() {
@@ -905,8 +905,8 @@ struct Profile {
     /// Whether a base is made each round, a version of it forked on another host, then deleted
     /// ([`base_round`]): each fork read at the end.
     bases: bool,
-    /// Whether the collector passes over the bucket meanwhile, and twice once the bucket heals,
-    /// its grace gone between ([`collect_pass`]).
+    /// Whether the collector passes over the bucket meanwhile, and twice once the bucket heals
+    /// ([`collect_pass`]).
     collector: bool,
     /// Whether a host's memory and disk are limited a while at each round, as the seed says
     /// ([`press`]).
@@ -934,8 +934,8 @@ impl Profile {
         gcs_slots: false,
     };
 
-    /// What the collector's rules need: frees leaving objects sparse, which it compacts, moving
-    /// their extents, versions it keeps, and passes meanwhile and at the end.
+    /// What the collector's rules need: frees leaving objects sparse, which writers relocate out
+    /// of, versions it keeps, and passes meanwhile and at the end.
     const COLLECTED: Self = Self { frees: true, versions: true, collector: true, ..Self::PLAIN };
 
     /// What forks' and references' rules need: bases forked and deleted, collected.
@@ -1117,16 +1117,10 @@ fn collector(bucket: &Arc<RoutedBucket>) -> madsim::runtime::NodeHandle {
     .build()
 }
 
-/// How long the collector keeps what it compacted, by the bucket's clock, in milliseconds: short,
-/// so that the passes once the bucket heals delete it.
-const GRACE: u64 = 2_000;
-
-/// A pass of the collector over `bucket`, as `holder`, which no other pass is, under the hosts' KMS
-/// (TASK-411.28): what it did, logged.
+/// A pass of the collector over `bucket`, as `holder`, which no other pass is: what it did,
+/// logged. It holds no key (doc-27).
 async fn collect_pass(bucket: &RoutedBucket, holder: u64) {
-    let options = bucket_cell::collector::Options { compact_below: 0.5, grace: GRACE };
-    let kmses = cladefs::bucket::kms().ok().map(|kms| kms.kmses().clone());
-    let mut collector = bucket_cell::collector::Collector::new(options).kmses(kmses);
+    let mut collector = bucket_cell::collector::Collector::new();
     match collector.collect(bucket, holder).await {
         Ok(report) => log::info!("collector pass {holder}: {report:?}"),
         Err(err) => log::info!("collector pass {holder}: {err:?}"),
@@ -1292,13 +1286,15 @@ async fn attrition(profile: Profile) -> Result<(), String> {
             node_local::restart(node.id()).await;
         }
     };
-    // The collector's passes meanwhile, each its own holder.
+    // The collector's passes meanwhile, each its own holder: often, so that passes straddle the
+    // writers' commits, as the races its rules close need (`collection_needs_candidates_first`);
+    // a pass compacting nothing is short (doc-27).
     let collector = profile.collector.then(|| collector(&bucket));
     let passes = collector.as_ref().map(|collector| {
         let bucket = bucket.clone();
         collector.spawn(async move {
             for holder in 1.. {
-                let after = madsim::rand::thread_rng().gen_range(500..3000);
+                let after = madsim::rand::thread_rng().gen_range(100..1000);
                 madsim::time::sleep(Duration::from_millis(after)).await;
                 collect_pass(&bucket, holder).await;
             }
@@ -1419,13 +1415,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     let last = path(ROUNDS, 0);
     let at = last.clone();
     manager.spawn(async move { take(1, &at, cell, ROUNDS + 10, false).await }).await.unwrap();
-    // The collector's last passes, its grace gone before each: what it compacted is deleted.
+    // The collector's last passes, one after the other.
     if let (Some(collector), Some(passes)) = (&collector, passes) {
         passes.abort();
         let bucket = bucket.clone();
         let last = collector.spawn(async move {
             for holder in [u64::MAX - 1, u64::MAX] {
-                madsim::time::sleep(Duration::from_millis(GRACE + 1000)).await;
                 collect_pass(&bucket, holder).await;
             }
         });

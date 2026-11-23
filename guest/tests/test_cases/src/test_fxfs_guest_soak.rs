@@ -426,7 +426,7 @@ mod host {
         fn collector(&self) -> anyhow::Result<Child> {
             let log = std::fs::File::create(self.setup.tmp_dir.join("gc.log"))?;
             let child = std::process::Command::new(&self.paths.gc)
-                .args([&self.paths.bucket, "--every", "15", "--grace", "10"])
+                .args([&self.paths.bucket, "--every", "15"])
                 .stderr(log)
                 .spawn()
                 .context("starting cladefs-gc")?;

@@ -1965,8 +1965,7 @@ fn deleted_cells_keep_what_their_forks_need() {
         assert!(deleted.deleted());
         let record = bucket_cell::head::get(&*bucket, fork_cell).await.unwrap().unwrap();
         assert!(!record.deleted());
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
-        bucket_cell::collector::collect(&*bucket, 1, &options).await.unwrap();
+        bucket_cell::collector::collect(&*bucket, 1).await.unwrap();
         let state = bucket_cell::recover(&*bucket, fork_cell, record.origin()).await.unwrap();
         let data =
             bucket_cell::testing::read(&bucket, base, &state.state.extents[&base]).await.unwrap();

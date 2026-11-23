@@ -3476,18 +3476,6 @@ impl<D: Dir> LocalCell<D> {
         Ok(closed)
     }
 
-    /// cladefs: the extents `moved` says the collector moved, from where to where, as the
-    /// uploader's writer names them where they went before its checkpoint lands
-    /// (`Writer::following`): those the cell reads in the bucket, held or kept, are named there
-    /// too, if it names them on their way there, so that it names none further back than the
-    /// writer's newest checkpoint, from which the collector keeps the moves (TASK-195). Before, it
-    /// named each where it was sealed, whose object the collector deleted, and the moves after,
-    /// once compacted again.
-    pub fn moved(&self, moved: &[(ExtentId, Location, Location)]) -> Result<(), Error> {
-        self.state()?.moved(moved);
-        Ok(())
-    }
-
     /// cladefs: segment `number`, which [`LocalCell::closed`] gave, the first of the write-ahead
     /// log, is acknowledged in the bucket: the extents sealed in it, and those stored on their own
     /// its footer names, are read there from now on ([`BucketData`]), and their files leave the

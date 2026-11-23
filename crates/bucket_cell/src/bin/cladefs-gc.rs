@@ -3,15 +3,14 @@
 // found in the LICENSE file.
 
 //! cladefs's collector (backlog doc-7, Garbage collection): reclaims what no live cell in a bucket
-//! can reach, and compacts what is mostly freed. Only it deletes; it coordinates with cells'
+//! can reach. Only it deletes; it coordinates with cells'
 //! writers, and with other collectors, through the bucket alone.
 //!
 //! ```sh
-//! cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] [--grace SECONDS]
-//!     [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] [--metrics FILE]
-//!     [--max-delete-objects N] [--max-delete-bytes N] [--max-requests-per-second N]
-//!     [--max-refused-passes N]
-//! cladefs-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] [--compact-below FRACTION]
+//! cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] [--at-once PASSES]
+//!     [--lease SECONDS] [--metrics FILE] [--max-delete-objects N] [--max-delete-bytes N]
+//!     [--max-requests-per-second N] [--max-refused-passes N]
+//! cladefs-gc URL [--cell TENANT/CELL] --dry-run
 //! cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE]
 //! cladefs-gc URL --delete-cell TENANT/CELL [--force-missing]
 //! cladefs-gc URL --clear-marks [--cell TENANT/CELL]
@@ -32,24 +31,12 @@
 //! its sweep began; so processes collecting one bucket at once split its cells. A process gone
 //! holds the cells its passes held until their leases expire, and the next sweep after that
 //! collects them. A pass that fails says so and stops none of the others; the next pass tries it
-//! again. A compacted object goes, and moves no state names, a grace period after (60 s by
-//! default); objects whose live extents take less than FRACTION of them are compacted: by default
-//! none (0), as writers relocate out of their cells' sparse segments (doc-27 step 1). Every
-//! cell's objects are encrypted (TASK-411.28), and compacted under its keys (TASK-411.6): its KEK
-//! unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
-//! (`bucket_cell::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
-//! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket,
-//! TASK-411.27), and only by a pass compacting something. With neither variable giving a KMS, or
-//! one that can't be had, cladefs-gc refuses to start collecting or deleting a cell, saying so; a
-//! dry run, `--cells`, `--usage` and `--rotate-master-key` read no data, and need none. With its
-//! tenant's KEK revoked or destroyed, a pass marks and deletes as ever but leaves what it would
-//! compact uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
-//! cell, unchanged, while its tenant's KEK is still not to be had, which a sweep asks the KMS once
-//! a tenant (TASK-411.13), saying nothing of it but in the sweep's lines; once it is, the next
-//! passes over it in full and compacts.
+//! again. It compacts nothing, and holds no key (doc-27): writers relocate out of their cells'
+//! sparse segments themselves, and a pass decides by metadata alone, authenticated, not encrypted.
+//! `--rotate-master-key` alone needs keys: the master keys.
 //!
-//! SECONDS are finite, from 0 to a year, `--every`'s and `--lease`'s of a millisecond at least:
-//! anything else is a usage error (board 8511), as a count of 0 is, and a fraction outside 0 to 1.
+//! SECONDS are finite, from a millisecond to a year: anything else is a usage error (board 8511),
+//! as a count of 0 is.
 //!
 //! cladefs: a sweep may be bounded (board 8529, `bucket_cell::sweep::Limits`): `--max-delete-objects`
 //! and `--max-delete-bytes` bound what its passes delete together, objects of its cells and
@@ -68,34 +55,30 @@
 //! cells, fails the run once it said what it did and wrote its metrics (board 8509); run every so
 //! long, it goes on, its metrics saying so, and ends as its last sweep did.
 //!
-//! Each sweep says on standard error, a line for each pass that deleted, compacted or retired
-//! something, or failed, what it did, in how long, and the requests it made of each kind; then two
-//! lines of all its passes: the objects and bytes deleted and compacted, the references retired,
+//! Each sweep says on standard error, a line for each pass that deleted or retired something, or
+//! failed, what it did, in how long, and the requests it made of each kind; then two lines of all
+//! its passes: the objects and bytes deleted, the references retired,
 //! the cells gone over, those left to passes holding them and to passes that went over them since,
 //! and those failed, and the requests of each kind, listing the cells among them; then how long it
 //! took, and its slowest passes. With `--metrics`, it writes the same of its last sweep to FILE
 //! after each, in Prometheus' text format, for a node exporter's textfile collector: see
 //! [`metrics`].
 //!
-//! `--mark-only` collects deleting nothing (TASK-264): each pass compacts as one that deletes does,
-//! and writes what it would delete to its cell's `gc/marks/<epoch>` instead, retiring no
-//! reference, and `gc/marking`, which readers watch the cells' marks only while it is there: an
-//! operator removes it with the marks, `--clear-marks` (board 8515): every cell's marks, then
-//! `gc/marking`, or `--cell`'s marks alone, leaving `gc/marking`, which other cells' may need. A
-//! cell's marks keep it, dead, from being removed whole until then. Every reader of the cell
-//! (cladefsd, cladefsctl, writers recovering, this collector) warns of reaching, a bug in the
-//! collector; and warns, loudly, of what the pass before marked that it finds kept, the same
-//! objects still, another. Nothing marked goes: the bucket grows by what passes would have
-//! reclaimed, the objects compacted and their moves both, until an operator collects it for real or
-//! removes the marks. `--dry-run` writes nothing at all, not even the collector's lease, which
-//! would fence a pass running meanwhile out of its deletes, and compacts nothing: it prints each
-//! object a pass would delete, `KEY KIND SIZE delete` a line, and each it would compact, by its
-//! listed size, `KEY KIND SIZE compact`, and each reference it would retire, `KEY reference -
-//! retire`, then their counts and bytes. It finds fewer than a pass
-//! deletes: what a pass deletes only once it compacted it, a grace period after, it can't find
-//! doomed, those it would compact among them. A pass of either says what it did on standard
-//! error, a line for each cell a mark-only pass ran over, a line for all the cells a pass that
-//! deletes ran over, and logs there what warns.
+//! `--mark-only` collects deleting nothing (TASK-264): each pass writes what it would delete to its
+//! cell's `gc/marks/<epoch>` instead, retiring no reference, and `gc/marking`, which readers watch
+//! the cells' marks only while it is there: an operator removes it with the marks, `--clear-marks`
+//! (board 8515): every cell's marks, then `gc/marking`, or `--cell`'s marks alone, leaving
+//! `gc/marking`, which other cells' may need. A cell's marks keep it, dead, from being removed
+//! whole until then. Every reader of the cell (cladefsd, cladefsctl, writers recovering, this
+//! collector) warns of reaching, a bug in the collector; and warns, loudly, of what the pass before
+//! marked that it finds kept, the same objects still, another. Nothing marked goes: the bucket
+//! grows by what passes would have reclaimed, until an operator collects it for real or removes the
+//! marks. `--dry-run` writes nothing at all, not even the collector's lease, which would fence a
+//! pass running meanwhile out of its deletes: it prints each object a pass would delete, `KEY KIND
+//! SIZE delete` a line, and each reference it would retire, `KEY reference - retire`, then their
+//! counts and bytes. A pass of either says what it did on standard error, a line for each cell a
+//! mark-only pass ran over, a line for all the cells a pass that deletes ran over, and logs there
+//! what warns.
 //!
 //! The collector keeps what every live cell inherited, whether or not a host holds the cell,
 //! which only hosts know. `--cells` lists the live cells, of every cell or of the one
@@ -108,9 +91,7 @@
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
 //! frees what only it held (TASK-79.85). A cell of no head it refuses, writing nothing (board
 //! 8511), as a typo of an ID would get a deleted head no pass removes, for good, unless
-//! `--force-missing` says to delete it all the same. A cell's deletion that records a fork of it into another
-//! cell, whose child has no record yet, authenticates its checkpoint at the origin under the
-//! cell's DEK, through the host's KMS (TASK-411.14).
+//! `--force-missing` says to delete it all the same.
 //!
 //! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as the
 //! collector's last pass over each cell to end found it, writing nothing (TASK-394, TASK-395.8): it
@@ -124,8 +105,8 @@
 //! and all four null for a cell no pass ran over to its end yet. A tenant's: `{"scope":"tenant",
 //! "tenant":"1","cells":...,"measured_cells":...,"oldest_measured_unix_ms":...,
 //! "newest_measured_unix_ms":...,"objects":...,"bytes":...,"kinds":{...}}`, the sum of its cells
-//! measured. A cell's objects are those under its prefix, of each kind: its cells', what the
-//! collector compacted of them, its collector's lease and marks, and the references of forks of its
+//! measured. A cell's objects are those under its prefix, of each kind: its cells', its
+//! collector's lease and marks, and the references of forks of its
 //! cells; the garbage the collector has yet to reclaim among them; bytes as stored. A pass that
 //! skips a cell unchanged since the last measures it not again: its usage is as of the last pass
 //! that went over it in full, which nothing under its prefix changed since.
@@ -150,7 +131,7 @@
 
 use base32_id::Short;
 use bucket_cell::bucket::{Bucket, Meta};
-use bucket_cell::collector::{Collector, DryRun, Marking, Options, Report};
+use bucket_cell::collector::{Collector, DryRun, Marking, Report};
 use bucket_cell::layout;
 use bucket_cell::layout::CellId;
 use bucket_cell::layout::Head;
@@ -166,18 +147,17 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 fn usage() -> String {
-    "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] [--grace SECONDS] \
-     [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] [--metrics FILE] \
+    "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
+     [--at-once PASSES] [--lease SECONDS] [--metrics FILE] \
      [--max-delete-objects N] [--max-delete-bytes N] [--max-requests-per-second N] \
      [--max-refused-passes N] | \
-     cladefs-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] \
-     [--compact-below FRACTION] | \
+     cladefs-gc URL [--cell TENANT/CELL] --dry-run | \
      cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] | \
      cladefs-gc URL --delete-cell TENANT/CELL [--force-missing] | \
      cladefs-gc URL --clear-marks [--cell TENANT/CELL] | cladefs-gc URL --usage [--tenant TENANT] | \
-     cladefs-gc URL --rotate-master-key (every cell, or the one --cell names; SECONDS from 0 to a \
-     year, --every's and --lease's more than 0; --mark-only deletes nothing, writing each cell's \
-     gc/marks/EPOCH: the bucket grows; --dry-run writes nothing, and finds less than a pass deletes)"
+     cladefs-gc URL --rotate-master-key (every cell, or the one --cell names; SECONDS from a \
+     millisecond to a year; --mark-only deletes nothing, writing each cell's gc/marks/EPOCH: the \
+     bucket grows; --dry-run writes nothing)"
         .into()
 }
 
@@ -192,13 +172,7 @@ struct Args {
 #[derive(Debug, PartialEq)]
 enum Command {
     /// Collects, every so long if more than once, every cell or one.
-    Collect {
-        every: Option<Duration>,
-        options: Options,
-        mode: Mode,
-        cell: Option<CellId>,
-        run: Run,
-    },
+    Collect { every: Option<Duration>, mode: Mode, cell: Option<CellId>, run: Run },
     /// Lists the live cells, of every cell or one, but those a file names.
     Cells { held: Option<PathBuf>, cell: Option<CellId> },
     /// Deletes a cell: one of no head only if `missing` says so (board 8511).
@@ -250,7 +224,7 @@ impl Default for Run {
 /// policy's, not a cell's.
 const REFUSED_IN_A_ROW: usize = 10;
 
-/// cladefs: the most seconds `--every`, `--grace` and `--lease` take: a year (board 8511), which
+/// cladefs: the most seconds `--every` and `--lease` take: a year (board 8511), which
 /// leaves each, in milliseconds, far from a u64's end, whatever a pass adds to it.
 const MOST_SECONDS: u64 = 365 * 24 * 3600;
 
@@ -265,7 +239,7 @@ const SLOWEST: usize = 5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Delete,
-    /// Marks it, compacting as a pass that deletes does.
+    /// Marks it.
     MarkOnly,
     /// Prints it, writing nothing, once.
     DryRun,
@@ -315,7 +289,7 @@ fn parse_cells(flags: &[&str]) -> Result<Command, String> {
 
 /// A pass's `flags`: a dry run's run once.
 fn parse_collect(flags: &[&str]) -> Result<Command, String> {
-    let (mut every, mut grace, mut compact_below) = (None, Duration::from_secs(60), 0.0);
+    let mut every = None;
     let mut mode = Mode::Delete;
     let mut cell = None;
     let mut run = Run::default();
@@ -329,10 +303,8 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
             "--cell" if cell.is_none() => cell = Some(value()?.parse().map_err(|_| usage())?),
             "--at-once" => run.at_once = count(value()?)?,
             "--metrics" if run.metrics.is_none() => run.metrics = Some(value()?.into()),
-            "--every" => every = Some(seconds(value()?, true)?),
-            "--grace" => grace = seconds(value()?, false)?,
-            "--lease" => run.lease = millis(seconds(value()?, true)?),
-            "--compact-below" => compact_below = value()?.parse().map_err(|_| usage())?,
+            "--every" => every = Some(seconds(value()?)?),
+            "--lease" => run.lease = millis(seconds(value()?)?),
             "--max-delete-objects" => run.max_deleted_objects = Some(count(value()?)?),
             "--max-delete-bytes" => run.max_deleted_bytes = Some(count(value()?)?),
             "--max-requests-per-second" => {
@@ -351,25 +323,17 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
     if mode == Mode::DryRun && (every.is_some() || run != Run::default()) {
         return Err(usage());
     }
-    // cladefs: a fraction of an object's data, which a fraction past 1 would have every pass
-    // compact anew whatever is whole, without end (TASK-572); 0 compacts nothing. NaN in no range.
-    if !(0.0..=1.0).contains(&compact_below) {
-        return Err(usage());
-    }
-    let options = Options { compact_below, grace: millis(grace) };
-    Ok(Command::Collect { every, options, mode, cell, run })
+    Ok(Command::Collect { every, mode, cell, run })
 }
 
-/// cladefs: a count of seconds, `text`, as `--every`, `--grace` and `--lease` take it (board
-/// 8511): finite, from 0 to [`MOST_SECONDS`], and of a millisecond at least if `positive`; a usage
-/// error otherwise, never a value cast into range: before, `-60` and `NaN` became 0, and `--every`
-/// of a negative, NaN or infinite count panicked.
-fn seconds(text: &str, positive: bool) -> Result<Duration, String> {
+/// cladefs: a count of seconds, `text`, as `--every` and `--lease` take it (board 8511): finite,
+/// from a millisecond to [`MOST_SECONDS`]; a usage error otherwise, never a value cast into range:
+/// before, `-60` and `NaN` became 0, and `--every` of a negative, NaN or infinite count panicked.
+fn seconds(text: &str) -> Result<Duration, String> {
     let seconds: f64 = text.parse().map_err(|_| usage())?;
     // Negative, NaN and infinite counts, and those past a Duration's end, refused.
     let duration = Duration::try_from_secs_f64(seconds).map_err(|_| usage())?;
-    let least = Duration::from_millis(u64::from(positive));
-    match least <= duration && duration <= Duration::from_secs(MOST_SECONDS) {
+    match Duration::from_millis(1) <= duration && duration <= Duration::from_secs(MOST_SECONDS) {
         true => Ok(duration),
         false => Err(usage()),
     }
@@ -549,33 +513,25 @@ fn cells(
 async fn collect(
     bucket: &Arc<RoutedBucket>,
     every: Option<Duration>,
-    options: Options,
     mode: Mode,
     named: Option<CellId>,
     (run, stop): (Run, Arc<Stop>),
 ) -> Result<(), String> {
-    let kms = match mode {
-        // It compacts nothing, asking the KMS nothing.
-        Mode::DryRun => None,
-        Mode::Delete | Mode::MarkOnly => Some(kms(bucket)?),
-    };
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
         Mode::MarkOnly => sweep::Mode::MarkOnly,
         Mode::DryRun => {
             let mut out = std::io::stdout().lock();
-            return dry_run_cells(&**bucket, options, named, &mut out).await;
+            return dry_run_cells(&**bucket, named, &mut out).await;
         }
     };
     let sweep = Sweep {
-        options,
         mode: swept_mode,
         at_once: run.at_once,
         lease: run.lease,
         slowest: SLOWEST,
         // Each pass on the runtime's threads (TASK-395.15).
         spawned: true,
-        kms,
     };
     let limits = Limits {
         deleted_objects: run.max_deleted_objects,
@@ -688,17 +644,6 @@ fn stop_on_signals() -> Result<Arc<Stop>, String> {
     let thread = std::thread::Builder::new().name("cladefs-gc signals".into());
     thread.spawn(waiting).map_err(|err| format!("a thread for signals: {err}"))?;
     Ok(stop)
-}
-
-/// The host's KMS, as every cladefs process chooses it (TASK-411.3,
-/// `bucket_cell::bucket_kms::from_env`): the one `CLADEFS_KMS` names; else, given a master key,
-/// the bucket KMS over `bucket`, the one collected (TASK-411.27). What passes unwrap their cells'
-/// KEKs through, to compact (TASK-411.6); and what a deletion authenticates its checkpoints at
-/// origins under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
-/// collects or deletes anything (TASK-411.28).
-fn kms(bucket: &Arc<RoutedBucket>) -> Result<extent_keys::kms::Shared, String> {
-    let chosen = bucket_cell::bucket_kms::from_env(|| Ok(bucket.own()))?;
-    Ok(chosen.shared())
 }
 
 /// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
@@ -833,11 +778,10 @@ async fn clear_marks(bucket: &ObjectBucket, named: Option<CellId>) -> Result<(),
 /// standard error.
 async fn dry_run_cells(
     bucket: &impl Bucket,
-    options: Options,
     named: Option<CellId>,
     out: &mut impl std::io::Write,
 ) -> Result<(), String> {
-    let collector = Collector::new(options);
+    let collector = Collector::new();
     let mut sum = DrySum::default();
     let mut cells = std::pin::pin!(cells(bucket, named));
     while let Some(cell) = cells.next().await {
@@ -860,22 +804,17 @@ fn requests_text(requests: &Requests) -> String {
     if made.is_empty() { "none".to_owned() } else { made.join(", ") }
 }
 
-/// What a pass that deleted, compacted or retired something, or failed, says of `passed`: none
-/// for one that did nothing, skipping its cell or not, or left its cell to another; nor for one
-/// skipping a cell whose pass before left objects encrypted uncompacted, which it leaves so, its
-/// KEK still not to be had: that pass said so, and the sweep's line counts it (TASK-411.13). A
-/// mark-only pass says what it marked whatever it did.
+/// What a pass that deleted or retired something, or failed, says of `passed`: none for one that
+/// did nothing, skipping its cell or not, or left its cell to another. A mark-only pass says what
+/// it marked whatever it did.
 fn passed_line(passed: &Ran) -> Option<String> {
     let Ran { cell, outcome, requests, took } = passed;
     let tail = format!("in {:.3} s; requests: {}", took.as_secs_f64(), requests_text(requests));
-    let idle = |report: &Report| match report.skipped {
-        0 => Report { skipped: 0, ..*report } == Report::default(),
-        _ => Report { skipped: 0, locked: 0, uncompacted: 0, ..*report } == Report::default(),
-    };
+    let idle = |report: &Report| Report { skipped: 0, ..*report } == Report::default();
     match outcome {
         Outcome::Collected(report) if idle(report) => None,
-        // One that skipped its cell, unchanged since its last pass, deleting what that one
-        // deferred, or retiring again what it retired (TASK-395.6).
+        // One that skipped its cell, unchanged since its last pass, trimming read evidence
+        // (TASK-395.6, TASK-702.2).
         Outcome::Collected(report) if report.skipped > 0 => {
             Some(format!("cladefs-gc: cell {cell}, unchanged: {}, {tail}", did(report)))
         }
@@ -891,32 +830,12 @@ fn passed_line(passed: &Ran) -> Option<String> {
 /// What passes that delete did, as `report` says; and the dead cells they removed whole, if any
 /// (TASK-455).
 fn did(report: &Report) -> String {
-    let Report { deleted, compacted, retired, deleted_bytes, compacted_bytes, removed, .. } =
-        report;
+    let Report { deleted, retired, deleted_bytes, removed, .. } = report;
     let removed = match removed {
         0 => String::new(),
         removed => format!(", removed {removed} dead cells"),
     };
-    format!(
-        "deleted {deleted} ({deleted_bytes} bytes), compacted {compacted} ({compacted_bytes} \
-         bytes), retired {retired} references{removed}{}",
-        locked(report)
-    )
-}
-
-/// What passes that left objects encrypted uncompacted, as `report` says, their cells' KEKs not to
-/// be had, say of them (TASK-411.6): nothing if none did. Each warned of its cell and why.
-fn locked(report: &Report) -> String {
-    let Report { locked, uncompacted, .. } = report;
-    match locked {
-        0 => String::new(),
-        1 => format!(", left {uncompacted} encrypted uncompacted, without their cell's KEK"),
-        _ => {
-            format!(
-                ", left {uncompacted} encrypted uncompacted in {locked} cells, without their KEKs"
-            )
-        }
-    }
+    format!("deleted {deleted} ({deleted_bytes} bytes), retired {retired} references{removed}")
 }
 
 /// What a sweep of `mode` says of `swept`: what its passes did, and the requests it made; then how
@@ -925,13 +844,8 @@ fn swept_lines(mode: Mode, swept: &Swept) -> (String, String) {
     let Swept { visited, held, swept: since, failed, report, requests, slowest, took, .. } = swept;
     let did = match mode {
         Mode::MarkOnly => format!(
-            "marked {} ({} bytes), compacted {} ({} bytes), resurrected {}{}",
-            swept.marked,
-            swept.marked_bytes,
-            report.compacted,
-            report.compacted_bytes,
-            swept.resurrected,
-            locked(report)
+            "marked {} ({} bytes), resurrected {}",
+            swept.marked, swept.marked_bytes, swept.resurrected
         ),
         _ => did(report),
     };
@@ -992,10 +906,8 @@ impl Histogram {
 ///   `cladefs_gc_sweep_capped_passes`, the passes that deleted nothing past those bounds (boards
 ///   8509, 8529, 8513).
 /// - `cladefs_gc_sweep_objects{action}` and `cladefs_gc_sweep_bytes{action}`: what its passes
-///   `deleted`, `compacted` and `marked`, as listed, and the objects encrypted they left
-///   `uncompacted`, without their cells' KEKs (TASK-411.6); `cladefs_gc_sweep_retired_references`,
-///   `cladefs_gc_sweep_removed_cells`, the dead cells removed whole (TASK-455),
-///   `cladefs_gc_sweep_locked_cells`, the cells those were of, and
+///   `deleted` and `marked`, as listed; `cladefs_gc_sweep_retired_references`,
+///   `cladefs_gc_sweep_removed_cells`, the dead cells removed whole (TASK-455), and
 ///   `cladefs_gc_sweep_resurrected_objects`.
 /// - `cladefs_gc_sweep_requests{request}`: the requests it made of each kind
 ///   (`bucket_cell::object_bucket::Request::name`), listing the cells among them.
@@ -1071,23 +983,15 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
         &one(swept.capped.to_string()),
     );
     let report = &swept.report;
-    let objects = [
-        ("deleted", report.deleted.to_string()),
-        ("compacted", report.compacted.to_string()),
-        ("marked", swept.marked.to_string()),
-        ("uncompacted", report.uncompacted.to_string()),
-    ];
+    let objects = [("deleted", report.deleted.to_string()), ("marked", swept.marked.to_string())];
     family(
         "cladefs_gc_sweep_objects",
         "gauge",
         "What its last sweep's passes did, in objects.",
         &labelled("action", &objects),
     );
-    let bytes = [
-        ("deleted", report.deleted_bytes.to_string()),
-        ("compacted", report.compacted_bytes.to_string()),
-        ("marked", swept.marked_bytes.to_string()),
-    ];
+    let bytes =
+        [("deleted", report.deleted_bytes.to_string()), ("marked", swept.marked_bytes.to_string())];
     family(
         "cladefs_gc_sweep_bytes",
         "gauge",
@@ -1105,12 +1009,6 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
         "gauge",
         "The dead cells its last sweep's passes removed whole.",
         &one(report.removed.to_string()),
-    );
-    family(
-        "cladefs_gc_sweep_locked_cells",
-        "gauge",
-        "The cells its last sweep's passes left encrypted objects uncompacted in, without their KEKs.",
-        &one(report.locked.to_string()),
     );
     family(
         "cladefs_gc_sweep_resurrected_objects",
@@ -1182,34 +1080,28 @@ fn write_atomically(file: &std::path::Path, text: &str) -> std::io::Result<()> {
 
 /// What a mark-only pass over `cell` says of `marking`.
 fn marked_line(cell: CellId, marking: &Marking) -> String {
-    let locked = locked(&marking.report);
     let Some(marks) = &marking.marks else {
-        let compacted = marking.report.compacted;
         return format!(
-            "cladefs-gc: cell {cell}: marked nothing, a later pass having taken the lease, compacted \
-             {compacted}{locked}"
+            "cladefs-gc: cell {cell}: marked nothing, a later pass having taken the lease"
         );
     };
     let bytes: u64 = marks.marked.iter().map(|marked| marked.size).sum();
     format!(
-        "cladefs-gc: cell {cell}: marked {} ({bytes} bytes) in {}, deleted 0, compacted {}, \
-         resurrected {}{locked}",
+        "cladefs-gc: cell {cell}: marked {} ({bytes} bytes) in {}, deleted 0, resurrected {}",
         marks.marked.len(),
         layout::marks(cell, marks.epoch),
-        marking.report.compacted,
         marking.resurrected.len()
     )
 }
 
-/// What a dry run prints of what it found of a cell, `found`: each object a pass would delete,
-/// then each it would compact, a line of its key, kind, size and which, then each reference it
-/// would retire, for standard output.
+/// What a dry run prints of what it found of a cell, `found`: each object a pass would delete, a
+/// line of its key, kind, size and which, then each reference it would retire, for standard
+/// output.
 fn dry_lines(found: &DryRun) -> String {
     let line = |meta: &Meta, which| {
         format!("{} {} {} {which}\n", meta.key, layout::kind(&meta.key).name(), meta.size)
     };
     (found.doomed.iter().map(|meta| line(meta, "delete")))
-        .chain(found.compactable.iter().map(|meta| line(meta, "compact")))
         .chain(found.retired.iter().map(|key| format!("{key} reference - retire\n")))
         .collect()
 }
@@ -1218,7 +1110,6 @@ fn dry_lines(found: &DryRun) -> String {
 #[derive(Default)]
 struct DrySum {
     doomed: Sum,
-    compactable: Sum,
     retired: u64,
     fenced: bool,
 }
@@ -1231,20 +1122,17 @@ impl DrySum {
             bytes: metas.iter().map(|meta| meta.size).sum(),
         };
         self.doomed += sum(&found.doomed);
-        self.compactable += sum(&found.compactable);
         self.retired += found.retired.len() as u64;
         self.fenced |= found.fenced;
     }
 
-    /// What a dry run says of them at its end, on standard error: their counts and bytes, with
-    /// what they leave out.
+    /// What a dry run says of them at its end, on standard error: their counts and bytes.
     fn line(&self) -> String {
-        let Self { doomed, compactable, retired, fenced } = self;
+        let Self { doomed, retired, fenced } = self;
         let mut line = format!(
-            "cladefs-gc: dry run: a pass would delete {} objects ({} bytes), and more: it would \
-             compact {} ({} bytes), and delete what it compacts a grace period after, which a dry \
-             run, compacting nothing, doesn't count; and retire {retired} references",
-            doomed.objects, doomed.bytes, compactable.objects, compactable.bytes,
+            "cladefs-gc: dry run: a pass would delete {} objects ({} bytes), and retire {retired} \
+             references",
+            doomed.objects, doomed.bytes,
         );
         if *fenced {
             line += "; a pass took a cell's collector lease meanwhile, deleting what this read may \
@@ -1316,8 +1204,8 @@ fn main() -> Result<(), String> {
             probe(&*bucket, rand::random()).await?;
         }
         match command {
-            Command::Collect { every, options, mode, cell, run } => {
-                collect(&bucket, every, options, mode, cell, (run, stop)).await
+            Command::Collect { every, mode, cell, run } => {
+                collect(&bucket, every, mode, cell, (run, stop)).await
             }
             Command::Cells { held, cell } => {
                 let held = match held {
@@ -1419,10 +1307,10 @@ mod tests {
         assert_eq!(bucket.stats().requests(Request::ListDelimited), 6);
     }
 
-    /// board 8511's AC #1: `--grace`, `--lease` and `--every` take finite counts of seconds, from
-    /// 0 to a year, `--lease`'s and `--every`'s of a millisecond at least: anything else is a usage
-    /// error, never a panic or a count cast into range; and the counts and rates of the other
-    /// flags likewise.
+    /// board 8511's AC #1: `--lease` and `--every` take finite counts of seconds, from a
+    /// millisecond to a year: anything else is a usage error, never a panic or a count cast into
+    /// range; and the counts and rates of the other flags likewise. doc-27: `--grace` and
+    /// `--compact-below` are gone, usage errors too.
     #[test]
     fn counts_out_of_range_are_usage_errors() {
         let parsed = |flags: &[&str]| {
@@ -1430,7 +1318,7 @@ mod tests {
             parse(args).map(|args| args.command)
         };
         let refused = ["-1", "-inf", "NaN", "inf", "1e30", "31536001", "one", ""];
-        for flag in ["--grace", "--lease", "--every"] {
+        for flag in ["--lease", "--every"] {
             for value in refused {
                 assert_eq!(parsed(&[flag, value]), Err(usage()), "{flag} {value}");
             }
@@ -1440,7 +1328,8 @@ mod tests {
             &["--every", "0"],
             &["--lease", "0.0001"],
             &["--every", "0.0001"],
-            &["--compact-below", "NaN"],
+            &["--grace", "0"],
+            &["--compact-below", "0.5"],
             &["--at-once", "0"],
             &["--max-delete-objects", "0"],
             &["--max-delete-objects", "-1"],
@@ -1456,16 +1345,16 @@ mod tests {
             assert_eq!(parsed(flags), Err(usage()), "{flags:?}");
         }
         let collect = |flags: &[&str]| match parsed(flags) {
-            Ok(Command::Collect { every, options, run, .. }) => (every, options.grace, run),
+            Ok(Command::Collect { every, run, .. }) => (every, run),
             parsed => panic!("{flags:?}: {parsed:?}"),
         };
-        let (every, grace, run) = collect(&["--grace", "0", "--every", "1.5", "--lease", "0.001"]);
-        assert_eq!((every, grace, run.lease), (Some(Duration::from_millis(1500)), 0, 1));
+        let (every, run) = collect(&["--every", "1.5", "--lease", "0.001"]);
+        assert_eq!((every, run.lease), (Some(Duration::from_millis(1500)), 1));
         let year = MOST_SECONDS.to_string();
-        let (every, grace, run) = collect(&["--grace", &year, "--every", &year, "--lease", &year]);
+        let (every, run) = collect(&["--every", &year, "--lease", &year]);
         let year = Duration::from_secs(MOST_SECONDS);
-        assert_eq!((every, grace, run.lease), (Some(year), millis(year), millis(year)));
-        let (_, _, run) = collect(&[
+        assert_eq!((every, run.lease), (Some(year), millis(year)));
+        let (_, run) = collect(&[
             "--max-delete-objects",
             "5",
             "--max-delete-bytes",
@@ -1477,7 +1366,7 @@ mod tests {
         ]);
         let bounds = (run.max_deleted_objects, run.max_deleted_bytes, run.requests_per_second);
         assert_eq!((bounds, run.refused_in_a_row), ((Some(5), Some(1000), Some(0.5)), 3));
-        assert_eq!(collect(&[]).2, Run::default());
+        assert_eq!(collect(&[]).1, Run::default());
     }
 
     /// board 8509's AC #1 and #2: `--metrics` of a sweep whose listing the bucket refused, which

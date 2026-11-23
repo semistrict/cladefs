@@ -17,7 +17,7 @@ import script
 bench_report = script.load("bench-report")
 
 STATS = """object-store: get=1 get-range=95 head=0 list=7 create=110 update=2 overwrite=0 \
-delete=1 up-segments=127401984 up-extents=0 up-checkpoints=20480 up-moves=0 up-other=1024 down=46080
+delete=1 up-segments=127401984 up-extents=0 up-checkpoints=20480 up-other=1024 down=46080
 """
 
 
@@ -71,7 +71,7 @@ $0.0004 per 1,000, deletes free).
 | delete | 1 | free | $0.000000 |
 | all | 216 | | $0.000633 |
 
-Uploaded 121.5 MiB (segments 121.5 MiB, extents 0 B, checkpoints 20.0 KiB, moves 0 B, other 1.0 KiB); downloaded 45.0 KiB.
+Uploaded 121.5 MiB (segments 121.5 MiB, extents 0 B, checkpoints 20.0 KiB, other 1.0 KiB); downloaded 45.0 KiB.
 
 """,
         )

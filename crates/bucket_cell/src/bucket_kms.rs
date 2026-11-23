@@ -449,11 +449,11 @@ pub fn no_kms() -> String {
 }
 
 /// The KMS a host's environment chooses, the one place every process that opens cells asks
-/// (cladefsd, cladefsctl, the cladefs CLI's mounts through `cladefs::bucket::kms`; `cladefs-gc`):
-/// the KMS [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
-/// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else refused
-/// ([`no_kms`]), as every cell is encrypted (TASK-411.28). A KMS named, or master keys given, that
-/// can't be had is refused, saying why, never what a key holds.
+/// (cladefsd, cladefsctl, the cladefs CLI's mounts through `cladefs::bucket::kms`;
+/// `cladefs-gc-fill`): the KMS [`KMS_VAR`] names, if it names one; else, given master keys
+/// (`CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's
+/// bucket; else refused ([`no_kms`]), as every cell is encrypted (TASK-411.28). A KMS named, or
+/// master keys given, that can't be had is refused, saying why, never what a key holds.
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {

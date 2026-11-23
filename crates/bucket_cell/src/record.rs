@@ -131,11 +131,13 @@ mod tests {
         // whose origins and versions carry no writer epoch and whose heads carry `resumed`
         // (board 6017, board 6020); and 25's, whose checkpoints keep no lengths of their segments'
         // data (doc-27, board 6214); and 26's, whose ephemeral cells' index entries name no
-        // bucket (board 8517).
-        assert_eq!(FORMAT, 27);
-        for format in
-            [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
-        {
+        // bucket (board 8517); and 27's, whose cells hold the collector's moves (doc-27, board
+        // 6216).
+        assert_eq!(FORMAT, 28);
+        for format in [
+            1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27,
+        ] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(

@@ -198,7 +198,7 @@ under the KMS its own environment names, as below.
 Design doc-16 is the design. Every cell is encrypted, always:
 the bucket, the cell directories and the part cache hold its data encrypted,
 under its cell's KEK, which its tenant's KEK wraps. Every process that opens
-cells (cladefsd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start
+cells (cladefsd, cladefsctl, cladefs-mount) refuses to start
 unless `CLADEFS_KMS` names the host's KMS or `CLADEFS_MASTER_KEY` gives a master key
 for the bucket KMS (below); a tenant the KMS has no KEK of gets no cell,
 refused as destroyed (`EACCES`). The KMS `CLADEFS_KMS` names is `local:///DIR`, a
@@ -234,7 +234,7 @@ host given a master key, `CLADEFS_MASTER_KEY` (64 hex digits: `openssl rand -hex
 keeps each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
 master key and made on the tenant's first use: every tenant's cells are encrypted,
 with no setup per tenant. Every process that opens cells (cladefsd, cladefsctl,
-mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs and
+mounts, and cladefs-gc to rotate it) is given the same key, and the bucket never holds it; logs and
 errors name it only by its ID, a short hash. To rotate it, give every host
 `CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest first: it
 wraps, any unwraps), run `cladefs-gc URL --rotate-master-key`, which rewraps every

@@ -40,7 +40,7 @@ pub struct Child {
 /// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a version's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
-/// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`collector_lease`],
+/// prefix: its objects' moves, its collector's lease and marks ([`collector_lease`],
 /// [`marks`]), and the references of forks of its cells ([`reference`]), so that a pass of the
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
 /// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
@@ -83,8 +83,10 @@ pub struct Child {
 /// index entry is kept, and routed, in its reference's bucket, which its key names, beside its
 /// host's incarnation's tombstone ([`ephemeral_index`], [`decommissioned`], boards 8517, 8519);
 /// nothing reads 26's, whose entries were by incarnation alone, in the bucket of the daemon that
-/// wrote them, which no decommissioning would find.
-pub const FORMAT: u32 = 27;
+/// wrote them, which no decommissioning would find. 28: the collector compacts nothing, its writers
+/// relocating out of their sparse segments (doc-27 step 2): no moves, and a cell holding the moves
+/// of 27's is refused ([`Kind::Moves`]); nothing reads 27's.
+pub const FORMAT: u32 = 28;
 
 /// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
 /// TASK-691): keys past it are no head's.
@@ -97,7 +99,7 @@ pub const TENANTS: &str = "tenants/";
 const GC: &str = "gc/";
 const GC_LEASE: &str = "gc/lease";
 const GC_MARKS: &str = "gc/marks/";
-/// Under a cell's prefix, the moves of its objects, and the moves of those, `moves/moves/...`.
+/// Under a cell's prefix, in formats before 28, the moves of its objects ([`Kind::Moves`]).
 const MOVES: &str = "moves/";
 /// cladefs: under a cell's prefix, the references of forks of its cells ([`reference`]).
 const REFS: &str = "refs/";
@@ -244,74 +246,9 @@ pub fn cell_of_prefix(prefix: &str) -> Option<CellId> {
     in_cell(prefix).filter(|(_, rest)| rest.is_empty()).map(|(cell, _)| cell)
 }
 
-/// What the pass of the collector of epoch `pass` made of the object at `key` when it compacted
-/// it: the extents of it that were live, and where in it each is. Being one object, written whole,
-/// it is never there without them. cladefs: under the cell of the object, `<C>moves/<rest>/<pass>`
-/// for the object `<C><rest>`, and so `<C>moves/moves/<rest>/<pass>/<pass>` for its moves' moves,
-/// so that the cell's pass of the collector lists them with the cell (TASK-395.2). The pass's epoch
-/// in the key, the cell's collector lease's, two passes' moves of one object never share a key:
-/// one slow to create them, after later passes made them and deleted them, makes its own, never
-/// again those at a key once read (rule `moves_by_pass`, TASK-407.1); readers find an object's
-/// moves by listing [`moves_of`]. Only a cell's objects are compacted: a key of no cell's, which a
-/// location read from a checkpoint or a footer may name if they are corrupt, has none
-/// ([`crate::Error::Corrupt`]).
-pub fn moves(key: &str, pass: u64) -> Result<String, crate::Error> {
-    let pass = if crate::rules().moves_by_pass { pass } else { 0 };
-    Ok(format!("{}{}", moves_of(key)?, Padded(pass)))
-}
-
-/// cladefs: the prefix of the keys of the moves of the object at `key`, whichever passes made them
-/// ([`moves`]).
-pub fn moves_of(key: &str) -> Result<String, crate::Error> {
-    Ok(format!("{}/", moves_under(key)?))
-}
-
-/// cladefs: the object whose moves' keys `prefix` is the prefix of, as [`moves_of`] makes it: none
-/// for another prefix, of no cell's, or of the moves of several objects ([`moves_under`]), which
-/// names no object of a cell's.
-pub fn moved_object(prefix: &str) -> Option<String> {
-    let (cell, rest) = in_cell(prefix)?;
-    let of = rest.strip_prefix(MOVES)?.strip_suffix('/')?;
-    let key = format!("{}{of}", cell.prefix());
-    let moved = matches!(kind(&key), Kind::Segment { .. } | Kind::Extent { .. });
-    // Of no cell's object: no moves' prefix.
-    (moved && moves_of(&key).ok()? == prefix).then_some(key)
-}
-
-/// cladefs: the prefix of the keys of the moves of the objects whose keys start with `prefix`, a
-/// cell's: `<C>moves/<rest>` for `<C><rest>`.
-pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
-    let Some((cell, rest)) = in_cell(prefix) else {
-        return Err(crate::Error::Corrupt(format!(
-            "{prefix}: no cell's object, which has no moves"
-        )));
-    };
-    Ok(format!("{}{MOVES}{rest}", cell.prefix()))
-}
-
 /// cladefs: the longest key, in bytes, the buckets cells live in take (S3, GCS, Azure; a macOS file
 /// bucket's PATH_MAX): a request of a longer one each refuses, for good (board 5861).
 pub const MAX_KEY: usize = 1024;
-
-/// cladefs: how many times the object at `key` is moves of moves: 0 for one not moves, 1 for
-/// an object's moves, 2 for their moves, and so on, each in its key once more ([`moves`]).
-pub fn moves_depth(key: &str) -> usize {
-    let Some((_, mut rest)) = in_cell(key) else { return 0 };
-    let mut depth = 0;
-    while let Some(under) = rest.strip_prefix(MOVES) {
-        (rest, depth) = (under, depth + 1);
-    }
-    depth
-}
-
-/// cladefs: the key of the object the moves at `key` are of, if they are moves: the inverse of
-/// [`moves`].
-pub fn moved_from(key: &str) -> Option<String> {
-    match kind(key) {
-        Kind::Moves { cell, of, .. } => Some(format!("{}{of}", cell.prefix())),
-        _ => None,
-    }
-}
 
 /// cladefs: the collector's lease over `cell`, which its passes over the cell take (doc-7, Garbage
 /// collection; TASK-395.2), a [`crate::passed::CollectorLease`]: passes over other
@@ -488,11 +425,6 @@ pub fn evidence(parent: CellId, at: u64, tenant: u64, id: u64) -> String {
     format!("{}{}", evidence_of(parent, at, tenant), Padded(id))
 }
 
-/// cladefs: the prefix of the moves of `cell`'s objects ([`moves`]).
-pub fn moves_prefix(cell: CellId) -> String {
-    format!("{}{MOVES}", cell.prefix())
-}
-
 /// cladefs: the prefix of the markers of `parent`'s versions mirrored in a bucket ([`mirror`]).
 pub fn mirrors(parent: CellId) -> String {
     format!("{}{MIRRORS}", parent.prefix())
@@ -528,24 +460,11 @@ pub fn referenced_at(parent: CellId, prefix: &str) -> Option<u64> {
     number(prefix.strip_prefix(&references(parent))?.strip_suffix('/')?)
 }
 
-/// Whether the object at `later` is further along the way of an extent from the object at `key`:
-/// the moves of it, or of moves of it.
-pub fn further(key: &str, later: &str) -> bool {
-    let mut at = later.to_owned();
-    while let Some(from) = moved_from(&at) {
-        if from == key {
-            return true;
-        }
-        at = from;
-    }
-    false
-}
-
 /// What kind of object a key names, and what its key says. cladefs: an extent's says the segment
 /// that names it, `segment`, of the writer of `epoch`, which uploaded it before: what it may yet be
 /// named by, as its writer declares it (TASK-79.3, TASK-153.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind<'a> {
+pub enum Kind {
     Segment {
         cell: CellId,
         segment: u64,
@@ -592,12 +511,11 @@ pub enum Kind<'a> {
         cell: CellId,
         epoch: u64,
     },
-    /// The moves of the object `of`, the rest of its key under the cell's prefix, by the pass of
-    /// the collector of epoch `pass` ([`moves`], [`moved_from`]).
+    /// cladefs: what the collector's compaction made of an object of the cell's, its moves, in
+    /// formats before 28 (doc-27): refused ([`crate::Error::Format`]), as no writer or collector of
+    /// this one makes or reads them.
     Moves {
         cell: CellId,
-        of: &'a str,
-        pass: u64,
     },
     /// cladefs: the reference of the fork of `parent`, of the cell it is under, at the end of its
     /// segment `at`, to `child` ([`reference`]): never a candidate.
@@ -661,7 +579,7 @@ pub enum Kind<'a> {
     Unknown,
 }
 
-impl Kind<'_> {
+impl Kind {
     /// cladefs: its name, as an operator reads it (`cladefs-gc --dry-run`).
     pub fn name(&self) -> &'static str {
         match self {
@@ -725,8 +643,8 @@ fn number(text: &str) -> Option<u64> {
     base32_id::parse_padded(text)
 }
 
-pub fn kind(key: &str) -> Kind<'_> {
-    let parsed = || -> Option<Kind<'_>> {
+pub fn kind(key: &str) -> Kind {
+    let parsed = || -> Option<Kind> {
         if key == MARKING {
             return Some(Kind::Marking);
         }
@@ -751,9 +669,8 @@ pub fn kind(key: &str) -> Kind<'_> {
             return Some(Kind::Kek { tenant: number(tenant)? });
         }
         let (cell, rest) = in_cell(key)?;
-        if let Some(moves) = rest.strip_prefix(MOVES) {
-            let (of, pass) = moves.rsplit_once('/')?;
-            return (!of.is_empty()).then_some(Kind::Moves { cell, of, pass: number(pass)? });
+        if rest.starts_with(MOVES) {
+            return Some(Kind::Moves { cell });
         }
         if let Some(rest) = rest.strip_prefix(GC) {
             if rest == GC_LEASE.strip_prefix(GC)? {
@@ -1152,9 +1069,6 @@ impl Head {
 pub struct Marks {
     /// The epoch of the collector's lease the pass took.
     pub epoch: u64,
-    /// Its grace period, in milliseconds by the backend's clock ([`crate::collector::Options`]):
-    /// what it found doomed, a pass of no shorter one finds doomed too.
-    pub grace: u64,
     /// The objects marked, in the order of their keys.
     pub marked: Vec<Marked>,
 }
@@ -1232,15 +1146,6 @@ impl Marked {
     }
 }
 
-/// The footer of a compacted object's moves: where in the moves each extent the object held, live,
-/// now is. cladefs: and the key of the object they are the moves of, which a reader checks against
-/// theirs: a whole moves copied to another's key is no moves of it (TASK-411.3).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Moves {
-    pub of: String,
-    pub extents: Vec<(ExtentId, Location)>,
-}
-
 pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     bincode::serialize(value).expect("objects serialize")
 }
@@ -1310,64 +1215,6 @@ impl Segment {
 mod tests {
     use super::*;
 
-    /// The moves of `key`, a cell's object's, by the pass of epoch 1.
-    fn moves(key: &str) -> String {
-        super::moves(key, 1).unwrap()
-    }
-
-    /// TASK-395.2: the moves of a moves are of what it is of, along the way, in its cell alone.
-    #[test]
-    fn moves_are_further_along_the_way_in_their_cell() {
-        let cell = CellId { tenant: 0xa, id: 0xc };
-        let sealed = segment(CellId { tenant: cell.tenant, id: 3 }, 7, 2);
-        let (once, twice) = (moves(&sealed), moves(&moves(&sealed)));
-        assert!(further(&sealed, &once) && further(&sealed, &twice) && further(&once, &twice));
-        assert!(!further(&once, &sealed) && !further(&twice, &once) && !further(&sealed, &sealed));
-        let other = segment(CellId { tenant: 0xa, id: 4 }, 7, 2);
-        assert!(!further(&other, &once) && !further(&sealed, &moves(&other)));
-        assert_eq!(moved_from(&once), Some(sealed.clone()));
-        assert_eq!(moved_from(&twice), Some(once.clone()));
-        assert_eq!(moved_from(&sealed), None);
-    }
-
-    /// TASK-572: how deep moves of moves are, each a level more, at the key the collector would
-    /// make for the deepest it compacts within the [`MAX_KEY`] bytes buckets take, its hops within those
-    /// a read follows.
-    #[test]
-    fn moves_are_as_deep_as_their_chains() {
-        let sealed = segment(CellId { tenant: 0xa, id: 3 }, 7, 2);
-        assert_eq!(moves_depth(&sealed), 0);
-        let mut key = sealed;
-        for depth in 1..=crate::collector::MOVES_DEPTH {
-            key = super::moves(&key, u64::MAX).unwrap();
-            assert_eq!(moves_depth(&key), depth);
-        }
-        assert!(key.len() <= MAX_KEY, "{} bytes: {key}", key.len());
-        assert!(crate::collector::MOVES_DEPTH < crate::moves::MOVES);
-    }
-
-    /// TASK-407.1: two passes' moves of one object are at keys of their own, under the object's
-    /// moves' prefix, which no other object's moves are under, nor its moves' moves.
-    #[test]
-    fn passes_moves_of_one_object_are_at_keys_of_their_own() {
-        let cell = CellId { tenant: 0xa, id: 0xc };
-        let sealed = segment(cell, 7, 2);
-        let (first, second) =
-            (super::moves(&sealed, 1).unwrap(), super::moves(&sealed, 2).unwrap());
-        assert_ne!(first, second);
-        let prefix = moves_of(&sealed).unwrap();
-        assert!(first.starts_with(&prefix) && second.starts_with(&prefix));
-        assert_eq!(
-            (moved_from(&first), moved_from(&second)),
-            (Some(sealed.clone()), Some(sealed.clone()))
-        );
-        let next = segment(cell, 8, 2);
-        assert!(!super::moves(&next, 1).unwrap().starts_with(&prefix));
-        assert!(!moves(&first).starts_with(&prefix));
-        let of = "segments/0000000000002.0000000000007";
-        assert_eq!(kind(&second), Kind::Moves { cell, of, pass: 2 });
-    }
-
     #[test]
     fn kinds() {
         let cell = CellId { tenant: 0xa, id: 0xc };
@@ -1400,13 +1247,11 @@ mod tests {
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
+        // cladefs: the collector's moves, of formats before 28 (doc-27): refused where found.
         let from = segment(cell, 7, 2);
         let of = "segments/0000000000002.0000000000007";
-        assert_eq!(kind(&moves(&from)), Kind::Moves { cell, of, pass: 1 });
-        let moved = format!("moves/{of}/0000000000001");
-        assert_eq!(kind(&moves(&moves(&from))), Kind::Moves { cell, of: &moved, pass: 1 });
-        assert_eq!(kind(&format!("{}moves/", cell.prefix())), Kind::Unknown);
-        assert_eq!(kind(&format!("{}moves/{of}", cell.prefix())), Kind::Unknown);
+        let moves = format!("{}moves/{of}/0000000000001", cell.prefix());
+        assert_eq!(kind(&moves), Kind::Moves { cell });
         let child = CellId { tenant: 1, id: 5 };
         assert_eq!(
             kind(&reference(cell, 7, child)),
@@ -1500,8 +1345,8 @@ mod tests {
         assert_eq!(cell_of_prefix(""), None);
     }
 
-    /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, its moves however many
-    /// times moved, its collector's lease and marks, and the references under it, of forks of its
+    /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, the moves of formats
+    /// before 27 too, its collector's lease and marks, and the references under it, of forks of its
     /// cells to other cells; object-ID blocks and keys of no kind are no cell's.
     #[test]
     fn owners() {
@@ -1512,8 +1357,7 @@ mod tests {
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
             head(cell, 0),
-            moves(&segment(cell, 7, 2)),
-            moves(&moves(&extent(cell, 2, 4, ExtentId::new(3, 9)))),
+            format!("{}moves/segments/0000000000002.0000000000007/0000000000001", cell.prefix()),
             collector_lease(cell),
             marks(cell, 1),
             reference(cell, 7, child),

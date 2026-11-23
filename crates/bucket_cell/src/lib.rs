@@ -77,7 +77,6 @@ pub mod local;
 pub mod lru;
 pub mod marks;
 pub mod mirror;
-mod moves;
 pub mod object;
 pub mod object_bucket;
 pub mod objectid;
@@ -308,13 +307,6 @@ pub struct Rules {
     /// newer than its own; it deletes the rest, of epochs no swap of whose can succeed (TASK-407).
     /// TLA+: `specs/bucket/mutations/NoCollectorEpochs.cfg`.
     pub collector_epochs: bool,
-    /// The key of the moves a pass of the collector makes names the pass, its cell's collector
-    /// epoch, so that two passes' moves of one object never share a key, and readers find them by
-    /// listing the object's moves: keyed by the object alone, a pass slow to create them, after
-    /// later passes made and deleted them, makes them again at their key, of other bytes
-    /// (TASK-407.1).
-    /// TLA+: `specs/bucket/mutations/NoMovesByPass.cfg`.
-    pub moves_by_pass: bool,
     /// A writer mints extents from its epoch's range of sequence numbers, having checked, after
     /// recovering the cell, that the head is still its taking.
     /// TLA+: `specs/bucket/mutations/NoEpochSequences.cfg`.
@@ -342,26 +334,6 @@ pub struct Rules {
     /// The collector gives up on the forks being made of versions dropped.
     /// TLA+: `specs/bucket/mutations/NoCollectorAbandons.cfg`.
     pub collector_abandons: bool,
-    /// The collector keeps every moves on the way to an extent from where it was sealed, not only
-    /// from where the cell's state says it is, unless that state's checkpoint is by the writer
-    /// holding the cell's head, read after the checkpoint was: a checkpoint of another writer's,
-    /// landing after the writer recovered the cell, or an inherited state, may name the extent
-    /// further along its moves than the writer does (TASK-175).
-    /// TLA+: `specs/bucket/mutations/NoWaysFromSeals.cfg`.
-    pub ways_from_seals: bool,
-    /// A writer names the extents its checkpoint records as moved where they went before it
-    /// creates the checkpoint, not once it is created: the collector trusts a checkpoint of the
-    /// writer holding the head to name nothing further along its way than the writer does
-    /// (TASK-175).
-    /// TLA+: `specs/bucket/mutations/NoMovesTakenFirst.cfg`.
-    pub moves_taken_first: bool,
-    /// A host's cell reading the extents its writer's checkpoints record as moved names them where
-    /// they went, as the writer does, before the checkpoint lands
-    /// ([`Writer::following`](crate::Writer::following)): it names none further back along its way
-    /// than the writer's newest checkpoint, from which the collector keeps the moves (TASK-195).
-    /// Simulation only (`sim::hosts_need_to_follow_moves`): specs/bucket models the writer's state,
-    /// not a cell's names.
-    pub hosts_follow_moves: bool,
     /// A host's write-ahead log is put after the cell's end only if the cell's last commit is
     /// one of the log's or the one it started from: otherwise another writer's commits came after
     /// what the log holds, and it diverged (doc-14, Opening a cell).
@@ -444,7 +416,6 @@ impl Rules {
         marks_kept: true,
         epoch_keys: true,
         collector_epochs: true,
-        moves_by_pass: true,
         epoch_sequences: true,
         candidates_first: true,
         tokens: true,
@@ -452,9 +423,6 @@ impl Rules {
         forks_check_versions: true,
         forks_pending: true,
         collector_abandons: true,
-        ways_from_seals: true,
-        moves_taken_first: true,
-        hosts_follow_moves: true,
         wal_follows: true,
         references: true,
         clones_refer_first: true,

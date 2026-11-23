@@ -192,8 +192,7 @@ impl Hosts {
     /// delete nothing: a dead cell's pass retires the references the version's cell keeps its
     /// state for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(bucket: &Arc<RoutedBucket>, case: &str) {
-        let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
-        let collected = bucket_cell::testing::collect_until_quiet(&**bucket, &options);
+        let collected = bucket_cell::testing::collect_until_quiet(&**bucket);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 

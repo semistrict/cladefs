@@ -173,9 +173,7 @@ async fn open_on<K: Kms>(
     host: &Host,
     dir: &MemDir,
 ) -> Result<(Arc<LocalCell<MemDir>>, Uploader<MemDir>), Failure> {
-    // cladefs: no relocations where the collector compacts (doc-27 step 1).
-    let options = Options { checkpoint_every: 1, relocate: false, ..Options::default() };
-    open_with(world, host, dir, options).await
+    open_with(world, host, dir, Options { checkpoint_every: 1, ..Options::default() }).await
 }
 
 /// The cell in `dir`, opened by `host` as [`open_on`] opens it, its uploader's options `options`
@@ -514,8 +512,7 @@ async fn objects_of_encrypted_cells_unencrypted_are_refused() {
 }
 
 /// AC #6: the object of an extent stored on its own, copied whole to another extent's key of the
-/// same cell, is refused there: its footer, which its MAC covers, names the extent it is of. The
-/// moves of an object, copied to another's moves, likewise.
+/// same cell, is refused there: its footer, which its MAC covers, names the extent it is of.
 #[tokio::test(flavor = "multi_thread")]
 async fn own_extents_copied_to_another_key_are_refused() {
     let world = World::new();
@@ -1439,8 +1436,8 @@ async fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
 /// unreadable, and the tenant's other cell readable. A host told nothing opens no cell of it
 /// afresh, the cell taken by no one, the error naming the cell; hosts told forget its KEK and their
 /// fetchers its cell's ring, opening nothing more of what they cached of it, and the other cell's
-/// cell reads on, there and afresh. The collector passes over it, marking, leaving its encrypted
-/// objects uncompacted, not failing. The cell's object as it was before, put back, as a bucket
+/// cell reads on, there and afresh. The collector passes over it, holding no key, not failing
+/// (doc-27). The cell's object as it was before, put back, as a bucket
 /// keeping non-current versions would let someone do, opens the cell again: why a cell's
 /// shredding needs non-current versions of its object expired, or versioning off.
 #[tokio::test(flavor = "multi_thread")]
@@ -1456,7 +1453,7 @@ async fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_read
     let mut at = Vec::new();
     for (dir, cell) in dirs.iter().zip([ours, sibling]) {
         let (open_cell, uploader) = open_on(&world, &writer, dir).await.unwrap();
-        // Two extents, one freed: a segment the collector would compact.
+        // Two extents, one freed.
         let (kept, freed) = (ExtentId::new(cell.id, 1), ExtentId::new(cell.id, 2));
         open_cell.write(freed, 0, &noise(9, 4096)).await.unwrap();
         written(&open_cell, &uploader, kept, &noise(cell.id, 4096)).await;
@@ -1512,13 +1509,10 @@ async fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_read
         assert_eq!(clear_files_on_disk(cache_dir.path(), &data), Vec::<String>::new());
     }
 
-    // The collector, with the tenant's KEK at hand, can't have the cell's.
-    let options = bucket_cell::collector::Options { compact_below: 1.0, grace: 0 };
-    let kms: extent_keys::kms::Shared = world.kms.clone();
-    let mut collector = bucket_cell::collector::Collector::new(options).kms(Some(kms));
-    let pass = collector.collect_cell(&*world.bucket, ours, 0x51);
-    let report = pass.await.unwrap();
-    assert_eq!((report.locked, report.uncompacted, report.compacted), (1, 1, 0), "{report:?}");
+    // The collector, holding no key, passes over it as over any cell.
+    let collector = bucket_cell::collector::Collector::new();
+    let report = collector.collect_cell(&*world.bucket, ours, 0x51).await.unwrap();
+    assert_eq!(report.skipped, 0, "{report:?}");
 
     // Its object as it was before, put back: the cell opens.
     for (key, bytes) in slots.iter().zip(before) {
@@ -1609,13 +1603,11 @@ async fn encrypted_cells_open_through_the_bucket_kms_on_two_hosts() {
     assert_eq!(read(&world, &second, &open_cell, extent, 4 * 4096).await, Ok(data.clone()));
     drop((open_cell, remote));
     let sweep = bucket_cell::sweep::Sweep {
-        options: bucket_cell::collector::Options { compact_below: 1.0, grace: 0 },
         mode: bucket_cell::sweep::Mode::Delete,
         at_once: 1,
         lease: 60_000,
         slowest: 0,
         spawned: false,
-        kms: Some(bucket_kms()),
     };
     let swept = sweep.run(&world.bucket, |_| {}).await;
     assert_eq!(swept.visited, 1);

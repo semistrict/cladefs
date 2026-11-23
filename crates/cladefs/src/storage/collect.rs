@@ -3,31 +3,29 @@
 // found in the LICENSE file.
 
 //! The collector of the file buckets images keep their cells in, each its own, beside its directory
-//! (backlog doc-14, TASK-165.6): what reclaims what their cells no longer need, and compacts what
-//! is mostly freed, there, the only thing that deletes what images free (TASK-165.8). No
-//! `cladefs-gc` collects an image's own bucket, as one does a host's: the processes that have
-//! images of it open do, a pass after an image's commit, on a thread of its own, at most one every
-//! [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
-//! image and its forks, which reads again only the cells' records that changed (`Collector`).
+//! (backlog doc-14, TASK-165.6): what reclaims what their cells no longer need there, the only
+//! thing that deletes what images free (TASK-165.8). No `cladefs-gc` collects an image's own
+//! bucket, as one does a host's: the processes that have images of it open do, a pass after an
+//! image's commit, on a thread of its own, at most one every [`EVERY`]. A process has one collector
+//! of a bucket, however many of its images it has open, an image and its forks, which reads again
+//! only the cells' records that changed (`Collector`).
 
-use bucket_cell::collector::{Collector, Options, Report};
+use bucket_cell::collector::{Collector, Report};
 use bucket_cell::object_bucket::RoutedBucket;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How often passes run, and how they collect.
+/// How often passes run.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Pace {
     /// How long at least goes from one pass's start to the next's.
     pub every: Duration,
-    pub options: Options,
 }
 
-/// A pass a minute, collecting as `cladefs-gc` does by default: compacting nothing, as writers
-/// relocate out of their sparse segments (doc-27 step 1, board 6214).
-const PACE: Pace = Pace { every: EVERY, options: Options { compact_below: 0.0, grace: 60_000 } };
+/// A pass a minute.
+const PACE: Pace = Pace { every: EVERY };
 
 /// How long at least goes from one pass's start to the next's.
 const EVERY: Duration = Duration::from_secs(60);
@@ -79,14 +77,6 @@ fn pace() -> Pace {
     PACE
 }
 
-/// A collector of `options`, which compacts the objects of images' cells, every one encrypted,
-/// under their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, the bucket runtime
-/// its pools refill on not to be made (TASK-449's review), it compacts none, deleting as ever.
-fn new_collector(options: Options) -> Collector {
-    // No KMS: none to compact under, as the doc says; deleting goes on.
-    Collector::new(options).kmses(crate::bucket::kms().ok().map(|kms| kms.kmses().clone()))
-}
-
 node_local::node_local! {
     /// The collectors of the buckets this process has images of open, by their URLs.
     static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
@@ -103,7 +93,7 @@ pub(crate) fn of(url: &str, bucket: &Arc<RoutedBucket>) -> Arc<Collecting> {
     let collector = Arc::new(Collecting {
         bucket: bucket.clone(),
         pace,
-        state: Mutex::new(State { idle: Some(new_collector(pace.options)), ..Default::default() }),
+        state: Mutex::new(State { idle: Some(Collector::new()), ..Default::default() }),
     });
     collecting.insert(url.to_owned(), Arc::downgrade(&collector));
     collector
@@ -133,18 +123,18 @@ struct State {
 
 impl State {
     /// Takes the collector back from the pass that ran, if it ended: a pass's thread that
-    /// panicked gives back none, and a new collector of `options`, which remembers nothing, takes
+    /// panicked gives back none, and a new collector, which remembers nothing, takes
     /// its place.
-    fn reap(&mut self, options: Options) {
+    fn reap(&mut self) {
         let Some(running) = self.running.take_if(|running| running.is_finished()) else { return };
-        self.ended(running, options);
+        self.ended(running);
     }
 
     /// Takes the collector back from `running`, waiting for it to end, and what it did.
-    fn ended(&mut self, running: JoinHandle<(Collector, Report)>, options: Options) {
+    fn ended(&mut self, running: JoinHandle<(Collector, Report)>) {
         // A pass that panicked, its panic said: a new collector in its place, as reap says.
         let (collector, report) =
-            running.join().unwrap_or_else(|_| (new_collector(options), Report::default()));
+            running.join().unwrap_or_else(|_| (Collector::new(), Report::default()));
         self.idle = Some(collector);
         self.collected += report;
     }
@@ -155,7 +145,7 @@ impl Collecting {
     /// [`Pace::every`].
     pub(crate) fn after_commit(&self) {
         let mut state = self.state.lock().unwrap();
-        state.reap(self.pace.options);
+        state.reap();
         let due = state.started.is_none_or(|started| started.elapsed() >= self.pace.every);
         let Some(mut collector) = state.idle.take().filter(|_| due) else { return };
         let bucket = self.bucket.clone();
@@ -171,7 +161,7 @@ impl Collecting {
             }
             Err(err) => {
                 log::warn!("cladefs: starting a pass of an image's collector: {err}");
-                state.idle = Some(new_collector(self.pace.options));
+                state.idle = Some(Collector::new());
             }
         }
     }
@@ -187,26 +177,25 @@ impl Collecting {
     pub(crate) fn collected(&self) -> Report {
         let mut state = self.state.lock().unwrap();
         if let Some(running) = state.running.take() {
-            state.ended(running, self.pace.options);
+            state.ended(running);
         }
         state.collected
     }
 
-    /// Waits for the pass running, if any, then runs one, its compacted objects and the moves no
-    /// state names going at once, with no grace period: as tests look at what a pass reclaims.
+    /// Waits for the pass running, if any, then runs one: as tests look at what a pass reclaims.
     #[cfg(test)]
     pub(crate) fn pass_now(&self) -> Report {
         let mut state = self.state.lock().unwrap();
         if let Some(running) = state.running.take() {
-            state.ended(running, self.pace.options);
+            state.ended(running);
         }
-        let mut collector = new_collector(Options { grace: 0, ..self.pace.options });
+        let mut collector = Collector::new();
         let collected =
             local_cell::upload::block_on(collector.collect(&*self.bucket, rand::random()));
         collected.unwrap().unwrap()
     }
 
-    /// Runs passes as [`Collecting::pass_now`] does until two in a row delete and compact nothing,
+    /// Runs passes as [`Collecting::pass_now`] does until two in a row delete nothing,
     /// every image of the bucket closed, and says what they left that they should have collected
     /// ([`bucket_cell::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
     /// pass over a dead cell retires the references that kept what its parents' cells reclaim at
@@ -217,14 +206,13 @@ impl Collecting {
         let mut quiet = 0;
         for _ in 0..PASSES {
             let report = self.pass_now();
-            quiet = if report.deleted == 0 && report.compacted == 0 { quiet + 1 } else { 0 };
+            quiet = if report.deleted == 0 { quiet + 1 } else { 0 };
             if quiet == 2 {
                 break;
             }
         }
         assert_eq!(quiet, 2, "{PASSES} passes alone, which kept doing something");
-        let left =
-            bucket_cell::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
+        let left = bucket_cell::testing::uncollected(&*self.bucket);
         local_cell::upload::block_on(left).unwrap()
     }
 }
@@ -250,25 +238,12 @@ fn pass(collector: &mut Collector, bucket: &Arc<RoutedBucket>) -> Report {
     let collected = collector.collect_with_own(&**bucket, Some(&*own), rand::random());
     let failed = match local_cell::upload::block_on(collected) {
         Ok(Ok(report)) => {
-            let Report {
-                deleted,
-                compacted,
-                retired,
-                deleted_bytes,
-                compacted_bytes,
-                skipped,
-                locked,
-                uncompacted,
-                removed,
-            } = report;
-            // Encrypted objects it leaves uncompacted, its collector having no KMS (TASK-411.6);
-            // dead cells removed whole (TASK-455).
+            let Report { deleted, retired, deleted_bytes, skipped, removed } = report;
+            // Dead cells removed whole (TASK-455).
             log::info!(
                 "cladefs: an image's bucket collected: deleted {deleted} ({deleted_bytes} bytes), \
-                 compacted {compacted} ({compacted_bytes} bytes), retired {retired} references, \
-                 {skipped} cells unchanged, {uncompacted} encrypted left uncompacted in {locked} \
-                 cells, \
-                 {removed} dead cells removed"
+                 retired {retired} references, {skipped} cells unchanged, {removed} dead cells \
+                 removed"
             );
             return report;
         }

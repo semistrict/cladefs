@@ -374,18 +374,19 @@ chmod 755 "$sockets"
 socket="$sockets/cladefsd.sock"
 control="$sockets/cladefsd.control"
 # cladefs: the run's cells encrypted, as production's tenants' are (TASK-411.15, doc-16): the guest
-# tests run encrypted only, plaintext covered by the host's suites. A local KMS, beside the
-# sockets, gone with them, not in the results, which runs keep, holding a KEK for every tenant the
-# cases use, the default tenant (0) among them (the runner's `kms`); CLADEFS_KMS names it to every
-# process of the run, the daemon, the cases' own daemons, cladefsctl, cladefs-gc and FUSE mounts, unless
-# it names one already, whose tenants' KEKs are the caller's to make. CLADEFS_E2E_ENCRYPTED has the
+# tests run encrypted only, plaintext covered by the host's suites. A local KMS, beside the sockets,
+# gone with them, not in the results, which runs keep, holding a KEK for every tenant the cases use,
+# the default tenant (0) among them (the runner's `kms`); CLADEFS_KMS names it to every process of
+# the run, the daemon, the cases' own daemons, cladefsctl, cladefs-gc and FUSE mounts, unless it
+# names one already, whose tenants' KEKs are the caller's to make. CLADEFS_E2E_ENCRYPTED has the
 # runner check each case's cells, once it passed, holding no key (test_cases::encrypted): its cells'
-# KEKs, its records' DEKs, its objects' and files' encryptions, and no known plaintext anywhere; and the
-# run's own bucket and part cache at its end. Every cell is encrypted since TASK-411.28: its daemon,
-# cladefsctl, cladefs-gc, FUSE mounts and runner refuse to start without a KMS. A daemon and harness
-# both built before encryption (an A/B's old side, CLADEFS_E2E_PREBUILT, CLADEFS_E2E_ROOT, of an old
-# pin) run in the clear, unchecked, saying so; one of them old and the other not is refused, as
-# neither reads the other's cells: what each run was is in encryption.txt.
+# KEKs, its records' DEKs, its objects' and files' encryptions, and no known plaintext anywhere; and
+# the run's own bucket and part cache at its end. Every cell is encrypted since TASK-411.28: its
+# daemon, cladefsctl, FUSE mounts and runner refuse to start without a KMS; cladefs-gc holds no key
+# (doc-27). A daemon and harness both built before encryption (an A/B's old side,
+# CLADEFS_E2E_PREBUILT, CLADEFS_E2E_ROOT, of an old pin) run in the clear, unchecked, saying so; one
+# of them old and the other not is refused, as neither reads the other's cells: what each run was is
+# in encryption.txt.
 kms_dir="$sockets/kms"
 old_daemon='' old_runner=''
 grep -qa CLADEFS_KMS "$cladefsd_bin" || old_daemon=1

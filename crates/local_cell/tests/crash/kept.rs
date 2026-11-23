@@ -92,11 +92,16 @@ impl Host {
             keys: bucket_cell::keys::testing::host(),
         };
         // Checkpoints often, so that the collector's passes find segments recoveries no longer
-        // read, which they compact. cladefs: no relocations where the collector compacts (doc-27
-        // step 1).
-        let (checkpoint_every, relocate) = (4, false);
-        let options =
-            upload::Options { interval, checkpoint_every, relocate, ..upload::Options::default() };
+        // read, which they delete. cladefs: no relocation rounds (doc-27): their commits, which
+        // change nothing a guest reads, take commit numbers the workload's model, by its own
+        // commits' numbers, has no place for. The simulation's relocations profile crashes hosts
+        // relocating, its oracle collapsing their commits (`sim`'s `applied`).
+        let options = upload::Options {
+            interval,
+            checkpoint_every: 4,
+            relocate: false,
+            ..upload::Options::default()
+        };
         upload::open(recovering, OPTIONS, self.bucket(), (holder, options), &runtime).await
     }
 
@@ -117,9 +122,6 @@ impl Host {
         Model { extents, root: cell.root().unwrap() }
     }
 }
-
-/// The collector's passes compact what is mostly dead, and delete it at once.
-const COLLECTING: collector::Options = collector::Options { compact_below: 0.9, grace: 0 };
 
 /// The host's bucket, as its collector reaches it: its first so many requests go, and none after,
 /// which never complete, as a dead host's do not. A failing request would be no cut: a pass
@@ -210,8 +212,8 @@ impl bucket_cell::Bucket for Cut {
 /// host's collector's, for as long as the host lives: until the pass going is cut, or the host
 /// crashes, which aborts them ([`Passes::abort`]).
 struct Passes {
-    /// What the passes done compacted and deleted.
-    done: Arc<(AtomicU64, AtomicU64)>,
+    /// What the passes done deleted.
+    done: Arc<AtomicU64>,
     abort: futures::future::AbortHandle,
     thread: std::thread::JoinHandle<Result<Result<(), String>, futures::future::Aborted>>,
 }
@@ -219,16 +221,15 @@ struct Passes {
 impl Passes {
     fn start(cut: Arc<Cut>, interval: Duration) -> Self {
         let (abort, registration) = futures::future::AbortHandle::new_pair();
-        let done = Arc::<(AtomicU64, AtomicU64)>::default();
+        let done = Arc::<AtomicU64>::default();
         let doing = done.clone();
         // Made on its thread: the passes' future, which the thread alone polls, need not be Send.
         let thread = std::thread::spawn(move || {
             let passes = async move {
                 for holder in 100.. {
-                    let pass = collector::collect(&*cut, holder, &COLLECTING).await;
+                    let pass = collector::collect(&*cut, holder).await;
                     let report = pass.map_err(|err| format!("pass {holder}: {err}"))?;
-                    doing.0.fetch_add(report.compacted as u64, SeqCst);
-                    doing.1.fetch_add(report.deleted as u64, SeqCst);
+                    doing.fetch_add(report.deleted as u64, SeqCst);
                     // The thread's alone: the passes wait for nothing else on it.
                     std::thread::sleep(interval);
                 }
@@ -240,13 +241,13 @@ impl Passes {
     }
 
     /// The host dies with its collector: what its pass going did so far stays in the bucket.
-    /// Returns how many objects the passes done compacted and deleted; or how a pass failed.
-    fn abort(self) -> Result<(u64, u64), String> {
+    /// Returns how many objects the passes done deleted; or how a pass failed.
+    fn abort(self) -> Result<u64, String> {
         self.abort.abort();
         if let Ok(failed) = self.thread.join().unwrap() {
             failed?;
         }
-        Ok((self.done.0.load(SeqCst), self.done.1.load(SeqCst)))
+        Ok(self.done.load(SeqCst))
     }
 }
 
@@ -260,8 +261,8 @@ struct Crashed {
     first: usize,
     /// Whether the host's collector was cut in a pass before the crash.
     cut: bool,
-    /// How many objects its passes compacted and deleted before.
-    collected: (u64, u64),
+    /// How many objects its passes deleted before.
+    collected: u64,
 }
 
 const DESCRIPTION: Description =
@@ -343,13 +344,12 @@ const HOUR: Duration = Duration::from_secs(3600);
 
 /// What a round of the kept rounds found: whether its uploader had acknowledged a commit of the
 /// workload's when it crashed, whether the cell opened from its disk held commits the bucket
-/// lacked, whether its collector was cut in a pass, and whether its passes compacted and deleted
-/// objects before the crash.
+/// lacked, whether its collector was cut in a pass, and whether its passes deleted objects before
+/// the crash.
 pub struct Found {
     pub acknowledged: bool,
     pub ahead: bool,
     pub cut: bool,
-    pub compacted: bool,
     pub deleted: bool,
 }
 
@@ -363,7 +363,7 @@ pub async fn kept(round: u64) -> Found {
 
     // A pass after the crash, over what it left, completes, as the next host's collector's would.
     let bucket = host.bucket();
-    let pass = collector::collect(&*bucket, 1 << 20, &COLLECTING);
+    let pass = collector::collect(&*bucket, 1 << 20);
     pass.await.unwrap_or_else(|err| panic!("round {round}: the pass: {err}"));
 
     // Its disk lost, another host takes the cell from the bucket.
@@ -387,13 +387,11 @@ pub async fn kept(round: u64) -> Found {
     let reopened =
         reopened(&host, round, &crashed, crashed.dir.clone(), 3, (*durable).max(epoch)).await;
     collected_alone(&host, round).await;
-    let (compacted, deleted) = (collected.0 > 0, collected.1 > 0);
     Found {
         acknowledged: acknowledged > first,
         ahead: reopened > epoch,
         cut: *cut,
-        compacted,
-        deleted,
+        deleted: *collected > 0,
     }
 }
 
@@ -401,13 +399,13 @@ pub async fn kept(round: u64) -> Found {
 const PASSES_ALONE: u64 = 8;
 
 /// Runs passes over `host`'s bucket, alone, every cell gone, until one does nothing, and checks
-/// they left nothing they should have collected, garbage or objects mostly freed, uncompacted: the
-/// space the round's commits freed comes back, not only what they hold stays (TASK-390).
+/// they left nothing they should have collected: the space the round's commits freed comes back,
+/// not only what they hold stays (TASK-390).
 async fn collected_alone(host: &Host, round: u64) {
     let bucket = host.bucket();
     let mut quiet = false;
     for pass in 0..PASSES_ALONE {
-        let pass = collector::collect(&*bucket, (2 << 20) + pass, &COLLECTING);
+        let pass = collector::collect(&*bucket, (2 << 20) + pass);
         let report = pass.await.unwrap_or_else(|err| panic!("round {round}: {err}"));
         if report == collector::Report::default() {
             quiet = true;
@@ -415,7 +413,7 @@ async fn collected_alone(host: &Host, round: u64) {
         }
     }
     assert!(quiet, "round {round}: {PASSES_ALONE} passes alone each did something");
-    let left = bucket_cell::testing::uncollected(&*bucket, COLLECTING.compact_below);
+    let left = bucket_cell::testing::uncollected(&*bucket);
     assert_eq!(left.await, Vec::<String>::new(), "round {round}");
 }
 

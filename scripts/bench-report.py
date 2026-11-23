@@ -55,7 +55,7 @@ CLASSES = {
     "overwrite": "A",
     "delete": "free",
 }
-UPLOADS = ["segments", "extents", "checkpoints", "moves", "other"]
+UPLOADS = ["segments", "extents", "checkpoints", "other"]
 
 
 def daemon_stats(directory, kind):

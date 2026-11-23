@@ -32,7 +32,6 @@ use crate::fetch::{Budget, Limits, Priority};
 use crate::head::{self, Held};
 use crate::keys::Ring;
 use crate::layout::{self, CellId, Chain, Footer, Location};
-use crate::moves::MovesMaps;
 use crate::recovery::{self, Recovered, State};
 use crate::wal::TakenCell;
 use crate::{EPOCH_SHIFT, Error, rules, trace};
@@ -90,10 +89,6 @@ pub struct Objects {
     pub data_len: u64,
 }
 
-/// What a writer tells of the extents its checkpoints record as moved, from where to where, as it
-/// names them where they went ([`Writer::following`]).
-pub type Mover = Box<dyn Fn(&[(ExtentId, Location, Location)]) + Send + Sync>;
-
 pub struct Writer<B: Bucket> {
     bucket: Arc<B>,
     cell: CellId,
@@ -105,8 +100,6 @@ pub struct Writer<B: Bucket> {
     /// The head as it last swapped it, which its next swap is conditional on: one at a time.
     held: futures::lock::Mutex<Held>,
     inner: Mutex<Inner>,
-    /// What follows the collector's moves with it, if anything does ([`Writer::following`]).
-    mover: std::sync::OnceLock<Mover>,
     /// cladefs: the keys it reads and encrypts under (TASK-411.3).
     keys: Arc<Ring>,
     /// cladefs: the decoded state its recovery started from, if any ([`Recovered::layer`]), which
@@ -223,7 +216,6 @@ impl<B: Bucket> Writer<B> {
                 dropped: BTreeSet::new(),
                 switch: None,
             }),
-            mover: std::sync::OnceLock::new(),
             keys,
             layer,
         };
@@ -235,18 +227,6 @@ impl<B: Bucket> Writer<B> {
     /// bounded only by how many at once it is asked for.
     pub fn uploading_within(self, budget: Arc<Budget>) -> Self {
         Self { budget, ..self }
-    }
-
-    /// Has `mover` told of the extents the writer's checkpoints record as moved, from where to
-    /// where, as the writer names them where they went, before each checkpoint lands: a host's
-    /// cell reading them, which so names none further back along its way than the writer's newest
-    /// checkpoint, from which the collector keeps the moves (TASK-195). Once: a second mover
-    /// would be told nothing, and panics.
-    pub fn following(
-        &self,
-        mover: impl Fn(&[(ExtentId, Location, Location)]) + Send + Sync + 'static,
-    ) {
-        assert!(self.mover.set(Box::new(mover)).is_ok(), "a writer follows one mover");
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -616,11 +596,8 @@ impl<B: Bucket> Writer<B> {
         Ok(())
     }
 
-    /// Writes a checkpoint as of the last segment acknowledged, with the extents the collector
-    /// moved where they went: where the writer names them from then on, before the checkpoint
-    /// lands, so that it never names one before where a checkpoint of its own does, which the
-    /// collector, its head naming it, keeps the moves from, not from before (TASK-175). Then swaps
-    /// the head to name it, the cell's newest (TASK-407).
+    /// Writes a checkpoint as of the last segment acknowledged, then swaps the head to name it, the
+    /// cell's newest (TASK-407).
     /// cladefs: in a span of its own, `upload.checkpoint`, its bucket's requests children of it
     /// (`crate::trace`, TASK-258).
     pub async fn checkpoint(&self) -> Result<Option<u64>, Error> {
@@ -633,7 +610,7 @@ impl<B: Bucket> Writer<B> {
 
     /// Writes a checkpoint, as [`Writer::checkpoint`] says, saying what it is of on `span`.
     async fn write_checkpoint(&self, span: &trace::Span) -> Result<Option<u64>, Error> {
-        let mut state = {
+        let state = {
             let inner = self.inner();
             if inner.state.through.is_none() || inner.state.through <= inner.checkpoint {
                 return Ok(inner.checkpoint);
@@ -645,23 +622,6 @@ impl<B: Bucket> Writer<B> {
         let segment = state.through.unwrap();
         span.set_count(trace::SEGMENT, segment);
         span.set_count(trace::EXTENTS, state.extents.len() as u64);
-        // The moves of the objects its extents are in, followed.
-        let mut maps = MovesMaps::default();
-        let keys = state.extents.values().map(|location| location.key.clone());
-        maps.read(&*self.bucket, keys).await?;
-        let mut moved = Vec::new();
-        for (extent, old) in &state.extents {
-            let location = maps.follow(&*self.bucket, *extent, old).await?;
-            if location != *old {
-                moved.push((*extent, old.clone(), location));
-            }
-        }
-        for (extent, _, location) in &moved {
-            state.extents.insert(*extent, location.clone());
-        }
-        if rules().moves_taken_first {
-            self.take_moves(&moved);
-        }
         failpoint!("writer::checkpoint");
         let key = layout::checkpoint(self.cell, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
@@ -680,9 +640,6 @@ impl<B: Bucket> Writer<B> {
             }
         }
         failpoint!("writer::checkpointed");
-        if !rules().moves_taken_first {
-            self.take_moves(&moved);
-        }
         let mut inner = self.inner();
         inner.checkpoint = inner.checkpoint.max(Some(segment));
         // cladefs: and lets go of those of segments it named none in as of it, which it names
@@ -691,27 +648,6 @@ impl<B: Bucket> Writer<B> {
             inner.state.lengths.remove(key);
         }
         Ok(inner.checkpoint)
-    }
-
-    /// Names the extents `moved` says the collector moved, from where to where, where they went,
-    /// if it names them on their way there, before: only forward along their ways, which another
-    /// checkpoint's moves may have taken further, its own since.
-    fn take_moves(&self, moved: &[(ExtentId, Location, Location)]) {
-        let mut inner = self.inner();
-        for (extent, _, to) in moved {
-            if let Some(at) = inner.state.extents.get_mut(extent)
-                && layout::further(&at.key, &to.key)
-            {
-                *at = to.clone();
-            }
-        }
-        drop(inner);
-        // And what follows them with it.
-        if rules().hosts_follow_moves
-            && let Some(mover) = self.mover.get()
-        {
-            mover(moved);
-        }
     }
 }
 
@@ -940,11 +876,11 @@ mod tests {
         });
     }
 
-    /// A checkpoint reads the moves of its segments that have them, which a listing finds: read
-    /// one at a time, each segment's, at 25 ms of latency, a cell of a few minutes' pgbench held
-    /// the uploader up for tens of seconds (TASK-91.2).
+    /// A checkpoint reads nothing: one at a time, each segment's moves read at 25 ms of latency
+    /// held a cell of a few minutes' pgbench's uploader up for tens of seconds (TASK-91.2), and
+    /// cladefs: the collector makes no moves now (doc-27).
     #[test]
-    fn checkpoints_read_only_the_moves_there_are() {
+    fn checkpoints_read_nothing() {
         futures::executor::block_on(async {
             let bucket = memory();
             lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
@@ -963,7 +899,7 @@ mod tests {
             let made = |request| after.requests(request) - before.requests(request);
             assert_eq!(
                 [Request::List, Request::Get, Request::GetRange].map(made),
-                [1, 0, 0],
+                [0, 0, 0],
                 "the checkpoint's listings, reads and ranged reads"
             );
         });
