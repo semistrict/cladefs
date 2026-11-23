@@ -2465,9 +2465,9 @@ fn metrics_are_there_before_any_cell_opens() {
     assert_eq!(families.len(), count, "a family named twice");
 }
 
-/// board 8563: a cell is labelled alike in every family, `TENANT/CELL`, as cells name it: its
-/// writer's and its follower's window gauges, its VM processes' builds, and its uploads', which a
-/// query joins on; and by role, not by connection, whose number made a series of each VM process.
+/// board 8563: a cell is labelled alike in every family, `TENANT/CELL`, as cells name it: its VM
+/// process's window gauges, its builds, and its uploads', which a query joins on; and not by
+/// connection, whose number made a series of each VM process.
 #[test]
 fn a_cells_metrics_name_it_alike_in_every_family() {
     host();
@@ -2481,29 +2481,21 @@ fn a_cells_metrics_name_it_alike_in_every_family() {
     let extent = ExtentId { cell: writer.cell(), sequence: 1 };
     write(&writer, extent, 0, &pattern(4, ps)).unwrap();
     writer.commit(None).unwrap();
-    let (follower, followed) = follow(&path).unwrap();
-    let followers = memory(2);
-    // SAFETY: As above. A follower's, which copies nothing on write.
-    unsafe { follower.create_dax_window_in_host_memory(followers, 2 * ps as u64, None, 0) }
-        .unwrap();
     let cell = cell_at(&path);
     let metrics = super::metrics::render();
     for line in [
-        format!("cladefsd_vm_window_mappings{{cell=\"{cell}\",role=\"writer\"}} "),
-        format!("cladefsd_vm_window_mappings{{cell=\"{cell}\",role=\"follower\"}} "),
-        format!("cladefsd_vm_build_info{{cell=\"{cell}\",commit=\"{}\"}} 2", crate::BUILD_COMMIT),
+        format!("cladefsd_vm_window_mappings{{cell=\"{cell}\"}} "),
+        format!("cladefsd_vm_build_info{{cell=\"{cell}\",commit=\"{}\"}} 1", crate::BUILD_COMMIT),
         format!("cladefsd_upload_pending_bytes{{cell=\"{cell}\"}} "),
     ] {
         assert!(metrics.lines().any(|each| each.starts_with(&line)), "no {line} in {metrics}");
     }
     assert!(!metrics.contains("connection="), "{metrics}");
-    drop((follower, writer));
-    followed.join().unwrap();
+    assert!(!metrics.contains("role="), "{metrics}");
+    drop(writer);
     written.join().unwrap();
-    for memory in [writers, followers] {
-        // SAFETY: Unmaps the memory, which nothing uses any more.
-        assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
-    }
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(writers.as_ptr().cast(), 2 * ps) }, 0);
 }
 
 /// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept
