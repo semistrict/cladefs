@@ -455,6 +455,13 @@ pub trait Members: Send + Sync + 'static {
     fn drives(&self, _: &Arc<crate::replicate::Replicator>) -> bool {
         false
     }
+    /// cladefs: whether the host at `address` is among those this host's configurations are picked
+    /// from now (board 8579): a member the host's peers name no more, `SetPeers` having removed it,
+    /// is replaced as one lost is, at once, while it serves still. Every host is, unless these
+    /// members say otherwise.
+    fn is_peer(&self, _address: &str) -> bool {
+        true
+    }
 }
 
 /// cladefs: the budget of a host's fetchers' GETs and the memory they keep tails and parts in
@@ -2345,14 +2352,29 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
             }
             let replace_after = self.options.replace_after;
-            let replace = configuration.f != wish.f || replicator.lost(replace_after);
+            // cladefs: members the host's peers name no more, replaced while they serve still,
+            // rather than once they are gone for `replace_after` (board 8579).
+            let removed = self.removed(&configuration);
+            let replace =
+                configuration.f != wish.f || replicator.lost(replace_after) || !removed.is_empty();
             if !replace || skip > 0 {
                 continue;
             }
+            if !removed.is_empty() {
+                log::info!(
+                    "cladefs: {cell:?}: configuration {}'s members {removed:?} are no peers of \
+                     this host's any more: replacing them",
+                    configuration.number
+                );
+            }
             let refusing = replicator.refusing().into_iter();
-            avoid.extend(
-                refusing.filter_map(|m| Some(configuration.members.get(m + 1)?.address.clone())),
-            );
+            let refusing =
+                refusing.filter_map(|m| Some(configuration.members.get(m + 1)?.address.clone()));
+            for address in refusing.chain(removed) {
+                if !avoid.contains(&address) {
+                    avoid.push(address);
+                }
+            }
             number = number.max(configuration.number + 1);
             let replacing = (&configuration, &mut number, wish.f);
             let mut new = self.replace(&writer, &replicator, replacing, &mut avoid).await;
@@ -2384,6 +2406,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
             }
         }
+    }
+
+    /// cladefs: the members of `configuration`, its writer aside, that the host's members are
+    /// picked from no more ([`Members::is_peer`], board 8579).
+    fn removed(&self, configuration: &bucket_cell::layout::Configuration) -> Vec<String> {
+        // No members: a configuration of no peers, none to say removed.
+        let Ok(members) = self.members() else { return Vec::new() };
+        let others = configuration.members.iter().skip(1);
+        others
+            .filter(|member| !members.is_peer(&member.address))
+            .map(|m| m.address.clone())
+            .collect()
     }
 
     /// cladefs: the head names the writer's configuration `number`, as its status says from now.

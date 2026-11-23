@@ -861,6 +861,132 @@ async fn create_replicated(host: u8, path: &Path, token: u64) -> u64 {
     panic!("host {host} never made a replicated cell");
 }
 
+/// Board 8579: a member of a replicated cell's configuration, of f 1 on three hosts of four, that its
+/// writer's host's peers name no more (SetPeers), its host up still, is replaced at once, not once
+/// it is gone for `replace_after`: two others picked, the removed host not among them, and the cell
+/// never degraded meanwhile; a SetPeers removing so many that no replacement is to be had leaves
+/// the configuration as it is, degraded not. Every commit told replicated, before and after, reads
+/// back once the writer's host is lost and the removed host takes the cell.
+#[madsim::test]
+async fn members_removed_from_the_peers_are_replaced_at_once() {
+    use cladefs::cladefsd::control::proto::SetPeersRequest;
+    const WRITES: u64 = 4;
+    let (bucket, faults) = world();
+    faults.set(bucket_cell::faults::Odds::NONE);
+    let (nodes, roots) = hosts_keeping(4, &bucket, Kept::replicas(4));
+    let handle = madsim::runtime::Handle::current();
+    let manager = manager();
+    let path = roots[0].join("store");
+    let at = path.clone();
+    let cell = manager.spawn(async move { create_replicated(1, &at, 10).await }).await.unwrap();
+    let id = bucket_cell::layout::CellId { tenant: 0, id: cell };
+    // The writer: its commits told replicated (`Commit::Uploaded` returns once they are, doc-21),
+    // a round before the peers change, one after.
+    let (ready, mut readied) = tokio::sync::mpsc::channel::<()>(1);
+    let (go, mut going) = tokio::sync::mpsc::channel::<()>(1);
+    let at = path.clone();
+    let writer = nodes[0].spawn(async move {
+        let guest = guest().await;
+        let cell = guest.open(&at, 64 << 20).await.unwrap();
+        let mut told = Blocks::new();
+        for round in 0..2 {
+            let first = guest.next_sequence().await.unwrap();
+            for sequence in first..first + WRITES {
+                let block = block_of(round, sequence);
+                guest.write(cladefs::ExtentId { cell, sequence }, 0, &block).await.unwrap();
+                guest.commit(cladefs::Commit::Uploaded).await.unwrap();
+                told.insert(sequence, block);
+            }
+            if round == 0 {
+                ready.send(()).await.unwrap();
+                going.recv().await.unwrap();
+            }
+        }
+        told
+    });
+    readied.recv().await.unwrap();
+    let members = || {
+        let bucket = bucket.clone();
+        async move {
+            let head = bucket_cell::head::get(&*bucket, id).await.unwrap().unwrap();
+            let configuration = head.replication.unwrap().configuration.unwrap();
+            let addresses = configuration.members.iter().map(|member| member.address.clone());
+            (configuration.number, addresses.collect::<Vec<_>>())
+        }
+    };
+    let (before, named) = members().await;
+    assert_eq!(named.len(), 3, "{named:?}");
+    assert_eq!(named[0], peer(1).to_string());
+    let removed = named[1].clone();
+    let at = path.clone();
+    let stat = move || {
+        let path = at.display().to_string();
+        async move {
+            let mut daemon = connect(1).await;
+            daemon.stat_cell(StatCellRequest { path }).await.unwrap().into_inner()
+        }
+    };
+    // Its host up still, the member is removed from the writer's host's peers.
+    let peers: Vec<String> = (1..=4).map(|host| peer(host).to_string()).collect();
+    let others: Vec<String> = peers.iter().filter(|at| **at != removed).cloned().collect();
+    let told = others.clone();
+    let set = manager.spawn(async move {
+        let mut daemon = connect(1).await;
+        daemon.set_peers(SetPeersRequest { addresses: told }).await.unwrap();
+    });
+    set.await.unwrap();
+    let watching = stat.clone();
+    let replaced = manager.spawn(async move {
+        let started = madsim::time::Instant::now();
+        loop {
+            let status = watching().await;
+            assert!(!status.degraded, "degraded {:?} after the peers changed", started.elapsed());
+            if status.configuration > before {
+                return started.elapsed();
+            }
+            // Well within `replace_after` (30 s): a removal replaces it, not its loss.
+            assert!(started.elapsed() < Duration::from_secs(10), "never replaced");
+            madsim::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    replaced.await.unwrap();
+    let (after, named) = members().await;
+    assert!(after > before, "{after} after {before}");
+    assert_eq!(named.len(), 3, "{named:?}");
+    assert!(!named.contains(&removed), "{removed} a member still: {named:?}");
+
+    // Peers so few that no configuration of f 1 is to be had: it is left as it is.
+    let kept = vec![peer(1).to_string(), named[1].clone()];
+    let set = manager.spawn(async move {
+        let mut daemon = connect(1).await;
+        daemon.set_peers(SetPeersRequest { addresses: kept }).await.unwrap();
+    });
+    set.await.unwrap();
+    let watching = stat.clone();
+    let left = manager.spawn(async move {
+        for _ in 0..30 {
+            let status = watching().await;
+            assert!(!status.degraded, "degraded with too few peers");
+            assert_eq!(status.configuration, after, "replaced with too few peers");
+            madsim::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    left.await.unwrap();
+    go.send(()).await.unwrap();
+    let told = writer.await.unwrap();
+
+    // The writer's host lost; the removed host takes the cell, and reads every block told.
+    node_local::kill(nodes[0].id()).await;
+    let host: u8 =
+        removed.trim_end_matches(&format!(":{PEERS}")).rsplit('.').next().unwrap().parse().unwrap();
+    let taken = roots[usize::from(host) - 1].join("taken");
+    let at = taken.clone();
+    manager.spawn(async move { take(host, &at, cell, 20, false).await }).await.unwrap();
+    let node = handle.get_node(nodes[usize::from(host) - 1].id()).unwrap();
+    let lost = node.spawn(lost_in(taken, cell, told, Blocks::new())).await.unwrap();
+    assert_eq!(lost, Vec::<u64>::new(), "blocks told replicated lost");
+}
+
 /// How a profile cuts its hosts off the network a while, at each round, as the seed says (doc-24,
 /// FoundationDB's partitions and swizzle).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

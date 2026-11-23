@@ -827,6 +827,13 @@ impl local_cell::upload::Members for ReplicaMembers {
         Ok(bucket_cell::layout::Member { address: self.me.clone(), incarnation: self.incarnation })
     }
 
+    /// cladefs: this host, or one of its peers now (board 8579): one `SetPeers` removed is no more.
+    fn is_peer(&self, address: &str) -> bool {
+        let peers = crate::bucket::peers();
+        address == self.me
+            || peers.is_some_and(|peers| peers.addresses().iter().any(|at| at == address))
+    }
+
     fn pick<'a>(
         &'a self,
         cell: crate::CellId,
