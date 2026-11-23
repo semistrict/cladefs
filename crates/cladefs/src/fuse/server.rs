@@ -109,6 +109,9 @@ struct Cells {
 struct Slot {
     /// Its path, as it was attached at.
     name: String,
+    /// Its tenant: its path's first name, whose requests the mount's workers bound together
+    /// ([`Server::tenant_of`]).
+    tenant: Arc<str>,
     /// The directory of the server's its root is in, and its name there.
     dir: u64,
     leaf: String,
@@ -337,7 +340,8 @@ impl Server {
     pub fn new(fs: Filesystem, notify: Notifier) -> Self {
         let root = fs.root().clone();
         let state = State::Attached(Arc::new(fs));
-        let slot = Slot { name: String::new(), dir: ROOT_ID, leaf: String::new(), state };
+        let (name, tenant, leaf) = (String::new(), Arc::from(""), String::new());
+        let slot = Slot { name, tenant, dir: ROOT_ID, leaf, state };
         let cells = Cells { slots: BTreeMap::from([(0, slot)]), ..Cells::default() };
         Self::of(Shape::One { root }, cells, notify)
     }
@@ -432,7 +436,8 @@ impl Server {
             .ok_or(Errno::ENOSPC)?;
         let path: Vec<&str> = name.split('/').collect();
         let (dir, leaf) = cells.put(&path, slot)?;
-        let reserved = Slot { name: name.to_owned(), dir, leaf, state: State::Opening };
+        let tenant = Arc::from(path[0]);
+        let reserved = Slot { name: name.to_owned(), tenant, dir, leaf, state: State::Opening };
         cells.slots.insert(slot, reserved);
         cells.names.insert(name.to_owned(), slot);
         Ok(Reserved { server: self, slot: Some(slot) })
@@ -534,6 +539,46 @@ impl Server {
             unmounted = unmounted.and(done);
         }
         unmounted
+    }
+
+    /// The tenant of the cell whose node `request`, as the kernel sent it, is of, in a server of
+    /// many cells: what the mount's workers bound the requests in service of, so that no tenant's,
+    /// nor any cell's, waiting on its bucket, can take every worker (board 8539). None for a
+    /// server of one filesystem, the server's own directories, and the requests that never wait
+    /// on a cell (`INIT`, `DESTROY`, `FORGET`, `BATCH_FORGET`, `INTERRUPT`).
+    pub(crate) fn tenant_of(&self, request: &[u8]) -> Option<Arc<str>> {
+        let Shape::Many { .. } = self.shape else { return None };
+        // Shorter than a header: no cell's, which its handling refuses.
+        let (header, _) = InHeader::read_from_prefix(request).ok()?;
+        if matches!(
+            header.opcode,
+            opcode::INIT
+                | opcode::DESTROY
+                | opcode::FORGET
+                | opcode::BATCH_FORGET
+                | opcode::INTERRUPT
+        ) {
+            return None;
+        }
+        let slot = self.slot_of(header.nodeid);
+        if slot == 0 {
+            return None;
+        }
+        // As a panic left the table, if one did, which the request's handling then answers: a
+        // tenant's name is the slot's from its attaching on.
+        let cells = self.cells.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cells.slots.get(&slot).map(|slot| slot.tenant.clone())
+    }
+
+    /// The reply to `request`, as the kernel sent it, whose handling panicked: `EIO`, unless it
+    /// takes none, so that the process waiting on it goes on (board 8539).
+    pub(crate) fn panicked(request: &[u8]) -> Option<Vec<u8>> {
+        // Shorter than a header: nothing to reply to, as its handling has none.
+        let (header, _) = InHeader::read_from_prefix(request).ok()?;
+        match header.opcode {
+            opcode::DESTROY | opcode::FORGET | opcode::BATCH_FORGET | opcode::INTERRUPT => None,
+            _ => Some(Reply { unique: header.unique }.error(Errno::EIO)),
+        }
     }
 
     /// Handles the request whose bytes are `request`, as the kernel sent it, and returns its
@@ -858,6 +903,8 @@ impl Server {
     }
 
     async fn lookup(&self, header: &InHeader, body: &mut Body<'_>) -> Result<Vec<u8>> {
+        // A test's: a handler that panics, which the mount answers `EIO` (board 8539).
+        fail::fail_point!("fuse::lookup");
         let [name] = strings(body.rest())?;
         let dir = self.target(header.nodeid)?;
         match self.lookup_in(&dir, name).await {

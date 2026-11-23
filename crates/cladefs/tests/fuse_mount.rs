@@ -775,3 +775,125 @@ fn a_cell_mounted_is_the_mounts_alone() {
     control.fork_cell(&cell_dir, &dir.path().join("fork")).unwrap();
     terminate(child, &m);
 }
+
+/// Board 8539: a handler that panics is answered `EIO`, and its worker serves on: nine lookups
+/// that panic, more than the mount's eight workers, and the mount still answers. Until then a
+/// panic ended its worker for good, the request it read never answered, and once eight had, every
+/// request went unread, their callers hung in the kernel for the server's life.
+#[test]
+fn handlers_that_panic_are_answered_eio_and_their_workers_serve_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cell_dir, m) = paths(dir.path());
+    let mount = MountOptions::new().mount(format(&cell_dir), &m).unwrap();
+    fail::cfg("fuse::lookup", "9*panic").unwrap();
+    let (sent, answered) = std::sync::mpsc::channel();
+    let looking = m.clone();
+    let looker = std::thread::spawn(move || {
+        let errno = |name: &str| std::fs::metadata(looking.join(name)).unwrap_err().raw_os_error();
+        let panicked: Vec<_> = (0..9).map(|n| errno(&format!("missing-{n}"))).collect();
+        sent.send((panicked, errno("missing-0"))).unwrap();
+    });
+    let answered = answered.recv_timeout(std::time::Duration::from_secs(30));
+    fail::remove("fuse::lookup");
+    let (panicked, after) = answered.expect("the mount stopped answering");
+    looker.join().unwrap();
+    assert_eq!(panicked, vec![Some(libc::EIO); 9]);
+    assert_eq!(after, Some(libc::ENOENT), "a lookup after the panics");
+    mount.unmount(true).unwrap();
+    block_on(mount.join().unwrap().check()).unwrap();
+}
+
+/// Board 8539: a tenant whose cells' requests wait, as on a bucket that never answers, holds at
+/// most all the mount's workers but two: another tenant's cell's lookup, and a listing of the
+/// mount's root, are answered meanwhile. Until then the waiting requests of one cell took every
+/// worker, and the mount answered nothing, of any tenant, until they ended.
+#[test]
+fn one_tenant_waiting_holds_no_other_tenants_requests() {
+    use std::sync::{Arc, Condvar, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let m = dir.path().join(".gvfs");
+    std::fs::create_dir(&m).unwrap();
+    let mount = MountOptions::new().mount_cells(&m).unwrap();
+    for (name, cell) in [("slow/a", "a"), ("fast/b", "b")] {
+        let fs = format(&dir.path().join(cell));
+        block_on(mount.server().attach(name, std::future::ready(Ok(fs)))).unwrap();
+    }
+    // Each request of tenant `slow` held, counted, until let go.
+    let held = Arc::new((Mutex::new((0usize, false)), Condvar::new()));
+    let holding = held.clone();
+    fail::cfg_callback("fuse::tenant::slow", move || {
+        let (state, changed) = &*holding;
+        let mut state = state.lock().unwrap();
+        state.0 += 1;
+        changed.notify_all();
+        while !state.1 {
+            state = changed.wait(state).unwrap();
+        }
+    })
+    .unwrap();
+    let waiting: Vec<_> = (0..16)
+        .map(|n| {
+            let missing = m.join("slow/a").join(format!("missing-{n}"));
+            std::thread::spawn(move || std::fs::metadata(missing).unwrap_err().raw_os_error())
+        })
+        .collect();
+    {
+        let (state, changed) = &*held;
+        let state = state.lock().unwrap();
+        let timeout = std::time::Duration::from_secs(30);
+        let (state, _) = changed.wait_timeout_while(state, timeout, |state| state.0 < 6).unwrap();
+        assert_eq!(state.0, 6, "slow's requests held");
+    }
+
+    let (sent, answered) = std::sync::mpsc::channel();
+    let listing = m.clone();
+    std::thread::spawn(move || {
+        let fast = std::fs::metadata(listing.join("fast/b/missing")).unwrap_err().raw_os_error();
+        sent.send((fast, names(&listing))).unwrap();
+    });
+    let answered = answered.recv_timeout(std::time::Duration::from_secs(1));
+    let held_then = held.0.lock().unwrap().0;
+    {
+        let (state, changed) = &*held;
+        state.lock().unwrap().1 = true;
+        changed.notify_all();
+    }
+    let still: Vec<_> = waiting.into_iter().map(|thread| thread.join().unwrap()).collect();
+    fail::remove("fuse::tenant::slow");
+    assert_eq!(answered, Ok((Some(libc::ENOENT), vec!["fast".to_owned(), "slow".to_owned()])));
+    assert_eq!(held_then, 6, "the most of slow's requests in service");
+    assert_eq!(still, vec![Some(libc::ENOENT); 16]);
+    mount.unmount(true).unwrap();
+    mount.join().unwrap();
+}
+
+/// Board 8537: a daemon killed with its mount of cells leaves it in the kernel, its connection
+/// aborted, answering `ENOTCONN`: the next daemon to mount there detaches it, a cladefs's, and
+/// mounts anew. Until then mount(2) failed with `ENOTCONN`, and no daemon started until someone
+/// ran `fusermount3 -uz`.
+#[test]
+fn a_daemon_mounts_over_the_mount_of_one_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let first = dir.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    let (mut killed, _, m) = cladefsd_mounting(&first, &bucket, 1);
+    killed.0.kill().unwrap();
+    killed.0.wait().unwrap();
+    let dead = std::fs::metadata(&m).unwrap_err();
+    assert_eq!(dead.raw_os_error(), Some(libc::ENOTCONN), "{dead}");
+
+    let second = dir.path().join("second");
+    std::fs::create_dir(&second).unwrap();
+    let socket = second.join("control");
+    let mut command = cladefsd(&second.join("vm.sock"), &bucket, 2);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_MOUNT", &m)
+        .env("CLADEFSD_MOUNT_STORES", second.join("cells"));
+    let child = serving(command, &socket);
+    assert_eq!(names(&m), Vec::<String>::new());
+    cladefsctl_mount(socket.to_str().unwrap(), &["create", "1", &CELL_SIZE.to_string()]);
+    assert_eq!(names(&m), ["0000000000001"]);
+    terminate(child, &m);
+}
