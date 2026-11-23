@@ -10,6 +10,18 @@
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
 // the bucket on any failure.
+//
+// Formats (board 8455): two daemons of different builds may serve each other only where what they
+// hand each other means the same. A part is the bucket's bytes, the same to every build, checked
+// against the asker's own tail: GetPart names no format. A live migration hands over a cell
+// directory, whose format is its build's: its prepare names the source's formats
+// (MigratePrepareRequest.formats: the cell directory's, the extent frames', the bucket's layout's
+// and this protocol's version, cladefsd::peers::formats), which the target refuses
+// (FAILED_PRECONDITION, "the source's formats ... are not this host's ...") unless they are its
+// own, before it notes or stages anything, as it refuses a prepare naming none (a source of a
+// build before them); and its hand-over opens the cell it staged, as its opening would, before it
+// takes it into place, answering no (the source serving the cell again) if it does not open. The
+// replication calls name no format yet (board 8457).
 
 syntax = "proto3";
 
@@ -59,15 +71,20 @@ service Peer {
   // cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
   // segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
   // this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
-  // ephemeral cells (CLADEFSD_EPHEMERAL). This host serves one request of a cell's migrations at a
-  // time (board 5732). Asked again, it prepares again, answering as before. A migration older than
-  // one of the cell it takes, by the cell's epoch, it refuses (ABORTED); one it takes it gives up
-  // for a newer (supersedes). UNAVAILABLE if its bucket calls timed out, what it noted undone.
+  // ephemeral cells (CLADEFSD_EPHEMERAL), or none migrated to it (CLADEFSD_EPHEMERAL_CELLS), or
+  // whose formats are not the source's (board 8455), or whose bucket is another than the one the
+  // prepare names (board 8443): each before anything is noted, made or opened. INVALID_ARGUMENT for
+  // a `to` other than a new name in CLADEFSD_EPHEMERAL_CELLS (board 8447). This host serves one
+  // request of a cell's migrations at a time (board 5732). Asked again, it prepares again, answering
+  // as before. A migration older than one of the cell it takes, by the cell's epoch, it refuses
+  // (ABORTED); one it takes it gives up for a newer (supersedes), unless that one goes to another
+  // path (FAILED_PRECONDITION). UNAVAILABLE if its bucket calls timed out, what it noted undone.
   rpc MigratePrepare(MigratePrepareRequest) returns (MigratePrepareResponse);
   // A piece of a file of the cell being migrated, or its holes.
   rpc MigrateFile(MigrateFileRequest) returns (MigrateFileResponse);
-  // Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-  // cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
+  // Takes the migrated cell over, if this host holds every file named whole (openAtNamed), and the
+  // cell they make opens as the cell prepared, of this build's format, its origin and bucket the
+  // prepare's (board 8455): its cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
   // until its source releases it, so that this answers yes to it again, however often asked.
   // Otherwise no, what it took dropped and its reference retired, so that it never takes that
   // migration after (refuseFinal): a hand-over naming another take of it than its prepare's answer
@@ -98,15 +115,21 @@ message MigratePrepareRequest {
   uint64 parent_cell = 5;
   // The segment of the parent's its version is at: its origin.
   uint64 at = 6;
-  // The URL of the bucket its parent is kept in.
+  // The URL of the bucket its parent is kept in: this host's, as CLADEFSD_BUCKET names it, or the
+  // prepare is refused (board 8443). A cell of another bucket of the system is reached through it,
+  // by its registry of buckets.
   string bucket = 7;
-  // Where it goes on this host.
+  // Where it goes on this host: a new name in its directory of migrated ephemeral cells
+  // (CLADEFSD_EPHEMERAL_CELLS), an absolute path, of no name beginning with `.` (board 8447).
   string to = 8;
   // The cell's epoch, as of this migration: greater than every migration's of the cell before it
   // (board 5732).
   uint64 epoch = 9;
   // The epoch of the parent's writer that wrote segment `at` (board 6017).
   uint64 parent_epoch = 10;
+  // The source's formats, as cladefsd::peers::formats names them: the target's own, or refused
+  // (board 8455). Empty, as a source of a build before it sends, is refused too.
+  string formats = 11;
 }
 
 // A migration prepared.

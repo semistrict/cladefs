@@ -336,6 +336,35 @@ impl Host {
     }
 }
 
+/// Why the cell directory at `dir` is not `entry`'s ephemeral cell, whole, if it is not: opened as
+/// its opening opens it, its description's format checked (`local_cell::Format`), its cell, the
+/// origin its local checkpoint names, and the bucket it names `entry`'s (board 8455). A migration's
+/// target takes a staged cell into place only if it is (`cladefsd::migration`): taken otherwise,
+/// a cell of another build's format, or one naming another bucket, would be accepted, its source
+/// then letting go of the only copy, and refused at its first opening here.
+pub(crate) fn not_its(dir: &Path, entry: &Entry) -> Result<Option<String>, Error> {
+    if local_cell::unmade_host(dir) {
+        return Ok(Some(format!("{} is no cell made whole", dir.display())));
+    }
+    let Some(checkpoint) = local_cell::host_local_checkpoint(dir)? else {
+        return Ok(Some(format!("{} is no ephemeral cell's", dir.display())));
+    };
+    let cell = local_cell::host_cell(dir)?;
+    if cell != entry.child {
+        return Ok(Some(format!("{} is cell {cell}'s, not {}'s", dir.display(), entry.child)));
+    }
+    let parent = checkpoint.parent();
+    let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
+    if origin != entry.origin {
+        return Ok(Some(format!("its origin is {origin:?}, not {:?}", entry.origin)));
+    }
+    let bucket = local_cell::host_bucket(dir)?;
+    if bucket.as_deref() != Some(entry.bucket.as_str()) {
+        return Ok(Some(format!("it names bucket {bucket:?}, not its parent's")));
+    }
+    Ok(None)
+}
+
 /// Whether the cell directory at `entry`'s path is its ephemeral cell's, whole.
 fn held(entry: &Entry) -> Result<bool, Error> {
     if !host_fs::exists(&entry.path) || local_cell::unmade_host(&entry.path) {

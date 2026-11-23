@@ -59,6 +59,27 @@ pub(crate) const MESSAGE_MOST: usize = 64 << 20;
 /// Sweeping stale replica logs).
 const SWEEP_EVERY: Duration = Duration::from_secs(600);
 
+/// cladefs: the version of the peer service's protocol, `peer.proto`'s (board 8455): a change to
+/// what a call means, or to a message's fields, is a new one, which [`formats`] names.
+pub(crate) const PROTOCOL: u32 = 1;
+
+/// cladefs: the formats of what this daemon hands its peers, in a line: its cell directories'
+/// (`local_cell::FORMAT`), its extent frames' (`extent_frame::FORMAT`), its bucket's layout's
+/// (`bucket_cell::layout::FORMAT`) and the protocol's ([`PROTOCOL`]). Two daemons hand each other
+/// a cell (a migration's prepare names them) only if theirs are the same (board 8455): nothing of
+/// another build's format is taken, as nothing migrates (AGENTS.md, "No migrations").
+pub(crate) fn formats() -> String {
+    let named = |cell: &str| {
+        let (frames, layout) = (extent_frame::FORMAT, bucket_cell::layout::FORMAT);
+        format!(
+            "cell directories {cell:?}, extent frames {frames}, bucket layout {layout}, peers {PROTOCOL}"
+        )
+    };
+    // A test's daemon of another build's cell directories: `peers::formats=return(FORMAT)`.
+    fail::fail_point!("peers::formats", |cell: Option<String>| named(&cell.unwrap_or_default()));
+    named(local_cell::FORMAT)
+}
+
 /// The parts the daemon served its peers, and those it had not as they asked.
 // The process's count, every simulated host's together, as a process's metrics are.
 static SERVED: AtomicU64 = AtomicU64::new(0);

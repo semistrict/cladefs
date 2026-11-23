@@ -5897,8 +5897,11 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
     use tonic::Code;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let ephemeral = crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
-    let path = dir.path().join("cell");
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    // SAFETY: as `host`'s: no other thread of this test's process reads the environment yet.
+    unsafe { std::env::set_var("CLADEFSD_EPHEMERAL_CELLS", &root) };
+    let ephemeral = crate::ephemeral_host::open(&root.join("ephemeral")).unwrap();
+    let path = root.join("cell");
     let staged = |migration| crate::ephemeral_host::staging(&path, migration);
     let (parent, child) = (crate::CellId { tenant: 1, id: 2 }, crate::CellId { tenant: 1, id: 7 });
     let prepare = |migration, epoch| MigratePrepareRequest {
@@ -5912,6 +5915,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         bucket: "memory:///cells".into(),
         to: path.display().to_string(),
         epoch,
+        formats: super::peers::formats(),
     };
     let bucket = super::cells::daemon_bucket().unwrap();
     let references = || {

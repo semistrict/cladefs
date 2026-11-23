@@ -49,6 +49,12 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         let let_go = super::migration::let_go_handed_over(&ephemeral).await?;
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
         super::migration::idle().map_err(anyhow::Error::msg)?;
+        // cladefs: where ephemeral cells migrated to it go (board 8447): none named, it takes no
+        // migrations; one named but not there, it refuses to start.
+        if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
+            let root = super::migration::target::cells_root().map_err(anyhow::Error::msg)?;
+            log::info!("cladefsd: ephemeral cells migrated here go in {}", root.display());
+        }
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
     }

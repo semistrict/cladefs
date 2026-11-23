@@ -177,6 +177,12 @@ pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<Objec
     Ok(ours.numbered(number).await?)
 }
 
+/// cladefs: the URLs of the buckets this process opened, for tests counting them (board 8443).
+#[cfg(test)]
+pub(crate) fn buckets_opened() -> Vec<String> {
+    BUCKETS.get().lock().unwrap().keys().cloned().collect()
+}
+
 /// cladefs: what the decoded states of the cells this process's buckets keep, or its cells hold
 /// as the maps of the extents they share, hold: each once, however many cells share it
 /// (`bucket_cell::recovery::Decoded::held`, TASK-453).
