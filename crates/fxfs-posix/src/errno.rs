@@ -115,8 +115,6 @@ errnos! {
     ESTALE = 116,
     /// Structure needs cleaning: metadata found inconsistent, as ext4's and XFS's `EFSCORRUPTED`.
     EUCLEAN = 117,
-    /// Required key not available: an encrypted node's, as fscrypt has it.
-    ENOKEY = 126,
 }
 
 impl Errno {
@@ -255,9 +253,6 @@ const fn of_fxfs(error: &FxfsError, call: Call) -> (Errno, Reported) {
         FxfsError::WrongType => (Errno::EINVAL, Logged),
         FxfsError::IntegrityError => (Errno::EBADMSG, Logged),
         FxfsError::Unavailable => (Errno::EBUSY, Logged),
-        FxfsError::NoKey => (Errno::ENOKEY, Logged),
-        // A link or rename across encryption policies, as fscrypt refuses one.
-        FxfsError::InconsistentEncryptionPolicy => (Errno::EXDEV, Logged),
     }
 }
 

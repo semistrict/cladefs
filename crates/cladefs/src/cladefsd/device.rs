@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
-use storage_device::{Device, ExtentId, ReadOptions, WriteFlags, WriteOptions};
+use storage_device::{Device, ExtentId, WriteFlags, WriteOptions};
 
 /// The size of the transfer buffers' memory.
 const TRANSFER_HEAP_SIZE: usize = 32 << 20;
@@ -59,12 +59,11 @@ impl Device for DaemonDevice {
         self.block_count
     }
 
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
-        _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let bytes = buffer.try_as_mut_slice().expect("a buffer of the heap's");
         let mut slices = [VolatileSliceMut::from(bytes)];

@@ -12,30 +12,26 @@ use crate::errors::FxfsError;
 use crate::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
 use crate::hooks::HooksHandle;
 use crate::log::*;
-use crate::metrics;
-use crate::object_handle::LayerObject;
+use crate::object_store::ObjectStore;
 use crate::object_store::allocator::{Allocator, Hold, Reservation};
 use crate::object_store::directory::Directory;
 use crate::object_store::graveyard::Graveyard;
 use crate::object_store::journal::super_block::SuperBlockHeader;
-use crate::object_store::journal::{self, Journal, JournalCheckpoint, JournalOptions};
+use crate::object_store::journal::{Journal, JournalCheckpoint, JournalOptions};
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::transaction::{
-    self, AssocObj, LockKey, LockManager, MetadataReservation, Mutation, ObjectMutationIterator,
+    self, AssocObj, LockKey, LockManager, MetadataReservation, Mutation,
     TRANSACTION_METADATA_MAX_AMOUNT, Transaction, WriteGuard, lock_keys,
 };
 use crate::object_store::tree_cache::{TreeCache, TreeCacheBudget};
-use crate::object_store::volume::{VOLUMES_DIRECTORY, root_volume};
-use crate::object_store::{DataObjectHandle, NewChildStoreOptions, ObjectStore, StoreOptions};
+use crate::object_store::volume::VOLUMES_DIRECTORY;
 use crate::serialized_types::{LATEST_VERSION, Version};
-use anyhow::{Context, Error, anyhow, bail};
+use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
 use event_listener::Event;
 use fuchsia_async as fasync;
-use fuchsia_inspect::{Inspector, LazyNode, NumericProperty as _, UintProperty};
 use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
-use fxfs_crypto::{Crypt, UnwrappedKey};
 use fxfs_trace::{TraceFutureExt, trace_future_args};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -58,16 +54,6 @@ const MAX_IN_FLIGHT_TRANSACTIONS: u64 = 4;
 /// How often to clean the transfer buffer.
 // TODO(https://fxbug.dev/489725256) Configure the task to run when fxfs is idle.
 const CLEAN_TRANSFER_BUFFER_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Services registration of layer files with a platform-specific layer pager.
-#[async_trait]
-pub trait LayerPager: Send + Sync + 'static {
-    async fn open_layer(
-        &self,
-        handle: DataObjectHandle<ObjectStore>,
-        unwrapped_key: Option<UnwrappedKey>,
-    ) -> Result<Arc<dyn LayerObject>, Error>;
-}
 
 /// Holds information on an Fxfs Filesystem
 pub struct Info {
@@ -96,23 +82,11 @@ pub struct Options {
     // The super-block will be written upon close().
     pub image_builder_mode: bool,
 
-    // If true, the filesystem will use the hardware's inline crypto engine to write encrypted
-    // data. Requires the block device to support inline encryption and for `barriers_enabled` to
-    // be true.
-    // TODO(https://fxbug.dev/393196849): For now, this flag only prevents the filesystem from
-    // computing checksums. Update this comment when the filesystem actually uses inline
-    // encryption.
-    pub inline_crypto_enabled: bool,
-
     // Configures the filesystem to use barriers instead of checksums to ensure consistency.
     // Checksums may be computed and stored in extent records but will no longer be stored in the
     // journal. The journal will use barriers to enforce proper ordering between data and metadata
-    // writes. Must be true if `inline_crypto_enabled` is true.
+    // writes.
     pub barriers_enabled: bool,
-
-    /// If true, allows writing Type 3 delivery blobs.
-    /// NOTE: Type 3 delivery blobs are currently UNSTABLE / EXPERIMENTAL and subject to change.
-    pub allow_type3_blobs: bool,
 
     /// cladefs: how many records of objects (and their extended attributes and keys) the stores
     /// cache, all told, whatever their number: each saves a lookup in its store's tree for each use
@@ -138,9 +112,7 @@ impl Default for Options {
             post_commit_hook: None,
             skip_initial_reap: false,
             image_builder_mode: false,
-            inline_crypto_enabled: false,
             barriers_enabled: false,
-            allow_type3_blobs: false,
             object_cache_items: crate::object_store::tree_cache::ITEM_LIMIT,
             graveyard_batch_delay: None,
             lazy_volumes: false,
@@ -185,9 +157,6 @@ pub enum FlushReason {
     /// Journal memory or space pressure.
     Journal(ForceMajor),
 
-    /// Clean up an encrypted mutations object after mount.
-    EncryptedMutations,
-
     /// Upgrade old layer files to the latest version after mount. This performs a full compaction.
     UpgradeVersion,
 }
@@ -209,40 +178,10 @@ pub trait JournalingObject: Send + Sync {
     /// Called when a transaction fails to commit.
     fn drop_mutation(&self, mutation: Mutation, transaction: &Transaction<'_>);
 
-    /// Called before committing a transaction. Implementations can use this to acquire locks
-    /// or resources (like keys) that must be held until the transaction is committed.
-    async fn prepare_commit<'a>(
-        &self,
-        _filesystem: &'a FxFilesystem,
-        _transaction: &Transaction<'_>,
-    ) -> Result<Option<WriteGuard<'a>>, Error> {
-        Ok(None)
-    }
-
     /// Flushes in-memory changes to the device (to allow journal space to be freed).
     ///
     /// Also returns the earliest version of a struct in the filesystem.
     async fn flush(&self, reason: FlushReason) -> Result<Version, Error>;
-
-    /// Writes mutations to the journal.  This allows objects to encrypt or otherwise modify what
-    /// gets written to the journal. cladefs: an object that writes them as they are, as this does,
-    /// says so (`writes_mutations_as_they_are`).
-    fn write_mutations(
-        &self,
-        mutations: ObjectMutationIterator<'_, '_>,
-        mut writer: journal::Writer<'_>,
-    ) {
-        for mutation in mutations {
-            writer.write(mutation.clone());
-        }
-    }
-
-    /// cladefs: whether `write_mutations` writes each mutation as it is, whatever was written before
-    /// it: the journal then serializes them before taking its writer's lock, which only orders
-    /// them (`Journal::commit`).
-    fn writes_mutations_as_they_are(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Default)]
@@ -316,7 +255,6 @@ pub struct FxFilesystemBuilder {
     on_new_allocator: Option<Box<dyn Fn(Arc<Allocator>) + Send + Sync>>,
     on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>,
     fsck_after_every_transaction: bool,
-    layer_pager: Option<Arc<dyn LayerPager>>,
 }
 
 impl FxFilesystemBuilder {
@@ -329,7 +267,6 @@ impl FxFilesystemBuilder {
             on_new_allocator: None,
             on_new_store: None,
             fsck_after_every_transaction: false,
-            layer_pager: None,
         }
     }
 
@@ -349,12 +286,6 @@ impl FxFilesystemBuilder {
     /// Incompatible with `format`.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.options.read_only = read_only;
-        self
-    }
-
-    /// Sets whether Type 3 delivery blobs are allowed. Defaults to `false`.
-    pub fn allow_type3_blobs(mut self, allow: bool) -> Self {
-        self.options.allow_type3_blobs = allow;
         self
     }
 
@@ -433,12 +364,6 @@ impl FxFilesystemBuilder {
         self
     }
 
-    /// Enables or disables inline encryption. Defaults to `false`.
-    pub fn inline_crypto_enabled(mut self, inline_crypto_enabled: bool) -> Self {
-        self.options.inline_crypto_enabled = inline_crypto_enabled;
-        self
-    }
-
     /// Enables or disables barriers in both the filesystem and journal options.
     /// Defaults to `false`.
     pub fn barriers_enabled(mut self, barriers_enabled: bool) -> Self {
@@ -452,21 +377,11 @@ impl FxFilesystemBuilder {
         self
     }
 
-    pub fn layer_pager(mut self, layer_pager: Option<Arc<dyn LayerPager>>) -> Self {
-        self.layer_pager = layer_pager;
-        self
-    }
-
     /// Constructs an `FxFilesystem` object with the specified settings.
     pub async fn open(self, device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
         let read_only = self.options.read_only;
         if self.format && read_only {
             bail!("Cannot initialize a filesystem as read-only");
-        }
-
-        // Inline encryption requires barriers to be enabled.
-        if self.options.inline_crypto_enabled && !self.options.barriers_enabled {
-            bail!("A filesystem using inline encryption requires barriers");
         }
 
         let objects = Arc::new(ObjectManager::new(self.on_new_store));
@@ -499,41 +414,23 @@ impl FxFilesystemBuilder {
             device.flush().await.context("Device flush failed")?;
         }
 
-        let filesystem = Arc::new_cyclic(|weak: &Weak<FxFilesystem>| {
-            let weak = weak.clone();
-            FxFilesystem {
-                device,
-                block_size,
-                objects: objects.clone(),
-                journal,
-                commit_mutex: futures::lock::Mutex::new(()),
-                lock_manager: LockManager::new(),
-                flush_task: Mutex::new(None),
-                background_tasks: fasync::Scope::new(),
-                closed: AtomicBool::new(true),
-                trace: self.trace,
-                tree_cache_budget: TreeCacheBudget::new(filesystem_options.object_cache_items),
-                graveyard: Graveyard::new(
-                    objects.clone(),
-                    filesystem_options.graveyard_batch_delay,
-                ),
-                completed_transactions: metrics::detail().create_uint("completed_transactions", 0),
-                options: filesystem_options,
-                in_flight_transactions: AtomicU64::new(0),
-                transaction_limit_event: Event::new(),
-                layer_pager: self.layer_pager,
-                follower: Default::default(),
-                _stores_node: metrics::register_fs(move || {
-                    let weak = weak.clone();
-                    Box::pin(async move {
-                        if let Some(fs) = weak.upgrade() {
-                            fs.populate_stores_node().await
-                        } else {
-                            Err(anyhow!("Filesystem has been dropped"))
-                        }
-                    })
-                }),
-            }
+        let filesystem = Arc::new(FxFilesystem {
+            device,
+            block_size,
+            objects: objects.clone(),
+            journal,
+            commit_mutex: futures::lock::Mutex::new(()),
+            lock_manager: LockManager::new(),
+            flush_task: Mutex::new(None),
+            background_tasks: fasync::Scope::new(),
+            closed: AtomicBool::new(true),
+            trace: self.trace,
+            tree_cache_budget: TreeCacheBudget::new(filesystem_options.object_cache_items),
+            graveyard: Graveyard::new(objects.clone(), filesystem_options.graveyard_batch_delay),
+            options: filesystem_options,
+            in_flight_transactions: AtomicU64::new(0),
+            transaction_limit_event: Event::new(),
+            follower: Default::default(),
         });
 
         filesystem.journal().set_image_builder_mode(image_builder_mode);
@@ -601,7 +498,7 @@ impl FxFilesystemBuilder {
                 }
 
                 if !read_only {
-                    for store in objects.unlocked_stores() {
+                    for store in objects.stores() {
                         let graveyard = filesystem.graveyard.clone();
                         crate::offload(move || async move { graveyard.initial_reap(&store).await })
                             .await?;
@@ -651,7 +548,6 @@ pub struct FxFilesystem {
     graveyard: Arc<Graveyard>,
     /// cladefs: what the caches of its stores' records share (`Options::object_cache_items`).
     tree_cache_budget: Arc<TreeCacheBudget>,
-    completed_transactions: UintProperty,
     options: Options,
 
     // The number of in-flight transactions which we will limit to MAX_IN_FLIGHT_TRANSACTIONS.
@@ -660,11 +556,6 @@ pub struct FxFilesystem {
     // An event that is used to wake up tasks that are blocked due to the in-flight transaction
     // limit.
     transaction_limit_event: Event,
-
-    // The "stores" node in the Inspect tree.
-    _stores_node: LazyNode,
-
-    layer_pager: Option<Arc<dyn LayerPager>>,
 
     // cladefs: a read-only mount's following of its writer (crate::follower).
     follower: crate::follower::Follower,
@@ -686,10 +577,6 @@ impl FxFilesystem {
 
     pub fn root_parent_store(&self) -> Arc<ObjectStore> {
         self.objects.root_parent_store()
-    }
-
-    pub fn layer_pager(&self) -> Option<&Arc<dyn LayerPager>> {
-        self.layer_pager.as_ref()
     }
 
     pub async fn close(&self) -> Result<(), Error> {
@@ -891,17 +778,14 @@ impl FxFilesystem {
         self.hooks().on_pre_commit(transaction)?;
         debug_assert_not_too_long!(self.lock_manager.commit_prepare(&transaction));
 
-        // Call prepare_commit on all unique objects involved in the transaction.
-        // We must hold the returned guards until the transaction is committed.
-        // Since transaction.mutations() is sorted by object_id, we can deduplicate
-        // on-the-fly.
-        let mut guards = Vec::new();
+        // cladefs: a store's commits, which a snapshot of it holds back from its flush until it
+        // commits (TASK-241), held until the transaction is committed. A flush's BeginFlush and
+        // EndFlush take nothing, as the snapshot's flush makes them. Since transaction.mutations()
+        // is sorted by object_id, we can deduplicate on-the-fly.
         let mut commits = Vec::new();
         let mut last_object_id = 0;
         for mutation in transaction.mutations() {
             let object_id = mutation.object_id;
-
-            // We don't need to prepare commits (which reserves keys) for flush mutations.
             if matches!(mutation.mutation, Mutation::BeginFlush | Mutation::EndFlush) {
                 continue;
             }
@@ -911,19 +795,9 @@ impl FxFilesystem {
             }
             assert!(object_id > last_object_id);
             last_object_id = object_id;
-
-            // cladefs: a store's commits, which a snapshot of it holds back from its flush until it
-            // commits (TASK-241): a flush's BeginFlush and EndFlush, above, take nothing, as the
-            // snapshot's flush makes them.
             if self.object_manager().store(object_id).is_some() {
                 let commits_of = lock_keys![LockKey::commits(object_id)];
                 commits.push(self.lock_manager.read_lock(commits_of).await);
-            }
-
-            if let Some(obj) = self.object_manager().journaling_object(object_id) {
-                if let Some(guard) = obj.prepare_commit(self, transaction).await? {
-                    guards.push(guard);
-                }
             }
         }
 
@@ -951,9 +825,7 @@ impl FxFilesystem {
             self.journal.commit(transaction).await?
         };
 
-        std::mem::drop(guards);
         std::mem::drop(commits);
-        self.completed_transactions.add(1);
 
         // For now, call the callback whilst holding the lock.  Technically, we don't need to do
         // that except if there's a post-commit-hook (which there usually won't be).  We can
@@ -1187,25 +1059,6 @@ impl FxFilesystem {
     ) -> TruncateGuard<'static> {
         self.truncate_guard(store_id, object_id).await.into_owned(self.clone())
     }
-
-    async fn populate_stores_node(&self) -> Result<Inspector, Error> {
-        let inspector = fuchsia_inspect::Inspector::default();
-        let root = inspector.root();
-        root.record_child("__root", |n| self.root_store().record_data(n));
-        root.record_child("__root_parent", |n| self.root_parent_store().record_data(n));
-        let object_manager = self.object_manager();
-        let volume_directory = object_manager.volume_directory();
-        let layer_set = volume_directory.store().tree().layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = volume_directory.iter(&mut merger).await?;
-        while let Some((name, id, _)) = iter.get() {
-            if let Some(store) = object_manager.store(id) {
-                root.record_child(name.to_string(), |n| store.record_data(n));
-            }
-            iter.advance().await?;
-        }
-        Ok(inspector)
-    }
 }
 
 /// A wrapper around a guard that needs to be taken when truncating an object.
@@ -1221,34 +1074,6 @@ impl<'a> TruncateGuard<'a> {
 /// Helper method for making a new filesystem.
 pub async fn mkfs(device: DeviceHolder) -> Result<DeviceHolder, Error> {
     let fs = FxFilesystem::new_empty(device).await?;
-    fs.close().await?;
-    Ok(fs.take_device().await)
-}
-
-/// Helper method for making a new filesystem with a single named volume.
-/// This shouldn't be used in production; instead volumes should be created with the Volumes
-/// protocol.
-pub async fn mkfs_with_volume(
-    device: DeviceHolder,
-    volume_name: &str,
-    crypt: Option<Arc<dyn Crypt>>,
-) -> Result<DeviceHolder, Error> {
-    let fs = FxFilesystem::new_empty(device).await?;
-    {
-        // expect instead of propagating errors here, since otherwise we could drop |fs| before
-        // close is called, which leads to confusing and unrelated error messages.
-        let root_volume = root_volume(fs.clone()).await.expect("Open root_volume failed");
-        root_volume
-            .new_volume(
-                volume_name,
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt, ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("Create volume failed");
-    }
     fs.close().await?;
     Ok(fs.take_device().await)
 }
@@ -1279,10 +1104,10 @@ impl FsckAfterEveryTransaction {
                 panic!("fsck after a transaction: {error:#}: {:?}", issues.lock());
             }
             let object_manager = fs.object_manager();
-            for store in object_manager.unlocked_stores() {
+            for store in object_manager.stores() {
                 let store_id = store.store_object_id();
                 if !object_manager.is_system_store(store_id) {
-                    let checked = fsck_volume_with_options(fs.as_ref(), &options, store_id, None);
+                    let checked = fsck_volume_with_options(fs.as_ref(), &options, store_id);
                     if let Err(error) = checked.await {
                         panic!(
                             "fsck of {store_id} after a transaction: {error:#}: {:?}",
@@ -1312,15 +1137,12 @@ mod tests {
     use crate::object_store::journal::super_block::Root;
     use crate::object_store::transaction::{LockKey, Options, lock_keys};
     use crate::object_store::volume::root_volume;
-    use crate::object_store::{
-        HandleOptions, NewChildStoreOptions, ObjectDescriptor, ObjectStore, StoreOptions,
-    };
+    use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectDescriptor, ObjectStore};
     use crate::range::RangeExt;
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::future::join_all;
     use futures::stream::{FuturesUnordered, TryStreamExt};
-    use fxfs_insecure_crypto::new_insecure_crypt;
     use rustc_hash::FxHashMap as HashMap;
     use std::ops::Range;
     use std::sync::Arc;
@@ -1333,7 +1155,7 @@ mod tests {
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_compaction() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
 
@@ -1378,7 +1200,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_enable_allocations() {
         // 1. enable_allocations() has no impact if image_builder_mode is not used.
         {
@@ -1461,7 +1283,7 @@ mod tests {
         // test failures and only seem controllable at the BUILD target level).
     }
 
-    #[fuchsia::test(threads = 10)]
+    #[fuchsia_async::run(10, test)]
     async fn test_replay_is_identical() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1614,7 +1436,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_max_in_flight_transactions() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1638,7 +1460,7 @@ mod tests {
 
     #[test_case(true; "test power fail with barriers")]
     #[test_case(false; "test power fail with checksums")]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_power_fail(barriers_enabled: bool) {
         // This test randomly discards blocks, so we run it a few times to increase the chances
         // of catching an issue in a single run.
@@ -1662,16 +1484,7 @@ mod tests {
                     .expect("sync failed");
 
                 let store = root_volume
-                    .new_volume(
-                        "test",
-                        NewChildStoreOptions {
-                            options: StoreOptions {
-                                crypt: Some(Arc::new(new_insecure_crypt())),
-                                ..StoreOptions::default()
-                            },
-                            ..Default::default()
-                        },
-                    )
+                    .new_volume("test", NewChildStoreOptions::default())
                     .await
                     .expect("new_volume failed");
                 let root_directory = Directory::open(&store, store.root_directory_object_id())
@@ -1771,9 +1584,7 @@ mod tests {
             // If we replayed and the store exists (i.e. the transaction that created the store
             // made it out), start by running fsck on it.
             let object_id = if fs.object_manager().store(store_id).is_some() {
-                fsck_volume(&fs, store_id, Some(Arc::new(new_insecure_crypt())))
-                    .await
-                    .expect("fsck_volume failed");
+                fsck_volume(&fs, store_id).await.expect("fsck_volume failed");
 
                 // Now we want to create another file, unmount cleanly, and then finally check that
                 // the new file exists.  This checks that we can continue to use the filesystem
@@ -1781,13 +1592,7 @@ mod tests {
                 let store = root_volume(fs.clone())
                     .await
                     .expect("root_volume failed")
-                    .volume(
-                        "test",
-                        StoreOptions {
-                            crypt: Some(Arc::new(new_insecure_crypt())),
-                            ..StoreOptions::default()
-                        },
-                    )
+                    .volume("test")
                     .await
                     .expect("volume failed");
 
@@ -1813,13 +1618,9 @@ mod tests {
                 transaction.commit().await.expect("commit failed");
 
                 // Write again to the test file if it exists.
-                if let Ok(test_file) = ObjectStore::open_object(
-                    &store,
-                    test_file_object_id,
-                    HandleOptions::default(),
-                    None,
-                )
-                .await
+                if let Ok(test_file) =
+                    ObjectStore::open_object(&store, test_file_object_id, HandleOptions::default())
+                        .await
                 {
                     // Check it has the contents we expect.
                     let mut buffer = test_file.allocate_buffer(4096).await;
@@ -1861,24 +1662,16 @@ mod tests {
             // As mentioned above, make sure that the object we created before the clean unmount
             // exists.
             if object_id != INVALID_OBJECT_ID {
-                fsck_volume(&fs, store_id, Some(Arc::new(new_insecure_crypt())))
-                    .await
-                    .expect("fsck_volume failed");
+                fsck_volume(&fs, store_id).await.expect("fsck_volume failed");
 
                 let store = root_volume(fs.clone())
                     .await
                     .expect("root_volume failed")
-                    .volume(
-                        "test",
-                        StoreOptions {
-                            crypt: Some(Arc::new(new_insecure_crypt())),
-                            ..StoreOptions::default()
-                        },
-                    )
+                    .volume("test")
                     .await
                     .expect("volume failed");
                 // We should be able to open the C object.
-                ObjectStore::open_object(&store, object_id, HandleOptions::default(), None)
+                ObjectStore::open_object(&store, object_id, HandleOptions::default())
                     .await
                     .expect("open_object failed");
 
@@ -1889,7 +1682,6 @@ mod tests {
                         &store,
                         test_file_object_id,
                         HandleOptions::default(),
-                        None,
                     )
                     .await
                     .expect("open_object failed");
@@ -1924,7 +1716,7 @@ mod tests {
     #[test_case(true, false; "with barriers")]
     #[test_case(true, true; "with barriers on atomic commits")]
     #[test_case(false, false; "with checksums")]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_crashes_at_random_barriers(barriers_enabled: bool, atomic_commits: bool) {
         use crate::object_store::AttributeId;
 
@@ -1943,17 +1735,10 @@ mod tests {
             .open(device)
             .await
             .expect("format failed");
-        let crypt = Arc::new(new_insecure_crypt());
         let store = root_volume(fs.clone())
             .await
             .expect("root_volume failed")
-            .new_volume(
-                VOLUME,
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..Default::default() },
-                    ..Default::default()
-                },
-            )
+            .new_volume(VOLUME, NewChildStoreOptions::default())
             .await
             .expect("new_volume failed");
         let directory =
@@ -2024,10 +1809,10 @@ mod tests {
             if round > 0 {
                 // Renames one of the round before's files, and deletes another.
                 let renamed = format!("r{}f0", round - 1);
-                let (renamed_id, _, _) =
+                let (renamed_id, _) =
                     directory.lookup(&renamed).await.expect("lookup failed").expect("missing");
                 let deleted = format!("r{}f1", round - 1);
-                let (deleted_id, _, _) =
+                let (deleted_id, _) =
                     directory.lookup(&deleted).await.expect("lookup failed").expect("missing");
                 let mut transaction = store
                     .new_transaction(
@@ -2079,10 +1864,10 @@ mod tests {
             let store = root_volume(fs.clone())
                 .await
                 .expect("root_volume failed")
-                .volume(VOLUME, StoreOptions { crypt: Some(crypt.clone()), ..Default::default() })
+                .volume(VOLUME)
                 .await
                 .unwrap_or_else(|e| panic!("crash {crash}: volume failed: {e:?}"));
-            fsck_volume(&fs, store.store_object_id(), Some(crypt.clone()))
+            fsck_volume(&fs, store.store_object_id())
                 .await
                 .unwrap_or_else(|e| panic!("crash {crash}: fsck_volume failed: {e:?}"));
             let directory = Directory::open(&store, store.root_directory_object_id())
@@ -2091,12 +1876,12 @@ mod tests {
             for round in 0..synced_rounds {
                 for i in 2..4 {
                     let name = format!("r{round}f{i}");
-                    let (id, _, _) = directory
+                    let (id, _) = directory
                         .lookup(&name)
                         .await
                         .expect("lookup failed")
                         .unwrap_or_else(|| panic!("crash {crash}: {name} is missing"));
-                    let file = ObjectStore::open_object(&store, id, HandleOptions::default(), None)
+                    let file = ObjectStore::open_object(&store, id, HandleOptions::default())
                         .await
                         .expect("open_object failed");
                     let data = contents(round, i);
@@ -2168,7 +1953,7 @@ mod tests {
 
     /// cladefs: Fxfs counts space against the store's capacity: it runs out with NoSpace before the
     /// store refuses a write, and the extents of files deleted are freed, which makes room again.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_space_runs_out_at_the_stores_capacity() {
         const MIB: usize = 1 << 20;
         // 16 MiB.
@@ -2217,7 +2002,7 @@ mod tests {
         assert!(mib >= 8, "{mib} MiB written");
 
         for name in &names {
-            let (id, _, _) = directory.lookup(name).await.expect("lookup failed").expect("missing");
+            let (id, _) = directory.lookup(name).await.expect("lookup failed").expect("missing");
             let mut transaction = store
                 .new_transaction(
                     lock_keys![
@@ -2251,7 +2036,7 @@ mod tests {
 
     /// cladefs: a fork of the store (backlog doc-4) has a cell of its own, and holds the
     /// filesystem as its parent did, which it mounts, changes and checks apart from its parent.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_fork() {
         async fn create(fs: &Arc<FxFilesystem>, name: &str, byte: u8) {
             let store = fs.root_store();
@@ -2281,8 +2066,8 @@ mod tests {
             let directory = Directory::open(&store, store.root_directory_object_id())
                 .await
                 .expect("open failed");
-            let (id, _, _) = directory.lookup(name).await.expect("lookup failed")?;
-            let file = ObjectStore::open_object(&store, id, HandleOptions::default(), None)
+            let (id, _) = directory.lookup(name).await.expect("lookup failed")?;
+            let file = ObjectStore::open_object(&store, id, HandleOptions::default())
                 .await
                 .expect("open_object failed");
             let mut buffer = file.allocate_buffer(4096).await;
@@ -2323,7 +2108,7 @@ mod tests {
 
     /// cladefs: random 4 KiB writes over a large file, each to new blocks that leave the old ones'
     /// extents partly dead, as a guest's mmapped writes make, and the journal compacted.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_after_random_overwrites() {
         const FILE_SIZE: u64 = 32 << 20;
         const WRITES: u64 = 4096;
@@ -2370,7 +2155,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_barrier_not_emitted_when_transaction_has_no_data() {
         let barrier_count = Arc::new(AtomicU32::new(0));
 
@@ -2395,16 +2180,7 @@ mod tests {
         {
             let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
             root_vol
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(Arc::new(new_insecure_crypt())),
-                            ..StoreOptions::default()
-                        },
-                        ..NewChildStoreOptions::default()
-                    },
-                )
+                .new_volume("test", NewChildStoreOptions { ..NewChildStoreOptions::default() })
                 .await
                 .expect("there is no test volume");
             fs.close().await.expect("close failed");
@@ -2421,16 +2197,7 @@ mod tests {
         let expected_barrier_count = barrier_count.load(Ordering::Relaxed);
 
         let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-        let store = root_vol
-            .volume(
-                "test",
-                StoreOptions {
-                    crypt: Some(Arc::new(new_insecure_crypt())),
-                    ..StoreOptions::default()
-                },
-            )
-            .await
-            .expect("there is no test volume");
+        let store = root_vol.volume("test").await.expect("there is no test volume");
 
         // Create a number of files with the goal of using up more than one journal block.
         let fs = store.filesystem();
@@ -2461,7 +2228,7 @@ mod tests {
         assert_eq!(expected_barrier_count, barrier_count.load(Ordering::Relaxed));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_barrier_emitted_when_transaction_includes_data() {
         let barrier_count = Arc::new(AtomicU32::new(0));
 
@@ -2486,16 +2253,7 @@ mod tests {
         {
             let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
             root_vol
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(Arc::new(new_insecure_crypt())),
-                            ..StoreOptions::default()
-                        },
-                        ..NewChildStoreOptions::default()
-                    },
-                )
+                .new_volume("test", NewChildStoreOptions { ..NewChildStoreOptions::default() })
                 .await
                 .expect("there is no test volume");
             fs.close().await.expect("close failed");
@@ -2512,16 +2270,7 @@ mod tests {
         let expected_barrier_count = barrier_count.load(Ordering::Relaxed);
 
         let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-        let store = root_vol
-            .volume(
-                "test",
-                StoreOptions {
-                    crypt: Some(Arc::new(new_insecure_crypt())),
-                    ..StoreOptions::default()
-                },
-            )
-            .await
-            .expect("there is no test volume");
+        let store = root_vol.volume("test").await.expect("there is no test volume");
 
         // Create a file and write something to it. This should cause a barrier to be emitted.
         let fs: Arc<FxFilesystem> = store.filesystem();
@@ -2559,9 +2308,8 @@ mod tests {
 
     #[test_case(true; "fail when original filesystem has barriers enabled")]
     #[test_case(false; "fail when original filesystem has barriers disabled")]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_switching_barrier_mode_on_existing_filesystem(original_barrier_mode: bool) {
-        let crypt = Some(Arc::new(new_insecure_crypt()) as Arc<dyn fxfs_crypto::Crypt>);
         let fake_device = FakeDevice::new(8192, 4096);
         let device = DeviceHolder::new(fake_device);
         let fs: super::OpenFxFilesystem = FxFilesystemBuilder::new()
@@ -2575,13 +2323,7 @@ mod tests {
         {
             let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
             let store = root_vol
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions { crypt: crypt.clone(), ..Default::default() },
-                        ..Default::default()
-                    },
-                )
+                .new_volume("test", NewChildStoreOptions::default())
                 .await
                 .expect("creating test volume");
             let root_dir = Directory::open(&store, store.root_directory_object_id())
@@ -2620,16 +2362,13 @@ mod tests {
             .expect("new filesystem failed");
         {
             let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_vol
-                .volume("test", StoreOptions { crypt: crypt.clone(), ..Default::default() })
-                .await
-                .expect("opening test volume");
+            let store = root_vol.volume("test").await.expect("opening test volume");
             let root_dir = Directory::open(&store, store.root_directory_object_id())
                 .await
                 .expect("open failed");
-            let (object_id, _, _) =
+            let (object_id, _) =
                 root_dir.lookup("file").await.expect("lookup failed").expect("missing file");
-            let test_file = ObjectStore::open_object(&store, object_id, Default::default(), None)
+            let test_file = ObjectStore::open_object(&store, object_id, Default::default())
                 .await
                 .expect("open failed");
             // Write some more data.
@@ -2651,16 +2390,13 @@ mod tests {
             .expect("new filesystem failed");
         {
             let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_vol
-                .volume("test", StoreOptions { crypt: crypt.clone(), ..Default::default() })
-                .await
-                .expect("opening test volume");
+            let store = root_vol.volume("test").await.expect("opening test volume");
             let root_dir = Directory::open(&store, store.root_directory_object_id())
                 .await
                 .expect("open failed");
-            let (object_id, _, _) =
+            let (object_id, _) =
                 root_dir.lookup("file").await.expect("lookup failed").expect("missing file");
-            let test_file = ObjectStore::open_object(&store, object_id, Default::default(), None)
+            let test_file = ObjectStore::open_object(&store, object_id, Default::default())
                 .await
                 .expect("open failed");
             let mut buffer = test_file.allocate_buffer(8192).await;
@@ -2676,7 +2412,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_image_builder_mode_no_early_writes() {
         const BLOCK_SIZE: u32 = 4096;
         let device = DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE));
@@ -2693,7 +2429,7 @@ mod tests {
         fs.close().await.expect("closed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_image_builder_mode() {
         const BLOCK_SIZE: u32 = 4096;
         const EXISTING_FILE_RANGE: Range<u64> = 4096 * 1024..4096 * 1025;
@@ -2769,13 +2505,12 @@ mod tests {
         let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
             .await
             .expect("open failed");
-        let (object_id, descriptor, _) =
+        let (object_id, descriptor) =
             root_directory.lookup("test").await.expect("lookup failed").unwrap();
         assert_eq!(descriptor, ObjectDescriptor::File);
-        let test_file =
-            ObjectStore::open_object(&root_store, object_id, HandleOptions::default(), None)
-                .await
-                .expect("open failed");
+        let test_file = ObjectStore::open_object(&root_store, object_id, HandleOptions::default())
+            .await
+            .expect("open failed");
         let mut read_buf =
             test_file.allocate_buffer(EXISTING_FILE_RANGE.length().unwrap() as usize).await;
         test_file.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
@@ -2784,7 +2519,7 @@ mod tests {
         fs.close().await.expect("closed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_only_mount_on_full_filesystem() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs =
@@ -2830,7 +2565,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_image_builder_mode_flush_on_close() {
         const BLOCK_SIZE: u32 = 4096;
         let device = DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE));

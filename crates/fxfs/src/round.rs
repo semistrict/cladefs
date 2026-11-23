@@ -25,28 +25,3 @@ pub fn round_down<
     let block_size = block_size.into();
     offset - offset % block_size
 }
-
-/// Computes the rounded division of `numerator` / `denominator`.
-///
-/// Returns None for an arithmetic error (overflow, or divide-by-zero).
-pub fn round_div(numerator: u64, denominator: u64) -> Option<u64> {
-    numerator.checked_add(denominator / 2)?.checked_div(denominator)
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::round::round_div;
-
-    #[test]
-    fn test_round_div() {
-        assert_eq!(round_div(9, 4), Some(2));
-        assert_eq!(round_div(10, 4), Some(3));
-        assert_eq!(round_div(11, 4), Some(3));
-        assert_eq!(round_div(12, 4), Some(3));
-        assert_eq!(round_div(13, 4), Some(3));
-        assert_eq!(round_div(14, 4), Some(4));
-        assert_eq!(round_div(0, 1), Some(0));
-        assert_eq!(round_div(100, 0), None);
-        assert_eq!(round_div(u64::MAX, 2), None);
-    }
-}

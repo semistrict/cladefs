@@ -72,7 +72,7 @@ use fxfs::object_store::journal::JournalOptions;
 use fxfs::object_store::object_record::ObjectKeyData;
 use fxfs::object_store::transaction::TRANSACTION_MAX_JOURNAL_USAGE;
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{Extent, ExtentMode, ExtentValue, NewChildStoreOptions, StoreOptions};
+use fxfs::object_store::{Extent, ExtentMode, ExtentValue, NewChildStoreOptions};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestRunner};
 use rand::rngs::StdRng;
@@ -1893,7 +1893,7 @@ impl<const KEEPS: bool> World<KEEPS> {
             return Err(format!("the volumes are {found:?}, not {expected:?}"));
         }
         for snapshot in &model.snapshots {
-            let volume = volumes.volume(&snapshot.name, StoreOptions::default()).await;
+            let volume = volumes.volume(&snapshot.name).await;
             let volume = volume.map_err(|e| format!("{}: {e:#}", snapshot.name))?;
             let platform = Seeded::<KEEPS> { workers: false };
             let fs = Fxfs::new((*self.filesystem).clone(), volume, true, platform);
@@ -1946,7 +1946,7 @@ impl<const KEEPS: bool> World<KEEPS> {
         let filesystem = builder.open(device).await;
         let filesystem = filesystem.map_err(|e| format!("opening: {e:#}"))?;
         let volumes = root_volume((*filesystem).clone()).await.map_err(|e| format!("{e:#}"))?;
-        let volume = volumes.volume(VOLUME, StoreOptions::default()).await;
+        let volume = volumes.volume(VOLUME).await;
         let volume = volume.map_err(|e| format!("the volume: {e:#}"))?;
         drop(volumes);
         let platform = Seeded { workers: setting.workers };

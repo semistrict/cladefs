@@ -541,7 +541,7 @@ mod tests {
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_graveyard() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -554,22 +554,14 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let handle1 = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("create_object failed");
-        let handle2 = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("create_object failed");
+        let handle1 =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
+        let handle2 =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("create_object failed");
         transaction.commit().await.expect("commit failed");
         let id1 = handle1.object_id();
         let id2 = handle2.object_id();
@@ -637,7 +629,7 @@ mod tests {
 
     /// cladefs: tombstoning in batches, the graveyard takes what is queued while it waits between
     /// them once something waits for it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_batches() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
@@ -653,14 +645,10 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let handle = ObjectStore::create_object(
-                &root_store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            let handle =
+                ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
             root_store.add_to_graveyard(&mut transaction, handle.object_id());
             transaction.commit().await.expect("commit failed");
             ids.push(handle.object_id());
@@ -674,8 +662,7 @@ mod tests {
         fs.graveyard().flush().await;
         assert_eq!(root_store.graveyard_count(), 0);
         for id in ids {
-            let opened =
-                ObjectStore::open_object(&root_store, id, HandleOptions::default(), None).await;
+            let opened = ObjectStore::open_object(&root_store, id, HandleOptions::default()).await;
             assert!(FxfsError::NotFound.matches(&opened.err().expect("open_object succeeded")));
         }
         fs.close().await.expect("close failed");
@@ -683,7 +670,7 @@ mod tests {
 
     /// cladefs: in batches, the graveyard tombstones many small files to a transaction, and
     /// finishes a file with another attribute on its own.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_batches_tombstone_objects_together() {
         const FILES: usize = 64;
         let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
@@ -702,14 +689,10 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let handle = ObjectStore::create_object(
-                &root_store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            let handle =
+                ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
             transaction.commit().await.expect("commit failed");
             if i == 0 {
                 // As an attribute being written is: in the graveyard until it is complete.
@@ -765,8 +748,7 @@ mod tests {
         assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 3);
         assert_eq!(root_store.graveyard_count(), 0);
         for id in ids {
-            let opened =
-                ObjectStore::open_object(&root_store, id, HandleOptions::default(), None).await;
+            let opened = ObjectStore::open_object(&root_store, id, HandleOptions::default()).await;
             assert!(FxfsError::NotFound.matches(&opened.err().expect("open_object succeeded")));
         }
         std::mem::drop(hooks);
@@ -774,7 +756,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_graveyard_count_replay() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let (device, _object_ids) = {
@@ -792,22 +774,14 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let handle1 = ObjectStore::create_object(
-                &root_store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
-            let handle2 = ObjectStore::create_object(
-                &root_store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            let handle1 =
+                ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
+            let handle2 =
+                ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
             transaction.commit().await.expect("commit failed");
             object_ids.push(handle1.object_id());
             object_ids.push(handle2.object_id());
@@ -865,7 +839,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_tombstone_attribute() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -876,14 +850,10 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        let handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("failed to create object");
+        let handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("failed to create object");
         transaction.commit().await.expect("commit failed");
 
         handle
@@ -923,16 +893,15 @@ mod tests {
         fs.graveyard().wait_for_reap().await;
         let root_store = fs.root_store();
 
-        let handle =
-            ObjectStore::open_object(&root_store, object_id, HandleOptions::default(), None)
-                .await
-                .expect("failed to open object");
+        let handle = ObjectStore::open_object(&root_store, object_id, HandleOptions::default())
+            .await
+            .expect("failed to open object");
 
         assert_eq!(handle.read_attr(AttributeId::TEST_ID).await.expect("read_attr failed"), None);
         fsck(fs.clone()).await.expect("fsck failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_tombstone_attribute_and_object() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -943,14 +912,10 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        let handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("failed to create object");
+        let handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("failed to create object");
         transaction.commit().await.expect("commit failed");
 
         const ATTR_1: AttributeId = AttributeId::TEST_ID;
@@ -1012,7 +977,7 @@ mod tests {
 
         let root_store = fs.root_store();
         if let Err(e) =
-            ObjectStore::open_object(&root_store, object_id, HandleOptions::default(), None).await
+            ObjectStore::open_object(&root_store, object_id, HandleOptions::default()).await
         {
             assert!(FxfsError::NotFound.matches(&e));
         } else {
@@ -1021,7 +986,7 @@ mod tests {
         fsck(fs.clone()).await.expect("fsck failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_tombstone_large_attribute() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1032,14 +997,10 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        let handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("failed to create object");
+        let handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await
+                .expect("failed to create object");
         transaction.commit().await.expect("commit failed");
 
         let object_id = {
@@ -1091,10 +1052,9 @@ mod tests {
 
         let root_store = fs.root_store();
 
-        let handle =
-            ObjectStore::open_object(&root_store, object_id, HandleOptions::default(), None)
-                .await
-                .expect("failed to open object");
+        let handle = ObjectStore::open_object(&root_store, object_id, HandleOptions::default())
+            .await
+            .expect("failed to open object");
 
         assert_eq!(handle.read_attr(AttributeId::TEST_ID).await.expect("read_attr failed"), None);
         fsck(fs.clone()).await.expect("fsck failed");
@@ -1145,7 +1105,7 @@ mod tests {
     // transactions (skip_journal_checks: false). If compactions are paused, graveyard operations
     // will throttle when journal space runs low and wait for compactions to free space (invoking
     // the check space callback), rather than borrowing unbounded metadata space.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_graveyard_borrowed_metadata_space_fails_compaction() {
         let reclaim_size = 65536;
         // 200,000 blocks of 512 bytes = 100 MiB device.

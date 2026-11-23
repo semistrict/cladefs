@@ -43,7 +43,6 @@ where
 
     {
         let start_time = std::time::Instant::now();
-        let merged_layer_count = layer_set.layers.len();
         let block_size = writer.block_size();
         let total_len = layer_set.sum_len();
         let mut merger = layer_set.merger();
@@ -62,7 +61,7 @@ where
         }
         .context("ObjectStore::flush")?;
 
-        tree.report_compaction_metrics(bytes_written, start_time.elapsed(), merged_layer_count);
+        tree.report_compaction_metrics(bytes_written, start_time.elapsed());
     }
 
     Ok((layers_to_keep, layer_set.layers))

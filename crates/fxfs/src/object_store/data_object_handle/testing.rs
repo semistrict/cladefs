@@ -115,7 +115,7 @@ pub(super) async fn create_file(fs: &FxFilesystem) -> DataObjectHandle<ObjectSto
         .new_transaction(lock_keys![], Options::default())
         .await
         .expect("new_transaction failed");
-    let file = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
+    let file = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
         .await
         .expect("create_object failed");
     transaction.commit().await.expect("commit failed");

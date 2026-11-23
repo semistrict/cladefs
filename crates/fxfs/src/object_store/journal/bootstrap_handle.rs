@@ -481,7 +481,7 @@ mod tests {
     use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
     use storage_device::{Device as _, ExtentId, ExtentRange};
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extent_object_handle_read() {
         let bs = BLOCK_SIZE.get();
         let device = Arc::new(FakeDevice::new(16, bs as u32));
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(handle.read_aligned(2 * bs, out.as_mut()).await.unwrap(), 0);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_journal_extent_handle_spans_and_bounds() {
         let bs = BLOCK_SIZE.get();
         let device = Arc::new(FakeDevice::new(32, bs as u32));

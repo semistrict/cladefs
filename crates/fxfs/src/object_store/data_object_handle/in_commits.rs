@@ -183,7 +183,7 @@ mod tests {
         counted_filesystem, create_file, every,
     };
     use crate::object_store::data_object_handle::tests::{
-        TEST_DEVICE_BLOCK_SIZE, create_object_with_key,
+        TEST_DEVICE_BLOCK_SIZE, create_test_object,
     };
     use crate::object_store::transaction::{Options, lock_keys};
     use crate::object_store::{DataObjectHandle, LockKey, ObjectStore};
@@ -194,7 +194,7 @@ mod tests {
     /// cladefs: a clone of thousands of fragments, one over as many more, a punch of them, and each
     /// across a hole of 2^50 bytes, each on a filesystem of its own: what they take, in commits and
     /// the bytes of their records, no more than the constants that split them took.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_what_clones_and_punches_cost() {
         const FRAGMENTS: usize = 2048;
         const FAR: u64 = 1 << 50;
@@ -278,7 +278,7 @@ mod tests {
 
     /// cladefs: `allocate` over thousands of fragments, whose extents it changes, and whose holes it
     /// fills, in as many transactions as it takes, none more than one may take of the journal.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_fills_transactions() {
         use crate::object_store::transaction::TRANSACTION_MAX_JOURNAL_USAGE;
 
@@ -302,11 +302,11 @@ mod tests {
     /// which its one metadata reservation must pay for, however many: a file of many extents,
     /// as PostgreSQL's relations written a page at a time are, panicked the guest's kernel with
     /// "Insufficient reservation space" (TASK-58).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_truncate_of_many_extents() {
         let device = DeviceHolder::new(FakeDevice::new(65536, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object = create_object_with_key(fs.clone(), None, false).await;
+        let object = create_test_object(fs.clone(), false).await;
         let block_size = fs.block_size().get();
         let mut buf = object.allocate_buffer(block_size as usize).await;
         buf.fill(0xaa);

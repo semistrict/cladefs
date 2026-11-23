@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/errors.rs`. Its conversions to `zx::Status` (`mod fuchsia`),
-// which upstream builds only on Fuchsia, are built for the in-process kernel.
+// Fuchsia's `src/storage/fxfs/src/errors.rs`, without its conversions to `zx::Status` (`mod
+// fuchsia`): cladefs maps these to errnos (fxfs-posix's `errno`). Nor are there errors of Fxfs's own
+// encryption, which cladefs leaves to its extents and buckets.
 
 use thiserror::Error;
 
@@ -53,10 +54,6 @@ pub enum FxfsError {
     IntegrityError,
     #[error("Unavailable")]
     Unavailable,
-    #[error("No key")]
-    NoKey,
-    #[error("Inconsistent encryption policy")]
-    InconsistentEncryptionPolicy,
 }
 
 impl FxfsError {
@@ -76,42 +73,6 @@ impl FxfsError {
             self == root_cause
         } else {
             false
-        }
-    }
-}
-
-mod fuchsia {
-    use super::*;
-    use zx::Status;
-
-    impl From<FxfsError> for Status {
-        fn from(err: FxfsError) -> Status {
-            match err {
-                FxfsError::AlreadyExists => Status::ALREADY_EXISTS,
-                FxfsError::Inconsistent => Status::IO_DATA_INTEGRITY,
-                FxfsError::Internal => Status::INTERNAL,
-                FxfsError::NotDir => Status::NOT_DIR,
-                FxfsError::NotFile => Status::NOT_FILE,
-                FxfsError::NotFound => Status::NOT_FOUND,
-                FxfsError::NotEmpty => Status::NOT_EMPTY,
-                FxfsError::ReadOnlyFilesystem => Status::ACCESS_DENIED,
-                FxfsError::NoSpace => Status::NO_SPACE,
-                FxfsError::Deleted => Status::ACCESS_DENIED,
-                FxfsError::InvalidArgs => Status::INVALID_ARGS,
-                FxfsError::TooBig => Status::FILE_BIG,
-                FxfsError::InvalidVersion => Status::NOT_SUPPORTED,
-                FxfsError::JournalFlushError => Status::IO,
-                FxfsError::NotSupported => Status::NOT_SUPPORTED,
-                FxfsError::AccessDenied => Status::ACCESS_DENIED,
-                FxfsError::OutOfRange => Status::OUT_OF_RANGE,
-                FxfsError::AlreadyBound => Status::ALREADY_BOUND,
-                FxfsError::BadPath => Status::BAD_PATH,
-                FxfsError::WrongType => Status::WRONG_TYPE,
-                FxfsError::IntegrityError => Status::IO_DATA_INTEGRITY,
-                FxfsError::Unavailable => Status::UNAVAILABLE,
-                FxfsError::NoKey => Status::ACCESS_DENIED,
-                FxfsError::InconsistentEncryptionPolicy => Status::BAD_STATE,
-            }
         }
     }
 }

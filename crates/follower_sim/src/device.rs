@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
-use storage_device::{Device, ExtentId, Previous, ReadOptions, WriteFlags, WriteOptions};
+use storage_device::{Device, ExtentId, Previous, WriteFlags, WriteOptions};
 
 /// The size of the transfer buffers' memory.
 const TRANSFER_HEAP_SIZE: usize = 4 << 20;
@@ -62,12 +62,11 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
         self.description.capacity / self.description.block_size as u64
     }
 
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
-        _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let mut data = vec![0; buffer.len()];
         self.cell.read(extent, offset, &mut data)?;
@@ -186,12 +185,11 @@ impl<D: Dir + 'static> Device for ViewDevice<D> {
         self.description.capacity / self.description.block_size as u64
     }
 
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
-        _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         if self.failing.load(Ordering::SeqCst) {
             bail!("reads fail");

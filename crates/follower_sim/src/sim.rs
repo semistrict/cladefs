@@ -158,7 +158,7 @@ async fn tree(fs: &OpenFxFilesystem) -> BTreeMap<String, Node> {
         let node = match descriptor {
             ObjectDescriptor::File => {
                 let options = HandleOptions::default();
-                let handle = ObjectStore::open_object(&store, object_id, options, None)
+                let handle = ObjectStore::open_object(&store, object_id, options)
                     .await
                     .expect("opening a file failed");
                 let properties = handle.get_properties().await.expect("properties failed");

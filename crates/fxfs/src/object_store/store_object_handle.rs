@@ -21,18 +21,16 @@ use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::ObjectHandle;
 use crate::object_store::allocator::STAGED_MAX;
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
-use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
     AttributeKey, BytesAndNodes, ExtendedAttributeValue, ObjectAttributes, ObjectKey,
     ObjectKeyData, ObjectValue, Timestamp,
 };
 use crate::object_store::transaction::{
-    AssocObj, AssociatedObject, LockKey, Mutation, ObjectStoreMutation, Options, ReadGuard,
-    Transaction, lock_keys,
+    LockKey, Mutation, ObjectStoreMutation, Options, ReadGuard, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AttributeId, Extent, FileExtent, HandleOptions, HandleOwner, ObjectStore, TrimMode, TrimResult,
-    VOLUME_DATA_KEY_ID,
+    AttributeId, Extent, FileExtent, HandleOptions, HandleOwner, MutableNodeAttributes,
+    ObjectStore, TrimMode, TrimResult,
 };
 use crate::range::RangeExt;
 use anyhow::{Context, Error, anyhow, bail, ensure};
@@ -40,24 +38,15 @@ use assert_matches::assert_matches;
 use futures::future::try_join_all;
 use futures::stream::{FuturesOrdered, unfold};
 use futures::{Stream, TryStreamExt, try_join};
-use fxfs_crypto::{
-    Cipher, CipherHolder, CipherSet, EncryptionKey, FindKeyResult, FxfsCipher, KeyPurpose,
-    MutPtrByteSlice,
-};
 use fxfs_trace::{TraceFutureExt, trace, trace_future_args};
-use static_assertions::const_assert;
 use std::cmp::min;
-use std::future::Future;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{self, AtomicBool, Ordering};
+use std::sync::atomic::{self, AtomicBool};
 use storage_device::buffer::{Buffer, BufferFuture, BufferRef, MutableBufferRef};
-use storage_device::{
-    ExtentId, ExtentRange, InlineCryptoOptions, NoExtent, ReadOptions, WriteOptions,
-};
+use storage_device::{ExtentId, ExtentRange, NoExtent, WriteOptions};
 use storage_units::BlockSize;
 
-use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 
 /// Maximum size for an extended attribute name.
@@ -128,9 +117,7 @@ impl MaybeChecksums {
     }
 }
 
-/// The mode of operation when setting extended attributes. This is the same as the fidl definition
-/// but is replicated here so we don't have fuchsia.io structures in the api, so this can be used
-/// on host.
+/// The mode of operation when setting extended attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetExtendedAttributeMode {
     /// Create the extended attribute if it doesn't exist, replace the value if it does.
@@ -141,31 +128,9 @@ pub enum SetExtendedAttributeMode {
     Replace,
 }
 
-impl From<fio::SetExtendedAttributeMode> for SetExtendedAttributeMode {
-    fn from(other: fio::SetExtendedAttributeMode) -> SetExtendedAttributeMode {
-        match other {
-            fio::SetExtendedAttributeMode::Set => SetExtendedAttributeMode::Set,
-            fio::SetExtendedAttributeMode::Create => SetExtendedAttributeMode::Create,
-            fio::SetExtendedAttributeMode::Replace => SetExtendedAttributeMode::Replace,
-        }
-    }
-}
-
-enum Encryption {
-    /// The object doesn't use encryption.
-    None,
-
-    /// The object has keys that are cached (which means unwrapping occurs on-demand) with
-    /// KeyManager.
-    CachedKeys,
-
-    /// The object has permanent keys registered with KeyManager.
-    PermanentKeys,
-}
-
 /// StoreObjectHandle is the lowest-level, untyped handle to an object with the id [`object_id`] in
 /// a particular store, [`owner`]. It provides functionality shared across all objects, such as
-/// reading and writing attributes and managing encryption keys.
+/// reading and writing attributes.
 ///
 /// Since it's untyped, it doesn't do any object kind validation, and is generally meant to
 /// implement higher-level typed handles.
@@ -180,7 +145,6 @@ pub struct StoreObjectHandle<S: HandleOwner> {
     object_id: u64,
     options: HandleOptions,
     trace: AtomicBool,
-    encryption: Encryption,
 }
 
 impl<S: HandleOwner> ObjectHandle for StoreObjectHandle<S> {
@@ -234,21 +198,8 @@ impl Watchdog {
 
 impl<S: HandleOwner> StoreObjectHandle<S> {
     /// Make a new StoreObjectHandle for the object with id [`object_id`] in store [`owner`].
-    pub fn new(
-        owner: Arc<S>,
-        object_id: u64,
-        permanent_keys: bool,
-        options: HandleOptions,
-        trace: bool,
-    ) -> Self {
-        let encryption = if permanent_keys {
-            Encryption::PermanentKeys
-        } else if owner.as_ref().as_ref().is_encrypted() {
-            Encryption::CachedKeys
-        } else {
-            Encryption::None
-        };
-        Self { owner, object_id, encryption, options, trace: AtomicBool::new(trace) }
+    pub fn new(owner: Arc<S>, object_id: u64, options: HandleOptions, trace: bool) -> Self {
+        Self { owner, object_id, options, trace: AtomicBool::new(trace) }
     }
 
     pub fn owner(&self) -> &Arc<S> {
@@ -261,10 +212,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
     pub fn trace(&self) -> bool {
         self.trace.load(atomic::Ordering::Relaxed)
-    }
-
-    pub fn is_encrypted(&self) -> bool {
-        !matches!(self.encryption, Encryption::None)
     }
 
     /// Get the default set of transaction options for this object. This is mostly the overall
@@ -379,17 +326,15 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok(deallocated)
     }
 
-    // Writes aligned data (that should already be encrypted) to the given offset in `extent` and
-    // computes checksums if requested. The aligned data must be from a single logical file range.
+    // Writes aligned data to the given offset in `extent` and computes checksums if requested. The
+    // aligned data must be from a single logical file range.
     //
-    // cladefs: `options` are forwarded to the underlying device (e.g. `WriteFlags::PRE_BARRIER`), but
-    // for their inline crypto, which `crypt_ctx` says.
+    // cladefs: `options` are forwarded to the underlying device (e.g. `WriteFlags::PRE_BARRIER`).
     async fn write_aligned(
         &self,
         buf: BufferRef<'_>,
         extent: ExtentId,
         extent_offset: u64,
-        crypt_ctx: Option<(u64, u8)>,
         options: WriteOptions<'_>,
     ) -> Result<MaybeChecksums, Error> {
         if self.trace() {
@@ -403,34 +348,13 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             );
         }
         let store = self.store();
-        store.device_write_ops.fetch_add(1, Ordering::Relaxed);
         let _watchdog = Watchdog::new(10, |count| {
             warn!("Write I/O request blocked for {} seconds", count * 10);
         });
 
-        let (opts, compute_checksums) = match crypt_ctx {
-            Some((dun, slot)) => {
-                if !store.filesystem().options().barriers_enabled {
-                    return Err(anyhow!(FxfsError::InvalidArgs)
-                        .context("Barriers must be enabled for inline encrypted writes."));
-                }
-                (
-                    WriteOptions {
-                        inline_crypto: InlineCryptoOptions::enabled(slot, dun),
-                        ..options
-                    },
-                    false,
-                )
-            }
-            None => (
-                WriteOptions { inline_crypto: InlineCryptoOptions::default(), ..options },
-                !self.options.skip_checksums,
-            ),
-        };
-
-        if compute_checksums {
+        if !self.options.skip_checksums {
             let mut checksums = Vec::new();
-            try_join!(store.device.write_with_opts(extent, extent_offset, buf, opts), async {
+            try_join!(store.device.write_with_opts(extent, extent_offset, buf, options), async {
                 let block_size = self.block_size().get() as usize;
                 for chunk in buf.as_ptr_slice().chunks(block_size) {
                     checksums.push(crate::checksum::fletcher64_ptr(chunk, 0));
@@ -439,7 +363,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             })?;
             Ok(MaybeChecksums::Fletcher(checksums))
         } else {
-            store.device.write_with_opts(extent, extent_offset, buf, opts).await?;
+            store.device.write_with_opts(extent, extent_offset, buf, options).await?;
             Ok(MaybeChecksums::None)
         }
     }
@@ -495,25 +419,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     pub async fn update_attributes<'a>(
         &self,
         transaction: &mut Transaction<'a>,
-        node_attributes: Option<&fio::MutableNodeAttributes>,
+        node_attributes: Option<&MutableNodeAttributes>,
         change_time: Option<Timestamp>,
     ) -> Result<(), Error> {
-        if let Some(&fio::MutableNodeAttributes { selinux_context: Some(ref context), .. }) =
-            node_attributes
-        {
-            if let fio::SelinuxContext::Data(context) = context {
-                self.set_extended_attribute_impl(
-                    "security.selinux".into(),
-                    context.clone(),
-                    SetExtendedAttributeMode::Set,
-                    transaction,
-                )
-                .await?;
-            } else {
-                return Err(anyhow!(FxfsError::InvalidArgs)
-                    .context("Only set SELinux context with `data` member."));
-            }
-        }
         self.store()
             .update_attributes(transaction, self.object_id, node_attributes, change_time)
             .await
@@ -646,109 +554,20 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok(NeedsTrim(needs_trim))
     }
 
-    /// Reads and decrypts a singular logical range.
-    pub async fn read_and_decrypt(
+    /// Reads `buffer` from `extent_offset` bytes into `extent`.
+    pub async fn read_extent(
         &self,
-        attribute_id: AttributeId,
         extent: ExtentId,
         extent_offset: u64,
-        file_offset: u64,
-        mut buffer: MutableBufferRef<'_>,
-        key_id: u64,
+        buffer: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
         let store = self.store();
-        store.device_read_ops.fetch_add(1, Ordering::Relaxed);
 
         let _watchdog = Watchdog::new(10, |count| {
             warn!("Read I/O request blocked for {} seconds", count * 10);
         });
 
-        let (_key_id, key) = self.get_key(Some(key_id)).await?;
-        if let Some(key) = key {
-            if let Some((dun, slot)) =
-                key.crypt_ctx(self.object_id, attribute_id.raw(), file_offset)
-            {
-                store
-                    .device
-                    .read_with_opts(
-                        extent,
-                        extent_offset,
-                        buffer.reborrow(),
-                        ReadOptions { inline_crypto: InlineCryptoOptions::enabled(slot, dun) },
-                    )
-                    .await?;
-            } else {
-                store.device.read(extent, extent_offset, buffer.reborrow()).await?;
-                key.decrypt(
-                    self.object_id,
-                    attribute_id.raw(),
-                    extent_offset,
-                    file_offset,
-                    buffer.as_mut_ptr_slice(),
-                )?;
-            }
-        } else {
-            store.device.read(extent, extent_offset, buffer.reborrow()).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Returns the specified key. If `key_id` is None, it will try and return the fscrypt key if
-    /// it is present, or the volume key if it isn't. If the fscrypt key is present, but the key
-    /// cannot be unwrapped, then this will return `FxfsError::NoKey`. If the volume is not
-    /// encrypted, this returns None.
-    pub async fn get_key(
-        &self,
-        key_id: Option<u64>,
-    ) -> Result<(u64, Option<Arc<dyn Cipher>>), Error> {
-        let store = self.store();
-        let result = match self.encryption {
-            Encryption::None => (VOLUME_DATA_KEY_ID, None),
-            Encryption::CachedKeys => {
-                if let Some(key_id) = key_id {
-                    (
-                        key_id,
-                        Some(
-                            store
-                                .key_manager
-                                .get_key(
-                                    self.object_id,
-                                    store.crypt().ok_or_else(|| anyhow!("No crypt!"))?.as_ref(),
-                                    async || store.get_keys(self.object_id).await,
-                                    key_id,
-                                )
-                                .await?,
-                        ),
-                    )
-                } else {
-                    let (key_id, key) = store
-                        .key_manager
-                        .get_fscrypt_key_if_present(
-                            self.object_id,
-                            store.crypt().ok_or_else(|| anyhow!("No crypt!"))?.as_ref(),
-                            async || store.get_keys(self.object_id).await,
-                        )
-                        .await?;
-                    (key_id, Some(key))
-                }
-            }
-            Encryption::PermanentKeys => {
-                (VOLUME_DATA_KEY_ID, Some(store.key_manager.get(self.object_id).await?.unwrap()))
-            }
-        };
-
-        // Ensure that if the key we receive uses inline encryption, barriers should be enabled.
-        if let Some(ref key) = result.1 {
-            if key.crypt_ctx(self.object_id, 0, 0).is_some() {
-                if !store.filesystem().options().barriers_enabled {
-                    return Err(anyhow!(FxfsError::InvalidArgs)
-                        .context("Barriers must be enabled for inline encrypted writes."));
-                }
-            }
-        }
-
-        Ok(result)
+        store.device.read(extent, extent_offset, buffer).await
     }
 
     /// Returns a stream of extents for the given attribute ID, mapping logical offsets to device
@@ -821,99 +640,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 }
             },
         ))
-    }
-
-    /// This will only work for a non-permanent volume data key. This is designed to be used with
-    /// extended attributes where we'll only create the key on demand for directories and encrypted
-    /// files.
-    async fn get_or_create_key(
-        &self,
-        transaction: &mut Transaction<'_>,
-    ) -> Result<Arc<dyn Cipher>, Error> {
-        let store = self.store();
-
-        // Fast path: try and get keys from the cache.
-        if let Some(key) = store.key_manager.get(self.object_id).await.context("get failed")? {
-            return Ok(key);
-        }
-
-        let crypt = store.crypt().ok_or_else(|| anyhow!("No crypt!"))?;
-
-        // Next, see if the keys are already created.
-        let (mut encryption_keys, mut cipher_set) = if let Some(value) =
-            store.tree.find_value(&ObjectKey::keys(self.object_id)).await.context("find failed")?
-        {
-            if let ObjectValue::Keys(encryption_keys) = value {
-                let cipher_set = store
-                    .key_manager
-                    .get_keys(
-                        self.object_id,
-                        crypt.as_ref(),
-                        &mut Some(async || Ok(encryption_keys.clone())),
-                        /* permanent= */ false,
-                        /* force= */ false,
-                    )
-                    .await
-                    .context("get_keys failed")?;
-                match cipher_set.find_key(VOLUME_DATA_KEY_ID) {
-                    FindKeyResult::NotFound => {}
-                    FindKeyResult::Unavailable => return Err(FxfsError::NoKey.into()),
-                    FindKeyResult::Key(key) => return Ok(key),
-                }
-                (encryption_keys, (*cipher_set).clone())
-            } else {
-                return Err(anyhow!(FxfsError::Inconsistent));
-            }
-        } else {
-            Default::default()
-        };
-
-        // Proceed to create the key.  The transaction holds the required locks.
-        let (key, unwrapped_key) = crypt.create_key(self.object_id, KeyPurpose::Data).await?;
-        let cipher: Arc<dyn Cipher> = Arc::new(FxfsCipher::new(&unwrapped_key));
-
-        // Add new cipher to cloned cipher set. This will replace existing one
-        // if transaction is successful.
-        cipher_set.add_key(VOLUME_DATA_KEY_ID, CipherHolder::Cipher(cipher.clone()));
-        let cipher_set = Arc::new(cipher_set);
-
-        // Arrange for the CipherSet to be added to the cache when (and if) the transaction
-        // commits.
-        struct UnwrappedKeys {
-            object_id: u64,
-            new_keys: Arc<CipherSet>,
-        }
-
-        impl AssociatedObject for UnwrappedKeys {
-            fn will_apply_mutation(
-                &self,
-                _mutation: &Mutation,
-                object_id: u64,
-                manager: &ObjectManager,
-            ) {
-                manager.store(object_id).unwrap().key_manager.insert(
-                    self.object_id,
-                    self.new_keys.clone(),
-                    /* permanent= */ false,
-                );
-            }
-        }
-
-        encryption_keys.insert(VOLUME_DATA_KEY_ID, EncryptionKey::Fxfs(key).into());
-
-        transaction.add_with_object(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::keys(self.object_id),
-                ObjectValue::keys(encryption_keys),
-            ),
-            AssocObj::Owned(Box::new(UnwrappedKeys {
-                object_id: self.object_id,
-                new_keys: cipher_set,
-            })),
-        );
-
-        Ok(cipher)
     }
 
     /// Reads up to `buf.len()` bytes from attribute `attribute_id` starting at `offset`.
@@ -1072,7 +798,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`, and `buf`'s
     /// memory buffer range start must be aligned to the device block size.
     ///
-    /// Extents from `iter` are read and decrypted in parallel. Holes and any unallocated portions
+    /// Extents from `iter` are read in parallel. Holes and any unallocated portions
     /// within `buf` are zero-filled.
     async fn read_aligned_impl(
         &self,
@@ -1090,11 +816,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let device_block_size = self.store().device.block_size() as u64;
         debug_assert!(buf.range().start as u64 % device_block_size == 0);
 
-        self.store().logical_read_ops.fetch_add(1, Ordering::Relaxed);
-
         let mut reads = Vec::new();
         loop {
-            let (mut extent_key, extent, mut extent_offset, key_id, mode) = match iter.get() {
+            let (mut extent_key, extent, mut extent_offset, mode) = match iter.get() {
                 Some(ItemRef {
                     key:
                         ObjectKey {
@@ -1106,7 +830,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     ..
                 }) if *object_id == self.object_id && *attr_id == attribute_id => {
                     match extent_value {
-                        ExtentValue::Some { extent, extent_offset, mode, key_id } => {
+                        ExtentValue::Some { extent, extent_offset, mode } => {
                             ensure!(extent_key.is_valid(), FxfsError::Inconsistent);
                             ensure!(block_size.is_aligned(extent_key), FxfsError::Inconsistent);
                             ensure!(
@@ -1115,7 +839,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                             );
                             // The iterator shouldn't start entirely before the offset.
                             ensure!(extent_key.end > offset, FxfsError::Inconsistent);
-                            (extent_key.0.clone(), *extent, *extent_offset, *key_id, mode)
+                            (extent_key.0.clone(), *extent, *extent_offset, mode)
                         }
                         ExtentValue::None => {
                             // Treat deleted extents like holes.
@@ -1169,16 +893,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 _ => false,
             };
             reads.push(async move {
-                let read = self
-                    .read_and_decrypt(
-                        attribute_id,
-                        extent,
-                        extent_offset,
-                        extent_key.start,
-                        to_read.reborrow(),
-                        key_id,
-                    )
-                    .await;
+                let read = self.read_extent(extent, extent_offset, to_read.reborrow()).await;
                 match read {
                     Err(error)
                         if may_be_unwritten && error.downcast_ref::<NoExtent>().is_some() =>
@@ -1213,18 +928,11 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
     /// Writes potentially unaligned data at `extent_offset` in `extent` and returns checksums if
     /// requested.
-    /// The data will be encrypted if necessary.  `buf` is mutable as an optimization, since the
-    /// write may require encryption, we can encrypt the buffer in-place rather than copying to
-    /// another buffer if the write is already aligned.
-    ///
-    /// NOTE: This will not create keys if they are missing (it will fail with an error if that
-    /// happens to be the case).
     pub async fn write_at(
         &self,
         attribute_id: AttributeId,
         offset: u64,
         buf: MutableBufferRef<'_>,
-        key_id: Option<u64>,
         extent: ExtentId,
         extent_offset: u64,
     ) -> Result<MaybeChecksums, Error> {
@@ -1232,7 +940,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             attribute_id,
             offset,
             buf,
-            key_id,
             extent,
             extent_offset,
             WriteOptions::default(),
@@ -1248,56 +955,21 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         attribute_id: AttributeId,
         offset: u64,
         buf: MutableBufferRef<'_>,
-        key_id: Option<u64>,
         extent: ExtentId,
         mut extent_offset: u64,
         options: WriteOptions<'_>,
     ) -> Result<MaybeChecksums, Error> {
         let mut transfer_buf;
         let block_size = self.block_size();
-        let (range, mut transfer_buf_ref) =
-            if offset % block_size == 0 && buf.len() as u64 % block_size == 0 {
-                (offset..offset + buf.len() as u64, buf)
-            } else {
-                let (range, buf) = self.align_buffer(attribute_id, offset, buf.as_ref()).await?;
-                transfer_buf = buf;
-                extent_offset -= offset - range.start;
-                (range, transfer_buf.as_mut())
-            };
-
-        let mut crypt_ctx = None;
-        if let (_, Some(key)) = self.get_key(key_id).await? {
-            if let Some(ctx) = key.crypt_ctx(self.object_id, attribute_id.raw(), range.start) {
-                crypt_ctx = Some(ctx);
-            } else {
-                key.encrypt(
-                    self.object_id,
-                    attribute_id.raw(),
-                    extent_offset,
-                    range.start,
-                    transfer_buf_ref.as_mut_ptr_slice(),
-                )?;
-            }
-        }
-        self.write_aligned(transfer_buf_ref.as_ref(), extent, extent_offset, crypt_ctx, options)
-            .await
-    }
-
-    /// Writes to multiple ranges with data provided in `buf`. This function is specifically
-    /// designed for migration purposes, allowing raw writes to the device without updating
-    /// object metadata like allocated size or mtime. It's essential for scenarios where
-    /// data needs to be transferred directly without triggering standard filesystem operations.
-    #[cfg(feature = "migration")]
-    pub async fn raw_multi_write(
-        &self,
-        transaction: &mut Transaction<'_>,
-        attribute_id: AttributeId,
-        key_id: Option<u64>,
-        ranges: &[Range<u64>],
-        buf: MutableBufferRef<'_>,
-    ) -> Result<(), Error> {
-        self.multi_write_internal(transaction, attribute_id, key_id, ranges, buf, false).await?;
-        Ok(())
+        let transfer_buf_ref = if offset % block_size == 0 && buf.len() as u64 % block_size == 0 {
+            buf
+        } else {
+            let (range, buf) = self.align_buffer(attribute_id, offset, buf.as_ref()).await?;
+            transfer_buf = buf;
+            extent_offset -= offset - range.start;
+            transfer_buf.as_mut()
+        };
+        self.write_aligned(transfer_buf_ref.as_ref(), extent, extent_offset, options).await
     }
 
     /// This is a low-level write function that writes to multiple ranges. Users should generally
@@ -1310,7 +982,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         &self,
         transaction: &mut Transaction<'_>,
         attribute_id: AttributeId,
-        key_id: Option<u64>,
         ranges: &[Range<u64>],
         mut buf: MutableBufferRef<'_>,
         packed: bool,
@@ -1324,49 +995,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let store = self.store();
         let store_id = store.store_object_id();
 
-        // The only key we allow to be created on-the-fly is a non permanent key wrapped with the
-        // volume data key.
-        // cladefs: box `get_or_create_key` and `get_key` so `multi_write_internal` stays small on
-        // 16 KiB guest kernel stacks (TASK-26.9).
-        let (key_id, key) = if key_id == Some(VOLUME_DATA_KEY_ID)
-            && matches!(self.encryption, Encryption::CachedKeys)
-        {
-            (
-                VOLUME_DATA_KEY_ID,
-                Some(
-                    crate::boxed(|| self.get_or_create_key(transaction))
-                        .await
-                        .context("get_or_create_key failed")?,
-                ),
-            )
-        } else {
-            crate::boxed(|| self.get_key(key_id)).await?
-        };
-        if let Some(key) = &key {
-            if !key.supports_inline_encryption() {
-                let mut slice = buf.as_mut_ptr_slice();
-                for r in ranges {
-                    let l = r.end - r.start;
-                    let (head, tail) = slice.split_at_mut(l as usize);
-                    key.encrypt(
-                        self.object_id,
-                        attribute_id.raw(),
-                        0, /* TODO(https://fxbug.dev/421269588): plumb through device_offset. */
-                        r.start,
-                        MutPtrByteSlice::from(head),
-                    )?;
-                    slice = tail;
-                }
-            }
-        }
-
         let mut allocated = 0;
         let allocator = store.allocator();
         let trace = self.trace();
         let mut writes = FuturesOrdered::new();
-
-        let mut logical_ranges = ranges.iter();
-        let mut current_range = logical_ranges.next().unwrap().clone();
 
         while !buf.is_empty() {
             let len = buf.len() as u64;
@@ -1388,58 +1020,30 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 );
             }
             let extent = allocated_range.extent;
-            let mut device_range = allocated_range.range;
-            let mut device_range_len = device_range.end - device_range.start;
-            allocated += device_range_len;
-            // If inline encryption is NOT supported, this loop should only happen once.
-            while device_range_len > 0 {
-                if current_range.end <= current_range.start {
-                    current_range = logical_ranges.next().unwrap().clone();
-                }
-                let (crypt_ctx, split) = if let Some(key) = &key {
-                    if key.supports_inline_encryption() {
-                        let split = std::cmp::min(
-                            current_range.end - current_range.start,
-                            device_range_len,
-                        );
-                        let crypt_ctx =
-                            key.crypt_ctx(self.object_id, attribute_id.raw(), current_range.start);
-                        current_range.start += split;
-                        (crypt_ctx, split)
-                    } else {
-                        (None, device_range_len)
-                    }
-                } else {
-                    (None, device_range_len)
-                };
+            let device_range = allocated_range.range;
+            let len = device_range.end - device_range.start;
+            allocated += len;
+            let (head, tail) = buf.split_at_mut(len as usize);
+            buf = tail;
 
-                let (head, tail) = buf.split_at_mut(split as usize);
-                buf = tail;
-
-                // cladefs: box each `write_aligned` future so `FuturesOrdered` and
-                // `multi_write_internal` stay small on 16 KiB guest kernel stacks (TASK-26.9).
-                writes.push_back(crate::boxed(|| async move {
-                    let len = head.len() as u64;
-                    Result::<_, Error>::Ok((
+            // cladefs: box each `write_aligned` future so `FuturesOrdered` and
+            // `multi_write_internal` stay small on 16 KiB guest kernel stacks (TASK-26.9).
+            writes.push_back(crate::boxed(|| async move {
+                Result::<_, Error>::Ok((
+                    extent,
+                    device_range.start,
+                    len,
+                    self.write_aligned(
+                        head.as_ref(),
                         extent,
                         device_range.start,
-                        len,
-                        self.write_aligned(
-                            head.as_ref(),
-                            extent,
-                            device_range.start,
-                            crypt_ctx,
-                            WriteOptions::default(),
-                        )
-                        .await?,
-                    ))
-                }));
-                device_range.start += split;
-                device_range_len = device_range.end - device_range.start;
-            }
+                        WriteOptions::default(),
+                    )
+                    .await?,
+                ))
+            }));
         }
 
-        self.store().logical_write_ops.fetch_add(1, Ordering::Relaxed);
         // cladefs: box the `try_join!` branches so `multi_write` does not keep `writes` and
         // `deallocate_old_extents` side-by-side on 16 KiB guest kernel stacks (TASK-26.9).
         let ((mutations, checksums), deallocated) = try_join!(
@@ -1473,7 +1077,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                                 extent,
                                 device_offset,
                                 checksums.to_mode(),
-                                key_id,
                             )),
                         ));
                         checksums = tail;
@@ -1507,20 +1110,17 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok((allocated, deallocated))
     }
 
-    /// Writes to multiple ranges with data provided in `buf`.  The buffer can be modified in place
-    /// if encryption takes place.  The ranges must all be aligned and no change to content size is
-    /// applied; the caller is responsible for updating size if required.  If `key_id` is None, it
-    /// means pick the default key for the object which is the fscrypt key if present, or the volume
-    /// data key, or no key if it's an unencrypted file.
+    /// Writes to multiple ranges with data provided in `buf`.  The ranges must all be aligned and
+    /// no change to content size is applied; the caller is responsible for updating size if
+    /// required.
     pub async fn multi_write(
         &self,
         transaction: &mut Transaction<'_>,
         attribute_id: AttributeId,
-        key_id: Option<u64>,
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        self.multi_write_allocating(transaction, attribute_id, key_id, ranges, buf, false).await
+        self.multi_write_allocating(transaction, attribute_id, ranges, buf, false).await
     }
 
     /// cladefs: as `multi_write`, but a write of at most STAGED_MAX bytes takes its blocks of the
@@ -1534,18 +1134,16 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         &self,
         transaction: &mut Transaction<'_>,
         attribute_id: AttributeId,
-        key_id: Option<u64>,
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        self.multi_write_allocating(transaction, attribute_id, key_id, ranges, buf, true).await
+        self.multi_write_allocating(transaction, attribute_id, ranges, buf, true).await
     }
 
     async fn multi_write_allocating(
         &self,
         transaction: &mut Transaction<'_>,
         attribute_id: AttributeId,
-        key_id: Option<u64>,
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
         packed: bool,
@@ -1554,7 +1152,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         // `multi_write`'s frame does not keep `multi_write_internal`'s 2.4 KiB locals live
         // across `update_allocated_size` on 16 KiB guest kernel stacks (TASK-26.9).
         let (allocated, deallocated) = crate::boxed(|| {
-            self.multi_write_internal(transaction, attribute_id, key_id, ranges, buf, packed)
+            self.multi_write_internal(transaction, attribute_id, ranges, buf, packed)
         })
         .await?;
         if allocated == 0 && deallocated == 0 {
@@ -1582,25 +1180,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let store = self.store();
         let tree = store.tree();
         let store_id = store.store_object_id();
-
-        let (key_id, key) = self.get_key(None).await?;
-        if let Some(key) = &key {
-            if !key.supports_inline_encryption() {
-                let mut slice = buf.as_mut_ptr_slice();
-                for r in ranges {
-                    let l = r.end - r.start;
-                    let (head, tail) = slice.split_at_mut(l as usize);
-                    key.encrypt(
-                        self.object_id,
-                        attr_id.raw(),
-                        0, /* TODO(https://fxbug.dev/421269588): plumb through device_offset. */
-                        r.start,
-                        MutPtrByteSlice::from(head),
-                    )?;
-                    slice = tail;
-                }
-            }
-        }
 
         let mut range_iter = ranges.iter();
         // There should be at least one range if the buffer has data in it
@@ -1690,8 +1269,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                                 target_range.start,
                                 old_device_range,
                                 current_buf,
-                                &key,
-                                key_id,
                                 &mut mutations,
                             )
                             .await?,
@@ -1747,8 +1324,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         mut offset: u64,
         old_device_range: ExtentRange,
         mut buf: MutableBufferRef<'_>,
-        key: &Option<Arc<dyn Cipher>>,
-        key_id: u64,
         mutations: &mut Vec<Mutation>,
     ) -> Result<Vec<(ExtentRange, Vec<Checksum>, bool)>, Error> {
         let store = self.store();
@@ -1769,14 +1344,11 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             let device_range = allocator.allocate(transaction, store_id, remaining).await?;
             let len = device_range.len();
             let (current_buf, remaining_buf) = buf.split_at_mut(len as usize);
-            let crypt_ctx =
-                key.as_ref().and_then(|key| key.crypt_ctx(self.object_id, attr_id.raw(), offset));
             match self
                 .write_aligned(
                     current_buf.as_ref(),
                     device_range.extent,
                     device_range.range.start,
-                    crypt_ctx,
                     WriteOptions::default(),
                 )
                 .await?
@@ -1792,7 +1364,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     device_range.extent,
                     device_range.range.start,
                     ExtentMode::Overwrite,
-                    key_id,
                 )),
             ));
             offset += len;
@@ -1807,8 +1378,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     /// Breaks up the write into multiple transactions if `data.len()` is larger than `batch_size`.
     /// If writing the attribute requires multiple transactions, adds the attribute to the
     /// graveyard. The caller is responsible for removing the attribute from the graveyard when it
-    /// commits the last transaction.  This always writes using a key wrapped with the volume data
-    /// key.
+    /// commits the last transaction.
     #[trace]
     pub async fn write_new_attr_in_batches<'a>(
         &'a self,
@@ -1849,7 +1419,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             self.multi_write(
                 transaction,
                 attribute_id,
-                Some(VOLUME_DATA_KEY_ID),
                 &[start_offset..start_offset + rounded_len],
                 buffer.as_mut(),
             )
@@ -1867,8 +1436,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     /// trimmed - if the new data is shorter than the old data, this will trim any extents beyond
     /// the end of the new size, but if there were too many for a single transaction, a commit
     /// needs to be made before trimming again, so the responsibility is left to the caller so as
-    /// to not accidentally split the transaction when it's not in a consistent state.  This will
-    /// write using the volume data key; the fscrypt key is not supported.
+    /// to not accidentally split the transaction when it's not in a consistent state.
     pub async fn write_attr(
         &self,
         transaction: &mut Transaction<'_>,
@@ -1897,14 +1465,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let mut slice = buffer.as_mut_ptr_slice();
         slice.subslice_mut(0..data.len()).copy_from_slice(data);
         slice.subslice_mut(data.len()..slice.len()).fill(0);
-        self.multi_write(
-            transaction,
-            attribute_id,
-            Some(VOLUME_DATA_KEY_ID),
-            &[0..rounded_len],
-            buffer.as_mut(),
-        )
-        .await?;
+        self.multi_write(transaction, attribute_id, &[0..rounded_len], buffer.as_mut()).await?;
         transaction.add(
             self.store().store_object_id,
             Mutation::replace_or_insert_object(
@@ -1949,33 +1510,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             iter.advance().await?;
         }
         Ok(out)
-    }
-
-    /// Looks up the values for the extended attribute `fio::SELINUX_CONTEXT_NAME`, returning it
-    /// if it is found inline. If it is not inline, it will request use of the
-    /// `get_extended_attributes` method. If the entry doesn't exist at all, returns None.
-    pub async fn get_inline_selinux_context(&self) -> Result<Option<fio::SelinuxContext>, Error> {
-        // This optimization is only useful as long as the attribute is smaller than inline sizes.
-        // Avoid reading the data out of the attributes.
-        const_assert!(fio::MAX_SELINUX_CONTEXT_ATTRIBUTE_LEN as usize <= MAX_INLINE_XATTR_SIZE);
-        self.store()
-            .tree()
-            .find_map(
-                &ObjectKey::extended_attribute(self.object_id(), fio::SELINUX_CONTEXT_NAME.into()),
-                |item| match item.value {
-                    ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(value)) => {
-                        Ok(fio::SelinuxContext::Data(value.clone()))
-                    }
-                    ObjectValue::ExtendedAttribute(ExtendedAttributeValue::AttributeId(_)) => {
-                        Ok(fio::SelinuxContext::UseExtendedAttributes(fio::EmptyStruct {}))
-                    }
-                    _ => Err(anyhow!(FxfsError::Inconsistent).context(
-                        "get_inline_extended_attribute: Expected ExtendedAttribute value",
-                    )),
-                },
-            )
-            .await?
-            .transpose()
     }
 
     pub async fn get_extended_attribute(&self, name: Vec<u8>) -> Result<Vec<u8>, Error> {
@@ -2206,40 +1740,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         transaction.commit().await?;
         Ok(())
     }
-
-    /// Returns a future that will pre-fetches the keys so as to avoid paying the performance
-    /// penalty later. Must ensure that the object is not removed before the future completes.
-    pub fn pre_fetch_keys(&self) -> Option<impl Future<Output = ()> + use<S>> {
-        if let Encryption::CachedKeys = self.encryption {
-            let owner = self.owner.clone();
-            let object_id = self.object_id;
-            Some(async move {
-                let store = owner.as_ref().as_ref();
-                if let Some(crypt) = store.crypt() {
-                    let _ = store
-                        .key_manager
-                        .get_keys(
-                            object_id,
-                            crypt.as_ref(),
-                            &mut Some(async || store.get_keys(object_id).await),
-                            /* permanent= */ false,
-                            /* force= */ false,
-                        )
-                        .await;
-                }
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl<S: HandleOwner> Drop for StoreObjectHandle<S> {
-    fn drop(&mut self) {
-        if self.is_encrypted() {
-            let _ = self.store().key_manager.remove(self.object_id);
-        }
-    }
 }
 
 /// When truncating an object, sometimes it might not be possible to complete the transaction in a
@@ -2270,7 +1770,7 @@ mod tests {
 
     /// cladefs: an attribute's size is what an image says: a size past what a transfer buffer could
     /// ever hold fails a read.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_reads_of_what_an_image_says() {
         use crate::object_store::AttributeId;
 
@@ -2282,10 +1782,9 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let handle =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed");
+        let handle = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create_object failed");
         let key =
             ObjectKey::attribute(handle.object_id(), AttributeId::TEST_ID, AttributeKey::Attribute);
         let value = ObjectValue::attribute(u64::MAX, false);
@@ -2322,10 +1821,9 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        let object =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
-                .await
-                .expect("create_object failed");
+        let object = ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+            .await
+            .expect("create_object failed");
 
         let root_directory =
             Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
@@ -2339,7 +1837,7 @@ mod tests {
         (fs, object)
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extent_stream() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2352,7 +1850,6 @@ mod tests {
         let basic = StoreObjectHandle::new(
             object.owner().clone(),
             object.object_id(),
-            /* permanent_keys: */ false,
             HandleOptions::default(),
             false,
         );
@@ -2376,7 +1873,7 @@ mod tests {
         assert_eq!(result[1].length(), 8192);
     }
 
-    #[fuchsia::test(threads = 3)]
+    #[fuchsia_async::run(3, test)]
     async fn extended_attribute_double_remove() {
         // This test is intended to trip a potential race condition in remove. Removing an
         // attribute that doesn't exist is an error, so we need to check before we remove, but if
@@ -2386,7 +1883,6 @@ mod tests {
         let basic = Arc::new(StoreObjectHandle::new(
             object.owner().clone(),
             object.object_id(),
-            /* permanent_keys: */ false,
             HandleOptions::default(),
             false,
         ));
@@ -2421,7 +1917,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test(threads = 3)]
+    #[fuchsia_async::run(3, test)]
     async fn extended_attribute_double_create() {
         // This test is intended to trip a potential race in set when using the create flag,
         // similar to above. If the create mode is set, we need to check that the attribute isn't
@@ -2431,7 +1927,6 @@ mod tests {
         let basic = Arc::new(StoreObjectHandle::new(
             object.owner().clone(),
             object.object_id(),
-            /* permanent_keys: */ false,
             HandleOptions::default(),
             false,
         ));
@@ -2504,7 +1999,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn extended_attributes() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2562,7 +2057,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn extended_attribute_invalid_id_range() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2606,7 +2101,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn large_extended_attribute() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2665,7 +2160,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn multiple_extended_attributes() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2719,7 +2214,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn multiple_extended_attributes_delete() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let store = object.owner().clone();
@@ -2781,7 +2276,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn extended_attribute_changing_sizes() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2874,7 +2369,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn extended_attribute_max_size() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2901,7 +2396,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn extended_attribute_remove_then_create() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -2937,7 +2432,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn large_extended_attribute_max_number() {
         let (fs, object) = test_filesystem_and_empty_object().await;
 
@@ -3009,7 +2504,7 @@ mod tests {
     /// cladefs: a trim of an object looks for its next attribute, and past the last it finds the
     /// object's extended attributes, which end the walk: stepping over them, from one attribute ID
     /// to the next, the graveyard's task never ended.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn trim_stops_at_extended_attributes() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         object
@@ -3038,7 +2533,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn write_attr_trims_beyond_new_end() {
         // When writing, multi_write will deallocate old extents that overlap with the new data,
         // but it doesn't trim anything beyond that, since it doesn't know what the total size will
@@ -3088,7 +2583,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn write_new_attr_in_batches_multiple_txns() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let merkle_tree = vec![1; 3 * WRITE_ATTR_BATCH_SIZE];
@@ -3123,50 +2618,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    // Running on target only, to use fake time features in the executor.
-    #[cfg(target_os = "fuchsia")]
-    #[fuchsia::test(allow_stalls = false)]
-    async fn test_watchdog() {
-        use super::Watchdog;
-        use fuchsia_async::{MonotonicDuration, MonotonicInstant, TestExecutor};
-        use std::sync::mpsc::channel;
-
-        TestExecutor::advance_to(make_time(0)).await;
-        let (sender, receiver) = channel();
-
-        fn make_time(time_secs: i64) -> MonotonicInstant {
-            MonotonicInstant::from_nanos(0) + MonotonicDuration::from_seconds(time_secs)
-        }
-
-        {
-            let _watchdog = Watchdog::new(10, move |count| {
-                sender.send(count).expect("Sending value");
-            });
-
-            // Too early.
-            TestExecutor::advance_to(make_time(5)).await;
-            receiver.try_recv().expect_err("Should not have message");
-
-            // First message.
-            TestExecutor::advance_to(make_time(10)).await;
-            assert_eq!(1, receiver.recv().expect("Receiving"));
-
-            // Too early for the next.
-            TestExecutor::advance_to(make_time(15)).await;
-            receiver.try_recv().expect_err("Should not have message");
-
-            // Missed one. They'll be spooled up.
-            TestExecutor::advance_to(make_time(30)).await;
-            assert_eq!(2, receiver.recv().expect("Receiving"));
-            assert_eq!(3, receiver.recv().expect("Receiving"));
-        }
-
-        // Watchdog is dropped, nothing should trigger.
-        TestExecutor::advance_to(make_time(100)).await;
-        receiver.recv().expect_err("Watchdog should be gone");
-    }
-
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_large_buffer_excessive_partitions() {
         let (_fs, object) = test_filesystem_and_empty_object().await;
 

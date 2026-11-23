@@ -345,7 +345,7 @@ mod tests {
 
     /// A block a reflink shares is alive until its last reference goes, and a write of it the
     /// device lost is found until then, whichever reference went first.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_block_is_verified_until_its_last_reference_goes() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(512).await;
@@ -369,7 +369,7 @@ mod tests {
 
     /// A transaction that deallocates a block of one extent and references it for another, as a
     /// reflink over a reflink of the same block does, leaves it alive.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_block_referenced_as_it_is_deallocated_stays() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(512).await;
@@ -384,7 +384,7 @@ mod tests {
     }
 
     /// cladefs: a journal record's checksums say what chunks its range is in, which may be anything.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_checksums_that_do_not_divide_a_range() {
         let mut list = ChecksumList::new(0);
         list.push(1, ExtentRange::new(E, 0..4096), &[], true).expect_err("no checksums");
@@ -394,7 +394,7 @@ mod tests {
         list.push(1, ExtentRange::new(E, 0..8192), &[1, 2], true).expect("good checksums");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_verify() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(2048).await;
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(list.verify(&device, 10).await.expect("verify failed"), 1);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_verify_entry_prior_to_flushed_offset_is_ignored() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(2048).await;
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(list.verify(&device, 10).await.expect("verify failed"), 10);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_deallocate_overlap() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(512).await;
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(list.verify(&device, 10).await.expect("verify failed"), 10);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_different_chunk_size() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(1024).await;
@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(list.verify(&device, 2).await.expect("verify failed"), 2);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_drop_unneeded_checksums_after_first_write() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(1024).await;
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(list.verify(&device, 2).await.expect("verify failed"), 2);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overlapping_checksums() {
         let device = FakeDevice::new(2048, 512);
         let mut buffer = device.allocate_buffer(1024).await;

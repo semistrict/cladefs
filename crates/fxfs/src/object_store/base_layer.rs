@@ -153,7 +153,7 @@ mod tests {
     }
 
     /// Reads cross extents, and what no extent holds reads as zeros.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn reads_cross_extents_and_holes() {
         let device = Arc::new(FakeDevice::new(1024, BLOCK as u32));
         write(&device, 1, 0xa).await;
@@ -177,7 +177,7 @@ mod tests {
     }
 
     /// A read of a layer whose base the device doesn't reach fails as a read of the extent does.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn reads_of_extents_the_device_lacks_fail() {
         let device = Arc::new(FakeDevice::new(1024, BLOCK as u32));
         let layer = BaseLayer { size: BLOCK, extents: vec![extent(0, BLOCK, 1)] };
@@ -187,7 +187,7 @@ mod tests {
     }
 
     /// What another filesystem says of a layer is not trusted to be in order, aligned or within it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn layers_that_make_no_sense_are_refused() {
         let device = Arc::new(FakeDevice::new(1024, BLOCK as u32));
         let overlapping = vec![extent(0, 2 * BLOCK, 1), extent(BLOCK, BLOCK, 2)];

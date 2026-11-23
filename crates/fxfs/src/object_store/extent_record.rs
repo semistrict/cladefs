@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/extent_record.rs`. cladefs: an extent is located by
-// an extent in the extent store and an offset within it (`ExtentValueV60`), not a device offset
-// (backlog doc-4); and an overwrite extent's bitmap, offset, is collected rather than split off
+// an extent in the extent store and an offset within it, not a device offset (backlog doc-4), and
+// names no key (`ExtentValueV65`), as Fxfs encrypts nothing; and an overwrite extent's bitmap, offset, is collected rather than split off
 // (`offset_by`), as bit-vec 0.10's `split_off` may leave storage its deserializer refuses.
 
 // TODO(https://fxbug.dev/42178223): need validation after deserialization. cladefs: what a layer or
@@ -26,8 +26,7 @@ pub enum ExtentModeV38 {
     /// here. Notable uses of this are things which have their own separate checksum mechanism,
     /// like the journal file and blobs.
     Raw,
-    /// This extent uses copy-on-write semantics. We store the post-encryption checksums for data
-    /// validation. New writes to this logical range are written to new extents.
+    /// This extent uses copy-on-write semantics. We store the checksums for data validation. New writes to this logical range are written to new extents.
     Cow(ChecksumsV38),
     /// This extent uses overwrite semantics. The bitmap keeps track of blocks which have been
     /// written to at least once. Blocks which haven't been written to at least once are logically
@@ -55,28 +54,26 @@ impl<'a> arbitrary::Arbitrary<'a> for ExtentMode {
 
 /// ExtentValue is the payload for an extent in the object store, which describes where the extent
 /// is physically located.
-pub type ExtentValue = ExtentValueV60;
+pub type ExtentValue = ExtentValueV65;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ExtentValueV60 {
+pub enum ExtentValueV65 {
     /// Indicates a deleted extent; that is, the logical range described by the extent key is
     /// considered to be deleted.
     None,
-    /// The location of the extent, `extent_offset` bytes into `extent` in the extent store, and
-    /// other related information.  `key_id` identifies which of the object's keys should be used.
-    /// Unencrypted files should use 0 (which can also be used for encrypted files).  `mode`
-    /// describes the write pattern for this extent.
-    Some { extent: ExtentId, extent_offset: u64, mode: ExtentModeV38, key_id: u64 },
+    /// The location of the extent, `extent_offset` bytes into `extent` in the extent store.
+    /// `mode` describes the write pattern for this extent.
+    Some { extent: ExtentId, extent_offset: u64, mode: ExtentModeV38 },
 }
 
 impl ExtentValue {
-    pub fn new(extent: ExtentId, extent_offset: u64, mode: ExtentMode, key_id: u64) -> ExtentValue {
-        ExtentValue::Some { extent, extent_offset, mode, key_id }
+    pub fn new(extent: ExtentId, extent_offset: u64, mode: ExtentMode) -> ExtentValue {
+        ExtentValue::Some { extent, extent_offset, mode }
     }
 
-    pub fn new_raw(extent: ExtentId, extent_offset: u64, key_id: u64) -> ExtentValue {
-        Self::new(extent, extent_offset, ExtentMode::Raw, key_id)
+    pub fn new_raw(extent: ExtentId, extent_offset: u64) -> ExtentValue {
+        Self::new(extent, extent_offset, ExtentMode::Raw)
     }
 
     /// Creates an ExtentValue with a checksum
@@ -84,9 +81,8 @@ impl ExtentValue {
         extent: ExtentId,
         extent_offset: u64,
         checksums: Checksums,
-        key_id: u64,
     ) -> ExtentValue {
-        Self::new(extent, extent_offset, ExtentMode::Cow(checksums), key_id)
+        Self::new(extent, extent_offset, ExtentMode::Cow(checksums))
     }
 
     /// Creates an ExtentValue for an overwrite range with no blocks written to yet.
@@ -94,23 +90,17 @@ impl ExtentValue {
         extent: ExtentId,
         extent_offset: u64,
         num_blocks: usize,
-        key_id: u64,
     ) -> ExtentValue {
         Self::new(
             extent,
             extent_offset,
             ExtentMode::OverwritePartial(BitVec::from_elem(num_blocks, false)),
-            key_id,
         )
     }
 
     /// Creates an ExtentValue for an overwrite range with all the blocks initialized.
-    pub fn initialized_overwrite_extent(
-        extent: ExtentId,
-        extent_offset: u64,
-        key_id: u64,
-    ) -> ExtentValue {
-        Self::new(extent, extent_offset, ExtentMode::Overwrite, key_id)
+    pub fn initialized_overwrite_extent(extent: ExtentId, extent_offset: u64) -> ExtentValue {
+        Self::new(extent, extent_offset, ExtentMode::Overwrite)
     }
 
     /// Creates an ObjectValue for a deletion of an object extent.
@@ -147,7 +137,7 @@ impl ExtentValue {
     pub fn offset_by(&self, amount: u64, extent_len: u64) -> Self {
         match self {
             ExtentValue::None => Self::deleted_extent(),
-            ExtentValue::Some { extent, extent_offset, mode, key_id } => {
+            ExtentValue::Some { extent, extent_offset, mode } => {
                 let mode = match mode {
                     ExtentMode::Raw => ExtentMode::Raw,
                     ExtentMode::Cow(checksums) => {
@@ -168,12 +158,7 @@ impl ExtentValue {
                         ExtentMode::OverwritePartial(bitmap.iter().skip(index).collect())
                     }
                 };
-                ExtentValue::Some {
-                    extent: *extent,
-                    extent_offset: extent_offset + amount,
-                    mode,
-                    key_id: *key_id,
-                }
+                ExtentValue::Some { extent: *extent, extent_offset: extent_offset + amount, mode }
             }
         }
     }
@@ -182,7 +167,7 @@ impl ExtentValue {
     pub fn shrunk(&self, original_len: u64, new_len: u64) -> Self {
         match self {
             ExtentValue::None => Self::deleted_extent(),
-            ExtentValue::Some { extent, extent_offset, mode, key_id } => {
+            ExtentValue::Some { extent, extent_offset, mode } => {
                 let mode = match mode {
                     ExtentMode::Raw => ExtentMode::Raw,
                     ExtentMode::Cow(checksums) => {
@@ -202,12 +187,7 @@ impl ExtentValue {
                         ExtentMode::OverwritePartial(new_bitmap)
                     }
                 };
-                ExtentValue::Some {
-                    extent: *extent,
-                    extent_offset: *extent_offset,
-                    mode,
-                    key_id: *key_id,
-                }
+                ExtentValue::Some { extent: *extent, extent_offset: *extent_offset, mode }
             }
         }
     }
@@ -217,7 +197,6 @@ impl ExtentValue {
 mod tests {
     use super::{ExtentMode, ExtentValue};
     use crate::checksum::Checksums;
-    use crate::object_store::VOLUME_DATA_KEY_ID;
     use bit_vec::BitVec;
     use storage_device::ExtentId;
 
@@ -227,41 +206,30 @@ mod tests {
     #[test]
     fn extent_value_offset_by() {
         assert_eq!(ExtentValue::None.offset_by(1024, 2048), ExtentValue::None);
+        assert_eq!(ExtentValue::new_raw(E, 1024).offset_by(0, 2048), ExtentValue::new_raw(E, 1024));
         assert_eq!(
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID).offset_by(0, 2048),
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID)
+            ExtentValue::new_raw(E, 1024).offset_by(1024, 2048),
+            ExtentValue::new_raw(E, 2048)
         );
         assert_eq!(
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID).offset_by(1024, 2048),
-            ExtentValue::new_raw(E, 2048, VOLUME_DATA_KEY_ID)
-        );
-        assert_eq!(
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID).offset_by(2048, 2048),
-            ExtentValue::new_raw(E, 3072, VOLUME_DATA_KEY_ID)
+            ExtentValue::new_raw(E, 1024).offset_by(2048, 2048),
+            ExtentValue::new_raw(E, 3072)
         );
 
         let make_checksums = |range: std::ops::Range<u64>| Checksums::fletcher(range.collect());
 
         // In these tests we are making block size 256.
         assert_eq!(
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
-                .offset_by(0, 2048),
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8)).offset_by(0, 2048),
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8))
         );
         assert_eq!(
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
-                .offset_by(1024, 2048),
-            ExtentValue::with_checksum(E, 2048, make_checksums(4..8), VOLUME_DATA_KEY_ID)
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8)).offset_by(1024, 2048),
+            ExtentValue::with_checksum(E, 2048, make_checksums(4..8))
         );
         assert_eq!(
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
-                .offset_by(2048, 2048),
-            ExtentValue::with_checksum(
-                E,
-                3072,
-                Checksums::fletcher(Vec::new()),
-                VOLUME_DATA_KEY_ID
-            )
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8)).offset_by(2048, 2048),
+            ExtentValue::with_checksum(E, 3072, Checksums::fletcher(Vec::new()))
         );
 
         // Takes a place to switch from zeros to ones. The goal is to make sure there is exactly
@@ -273,7 +241,7 @@ mod tests {
             ExtentMode::OverwritePartial(begin_bitmap)
         };
         let make_extent =
-            |extent_offset, mode| ExtentValue::Some { extent: E, extent_offset, mode, key_id: 0 };
+            |extent_offset, mode| ExtentValue::Some { extent: E, extent_offset, mode };
 
         assert_eq!(
             make_extent(1024, make_bitmap(1, 8)).offset_by(0, 2048),
@@ -312,7 +280,6 @@ mod tests {
             extent: E,
             extent_offset: 0,
             mode: ExtentMode::OverwritePartial(bitmap.clone()),
-            key_id: 0,
         }
         .offset_by(10 * 256, 40 * 256);
         let expected: BitVec = bitmap.iter().skip(10).collect();
@@ -335,41 +302,24 @@ mod tests {
     #[test]
     fn extent_value_shrunk() {
         assert_eq!(ExtentValue::None.shrunk(2048, 1024), ExtentValue::None);
-        assert_eq!(
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID).shrunk(2048, 2048),
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID)
-        );
-        assert_eq!(
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID).shrunk(2048, 1024),
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID)
-        );
-        assert_eq!(
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID).shrunk(2048, 0),
-            ExtentValue::new_raw(E, 1024, VOLUME_DATA_KEY_ID)
-        );
+        assert_eq!(ExtentValue::new_raw(E, 1024).shrunk(2048, 2048), ExtentValue::new_raw(E, 1024));
+        assert_eq!(ExtentValue::new_raw(E, 1024).shrunk(2048, 1024), ExtentValue::new_raw(E, 1024));
+        assert_eq!(ExtentValue::new_raw(E, 1024).shrunk(2048, 0), ExtentValue::new_raw(E, 1024));
 
         let make_checksums = |range: std::ops::Range<u64>| Checksums::fletcher(range.collect());
 
         // In these tests we are making block size 256.
         assert_eq!(
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
-                .shrunk(2048, 2048),
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8)).shrunk(2048, 2048),
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8))
         );
         assert_eq!(
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
-                .shrunk(2048, 1024),
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..4), VOLUME_DATA_KEY_ID)
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8)).shrunk(2048, 1024),
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..4))
         );
         assert_eq!(
-            ExtentValue::with_checksum(E, 1024, make_checksums(0..8), VOLUME_DATA_KEY_ID)
-                .shrunk(2048, 0),
-            ExtentValue::with_checksum(
-                E,
-                1024,
-                Checksums::fletcher(Vec::new()),
-                VOLUME_DATA_KEY_ID
-            )
+            ExtentValue::with_checksum(E, 1024, make_checksums(0..8)).shrunk(2048, 0),
+            ExtentValue::with_checksum(E, 1024, Checksums::fletcher(Vec::new()))
         );
 
         // Takes a place to switch from zeros to ones. The goal is to make sure there is exactly
@@ -381,7 +331,7 @@ mod tests {
             ExtentMode::OverwritePartial(begin_bitmap)
         };
         let make_extent =
-            |extent_offset, mode| ExtentValue::Some { extent: E, extent_offset, mode, key_id: 0 };
+            |extent_offset, mode| ExtentValue::Some { extent: E, extent_offset, mode };
 
         assert_eq!(
             make_extent(1024, make_bitmap(1, 8)).shrunk(2048, 2048),

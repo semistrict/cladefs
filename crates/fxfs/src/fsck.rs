@@ -26,7 +26,6 @@ use crate::object_store::volume::root_volume;
 use crate::object_store::{ObjectStore, load_store_info};
 use anyhow::{Context, Error, anyhow};
 use futures::try_join;
-use fxfs_crypto::Crypt;
 use rustc_hash::FxHashSet as HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::iter::zip;
@@ -259,19 +258,14 @@ pub async fn fsck_with_options(
 /// Verifies the integrity of a volume within Fxfs.  See errors.rs for a list of checks performed.
 // TODO(https://fxbug.dev/42178152): This currently takes a write lock on the filesystem.  It would
 // be nice if we could take a snapshot.
-pub async fn fsck_volume(
-    filesystem: &FxFilesystem,
-    store_id: u64,
-    crypt: Option<Arc<dyn Crypt>>,
-) -> Result<FsckResult, Error> {
-    fsck_volume_with_options(filesystem, &FsckOptions::default(), store_id, crypt).await
+pub async fn fsck_volume(filesystem: &FxFilesystem, store_id: u64) -> Result<FsckResult, Error> {
+    fsck_volume_with_options(filesystem, &FsckOptions::default(), store_id).await
 }
 
 pub async fn fsck_volume_with_options(
     filesystem: &FxFilesystem,
     options: &FsckOptions<'_>,
     store_id: u64,
-    crypt: Option<Arc<dyn Crypt>>,
 ) -> Result<FsckResult, Error> {
     let mut result = FsckResult::default();
     if !options.quiet {
@@ -279,15 +273,6 @@ pub async fn fsck_volume_with_options(
     }
 
     let store = filesystem.object_manager().store(store_id).context("open_store failed").unwrap();
-
-    let _relock_guard;
-    if store.is_locked() {
-        let crypt = crypt.ok_or_else(|| anyhow!("Invalid key"))?;
-        store.unlock_read_only(crypt).await?;
-        _relock_guard = scopeguard::guard(store.clone(), |store| {
-            store.lock_read_only();
-        });
-    }
 
     let _guard = if options.no_lock { None } else { Some(filesystem.lock_commits().await) };
 
@@ -429,7 +414,7 @@ impl<'a> Fsck<'a> {
     ) -> Result<(), Error> {
         let root_store = filesystem.root_store();
 
-        // Manually open the StoreInfo so we can validate it without unlocking the store.
+        // Manually open the StoreInfo so we can validate it without opening the store.
         let info = self.assert(
             load_store_info(&root_store, store_id).await,
             FsckFatal::MalformedStore(store_id),

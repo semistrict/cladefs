@@ -17,9 +17,12 @@
 // super-block records that hold an ObjectValue are V63. Version 64 replaces the journal file and
 // A/B super-block objects with position-derived journal spans and a single atomic super-block in
 // Root (boards 6923, 6926): SuperBlockHeaderV64 drops journal_object_id, SuperBlockRecordV64 drops
-// Extent, and JournalRecordV64 adds JournalSpan.
+// Extent, and JournalRecordV64 adds JournalSpan. Version 65 drops Fxfs's own encryption, fscrypt,
+// fsverity and blobs (cladefs encrypts below Fxfs): no keys, encrypted children, encrypted symlinks,
+// verified attributes or encrypted mutations; an extent names no key (ExtentValueV65); a store's
+// information no mutations key (StoreInfoV65). The object, mutation, journal and super-block
+// records that hold them are V65.
 
-use crate::blob_metadata::{BlobMetadata, BlobMetadataV53};
 use crate::lsm_tree::{
     PersistentLayerHeader, PersistentLayerHeaderV39, PersistentLayerInfo, PersistentLayerInfoV39,
 };
@@ -28,17 +31,12 @@ use crate::object_store::allocator::{
     AllocatorValueV32,
 };
 use crate::object_store::journal::super_block::{
-    SuperBlockHeader, SuperBlockHeaderV64, SuperBlockRecord, SuperBlockRecordV64,
+    SuperBlockHeader, SuperBlockHeaderV64, SuperBlockRecord, SuperBlockRecordV65,
 };
-use crate::object_store::journal::{JournalRecord, JournalRecordV64};
-use crate::object_store::object_record::{
-    FsverityMetadata, FsverityMetadataV50, ObjectKey, ObjectKeyV54, ObjectValue, ObjectValueV63,
-};
-use crate::object_store::transaction::{Mutation, MutationV63};
-use crate::object_store::{
-    EncryptedMutations, EncryptedMutationsV49, EncryptedTransaction, EncryptedTransactionV63,
-    StoreInfo, StoreInfoV61,
-};
+use crate::object_store::journal::{JournalRecord, JournalRecordV65};
+use crate::object_store::object_record::{ObjectKey, ObjectKeyV65, ObjectValue, ObjectValueV65};
+use crate::object_store::transaction::{Mutation, MutationV65};
+use crate::object_store::{StoreInfo, StoreInfoV65};
 use crate::serialized_types::{Version, Versioned, VersionedLatest, versioned_type};
 use std::collections::BTreeMap;
 
@@ -51,7 +49,7 @@ use std::collections::BTreeMap;
 ///
 /// IMPORTANT: When changing this (major or minor), update the list of possible versions at
 /// https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/cobalt_config/fuchsia/local_storage/versions.txt.
-pub const LATEST_VERSION: Version = Version { major: 64, minor: 0 };
+pub const LATEST_VERSION: Version = Version { major: 65, minor: 0 };
 
 /// The last version of the filesystem where keys in layer files used the old serialization format
 /// (prior to SerializeKey and delta encoding).
@@ -69,19 +67,11 @@ pub const OLD_KEY_SERIALIZATION_VERSION: Version = Version { major: 57, minor: 0
 /// cladefs: the latest, whatever it is: every change is breaking, as no format is migrated.
 pub const EARLIEST_SUPPORTED_VERSION: Version = LATEST_VERSION;
 
-// From this version forward, the journal encryption uses AES-256-XTS instead of Chacha20, as well
-// as chunking the mutations together for a transaction.
-pub const AES_JOURNAL_ENCRYPTION_VERSION: Version = Version { major: 57, minor: 0 };
-
 /// This trait prevents types from showing up in `versioned_types` multiple times. `versioned_types`
 /// implements this trait for every type passed to it. If a type is listed multiple times then this
 /// trait will be implemented for the type multiple times which will fail to compile.
 #[allow(dead_code)]
 trait UniqueVersionForType {}
-
-trait HasVersion {
-    const VERSION: u32;
-}
 
 macro_rules! versioned_types {
     ( $( $name:ident { $latest:literal.. => $latest_type:ty $(, $major:literal.. => $type:ty )* $(,)? } )+ ) => {
@@ -95,10 +85,6 @@ macro_rules! versioned_types {
 
             impl UniqueVersionForType for $latest_type {}
             $( impl UniqueVersionForType for $type {} )*
-
-            impl HasVersion for $latest_type {
-                const VERSION: u32 = $latest;
-            }
 
         )+
 
@@ -138,26 +124,17 @@ versioned_types! {
     AllocatorValue {
         32.. => AllocatorValueV32,
     }
-    EncryptedMutations {
-        49.. => EncryptedMutationsV49,
-    }
-    EncryptedTransaction {
-        63.. => EncryptedTransactionV63,
-    }
-    FsverityMetadata {
-        50.. => FsverityMetadataV50,
-    }
     JournalRecord {
-        64.. => JournalRecordV64,
+        65.. => JournalRecordV65,
     }
     Mutation {
-        63.. => MutationV63,
+        65.. => MutationV65,
     }
     ObjectKey {
-        54.. => ObjectKeyV54,
+        65.. => ObjectKeyV65,
     }
     ObjectValue {
-        63.. => ObjectValueV63,
+        65.. => ObjectValueV65,
     }
     PersistentLayerHeader {
         39.. => PersistentLayerHeaderV39,
@@ -166,22 +143,12 @@ versioned_types! {
         39.. => PersistentLayerInfoV39,
     }
     StoreInfo {
-        61.. => StoreInfoV61,
+        65.. => StoreInfoV65,
     }
     SuperBlockHeader {
         64.. => SuperBlockHeaderV64,
     }
     SuperBlockRecord {
-        64.. => SuperBlockRecordV64,
-    }
-    BlobMetadata {
-        53.. => BlobMetadataV53,
+        65.. => SuperBlockRecordV65,
     }
 }
-
-// EncryptedTransaction is actually inside the Mutation type, but obscured by a layer of
-// encryption. This ensures that when the EncryptedTransaction type is incremented, so is the
-// Mutation and thus any types above that.
-static_assertions::const_assert!(
-    <EncryptedTransaction as HasVersion>::VERSION <= <Mutation as HasVersion>::VERSION
-);

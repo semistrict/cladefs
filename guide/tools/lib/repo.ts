@@ -59,8 +59,6 @@ export function standIns(repo = REPO): Set<string> {
       }
     }
   }
-  // zx-sys has no row: it is the syscalls cladefs defines none of, a stand-in all the same.
-  if (existsSync(join(repo, "crates", "zx-sys"))) names.add("zx-sys");
   return names;
 }
 

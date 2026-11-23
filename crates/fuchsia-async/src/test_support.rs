@@ -2,14 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(target_os = "fuchsia")]
-use crate::TestExecutorBuilder;
 use crate::{LocalExecutorBuilder, SendExecutorBuilder, TimeoutExt};
 use futures::prelude::*;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(target_os = "fuchsia")]
-use std::task::Poll;
 use std::time::Duration;
 
 // Apply the timeout from config to test
@@ -37,18 +33,6 @@ pub trait TestResult: Sized {
     /// How to repeatedly run a test with this result in a single threaded executor.
     fn run_singlethreaded(
         test: &(dyn Sync + Fn(usize) -> Pin<Box<dyn Future<Output = Self>>>),
-        options: TestOptions,
-        cfg: EnvironmentConfig,
-    ) -> Self;
-
-    /// Similarly, but use run_until_stalled
-    #[cfg(target_os = "fuchsia")]
-    fn run_until_stalled<
-        F: 'static + Sync + Fn(usize) -> Fut,
-        Fut: 'static + Future<Output = Self>,
-    >(
-        fake_time: bool,
-        test: F,
         options: TestOptions,
         cfg: EnvironmentConfig,
     ) -> Self;
@@ -82,32 +66,6 @@ impl<E: Send + 'static + std::fmt::Debug> TestResult for Result<(), E> {
                 .allow_interrupts(options.allow_interrupts)
                 .build()
                 .run_singlethreaded(test(run))
-        })
-    }
-
-    #[cfg(target_os = "fuchsia")]
-    fn run_until_stalled<
-        F: 'static + Sync + Fn(usize) -> Fut,
-        Fut: 'static + Future<Output = Self>,
-    >(
-        fake_time: bool,
-        test: F,
-        options: TestOptions,
-        cfg: EnvironmentConfig,
-    ) -> Self {
-        let test = apply_timeout!(cfg, |run| test(run));
-        cfg.run(1, |run| {
-            let mut executor = TestExecutorBuilder::new()
-                .fake_time(fake_time)
-                .allow_interrupts(options.allow_interrupts)
-                .build();
-            match executor.run_until_stalled(&mut std::pin::pin!(test(run))) {
-                Poll::Ready(result) => result,
-                Poll::Pending => panic!(
-                    "Stalled without completing. Consider using \"run_singlethreaded\", or check \
-                     for a deadlock."
-                ),
-            }
         })
     }
 
@@ -153,30 +111,6 @@ impl TestResult for () {
                 .run_singlethreaded(test(run));
             Ok::<(), ()>(())
         });
-    }
-
-    #[cfg(target_os = "fuchsia")]
-    fn run_until_stalled<
-        F: Sync + 'static + Fn(usize) -> Fut,
-        Fut: 'static + Future<Output = Self>,
-    >(
-        fake_time: bool,
-        test: F,
-        options: TestOptions,
-        cfg: EnvironmentConfig,
-    ) -> Self {
-        let _ = TestResult::run_until_stalled(
-            fake_time,
-            move |run| {
-                let test = test(run);
-                async move {
-                    test.await;
-                    Ok::<(), ()>(())
-                }
-            },
-            options,
-            cfg,
-        );
     }
 
     fn is_ok(&self) -> bool {
@@ -304,17 +238,6 @@ where
     )
 }
 
-/// Runs a test in an executor until it's stalled.
-#[cfg(target_os = "fuchsia")]
-pub fn run_until_stalled_test<F, Fut, R>(fake_time: bool, test: F, options: TestOptions) -> R
-where
-    F: 'static + Sync + Fn(usize) -> Fut,
-    Fut: 'static + Future<Output = R>,
-    R: TestResult,
-{
-    TestResult::run_until_stalled(fake_time, test, options, EnvironmentConfig::get())
-}
-
 /// Runs a test in an executor, potentially repeatedly and concurrently.
 pub fn run_test<F, Fut, R>(test: F, threads: u8, options: TestOptions) -> R
 where
@@ -383,32 +306,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "fuchsia")]
-    fn run_until_stalled() {
-        const REPEAT_COUNT: usize = 1000;
-        let pending_runs: Arc<Mutex<HashSet<_>>> =
-            Arc::new(Mutex::new((0..REPEAT_COUNT).collect()));
-        let pending_runs_child = pending_runs.clone();
-        TestResult::run_until_stalled(
-            false,
-            move |i| {
-                let pending_runs_child = pending_runs_child.clone();
-                async move {
-                    assert!(pending_runs_child.lock().await.remove(&i));
-                }
-            },
-            TestOptions::default(),
-            EnvironmentConfig {
-                repeat_count: REPEAT_COUNT,
-                max_concurrency: 1,
-                max_threads: 1,
-                timeout: None,
-            },
-        );
-        assert!(pending_runs.try_lock().unwrap().is_empty());
-    }
-
-    #[test]
     fn run() {
         const REPEAT_COUNT: usize = 1000;
         const THREADS: u8 = 4;
@@ -463,22 +360,6 @@ mod tests {
             EnvironmentConfig {
                 repeat_count: 1,
                 max_concurrency: 0,
-                max_threads: 1,
-                timeout: None,
-            },
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "fuchsia")]
-    fn run_until_stalled_with_allow_interrupts() {
-        TestResult::run_until_stalled(
-            false,
-            move |_| async move {},
-            TestOptions { allow_interrupts: true },
-            EnvironmentConfig {
-                repeat_count: 1,
-                max_concurrency: 1,
                 max_threads: 1,
                 timeout: None,
             },

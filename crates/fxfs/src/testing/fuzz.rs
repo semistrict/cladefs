@@ -10,7 +10,7 @@ use crate::fsck::{FsckOptions, fsck_with_options};
 use crate::object_store::directory::Directory;
 use crate::object_store::transaction::{LockKey, Options, lock_keys};
 use crate::object_store::volume::root_volume;
-use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectStore, StoreOptions};
+use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectStore};
 use fuchsia_async as fasync;
 use std::future::Future;
 use std::sync::OnceLock;
@@ -76,7 +76,7 @@ pub async fn mounts_without_panicking(device: DeviceHolder) {
     let _ = fsck_with_options(fs.clone(), &options).await;
     let read = async {
         let volumes = root_volume(fs.clone()).await?;
-        let store = volumes.volume(VOLUME, StoreOptions::default()).await?;
+        let store = volumes.volume(VOLUME).await?;
         let root = Directory::open(&store, store.root_directory_object_id()).await?;
         let layer_set = root.store().tree().layer_set();
         let mut merger = layer_set.merger();
@@ -84,8 +84,7 @@ pub async fn mounts_without_panicking(device: DeviceHolder) {
         while let Some((_, object_id, descriptor)) = entries.get() {
             if descriptor.is_file() {
                 let handle =
-                    ObjectStore::open_object(&store, object_id, HandleOptions::default(), None)
-                        .await?;
+                    ObjectStore::open_object(&store, object_id, HandleOptions::default()).await?;
                 drop(handle);
             }
             entries.advance().await?;

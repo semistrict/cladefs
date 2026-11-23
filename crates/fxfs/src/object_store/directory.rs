@@ -1,6 +1,10 @@
 // Copyright 2021 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+// Fuchsia's `src/storage/fxfs/src/object_store/directory.rs`. cladefs: no directory is encrypted
+// (fscrypt), as Fxfs encrypts nothing: names are children's keys as they are, or casefolded.
+
 use crate::errors::FxfsError;
 use crate::filesystem::TruncateGuard;
 use crate::lsm_tree::Query;
@@ -8,28 +12,22 @@ use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties};
 use crate::object_store::object_record::{
-    BytesAndNodes, ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, ObjectAttributes,
-    ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
+    BytesAndNodes, ChildValue, DirType, ObjectAttributes, ObjectDescriptor, ObjectKey,
+    ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
 };
 use crate::object_store::transaction::{
     LockKey, LockKeys, Mutation, Options, Transaction, lock_keys,
 };
 use crate::object_store::{
-    DataObjectHandle, HandleOptions, HandleOwner, ObjectStore, ProjectId, SetExtendedAttributeMode,
-    StoreObjectHandle,
+    DataObjectHandle, HandleOptions, HandleOwner, MutableNodeAttributes, ObjectStore, ProjectId,
+    SetExtendedAttributeMode, StoreObjectHandle,
 };
 use anyhow::{Error, anyhow, bail, ensure};
-use fidl_fuchsia_io as fio;
-use fscrypt::proxy_filename::ProxyFilename;
 use fuchsia_sync::Mutex;
-use fxfs_crypto::{Cipher, CipherHolder, ObjectType, WrappingKeyId, key_to_cipher};
 use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use zerocopy::IntoBytes;
-
-use super::FSCRYPT_KEY_ID;
 
 type BoxPredicate<'a> = Box<dyn Fn(&ObjectKey) -> ControlFlow<bool> + Send + 'a>;
 
@@ -48,7 +46,6 @@ pub struct LookupEntry {
     pub object_id: u64,
     pub descriptor: ObjectDescriptor,
     pub key: ObjectKey,
-    pub locked: bool,
 }
 
 /// A directory stores name to child object mappings.
@@ -56,14 +53,14 @@ pub struct Directory<S: HandleOwner> {
     handle: StoreObjectHandle<S>,
     /// True if the directory has been deleted and is no longer accessible.
     is_deleted: AtomicBool,
-    /// The type of directory (encryption, casefolding, etc.)
+    /// The type of directory (casefolding)
     dir_type: Mutex<DirType>,
 }
 
 /// cladefs: the longest target a symlink's record holds, as upstream limits targets to.
 pub const MAX_INLINE_SYMLINK: usize = 256;
 
-/// cladefs: the longest target an unencrypted symlink has: PATH_MAX - 1, as Linux's, beyond
+/// cladefs: the longest target a symlink has: PATH_MAX - 1, as Linux's, beyond
 /// _POSIX_SYMLINK_MAX.
 pub const MAX_LONG_SYMLINK: usize = 4095;
 
@@ -99,28 +96,6 @@ impl MutableAttributesInternal {
     }
 }
 
-/// Encrypts a unicode `name` into a sequence of bytes using the fscrypt key.
-pub(crate) fn encrypt_filename(
-    key: &dyn Cipher,
-    object_id: u64,
-    name: &str,
-) -> Result<Vec<u8>, Error> {
-    let mut name_bytes = name.as_bytes().to_vec();
-    key.encrypt_filename(object_id, &mut name_bytes)?;
-    Ok(name_bytes)
-}
-
-/// Decrypts a unicode `name` from a sequence of bytes using the fscrypt key.
-pub(crate) fn decrypt_filename(
-    key: &dyn Cipher,
-    object_id: u64,
-    data: &[u8],
-) -> Result<String, Error> {
-    let mut raw = data.to_vec();
-    key.decrypt_filename(object_id, &mut raw)?;
-    Ok(String::from_utf8(raw)?)
-}
-
 #[fxfs_trace::trace]
 impl<S: HandleOwner> Directory<S> {
     fn new(owner: Arc<S>, object_id: u64, dir_type: DirType) -> Self {
@@ -128,7 +103,6 @@ impl<S: HandleOwner> Directory<S> {
             handle: StoreObjectHandle::new(
                 owner,
                 object_id,
-                /* permanent_keys: */ false,
                 HandleOptions::default(),
                 /* trace: */ false,
             ),
@@ -137,57 +111,19 @@ impl<S: HandleOwner> Directory<S> {
         }
     }
 
-    /// Returns `Some(name)` for a given object (assumed to be child object of Directory).
-    /// If the object is encrypted and is not unlocked, we will return `None`.
-    /// The caller should ensure that `None` is handled correctly -- for example by using the
-    /// `ProxyFilename` for things like `did_remove()` and readdir entry fields.
-    pub async fn get_case_preserved_name(&self, key: ObjectKey) -> Result<Option<String>, Error> {
+    /// Returns `Some(name)` for a given child's key of the directory: its name as it was given,
+    /// whatever its case. `None` if the key is no child's.
+    pub fn get_case_preserved_name(&self, key: ObjectKey) -> Option<String> {
         match key.data {
-            ObjectKeyData::Child { name } => Ok(Some(name)),
-            ObjectKeyData::CasefoldChild { name, .. } => Ok(Some(name)),
-            ObjectKeyData::LegacyCasefoldChild(name) => Ok(Some(name.to_string())),
-            ObjectKeyData::EncryptedChild(crate::object_store::object_record::EncryptedChild(
-                name,
-            )) => {
-                if let CipherHolder::Cipher(cipher) = self.get_fscrypt_key().await? {
-                    Ok(Some(decrypt_filename(cipher.as_ref(), self.object_id(), &name)?))
-                } else {
-                    Ok(None)
-                }
-            }
-            ObjectKeyData::EncryptedCasefoldChild(
-                crate::object_store::object_record::EncryptedCasefoldChild { name, .. },
-            ) => {
-                if let CipherHolder::Cipher(cipher) = self.get_fscrypt_key().await? {
-                    Ok(Some(decrypt_filename(cipher.as_ref(), self.object_id(), &name)?))
-                } else {
-                    Ok(None)
-                }
-            }
-            _ => Ok(None),
+            ObjectKeyData::Child { name } => Some(name),
+            ObjectKeyData::CasefoldChild { name, .. } => Some(name),
+            ObjectKeyData::LegacyCasefoldChild(name) => Some(name.to_string()),
+            _ => None,
         }
     }
 
     pub fn object_id(&self) -> u64 {
         self.handle.object_id()
-    }
-
-    pub fn wrapping_key_id(&self) -> Option<WrappingKeyId> {
-        self.dir_type.lock().wrapping_key_id()
-    }
-
-    /// Retrieves keys from the key manager or unwraps the wrapped keys in the directory's key
-    /// record.  Returns None if the key is currently unavailable due to the wrapping key being
-    /// unavailable.
-    pub async fn get_fscrypt_key(&self) -> Result<CipherHolder, Error> {
-        let object_id = self.object_id();
-        let store = self.store();
-        store
-            .key_manager()
-            .get_fscrypt_key(object_id, store.crypt().unwrap().as_ref(), async || {
-                store.get_keys(object_id).await
-            })
-            .await
     }
 
     pub fn owner(&self) -> &Arc<S> {
@@ -248,13 +184,8 @@ impl<S: HandleOwner> Directory<S> {
     pub async fn create(
         transaction: &mut Transaction<'_>,
         owner: &Arc<S>,
-        wrapping_key_id: Option<WrappingKeyId>,
     ) -> Result<Directory<S>, Error> {
-        let dir_type = match wrapping_key_id {
-            Some(id) => DirType::Encrypted(id),
-            None => DirType::Normal,
-        };
-        Self::create_with_options(transaction, owner, dir_type).await
+        Self::create_with_options(transaction, owner, DirType::Normal).await
     }
 
     pub async fn create_with_options(
@@ -286,107 +217,7 @@ impl<S: HandleOwner> Directory<S> {
                 },
             ),
         );
-        if let Some(wrapping_key_id) = dir_type.wrapping_key_id() {
-            if let Some(crypt) = store.crypt() {
-                let (key, unwrapped_key) = crypt
-                    .create_key_with_id(object_id, wrapping_key_id, ObjectType::Directory)
-                    .await?;
-                let cipher = key_to_cipher(&key, &unwrapped_key)?;
-                transaction.add(
-                    store.store_object_id(),
-                    Mutation::insert_object(
-                        ObjectKey::keys(object_id),
-                        ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
-                    ),
-                );
-                // Note that it's possible that this entry gets inserted into the key manager but
-                // this transaction doesn't get committed. This shouldn't be a problem because
-                // unused keys get purged on a standard timeout interval and this key shouldn't
-                // conflict with any other keys.
-                store.key_manager.insert(
-                    object_id,
-                    Arc::new(vec![(FSCRYPT_KEY_ID, CipherHolder::Cipher(cipher))].into()),
-                    false,
-                );
-            } else {
-                return Err(anyhow!("No crypt"));
-            }
-        }
         Ok(Directory::new(owner.clone(), object_id, dir_type))
-    }
-
-    /// Sets the file-based-encryption (FBE) wrapping key for this directory.
-    ///
-    /// This can only be done on empty directories and must NOT be done as part of a transaction
-    /// that creates entries in the same directory. The reason for this is that local state
-    /// (self.wrapping_key_id) is used to control the type of child record written out. If children
-    /// are written to a directory as part of the same transaction that enables FBE, they will be
-    /// written as the wrong child record type.
-    pub async fn set_wrapping_key(
-        &self,
-        transaction: &mut Transaction<'_>,
-        id: WrappingKeyId,
-    ) -> Result<Arc<dyn Cipher>, Error> {
-        let object_id = self.object_id();
-        let store = self.store();
-        if let Some(crypt) = store.crypt() {
-            let (key, unwrapped_key) =
-                crypt.create_key_with_id(object_id, id, ObjectType::Directory).await?;
-            let mut mutation = store.txn_get_object_mutation(transaction, object_id).await?;
-            if let ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. } =
-                &mut mutation.item.value
-            {
-                if dir_type.is_encrypted() {
-                    return Err(anyhow!("wrapping key id is already set"));
-                }
-                if self.has_children().await? {
-                    return Err(FxfsError::NotEmpty.into());
-                }
-                *dir_type = dir_type.with_encryption(id);
-            } else {
-                match mutation.item.value {
-                    ObjectValue::None => bail!(FxfsError::NotFound),
-                    _ => bail!(FxfsError::NotDir),
-                }
-            }
-            transaction.add(store.store_object_id(), Mutation::ObjectStore(mutation));
-
-            let keys_key = ObjectKey::keys(object_id);
-            let value = if let Some(mutation) =
-                transaction.get_object_mutation(store.store_object_id(), keys_key.clone())
-            {
-                Some(mutation.item.value.clone())
-            } else {
-                store.tree.find_value(&keys_key).await?
-            };
-
-            let cipher = key_to_cipher(&key, &unwrapped_key)?;
-            match value {
-                None | Some(ObjectValue::None) => {
-                    transaction.add(
-                        store.store_object_id(),
-                        Mutation::insert_object(
-                            ObjectKey::keys(object_id),
-                            ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
-                        ),
-                    );
-                }
-                Some(ObjectValue::Keys(mut keys)) => {
-                    keys.insert(FSCRYPT_KEY_ID, key.into());
-                    transaction.add(
-                        store.store_object_id(),
-                        Mutation::replace_or_insert_object(
-                            ObjectKey::keys(object_id),
-                            ObjectValue::keys(keys),
-                        ),
-                    );
-                }
-                Some(value) => bail!("Unexpected value in lookup: {value:?}"),
-            }
-            Ok(cipher)
-        } else {
-            Err(anyhow!("No crypt"))
-        }
     }
 
     #[trace]
@@ -489,7 +320,6 @@ impl<S: HandleOwner> Directory<S> {
                             src_name_out = Some(
                                 src_dir
                                     .get_case_preserved_name(entry.key)
-                                    .await?
                                     .unwrap_or_else(|| src_name.to_string()),
                             );
                         }
@@ -514,7 +344,6 @@ impl<S: HandleOwner> Directory<S> {
                         }
                         dst_name_out = Some(
                             self.get_case_preserved_name(entry.key)
-                                .await?
                                 .unwrap_or_else(|| dst.to_string()),
                         );
                         Some((entry.object_id, entry.descriptor.clone()))
@@ -551,125 +380,49 @@ impl<S: HandleOwner> Directory<S> {
         Ok(self.iter(&mut merger).await?.get().is_some())
     }
 
-    /// Returns the object ID and descriptor for the given child, or None if not found. If found,
-    /// also returns a boolean indicating whether or not the parent directory was locked during the
-    /// lookup.
+    /// Returns the object ID and descriptor for the given child, or None if not found.
     #[trace]
-    pub async fn lookup(&self, name: &str) -> Result<Option<(u64, ObjectDescriptor, bool)>, Error> {
-        Ok(self
-            .lookup_ext(name)
-            .await?
-            .map(|entry| (entry.object_id, entry.descriptor, entry.locked)))
+    pub async fn lookup(&self, name: &str) -> Result<Option<(u64, ObjectDescriptor)>, Error> {
+        Ok(self.lookup_ext(name).await?.map(|entry| (entry.object_id, entry.descriptor)))
     }
 
     /// Like lookup, but also returns the key that was found.
     #[trace]
     pub async fn lookup_ext(&self, name: &str) -> Result<Option<LookupEntry>, Error> {
-        let _measure =
-            crate::metrics::DurationMeasureScope::new(&crate::metrics::directory_metrics().lookup);
         if self.is_deleted() {
             return Ok(None);
         }
-        let cipher;
-        let proxy_name;
         // In some cases, we need to iterate over directory entries to find a match.  The code below
         // finds a starting key and an optional predicate that is used to find a matching entry.
         // If there is no predicate, we can look for an exact match.
-        let (key, predicate, locked): (_, Option<BoxPredicate<'_>>, _) = if self
-            .dir_type()
-            .is_encrypted()
-        {
-            cipher = self.get_fscrypt_key().await?;
-            match &cipher {
-                CipherHolder::Cipher(cipher) => {
-                    if self.dir_type().is_casefold() {
-                        // We must iterate over all directory entries that have a matching hash code
-                        // until we find a match.
-                        let target_hash_code = cipher.hash_code_casefold(name);
-                        let key = ObjectKey::encrypted_child(
-                            self.object_id(),
-                            vec![],
-                            Some(target_hash_code),
-                        );
-                        (
-                            key,
-                            Some(Box::new(encrypted_casefold_predicate(
-                                cipher.as_ref(),
-                                self.object_id(),
-                                target_hash_code,
-                                name,
-                            ))),
-                            false,
-                        )
-                    } else {
-                        let encrypted_name =
-                            encrypt_filename(cipher.as_ref(), self.object_id(), name)?;
-                        let hash_code = cipher.hash_code(encrypted_name.as_bytes(), name);
-                        (
-                            ObjectKey::encrypted_child(self.object_id(), encrypted_name, hash_code),
-                            None,
-                            false,
-                        )
-                    }
-                }
-                CipherHolder::Unavailable => {
-                    proxy_name = match ProxyFilename::try_from(name) {
-                        Ok(name) => name,
-                        Err(_) => return Ok(None),
-                    };
-                    let (key, predicate) =
-                        self.get_key_and_predicate_for_unavailable_cipher(&proxy_name);
-                    (key, predicate, true)
-                }
-            }
-        } else {
-            match self.dir_type() {
-                DirType::Casefold => {
-                    let target_key = ObjectKey::child(self.object_id(), name, DirType::Casefold);
-                    let target_hash_code = match &target_key.data {
-                        ObjectKeyData::CasefoldChild { hash_code, .. } => *hash_code,
-                        _ => unreachable!(),
-                    };
-                    (
-                        ObjectKey {
-                            object_id: self.object_id(),
-                            data: ObjectKeyData::CasefoldChild {
-                                hash_code: target_hash_code,
-                                name: "".to_string(),
-                            },
+        let (key, predicate): (_, Option<BoxPredicate<'_>>) = match self.dir_type() {
+            DirType::Casefold => {
+                let target_key = ObjectKey::child(self.object_id(), name, DirType::Casefold);
+                let target_hash_code = match &target_key.data {
+                    ObjectKeyData::CasefoldChild { hash_code, .. } => *hash_code,
+                    _ => unreachable!(),
+                };
+                (
+                    ObjectKey {
+                        object_id: self.object_id(),
+                        data: ObjectKeyData::CasefoldChild {
+                            hash_code: target_hash_code,
+                            name: "".to_string(),
                         },
-                        Some(Box::new(casefold_predicate(
-                            self.object_id(),
-                            target_hash_code,
-                            name,
-                        ))),
-                        false,
-                    )
-                }
-                DirType::LegacyCasefold | DirType::Normal => {
-                    (ObjectKey::child(self.object_id(), name, self.dir_type()), None, false)
-                }
-                DirType::Encrypted(_) | DirType::EncryptedCasefold(_) => {
-                    unreachable!("is_encrypted() was already checked")
-                }
+                    },
+                    Some(Box::new(casefold_predicate(self.object_id(), target_hash_code, name))),
+                )
+            }
+            DirType::LegacyCasefold | DirType::Normal => {
+                (ObjectKey::child(self.object_id(), name, self.dir_type()), None)
             }
         };
 
-        // If the directory is locked, we don't want to use `LMSTree::find` because it caches
-        // results, and if the directory later becomes unlocked, we don't want the cache to yield
-        // entries from when it was locked.
-        if locked || predicate.is_some() {
+        if let Some(predicate) = predicate {
             let layer_set = self.store().tree().layer_set();
             let mut merger = layer_set.merger();
             let mut iter = merger.query(Query::FullRange(&key)).await?;
-            if let Some(predicate) = predicate {
-                if !self.advance_until(&mut iter, predicate).await? {
-                    return Ok(None);
-                }
-            } else if iter
-                .get()
-                .is_none_or(|item| item.key != &key || matches!(item.value, ObjectValue::None))
-            {
+            if !self.advance_until(&mut iter, predicate).await? {
                 return Ok(None);
             }
             let item = iter.get().unwrap();
@@ -679,7 +432,6 @@ impl<S: HandleOwner> Directory<S> {
                         object_id: *object_id,
                         descriptor: object_descriptor.clone(),
                         key: item.key.clone(),
-                        locked,
                     }))
                 }
                 _ => Err(anyhow!(FxfsError::Inconsistent)
@@ -694,7 +446,6 @@ impl<S: HandleOwner> Directory<S> {
                             object_id: *object_id,
                             descriptor: *object_descriptor,
                             key: item.key.clone(),
-                            locked: false,
                         })
                     }
                     _ => Err(anyhow!(FxfsError::Inconsistent)
@@ -714,32 +465,13 @@ impl<S: HandleOwner> Directory<S> {
 
         let handle =
             Directory::create_with_options(transaction, self.owner(), self.dir_type()).await?;
-        if self.dir_type().is_encrypted() {
-            let fscrypt_key =
-                self.get_fscrypt_key().await?.into_cipher().ok_or(FxfsError::NoKey)?;
-            let encrypted_name =
-                encrypt_filename(&*fscrypt_key, self.object_id(), name).expect("encrypt_filename");
-            let hash_code = if self.dir_type().is_casefold() {
-                Some(fscrypt_key.hash_code_casefold(name))
-            } else {
-                fscrypt_key.hash_code(encrypted_name.as_bytes(), name)
-            };
-            transaction.add(
-                self.store().store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::encrypted_child(self.object_id(), encrypted_name, hash_code),
-                    ObjectValue::child(handle.object_id(), ObjectDescriptor::Directory),
-                ),
-            );
-        } else {
-            transaction.add(
-                self.store().store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::child(self.object_id(), &name, self.dir_type()),
-                    ObjectValue::child(handle.object_id(), ObjectDescriptor::Directory),
-                ),
-            );
-        }
+        transaction.add(
+            self.store().store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectValue::child(handle.object_id(), ObjectDescriptor::Directory),
+            ),
+        );
         let now = Timestamp::now();
         self.update_dir_attributes_internal(
             transaction,
@@ -777,32 +509,13 @@ impl<S: HandleOwner> Directory<S> {
     ) -> Result<(), Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         ensure!(descriptor.is_file(), FxfsError::InvalidArgs);
-        if self.dir_type().is_encrypted() {
-            let fscrypt_key =
-                self.get_fscrypt_key().await?.into_cipher().ok_or(FxfsError::NoKey)?;
-            let encrypted_name =
-                encrypt_filename(&*fscrypt_key, self.object_id(), name).expect("encrypt_filename");
-            let hash_code = if self.dir_type().is_casefold() {
-                Some(fscrypt_key.hash_code_casefold(name))
-            } else {
-                fscrypt_key.hash_code(encrypted_name.as_bytes(), name)
-            };
-            transaction.add(
-                self.store().store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::encrypted_child(self.object_id(), encrypted_name, hash_code),
-                    ObjectValue::child(handle.object_id(), descriptor),
-                ),
-            );
-        } else {
-            transaction.add(
-                self.store().store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::child(self.object_id(), &name, self.dir_type()),
-                    ObjectValue::child(handle.object_id(), descriptor),
-                ),
-            );
-        }
+        transaction.add(
+            self.store().store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectValue::child(handle.object_id(), descriptor),
+            ),
+        );
         if !times {
             return Ok(());
         }
@@ -898,14 +611,8 @@ impl<S: HandleOwner> Directory<S> {
         times: bool,
     ) -> Result<DataObjectHandle<S>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
-        let wrapping_key_id = self.wrapping_key_id();
-        let handle = ObjectStore::create_object(
-            self.owner(),
-            transaction,
-            HandleOptions::default(),
-            wrapping_key_id,
-        )
-        .await?;
+        let handle =
+            ObjectStore::create_object(self.owner(), transaction, HandleOptions::default()).await?;
         self.add_child_file_and_time(transaction, name, &handle, descriptor, times).await?;
         let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } =
             self.store().txn_get_object_mutation(transaction, self.object_id()).await?.item.value
@@ -923,9 +630,7 @@ impl<S: HandleOwner> Directory<S> {
         options: HandleOptions,
     ) -> Result<DataObjectHandle<S>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
-        let wrapping_key_id = self.wrapping_key_id();
-        let handle =
-            ObjectStore::create_object(self.owner(), transaction, options, wrapping_key_id).await?;
+        let handle = ObjectStore::create_object(self.owner(), transaction, options).await?;
         self.add_child_file(transaction, name, &handle).await?;
         self.copy_project_id_to_object_in_txn(transaction, handle.object_id())?;
         Ok(handle)
@@ -936,14 +641,8 @@ impl<S: HandleOwner> Directory<S> {
         transaction: &mut Transaction<'a>,
     ) -> Result<DataObjectHandle<S>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
-        let wrapping_key_id = self.wrapping_key_id();
-        let handle = ObjectStore::create_object(
-            self.owner(),
-            transaction,
-            HandleOptions::default(),
-            wrapping_key_id,
-        )
-        .await?;
+        let handle =
+            ObjectStore::create_object(self.owner(), transaction, HandleOptions::default()).await?;
 
         // Copy project ID from self to the created file object.
         let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } = self
@@ -998,112 +697,41 @@ impl<S: HandleOwner> Directory<S> {
         // Limit the length of link that might be too big to put in the tree.
         // https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/limits.h.html.
         // See _POSIX_SYMLINK_MAX.
-        // cladefs: unencrypted symlinks' targets may be longer, up to MAX_LONG_SYMLINK, which they
-        // keep outside their records (see `LONG_SYMLINK_XATTR`).
-        let encrypted = self.dir_type().is_encrypted();
-        ensure!(
-            link.len() <= if encrypted { MAX_INLINE_SYMLINK } else { MAX_LONG_SYMLINK },
-            FxfsError::BadPath
-        );
+        // cladefs: symlinks' targets may be longer, up to MAX_LONG_SYMLINK, which they keep
+        // outside their records (see `LONG_SYMLINK_XATTR`).
+        ensure!(link.len() <= MAX_LONG_SYMLINK, FxfsError::BadPath);
         let reserved_symlink_id = self.store().get_next_object_id().await?;
         let symlink_id = reserved_symlink_id.get();
-        let mut link = link.to_vec();
 
-        match self.dir_type() {
-            DirType::Encrypted(wrapping_key_id) | DirType::EncryptedCasefold(wrapping_key_id) => {
-                if let Some(crypt) = self.store().crypt() {
-                    let (key, unwrapped_key) = crypt
-                        .create_key_with_id(symlink_id, wrapping_key_id, ObjectType::Symlink)
-                        .await?;
-
-                    // Note that it's possible that this entry gets inserted into the key manager but
-                    // this transaction doesn't get committed. This shouldn't be a problem because
-                    // unused keys get purged on a standard timeout interval and this key shouldn't
-                    // conflict with any other keys.
-                    let cipher = key_to_cipher(&key, &unwrapped_key)?;
-                    self.store().key_manager.insert(
-                        symlink_id,
-                        Arc::new(
-                            vec![(FSCRYPT_KEY_ID, CipherHolder::Cipher(cipher.clone()))].into(),
-                        ),
-                        false,
-                    );
-
-                    let dir_key =
-                        self.get_fscrypt_key().await?.into_cipher().ok_or(FxfsError::NoKey)?;
-                    let encrypted_name = encrypt_filename(&*dir_key, self.object_id(), name)?;
-                    let hash_code = if self.dir_type().is_casefold() {
-                        Some(dir_key.hash_code_casefold(name))
-                    } else {
-                        dir_key.hash_code(encrypted_name.as_bytes(), name)
-                    };
-                    cipher.encrypt_symlink(symlink_id, &mut link)?;
-
-                    transaction.add(
-                        self.store().store_object_id(),
-                        Mutation::insert_object(
-                            ObjectKey::object(reserved_symlink_id.release().get()),
-                            ObjectValue::encrypted_symlink(
-                                link,
-                                Timestamp::now(),
-                                Timestamp::now(),
-                                None,
-                            ),
-                        ),
-                    );
-                    transaction.add(
-                        self.store().store_object_id(),
-                        Mutation::insert_object(
-                            ObjectKey::keys(symlink_id),
-                            ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
-                        ),
-                    );
-                    transaction.add(
-                        self.store().store_object_id(),
-                        Mutation::replace_or_insert_object(
-                            ObjectKey::encrypted_child(self.object_id(), encrypted_name, hash_code),
-                            ObjectValue::child(symlink_id, ObjectDescriptor::Symlink),
-                        ),
-                    );
-                } else {
-                    return Err(anyhow!("No crypt"));
-                }
-            }
-            _ => {
-                // cladefs: a target too long for the symlink's record is in records of its own, and
-                // the record's target empty, as no target otherwise is.
-                let long = link.len() > MAX_INLINE_SYMLINK;
-                let inline = if long { Vec::new() } else { link.clone() };
+        // cladefs: a target too long for the symlink's record is in records of its own, and the
+        // record's target empty, as no target otherwise is.
+        let long = link.len() > MAX_INLINE_SYMLINK;
+        let inline = if long { Vec::new() } else { link.to_vec() };
+        transaction.add(
+            self.store().store_object_id(),
+            Mutation::insert_object(
+                ObjectKey::object(reserved_symlink_id.release().get()),
+                ObjectValue::symlink(inline, Timestamp::now(), Timestamp::now(), None),
+            ),
+        );
+        if long {
+            for (index, chunk) in link.chunks(LONG_SYMLINK_CHUNK).enumerate() {
                 transaction.add(
                     self.store().store_object_id(),
                     Mutation::insert_object(
-                        ObjectKey::object(reserved_symlink_id.release().get()),
-                        ObjectValue::symlink(inline, Timestamp::now(), Timestamp::now(), None),
-                    ),
-                );
-                if long {
-                    for (index, chunk) in link.chunks(LONG_SYMLINK_CHUNK).enumerate() {
-                        transaction.add(
-                            self.store().store_object_id(),
-                            Mutation::insert_object(
-                                ObjectKey::extended_attribute(
-                                    symlink_id,
-                                    long_symlink_xattr(index),
-                                ),
-                                ObjectValue::inline_extended_attribute(chunk),
-                            ),
-                        );
-                    }
-                }
-                transaction.add(
-                    self.store().store_object_id(),
-                    Mutation::replace_or_insert_object(
-                        ObjectKey::child(self.object_id(), &name, self.dir_type()),
-                        ObjectValue::child(symlink_id, ObjectDescriptor::Symlink),
+                        ObjectKey::extended_attribute(symlink_id, long_symlink_xattr(index)),
+                        ObjectValue::inline_extended_attribute(chunk),
                     ),
                 );
             }
         }
+        transaction.add(
+            self.store().store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectValue::child(symlink_id, ObjectDescriptor::Symlink),
+            ),
+        );
 
         let now = Timestamp::now();
         self.update_dir_attributes_internal(
@@ -1180,31 +808,13 @@ impl<S: HandleOwner> Directory<S> {
     ) -> Result<(), Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         let sub_dirs_delta = if descriptor == ObjectDescriptor::Directory { 1 } else { 0 };
-        if self.dir_type().is_encrypted() {
-            let fscrypt_key =
-                self.get_fscrypt_key().await?.into_cipher().ok_or(FxfsError::NoKey)?;
-            let encrypted_name = encrypt_filename(&*fscrypt_key, self.object_id(), name)?;
-            let hash_code = if self.dir_type().is_casefold() {
-                Some(fscrypt_key.hash_code_casefold(name))
-            } else {
-                fscrypt_key.hash_code(encrypted_name.as_bytes(), name)
-            };
-            transaction.add(
-                self.store().store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::encrypted_child(self.object_id(), encrypted_name, hash_code),
-                    ObjectValue::child(object_id, descriptor),
-                ),
-            );
-        } else {
-            transaction.add(
-                self.store().store_object_id(),
-                Mutation::replace_or_insert_object(
-                    ObjectKey::child(self.object_id(), &name, self.dir_type()),
-                    ObjectValue::child(object_id, descriptor),
-                ),
-            );
-        }
+        transaction.add(
+            self.store().store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectValue::child(object_id, descriptor),
+            ),
+        );
         let now = Timestamp::now();
         self.update_dir_attributes_internal(
             transaction,
@@ -1220,8 +830,7 @@ impl<S: HandleOwner> Directory<S> {
     }
 
     /// cladefs: whether a child's record is keyed by its name as given, which removing it then
-    /// needn't look up (`txn_remove_known_child`): not in a directory whose names are casefolded
-    /// or encrypted.
+    /// needn't look up (`txn_remove_known_child`): not in a directory whose names are casefolded.
     pub fn names_are_keys(&self) -> bool {
         self.dir_type() == DirType::Normal
     }
@@ -1231,7 +840,7 @@ impl<S: HandleOwner> Directory<S> {
     /// and returns whether it was the object's last name, which puts the object in the graveyard
     /// (`ObjectStore::txn_tombstone_unlinked` may take it out again). The times of the directory
     /// and of the object are left be, which the caller keeps, as the guest kernel writes them
-    /// back: in a directory whose names fold case or are encrypted too, whose unlinks went through
+    /// back: in a directory whose names fold case too, whose unlinks went through
     /// `replace_child`, which timed them as they applied, after what the kernel wrote back since
     /// (TASK-149.36).
     ///
@@ -1266,7 +875,7 @@ impl<S: HandleOwner> Directory<S> {
     pub async fn update_attributes<'a>(
         &self,
         mut transaction: Transaction<'a>,
-        node_attributes: Option<&fio::MutableNodeAttributes>,
+        node_attributes: Option<&MutableNodeAttributes>,
         sub_dirs_delta: i64,
         change_time: Option<Timestamp>,
     ) -> Result<(), Error> {
@@ -1289,48 +898,15 @@ impl<S: HandleOwner> Directory<S> {
             transaction.add(self.store().store_object_id(), Mutation::ObjectStore(mutation));
         }
 
-        let wrapping_key =
-            if let Some(fio::MutableNodeAttributes { wrapping_key_id: Some(id), .. }) =
-                node_attributes
-            {
-                Some((*id, self.set_wrapping_key(&mut transaction, *id).await?))
-            } else {
-                None
-            };
-
         // Delegate to the StoreObjectHandle update_attributes for the rest of the updates.
         if node_attributes.is_some() || change_time.is_some() {
             self.handle.update_attributes(&mut transaction, node_attributes, change_time).await?;
         }
-        transaction
-            .commit_with_callback(|_| {
-                if let Some((wrapping_key_id, cipher)) = wrapping_key {
-                    {
-                        let mut dir_type = self.dir_type.lock();
-                        *dir_type = match *dir_type {
-                            DirType::Normal => DirType::Encrypted(wrapping_key_id),
-                            DirType::Casefold => DirType::EncryptedCasefold(wrapping_key_id),
-                            _ => *dir_type,
-                        };
-                    }
-                    self.store().key_manager.merge(self.object_id(), |existing| match existing {
-                        Some(existing) => {
-                            let mut cipher_set = (**existing).clone();
-                            cipher_set.add_key(FSCRYPT_KEY_ID, CipherHolder::Cipher(cipher));
-                            Arc::new(cipher_set)
-                        }
-                        None => {
-                            Arc::new(vec![(FSCRYPT_KEY_ID, CipherHolder::Cipher(cipher))].into())
-                        }
-                    });
-                }
-            })
-            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
-    /// Updates attributes set in `mutable_node_attributes`. MutableAttributesInternal can be
-    /// extended but should never include wrapping_key_id. Useful for object store Directory
+    /// Updates attributes set in `mutable_node_attributes`. Useful for object store Directory
     /// methods that only have access to a reference to a transaction.
     pub async fn update_dir_attributes_internal<'a>(
         &self,
@@ -1460,22 +1036,7 @@ impl<S: HandleOwner> Directory<S> {
         &self,
         merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
     ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        // It might be tempting to always use `ObjectKeyData::Child` here knowing that it should
-        // come earlier than any other directory entries, but directories can have extended
-        // attributes, and `ObjectKeyData::ExtendedAttribute` sorts after `ObjectKeyData::Child` but
-        // before `ObjectKeyData::EncryptedChild`.
-        self.iter_from_key(
-            merger,
-            &if self.dir_type().is_encrypted() {
-                // This will return ObjectKeyData::EncryptedCasefoldChild which sorts before
-                // ObjectKeyData::EncryptedChild, so this should work even if not an encrypted
-                // casefold directory.
-                ObjectKey::encrypted_child(self.object_id(), Vec::new(), Some(0))
-            } else {
-                ObjectKey::child(self.object_id(), "", self.dir_type())
-            },
-        )
-        .await
+        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), "", self.dir_type())).await
     }
 
     /// Like `iter`, but seeks from a specific key.
@@ -1486,21 +1047,10 @@ impl<S: HandleOwner> Directory<S> {
     ) -> Result<DirectoryIterator<'a, 'b>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
 
-        DirectoryIterator::new(
-            self.object_id(),
-            merger.query(Query::FullRange(key)).await?,
-            if self.dir_type().is_encrypted() {
-                self.get_fscrypt_key().await?.into_cipher()
-            } else {
-                None
-            },
-        )
-        .await
+        DirectoryIterator::new(self.object_id(), merger.query(Query::FullRange(key)).await?).await
     }
 
-    /// Like "iter", but seeks from a specific filename (inclusive).  This should *not* be
-    /// used for encrypted entries, because it won't decrypt entries (and will panic on
-    /// a debug build).
+    /// Like "iter", but seeks from a specific filename (inclusive).
     ///
     /// Example usage:
     ///
@@ -1513,22 +1063,7 @@ impl<S: HandleOwner> Directory<S> {
         merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
         from: &str,
     ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        debug_assert!(!self.dir_type().is_encrypted());
-
         self.iter_from_key(merger, &ObjectKey::child(self.object_id(), from, self.dir_type())).await
-    }
-
-    /// Like "iter_from", but takes bytes which is expected to be a serialized ObjectKey.  This will
-    /// decrypt encrypted entries if the key is available.  This should *not* be used for
-    /// unencrypted directories.
-    pub async fn iter_from_bytes<'a, 'b>(
-        &self,
-        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
-        from: &[u8],
-    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        debug_assert!(self.dir_type().is_encrypted());
-
-        self.iter_from_key(merger, &bincode::deserialize(&from).unwrap()).await
     }
 
     /// Skips over directory entries for this directory until `predicate` returns a match.  Returns
@@ -1557,71 +1092,6 @@ impl<S: HandleOwner> Directory<S> {
         }
         Ok(false)
     }
-
-    /// Returns the starting key and an optional predicate (where an iteration is required) to be
-    /// used when the cipher is unavailable.
-    fn get_key_and_predicate_for_unavailable_cipher<'a>(
-        &self,
-        proxy_name: &'a ProxyFilename,
-    ) -> (ObjectKey, Option<BoxPredicate<'a>>) {
-        if self.dir_type().is_casefold() {
-            (
-                ObjectKey::encrypted_child(
-                    self.object_id(),
-                    proxy_name.raw_filename().to_vec(),
-                    Some(proxy_name.hash_code as u32),
-                ),
-                proxy_name
-                    .is_truncated()
-                    .then(|| Box::new(long_proxy_prefix_casefold_predicate(&proxy_name)) as Box<_>),
-            )
-        } else {
-            (
-                ObjectKey::encrypted_child(
-                    self.object_id(),
-                    proxy_name.raw_filename().to_vec(),
-                    None,
-                ),
-                proxy_name
-                    .is_truncated()
-                    .then(|| Box::new(long_proxy_prefix_predicate(&proxy_name)) as Box<_>),
-            )
-        }
-    }
-}
-
-/// Used to find an encrypted casefold entry when the cipher is available.
-fn encrypted_casefold_predicate<'a>(
-    cipher: &'a dyn Cipher,
-    object_id: u64,
-    target_hash_code: u32,
-    name: &'a str,
-) -> impl Fn(&ObjectKey) -> ControlFlow<bool> + 'a {
-    move |key| match key {
-        ObjectKey {
-            data:
-                ObjectKeyData::EncryptedCasefoldChild(EncryptedCasefoldChild {
-                    hash_code,
-                    name: encrypted_name,
-                }),
-            ..
-        } if *hash_code == target_hash_code => {
-            let decrypted_name = decrypt_filename(cipher, object_id, encrypted_name);
-            match decrypted_name {
-                Ok(decrypted_name) => {
-                    if fxfs_unicode::casefold_cmp(name, &decrypted_name)
-                        == std::cmp::Ordering::Equal
-                    {
-                        ControlFlow::Break(true)
-                    } else {
-                        ControlFlow::Continue(())
-                    }
-                }
-                Err(_) => ControlFlow::Continue(()),
-            }
-        }
-        _ => ControlFlow::Break(false),
-    }
 }
 
 fn casefold_predicate(
@@ -1644,47 +1114,6 @@ fn casefold_predicate(
     }
 }
 
-/// Used when a long proxy prefix is used with case folding.
-fn long_proxy_prefix_casefold_predicate(
-    proxy_name: &ProxyFilename,
-) -> impl Fn(&ObjectKey) -> ControlFlow<bool> + '_ {
-    move |key| match key {
-        ObjectKey {
-            data: ObjectKeyData::EncryptedCasefoldChild(EncryptedCasefoldChild { hash_code, name }),
-            ..
-        } if *hash_code as u64 == proxy_name.hash_code
-            && name.starts_with(&proxy_name.filename) =>
-        {
-            if ProxyFilename::compute_sha256(&name) == proxy_name.sha256 {
-                ControlFlow::Break(true)
-            } else {
-                ControlFlow::Continue(())
-            }
-        }
-        _ => ControlFlow::Break(false),
-    }
-}
-
-/// Used when a long proxy prefix is used without case folding.
-fn long_proxy_prefix_predicate(
-    proxy_name: &ProxyFilename,
-) -> impl Fn(&ObjectKey) -> ControlFlow<bool> + '_ {
-    move |key| match key {
-        ObjectKey { data: ObjectKeyData::EncryptedChild(EncryptedChild(name)), .. }
-            if name.starts_with(&proxy_name.filename) =>
-        {
-            if ProxyFilename::compute_hash_code(name) == proxy_name.hash_code
-                && ProxyFilename::compute_sha256(name) == proxy_name.sha256
-            {
-                ControlFlow::Break(true)
-            } else {
-                ControlFlow::Continue(())
-            }
-        }
-        _ => ControlFlow::Break(false),
-    }
-}
-
 impl<S: HandleOwner> fmt::Debug for Directory<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Directory")
@@ -1697,19 +1126,15 @@ impl<S: HandleOwner> fmt::Debug for Directory<S> {
 pub struct DirectoryIterator<'a, 'b> {
     object_id: u64,
     iter: MergerIterator<'a, 'b, ObjectKey, ObjectValue>,
-    cipher: Option<Arc<dyn Cipher>>,
-    // Holds decrypted or proxy filenames so we can return a reference from get().
-    filename: Option<String>,
 }
 
 impl<'a, 'b> DirectoryIterator<'a, 'b> {
     pub async fn new(
         object_id: u64,
         iter: MergerIterator<'a, 'b, ObjectKey, ObjectValue>,
-        cipher: Option<Arc<dyn Cipher>>,
     ) -> Result<Self, Error> {
-        let mut this = DirectoryIterator { object_id, iter, cipher, filename: None };
-        this.init_item().await?;
+        let mut this = DirectoryIterator { object_id, iter };
+        this.skip_deleted().await?;
         Ok(this)
     }
 
@@ -1734,131 +1159,23 @@ impl<'a, 'b> DirectoryIterator<'a, 'b> {
                 value: ObjectValue::Child(ChildValue { object_id, object_descriptor }),
                 ..
             }) if *oid == self.object_id => Some((name.as_str(), *object_id, object_descriptor)),
-            Some(ItemRef {
-                key: ObjectKey { object_id: oid, data: ObjectKeyData::EncryptedChild(_) },
-                value: ObjectValue::Child(ChildValue { object_id, object_descriptor }),
-                ..
-            }) if *oid == self.object_id => {
-                Some((self.filename.as_ref().unwrap(), *object_id, object_descriptor))
-            }
-            Some(ItemRef {
-                key: ObjectKey { object_id: oid, data: ObjectKeyData::EncryptedCasefoldChild(_) },
-                value: ObjectValue::Child(ChildValue { object_id, object_descriptor }),
-                ..
-            }) if *oid == self.object_id => {
-                Some((self.filename.as_ref().unwrap(), *object_id, object_descriptor))
-            }
             _ => None,
         }
     }
 
     pub async fn advance(&mut self) -> Result<(), Error> {
         self.iter.advance().await?;
-        self.init_item().await
+        self.skip_deleted().await
     }
 
-    /// Returns a traversal position.
-    pub fn traversal_position<R>(
-        &self,
-        name_visitor: impl FnOnce(&str) -> R,
-        bytes_visitor: impl FnOnce(Box<[u8]>) -> R,
-    ) -> Option<R> {
-        match self.iter.get() {
-            Some(ItemRef {
-                key: ObjectKey { object_id: oid, data: ObjectKeyData::Child { name } },
-                ..
-            }) if *oid == self.object_id => Some(name_visitor(name)),
-            Some(ItemRef {
-                key:
-                    ObjectKey {
-                        object_id: oid,
-                        data: ObjectKeyData::CasefoldChild { hash_code: _, name },
-                    },
-                ..
-            }) if *oid == self.object_id => Some(name_visitor(&name)),
-            Some(ItemRef {
-                key: ObjectKey { object_id: oid, data: ObjectKeyData::LegacyCasefoldChild(name) },
-                ..
-            }) if *oid == self.object_id => Some(name_visitor(name.as_str())),
-
-            Some(ItemRef {
-                key:
-                    key @ ObjectKey {
-                        object_id: oid,
-                        data:
-                            ObjectKeyData::EncryptedChild(_) | ObjectKeyData::EncryptedCasefoldChild(_),
-                    },
-                ..
-            }) if *oid == self.object_id => {
-                Some(bytes_visitor(bincode::serialize(key).unwrap().into()))
-            }
-            _ => None,
-        }
-    }
-
-    /// Called to initialize the item after the iterator has moved.
-    async fn init_item(&mut self) -> Result<(), Error> {
-        loop {
-            match self.iter.get() {
-                Some(ItemRef {
-                    key: ObjectKey { object_id, .. },
-                    value: ObjectValue::None,
-                    ..
-                }) if *object_id == self.object_id => {}
-                Some(ItemRef {
-                    key:
-                        ObjectKey {
-                            object_id,
-                            data:
-                                ObjectKeyData::EncryptedCasefoldChild(EncryptedCasefoldChild {
-                                    hash_code,
-                                    name,
-                                }),
-                        },
-                    value: ObjectValue::Child(_),
-                    ..
-                }) if *object_id == self.object_id => {
-                    // We decrypt filenames on advance. This allows us to return errors on bad data
-                    // and avoids repeated work if the user calls get() more than once.
-                    self.update_encrypted_filename(Some(*hash_code), name.clone())?;
-                    return Ok(());
-                }
-                Some(ItemRef {
-                    key:
-                        ObjectKey {
-                            object_id,
-                            data: ObjectKeyData::EncryptedChild(EncryptedChild(name)),
-                        },
-                    value: ObjectValue::Child(_),
-                    ..
-                }) if *object_id == self.object_id => {
-                    // We decrypt filenames on advance. This allows us to return errors on bad data
-                    // and avoids repeated work if the user calls get() more than once.
-                    self.update_encrypted_filename(None, name.clone())?;
-                    return Ok(());
-                }
-                _ => return Ok(()),
-            }
+    /// Skips the directory's deleted entries, after the iterator has moved.
+    async fn skip_deleted(&mut self) -> Result<(), Error> {
+        while let Some(ItemRef {
+            key: ObjectKey { object_id, .. }, value: ObjectValue::None, ..
+        }) = self.iter.get()
+            && *object_id == self.object_id
+        {
             self.iter.advance().await?;
-        }
-    }
-
-    // For encrypted children, we calculate the filename once and cache it.  This function is called
-    // to update that cached name.
-    fn update_encrypted_filename(
-        &mut self,
-        hash_code: Option<u32>,
-        mut name: Vec<u8>,
-    ) -> Result<(), Error> {
-        if let Some(cipher) = &self.cipher {
-            cipher.decrypt_filename(self.object_id, &mut name)?;
-            self.filename = Some(String::from_utf8(name).map_err(|_| {
-                anyhow!(FxfsError::Internal).context("Bad UTF-8 encrypted filename")
-            })?);
-        } else if let Some(hash_code) = hash_code {
-            self.filename = Some(ProxyFilename::new_with_hash_code(hash_code as u64, &name).into());
-        } else {
-            self.filename = Some(ProxyFilename::new(&name).into());
         }
         Ok(())
     }
@@ -1919,25 +1236,7 @@ pub async fn replace_child_with_purge<'a, S: HandleOwner>(
         assert_eq!(store_id, src_dir.store().store_object_id());
 
         let src_entry = src_dir.lookup_ext(src_name).await?.ok_or(FxfsError::NotFound)?;
-        let LookupEntry { object_id: id, descriptor, key: src_key, .. } = src_entry;
-
-        match (src_dir.dir_type(), dst.0.dir_type()) {
-            (
-                DirType::Encrypted(src_id) | DirType::EncryptedCasefold(src_id),
-                DirType::Encrypted(dst_id) | DirType::EncryptedCasefold(dst_id),
-            ) => {
-                ensure!(src_id == dst_id, FxfsError::InconsistentEncryptionPolicy);
-
-                // Renames only work on unlocked encrypted directories. Fail rename if src is
-                // locked.
-                let _ = src_dir.get_fscrypt_key().await?.into_cipher().ok_or(FxfsError::NoKey)?;
-            }
-            (
-                DirType::Normal | DirType::Casefold | DirType::LegacyCasefold,
-                DirType::Normal | DirType::Casefold | DirType::LegacyCasefold,
-            ) => {}
-            _ => bail!(FxfsError::InconsistentEncryptionPolicy),
-        }
+        let LookupEntry { object_id: id, descriptor, key: src_key } = src_entry;
 
         transaction.add(store_id, Mutation::replace_or_insert_object(src_key, ObjectValue::None));
 
@@ -2075,28 +1374,7 @@ async fn replace_child_with_object_impl<'a, S: HandleOwner>(
     let new_key = if matches!(new_value, ObjectValue::None) {
         None
     } else {
-        if dst.0.dir_type().is_encrypted() {
-            match dst.0.get_fscrypt_key().await? {
-                CipherHolder::Cipher(cipher) => {
-                    let encrypted_dst_name = encrypt_filename(&*cipher, dst.0.object_id(), dst.1)?;
-                    let dst_hash_code = if dst.0.dir_type().is_casefold() {
-                        Some(cipher.hash_code_casefold(dst.1))
-                    } else {
-                        cipher.hash_code(encrypted_dst_name.as_bytes(), dst.1)
-                    };
-                    Some(ObjectKey::encrypted_child(
-                        dst.0.object_id(),
-                        encrypted_dst_name,
-                        dst_hash_code,
-                    ))
-                }
-                CipherHolder::Unavailable => {
-                    bail!(FxfsError::NoKey);
-                }
-            }
-        } else {
-            Some(ObjectKey::child(dst.0.object_id(), dst.1, dst.0.dir_type()))
-        }
+        Some(ObjectKey::child(dst.0.object_id(), dst.1, dst.0.dir_type()))
     };
 
     if let Some(dst_key) = dst_key
@@ -2125,7 +1403,7 @@ async fn replace_child_with_object_impl<'a, S: HandleOwner>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProxyFilename, encrypt_filename, replace_child_with_object};
+    use super::replace_child_with_object;
     use crate::errors::FxfsError;
     use crate::filesystem::{FxFilesystem, SyncOptions};
     use crate::fsck::{fsck, fsck_volume};
@@ -2134,28 +1412,21 @@ mod tests {
         Directory, MutableAttributesInternal, ReplacedChild, replace_child,
         replace_child_with_purge,
     };
-    use crate::object_store::object_record::{ObjectKey, ObjectValue, Timestamp};
+    use crate::object_store::object_record::{ObjectKey, Timestamp};
     use crate::object_store::transaction::{Options, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
-        AttributeId, HandleOptions, LockKey, NewChildStoreOptions, ObjectDescriptor, ObjectKind,
-        ObjectStore, SetExtendedAttributeMode, SpecialFile, StoreObjectHandle, StoreOptions,
+        AttributeId, HandleOptions, LockKey, MutableNodeAttributes, NewChildStoreOptions,
+        ObjectDescriptor, ObjectStore, SetExtendedAttributeMode, SpecialFile, StoreObjectHandle,
     };
     use anyhow::Error;
     use assert_matches::assert_matches;
-    use fidl_fuchsia_io as fio;
-    use fxfs_crypt_common::CryptBase;
-    use fxfs_crypto::{Cipher, Crypt, WrappingKeyId};
-    use fxfs_insecure_crypto::new_insecure_crypt;
-    use std::collections::HashSet;
     use std::future::poll_fn;
-    use std::sync::Arc;
     use std::task::Poll;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-    use test_case::test_case;
 
-    #[fuchsia::test]
+    #[test]
     fn test_casefold_equality_implies_hash_equality() {
         use fxfs_unicode::CasefoldString;
 
@@ -2182,116 +1453,13 @@ mod tests {
                 a, b
             );
 
-            let hash_a = fscrypt::direntry::tea_hash_filename(bytes_a);
-            let hash_b = fscrypt::direntry::tea_hash_filename(bytes_b);
+            let hash_a = crate::tea_hash::tea_hash_filename(bytes_a);
+            let hash_b = crate::tea_hash::tea_hash_filename(bytes_b);
             assert_eq!(hash_a, hash_b, "Hashes for {:?} and {:?} should be identical", a, b);
         }
     }
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
-    const WRAPPING_KEY_ID: WrappingKeyId = u128::to_le_bytes(2);
-
-    /// The synthetic symlink we return when locked is not usable for anything but we still want
-    /// it to match that returned by fscrypt so we will verify here that we get back the
-    /// expected ProxyFilename-derived link content.
-    #[fuchsia::test]
-    async fn test_reopen_with_different_crypt_shows_proxy_name() -> Result<(), Error> {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let symlink_object_id;
-        {
-            let crypt = Arc::new(new_insecure_crypt());
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add_wrapping_key failed");
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("new_volume failed");
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        store.store_object_id(),
-                        store.root_directory_object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let root_dir = Directory::open(&store, store.root_directory_object_id())
-                .await
-                .expect("open failed");
-            let _ = root_dir.set_wrapping_key(&mut transaction, WRAPPING_KEY_ID).await?;
-            transaction.commit().await.unwrap();
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        store.store_object_id(),
-                        store.root_directory_object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let root_dir = Directory::open(&store, store.root_directory_object_id())
-                .await
-                .expect("open failed");
-            symlink_object_id = root_dir
-                .create_symlink(&mut transaction, b"some_link_text", "a")
-                .await
-                .expect("create_symlink failed");
-            transaction.commit().await.expect("commit failed");
-        };
-        fs.close().await.expect("close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        // Open the volume without providing the keys.
-        let store = root_volume
-            .volume(
-                "test",
-                StoreOptions {
-                    crypt: Some(Arc::new(new_insecure_crypt())),
-                    ..StoreOptions::default()
-                },
-            )
-            .await
-            .expect("volume failed");
-
-        let value = store
-            .tree()
-            .find_value(&ObjectKey::object(symlink_object_id))
-            .await
-            .expect("find failed")
-            .expect("found record");
-        let raw_link = match value {
-            ObjectValue::Object { kind: ObjectKind::EncryptedSymlink { link, .. }, .. } => link,
-            _ => panic!("Unexpected value {value:?}"),
-        };
-        let symlink_target = store.read_symlink(symlink_object_id).await?;
-        // Locked symlinks always have hash_code of zero.
-        let expected_symlink_target: String =
-            ProxyFilename::new_with_hash_code(0, &raw_link).into();
-        assert_eq!(symlink_target, expected_symlink_target.as_bytes());
-
-        fs.close().await.expect("Close failed");
-        Ok(())
-    }
 
     async fn yield_to_executor() {
         let mut done = false;
@@ -2307,7 +1475,7 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_create_directory() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -2317,9 +1485,8 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let dir = Directory::create(&mut transaction, &fs.root_store(), None)
-                .await
-                .expect("create failed");
+            let dir =
+                Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
             let child_dir = dir
                 .create_child_dir(&mut transaction, "foo")
@@ -2346,34 +1513,26 @@ mod tests {
         let fs = FxFilesystem::open(device).await.expect("open failed");
         {
             let dir = Directory::open(&fs.root_store(), object_id).await.expect("open failed");
-            let (object_id, object_descriptor, _) =
+            let (object_id, object_descriptor) =
                 dir.lookup("foo").await.expect("lookup failed").expect("not found");
             assert_eq!(object_descriptor, ObjectDescriptor::Directory);
             let child_dir =
                 Directory::open(&fs.root_store(), object_id).await.expect("open failed");
-            let (object_id, object_descriptor, _) =
+            let (object_id, object_descriptor) =
                 child_dir.lookup("bar").await.expect("lookup failed").expect("not found");
             assert_eq!(object_descriptor, ObjectDescriptor::File);
-            let _child_dir_file = ObjectStore::open_object(
-                &fs.root_store(),
-                object_id,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("open object failed");
-            let (object_id, object_descriptor, _) =
+            let _child_dir_file =
+                ObjectStore::open_object(&fs.root_store(), object_id, HandleOptions::default())
+                    .await
+                    .expect("open object failed");
+            let (object_id, object_descriptor) =
                 dir.lookup("baz").await.expect("lookup failed").expect("not found");
             assert_eq!(object_descriptor, ObjectDescriptor::File);
-            let _child_file = ObjectStore::open_object(
-                &fs.root_store(),
-                object_id,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("open object failed");
-            let (object_id, object_descriptor, _) =
+            let _child_file =
+                ObjectStore::open_object(&fs.root_store(), object_id, HandleOptions::default())
+                    .await
+                    .expect("open object failed");
+            let (object_id, object_descriptor) =
                 dir.lookup("corge").await.expect("lookup failed").expect("not found");
             assert_eq!(object_id, 100);
             if let ObjectDescriptor::Volume = object_descriptor {
@@ -2386,420 +1545,8 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
-    async fn test_set_wrapping_key_does_not_exist() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-        let store = root_volume
-            .new_volume(
-                "test",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .expect("new_volume failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(
-                    store.store_object_id(),
-                    store.root_directory_object_id()
-                )],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let directory = root_directory
-            .create_child_dir(&mut transaction, "foo")
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        directory
-            .set_wrapping_key(&mut transaction, WRAPPING_KEY_ID)
-            .await
-            .expect_err("wrapping key id 2 has not been added");
-        transaction.commit().await.expect("commit failed");
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        directory
-            .set_wrapping_key(&mut transaction, WRAPPING_KEY_ID)
-            .await
-            .expect("wrapping key id 2 has been added");
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_set_encryption_policy_on_unencrypted_nonempty_dir() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-        let store = root_volume
-            .new_volume(
-                "test",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .expect("new_volume failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(
-                    store.store_object_id(),
-                    store.root_directory_object_id()
-                )],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let directory = root_directory
-            .create_child_dir(&mut transaction, "foo")
-            .await
-            .expect("create_child_dir failed");
-        let _file = directory
-            .create_child_file(&mut transaction, "bar")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        directory
-            .set_wrapping_key(&mut transaction, WRAPPING_KEY_ID)
-            .await
-            .expect_err("directory is not empty");
-        transaction.commit().await.expect("commit failed");
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_create_file_or_subdir_in_locked_directory() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-        let store = root_volume
-            .new_volume(
-                "test",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .expect("new_volume failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(
-                    store.store_object_id(),
-                    store.root_directory_object_id()
-                )],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let directory = root_directory
-            .create_child_dir(&mut transaction, "foo")
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit failed");
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        let transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        directory
-            .update_attributes(
-                transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                0,
-                None,
-            )
-            .await
-            .expect("update attributes failed");
-        crypt.forget_wrapping_key(&WRAPPING_KEY_ID).expect("forget wrapping key failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        directory
-            .create_child_dir(&mut transaction, "bar")
-            .await
-            .expect_err("cannot create a dir inside of a locked encrypted directory");
-        directory
-            .create_child_file(&mut transaction, "baz")
-            .await
-            .map(|_| ())
-            .expect_err("cannot create a file inside of a locked encrypted directory");
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_replace_child_with_object_in_locked_directory() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
-
-        let (parent_oid, src_oid, dst_oid) = {
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("new_volume failed");
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        store.store_object_id(),
-                        store.root_directory_object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new transaction failed");
-            let root_directory = Directory::open(&store, store.root_directory_object_id())
-                .await
-                .expect("open failed");
-            let directory = root_directory
-                .create_child_dir(&mut transaction, "foo")
-                .await
-                .expect("create_child_dir failed");
-            transaction.commit().await.expect("commit failed");
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add_wrapping_key failed");
-            let transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                    Options::default(),
-                )
-                .await
-                .expect("new transaction failed");
-            directory
-                .update_attributes(
-                    transaction,
-                    Some(&fio::MutableNodeAttributes {
-                        wrapping_key_id: Some(WRAPPING_KEY_ID),
-                        ..Default::default()
-                    }),
-                    0,
-                    None,
-                )
-                .await
-                .expect("update attributes failed");
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(store.store_object_id(), directory.object_id())],
-                    Options::default(),
-                )
-                .await
-                .expect("new transaction failed");
-            let src_child = directory
-                .create_child_dir(&mut transaction, "fee")
-                .await
-                .expect("create_child_dir failed");
-            let dst_child = directory
-                .create_child_dir(&mut transaction, "faa")
-                .await
-                .expect("create_child_dir failed");
-            transaction.commit().await.expect("commit failed");
-            crypt.forget_wrapping_key(&WRAPPING_KEY_ID).expect("forget_wrapping_key failed");
-            (directory.object_id(), src_child.object_id(), dst_child.object_id())
-        };
-        fs.close().await.expect("Close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        let store = root_volume
-            .volume(
-                "test",
-                StoreOptions {
-                    crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                    ..StoreOptions::default()
-                },
-            )
-            .await
-            .expect("volume failed");
-
-        {
-            let parent_directory = Directory::open(&store, parent_oid).await.expect("open failed");
-            let layer_set = store.tree().layer_set();
-            let mut merger = layer_set.merger();
-            let mut encrypted_src_name = None;
-            let mut encrypted_dst_name = None;
-            let mut iter = parent_directory.iter(&mut merger).await.expect("iter_from failed");
-            while let Some((name, object_id, object_descriptor)) = iter.get() {
-                assert!(matches!(object_descriptor, ObjectDescriptor::Directory));
-                if object_id == dst_oid {
-                    encrypted_dst_name = Some(name.to_string());
-                } else if object_id == src_oid {
-                    encrypted_src_name = Some(name.to_string());
-                }
-                iter.advance().await.expect("iter advance failed");
-            }
-
-            let src_child = parent_directory
-                .lookup(&encrypted_src_name.expect("src child not found"))
-                .await
-                .expect("lookup failed")
-                .expect("not found");
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        store.store_object_id(),
-                        parent_directory.object_id(),
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new transaction failed");
-            replace_child_with_object(
-                &mut transaction,
-                Some((src_child.0, src_child.1)),
-                (&parent_directory, &encrypted_dst_name.expect("dst child not found")),
-                0,
-                false,
-                Timestamp::now(),
-            )
-            .await
-            .expect_err("renames should fail within a locked directory");
-        }
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
-    async fn test_set_encryption_policy_on_unencrypted_file() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-        let store = root_volume
-            .new_volume(
-                "test",
-                NewChildStoreOptions {
-                    options: StoreOptions {
-                        crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                        ..StoreOptions::default()
-                    },
-                    ..NewChildStoreOptions::default()
-                },
-            )
-            .await
-            .expect("new_volume failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(
-                    store.store_object_id(),
-                    store.root_directory_object_id()
-                )],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let file_handle = root_directory
-            .create_child_file(&mut transaction, "foo")
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), file_handle.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        file_handle
-            .update_attributes(
-                &mut transaction,
-                Some(&fio::MutableNodeAttributes {
-                    wrapping_key_id: Some(WRAPPING_KEY_ID),
-                    ..Default::default()
-                }),
-                None,
-            )
-            .await
-            .expect_err("Cannot update the wrapping key id of a file");
-        fs.close().await.expect("Close failed");
-    }
-
     /// cladefs: a file created untimed is named in its directory, which keeps its times.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_create_child_node_untimed() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -2808,9 +1555,8 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        let dir =
+            Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         transaction.commit().await.expect("commit failed");
         let before = dir.get_properties().await.expect("get_properties failed");
 
@@ -2855,7 +1601,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_delete_child() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -2866,9 +1612,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
         child =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
@@ -2897,7 +1641,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_delete_child_with_children_fails() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -2909,9 +1653,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
         child =
             dir.create_child_dir(&mut transaction, "foo").await.expect("create_child_dir failed");
@@ -2984,7 +1726,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_delete_and_reinsert_child() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -2995,9 +1737,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
         child =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
@@ -3037,7 +1777,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_delete_child_persists() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3049,9 +1789,8 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            dir = Directory::create(&mut transaction, &fs.root_store(), None)
-                .await
-                .expect("create failed");
+            dir =
+                Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
             child = dir
                 .create_child_file(&mut transaction, "foo")
@@ -3092,7 +1831,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_child() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3104,9 +1843,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
         child_dir1 =
             dir.create_child_dir(&mut transaction, "dir1").await.expect("create_child_dir failed");
@@ -3143,7 +1880,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_child_overwrites_dst() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3155,9 +1892,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
         child_dir1 =
             dir.create_child_dir(&mut transaction, "dir1").await.expect("create_child_dir failed");
@@ -3209,13 +1944,12 @@ mod tests {
         assert_eq!(child_dir1.lookup("foo").await.expect("lookup failed"), None);
 
         // Check the contents to ensure that the file was replaced.
-        let (oid, object_descriptor, _) =
+        let (oid, object_descriptor) =
             child_dir2.lookup("bar").await.expect("lookup failed").expect("not found");
         assert_eq!(object_descriptor, ObjectDescriptor::File);
-        let bar =
-            ObjectStore::open_object(&child_dir2.owner(), oid, HandleOptions::default(), None)
-                .await
-                .expect("Open failed");
+        let bar = ObjectStore::open_object(&child_dir2.owner(), oid, HandleOptions::default())
+            .await
+            .expect("Open failed");
         let mut buf = bar.allocate_buffer(bar.block_size().get() as usize).await;
         assert_eq!(
             bar.read_aligned(0, buf.as_mut()).await.expect("read failed"),
@@ -3228,7 +1962,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_child_with_purge() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3238,9 +1972,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         let file =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
         let file_oid = file.object_id();
@@ -3294,7 +2026,7 @@ mod tests {
     /// directory whose names aren't their keys, looked up, in any case it folds to: the object's
     /// other names stay, its last puts it in the graveyard, and the times are left be. A name
     /// linking another object is refused (TASK-149.36).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_txn_remove_known_child() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3306,8 +2038,8 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &store, None).await.expect("create failed");
-        casefold = Directory::create(&mut transaction, &store, None).await.expect("create failed");
+        dir = Directory::create(&mut transaction, &store).await.expect("create failed");
+        casefold = Directory::create(&mut transaction, &store).await.expect("create failed");
         let file =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
         let file_oid = file.object_id();
@@ -3389,7 +2121,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_child_fails_if_would_overwrite_nonempty_dir() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3401,9 +2133,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
         child_dir1 =
             dir.create_child_dir(&mut transaction, "dir1").await.expect("create_child_dir failed");
@@ -3447,7 +2177,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_child_within_dir() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3457,9 +2187,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         let foo =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
         transaction.commit().await.expect("commit failed");
@@ -3488,68 +2216,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
-    async fn test_replace_child_normal_into_encrypted_fails() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-        let store = root_volume(fs.clone())
-            .await
-            .expect("root_volume")
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..Default::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("new_volume");
-
-        let normal_dir;
-        let encrypted_dir;
-        let foo;
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        normal_dir =
-            Directory::create(&mut transaction, &store, None).await.expect("create failed");
-        encrypted_dir = Directory::create(&mut transaction, &store, Some(WRAPPING_KEY_ID))
-            .await
-            .expect("create failed");
-        foo = normal_dir
-            .create_child_file(&mut transaction, "foo")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![
-                    LockKey::object(store.store_object_id(), normal_dir.object_id()),
-                    LockKey::object(store.store_object_id(), encrypted_dir.object_id()),
-                    LockKey::object(store.store_object_id(), foo.object_id()),
-                ],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        assert_eq!(
-            replace_child(&mut transaction, Some((&normal_dir, "foo")), (&encrypted_dir, "foo"))
-                .await
-                .expect_err("replace_child succeeded")
-                .downcast::<FxfsError>()
-                .expect("wrong error"),
-            FxfsError::InconsistentEncryptionPolicy
-        );
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_iterate() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3559,9 +2226,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         let _cat =
             dir.create_child_file(&mut transaction, "cat").await.expect("create_child_file failed");
         let _ball = dir
@@ -3600,7 +2265,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_sub_dir_count() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3611,9 +2276,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         child_dir =
             dir.create_child_dir(&mut transaction, "foo").await.expect("create_child_dir failed");
         transaction.commit().await.expect("commit failed");
@@ -3718,7 +2381,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_deleted_dir() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3728,9 +2391,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         let child =
             dir.create_child_dir(&mut transaction, "foo").await.expect("create_child_dir failed");
         dir.create_child_dir(&mut transaction, "bar").await.expect("create_child_dir failed");
@@ -3802,7 +2463,7 @@ mod tests {
         assert_access_denied(dir.iter(&mut merger).await.map(|_| {}));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_create_symlink() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3812,9 +2473,8 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let dir = Directory::create(&mut transaction, &fs.root_store(), None)
-                .await
-                .expect("create failed");
+            let dir =
+                Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
             let symlink_id = dir
                 .create_symlink(&mut transaction, b"link", "foo")
@@ -3833,13 +2493,13 @@ mod tests {
             let dir = Directory::open(&fs.root_store(), dir_id).await.expect("open failed");
             assert_eq!(
                 dir.lookup("foo").await.expect("lookup failed").expect("not found"),
-                (symlink_id, ObjectDescriptor::Symlink, false)
+                (symlink_id, ObjectDescriptor::Symlink)
             );
         }
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_symlink() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3849,7 +2509,7 @@ mod tests {
             .await
             .expect("new_transaction failed");
         let store = fs.root_store();
-        let dir = Directory::create(&mut transaction, &store, None).await.expect("create failed");
+        let dir = Directory::create(&mut transaction, &store).await.expect("create failed");
 
         let symlink_id = dir
             .create_symlink(&mut transaction, b"link", "foo")
@@ -3864,7 +2524,7 @@ mod tests {
 
     // cladefs: a target longer than a record holds, up to PATH_MAX - 1, which survives remounting,
     // isn't among the symlink's extended attributes, and goes with the symlink.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_long_symlink() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3884,13 +2544,8 @@ mod tests {
         );
         transaction.commit().await.expect("commit failed");
         assert_eq!(store.read_symlink(symlink_id).await.expect("read_symlink"), target);
-        let handle = StoreObjectHandle::new(
-            store.clone(),
-            symlink_id,
-            false,
-            HandleOptions::default(),
-            false,
-        );
+        let handle =
+            StoreObjectHandle::new(store.clone(), symlink_id, HandleOptions::default(), false);
         assert_eq!(handle.list_extended_attributes().await.expect("list"), Vec::<Vec<u8>>::new());
 
         fs.close().await.expect("close failed");
@@ -3918,7 +2573,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_unlink_symlink() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3929,7 +2584,7 @@ mod tests {
             .await
             .expect("new_transaction failed");
         let store = fs.root_store();
-        dir = Directory::create(&mut transaction, &store, None).await.expect("create failed");
+        dir = Directory::create(&mut transaction, &store).await.expect("create failed");
 
         let symlink_id = dir
             .create_symlink(&mut transaction, b"link", "foo")
@@ -3959,7 +2614,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_get_properties() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3970,9 +2625,7 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         transaction.commit().await.expect("commit failed");
 
         // Check attributes of `dir`
@@ -4028,7 +2681,7 @@ mod tests {
         child_dir_file
             .update_attributes(
                 &mut transaction,
-                Some(&fio::MutableNodeAttributes { gid: Some(1), ..Default::default() }),
+                Some(&MutableNodeAttributes { gid: Some(1), ..Default::default() }),
                 None,
             )
             .await
@@ -4052,7 +2705,7 @@ mod tests {
         assert_eq!(properties.posix_attributes.unwrap().rdev, 0);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_update_create_attributes() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4063,9 +2716,7 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         transaction.commit().await.expect("commit failed");
         let mut properties = dir.get_properties().await.expect("get_properties failed");
         assert_eq!(properties.sub_dirs, 0);
@@ -4090,7 +2741,7 @@ mod tests {
         let now = Timestamp::now();
         dir.update_attributes(
             transaction,
-            Some(&fio::MutableNodeAttributes {
+            Some(&MutableNodeAttributes {
                 modification_time: Some(now.as_nanos()),
                 uid: Some(1),
                 gid: Some(2),
@@ -4126,7 +2777,7 @@ mod tests {
             .expect("new_transaction failed");
         dir.update_attributes(
             transaction,
-            Some(&fio::MutableNodeAttributes {
+            Some(&MutableNodeAttributes {
                 creation_time: Some(now.as_nanos()),
                 uid: Some(3),
                 rdev: Some(10),
@@ -4149,25 +2800,15 @@ mod tests {
         assert_eq!(properties.posix_attributes.unwrap().mode, 0);
     }
 
-    #[fuchsia::test]
-    async fn write_to_directory_attribute_creates_keys() {
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn write_to_directory_attribute() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
 
         {
             let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
             let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
+                .new_volume("vol", NewChildStoreOptions::default())
                 .await
                 .expect("new_volume failed");
             let mut transaction = filesystem
@@ -4213,10 +2854,7 @@ mod tests {
 
         {
             let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let volume = root_volume
-                .volume("vol", StoreOptions { crypt: Some(crypt), ..StoreOptions::default() })
-                .await
-                .expect("volume failed");
+            let volume = root_volume.volume("vol").await.expect("volume failed");
             let root_directory = Directory::open(&volume, volume.root_directory_object_id())
                 .await
                 .expect("open failed");
@@ -4246,21 +2884,14 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn directory_with_extended_attributes() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
 
         let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions::default())
             .await
             .expect("new_volume failed");
         let directory =
@@ -4298,9 +2929,7 @@ mod tests {
         );
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         directory.remove_extended_attribute(test_small_name.clone()).await.unwrap();
         directory.remove_extended_attribute(test_large_name.clone()).await.unwrap();
@@ -4308,21 +2937,14 @@ mod tests {
         filesystem.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn remove_directory_with_extended_attributes() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
 
         let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions::default())
             .await
             .expect("new_volume failed");
         let mut transaction = filesystem
@@ -4345,9 +2967,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         let test_small_name = b"security.selinux".to_vec();
         let test_small_value = b"foo".to_vec();
@@ -4372,9 +2992,7 @@ mod tests {
             .unwrap();
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         let mut transaction = filesystem
             .root_store()
@@ -4393,28 +3011,19 @@ mod tests {
         transaction.commit().await.unwrap();
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         filesystem.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn remove_symlink_with_extended_attributes() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
 
         let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
         let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
+            .new_volume("vol", NewChildStoreOptions::default())
             .await
             .expect("new_volume failed");
         let mut transaction = filesystem
@@ -4436,18 +3045,11 @@ mod tests {
             .expect("create_symlink failed");
         transaction.commit().await.expect("commit failed");
 
-        let symlink = StoreObjectHandle::new(
-            store.clone(),
-            symlink_id,
-            false,
-            HandleOptions::default(),
-            false,
-        );
+        let symlink =
+            StoreObjectHandle::new(store.clone(), symlink_id, HandleOptions::default(), false);
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         let test_small_name = b"security.selinux".to_vec();
         let test_small_value = b"foo".to_vec();
@@ -4472,9 +3074,7 @@ mod tests {
             .unwrap();
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         let mut transaction = filesystem
             .root_store()
@@ -4493,14 +3093,12 @@ mod tests {
         transaction.commit().await.unwrap();
 
         fsck(filesystem.clone()).await.unwrap();
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .unwrap();
+        fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();
 
         filesystem.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_update_timestamps() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4513,9 +3111,7 @@ mod tests {
 
         // Expect that atime, ctime, mtime (and creation time) to be the same when we create a
         // directory
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         transaction.commit().await.expect("commit failed");
         let mut properties = dir.get_properties().await.expect("get_properties failed");
         let starting_time = properties.creation_time;
@@ -4536,7 +3132,7 @@ mod tests {
         let update1_time = Timestamp::now();
         dir.update_attributes(
             transaction,
-            Some(&fio::MutableNodeAttributes {
+            Some(&MutableNodeAttributes {
                 modification_time: Some(update1_time.as_nanos()),
                 ..Default::default()
             }),
@@ -4552,7 +3148,7 @@ mod tests {
         assert_eq!(properties.change_time, update1_time);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_move_dir_timestamps() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4564,9 +3160,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         child1 = dir
             .create_child_dir(&mut transaction, "child1")
             .await
@@ -4617,7 +3211,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_unlink_timestamps() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4628,9 +3222,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         foo =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_dir failed");
 
@@ -4670,7 +3262,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_dir_timestamps() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4683,9 +3275,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &fs.root_store(), None)
-            .await
-            .expect("create failed");
+        dir = Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
         child_dir1 =
             dir.create_child_dir(&mut transaction, "dir1").await.expect("create_child_dir failed");
         child_dir2 =
@@ -4737,7 +3327,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_create_casefold_directory() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -4747,9 +3337,8 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let dir = Directory::create(&mut transaction, &fs.root_store(), None)
-                .await
-                .expect("create failed");
+            let dir =
+                Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
 
             let child_dir = dir
                 .create_child_dir(&mut transaction, "foo")
@@ -4771,14 +3360,14 @@ mod tests {
         let fs = FxFilesystem::open(device).await.expect("open failed");
         {
             let dir = Directory::open(&fs.root_store(), object_id).await.expect("open failed");
-            let (object_id, object_descriptor, _) =
+            let (object_id, object_descriptor) =
                 dir.lookup("foo").await.expect("lookup failed").expect("not found");
             assert_eq!(object_descriptor, ObjectDescriptor::Directory);
             let child_dir =
                 Directory::open(&fs.root_store(), object_id).await.expect("open failed");
             assert!(!child_dir.dir_type().is_casefold());
             assert!(child_dir.lookup("BAR").await.expect("lookup failed").is_none());
-            let (object_id, descriptor, _) =
+            let (object_id, descriptor) =
                 child_dir.lookup("bAr").await.expect("lookup failed").unwrap();
             assert_eq!(descriptor, ObjectDescriptor::File);
 
@@ -4858,327 +3447,14 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
-    async fn test_create_casefold_encrypted_directory() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let proxy_filename: ProxyFilename;
-        let object_id;
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.unwrap();
-            let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-
-            // Create a (very weak) key for our encrypted directory.
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add wrapping key failed");
-
-            object_id = {
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(lock_keys![], Options::default())
-                    .await
-                    .expect("new_transaction failed");
-                let dir = Directory::create(&mut transaction, &store, Some(WRAPPING_KEY_ID))
-                    .await
-                    .expect("create failed");
-
-                transaction.commit().await.expect("commit");
-                dir.object_id()
-            };
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-
-            dir.set_casefold(true).await.expect("set casefold");
-            assert!(dir.dir_type().is_casefold());
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(store.store_object_id(), dir.object_id()),],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let _file = dir
-                .create_child_file(&mut transaction, "bAr")
-                .await
-                .expect("create_child_file failed");
-            transaction.commit().await.expect("commit failed");
-
-            // Check that we can look up the original name.
-            assert!(dir.lookup("bAr").await.expect("original lookup failed").is_some());
-
-            // Derive the proxy filename now, for use later when operating on the locked volume
-            // as we won't have the key then.
-            let key = dir.get_fscrypt_key().await.expect("key").into_cipher().unwrap();
-            let encrypted_name =
-                encrypt_filename(&*key, dir.object_id(), "bAr").expect("encrypt_filename");
-            let hash_code = key.hash_code_casefold("bAr");
-            proxy_filename = ProxyFilename::new_with_hash_code(hash_code as u64, &encrypted_name);
-
-            // Check that we can lookup via a case insensitive name.
-            assert!(dir.lookup("BAR").await.expect("casefold lookup failed").is_some());
-
-            // Check hash values generated are stable across case.
-            assert_eq!(key.hash_code_casefold("bar"), key.hash_code_casefold("BaR"));
-
-            // We can't easily check iteration from here as we only get encrypted entries so
-            // we just count instead.
-            let mut count = 0;
-            let layer_set = dir.store().tree().layer_set();
-            let mut merger = layer_set.merger();
-            let mut iter = dir.iter(&mut merger).await.expect("iter");
-            while let Some(_entry) = iter.get() {
-                count += 1;
-                iter.advance().await.expect("advance");
-            }
-            assert_eq!(1, count, "unexpected number of entries.");
-
-            fs.close().await.expect("Close failed");
-        }
-
-        let device = fs.take_device().await;
-
-        // Now try and read the encrypted directory without keys.
-
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .volume(
-                    "vol",
-                    StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                )
-                .await
-                .expect("volume failed");
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-            assert!(dir.dir_type().is_casefold());
-
-            // Check that we can NOT look up the original name.
-            assert!(dir.lookup("bAr").await.expect("lookup failed").is_none());
-            // We should instead see the proxy filename.
-            let filename: String = proxy_filename.into();
-            assert!(dir.lookup(&filename).await.expect("lookup failed").is_some());
-
-            let layer_set = dir.store().tree().layer_set();
-            let mut merger = layer_set.merger();
-            let mut iter = dir.iter(&mut merger).await.expect("iter");
-            let item = iter.get().expect("expect item");
-            let filename: String = proxy_filename.into();
-            assert_eq!(item.0, &filename);
-            iter.advance().await.expect("advance");
-            assert_eq!(None, iter.get());
-
-            fsck(fs.clone()).await.unwrap();
-            fsck_volume(fs.as_ref(), store.store_object_id(), Some(crypt.clone())).await.unwrap();
-
-            fs.close().await.expect("Close failed");
-        }
-    }
-
-    /// Search for a pair of filenames that encode to the same casefold hash and same
-    /// filename prefix, but different sha256.
-    /// We are specifically looking for a case where encrypted child of a > encrypted child of b
-    /// but proxy_filename of a < proxy filename of b or vice versa.
-    /// This is to fully test the iterator logic for locked directories.
-    ///
-    /// Note this is a SLOW process (~12 seconds on my workstation with release build).
-    /// For that reason, the solution is hard coded and this function is marked as ignored.
-    ///
-    /// Returns a pair of filenames on success, None on failure.
-    #[allow(dead_code)]
-    fn find_out_of_order_sha256_long_prefix_pair(
-        object_id: u64,
-        key: &Arc<dyn Cipher>,
-    ) -> Option<[String; 2]> {
-        let mut collision_map: std::collections::HashMap<u32, (usize, ProxyFilename, Vec<u8>)> =
-            std::collections::HashMap::new();
-        for i in 0..(1usize << 32) {
-            let filename = format!("{:0>176}_{i}", 0);
-            let encrypted_name =
-                encrypt_filename(&**key, object_id, &filename).expect("encrypt_filename");
-            let hash_code = key.hash_code_casefold(&filename);
-            let a = ProxyFilename::new_with_hash_code(hash_code as u64, &encrypted_name);
-            let hash_code = a.hash_code as u32;
-            if let Some((j, b, b_encrypted_name)) = collision_map.get(&hash_code) {
-                assert_eq!(a.filename, b.filename);
-                if encrypted_name.cmp(b_encrypted_name) != a.sha256.cmp(&b.sha256) {
-                    return Some([format!("{:0>176}_{i}", 0), format!("{:0>176}_{j}", 0)]);
-                }
-            } else {
-                collision_map.insert(hash_code, (i, a, encrypted_name));
-            }
-        }
-        None
-    }
-
-    #[fuchsia::test]
-    async fn test_proxy_filename() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let mut filenames = Vec::new();
-        let object_id;
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.unwrap();
-            let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-
-            // Create a (very weak) key for our encrypted directory.
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add wrapping key failed");
-
-            object_id = {
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(lock_keys![], Options::default())
-                    .await
-                    .expect("new_transaction failed");
-                let dir = Directory::create(&mut transaction, &store, Some(WRAPPING_KEY_ID))
-                    .await
-                    .expect("create failed");
-
-                transaction.commit().await.expect("commit");
-                dir.object_id()
-            };
-
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-
-            dir.set_casefold(true).await.expect("set casefold");
-            assert!(dir.dir_type().is_casefold());
-
-            let key = dir.get_fscrypt_key().await.expect("key").into_cipher().unwrap();
-
-            // Nb: We use a rather expensive brute force search to find two filenames that:
-            //   1. Have the same hash_code.
-            //   2. Have the same prefix.
-            //   3. Have encrypted names and sha256 that sort differently.
-            // This is to exercise iter_from and lookup() handling scanning of locked directories.
-            // This search returns stable results so in the interest of cheap tests, this code
-            // is commented out but should be equivalent to the constants below.
-            // let collision_pair =
-            //     find_out_of_order_sha256_long_prefix_pair(dir.object_id(), &key).unwrap();
-            let collision_pair =
-                [format!("{:0>176}_{}", 0, 93515), format!("{:0>176}_{}", 0, 15621)];
-
-            // Create set of files with a common prefix, long enough to exceed prefix length of 48.
-            // The first 48 encrypted name bytes will be the same, but the `sha256` will differ.
-            for filename in (0..64)
-                .into_iter()
-                .map(|i| format!("{:0>176}_{i}", 0))
-                .chain(collision_pair.into_iter())
-            {
-                let hash_code = key.hash_code_casefold(&filename);
-                let encrypted_name =
-                    encrypt_filename(&*key, dir.object_id(), &filename).expect("encrypt_filename");
-                let proxy_filename =
-                    ProxyFilename::new_with_hash_code(hash_code as u64, &encrypted_name);
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(
-                        lock_keys![LockKey::object(store.store_object_id(), dir.object_id()),],
-                        Options::default(),
-                    )
-                    .await
-                    .expect("new_transaction failed");
-                let file = dir
-                    .create_child_file(&mut transaction, &filename)
-                    .await
-                    .expect("create_child_file failed");
-                filenames.push((proxy_filename, file.object_id()));
-                transaction.commit().await.expect("commit failed");
-            }
-
-            fs.close().await.expect("Close failed");
-        }
-
-        let device = fs.take_device().await;
-
-        // Now try and read the encrypted directory without keys.
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .volume(
-                    "vol",
-                    StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                )
-                .await
-                .expect("volume failed");
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-            assert!(dir.dir_type().is_casefold());
-
-            // Ensure uniqueness of the proxy filenames.
-            assert_eq!(
-                filenames.iter().map(|(name, _)| (*name).into()).collect::<HashSet<String>>().len(),
-                filenames.len()
-            );
-
-            let filename = filenames[0].0.filename.clone();
-            for (proxy_filename, object_id) in &filenames {
-                // We used such a long prefix that we expect all files to share it.
-                assert_eq!(filename, proxy_filename.filename);
-
-                let proxy_filename_str: String = (*proxy_filename).into();
-                let item = dir
-                    .lookup(&proxy_filename_str)
-                    .await
-                    .expect("lookup failed")
-                    .expect("lookup is not None");
-                assert_eq!(item.0, *object_id, "Mismatch for filename '{proxy_filename:?}'");
-            }
-
-            fs.close().await.expect("Close failed");
-        }
-    }
-
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_directory_and_tombstone_on_remount() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt = Arc::new(new_insecure_crypt());
         {
             let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
             let store = root_volume
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
+                .new_volume("test", NewChildStoreOptions::default())
                 .await
                 .expect("new_volume failed");
 
@@ -5246,16 +3522,7 @@ mod tests {
         device.reopen(false);
         let fs = FxFilesystem::open(device).await.expect("open failed");
         let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-        let _store = root_volume
-            .volume(
-                "test",
-                StoreOptions {
-                    crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                    ..StoreOptions::default()
-                },
-            )
-            .await
-            .expect("new_volume failed");
+        let _store = root_volume.volume("test").await.expect("new_volume failed");
 
         // Allow the graveyard to run.
         yield_to_executor().await;
@@ -5263,305 +3530,9 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[test_case(false; "non_casefold")]
-    #[test_case(true; "casefold")]
-    #[fuchsia::test]
-    async fn test_lookup_long_filename_in_locked_directory(casefold: bool) {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object_id;
-        let mut filenames = Vec::new();
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.unwrap();
-            let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add_wrapping_key failed");
-
-            object_id = {
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(lock_keys![], Options::default())
-                    .await
-                    .expect("new_transaction failed");
-                let dir = Directory::create(&mut transaction, &store, Some(WRAPPING_KEY_ID))
-                    .await
-                    .expect("create failed");
-
-                transaction.commit().await.expect("commit");
-                dir.object_id()
-            };
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-            if casefold {
-                dir.set_casefold(true).await.expect("set casefold");
-            }
-
-            let key = dir.get_fscrypt_key().await.expect("key").into_cipher().unwrap();
-
-            for len in [144, 145, 255] {
-                let filename = "a".repeat(len);
-                let encrypted_name =
-                    encrypt_filename(&*key, dir.object_id(), &filename).expect("encrypt_filename");
-                let proxy_filename = if casefold {
-                    let hash_code = key.hash_code_casefold(&filename);
-                    ProxyFilename::new_with_hash_code(hash_code as u64, &encrypted_name)
-                } else {
-                    ProxyFilename::new(&encrypted_name)
-                };
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(
-                        lock_keys![LockKey::object(store.store_object_id(), dir.object_id()),],
-                        Options::default(),
-                    )
-                    .await
-                    .expect("new_transaction failed");
-                let file = dir
-                    .create_child_file(&mut transaction, &filename)
-                    .await
-                    .expect("create_child_file failed");
-                filenames.push((proxy_filename, file.object_id()));
-                transaction.commit().await.expect("commit failed");
-            }
-
-            fs.close().await.expect("Close failed");
-        }
-
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .volume(
-                    "vol",
-                    StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                )
-                .await
-                .expect("volume failed");
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-
-            // Verify that iteration works.
-            let layer_set = dir.store().tree().layer_set();
-            let mut merger = layer_set.merger();
-            let mut iter = dir.iter(&mut merger).await.expect("iter failed");
-            let mut entries = Vec::new();
-            while let Some((name, _, _)) = iter.get() {
-                entries.push(name.to_string());
-                iter.advance().await.expect("advance failed");
-            }
-            assert_eq!(entries.len(), filenames.len());
-
-            for (proxy_filename, object_id) in &filenames {
-                let proxy_filename_str: String = (*proxy_filename).into();
-                assert!(entries.contains(&proxy_filename_str));
-                let item = dir
-                    .lookup(&proxy_filename_str)
-                    .await
-                    .expect("lookup failed")
-                    .expect("lookup is not None");
-                assert_eq!(item.0, *object_id, "Mismatch for filename '{proxy_filename:?}'");
-            }
-
-            fs.close().await.expect("Close failed");
-        }
-    }
-
-    #[fuchsia::test]
-    async fn test_lookup_cached_entry_after_unlock() {
-        const FILENAME: &str = "foo";
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object_id;
-        let proxy_filename;
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.unwrap();
-            let store = root_volume
-                .new_volume(
-                    "vol",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone()),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add_wrapping_key failed");
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(lock_keys![], Options::default())
-                .await
-                .expect("new_transaction failed");
-            let dir = Directory::create(&mut transaction, &store, Some(WRAPPING_KEY_ID))
-                .await
-                .expect("create failed");
-            transaction.commit().await.expect("commit");
-            object_id = dir.object_id();
-
-            let key = dir.get_fscrypt_key().await.expect("key").into_cipher().unwrap();
-            let encrypted_name =
-                encrypt_filename(&*key, object_id, FILENAME).expect("encrypt_filename");
-            proxy_filename = ProxyFilename::new(&encrypted_name);
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(store.store_object_id(), object_id),],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            dir.create_child_file(&mut transaction, FILENAME)
-                .await
-                .expect("create_child_file failed");
-            transaction.commit().await.expect("commit failed");
-
-            fs.close().await.expect("Close failed");
-        }
-
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let store = root_volume
-                .volume(
-                    "vol",
-                    StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                )
-                .await
-                .expect("volume failed");
-            let dir = Directory::open(&store, object_id).await.expect("open failed");
-
-            let proxy_filename_str: String = proxy_filename.into();
-            // This should succeed because the directory is locked.
-            dir.lookup(&proxy_filename_str)
-                .await
-                .expect("lookup failed")
-                .expect("lookup is not None");
-
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add_wrapping_key failed");
-
-            // This should fail because the directory is now unlocked and we shouldn't be able to
-            // find the file using its encrypted name.
-            assert!(dir.lookup(&proxy_filename_str).await.expect("lookup failed").is_none());
-
-            fs.close().await.expect("Close failed");
-        }
-    }
-
-    #[test_case(false, false; "no_encryption_no_casefold")]
-    #[test_case(false, true; "no_encryption_casefold")]
-    #[test_case(true, false; "encryption_no_casefold")]
-    #[test_case(true, true; "encryption_casefold")]
-    #[fuchsia::test]
-    async fn test_traversal_position(encrypted: bool, casefold: bool) {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        {
-            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
-            let crypt = Arc::new(new_insecure_crypt());
-            crypt
-                .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
-                .expect("add_wrapping_key failed");
-            let store = root_volume
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions {
-                        options: StoreOptions {
-                            crypt: Some(crypt.clone() as Arc<dyn Crypt>),
-                            ..StoreOptions::default()
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("new_volume failed");
-            let mut root_dir = Directory::open(&store, store.root_directory_object_id())
-                .await
-                .expect("open failed");
-            if encrypted {
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(
-                        lock_keys![LockKey::object(
-                            store.store_object_id(),
-                            store.root_directory_object_id()
-                        )],
-                        Options::default(),
-                    )
-                    .await
-                    .expect("new_transaction failed");
-                root_dir.set_wrapping_key(&mut transaction, WRAPPING_KEY_ID).await.unwrap();
-                transaction.commit().await.unwrap();
-
-                // `set_wrapping_key` doesn't update the in-memory state, so reopen the directory.
-                root_dir = Directory::open(&store, store.root_directory_object_id())
-                    .await
-                    .expect("open failed");
-            }
-            if casefold {
-                root_dir.set_casefold(true).await.unwrap();
-            }
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        store.store_object_id(),
-                        store.root_directory_object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let _ = root_dir.create_child_file(&mut transaction, "foo").await.unwrap();
-            transaction.commit().await.unwrap();
-
-            let layer_set = store.tree().layer_set();
-            let mut merger = layer_set.merger();
-            let iter = root_dir.iter(&mut merger).await.expect("iter failed");
-            let pos =
-                iter.traversal_position(|name| name.to_string(), |bytes| format!("{:?}", bytes));
-            assert!(
-                pos.is_some(),
-                "traversal_position returned None for encrypted={}, casefold={}",
-                encrypted,
-                casefold
-            );
-        }
-        fs.close().await.expect("close failed");
-    }
-
     /// Verifies that renaming a file to a casefold-equivalent casing variant within
     /// the same directory works.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_casefold_same_dir_rename() -> Result<(), Error> {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -5575,8 +3546,7 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let dir =
-                Directory::create(&mut transaction, &store, None).await.expect("create failed");
+            let dir = Directory::create(&mut transaction, &store).await.expect("create failed");
             transaction.commit().await.expect("commit");
             dir
         };
@@ -5601,9 +3571,9 @@ mod tests {
         };
 
         // 3. Confirm target can be looked up under both "FOO" and "foo" (due to case-insensitivity)
-        let (lookup_id_foo, _, _) = dir.lookup("foo").await.unwrap().unwrap();
+        let (lookup_id_foo, _) = dir.lookup("foo").await.unwrap().unwrap();
         assert_eq!(lookup_id_foo, file_id);
-        let (lookup_id_foo_upper, _, _) = dir.lookup("FOO").await.unwrap().unwrap();
+        let (lookup_id_foo_upper, _) = dir.lookup("FOO").await.unwrap().unwrap();
         assert_eq!(lookup_id_foo_upper, file_id);
 
         // 4. Execute the same-directory casefolded rename "FOO" -> "foo" (lowercase)
@@ -5628,14 +3598,13 @@ mod tests {
         }
 
         // 5. Assert the file was NOT purged (lookup still succeeds!)
-        let (final_id_foo, _, _) = dir.lookup("foo").await.unwrap().unwrap();
+        let (final_id_foo, _) = dir.lookup("foo").await.unwrap().unwrap();
         assert_eq!(final_id_foo, file_id);
 
         // Verify survival of the underlying node handle (ObjectStore::open_object)
-        let file_handle =
-            ObjectStore::open_object(&dir.owner(), file_id, HandleOptions::default(), None)
-                .await
-                .expect("Underlying file object was prematurely tombstoned / graveyarded!");
+        let file_handle = ObjectStore::open_object(&dir.owner(), file_id, HandleOptions::default())
+            .await
+            .expect("Underlying file object was prematurely tombstoned / graveyarded!");
 
         // Assert reference count is exactly 1.
         let properties = file_handle.get_properties().await.unwrap();
@@ -5662,7 +3631,7 @@ mod tests {
         Ok(())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_casefold_rename_mismatched_casing() -> Result<(), Error> {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -5676,8 +3645,7 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let dir =
-                Directory::create(&mut transaction, &store, None).await.expect("create failed");
+            let dir = Directory::create(&mut transaction, &store).await.expect("create failed");
             transaction.commit().await.expect("commit");
             dir
         };
@@ -5730,118 +3698,10 @@ mod tests {
         );
 
         // Check if "bar" exists.
-        let (lookup_id_bar, _, _) = dir.lookup("bar").await.unwrap().expect("bar not found");
+        let (lookup_id_bar, _) = dir.lookup("bar").await.unwrap().expect("bar not found");
         assert_eq!(lookup_id_bar, file_id);
 
         fs.close().await.expect("Close failed");
         Ok(())
-    }
-
-    #[fuchsia::test]
-    async fn test_hard_link_encrypted_symlink_and_fsck_passes() {
-        let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-        let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let crypt: Arc<CryptBase> = Arc::new(new_insecure_crypt());
-        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).expect("add_wrapping_key failed");
-
-        let root_volume = root_volume(filesystem.clone()).await.expect("root_volume failed");
-        let store = root_volume
-            .new_volume(
-                "vol",
-                NewChildStoreOptions {
-                    options: StoreOptions { crypt: Some(crypt.clone()), ..StoreOptions::default() },
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("new_volume failed");
-
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = filesystem
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(
-                    store.store_object_id(),
-                    store.root_directory_object_id()
-                )],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        root_directory.set_wrapping_key(&mut transaction, WRAPPING_KEY_ID).await.unwrap();
-        transaction.commit().await.unwrap();
-
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = filesystem
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(
-                    store.store_object_id(),
-                    store.root_directory_object_id()
-                )],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        let symlink_id = root_directory
-            .create_symlink(&mut transaction, b"target_path", "symlink")
-            .await
-            .expect("create_symlink failed");
-        transaction.commit().await.expect("commit failed");
-
-        fsck(filesystem.clone()).await.expect("fsck failed");
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .expect("fsck_volume failed");
-
-        let mut transaction = filesystem
-            .root_store()
-            .new_transaction(
-                lock_keys![
-                    LockKey::object(store.store_object_id(), root_directory.object_id()),
-                    LockKey::object(store.store_object_id(), symlink_id)
-                ],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        root_directory
-            .insert_child(&mut transaction, "symlink_link", symlink_id, ObjectDescriptor::Symlink)
-            .await
-            .expect("insert_child failed");
-        store.adjust_refs(&mut transaction, symlink_id, 1).await.expect("adjust_refs failed");
-        transaction.commit().await.expect("commit failed");
-
-        fsck(filesystem.clone()).await.expect("fsck failed");
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .expect("fsck_volume failed");
-
-        let mut transaction = filesystem
-            .root_store()
-            .new_transaction(
-                lock_keys![
-                    LockKey::object(store.store_object_id(), root_directory.object_id()),
-                    LockKey::object(store.store_object_id(), symlink_id)
-                ],
-                Options::default(),
-            )
-            .await
-            .expect("new transaction failed");
-        replace_child(&mut transaction, None, (&root_directory, "symlink"))
-            .await
-            .expect("replace_child failed");
-        transaction.commit().await.expect("commit failed");
-
-        fsck(filesystem.clone()).await.expect("fsck failed");
-        fsck_volume(filesystem.as_ref(), store.store_object_id(), Some(crypt.clone()))
-            .await
-            .expect("fsck_volume failed");
-
-        filesystem.close().await.expect("close failed");
     }
 }

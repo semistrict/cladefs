@@ -26,7 +26,6 @@ pub mod testing;
 
 use crate::drop_event::DropEvent;
 use crate::log::*;
-use crate::metrics::DurationMeasureScope;
 use crate::object_handle::{LayerObject, WriteBytes};
 use crate::object_store::ObjectStore;
 use crate::serialized_types::{LATEST_VERSION, Version};
@@ -34,9 +33,7 @@ use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::Error;
 use cache::{ObjectCache, ObjectCacheResult};
 
-use fuchsia_inspect::HistogramProperty;
 use fuchsia_sync::RwLock;
-use fxfs_crypto::Crypt;
 use persistent_layer::{PersistentLayer, PersistentLayerWriter};
 use skip_list_layer::SkipListLayer;
 use std::fmt;
@@ -238,9 +235,8 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         &self,
         store: &Arc<ObjectStore>,
         object_ids: impl IntoIterator<Item = u64>,
-        crypt: Option<Arc<dyn Crypt>>,
     ) -> Result<u64, Error> {
-        let (layers, total_size) = open_layers(store, object_ids, crypt).await?;
+        let (layers, total_size) = open_layers(store, object_ids).await?;
         self.append_open_layers(layers);
         Ok(total_size)
     }
@@ -299,12 +295,7 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         self.cache.as_ref().map_or(0, |c| c.shrink(count))
     }
 
-    pub fn report_compaction_metrics(
-        &self,
-        bytes_written: u64,
-        duration: std::time::Duration,
-        layer_count: usize,
-    ) {
+    pub fn report_compaction_metrics(&self, bytes_written: u64, duration: std::time::Duration) {
         let mut counters = self.counters.compaction.lock().unwrap();
         counters.compactions += 1;
         counters.compaction_bytes_written += bytes_written;
@@ -316,15 +307,13 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
             std::cmp::min(LOG2_HISTOGRAM_BUCKETS - 1, 63 - bytes_written.leading_zeros() as usize)
         };
         counters.layer_size_histogram[bucket] += 1;
-
-        crate::metrics::lsm_tree_metrics().compaction_layer_stack_depth.insert(layer_count as u64);
     }
 
     pub fn compaction_bytes_written(&self) -> u64 {
         self.counters.compaction.lock().unwrap().compaction_bytes_written
     }
 
-    /// cladefs: the tree's compaction counters as they are now, which Inspect reads on Fuchsia.
+    /// cladefs: the tree's compaction counters as they are now.
     pub fn compaction_counters(&self) -> CompactionCounters {
         self.counters.compaction.lock().unwrap().clone()
     }
@@ -369,8 +358,6 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
     /// Inserts an item into the mutable layer.
     /// Returns error if item already exists.
     pub fn insert(&self, item: Item<K, V>) -> Result<(), Error> {
-        let _measure = DurationMeasureScope::new(&crate::metrics::lsm_tree_metrics().insert);
-
         let item_dup = if self.is_cacheable(&item.key) { Some(item.clone()) } else { None };
 
         {
@@ -391,9 +378,6 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
 
     /// Replaces or inserts an item into the mutable layer.
     pub fn replace_or_insert(&self, item: Item<K, V>) {
-        let _measure =
-            DurationMeasureScope::new(&crate::metrics::lsm_tree_metrics().replace_or_insert);
-
         let item_dup = if self.is_cacheable(&item.key) { Some(item.clone()) } else { None };
 
         {
@@ -413,8 +397,6 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
 
     /// Merges the given item into the mutable layer.
     pub fn merge_into(&self, item: Item<K, V>, lower_bound: &K) {
-        let _measure = DurationMeasureScope::new(&crate::metrics::lsm_tree_metrics().merge_into);
-
         let key = if self.is_cacheable(&item.key) { Some(item.key.clone()) } else { None };
         {
             // `seal` below relies on us holding a read lock whilst we do the mutation.
@@ -461,7 +443,6 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         K: Eq,
         F: FnOnce(ItemRef<'_, K, V>) -> R,
     {
-        let _measure = DurationMeasureScope::new(&crate::metrics::lsm_tree_metrics().find);
         // It is important that the cache lookup is done prior to fetching the layer set as the
         // placeholder returned acts as a sort of lock for the validity of the item that may be
         // inserted later via that placeholder.
@@ -566,56 +547,6 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
     /// Replaces the mutable layer.
     pub fn set_mutable_layer(&self, layer: Arc<SkipListLayer<K, V>>) {
         self.data.write().mutable_layer = layer;
-    }
-
-    /// Records inspect data for the LSM tree into `node`.  Called lazily when inspect is queried.
-    pub fn record_inspect_data(&self, root: &fuchsia_inspect::Node) {
-        let layer_set = self.layer_set();
-        root.record_child("layers", move |node| {
-            let mut index = 0;
-            for layer in layer_set.layers {
-                node.record_child(format!("{index}"), move |node| {
-                    layer.1.record_inspect_data(node)
-                });
-                index += 1;
-            }
-        });
-        {
-            let counters = self.counters.compaction.lock().unwrap();
-            root.record_uint("num_seeks", self.counters.num_seeks.load(Ordering::Relaxed) as u64);
-            root.record_uint("bloom_filter_success_percent", {
-                let layer_files_total = self.counters.layer_files_total.load(Ordering::Relaxed);
-                let layer_files_skipped = self.counters.layer_files_skipped.load(Ordering::Relaxed);
-                if layer_files_total == 0 {
-                    0
-                } else {
-                    (layer_files_skipped * 100).div_ceil(layer_files_total) as u64
-                }
-            });
-            root.record_uint(
-                "excessive_hash_partitions",
-                self.counters.excessive_hash_partitions.load(Ordering::Relaxed) as u64,
-            );
-            root.record_uint("compactions", counters.compactions);
-            root.record_uint("compaction_bytes_written", counters.compaction_bytes_written);
-            root.record_uint("compaction_time_ns", counters.compaction_time_ns);
-            root.record_uint("total_layers_added", counters.total_layers_added);
-            root.record_uint("max_layer_count", counters.max_layer_count);
-
-            let layer_sizes = root.create_uint_exponential_histogram(
-                "layer_size_histogram_log2",
-                fuchsia_inspect::ExponentialHistogramParams {
-                    floor: 1,
-                    initial_step: 1,
-                    step_multiplier: 2,
-                    buckets: LOG2_HISTOGRAM_BUCKETS,
-                },
-            );
-            for (i, count) in counters.layer_size_histogram.iter().enumerate() {
-                layer_sizes.insert_multiple(1u64 << i, *count as usize);
-            }
-            root.record(layer_sizes);
-        }
     }
 }
 
@@ -819,7 +750,7 @@ mod tests {
         async fn yield_now(&mut self) {}
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_iteration() {
         let tree = LSMTree::new(emit_left_merge_fn, None);
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), 2)];
@@ -837,7 +768,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compact() {
         let tree = LSMTree::new(emit_left_merge_fn, None);
         let items = [
@@ -883,7 +814,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_find() {
         let items = [
             Item::new(TestKey(1..1), 1),
@@ -920,7 +851,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_find_no_return_deleted_values() {
         let items = [Item::new(TestKey(1..1), 1), Item::new(TestKey(2..2), u64::DELETED_MARKER)];
         let tree = LSMTree::new(emit_left_merge_fn, None);
@@ -942,7 +873,7 @@ mod tests {
         assert!(!tree.exists(&items[1].key).await.expect("exists failed"));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_find_full_merge() {
         let tree = LSMTree::new(emit_left_i32_merge_fn, None);
         let items = [
@@ -976,7 +907,7 @@ mod tests {
         assert_eq!(tree.find_map(&4, |_| ()).await.expect("find_map failed"), None);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_find_full_merge_multi_layer() {
         let tree = LSMTree::new(merge_sum_i32, None);
 
@@ -1019,7 +950,7 @@ mod tests {
         assert!(!tree.exists(&5).await.expect("exists failed"));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_find_optimized_merge_multi_layer() {
         let tree = LSMTree::new(emit_left_merge_fn, None);
 
@@ -1061,7 +992,7 @@ mod tests {
         assert!(!tree.exists(&TestKey(5..5)).await.expect("exists failed"));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_find_bloom_filter_rejection() {
         struct BloomFilterMockLayer {
             drop_event: Mutex<Option<Arc<DropEvent>>>,
@@ -1126,7 +1057,7 @@ mod tests {
         assert_eq!(total_after - total_before, 4);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_empty_seal() {
         let tree = LSMTree::new(emit_left_merge_fn, None);
         tree.seal();
@@ -1154,7 +1085,7 @@ mod tests {
         assert!(!tree.exists(&TestKey(2..2)).await.expect("find failed"));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_filter() {
         let items = [
             Item::new(TestKey(1..1), 1),
@@ -1187,7 +1118,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_insert_order_agnostic() {
         let items = [
             Item::new(TestKey(1..1), 1),
@@ -1321,7 +1252,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_cache_handling() {
         let item = Item::new(TestKey(1..1), 1);
         let cache = Box::new(AuditCache::new());
@@ -1373,7 +1304,7 @@ mod tests {
         assert_eq!(inner.lock().stats(), (5, 5, 5, 0));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_cache_hit() {
         let item = Item::new(TestKey(1..1), 1);
         let cache = Box::new(AuditCache::new());
@@ -1398,7 +1329,7 @@ mod tests {
         assert_eq!(inner.lock().stats(), (1, 0, 1, 0));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_cache_hit_deleted_marker() {
         let item = Item::new(TestKey(1..1), 1);
         let cache = Box::new(AuditCache::new());
@@ -1435,7 +1366,7 @@ mod tests {
         assert_eq!(inner.lock().stats(), (4, 0, 1, 0));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_cache_says_uncacheable() {
         let item = Item::new(TestKey(1..1), 1);
         let cache = Box::new(AuditCache::new());
@@ -1457,7 +1388,7 @@ mod tests {
         assert_eq!(inner.lock().stats(), (1, 0, 1, 0));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_uncacheable_key_skips_invalidation() {
         let item = Item::new(TestKey(1..1), 1);
         let cache = Box::new(AuditCache::new());
@@ -1576,7 +1507,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clear_cache() {
         let item = Item::new(TestKey(1..1), 1);
         let cache = Box::new(AuditCache::new());
@@ -1602,7 +1533,7 @@ mod tests {
         assert!(layer2.cleared.load(Ordering::Relaxed));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_set_key_exists() {
         use super::LockedLayer;
 
@@ -1646,7 +1577,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_failed_lookup() {
         let cache = Box::new(AuditCache::new());
         let inner = cache.inner.clone();

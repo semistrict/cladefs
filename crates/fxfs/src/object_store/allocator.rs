@@ -176,7 +176,6 @@ use crate::object_store::{
     DataObjectHandle, DirectWriter, Extent, HandleOptions, ObjectStore, ReservedId, tree,
 };
 use crate::range::RangeExt;
-use crate::round::round_div;
 use crate::serialized_types::{
     DEFAULT_MAX_SERIALIZED_RECORD_SIZE, LATEST_VERSION, Version, Versioned, VersionedLatest,
 };
@@ -186,9 +185,7 @@ use either::Either::{Left, Right};
 use extent_table::{Applied, Dropped, ExtentTable, Loading, Records, Recount};
 use fprint::TypeFingerprint;
 use fuchsia_async as fasync;
-use fuchsia_inspect::HistogramProperty;
 use fuchsia_sync::Mutex;
-use futures::FutureExt;
 use futures::future::BoxFuture;
 use fxfs_macros::SerializeKey;
 use merge::{filter_marked_for_deletion, filter_tombstones, merge};
@@ -644,12 +641,6 @@ pub fn max_extent_size_for_block_size(block_size: BlockSize) -> u64 {
     block_size * ((DEFAULT_MAX_SERIALIZED_RECORD_SIZE - 64) / 9)
 }
 
-#[derive(Default)]
-struct AllocatorCounters {
-    num_flushes: u64,
-    last_flush_time: Option<std::time::SystemTime>,
-}
-
 pub struct Allocator {
     filesystem: Weak<FxFilesystem>,
     block_size: BlockSize,
@@ -663,7 +654,6 @@ pub struct Allocator {
     max_extent_size_bytes: u64,
     tree: LSMTree<AllocatorKey, AllocatorValue>,
     inner: Mutex<Inner>,
-    counters: Mutex<AllocatorCounters>,
     allocations_allowed: AtomicBool,
     /// cladefs: the frees of the extents the last device flush let die, in progress
     /// (`did_flush_device`), and of those before them. Held while waiting for them, so that all
@@ -998,7 +988,6 @@ impl Allocator {
                 unrecorded_reaches: Vec::new(),
                 allocation_size_histogram: [0; 64],
             }),
-            counters: Mutex::new(AllocatorCounters::default()),
             allocations_allowed: AtomicBool::new(!filesystem.options().image_builder_mode),
             freeing: futures::lock::Mutex::new(None),
         }
@@ -1052,7 +1041,6 @@ impl Allocator {
             transaction,
             ReservedId::new(&root_store, NonZero::new(self.object_id()).unwrap()),
             HandleOptions::default(),
-            None,
         )?;
         root_store.update_last_object_id(self.object_id());
         Ok(())
@@ -1065,7 +1053,7 @@ impl Allocator {
         let root_store = filesystem.root_store();
 
         let handle =
-            ObjectStore::open_object(&root_store, self.object_id, HandleOptions::default(), None)
+            ObjectStore::open_object(&root_store, self.object_id, HandleOptions::default())
                 .await
                 .context("Failed to open allocator object")?;
 
@@ -1078,7 +1066,7 @@ impl Allocator {
             let (info, _version) = AllocatorInfo::deserialize_with_version(&mut cursor)
                 .context("Failed to deserialize AllocatorInfo")?;
 
-            let (layers, total_size) = open_layers(&root_store, info.layers.iter().cloned(), None)
+            let (layers, total_size) = open_layers(&root_store, info.layers.iter().cloned())
                 .await
                 .context("Failed to open allocator layer file")?;
 
@@ -1329,94 +1317,6 @@ impl Allocator {
         inner.remove_reservation(old_owner_object_id, amount);
         inner.add_reservation(None, amount);
     }
-
-    /// Creates a lazy inspect node named `str` under `parent` which will yield statistics for the
-    /// allocator when queried.
-    pub fn track_statistics(self: &Arc<Self>, parent: &fuchsia_inspect::Node, name: &str) {
-        let this = Arc::downgrade(self);
-        parent.record_lazy_child(name, move || {
-            let this_clone = this.clone();
-            async move {
-                let inspector = fuchsia_inspect::Inspector::default();
-                if let Some(this) = this_clone.upgrade() {
-                    let counters = this.counters.lock();
-                    let root = inspector.root();
-                    root.record_uint("max_extent_size_bytes", this.max_extent_size_bytes);
-                    root.record_uint("bytes_total", this.device_size());
-                    let system_bytes = this.system_bytes();
-                    let (allocated, reserved, used, unavailable, extents, dead) = {
-                        // TODO(https://fxbug.dev/42069513): Push-back or rate-limit to prevent DoS.
-                        let inner = this.inner.lock();
-                        (
-                            inner.allocated_bytes().0,
-                            inner.reserved_bytes(),
-                            inner.used_bytes() + system_bytes,
-                            inner.unavailable_bytes() + system_bytes,
-                            inner.extents.alive().count() as u64,
-                            inner.extents.dead().len() as u64,
-                        )
-                    };
-                    root.record_uint("bytes_allocated", allocated);
-                    root.record_uint("bytes_reserved", reserved);
-                    root.record_uint("bytes_used", used);
-                    root.record_uint("bytes_unavailable", unavailable);
-                    root.record_uint("extents", extents);
-                    root.record_uint("dead_extents", dead);
-
-                    // TODO(https://fxbug.dev/42068224): Post-compute rather than manually computing
-                    // metrics.
-                    if let Some(x) = round_div(100 * allocated, this.device_size()) {
-                        root.record_uint("bytes_allocated_percent", x);
-                    }
-                    if let Some(x) = round_div(100 * reserved, this.device_size()) {
-                        root.record_uint("bytes_reserved_percent", x);
-                    }
-                    if let Some(x) = round_div(100 * used, this.device_size()) {
-                        root.record_uint("bytes_used_percent", x);
-                    }
-                    if let Some(x) = round_div(100 * unavailable, this.device_size()) {
-                        root.record_uint("bytes_unavailable_percent", x);
-                    }
-
-                    root.record_uint("num_flushes", counters.num_flushes);
-                    if let Some(last_flush_time) = counters.last_flush_time.as_ref() {
-                        root.record_uint(
-                            "last_flush_time_ms",
-                            last_flush_time
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or(std::time::Duration::ZERO)
-                                .as_millis()
-                                .try_into()
-                                .unwrap_or(0u64),
-                        );
-                    }
-
-                    let data = this.allocation_size_histogram();
-                    let alloc_sizes = root.create_uint_linear_histogram(
-                        "allocation_size_histogram",
-                        fuchsia_inspect::LinearHistogramParams {
-                            floor: 1,
-                            step_size: 1,
-                            buckets: 64,
-                        },
-                    );
-                    for (i, count) in data.iter().enumerate() {
-                        if i != 0 {
-                            alloc_sizes.insert_multiple(i as u64, *count as usize);
-                        }
-                    }
-                    root.record(alloc_sizes);
-
-                    let allocator_ref = this.clone();
-                    root.record_child("lsm_tree", move |node| {
-                        allocator_ref.tree.record_inspect_data(node);
-                    });
-                }
-                Ok(inspector)
-            }
-            .boxed()
-        });
-    }
 }
 
 impl Drop for Allocator {
@@ -1472,7 +1372,7 @@ impl Allocator {
     /// simply call allocate again until they have enough blocks.
     ///
     /// We also store the object store ID of the store that the allocation should be assigned to so
-    /// that we have a means to delete encrypted stores without needing the encryption key.
+    /// that we have a means to delete stores without walking their objects.
     #[trace]
     pub async fn allocate(
         self: &Arc<Self>,
@@ -1958,7 +1858,7 @@ impl Allocator {
 
     /// Marks allocations associated with a given |owner_object_id| for deletion.
     ///
-    /// This is used as part of deleting encrypted volumes (ObjectStore) without having the keys.
+    /// This is used as part of deleting volumes (ObjectStore) without walking their objects.
     ///
     /// MarkForDeletion mutations eventually manipulates allocator metadata (AllocatorInfo) instead
     /// of the mutable layer but we must be careful not to do this too early and risk premature
@@ -2246,10 +2146,6 @@ impl Allocator {
 
 #[async_trait]
 impl JournalingObject for Allocator {
-    fn writes_mutations_as_they_are(&self) -> bool {
-        true
-    }
-
     fn apply_mutation(
         &self,
         mutation: Mutation,
@@ -2524,7 +2420,6 @@ impl<'a> Flusher<'a> {
             &root_store,
             &mut transaction,
             HandleOptions { skip_journal_checks: true, ..Default::default() },
-            None,
         )
         .await?;
         root_store.add_to_graveyard(&mut transaction, layer_object_handle.object_id());
@@ -2582,7 +2477,6 @@ impl<'a> Flusher<'a> {
         // extra 2.8 KiB wrapper frame on top of `compact_with_iterator` (TASK-26.9).
         {
             let start_time = std::time::Instant::now();
-            let merged_layer_count = layer_set.layers.len();
             let mut merger = layer_set.merger();
             let block_size = layer_object_handle.block_size();
             let yielder = Some(self.fs.journal().get_compaction_yielder());
@@ -2611,11 +2505,7 @@ impl<'a> Flusher<'a> {
                 .await?
             };
 
-            self.allocator.tree.report_compaction_metrics(
-                bytes_written,
-                start_time.elapsed(),
-                merged_layer_count,
-            );
+            self.allocator.tree.report_compaction_metrics(bytes_written, start_time.elapsed());
         }
 
         let root_store = self.fs.root_store();
@@ -2643,7 +2533,6 @@ impl<'a> Flusher<'a> {
                 &root_store,
                 self.allocator.object_id(),
                 HandleOptions::default(),
-                None,
             )
         })
         .await?;
@@ -2669,7 +2558,7 @@ impl<'a> Flusher<'a> {
         let layer_object_id = layer_object_handle.object_id();
         // cladefs: box `layer_from_handle` in a non-inlined frame to keep `Flusher::finish` small
         // on 16 KiB guest kernel stacks (TASK-26.9).
-        let mut layers = vec![crate::boxed(|| layer_from_handle(layer_object_handle, None)).await?];
+        let mut layers = vec![crate::boxed(|| layer_from_handle(layer_object_handle)).await?];
         layers.extend(layers_to_keep.iter().map(|layer| (*layer).clone()));
         info.layers = layers
             .iter()
@@ -2723,9 +2612,6 @@ impl<'a> Flusher<'a> {
             }
         }
 
-        let mut counters = self.allocator.counters.lock();
-        counters.num_flushes += 1;
-        counters.last_flush_time = Some(std::time::SystemTime::now());
         // Return the earliest version used by a struct in the tree
         Ok(self.allocator.tree.get_earliest_version())
     }
@@ -2842,7 +2728,7 @@ mod tests {
         assert_eq!(deserialized_key, key);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_coalescing_iterator() {
         let skip_list = SkipListLayer::new(100);
         let items = [
@@ -2871,7 +2757,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_and_coalesce_across_three_layers() {
         let lsm_tree = LSMTree::new(merge, None);
         lsm_tree
@@ -2906,7 +2792,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_and_coalesce_wont_merge_across_object_id() {
         let lsm_tree = LSMTree::new(merge, None);
         lsm_tree
@@ -2952,7 +2838,7 @@ mod tests {
 
     /// cladefs: keys sort by extent, and within an extent, by range; records of different extents
     /// never coalesce.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_and_coalesce_wont_merge_across_extents() {
         let lsm_tree = LSMTree::new(merge, None);
         let (a, b) = (ExtentId::new(1, 2), ExtentId::new(1, 3));
@@ -3093,7 +2979,7 @@ mod tests {
     /// cut short after writing there left the orphans of the range before unfreed, and the next
     /// sought orphans below the device's next alone, past the floor: they stayed on the device,
     /// in room no one counts, as fxfs-posix's model test found of power cuts during replays.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_orphans_are_freed_and_sealed_before_a_mount_writes() {
         use std::sync::Mutex;
         use std::sync::atomic::AtomicBool;
@@ -3168,7 +3054,7 @@ mod tests {
     /// another writer of its cell takes it over (backlog doc-7, The head), mints from the floor,
     /// and looks for extents a crash left below what the device holds only: not across the gap to
     /// the floor, which took a guest's allocator ever.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mints_past_the_sequence_floor() {
         const STORE_OBJECT_ID: u64 = 99;
         let floor = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -3200,7 +3086,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocations() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3245,7 +3131,7 @@ mod tests {
         check_allocations(&allocator, &device_ranges).await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_more_than_max_size() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3268,7 +3154,7 @@ mod tests {
     }
 
     /// An extent dies once it is deallocated, and is freed once the device has been flushed.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_deallocations() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3314,7 +3200,7 @@ mod tests {
 
     /// cladefs: an extent part of which is deallocated is alive until the rest is, and keeps its
     /// size meanwhile, across remounts.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_partial_deallocations() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3373,7 +3259,7 @@ mod tests {
 
     /// cladefs: a transaction that is dropped kills the extents it allocated, which are never minted
     /// again.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mark_allocated() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3440,7 +3326,7 @@ mod tests {
         check_allocations(&allocator, &device_ranges).await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mark_for_deletion() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3561,7 +3447,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replay_with_deleted_store_and_compaction() {
         let (fs, _) = test_fs().await;
 
@@ -3630,7 +3516,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test(threads = 4)]
+    #[fuchsia_async::run(4, test)]
     async fn test_compaction_delete_race() {
         let (fs, _allocator) = test_fs().await;
 
@@ -3695,7 +3581,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_delete_multiple_volumes() {
         let (mut fs, _) = test_fs().await;
 
@@ -3744,7 +3630,7 @@ mod tests {
 
     /// cladefs: the device's capacity changes while mounted: it grows, and shrinks no lower than
     /// what the allocator holds, which allocations then fit within.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_device_size_changes() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3805,7 +3691,7 @@ mod tests {
     /// cladefs: a filesystem shrunk below what it had allocated when the allocator's tree was last
     /// compacted, though not below what it holds, mounts again on the smaller device: the mount
     /// checks the bytes allocated as replay leaves them, not as that compaction recorded them.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_remount_after_a_shrink() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3844,7 +3730,7 @@ mod tests {
 
     /// cladefs: a mount refuses a device smaller than the bytes allocated, as replay leaves them,
     /// though the allocator's tree, when last compacted, recorded fewer.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mount_refuses_a_device_smaller_than_what_is_allocated() {
         let (fs, allocator) = test_fs().await;
         let size = allocator.get_disk_bytes();
@@ -3862,7 +3748,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocate_free_reallocate() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -3927,7 +3813,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_flush() {
         const STORE_OBJECT_ID: u64 = 99;
 
@@ -3987,7 +3873,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dropped_transaction() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -4024,7 +3910,7 @@ mod tests {
         assert_eq!(allocator.dead_extents(), vec![allocated_range.extent]);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocated_bytes() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -4090,7 +3976,7 @@ mod tests {
         assert_eq!(allocator.get_allocated_bytes(), initial_allocated_bytes + 40);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_cleanup_removed_owner() {
         const STORE_OBJECT_ID: u64 = 99;
         let device = {
@@ -4132,7 +4018,7 @@ mod tests {
         assert!(!allocator.get_owner_allocated_bytes().contains_key(&STORE_OBJECT_ID));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_persist_bytes_limit() {
         const LIMIT: u64 = 12345;
         const OWNER_ID: u64 = 12;
@@ -4160,7 +4046,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocation_with_reservation_not_multiple_of_block_size() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -4195,7 +4081,7 @@ mod tests {
 
     /// cladefs: extents that die in transactions the journal holds, whose frees a crash may have
     /// lost, are freed after replay, with the next flush.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replay_frees_dead_extents() {
         const STORE_OBJECT_ID: u64 = 99;
         let fail_frees = Arc::new(AtomicBool::new(false));
@@ -4258,7 +4144,7 @@ mod tests {
 
     /// cladefs: a sync that frees in the background returns with the extents its flush let die
     /// still dead; the next flush waits for their frees.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_background_frees_finish_before_the_next_flush() {
         const STORE_OBJECT_ID: u64 = 99;
         // Calm: an awkward device may be done with the frees before the test looks.
@@ -4337,7 +4223,7 @@ mod tests {
     /// trips, keeps their extents dying in the info it writes: a crash once the compaction is on
     /// the device, and before the frees are, leaves them to the mount to free again, not leaked
     /// (TASK-79.22).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_during_frees_keeps_their_extents_dying() {
         let frees = Arc::new(futures::lock::Mutex::new(()));
         let next_op = NextOp::default();
@@ -4387,7 +4273,7 @@ mod tests {
 
     /// cladefs: the allocator's info holds the extents dying, however many: more than a record of the
     /// default size holds, as removing many files at once leaves.
-    #[fuchsia::test]
+    #[test]
     fn test_info_with_many_extents_dying() {
         use crate::serialized_types::VersionedLatest;
         let info = super::AllocatorInfo {
@@ -4404,7 +4290,7 @@ mod tests {
 
     /// cladefs: a crash may leave extents written whose transactions were lost: they are freed after
     /// replay, and their sequence numbers aren't minted again.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_orphans_are_freed() {
         let (fs, allocator) = test_fs().await;
         let next_sequence = allocator.inner.lock().extents.next_sequence();
@@ -4434,7 +4320,7 @@ mod tests {
     /// cladefs: transactions commit in no particular order, so that one lost may have minted its
     /// extent before one replay finds did: its extent is an orphan too, below the sequence numbers
     /// the journal holds, and was left on the device for good.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_orphans_minted_before_a_later_commit_are_freed() {
         let (fs, allocator) = test_fs().await;
         let root_store = fs.root_store();
@@ -4496,7 +4382,7 @@ mod tests {
 
     /// cladefs: an extent minted before a compaction, whose transaction a crash loses after it, is
     /// below the sequence numbers the compaction recorded: an orphan a mount frees all the same.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_orphans_minted_before_a_compaction_are_freed() {
         let (fs, allocator) = test_fs().await;
         let (lost, orphan) = allocation_across_a_compaction(&fs, &allocator).await;
@@ -4515,7 +4401,7 @@ mod tests {
 
     /// cladefs: an extent minted before a compaction, whose transaction commits after it, is alive
     /// after a replay: that the compaction recorded it as possibly lost mustn't free it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extents_committed_after_a_compaction_survive_replay() {
         let (fs, allocator) = test_fs().await;
         let (committed, range) = allocation_across_a_compaction(&fs, &allocator).await;
@@ -4537,7 +4423,7 @@ mod tests {
     /// cladefs: sequence numbers are the store's, and far apart: a mount looks for orphans among a
     /// bounded number of them, however far the device's are from those the tree holds. Every one
     /// between was sought once, at 2 GiB of them, and the guest panicked with no memory for them.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_orphans_are_sought_among_few_sequence_numbers() {
         let (fs, _allocator) = test_fs().await;
         fs.close().await.expect("close failed");
@@ -4559,7 +4445,7 @@ mod tests {
     /// as many as it seeks, whose records, which no journal record pays for as a compaction's
     /// metadata reservation counts on, took more room than it held: the compaction failed with
     /// NoSpace, and the journal closed. The mount frees them, and seals that, before any compaction.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_mount_leaves_a_compaction_nothing_of_the_numbers_it_sought() {
         let floor = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let device = FakeDevice::new(4096, 4096).calm().with_sequence_floor(floor.clone());
@@ -4607,7 +4493,7 @@ mod tests {
     /// reservation of its own or not. Given back, a reservation took it, and the next commit in the
     /// extent took it again: the filesystem held more than the device, and its next mount couldn't
     /// reserve its metadata (TASK-211).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_shared_allocation_dropped_stays_taken() {
         for reserved in [false, true] {
             let (fs, allocator) = test_fs().await;
@@ -4661,7 +4547,7 @@ mod tests {
     /// did, which a full device's compactions, which its metadata reservation promises room,
     /// would find (TASK-213). The journal records it at the next sync, which a mount replays, or a
     /// compaction keeps.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_shared_extent_takes_what_was_dropped_in_it_after_a_remount() {
         for compacted in [false, true] {
             let (fs, _) = test_fs().await;
@@ -4702,7 +4588,7 @@ mod tests {
     /// cladefs: shared allocations take the staging extent's blocks in turn, open on the device, until
     /// it is sealed; it outlives its allocations while it is the staging extent, and dies once it
     /// isn't, and is freed.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_shared_allocations() {
         let (fs, allocator) = test_fs().await;
         let bs = fs.block_size().get();
@@ -4744,7 +4630,7 @@ mod tests {
     /// have written. The next mount finds nothing of it allocated, kills it, and removes it from
     /// the tree, which fsck finds whole: it reported an ExtentMismatch (TASK-119.22, a guest's
     /// store after fxfs-guest-checks-dax).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_staging_extent_empty_at_close() {
         let (fs, allocator) = test_fs().await;
         let (transaction, range) = shared_allocation(&fs).await;
@@ -4765,7 +4651,7 @@ mod tests {
 
     /// cladefs: a shared extent doesn't die while a transaction not yet committed has allocated in
     /// it, nor with a transaction that drops: it dies once neither it nor staging pins it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_shared_allocations_pin() {
         let (fs, allocator) = test_fs().await;
         let bs = fs.block_size().get();
@@ -4798,7 +4684,7 @@ mod tests {
     /// cladefs: a shared extent whose allocations all go while a transaction not yet committed has
     /// allocated in it lives on, live and in replay, which kills it with the deallocation, and
     /// revives it with the allocation: replay doesn't free it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_shared_allocations_pin_replayed() {
         let (fs, allocator) = test_fs().await;
         let bs = fs.block_size().get();
@@ -4832,7 +4718,7 @@ mod tests {
 
     /// cladefs: a shared extent is alive, after a remount, until all its allocations are
     /// deallocated, and is checked as any other.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_shared_allocations_remount() {
         let (fs, _) = test_fs().await;
         let bs = fs.block_size().get();
@@ -5000,7 +4886,7 @@ mod tests {
 
     /// cladefs: a compaction of the allocator's tree merges its newer layers, and keeps a layer much
     /// larger than they are, which it doesn't write again (see "Compactions").
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_merges_newer_layers() {
         let (fs, _store, file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5032,7 +4918,7 @@ mod tests {
 
     /// cladefs: a compaction of the allocator's newer layers keeps the removals of extents that died:
     /// the older layers it keeps hold their records, which they hide.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_of_newer_layers_keeps_removals() {
         let (fs, _store, file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5058,7 +4944,7 @@ mod tests {
     /// disk is kept while those newer than it are together less than three quarters of it, and the
     /// newest, alone, while it is larger than `journal::DEFAULT_RECLAIM_SIZE` (see "Compactions"):
     /// the test's files are sized for that.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_of_middle_layer_keeps_its_removals() {
         let (fs, store, file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5108,7 +4994,7 @@ mod tests {
 
     /// cladefs: a compaction of the allocator's newer layers reserves the metadata space to compact
     /// all the layers it leaves, the one it writes and those it keeps, as a mount does.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_of_newer_layers_reserves_for_all_layers() {
         let (fs, _store, file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5133,7 +5019,7 @@ mod tests {
     /// cladefs: a compaction of the allocator's newer layers keeps a deleted volume's owner marked
     /// for deletion, as the older layers it keeps hold the owner's records; once the volume's
     /// extents are freed, the next compaction merges all the layers, without the owner's records.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_compaction_of_newer_layers_keeps_owners_marked_for_deletion() {
         let (fs, _store, _file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5177,7 +5063,7 @@ mod tests {
     /// owner marked for deletion, kills the owner's extents, whose records are in the layer the
     /// compaction wrote and in the one it kept; once they are freed, the next compaction merges
     /// all the layers, without their records.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mount_kills_owners_marked_for_deletion_in_layers_kept() {
         let (fs, _store, _file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5244,7 +5130,7 @@ mod tests {
     /// cladefs: a major compaction, which the journal asks for once the metadata reservation runs
     /// low, merges all the allocator's layers, whatever their sizes, which gives back what the
     /// removals took of it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_major_compaction_merges_all_layers() {
         let (fs, _store, file) = tiered_fs(FxFilesystemBuilder::new()).await;
         let allocator = fs.allocator();
@@ -5343,7 +5229,7 @@ mod tests {
 
     /// cladefs: a crash as a compaction of the allocator's newer layers writes the layer it merges
     /// them into leaves the layers as they were.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_crash_writing_compaction_of_newer_layers() {
         let (before, fs) = crash_in_compaction_of_newer_layers(Crash::Writing).await;
         assert_eq!(before.len(), 2, "{before:?}");
@@ -5353,7 +5239,7 @@ mod tests {
 
     /// cladefs: a crash as a compaction of the allocator's newer layers ends leaves the layers as
     /// they were.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_crash_ending_compaction_of_newer_layers() {
         let (before, fs) = crash_in_compaction_of_newer_layers(Crash::Ending).await;
         assert_eq!(before.len(), 2, "{before:?}");
@@ -5364,7 +5250,7 @@ mod tests {
     /// cladefs: a crash once a compaction of the allocator's newer layers has ended, as it purges
     /// the layers it merged, leaves the layer it wrote and those it kept, and the mount purges
     /// those it merged.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_crash_purging_compaction_of_newer_layers() {
         let (before, fs) = crash_in_compaction_of_newer_layers(Crash::Purging).await;
         assert_eq!(before.len(), 2, "{before:?}");
@@ -5374,8 +5260,7 @@ mod tests {
         assert_eq!(after[1], before[1]);
         fs.graveyard().flush().await;
         let merged =
-            ObjectStore::open_object(&fs.root_store(), before[0], HandleOptions::default(), None)
-                .await;
+            ObjectStore::open_object(&fs.root_store(), before[0], HandleOptions::default()).await;
         assert!(FxfsError::NotFound.matches(&merged.err().expect("the merged layer is there")));
         fs.close().await.expect("close failed");
     }

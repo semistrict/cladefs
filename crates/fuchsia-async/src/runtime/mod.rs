@@ -38,7 +38,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, ready};
 
-/// An extension trait to provide `after_now` on `zx::MonotonicDuration`.
+/// An extension trait to provide `after_now` on `std::time::Duration`.
 pub trait DurationExt {
     /// Return a `MonotonicInstant` which is a `MonotonicDuration` after the current time.
     /// `duration.after_now()` is equivalent to `MonotonicInstant::after(duration)`.
@@ -56,31 +56,9 @@ pub trait WakeupTime {
     fn into_timer(self) -> Timer;
 }
 
-#[cfg(target_os = "fuchsia")]
-impl WakeupTime for std::time::Duration {
-    fn into_timer(self) -> Timer {
-        EHandle::local().mono_timers().new_timer(MonotonicInstant::now() + self.into())
-    }
-}
-
-#[cfg(not(target_os = "fuchsia"))]
 impl WakeupTime for std::time::Duration {
     fn into_timer(self) -> Timer {
         Timer::from(self)
-    }
-}
-
-#[cfg(target_os = "fuchsia")]
-impl WakeupTime for MonotonicDuration {
-    fn into_timer(self) -> Timer {
-        EHandle::local().mono_timers().new_timer(MonotonicInstant::after(self))
-    }
-}
-
-#[cfg(target_os = "fuchsia")]
-impl WakeupTime for zx::BootDuration {
-    fn into_timer(self) -> Timer {
-        EHandle::local().boot_timers().new_timer(BootInstant::after(self))
     }
 }
 
@@ -325,17 +303,6 @@ mod timer_tests {
             Either::Left((_, _)) => {}
             Either::Right((_, _)) => panic!("wrong timer fired"),
         }
-    }
-
-    #[cfg(target_os = "fuchsia")]
-    #[test]
-    fn can_use_zx_duration() {
-        let mut exec = LocalExecutorBuilder::new().build();
-        let start = MonotonicInstant::now();
-        let timer = Timer::new(MonotonicDuration::from_millis(100));
-        exec.run_singlethreaded(timer);
-        let end = MonotonicInstant::now();
-        assert!(end - start > MonotonicDuration::from_millis(100));
     }
 
     #[test]

@@ -3,10 +3,13 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/object_record.rs`. cladefs: an extent's value locates
-// its data in an extent of the extent store (backlog doc-4), so ObjectValue holds ExtentValueV60,
+// its data in an extent of the extent store (backlog doc-4), so ObjectValue holds an ExtentValue,
 // which nothing older converts to. ObjectDescriptorV63 says which special file a file is, so that
-// a directory's entries say what each node is (`ObjectDescriptor::Special`), and ChildValueV63,
-// ObjectValueV63 and ObjectItemV63 hold it.
+// a directory's entries say what each node is (`ObjectDescriptor::Special`), and ChildValueV63
+// holds it. Version 65 drops what Fxfs's own encryption, fscrypt and fsverity kept (cladefs
+// encrypts below Fxfs, in its extents and buckets): keys, encrypted children and symlinks, and
+// verified attributes; ObjectKeyDataV65, ObjectKeyV65, ObjectKindV65, ObjectValueV65 and
+// ObjectItemV65 are what is left.
 
 mod legacy;
 
@@ -19,15 +22,13 @@ use crate::lsm_tree::types::{
 };
 use crate::object_store::ProjectId;
 use crate::object_store::extent::{Extent, ExtentPartitionIterator};
-use crate::object_store::extent_record::{ExtentValue, ExtentValueV60};
+use crate::object_store::extent_record::{ExtentValue, ExtentValueV65};
 use crate::serialized_types::Versioned;
 use fprint::TypeFingerprint;
-use fxfs_crypto::{WrappedKey, WrappingKeyId};
 use fxfs_macros::SerializeKey;
 use fxfs_unicode::CasefoldString;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::default::Default;
 use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -137,7 +138,7 @@ pub enum ProjectPropertyV32 {
     Usage,
 }
 
-pub type ObjectKeyData = ObjectKeyDataV54;
+pub type ObjectKeyData = ObjectKeyDataV65;
 
 #[derive(
     Clone,
@@ -153,12 +154,10 @@ pub type ObjectKeyData = ObjectKeyDataV54;
     SerializeKey,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectKeyDataV54 {
+pub enum ObjectKeyDataV65 {
     /// A generic, untyped object.  This must come first and sort before all other keys for a given
     /// object because it's also used as a tombstone and it needs to merge with all following keys.
     Object,
-    /// Encryption keys for an object.
-    Keys,
     /// An attribute associated with an object.  It has a 64-bit ID.
     Attribute(AttributeId, AttributeKeyV32),
     /// A child of a directory.
@@ -177,55 +176,12 @@ pub enum ObjectKeyDataV54 {
     },
     /// A graveyard entry for an attribute.
     GraveyardAttributeEntry { object_id: u64, attribute_id: AttributeId },
-    /// A child of an encrypted directory.  We store the filename in its encrypted form.  hash_code
-    /// is the hash of the casefolded human-readable name if a directory is also casefolded.  In
-    /// some legacy cases, this is also used in non-casefolded cases, and in some of those cases the
-    /// hash code can be 0.  Going forward, these cases are covered by `EncryptedChild` below.
-    EncryptedCasefoldChild(EncryptedCasefoldChild),
     /// Case-insensitive child (legacy).
     LegacyCasefoldChild(CasefoldString),
-    /// An encrypted child that does not use case folding.
-    EncryptedChild(EncryptedChild),
     /// A child of a directory that uses the casefold feature.
     /// (i.e. case insensitive, case preserving names)
     CasefoldChild { hash_code: u32, name: String },
 }
-
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    TypeFingerprint,
-    SerializeKey,
-)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct EncryptedCasefoldChild {
-    pub hash_code: u32,
-    #[serde(with = "crate::zerocopy_serialization")]
-    pub name: Vec<u8>,
-}
-
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    TypeFingerprint,
-    SerializeKey,
-)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct EncryptedChild(#[serde(with = "crate::zerocopy_serialization")] pub Vec<u8>);
 
 pub type AttributeKey = AttributeKeyV32;
 
@@ -250,7 +206,7 @@ pub enum AttributeKeyV32 {
 }
 
 /// ObjectKey is a key in the object store.
-pub type ObjectKey = ObjectKeyV54;
+pub type ObjectKey = ObjectKeyV65;
 
 #[derive(
     Clone,
@@ -267,11 +223,11 @@ pub type ObjectKey = ObjectKeyV54;
     Versioned,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct ObjectKeyV54 {
+pub struct ObjectKeyV65 {
     /// The ID of the object referred to.
     pub object_id: u64,
     /// The type and data of the key.
-    pub data: ObjectKeyDataV54,
+    pub data: ObjectKeyDataV65,
 }
 
 impl SortByU64 for ObjectKey {
@@ -284,11 +240,6 @@ impl ObjectKey {
     /// Creates a generic ObjectKey.
     pub fn object(object_id: u64) -> Self {
         Self { object_id: object_id, data: ObjectKeyData::Object }
-    }
-
-    /// Creates an ObjectKey for encryption keys.
-    pub fn keys(object_id: u64) -> Self {
-        Self { object_id, data: ObjectKeyData::Keys }
     }
 
     /// Creates an ObjectKey for an attribute.
@@ -318,7 +269,7 @@ impl ObjectKey {
             DirType::Casefold => {
                 let cf = fxfs_unicode::CasefoldStr::new(name);
                 let casefolded = cf.casefold_normalized_chars().flat_map(fxfs_unicode::utf8_bytes);
-                let hash_code = fscrypt::direntry::tea_hash_filename(casefolded);
+                let hash_code = crate::tea_hash::tea_hash_filename(casefolded);
                 Self {
                     object_id,
                     data: ObjectKeyData::CasefoldChild { hash_code, name: name.into() },
@@ -329,33 +280,6 @@ impl ObjectKey {
                 data: ObjectKeyData::LegacyCasefoldChild(CasefoldString::new(name.into())),
             },
             DirType::Normal => Self { object_id, data: ObjectKeyData::Child { name: name.into() } },
-            DirType::Encrypted(_) | DirType::EncryptedCasefold(_) => {
-                // These shouldn't be used directly; encrypted_child should be used instead.
-                panic!("Encrypted modes require an encrypted name");
-            }
-        }
-    }
-
-    /// Creates an ObjectKey for an encrypted child.
-    ///
-    /// The hash_code is important here -- especially for fscrypt as it affects the
-    /// name of locked files.
-    ///
-    /// For case-insensitive lookups in large encrypted directories, we lose the ability to binary
-    /// search for an entry of interest because encryption breaks our sort order. In these cases
-    /// we prefix records with a 32-bit hash based on the stable *casefolded* name. Hash collisions
-    /// aside, this lets us jump straight to the entry of interest, if it exists.
-    pub fn encrypted_child(object_id: u64, name: Vec<u8>, hash_code: Option<u32>) -> Self {
-        if let Some(hash_code) = hash_code {
-            Self {
-                object_id,
-                data: ObjectKeyData::EncryptedCasefoldChild(EncryptedCasefoldChild {
-                    hash_code,
-                    name,
-                }),
-            }
-        } else {
-            Self { object_id, data: ObjectKeyData::EncryptedChild(EncryptedChild(name)) }
         }
     }
 
@@ -441,11 +365,8 @@ impl LayerKey for ObjectKey {
         // subsets of the keyspace are merged.
         match self.data {
             ObjectKeyData::Object
-            | ObjectKeyData::Keys
             | ObjectKeyData::Attribute(..)
             | ObjectKeyData::Child { .. }
-            | ObjectKeyData::EncryptedChild(_)
-            | ObjectKeyData::EncryptedCasefoldChild(_)
             | ObjectKeyData::CasefoldChild { .. }
             | ObjectKeyData::LegacyCasefoldChild(_)
             | ObjectKeyData::GraveyardEntry { .. }
@@ -649,66 +570,31 @@ impl From<Timestamp> for std::time::Duration {
     }
 }
 
-pub type ObjectKind = ObjectKindV54;
+pub type ObjectKind = ObjectKindV65;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TypeFingerprint)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
 pub enum DirType {
+    #[default]
     Normal,
-    Encrypted(WrappingKeyId),
     /// Legacy casefolded mode.
     LegacyCasefold,
     Casefold,
-    EncryptedCasefold(WrappingKeyId),
 }
 
 impl DirType {
     pub fn is_casefold(&self) -> bool {
-        matches!(self, DirType::LegacyCasefold | DirType::Casefold | DirType::EncryptedCasefold(_))
-    }
-
-    pub fn is_encrypted(&self) -> bool {
-        matches!(self, DirType::Encrypted(_) | DirType::EncryptedCasefold(_))
-    }
-
-    pub fn with_encryption(self, id: WrappingKeyId) -> Self {
-        match self {
-            DirType::Normal => DirType::Encrypted(id),
-            DirType::Casefold => DirType::EncryptedCasefold(id),
-            _ => self,
-        }
+        matches!(self, DirType::LegacyCasefold | DirType::Casefold)
     }
 
     pub fn with_casefold(self, val: bool) -> Self {
-        match (val, self) {
-            (true, DirType::Encrypted(id) | DirType::EncryptedCasefold(id)) => {
-                DirType::EncryptedCasefold(id)
-            }
-            (true, _) => DirType::Casefold,
-            (false, DirType::Encrypted(id) | DirType::EncryptedCasefold(id)) => {
-                DirType::Encrypted(id)
-            }
-            (false, _) => DirType::Normal,
-        }
-    }
-
-    pub fn wrapping_key_id(&self) -> Option<WrappingKeyId> {
-        match self {
-            DirType::Encrypted(id) | DirType::EncryptedCasefold(id) => Some(*id),
-            _ => None,
-        }
-    }
-}
-
-impl Default for DirType {
-    fn default() -> Self {
-        DirType::Normal
+        if val { DirType::Casefold } else { DirType::Normal }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectKindV54 {
+pub enum ObjectKindV65 {
     File {
         /// The number of references to this file.
         refs: u64,
@@ -716,7 +602,7 @@ pub enum ObjectKindV54 {
     Directory {
         /// The number of sub-directories in this directory.
         sub_dirs: u64,
-        /// The type of directory (encryption, casefolding, etc.)
+        /// The type of directory (casefolding).
         dir_type: DirType,
     },
     Graveyard,
@@ -725,54 +611,6 @@ pub enum ObjectKindV54 {
         refs: u64,
         /// `link` is the target of the link and has no meaning within Fxfs; clients are free to
         /// interpret it however they like.
-        #[serde(with = "crate::zerocopy_serialization")]
-        link: Box<[u8]>,
-    },
-    EncryptedSymlink {
-        /// The number of references to this symbolic link.
-        refs: u64,
-        /// `link` is the target of the link and has no meaning within Fxfs; clients are free to
-        /// interpret it however they like.
-        /// `link` is stored here in encrypted form, encrypted with the symlink's key using the
-        /// volume's data key.
-        #[serde(with = "crate::zerocopy_serialization")]
-        link: Box<[u8]>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint, Versioned)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectKindV49 {
-    File {
-        /// The number of references to this file.
-        refs: u64,
-    },
-    Directory {
-        /// The number of sub-directories in this directory.
-        sub_dirs: u64,
-        /// If set, contains the wrapping key id used to encrypt the file contents and filenames in
-        /// this directory.
-        wrapping_key_id: Option<WrappingKeyId>,
-        /// If true, all files and sub-directories created in this directory will support case
-        /// insensitive (but case-preserving) file naming.
-        casefold: bool,
-    },
-    Graveyard,
-    Symlink {
-        /// The number of references to this symbolic link.
-        refs: u64,
-        /// `link` is the target of the link and has no meaning within Fxfs; clients are free to
-        /// interpret it however they like.
-        #[serde(with = "crate::zerocopy_serialization")]
-        link: Box<[u8]>,
-    },
-    EncryptedSymlink {
-        /// The number of references to this symbolic link.
-        refs: u64,
-        /// `link` is the target of the link and has no meaning within Fxfs; clients are free to
-        /// interpret it however they like.
-        /// `link` is stored here in encrypted form, encrypted with the symlink's key using the
-        /// same encryption scheme as the one used to encrypt filenames.
         #[serde(with = "crate::zerocopy_serialization")]
         link: Box<[u8]>,
     },
@@ -845,85 +683,17 @@ pub struct ChildValueV63 {
     pub object_descriptor: ObjectDescriptorV63,
 }
 
-pub type RootDigest = RootDigestV33;
-
-#[derive(
-    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, TypeFingerprint,
-)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum RootDigestV33 {
-    Sha256([u8; 32]),
-    Sha512(#[serde(with = "crate::zerocopy_serialization")] Vec<u8>),
-}
-
-pub type FsverityMetadata = FsverityMetadataV50;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum FsverityMetadataV50 {
-    /// The root hash and salt.
-    Internal(RootDigestV33, #[serde(with = "crate::zerocopy_serialization")] Vec<u8>),
-    /// The root hash and salt are in a descriptor inside the merkle attribute.
-    F2fs(std::ops::Range<u64>),
-}
-
-pub type EncryptionKey = EncryptionKeyV56;
-pub type EncryptionKeyV56 = fxfs_crypto::EncryptionKey;
-
-pub type EncryptionKeys = EncryptionKeysV56;
-
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct EncryptionKeysV56(Vec<(u64, EncryptionKeyV56)>);
-
-impl EncryptionKeys {
-    pub fn get(&self, id: u64) -> Option<&EncryptionKey> {
-        self.0.iter().find_map(|(i, key)| (*i == id).then_some(key))
-    }
-
-    pub fn insert(&mut self, id: u64, key: EncryptionKey) {
-        self.0.push((id, key))
-    }
-
-    pub fn remove(&mut self, id: u64) -> Option<EncryptionKey> {
-        if let Some(ix) = self.0.iter().position(|(k, _)| *k == id) {
-            Some(self.0.remove(ix).1)
-        } else {
-            None
-        }
-    }
-}
-
-impl From<EncryptionKeys> for BTreeMap<u64, WrappedKey> {
-    fn from(keys: EncryptionKeys) -> Self {
-        keys.0.into_iter().map(|(id, key)| (id, key.into())).collect()
-    }
-}
-
-impl From<Vec<(u64, EncryptionKey)>> for EncryptionKeys {
-    fn from(value: Vec<(u64, EncryptionKey)>) -> Self {
-        Self(value)
-    }
-}
-
-impl std::ops::Deref for EncryptionKeys {
-    type Target = Vec<(u64, EncryptionKey)>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 /// ObjectValue is the value of an item in the object store.
 /// Note that the tree stores deltas on objects, so these values describe deltas. Unless specified
 /// otherwise, a value indicates an insert/replace mutation.
-pub type ObjectValue = ObjectValueV63;
+pub type ObjectValue = ObjectValueV65;
 impl Value for ObjectValue {
     const DELETED_MARKER: Self = Self::None;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectValueV63 {
+pub enum ObjectValueV65 {
     /// Some keys have no value (this often indicates a tombstone of some sort).  Records with this
     /// value are always filtered when a major compaction is performed, so the meaning must be the
     /// same as if the item was not present.
@@ -932,13 +702,11 @@ pub enum ObjectValueV63 {
     /// (None) i.e. their value is really a boolean: None => false, Some => true.
     Some,
     /// The value for an ObjectKey::Object record.
-    Object { kind: ObjectKindV54, attributes: ObjectAttributesV49 },
-    /// Specifies encryption keys to use for an object.
-    Keys(EncryptionKeysV56),
+    Object { kind: ObjectKindV65, attributes: ObjectAttributesV49 },
     /// An attribute associated with a file object. |size| is the size of the attribute in bytes.
     Attribute { size: u64, has_overwrite_extents: bool },
     /// An extent associated with an object.
-    Extent(ExtentValueV60),
+    Extent(ExtentValueV65),
     /// A child of an object.
     Child(ChildValue),
     /// Graveyard entries can contain these entries which will cause a file that has extents beyond
@@ -950,9 +718,6 @@ pub enum ObjectValueV63 {
     /// A value for an extended attribute. Either inline or a redirection to an attribute with
     /// extents.
     ExtendedAttribute(ExtendedAttributeValueV32),
-    /// An attribute associated with a verified file object. |size| is the size of the attribute
-    /// in bytes.
-    VerifiedAttribute { size: u64, fsverity_metadata: FsverityMetadataV50 },
 }
 
 /// Storage for a pair of related byte and node values.
@@ -1043,29 +808,21 @@ impl ObjectValue {
             },
         }
     }
-    pub fn keys(encryption_keys: EncryptionKeys) -> ObjectValue {
-        ObjectValue::Keys(encryption_keys)
-    }
     /// Creates an ObjectValue for an object attribute.
     pub fn attribute(size: u64, has_overwrite_extents: bool) -> ObjectValue {
         ObjectValue::Attribute { size, has_overwrite_extents }
     }
-    /// Creates an ObjectValue for an object attribute of a verified file.
-    pub fn verified_attribute(size: u64, fsverity_metadata: FsverityMetadata) -> ObjectValue {
-        ObjectValue::VerifiedAttribute { size, fsverity_metadata }
-    }
     /// Creates an ObjectValue for an insertion/replacement of an object extent.
-    pub fn extent(extent: ExtentId, extent_offset: u64, key_id: u64) -> ObjectValue {
-        ObjectValue::Extent(ExtentValue::new_raw(extent, extent_offset, key_id))
+    pub fn extent(extent: ExtentId, extent_offset: u64) -> ObjectValue {
+        ObjectValue::Extent(ExtentValue::new_raw(extent, extent_offset))
     }
     /// Creates an ObjectValue for an insertion/replacement of an object extent.
     pub fn extent_with_checksum(
         extent: ExtentId,
         extent_offset: u64,
         checksum: Checksums,
-        key_id: u64,
     ) -> ObjectValue {
-        ObjectValue::Extent(ExtentValue::with_checksum(extent, extent_offset, checksum, key_id))
+        ObjectValue::Extent(ExtentValue::with_checksum(extent, extent_offset, checksum))
     }
     /// Creates an ObjectValue for a deletion of an object extent.
     pub fn deleted_extent() -> ObjectValue {
@@ -1092,23 +849,6 @@ impl ObjectValue {
             },
         }
     }
-    /// Creates an ObjectValue for an encrypted symlink object.
-    pub fn encrypted_symlink(
-        link: impl Into<Box<[u8]>>,
-        creation_time: Timestamp,
-        modification_time: Timestamp,
-        project_id: Option<ProjectId>,
-    ) -> ObjectValue {
-        ObjectValue::Object {
-            kind: ObjectKind::EncryptedSymlink { refs: 1, link: link.into() },
-            attributes: ObjectAttributes {
-                creation_time,
-                modification_time,
-                project_id,
-                ..Default::default()
-            },
-        }
-    }
     pub fn inline_extended_attribute(value: impl Into<Vec<u8>>) -> ObjectValue {
         ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(value.into()))
     }
@@ -1117,9 +857,9 @@ impl ObjectValue {
     }
 }
 
-pub type ObjectItem = ObjectItemV63;
+pub type ObjectItem = ObjectItemV65;
 
-pub type ObjectItemV63 = Item<ObjectKeyV54, ObjectValueV63>;
+pub type ObjectItemV65 = Item<ObjectKeyV65, ObjectValueV65>;
 
 impl ObjectItem {
     pub fn is_tombstone(&self) -> bool {
@@ -1158,9 +898,6 @@ impl<'a> From<ItemRef<'a, ObjectKey, ObjectValue>>
     }
 }
 
-pub type FxfsKey = FxfsKeyV49;
-pub type FxfsKeyV49 = fxfs_crypto::FxfsKey;
-
 #[derive(
     Clone,
     Copy,
@@ -1182,21 +919,6 @@ pub struct AttributeId(pub u64);
 impl AttributeId {
     /// The common case for extents which cover the data payload of an object.
     pub const DATA: Self = Self(0);
-
-    /// Contains a serialized and versioned `BlobMetadata` struct. Use [`BlobMetadata::read_from`]
-    /// and [`BlobMetadata::write_to`] to access this attribute.
-    pub const BLOB_METADATA: Self = Self(3);
-
-    /// Contains a serialized `BlobMetadataUnversioned` struct. This attribute may still exist on
-    /// blobs but should no longer be written. Use `AttributeId::BLOB_METADATA` instead.
-    pub const BLOB_MERKLE: Self = Self(1);
-
-    /// For fsverity files in Fxfs, we store the merkle tree of the verified file at a well-known
-    /// attribute.
-    pub const FSVERITY_MERKLE: Self = Self(2);
-
-    /// For storing an associated profile of paging activity.
-    pub const PROFILE_RECORDING: Self = Self(4);
 
     /// The range of fxfs attribute IDs which are reserved for extended attribute values. Whenever a
     /// new attribute is needed, the first unused ID will be chosen from this range. It's
@@ -1245,7 +967,7 @@ impl std::fmt::Display for AttributeId {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttributeId, ObjectKey, ObjectKeyV54, TimestampV49};
+    use super::{AttributeId, ObjectKey, ObjectKeyV65, TimestampV49};
     use crate::lsm_tree::types::{FuzzyHash as _, LayerKey};
     use crate::object_store::extent::MIN_BLOCK_SIZE;
     use std::ops::Add;
@@ -1257,18 +979,18 @@ mod tests {
     // https://fxbug.dev/419133532).
     #[test]
     fn test_hash_stability() {
-        // Target a specific version of ObjectKey.  If you want to delete ObjectKeyV54, simply
+        // Target a specific version of ObjectKey.  If you want to delete ObjectKeyV65, simply
         // update this test with a later key version, which will also require re-generating the
         // hashes.
         assert_eq!(
-            &ObjectKeyV54::object(100).fuzzy_hash().collect::<Vec<_>>()[..],
+            &ObjectKeyV65::object(100).fuzzy_hash().collect::<Vec<_>>()[..],
             &[11885326717398844384]
         );
         assert_eq!(
-            &ObjectKeyV54::extent(1, AttributeId::DATA, 0..2 * 1024 * 1024)
+            &ObjectKeyV65::extent(1, AttributeId::DATA, 0..2 * 1024 * 1024)
                 .fuzzy_hash()
                 .collect::<Vec<_>>()[..],
-            &[11090579907097549012, 2814892992701560424]
+            &[240613681451893062, 14933272422807517849]
         );
     }
 
@@ -1373,18 +1095,5 @@ mod tests {
 
         let ts: TimestampV49 = (Duration::from_nanos(u64::MAX).add(Duration::from_nanos(1))).into();
         assert_eq!(ts.nanos, u64::MAX);
-    }
-
-    #[test]
-    fn test_legacy_fxfs_key_decoding_fails() {
-        use fxfs_crypto::{EncryptionKey, FXFS_WRAPPED_KEY_SIZE, FxfsKey, WrappedKeyBytes};
-
-        let key = EncryptionKey::LegacyFxfs(FxfsKey {
-            wrapping_key_id: [1; 16],
-            key: WrappedKeyBytes([2; FXFS_WRAPPED_KEY_SIZE]),
-        });
-        let mut buf = Vec::new();
-        bincode::serialize_into(&mut buf, &key).expect("serialize succeeds");
-        assert!(bincode::deserialize::<EncryptionKey>(&buf).is_err());
     }
 }

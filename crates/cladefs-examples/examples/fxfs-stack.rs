@@ -314,7 +314,7 @@ async fn populate(uses: &mut Uses, fs: &Arc<FxFilesystem>) {
         }
         for f in (0..FILES).step_by(2) {
             let name = format!("file{f}");
-            let (id, _, _) = measure(uses, "lookup", dir.lookup(&name)).await.unwrap().unwrap();
+            let (id, _) = measure(uses, "lookup", dir.lookup(&name)).await.unwrap().unwrap();
             let (phase, to) = if f % 4 == 0 { ("unlink", None) } else { ("rename", Some(&dir)) };
             measure(uses, phase, async {
                 let mut transaction = store
@@ -343,16 +343,14 @@ async fn populate(uses: &mut Uses, fs: &Arc<FxFilesystem>) {
 /// Opens the volume and reads back a renamed file.
 async fn check(uses: &mut Uses, fs: &Arc<FxFilesystem>) {
     let volume = root_volume(fs.clone()).await.unwrap();
-    let store =
-        measure(uses, "open volume", volume.volume("vol", Default::default())).await.unwrap();
+    let store = measure(uses, "open volume", volume.volume("vol")).await.unwrap();
     let root = Directory::open(&store, store.root_directory_object_id()).await.unwrap();
-    let (id, _, _) = root.lookup("dir3").await.unwrap().unwrap();
+    let (id, _) = root.lookup("dir3").await.unwrap().unwrap();
     let dir = Directory::open(&store, id).await.unwrap();
-    let (id, _, _) = dir.lookup("renamed2").await.unwrap().unwrap();
-    let file =
-        measure(uses, "open file", ObjectStore::open_object(&store, id, Default::default(), None))
-            .await
-            .unwrap();
+    let (id, _) = dir.lookup("renamed2").await.unwrap().unwrap();
+    let file = measure(uses, "open file", ObjectStore::open_object(&store, id, Default::default()))
+        .await
+        .unwrap();
     let mut buf = file.allocate_buffer(BLOCK_SIZE as usize).await;
     assert_eq!(
         measure(uses, "read", file.read_aligned(0, buf.as_mut())).await.unwrap(),

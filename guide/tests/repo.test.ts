@@ -11,27 +11,16 @@ import { firstSentence, indexRepo, isTestPath } from "../tools/lib/symbols.ts";
 describe("where code comes from", () => {
   const crates = crateOrigins();
 
-  test("the stand-ins are docs/code.md's table's, and zx-sys", () => {
-    expect([...standIns()].sort()).toEqual([
-      "bssl-crypto",
-      "diagnostics-log",
-      "fidl",
-      "fidl-fuchsia-diagnostics-types",
-      "fidl-fuchsia-fxfs",
-      "fidl-fuchsia-io",
-      "fuchsia-inspect",
-      "fxfs-unicode-gen",
-      "mundane",
-      "zx-sys",
-    ]);
+  test("the stand-ins are docs/code.md's table's", () => {
+    expect([...standIns()].sort()).toEqual(["fxfs-unicode-gen"]);
   });
 
   test.each([
     ["crates/fxfs/src/object_store/journal.rs", "fuchsia-changed"],
     ["crates/fxfs/src/object_store/volume/snapshot.rs", "cladefs"],
     ["crates/storage_device/src/extent.rs", "cladefs"],
-    ["crates/zx/src/lib.rs", "fuchsia"],
-    ["crates/fidl/src/lib.rs", "stand-in"],
+    ["crates/fxfs/src/round.rs", "fuchsia"],
+    ["crates/fxfs-unicode-gen/src/lib.rs", "stand-in"],
     ["crates/cladefs/src/open_cell.rs", "cladefs"],
     ["crates/bucket_cell/src/writer.rs", "cladefs"],
     ["guest/linux/fs/cladefs/dax.c", "cladefs"],

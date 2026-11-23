@@ -144,15 +144,15 @@ mod tests {
     use super::ExtentAccess;
     use crate::filesystem::SyncOptions;
     use crate::object_handle::{ObjectHandle, WriteObjectHandle};
-    use crate::object_store::data_object_handle::tests::test_filesystem_and_object_with_key;
+    use crate::object_store::data_object_handle::tests::test_filesystem_and_object_with;
     use std::ops::Range;
 
     /// cladefs: `extents_in` gives the extents holding a file's data in a range, clipped to it, and
     /// whether each is sealed, as a DAX window maps sealed extents only (backlog doc-13): blocks
     /// written are unsealed until the device's next barrier seals their extent.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extents_in_says_whether_sealed() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, false).await;
+        let (fs, object) = test_filesystem_and_object_with(false).await;
         let bs = fs.block_size().get();
         let mut buf = object.allocate_buffer(2 * bs as usize).await;
         buf.fill(3);
@@ -178,9 +178,9 @@ mod tests {
     /// cladefs: of what an allocation made, `extents_in` gives what was written since alone: the
     /// device doesn't hold the rest, which reads as zeros, as holes do, and a window that mapped it
     /// would map what isn't there (TASK-149.36).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_extents_in_leaves_out_what_an_allocation_left_unwritten() {
-        let (fs, object) = test_filesystem_and_object_with_key(None, false).await;
+        let (fs, object) = test_filesystem_and_object_with(false).await;
         let bs = fs.block_size().get();
         object.allocate(0..4 * bs).await.expect("allocate failed");
         let extents_in = async |range: Range<u64>| {

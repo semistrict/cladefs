@@ -139,16 +139,13 @@ impl Changes {
                 }
             }
             ObjectKeyData::Object
-            | ObjectKeyData::Keys
             | ObjectKeyData::Attribute(..)
             | ObjectKeyData::Project { .. }
             | ObjectKeyData::ExtendedAttribute { .. } => {
                 self.attributes.insert(object);
             }
             ObjectKeyData::Child { .. }
-            | ObjectKeyData::EncryptedCasefoldChild(_)
             | ObjectKeyData::LegacyCasefoldChild(_)
-            | ObjectKeyData::EncryptedChild(_)
             | ObjectKeyData::CasefoldChild { .. } => {
                 self.entries.insert(object);
             }

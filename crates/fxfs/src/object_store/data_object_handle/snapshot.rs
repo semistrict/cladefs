@@ -33,7 +33,7 @@ pub struct FrozenPage {
 
 impl<S: HandleOwner> DataObjectHandle<S> {
     /// cladefs: the pages of `page_size` bytes in `range`, which must be aligned to them, whose
-    /// content is data that frozen owners hold: unencrypted, in a single extent, fully written and
+    /// content is data that frozen owners hold: in a single extent, fully written and
     /// held by one owner. Pages past the end of the object are its caller's to leave out, as their
     /// content is zero past it.
     pub async fn frozen_pages(
@@ -45,7 +45,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         let store = self.store();
         let fs = store.filesystem();
         let allocator = fs.allocator();
-        if range.is_empty() || self.handle.is_encrypted() || !allocator.has_frozen_owners() {
+        if range.is_empty() || !allocator.has_frozen_owners() {
             return Ok(Vec::new());
         }
         let _guard = fs

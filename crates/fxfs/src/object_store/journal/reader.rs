@@ -526,7 +526,7 @@ mod tests {
     /// `READ_AHEAD_BLOCKS`, each of whose blocks it reads at once: through the journal's handle,
     /// whose blocks are each an extent of their own, it waits for a round trip to the device per
     /// window, not per block (TASK-92.18).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_reads_ahead() {
         use crate::object_store::journal::bootstrap_handle::JournalExtentHandle;
         use crate::object_store::journal::super_block::JournalSpan;
@@ -566,7 +566,7 @@ mod tests {
 
     /// cladefs: what a reader read ahead through spans that `sync_spans` replaces (e.g. a
     /// follower after a writer rotation) is forgotten and read again through the replacement spans.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_forgets_what_it_read_ahead_through_spans_replaced() {
         use crate::object_store::journal::bootstrap_handle::JournalExtentHandle;
         use crate::object_store::journal::super_block::JournalSpan;
@@ -625,7 +625,7 @@ mod tests {
 
     /// cladefs: a record may be as long as a block, which a writer never writes: what a corrupt
     /// journal holds is refused.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_record_as_long_as_a_block() {
         use crate::errors::FxfsError;
         use crate::object_store::journal::JournalRecord;
@@ -672,7 +672,7 @@ mod tests {
     /// cladefs: a reader that starts within a block that doesn't verify read none of it, and can't
     /// skip to its end: that took the one checksum it had, and the checkpoint after indexed none,
     /// as a mount does when a super-block says the journal starts there (TASK-149.23).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_skip_through_a_block_not_read() {
         use crate::errors::FxfsError;
 
@@ -698,7 +698,7 @@ mod tests {
     /// cladefs: a record of a corrupt journal may cross two block ends, as no writer's does: the
     /// reader moves past both checksums, and the checkpoint after is where the record ends, with
     /// the checksum of the block it ends in (TASK-149.23).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_record_crossing_two_block_ends() {
         use crate::object_store::journal::JournalRecord;
         use crate::object_store::object_record::{ObjectKey, ObjectValue};
@@ -746,7 +746,7 @@ mod tests {
     }
 
     /// cladefs: a stream span whose end overflows or crosses the journal limit is refused.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_spans_past_any_offset() {
         use crate::object_store::journal::bootstrap_handle::JournalExtentHandle;
         use crate::object_store::journal::super_block::JournalSpan;
@@ -777,7 +777,7 @@ mod tests {
             .expect_err("past any offset");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_single_record() {
         let object = Arc::new(FakeObject::new());
         let handle = FakeObjectHandle::new(object.clone());
@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(value, ReadResult::Some(4u32));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_journal_file_checkpoint() {
         let object = Arc::new(FakeObject::new());
         let checkpoint =
@@ -822,7 +822,7 @@ mod tests {
 
     /// cladefs: a follower's reader reads on from where it last read whole records, once the
     /// journal holds more.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_rewind_reads_on() {
         let object = Arc::new(FakeObject::new());
         let handle = FakeObjectHandle::new(object.clone());
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(reader.deserialize().await.expect("deserialize failed"), ReadResult::Some(7u32));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_skip_to_end_of_block() {
         let object = Arc::new(FakeObject::new());
         // Make the journal file a minimum of two blocks since reading to EOF is an error.
@@ -889,7 +889,7 @@ mod tests {
         assert_eq!(reader.deserialize().await.expect("deserialize failed"), ReadResult::Some(7u32));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_handle() {
         let object = Arc::new(FakeObject::new());
         // Make the journal file a minimum of two blocks since reading to EOF is an error.
@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(reader.handle.get_size(), BLOCK_SIZE * 3);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_item_spanning_block() {
         let object = Arc::new(FakeObject::new());
         // Make the journal file a minimum of two blocks since reading to EOF is an error.
@@ -942,7 +942,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_reset() {
         let object = Arc::new(FakeObject::new());
         // Make the journal file a minimum of two blocks since reading to EOF is an error.
@@ -1022,7 +1022,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_reader_starting_near_end_of_block() {
         let object = Arc::new(FakeObject::new());
         // Make the journal file a minimum of two blocks since reading to EOF is an error.
@@ -1056,7 +1056,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_to_block_boundary() {
         let object = Arc::new(FakeObject::new());
         // Make the journal file a minimum of two blocks since reading to EOF is an error.

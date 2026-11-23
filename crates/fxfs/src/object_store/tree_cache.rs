@@ -12,12 +12,11 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 fn filter(key: &ObjectKey) -> bool {
     match key.data {
-        // Attribute and keys could also be added here to some immediate benefit, but would be
-        // somewhat redundant with a node cache planned to be added after.
+        // Attributes could also be added here to some immediate benefit, but would be somewhat
+        // redundant with a node cache planned to be added after.
         ObjectKeyData::Object => true,
         ObjectKeyData::ExtendedAttribute { .. } => true,
-        ObjectKeyData::Keys => true,
-        // cladefs: names in directories neither encrypted nor case-insensitive, which lookups find
+        // cladefs: names in directories that aren't case-insensitive, which lookups find
         // exactly (`Directory::lookup_ext`), and the record of an object's data, which says its
         // size: a file's attributes are its object's and its data's. That record goes with its
         // object's (`invalidate`).
@@ -154,10 +153,8 @@ impl<'a> ObjectCachePlaceholder<ObjectValue> for Placeholder<'a> {
         let entry_value = match value {
             value @ Some(ObjectValue::Object { .. }) => value.cloned(),
             value @ Some(ObjectValue::ExtendedAttribute(_)) => value.cloned(),
-            value @ Some(ObjectValue::Keys(_)) => value.cloned(),
             value @ Some(ObjectValue::Child(_)) => value.cloned(),
             value @ Some(ObjectValue::Attribute { .. }) => value.cloned(),
-            value @ Some(ObjectValue::VerifiedAttribute { .. }) => value.cloned(),
             // cladefs: there is none.
             value @ Some(ObjectValue::None) => value.cloned(),
             _ => None,
@@ -342,10 +339,9 @@ mod tests {
     };
     use super::{ITEM_LIMIT, TreeCache};
     use crate::lsm_tree::cache::{ObjectCache, ObjectCacheResult};
-    use crate::object_store::EncryptionKey;
     use assert_matches::assert_matches;
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_basic_operations() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::object(1);
@@ -371,20 +367,20 @@ mod tests {
         };
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_enforce_limits() {
         enforce_limit(ITEM_LIMIT);
     }
 
     /// cladefs: a cache larger than the default keeps as many items as it was made for.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_enforce_larger_limit() {
         enforce_limit(4 * ITEM_LIMIT);
     }
 
     /// cladefs: a large cache, in shards, keeps at most as many items as it was made for, and what
     /// was used last.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_sharded_cache_limit() {
         let limit = 2 * super::SHARD_ABOVE;
         let cache = TreeCache::with_limit(limit);
@@ -404,7 +400,7 @@ mod tests {
     /// does both under memory pressure from an allocation made under it (`invalidate`'s insert):
     /// a count that took the lock waited for itself, and the guest hung (TASK-292). The count is
     /// the shards' items, all told, through what changes them.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_counted_and_shrunk_under_a_shards_lock() {
         let now = Timestamp::now();
         let value = ObjectValue::file(1, 0, now, now, now, now, None, None);
@@ -433,7 +429,7 @@ mod tests {
 
     /// cladefs: shrinking removes what was used least recently, and stops when the cache is empty;
     /// a cache in shards shrinks by as many.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_shrink() {
         let now = Timestamp::now();
         let value = ObjectValue::file(1, 0, now, now, now, now, None, None);
@@ -490,7 +486,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_invalidate_inserts() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::object(1);
@@ -517,7 +513,7 @@ mod tests {
         };
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_caching_for_filtered_item() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::extent(1, AttributeId::TEST_ID, 1..2);
@@ -526,13 +522,12 @@ mod tests {
         assert!(matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::NoCache));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_is_cacheable() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
 
-        // Cacheable keys: Object, ExtendedAttribute, Keys, and cladefs: attributes' records
+        // Cacheable keys: Object, ExtendedAttribute, and cladefs: attributes' records
         assert!(cache.is_cacheable(&ObjectKey::object(1)));
-        assert!(cache.is_cacheable(&ObjectKey::keys(1)));
         assert!(cache.is_cacheable(&ObjectKey::extended_attribute(1, vec![1, 2, 3])));
         assert!(cache.is_cacheable(&ObjectKey::attribute(
             1,
@@ -552,7 +547,7 @@ mod tests {
 
     // Two clients looking for the same key don't interfere with each other. Prevents priority
     // inversion.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_two_parallel_clients() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::object(1);
@@ -588,37 +583,10 @@ mod tests {
         };
     }
 
-    #[fuchsia::test]
-    async fn test_keys_are_cached() {
-        let cache = TreeCache::with_limit(ITEM_LIMIT);
-        let key = ObjectKey::keys(1);
-        let value = ObjectValue::keys(
-            vec![(2, EncryptionKey::FscryptInoLblk32File { key_identifier: [3u8; 16] })].into(),
-        );
-
-        let placeholder = match cache.lookup_or_reserve(&key) {
-            ObjectCacheResult::Placeholder(placeholder) => placeholder,
-            _ => panic!("Expected cache miss with placeholder returned."),
-        };
-        placeholder.complete(Some(&value));
-
-        match cache.lookup_or_reserve(&key) {
-            ObjectCacheResult::Value(result) => assert_eq!(&*result, &value),
-            _ => panic!("Expected to find item."),
-        };
-
-        cache.invalidate(&key, None);
-
-        match cache.lookup_or_reserve(&key) {
-            ObjectCacheResult::Placeholder(placeholder) => placeholder.complete(None),
-            _ => panic!("Expected cache miss with placeholder returned."),
-        };
-    }
-
-    /// cladefs: a name in a directory neither encrypted nor case-insensitive is cached as it is
+    /// cladefs: a name in a directory that isn't case-insensitive is cached as it is
     /// written, not as a lookup misses it, and forgotten once removed; others aren't, which
     /// lookups don't find exactly.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_children_are_cached() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::child(1, "name", DirType::Normal);
@@ -639,11 +607,10 @@ mod tests {
         };
 
         assert!(!cache.is_cacheable(&ObjectKey::child(1, "name", DirType::Casefold)));
-        assert!(!cache.is_cacheable(&ObjectKey::encrypted_child(1, vec![1, 2, 3], None)));
     }
 
     /// cladefs: that there is no item is cached too, until one is inserted.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_absence_is_cached() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::extended_attribute(1, b"user.name".to_vec());
@@ -668,7 +635,7 @@ mod tests {
 
     /// cladefs: an object's tombstone, which deletes its other records by merging, takes its
     /// data's record from the cache too.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_object_tombstone_takes_its_data_record() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::attribute(1, AttributeId::DATA, AttributeKey::Attribute);
@@ -692,7 +659,7 @@ mod tests {
 
     /// cladefs: caches sharing a budget hold no more than it, all told, and one used takes the
     /// room of one that isn't, which empties; one dropped gives its room back.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_shared_budget() {
         let budget = super::TreeCacheBudget::new(ITEM_LIMIT);
         let idle = TreeCache::sharing(&budget);
@@ -719,7 +686,7 @@ mod tests {
     }
 
     /// cladefs: a record written is cached, though not looked up before.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_written_records_are_cached() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::object(1);
@@ -732,7 +699,7 @@ mod tests {
         };
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dropped_placeholder_clears_entry() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::object(1);
@@ -747,7 +714,7 @@ mod tests {
         assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::Placeholder(_));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clear() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::object(1);

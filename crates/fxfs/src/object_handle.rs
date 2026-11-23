@@ -119,11 +119,6 @@ pub trait LayerObject: ReadObjectHandle {
         None
     }
 
-    /// Returns true if an underlying I/O error occurred while paging in data for this object.
-    fn has_io_error(&self) -> bool {
-        false
-    }
-
     /// Requests that cached data (such as paged-in pages) for this object be purged.
     fn purge_cached_data(&self) {}
 
@@ -165,10 +160,6 @@ impl<T: ReadObjectHandle + ?Sized> ReadObjectHandle for Arc<T> {
 impl<T: LayerObject + ?Sized> LayerObject for Arc<T> {
     fn as_slice(&self) -> Option<&[u8]> {
         (**self).as_slice()
-    }
-
-    fn has_io_error(&self) -> bool {
-        (**self).has_io_error()
     }
 
     fn purge_cached_data(&self) {
@@ -213,10 +204,6 @@ impl<T: ReadObjectHandle + ?Sized> ReadObjectHandle for Box<T> {
 impl<T: LayerObject + ?Sized> LayerObject for Box<T> {
     fn as_slice(&self) -> Option<&[u8]> {
         (**self).as_slice()
-    }
-
-    fn has_io_error(&self) -> bool {
-        (**self).has_io_error()
     }
 
     fn purge_cached_data(&self) {

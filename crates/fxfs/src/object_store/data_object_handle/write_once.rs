@@ -55,7 +55,7 @@ mod tests {
     use crate::object_handle::{ObjectHandle, WriteObjectHandle};
     use crate::object_store::AttributeId;
     use crate::object_store::data_object_handle::tests::{
-        TEST_DEVICE_BLOCK_SIZE, create_object_with_key,
+        TEST_DEVICE_BLOCK_SIZE, create_test_object,
     };
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
@@ -64,13 +64,13 @@ mod tests {
     /// its own (as fxfs-platform flushes overwrite ranges), read back, with the journal compacted.
     /// Each overwrite writes new blocks, and the old ones' extents live on while any of their
     /// blocks does.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_random_overwrites_of_an_allocated_file() {
         const FILE_SIZE: u64 = 128 << 20;
         const WRITES: usize = 8192;
         let device = DeviceHolder::new(FakeDevice::new(1 << 20, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object = create_object_with_key(fs.clone(), None, false).await;
+        let object = create_test_object(fs.clone(), false).await;
         object.truncate(FILE_SIZE).await.expect("truncate failed");
         object.allocate(0..FILE_SIZE).await.expect("allocate failed");
         let bs = fs.block_size().get();

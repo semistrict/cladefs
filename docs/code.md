@@ -19,22 +19,23 @@ follows the revision in the root `Cargo.toml`'s
 Most crates are Fuchsia's own, with only the files the workspace builds, and
 their tests:
 
-- Fxfs;
-- its libraries (`storage_device`, `fscrypt`, `fsverity-merkle` and others);
-- the Rust runtime crates (`fuchsia-async`, `fuchsia-sync` and others);
-- the SDK's `zx` crates, for their types: cladefs defines none of Zircon's
-  syscalls, and neither Fxfs in the guest nor Fxfs on the host calls any.
+- Fxfs, which cladefs owns outright since board 8246: no upstream change is
+  brought over to it any more;
+- its libraries (`storage_device`, `storage_units` and others);
+- the Rust runtime crates (`fuchsia-async`, `fuchsia-sync`): the runtime seam
+  Fxfs runs on in the guest's kernel (`guest/rust/linux-rt`), on the host, and
+  under Shuttle and madsim.
 
 Each crate's `Cargo.toml` cites the Fuchsia directory it is copied from. Most
 files are as upstream wrote them. Those that aren't say how they deviate in
 their leading comment:
 
-- The runtime crates are built for the host only, without Fuchsia's runtime
-  and handles.
-- Code that needs Zircon, such as VMO-backed buffers, builds only when
-  `target_os = "fuchsia"`: cladefs's buffers are plain memory. What can't build
-  at all, such as FIDL protocols over channels or tests that need Fuchsia's
-  component framework, is removed from those files.
+- The runtime crates have no Fuchsia runtime, handles or Zircon: what only
+  Fuchsia builds is removed, as are FIDL protocols, Inspect and tests that need
+  Fuchsia's component framework. Tests run on `fuchsia-async`'s own test
+  macros.
+- Fxfs encrypts nothing (no Fxfs keys, fscrypt or encrypted stores: cladefs
+  encrypts below it, in its extents and buckets), and has no fsverity or blobs.
 - `storage_device` has no `FileBackedDevice`: cladefs has its own image device
   (see `crates/cladefs`).
 - Fxfs can snapshot a volume (`RootVolume::snapshot_volume`), which upstream
@@ -44,7 +45,7 @@ their leading comment:
   frozen, its extents never deallocated one by one while any store shares
   them, and freed once none does. Blocks written in place (preallocated
   files) are written to new blocks where a snapshot shares them. fsck checks
-  shared extents, and the on-disk format is version 63, the only one a mount
+  shared extents, and the on-disk format is version 65, the only one a mount
   reads: no format is migrated.
 
 ## `crates/cladefs/src/slabs.rs`: physical memory
@@ -76,10 +77,6 @@ of these stands in with the items the code copied from Fuchsia uses:
 
 | Crate | Stands in for | How |
 |---|---|---|
-| `fidl` | FIDL runtime | No channels or wire format: the types the generated bindings use. |
-| `fidl-fuchsia-io`, `-fxfs`, `-diagnostics-types` | generated FIDL bindings | Written to the shape of the generated types, for the types Fxfs uses. |
-| `fuchsia-inspect`, `diagnostics-log` | diagnostics | No-ops, and stderr logging. |
-| `bssl-crypto`, `mundane` | BoringSSL bindings | SHA-256/512 on the `sha2` crate. |
 | `fxfs-unicode-gen` | build-time generated tables | Tables generated once from UCD 12.1.0 by Fxfs's own generator (`scripts/generate-unicode-tables.sh`). |
 
 ## `crates/cladefs`: cladefs's own code

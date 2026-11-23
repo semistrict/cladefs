@@ -18,8 +18,8 @@ use crate::object_store::allocator::{AllocatorItem, Reservation};
 use crate::object_store::journal::{checksums_record_bytes, mutation_record_bytes};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
-    BytesAndNodes, FxfsKey, FxfsKeyV49, ObjectItem, ObjectItemV63, ObjectKey, ObjectKeyData,
-    ObjectValue, ProjectProperty,
+    BytesAndNodes, ObjectItem, ObjectItemV65, ObjectKey, ObjectKeyData, ObjectValue,
+    ProjectProperty,
 };
 use crate::object_store::{AttributeId, AttributeKey, ProjectId};
 use crate::serialized_types::Versioned;
@@ -90,15 +90,14 @@ pub struct TransactionLocks<'a>(pub WriteGuard<'a>);
 /// transaction, these are stored as a set which allows some mutations to be deduplicated and found
 /// (and we require custom comparison functions below).  For example, we need to be able to find
 /// object size changes.
-pub type Mutation = MutationV63;
+pub type Mutation = MutationV65;
 
 #[derive(
     Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, TypeFingerprint, Versioned,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum MutationV63 {
-    ObjectStore(ObjectStoreMutationV63),
-    EncryptedObjectStore(#[serde(with = "crate::zerocopy_serialization")] Box<[u8]>),
+pub enum MutationV65 {
+    ObjectStore(ObjectStoreMutationV65),
     Allocator(AllocatorMutationV60),
     /// Indicates the beginning of a flush. This would typically involve sealing a tree.
     BeginFlush,
@@ -120,7 +119,6 @@ pub enum MutationV63 {
         from: u64,
         paid: u64,
     },
-    UpdateMutationsKey(UpdateMutationsKey),
     CreateInternalDir(u64),
 }
 
@@ -145,21 +143,17 @@ impl Mutation {
             op: Operation::Merge,
         })
     }
-
-    pub fn update_mutations_key(key: FxfsKey) -> Self {
-        Mutation::UpdateMutationsKey(key.into())
-    }
 }
 
 // We have custom comparison functions for mutations that just use the key, rather than the key and
 // value that would be used by default so that we can deduplicate and find mutations (see
 // get_object_mutation below).
-pub type ObjectStoreMutation = ObjectStoreMutationV63;
+pub type ObjectStoreMutation = ObjectStoreMutationV65;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct ObjectStoreMutationV63 {
-    pub item: ObjectItemV63,
+pub struct ObjectStoreMutationV65 {
+    pub item: ObjectItemV65,
     pub op: Operation,
 }
 
@@ -223,8 +217,7 @@ pub enum AllocatorMutationV60 {
         owner_object_id: u64,
         bytes: u64,
     },
-    /// Marks all extents with a given owner_object_id for deletion.
-    /// Used to free space allocated to encrypted ObjectStore where we may not have the key.
+    /// Marks all extents with a given owner_object_id for deletion: a deleted volume's.
     /// Note that the actual deletion time is undefined so this should never be used where an
     /// ObjectStore is still in use due to a high risk of corruption. Similarly, owner_object_id
     /// should never be reused for the same reasons.
@@ -257,50 +250,6 @@ pub enum AllocatorMutationV60 {
         device_range: ExtentRange,
         owner_object_id: u64,
     },
-}
-
-pub type UpdateMutationsKey = UpdateMutationsKeyV49;
-
-#[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint)]
-pub struct UpdateMutationsKeyV49(pub FxfsKeyV49);
-
-impl From<UpdateMutationsKey> for FxfsKey {
-    fn from(outer: UpdateMutationsKey) -> Self {
-        outer.0
-    }
-}
-
-impl From<FxfsKey> for UpdateMutationsKey {
-    fn from(inner: FxfsKey) -> Self {
-        Self(inner)
-    }
-}
-
-#[cfg(fuzz)]
-impl<'a> arbitrary::Arbitrary<'a> for UpdateMutationsKey {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(UpdateMutationsKey::from(FxfsKey::arbitrary(u).unwrap()))
-    }
-}
-
-impl Ord for UpdateMutationsKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self as *const UpdateMutationsKey).cmp(&(other as *const _))
-    }
-}
-
-impl PartialOrd for UpdateMutationsKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Eq for UpdateMutationsKey {}
-
-impl PartialEq for UpdateMutationsKey {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
-    }
 }
 
 /// When creating a transaction, locks typically need to be held to prevent two or more writers
@@ -346,13 +295,6 @@ pub enum LockKey {
         store_object_id: u64,
     },
 
-    /// Used to serialize pre caching of keys.  The lock ordering is different for this: it is
-    /// acquired in `Filesystem::commit_transaction` and happens *after* other keys have been
-    /// promoted to write locks, but before the commit lock.
-    PreCacheKeys {
-        store_object_id: u64,
-    },
-
     /// cladefs: a store's commits: each takes it to read, in `FxFilesystem::commit_transaction`,
     /// after its keys are promoted to write locks, for each store it changes; a snapshot of the
     /// store takes it to write, before its flush, and holds it until it commits, so that no commit
@@ -381,10 +323,6 @@ impl LockKey {
 
     pub const fn truncate(store_object_id: u64, object_id: u64) -> Self {
         LockKey::Truncate { store_object_id, object_id }
-    }
-
-    pub const fn pre_cache_keys(store_object_id: u64) -> Self {
-        LockKey::PreCacheKeys { store_object_id }
     }
 
     pub const fn commits(store_object_id: u64) -> Self {
@@ -958,8 +896,6 @@ impl<'a> Transaction<'a> {
                         // TODO(https://fxbug.dev/42073914): Check lock requirements.
                     }
                     ObjectKeyData::Child { .. }
-                    | ObjectKeyData::EncryptedChild(_)
-                    | ObjectKeyData::EncryptedCasefoldChild(_)
                     | ObjectKeyData::CasefoldChild { .. }
                     | ObjectKeyData::LegacyCasefoldChild(_) => {
                         let id = key.object_id;
@@ -983,22 +919,6 @@ impl<'a> Transaction<'a> {
                     }
                     ObjectKeyData::GraveyardAttributeEntry { .. } => {
                         // TODO(https://fxbug.dev/122974): Check lock requirements.
-                    }
-                    ObjectKeyData::Keys => {
-                        let id = key.object_id;
-                        if !self.txn_locks.contains(&LockKey::object(*store_object_id, id))
-                            && !self.new_objects.contains(&(*store_object_id, id))
-                        {
-                            debug_assert!(
-                                false,
-                                "Not holding required lock for object {id} \
-                                in store {store_object_id}"
-                            );
-                            error!(
-                                "Not holding required lock for object {id} in store \
-                                {store_object_id}"
-                            )
-                        }
                     }
                     ObjectKeyData::Object => match op {
                         // Insert implies the caller expects no object with which to race
@@ -1797,7 +1717,7 @@ mod tests {
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_simple() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1810,7 +1730,7 @@ mod tests {
         assert!(!t.is_empty());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_locks() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1873,7 +1793,7 @@ mod tests {
         while let Some(()) = futures.next().await {}
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_lock_after_write_lock() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1912,7 +1832,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_lock_after_read_lock() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1951,7 +1871,7 @@ mod tests {
         );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_drop_uncommitted_transaction() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1981,7 +1901,7 @@ mod tests {
             .expect("new_transaction failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_drop_waiting_write_lock() {
         let manager = LockManager::new();
         let keys = lock_keys![LockKey::object(1, 1)];
@@ -1996,7 +1916,7 @@ mod tests {
         let _ = manager.lock(keys, LockState::WriteLock).await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_lock_blocks_everything() {
         let manager = LockManager::new();
         let keys = lock_keys![LockKey::object(1, 1)];
@@ -2021,7 +1941,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_downgrade_locks() {
         let manager = LockManager::new();
         let keys = lock_keys![LockKey::object(1, 1)];
@@ -2041,7 +1961,7 @@ mod tests {
         assert!(futures::poll!(read_lock.next()).is_ready());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_dropped_write_lock_wakes() {
         let manager = LockManager::new();
         let keys = lock_keys![LockKey::object(1, 1)];
@@ -2064,7 +1984,7 @@ mod tests {
         assert!(futures::poll!(read_lock.next()).is_ready());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_drop_upgrade() {
         let manager = LockManager::new();
         let keys = lock_keys![LockKey::object(1, 1)];
@@ -2084,7 +2004,7 @@ mod tests {
         manager.commit_prepare_keys(&keys).await;
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_woken_upgrade_blocks_reads() {
         let manager = LockManager::new();
         let keys = lock_keys![LockKey::object(1, 1)];
@@ -2356,7 +2276,7 @@ mod tests {
 
     /// cladefs: a name changed in a directory the transaction doesn't lock is checked as unlocked
     /// (a debug assertion), unless the transaction says it changes the directory's names unlocked.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_change_names_unlocked() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -2378,7 +2298,7 @@ mod tests {
         assert_eq!(t.mutations().len(), 1);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     #[should_panic(expected = "Not holding required lock")]
     async fn test_change_names_locked() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
@@ -2401,7 +2321,7 @@ mod tests {
 
     /// cladefs: a transaction counts what its records take of the journal, as they replace each
     /// other and go, and its checksums', until a commit takes them, and is full at TRANSACTION_ROOM.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_a_transaction_says_how_much_room_it_has_left() {
         use crate::object_store::journal::{checksums_record_bytes, mutation_record_bytes};
         use crate::object_store::transaction::{AllocatorMutation, Mutation, TRANSACTION_ROOM};
@@ -2480,7 +2400,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_merge_bytes_and_nodes() {
         let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");

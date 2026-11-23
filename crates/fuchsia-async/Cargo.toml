@@ -17,7 +17,6 @@ shuttle = ["dep:shuttle", "fuchsia-sync/shuttle"]
 
 [dependencies]
 fuchsia-async-macro.workspace = true
-fuchsia-emulated-handle.workspace = true
 fuchsia-sync.workspace = true
 futures.workspace = true
 futures-lite.workspace = true

@@ -28,7 +28,8 @@ enum State {
 
 struct SplittableBufferInner {
     state: Mutex<State>,
-    parent_allocator: Arc<dyn BufferAllocator>,
+    // Held, so that the parent buffer's range stays allocated while its children live.
+    _parent_allocator: Arc<dyn BufferAllocator>,
     is_trusted: bool,
 }
 
@@ -46,14 +47,6 @@ impl BufferAllocator for SplittableBufferInner {
 
     fn is_trusted(&self) -> bool {
         self.is_trusted
-    }
-
-    fn vmo(&self) -> Option<Arc<zx::Vmo>> {
-        self.parent_allocator.vmo()
-    }
-
-    fn paddrs(&self, range: &Range<usize>) -> Option<(&[zx::sys::zx_paddr_t], u64)> {
-        self.parent_allocator.paddrs(range)
     }
 }
 
@@ -205,7 +198,7 @@ impl OwnedBuffer {
         let current_ptr = self.as_mut_ptr();
         let inner = Arc::new(SplittableBufferInner {
             state: Mutex::new(State::Pending { failed: None }),
-            parent_allocator: self.allocator.clone(),
+            _parent_allocator: self.allocator.clone(),
             is_trusted,
         });
         let mut splittable =
@@ -243,7 +236,7 @@ mod tests {
     use anyhow::anyhow;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_splittable_buffer_with_callback_success() {
         let source = BufferSource::new(4096);
         let pool = Arc::new(PoolBufferAllocator::new(512, source));
@@ -303,7 +296,7 @@ mod tests {
         assert!(completed.load(Ordering::Relaxed));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_splittable_buffer_with_callback_async_error() {
         let source = BufferSource::new(4096);
         let pool = Arc::new(PoolBufferAllocator::new(512, source));
@@ -350,7 +343,7 @@ mod tests {
         sub2.merge(|| Ok(()));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_splittable_buffer_sub_handle_dropped_fails_operation() {
         let source = BufferSource::new(4096);
         let pool = Arc::new(PoolBufferAllocator::new(512, source));
@@ -383,7 +376,7 @@ mod tests {
         assert!(err_received.load(Ordering::Relaxed));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_splittable_buffer_sync_error() {
         let source = BufferSource::new(4096);
         let pool = Arc::new(PoolBufferAllocator::new(512, source));
@@ -412,7 +405,7 @@ mod tests {
         assert!(!callback_called.load(Ordering::Relaxed));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_splittable_buffer_fill_zeros() {
         let source = BufferSource::new(4096);
         let pool = Arc::new(PoolBufferAllocator::new(512, source));
@@ -428,46 +421,6 @@ mod tests {
                     let buffer = res.unwrap();
                     assert_eq!(buffer.len(), 2048);
                     assert!(buffer.as_ptr_slice().iter_as::<u8>().all(|b| b == 0));
-                },
-            )
-            .unwrap();
-    }
-
-    #[cfg(target_os = "fuchsia")]
-    #[fuchsia::test]
-    async fn test_splittable_buffer_preserves_vmo_and_paddrs() {
-        let fake_bti = fake_bti::FakeBti::create().unwrap();
-        fake_bti.set_paddrs(&[4096, 8192]);
-        let source = BufferSource::new(8192);
-        let allocator =
-            Arc::new(crate::pinned_buffer_allocator::PinnedBufferAllocator::with_chunk_size(
-                4096,
-                source,
-                fake_bti.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-                4096,
-                8192,
-            ));
-        let owned = allocator.allocate_buffer_sync_owned(8192);
-        let expected_vmo_koid = owned.vmo().unwrap().koid().unwrap();
-        let expected_paddrs: Vec<_> = owned.paddrs().unwrap().to_vec();
-
-        owned
-            .split(
-                |splittable| {
-                    let (child1, sub1) = splittable.take_prefix(4096);
-                    let (child2, sub2) = splittable.take_prefix(4096);
-                    assert_eq!(child1.vmo().unwrap().koid().unwrap(), expected_vmo_koid);
-                    assert_eq!(child2.vmo().unwrap().koid().unwrap(), expected_vmo_koid);
-                    assert_eq!(child1.contiguity(), Some(4096));
-                    assert_eq!(child2.contiguity(), Some(4096));
-                    assert_eq!(child1.paddrs().unwrap(), &expected_paddrs[0..1]);
-                    assert_eq!(child2.paddrs().unwrap(), &expected_paddrs[1..2]);
-                    sub1.merge(|| Ok(()));
-                    sub2.merge(|| Ok(()));
-                    Ok(())
-                },
-                |res| {
-                    assert!(res.is_ok());
                 },
             )
             .unwrap();

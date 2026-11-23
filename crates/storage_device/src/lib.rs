@@ -25,8 +25,7 @@
 use crate::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use anyhow::{Error, bail};
 use async_trait::async_trait;
-// pub so `Device` trait implementations don't need to depend on the `block_protocol` crate
-pub use block_protocol::{InlineCryptoOptions, ReadOptions, WriteFlags, WriteOptions};
+use bitflags::bitflags;
 use futures::channel::oneshot::{Sender, channel};
 use std::future::Future;
 use std::mem::ManuallyDrop;
@@ -50,6 +49,30 @@ pub mod fake_device;
 /// extent device carries no more of (TASK-149.17). A filesystem on extents keeps its root within it
 /// (TASK-551).
 pub const MAX_ROOT: usize = 4096;
+
+bitflags! {
+    /// Options that may be used for writes.
+    #[repr(transparent)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct WriteFlags: u32 {
+        const FORCE_ACCESS = 1;
+        const PRE_BARRIER = 2;
+        /// cladefs: a barrier follows the write, as a flush once it completes would: one request,
+        /// where a device's requests are round trips to its host (doc-4).
+        const POST_BARRIER = 4;
+    }
+}
+
+/// How a write goes to the device ([`Device::write_with_opts`]). cladefs: Fuchsia's
+/// `block_protocol` crate's, without its inline encryption, which cladefs leaves to its extents.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteOptions<'a> {
+    pub flags: WriteFlags,
+    /// cladefs: with `POST_BARRIER`, the root its barrier sets, as a commit of the root does
+    /// ([`Device::commit_root`]): in the write's one request, where a device's requests are round
+    /// trips to its host (doc-4).
+    pub root: Option<&'a [u8]>,
+}
 
 #[async_trait]
 /// Device is an abstract representation of an underlying block device.
@@ -75,22 +98,11 @@ pub trait Device: Send + Sync {
 
     /// Fills `buffer` with blocks read from `offset` in `extent`. Reading an extent the device
     /// doesn't hold fails with `NoExtent`.
-    fn read<'a>(
-        &'a self,
-        extent: ExtentId,
-        offset: u64,
-        buffer: MutableBufferRef<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
-        self.read_with_opts(extent, offset, buffer, ReadOptions::default())
-    }
-
-    /// Fills `buffer` with blocks read from `offset` in `extent`.
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         buffer: MutableBufferRef<'_>,
-        read_opts: ReadOptions,
     ) -> Result<(), Error>;
 
     /// Writes the contents of `buffer` to `extent` at `offset`. An extent is written once: from
@@ -239,16 +251,6 @@ pub trait Device: Send + Sync {
     fn poison(&self) -> Result<(), Error> {
         bail!("Not supported");
     }
-
-    /// Connects to the device's Mapper protocol.
-    #[cfg(target_os = "fuchsia")]
-    async fn connect_mapper(
-        &self,
-        server_end: fidl::endpoints::ServerEnd<fidl_fuchsia_storage_block::MapperMarker>,
-    ) -> Result<(), zx::Status> {
-        let _ = server_end.close_with_epitaph(zx::Status::NOT_SUPPORTED);
-        Err(zx::Status::NOT_SUPPORTED)
-    }
 }
 
 /// cladefs: what keeps a follower's device's previous commit (see [`Device::advance`]), until
@@ -321,7 +323,7 @@ mod tests {
     use super::DeviceHolder;
     use crate::fake_device::FakeDevice;
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_take_when_dropped() {
         let holder = DeviceHolder::new(FakeDevice::new(1, 512));
         let fut = holder.take_when_dropped();

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/lib/units/src/lib.rs`. The system page size (`mod page`), which upstream
-// builds only on Fuchsia, is the in-process kernel's.
+// Fuchsia's `src/storage/lib/units/src/lib.rs`, without the system page size (`mod page`), which
+// nothing of cladefs's asks.
 
 //! Types for representing and performing efficient power-of-two block size arithmetic and
 //! alignments.
@@ -14,9 +14,6 @@ use std::fmt::{self, Debug};
 use std::ops::{
     Add, AddAssign, Div, DivAssign, Mul, MulAssign, Range, Rem, RemAssign, Sub, SubAssign,
 };
-
-mod page;
-pub use crate::page::*;
 
 /// Defines the block size specification for use with [`GenericBlockSize`]. Only block sizes which
 /// are a power of 2 are supported.
@@ -443,7 +440,7 @@ impl<T: BlockSizeSpec> IsAligned<T> for &Range<u64> {
 mod tests {
     use super::*;
 
-    #[fuchsia::test]
+    #[test]
     fn test_new() {
         assert!(BlockSize::new(0).is_none());
         assert_eq!(BlockSize::new(1).unwrap().get(), 1);
@@ -462,7 +459,7 @@ mod tests {
         assert!(BlockSize::from_u64(u64::MAX).is_none());
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_getters_and_constants() {
         let bs = BlockSize::SIZE_4KIB;
         assert_eq!(bs.get(), 4096);
@@ -484,7 +481,7 @@ mod tests {
         assert_eq!(BlockSize::SIZE_1MIB.get(), 1048576);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_alignment_helpers() {
         let bs = BlockSize::SIZE_4KIB;
 
@@ -528,7 +525,7 @@ mod tests {
         assert_eq!(bs.align_range_outwards(0..u64::MAX), None);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_arithmetic_ops() {
         let bs = BlockSize::SIZE_4KIB;
         let bs_ref = &bs;
@@ -584,7 +581,7 @@ mod tests {
         assert_eq!(&5000u64 % bs_ref, 904);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_assign_ops() {
         let bs = BlockSize::SIZE_4KIB;
 
@@ -621,7 +618,7 @@ mod tests {
         assert_eq!(rem2, 904);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_comparisons_and_hash() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -683,21 +680,21 @@ mod tests {
     }
 
     #[cfg(debug_assertions)]
-    #[fuchsia::test]
+    #[test]
     #[should_panic(expected = "attempt to multiply with overflow")]
     fn test_mul_overflow() {
         let _ = BlockSize::SIZE_4KIB * (1u64 << 60);
     }
 
     #[cfg(debug_assertions)]
-    #[fuchsia::test]
+    #[test]
     #[should_panic(expected = "attempt to multiply with overflow")]
     fn test_mul_assign_overflow() {
         let mut v = 1u64 << 60;
         v *= BlockSize::SIZE_4KIB;
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_formatting() {
         let bs = BlockSize::SIZE_4KIB;
         assert_eq!(format!("{}", bs), "4096");
@@ -707,7 +704,7 @@ mod tests {
         assert_eq!(format!("{:o}", bs), "10000");
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_block_size_one() {
         let block_size = BlockSize::new(1).unwrap();
 
@@ -735,7 +732,7 @@ mod tests {
         assert_eq!(u64::MAX % block_size, 0);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_block_size_max_4gib() {
         let bs = BlockSize::from_u64(1 << 32).unwrap();
         assert_eq!(bs.get(), 1 << 32);

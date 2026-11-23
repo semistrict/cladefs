@@ -38,7 +38,7 @@ impl RootVolume {
         let filesystem = &self.filesystem;
         let root_store = filesystem.root_store();
         let source_object_id = match self.volume_directory().lookup(source_name).await? {
-            Some((object_id, ObjectDescriptor::Volume, _)) => object_id,
+            Some((object_id, ObjectDescriptor::Volume)) => object_id,
             Some(_) => bail!(anyhow!(FxfsError::Inconsistent).context("Expected volume")),
             None => bail!(FxfsError::NotFound),
         };
@@ -67,7 +67,7 @@ impl RootVolume {
             .write_lock(lock_keys![LockKey::flush(source_object_id)])
             .await;
         source.flush_guarded_with_reason(FlushReason::Journal(ForceMajor::False)).await?;
-        let info = source.snapshot_store_info()?;
+        let info = source.snapshot_store_info();
 
         let root_store_object_id = root_store.store_object_id();
         let mut keys =
@@ -83,13 +83,9 @@ impl RootVolume {
         );
 
         // The snapshot's store, whose information is the source's, sharing its layers.
-        handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await?;
+        handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await?;
         let snapshot_object_id = handle.object_id();
         for layer in &info.layers {
             root_store.adjust_refs(&mut transaction, *layer, 1).await?;
@@ -135,7 +131,7 @@ mod tests {
     use crate::object_store::volume::root_volume;
     use crate::object_store::volume::testing::{delete_volume, open_file, read_file, write_file};
     use crate::object_store::volume::tests::do_fsck;
-    use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectStore, StoreOptions};
+    use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectStore};
     use fuchsia_async as fasync;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -144,7 +140,7 @@ mod tests {
     use test_case::test_case;
 
     /// cladefs: a snapshot holds what its source held, and each changes on its own after it.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -179,12 +175,11 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
-        do_fsck(&filesystem, Some("source"), None).await;
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-        let source = root.volume("source", StoreOptions::default()).await.expect("volume failed");
-        let snapshot =
-            root.volume("snapshot", StoreOptions::default()).await.expect("volume failed");
+        let source = root.volume("source").await.expect("volume failed");
+        let snapshot = root.volume("snapshot").await.expect("volume failed");
         assert_eq!(read_file(&source, "file").await, vec![0xbb; 8192]);
         assert_eq!(read_file(&snapshot, "file").await, vec![0xaa; 8192]);
         assert_eq!(read_file(&source, "kept").await, vec![0x11; 4096]);
@@ -194,7 +189,7 @@ mod tests {
     }
 
     /// cladefs: the pages of a file that a snapshot shares are frozen, until written.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_frozen_pages() {
         const PAGE: u64 = 4096;
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
@@ -237,7 +232,7 @@ mod tests {
     }
 
     /// cladefs: a snapshot replays from the journal.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume_replays() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -261,21 +256,19 @@ mod tests {
         filesystem.close().await.expect("Close failed");
 
         let filesystem = FxFilesystem::open(crashed).await.expect("open failed");
-        do_fsck(&filesystem, Some("source"), None).await;
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let source =
-                root.volume("source", StoreOptions::default()).await.expect("volume failed");
-            let snapshot =
-                root.volume("snapshot", StoreOptions::default()).await.expect("volume failed");
+            let source = root.volume("source").await.expect("volume failed");
+            let snapshot = root.volume("snapshot").await.expect("volume failed");
             assert_eq!(read_file(&source, "file").await, vec![0xbb; 8192]);
             assert_eq!(read_file(&snapshot, "file").await, vec![0xaa; 8192]);
             assert_eq!(read_file(&snapshot, "new").await, vec![0xcc; 4096]);
             // A new file in the source doesn't take an object id the snapshot's owner has.
             write_file(&filesystem, &source, "after", &[0xdd; 4096]).await;
         }
-        do_fsck(&filesystem, Some("source"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
         filesystem.close().await.expect("Close failed");
     }
 
@@ -284,7 +277,7 @@ mod tests {
     /// or not, each file whole, and free nothing it shares; the snapshot reads back, passes fsck,
     /// and so after a remount. A commit between the snapshot's flush and its own freed extents
     /// the snapshot shared.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume_racing_writes() {
         const FILES: u8 = 8;
         const LEN: usize = 8192;
@@ -316,17 +309,16 @@ mod tests {
             }
             filesystem.sync(SyncOptions::default()).await.expect("sync failed");
         }
-        do_fsck(&filesystem, Some("source"), None).await;
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         filesystem.close().await.expect("Close failed");
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let snapshot =
-                root.volume("snapshot", StoreOptions::default()).await.expect("volume failed");
+            let snapshot = root.volume("snapshot").await.expect("volume failed");
             for file in 0..FILES {
                 assert_eq!(read_file(&snapshot, &name(file)).await.len(), LEN);
             }
@@ -339,7 +331,7 @@ mod tests {
     /// among them; one held up on another store, here by its flush lock, has the journal fill, so
     /// that the snapshot's transaction waits for room. Holding the source's flush lock as it
     /// waited, the compaction, let go, then waited for that lock: neither went on.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume_waits_for_the_journal_holding_nothing() {
         let device = DeviceHolder::new(FakeDevice::new(32768, 512));
         let options =
@@ -421,7 +413,7 @@ mod tests {
             futures::future::Either::Right(_) => panic!("the snapshot and the compaction hung"),
         }
         writer.await;
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         filesystem.close().await.expect("Close failed");
         drop(hooks);
     }
@@ -430,7 +422,7 @@ mod tests {
     /// either order of deletion.
     #[test_case(true; "source first")]
     #[test_case(false; "snapshot first")]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume_deletion_frees_space(source_first: bool) {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -459,17 +451,17 @@ mod tests {
         let (first, second) =
             if source_first { ("source", "snapshot") } else { ("snapshot", "source") };
         delete_volume(&filesystem, first).await;
-        do_fsck(&filesystem, Some(second), None).await;
+        do_fsck(&filesystem, Some(second)).await;
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let left = root.volume(second, StoreOptions::default()).await.expect("volume failed");
+            let left = root.volume(second).await.expect("volume failed");
             let shared = read_file(&left, "shared").await;
             assert_eq!(shared, vec![if source_first { 0xaa } else { 0xdd }; 65536]);
         }
         assert_eq!(allocator.frozen_owners().len(), 1, "the shared data has a sharer left");
 
         delete_volume(&filesystem, second).await;
-        do_fsck(&filesystem, None, None).await;
+        do_fsck(&filesystem, None).await;
         assert!(allocator.frozen_owners().is_empty());
         assert_eq!(nonzero(&allocator), baseline);
 
@@ -478,14 +470,14 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
-        do_fsck(&filesystem, None, None).await;
+        do_fsck(&filesystem, None).await;
         assert_eq!(nonzero(&filesystem.allocator()), baseline);
         filesystem.close().await.expect("Close failed");
     }
 
     /// cladefs: overwriting a preallocated file's blocks that a snapshot shares writes new blocks,
     /// leaving the snapshot's as they were.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume_overwrite_extents() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -500,12 +492,11 @@ mod tests {
             let root_directory = Directory::open(&source, source.root_directory_object_id())
                 .await
                 .expect("open failed");
-            let (object_id, _, _) =
+            let (object_id, _) =
                 root_directory.lookup("file").await.expect("lookup failed").expect("not found");
-            let handle =
-                ObjectStore::open_object(&source, object_id, HandleOptions::default(), None)
-                    .await
-                    .expect("open_object failed");
+            let handle = ObjectStore::open_object(&source, object_id, HandleOptions::default())
+                .await
+                .expect("open_object failed");
             handle.truncate(10 * block as u64).await.expect("truncate failed");
             handle.allocate(0..10 * block as u64).await.expect("allocate failed");
             let overwrite = |range: std::ops::Range<usize>, byte: u8| {
@@ -542,14 +533,13 @@ mod tests {
             assert_eq!(read_file(&source, "file").await, expected_source);
         }
         filesystem.sync(SyncOptions::default()).await.expect("sync failed");
-        do_fsck(&filesystem, Some("source"), None).await;
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         delete_volume(&filesystem, "snapshot").await;
-        do_fsck(&filesystem, Some("source"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let source =
-                root.volume("source", StoreOptions::default()).await.expect("volume failed");
+            let source = root.volume("source").await.expect("volume failed");
             let contents = read_file(&source, "file").await;
             assert_eq!(&contents[..block], &vec![0xbb; block][..]);
             assert_eq!(&contents[block..2 * block], &vec![0xaa; block][..]);
@@ -560,7 +550,7 @@ mod tests {
 
     /// cladefs: snapshots of snapshots share what each was made from, and deleting them in any order
     /// frees everything once the last is gone.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_snapshot_volume_chain() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -591,21 +581,20 @@ mod tests {
         }
         filesystem.sync(SyncOptions::default()).await.expect("sync failed");
         for volume in ["source", "first", "second"] {
-            do_fsck(&filesystem, Some(volume), None).await;
+            do_fsck(&filesystem, Some(volume)).await;
         }
         delete_volume(&filesystem, "first").await;
-        do_fsck(&filesystem, Some("source"), None).await;
-        do_fsck(&filesystem, Some("second"), None).await;
+        do_fsck(&filesystem, Some("source")).await;
+        do_fsck(&filesystem, Some("second")).await;
         {
             let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let second =
-                root.volume("second", StoreOptions::default()).await.expect("volume failed");
+            let second = root.volume("second").await.expect("volume failed");
             assert_eq!(read_file(&second, "b").await, vec![2; 16384]);
         }
         delete_volume(&filesystem, "source").await;
-        do_fsck(&filesystem, Some("second"), None).await;
+        do_fsck(&filesystem, Some("second")).await;
         delete_volume(&filesystem, "second").await;
-        do_fsck(&filesystem, None, None).await;
+        do_fsck(&filesystem, None).await;
         assert!(allocator.frozen_owners().is_empty());
         assert_eq!(nonzero(&allocator), baseline);
         filesystem.close().await.expect("Close failed");

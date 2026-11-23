@@ -137,7 +137,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             let extent =
                 ObjectKey::extent(self.object_id(), self.attribute_id(), write.blocks.clone());
             let no_sums = Checksums::fletcher(Vec::new());
-            let value = ExtentValue::with_checksum(blocks.extent, blocks.range.start, no_sums, 0);
+            let value = ExtentValue::with_checksum(blocks.extent, blocks.range.start, no_sums);
             let extent = Mutation::merge_object(extent, ObjectValue::Extent(value));
             mutation_record_bytes(store.store_object_id(), &extent)
                 + if journaled { checksums_record_bytes(&blocks, &[], true) } else { 0 }
@@ -245,10 +245,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         }
         let (handle, attribute_id, buf) = (&self.handle, self.attribute_id(), buf.as_mut());
         match packed {
-            true => {
-                handle.multi_write_packed(transaction, attribute_id, None, &ranges, buf).await?
-            }
-            false => handle.multi_write(transaction, attribute_id, None, &ranges, buf).await?,
+            true => handle.multi_write_packed(transaction, attribute_id, &ranges, buf).await?,
+            false => handle.multi_write(transaction, attribute_id, &ranges, buf).await?,
         }
         self.txn_grow_size(transaction, last.range.end, &ranges).await
     }
@@ -265,7 +263,7 @@ mod tests {
         counted_filesystem, create_file, every, writeback_filesystem,
     };
     use crate::object_store::data_object_handle::tests::{
-        TEST_DEVICE_BLOCK_SIZE, create_object_with_key,
+        TEST_DEVICE_BLOCK_SIZE, create_test_object,
     };
     use crate::object_store::directory::{Directory, replace_child};
     use crate::object_store::transaction::{Options, TRANSACTION_ROOM, lock_keys};
@@ -283,7 +281,7 @@ mod tests {
     /// order they were written, a transaction's writes together. The extent lives while any file
     /// holds its blocks, and dies once none does and it is the staging extent no more; a large
     /// write takes an extent of its own; and fsck finds nothing wrong.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_many_packs_small_files() {
         let device = DeviceHolder::new(FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -390,7 +388,7 @@ mod tests {
     /// barrier sealing it between the allocation and the write has it do, is tried again in a new
     /// transaction, unpacked, which writes it (`write_many_paid`); one the device goes on refusing
     /// fails with the device's error.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_many_tries_again_after_a_seal() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use storage_device::fake_device::Op;
@@ -407,7 +405,7 @@ mod tests {
             }
         });
         let fs = FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new_empty");
-        let object = create_object_with_key(fs.clone(), None, false).await;
+        let object = create_test_object(fs.clone(), false).await;
 
         refusals.store(1, Ordering::SeqCst);
         object.write_many(&[(0, b"a small file")]).await.expect("write_many failed");
@@ -430,7 +428,7 @@ mod tests {
     /// while another fsyncs (r549's log_writes): each seals the staging extent, the device's
     /// barrier sealing it for real rather than a callback refusing writes, and each write is
     /// written, and reads back, whatever the seals came between.
-    #[fuchsia::test(threads = 4)]
+    #[fuchsia_async::run(4, test)]
     async fn test_write_many_across_real_seals() {
         use std::sync::atomic::{AtomicBool, Ordering};
         const WRITERS: usize = 8;
@@ -445,14 +443,10 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let object = ObjectStore::create_object(
-                &store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            let object =
+                ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
             transaction.commit().await.expect("commit failed");
             objects.push(Arc::new(object));
         }
@@ -502,15 +496,15 @@ mod tests {
     /// discard had the next replay read the write again, and verify it in an extent the device no
     /// longer held: a filesystem that mounted no more (CI run 41876989384). Every cut of the mount
     /// mounts.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_every_cut_of_a_mount_discarding_a_write_to_the_staging_extent_emptied() {
         use storage_device::fake_device::Crashes;
         let crashes = Crashes::new(0, u32::MAX);
         let device = FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE).record_crashes(crashes.clone());
         let fs = FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new_empty");
         let bs = fs.block_size().get();
-        let first = create_object_with_key(fs.clone(), None, false).await;
-        let second = create_object_with_key(fs.clone(), None, false).await;
+        let first = create_test_object(fs.clone(), false).await;
+        let second = create_test_object(fs.clone(), false).await;
         fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.expect("sync");
         let staged = async |object: &DataObjectHandle<ObjectStore>| {
             let extents = object.extents_in(0..bs).await.expect("extents_in failed");
@@ -545,7 +539,7 @@ mod tests {
         let device = DeviceHolder::new(device.record_crashes(cuts.clone()));
         let fs = FxFilesystem::open(device).await.expect("open failed");
         // What goes on after the mount: a transaction, and a sync.
-        drop(create_object_with_key(fs.clone(), None, false).await);
+        drop(create_test_object(fs.clone(), false).await);
         fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.expect("sync");
         cuts.stop();
         fsck(fs.clone()).await.expect("fsck failed");
@@ -568,14 +562,14 @@ mod tests {
     /// it at once, and a cut before the journal recorded the discard had the next replay read the
     /// write again, and verify it in an extent the device no longer held: a filesystem that
     /// mounted no more (CI run 42196106048, TASK-210). Every cut of the mount mounts.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_every_cut_of_a_mount_discarding_a_write_to_an_extent_minted_as_it_compacted() {
         use storage_device::fake_device::Crashes;
         let crashes = Crashes::new(0, u32::MAX);
         let device = FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE).record_crashes(crashes.clone());
         let fs = FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new_empty");
         let bs = fs.block_size().get();
-        let object = create_object_with_key(fs.clone(), None, false).await;
+        let object = create_test_object(fs.clone(), false).await;
         fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.expect("sync");
         let mut transaction = object.new_transaction().await.expect("new_transaction failed");
         let mut buffer = object.allocate_buffer(bs as usize).await;
@@ -609,7 +603,7 @@ mod tests {
         let device = DeviceHolder::new(device.record_crashes(cuts.clone()));
         let fs = FxFilesystem::open(device).await.expect("open failed");
         // What goes on after the mount: a transaction, and a sync.
-        drop(create_object_with_key(fs.clone(), None, false).await);
+        drop(create_test_object(fs.clone(), false).await);
         fs.sync(SyncOptions { flush_device: true, ..Default::default() }).await.expect("sync");
         cuts.stop();
         fsck(fs.clone()).await.expect("fsck failed");
@@ -632,7 +626,7 @@ mod tests {
     /// for real, and its one try again takes an extent of its own, which no other write reaches,
     /// nor the seals therefore, and writes it. A try again packed would take a new staging extent,
     /// for the next interloper and seal to take from under it in turn, until the tries ran out.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_many_outlives_seals_of_the_staging_extent() {
         use crate::object_store::allocator::STAGING_SIZE;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -672,14 +666,10 @@ mod tests {
                 .new_transaction(lock_keys![], Options::default())
                 .await
                 .expect("new_transaction failed");
-            let object = ObjectStore::create_object(
-                &store,
-                &mut transaction,
-                HandleOptions::default(),
-                None,
-            )
-            .await
-            .expect("create_object failed");
+            let object =
+                ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
+                    .await
+                    .expect("create_object failed");
             transaction.commit().await.expect("commit failed");
             objects.push(Arc::new(object));
         }
@@ -704,7 +694,7 @@ mod tests {
     /// transaction, whose blocks one device write writes, at once. One write each, as the guest
     /// wrote back each run of pages, took a transaction and a round trip to the device each
     /// (TASK-92.10).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_writeback_of_scattered_pages() {
         let (fs, trips, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_CELL).await;
         let bs = fs.block_size().get() as usize;
@@ -748,7 +738,7 @@ mod tests {
     /// cladefs: `write_many` writes each write as `write_or_append` does: parts of blocks keep what
     /// the file holds around them, empty writes write nothing, and the file grows to the last
     /// one's end. Writes out of order, or sharing a block, are refused.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_many_writes_as_each_write_would() {
         let (fs, _, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_CELL).await;
         let bs = fs.block_size().get() as usize;
@@ -791,7 +781,7 @@ mod tests {
 
     /// cladefs: `write_many`'s transactions hold the writes they have room for, by what they could
     /// cost, unless one alone costs more: each a device write here.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_many_splits_its_transactions() {
         const LARGE: usize = 1 << 20;
         let (fs, trips, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_CELL).await;
@@ -827,7 +817,7 @@ mod tests {
     /// else they take within what a transaction may take of the journal, their records' integers
     /// as long as a cell's and a large file's make them; and one holds the
     /// BLOCKS_PER_TRANSACTION writes of a block that dirty data pays its metadata for.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_write_many_transactions_fit_the_journal() {
         use crate::object_store::dirty_reservation::BLOCKS_PER_TRANSACTION;
         use crate::object_store::transaction::TRANSACTION_MAX_JOURNAL_USAGE;

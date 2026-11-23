@@ -399,7 +399,7 @@ mod tests {
     }
 
     /// cladefs: contents given are cached already: reading them reads nothing from the source.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_new_with_contents() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let size = CHUNK_SIZE.get() as usize + 4096;
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!([&*first, &*second].concat(), contents);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_with_missing_chunk() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = FakeSource::new(device, 4096);
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(&*chunk, make_buf(1, 4096));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_with_present_chunk() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = FakeSource::new(device, 4096);
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(&*chunk, expected);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_with_pending_chunk() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = FakeSource::new(device, 8192);
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(&*read_fut2.await.unwrap(), expected);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_with_notification_for_other_chunk() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = FakeSource::new(device, (CHUNK_SIZE + 4096) as usize);
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(&*read_fut3.await.unwrap(), expected);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_with_dropped_future() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = FakeSource::new(device, 4096);
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(&*read_fut2.await.unwrap(), make_buf(2, 4096));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_past_end_of_source() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = FakeSource::new(device, 300);
@@ -535,7 +535,7 @@ mod tests {
         caching_object_handle.read(500).await.expect_err("Read should fail");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_to_end_of_source() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         const SOURCE_SIZE: usize = 300;
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(&*chunk, make_buf(1, SOURCE_SIZE));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_chunk_purging() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = Arc::new(FakeSource::new(device, (CHUNK_SIZE + 4096) as usize));
@@ -581,7 +581,7 @@ mod tests {
             .expect_err("Chunk was not purged");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_chunk_clearing() {
         let device = Arc::new(FakeDevice::new(1024, 512));
         let source = Arc::new(FakeSource::new(device, (CHUNK_SIZE + 4096) as usize));

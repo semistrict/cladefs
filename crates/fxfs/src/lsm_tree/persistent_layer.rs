@@ -59,7 +59,7 @@ use crate::drop_event::DropEvent;
 use crate::errors::FxfsError;
 use crate::filesystem::MAX_BLOCK_SIZE;
 use crate::log::*;
-use crate::lsm_tree::bloom_filter::{BloomFilterReader, BloomFilterStats, BloomFilterWriter};
+use crate::lsm_tree::bloom_filter::{BloomFilterReader, BloomFilterWriter};
 use crate::lsm_tree::types::{
     BoxedLayerIterator, Existence, FuzzyHash, Item, ItemRef, Key, Layer, LayerIterator, LayerValue,
     LayerWriter, MaybeContainsKey,
@@ -79,7 +79,6 @@ use fprint::TypeFingerprint;
 use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, TryStreamExt};
-use fxfs_crypto::{Crypt, UnwrappedKey, WrappedKey};
 use serde::{Deserialize, Serialize};
 use static_assertions::const_assert;
 use std::cmp::Ordering;
@@ -132,7 +131,6 @@ struct LayerData<K> {
     seek_table: Vec<u64>,
     num_items: usize,
     bloom_filter: Option<BloomFilterReader<K>>,
-    bloom_filter_stats: Option<BloomFilterStats>,
     close_event: Mutex<Option<Arc<DropEvent>>>,
 }
 
@@ -179,10 +177,6 @@ trait LayerBuffer {
     fn read_at(&self, pos: usize, buf: &mut [u8]) -> usize;
 
     fn as_bytes_from(&self, pos: usize) -> &[u8];
-
-    fn has_io_error(&self) -> bool {
-        false
-    }
 }
 
 struct ChunkBuffer<'iter> {
@@ -208,7 +202,6 @@ impl LayerBuffer for ChunkBuffer<'_> {
 }
 
 struct SliceBuffer<'iter> {
-    handle: &'iter dyn LayerObject,
     slice: &'iter [u8],
 }
 
@@ -223,10 +216,6 @@ impl LayerBuffer for SliceBuffer<'_> {
 
     fn as_bytes_from(&self, pos: usize) -> &[u8] {
         self.slice.get(pos..).unwrap_or(&[])
-    }
-
-    fn has_io_error(&self) -> bool {
-        self.handle.has_io_error()
     }
 }
 
@@ -282,11 +271,7 @@ struct KeyOnlyIterator<'iter, K: Key, V: LayerValue, B> {
 
 impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
     fn corruption_error(&self, err: impl std::fmt::Display + Send + Sync + 'static) -> Error {
-        if self.buffer.buffer.has_io_error() {
-            anyhow!(zx_status::Status::IO).context(err)
-        } else {
-            anyhow!(FxfsError::Inconsistent).context(err)
-        }
+        anyhow!(FxfsError::Inconsistent).context(err)
     }
 
     // Repositions the iterator to point to the `index`'th item in the current block.
@@ -499,10 +484,7 @@ impl<'iter, K: Key, V: LayerValue> KeyOnlyIterator<'iter, K, V, SliceBuffer<'ite
         let slice = layer.object_handle.as_slice().expect("slice must be present");
         Self {
             layer: &layer.data,
-            buffer: BufferCursor {
-                buffer: SliceBuffer { handle: layer.object_handle.as_ref(), slice },
-                pos: pos as usize,
-            },
+            buffer: BufferCursor { buffer: SliceBuffer { slice }, pos: pos as usize },
             pos,
             item_index: 0,
             item_count: 0,
@@ -831,7 +813,6 @@ impl<K: FuzzyHash> LayerData<K> {
             // must ignore the bloom filter and always query the layer.
             None
         };
-        let bloom_filter_stats = bloom_filter.as_ref().map(|b| b.stats());
 
         let seek_table =
             load_seek_table(handle, layout.seek_table_offset, layer_info.num_data_blocks, version)
@@ -846,7 +827,6 @@ impl<K: FuzzyHash> LayerData<K> {
             seek_table,
             num_items: layer_info.num_items,
             bloom_filter,
-            bloom_filter_stats,
             close_event: Mutex::new(Some(Arc::new(DropEvent::new()))),
         })
     }
@@ -973,14 +953,7 @@ macro_rules! seek_impl {
 }
 
 fn page_size() -> BlockSize {
-    #[cfg(target_os = "fuchsia")]
-    {
-        storage_units::page_size().into()
-    }
-    #[cfg(not(target_os = "fuchsia"))]
-    {
-        BlockSize::SIZE_4KIB
-    }
+    BlockSize::SIZE_4KIB
 }
 
 impl<K: Key, V: LayerValue> PersistentLayer<K, V> {
@@ -1025,26 +998,11 @@ impl<K: Key, V: LayerValue> PersistentLayer<K, V> {
         }))
     }
 
-    /// Opens a persistent layer backed by `handle`. If the layer is encrypted and the platform
-    /// uses a pager, `unwrapped_key` is registered with the pager and dropped immediately.
+    /// Opens a persistent layer backed by `handle`.
     pub async fn open_handle(
         handle: DataObjectHandle<ObjectStore>,
-        unwrapped_key: Option<UnwrappedKey>,
     ) -> Result<Arc<dyn Layer<K, V>>, Error> {
-        Self::open_handle_with_contents(handle, unwrapped_key, None).await
-    }
-
-    /// cladefs: as `open_handle`, with `contents`, all of the layer's, if given, cached already,
-    /// unless a pager serves the layer.
-    async fn open_handle_with_contents(
-        handle: DataObjectHandle<ObjectStore>,
-        unwrapped_key: Option<UnwrappedKey>,
-        contents: Option<Vec<u8>>,
-    ) -> Result<Arc<dyn Layer<K, V>>, Error> {
-        if let Some(layer_pager) = handle.store().filesystem().layer_pager() {
-            return Self::open_layer(layer_pager.open_layer(handle, unwrapped_key).await?).await;
-        }
-        Self::open_layer_with_contents(Arc::new(handle), contents).await
+        Self::open_layer_with_contents(Arc::new(handle), None).await
     }
 
     fn data_offset(&self) -> u64 {
@@ -1084,40 +1042,11 @@ impl<K: Key, V: LayerValue> SyncPersistentLayer<K, V> {
     }
 }
 
-/// Unwraps the encryption key for `object_id` if a `LayerPager` is active on `store`.
-async fn unwrap_layer_key(
-    store: &ObjectStore,
-    object_id: u64,
-    crypt: &dyn Crypt,
-) -> Result<Option<UnwrappedKey>, Error> {
-    if store.filesystem().layer_pager().is_none() {
-        return Ok(None);
-    }
-    let keys = store
-        .get_keys(object_id)
-        .await
-        .with_context(|| format!("Failed to get keys for layer file {object_id}"))?;
-    let (_, key) = keys
-        .first()
-        .ok_or_else(|| anyhow!(FxfsError::Inconsistent))
-        .with_context(|| format!("Missing key for encrypted layer file {object_id}"))?;
-    let wrapped_key = WrappedKey::from(key.clone());
-    let unwrapped = crypt
-        .unwrap_key(&wrapped_key, object_id)
-        .await
-        .with_context(|| format!("Failed to unwrap key for layer file {object_id}"))?;
-    Ok(Some(unwrapped))
-}
-
 /// Opens a persistent layer from a newly created or existing `DataObjectHandle`.
-///
-/// If the layer is encrypted and the platform uses a pager, `unwrapped_key` is registered with the
-/// pager and dropped immediately.
 pub async fn layer_from_handle<K: Key, V: LayerValue>(
     handle: DataObjectHandle<ObjectStore>,
-    unwrapped_key: Option<UnwrappedKey>,
 ) -> Result<Arc<dyn Layer<K, V>>, Error> {
-    PersistentLayer::open_handle(handle, unwrapped_key).await
+    PersistentLayer::open_handle(handle).await
 }
 
 /// cladefs: as `layer_from_handle`, for a layer just written through `writer`, which kept what it
@@ -1125,10 +1054,9 @@ pub async fn layer_from_handle<K: Key, V: LayerValue>(
 /// layer is: a directory listed after a compaction read the layer's chunks back one by one).
 pub async fn layer_from_written_handle<K: Key, V: LayerValue>(
     handle: DataObjectHandle<ObjectStore>,
-    unwrapped_key: Option<UnwrappedKey>,
     kept: &KeptContents,
 ) -> Result<Arc<dyn Layer<K, V>>, Error> {
-    PersistentLayer::open_handle_with_contents(handle, unwrapped_key, kept.take()).await
+    PersistentLayer::open_layer_with_contents(Arc::new(handle), kept.take()).await
 }
 
 /// cladefs: what a `KeptWriter` wrote, once it completed, unless it wrote more than it keeps.
@@ -1196,22 +1124,15 @@ impl<W: WriteBytes + Send> WriteBytes for KeptWriter<W> {
 pub async fn open_layers<K: Key, V: LayerValue>(
     store: &Arc<ObjectStore>,
     object_ids: impl IntoIterator<Item = u64>,
-    crypt: Option<Arc<dyn Crypt>>,
 ) -> Result<(Vec<Arc<dyn Layer<K, V>>>, u64), Error> {
     let mut layers = Vec::new();
     let mut total_size = 0;
     for object_id in object_ids {
-        let handle =
-            ObjectStore::open_object(store, object_id, HandleOptions::default(), crypt.clone())
-                .await
-                .with_context(|| format!("Failed to open layer file {object_id}"))?;
+        let handle = ObjectStore::open_object(store, object_id, HandleOptions::default())
+            .await
+            .with_context(|| format!("Failed to open layer file {object_id}"))?;
         total_size += handle.get_size();
-        let unwrapped_key = if let Some(crypt) = &crypt {
-            unwrap_layer_key(store, object_id, crypt.as_ref()).await?
-        } else {
-            None
-        };
-        layers.push(PersistentLayer::open_handle(handle, unwrapped_key).await?);
+        layers.push(PersistentLayer::open_handle(handle).await?);
     }
     Ok((layers, total_size))
 }
@@ -1280,19 +1201,6 @@ impl<K: Key, V: LayerValue> Layer<K, V> for PersistentLayer<K, V> {
     fn get_version(&self) -> Version {
         return self.data.version;
     }
-
-    fn record_inspect_data(self: Arc<Self>, node: &fuchsia_inspect::Node) {
-        node.record_uint("num_items", self.data.num_items as u64);
-        node.record_bool("persistent", true);
-        node.record_uint("size", self.object_handle.source().get_size());
-        if let Some(stats) = self.data.bloom_filter_stats.as_ref() {
-            node.record_child("bloom_filter", move |node| {
-                node.record_uint("size", stats.size as u64);
-                node.record_uint("num_hashes", stats.num_hashes as u64);
-                node.record_uint("fill_percentage", stats.fill_percentage as u64);
-            });
-        }
-    }
 }
 
 #[async_trait]
@@ -1358,19 +1266,6 @@ impl<K: Key, V: LayerValue> Layer<K, V> for SyncPersistentLayer<K, V> {
 
     fn get_version(&self) -> Version {
         return self.data.version;
-    }
-
-    fn record_inspect_data(self: Arc<Self>, node: &fuchsia_inspect::Node) {
-        node.record_uint("num_items", self.data.num_items as u64);
-        node.record_bool("persistent", true);
-        node.record_uint("size", self.object_handle.get_size());
-        if let Some(stats) = self.data.bloom_filter_stats.as_ref() {
-            node.record_child("bloom_filter", move |node| {
-                node.record_uint("size", stats.size as u64);
-                node.record_uint("num_hashes", stats.num_hashes as u64);
-                node.record_uint("fill_percentage", stats.fill_percentage as u64);
-            });
-        }
     }
 }
 
@@ -1832,7 +1727,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_iterate_after_write() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEM_COUNT: i32 = 10000;
@@ -1861,7 +1756,7 @@ mod tests {
         assert!(iterator.get().is_none());
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_after_write() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEM_COUNT: i32 = 5000;
@@ -1912,7 +1807,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_unbounded() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEM_COUNT: i32 = 1000;
@@ -1942,7 +1837,7 @@ mod tests {
         assert_eq!((key, value), (&1, &1));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_zero_items() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
 
@@ -1966,7 +1861,7 @@ mod tests {
         assert!(iterator.get().is_none())
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_one_item() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
 
@@ -2023,7 +1918,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_large_block_size() {
         // At the upper end of the supported size.
         const BLOCK_SIZE: BlockSize = MAX_BLOCK_SIZE;
@@ -2090,7 +1985,7 @@ mod tests {
     }
 
     /// cladefs: a layer's trailing length near the largest there is overflowed what it was added to.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_info_length_may_be_anything() {
         for length in [u64::MAX - 7, u64::MAX] {
             let object = written_layer().await;
@@ -2105,7 +2000,7 @@ mod tests {
     }
 
     /// cladefs: a layer's counts of blocks overflowed their sum, whose check they then passed.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_block_counts_may_be_anything() {
         let object = written_layer().await;
         let layer_info = LayerInfo {
@@ -2121,7 +2016,7 @@ mod tests {
     }
 
     /// cladefs: a layer's count of items is what the bloom filter of what compacts it is sized for.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_item_count_may_be_anything() {
         let object = written_layer().await;
         let layer_info = LayerInfo {
@@ -2138,7 +2033,7 @@ mod tests {
 
     /// cladefs: a layer's size is how many chunks a caching handle has entries for: no more than
     /// the layer says it holds.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_no_longer_than_it_says() {
         let object = written_layer().await;
         let layer_info = LayerInfo {
@@ -2161,7 +2056,7 @@ mod tests {
     }
 
     /// cladefs: a bloom filter's count of hashes is how long each query takes.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_bloom_hashes_may_be_anything() {
         let object = written_layer().await;
         let layer_info = LayerInfo {
@@ -2230,7 +2125,7 @@ mod tests {
 
     /// cladefs: an item an object store's layer can't hold is refused as it's read: a layer's items
     /// are what `Journal::validate_mutation` lets by, as a mutation of the journal's.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_items_are_checked_as_they_are_read() {
         use crate::checksum::Checksums;
         use crate::object_store::{ExtentMode, ExtentValue, ObjectValue};
@@ -2241,7 +2136,7 @@ mod tests {
         let before = Item::new(ObjectKey::object(1), ObjectValue::Some);
         let extent_item = |range: Range<u64>, offset, mode| {
             let key = ObjectKey::extent(2, AttributeId::DATA, range);
-            Item::new(key, ObjectValue::Extent(ExtentValue::new(extent, offset, mode, 0)))
+            Item::new(key, ObjectValue::Extent(ExtentValue::new(extent, offset, mode)))
         };
         let sums = |count| ExtentMode::Cow(Checksums::fletcher(vec![7; count]));
         let bits = |count| ExtentMode::OverwritePartial(BitVec::from_elem(count, true));
@@ -2280,7 +2175,7 @@ mod tests {
 
     /// cladefs: an item an allocator's layer can't hold is refused as it's read, as of an object
     /// store's.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocator_layer_items_are_checked_as_they_are_read() {
         use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
         use storage_device::ExtentId;
@@ -2300,7 +2195,7 @@ mod tests {
 
     /// cladefs: a layer's keys come each after the one before, overlapping none: what merges it
     /// trusts that, so a layer that says otherwise is refused as it's read.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_keys_out_of_order_are_refused_as_they_are_read() {
         let items = [Item::new(1, 1), Item::new(3, 3), Item::new(2, 2)];
         scan_until_refused(&items, 2).await;
@@ -2316,7 +2211,7 @@ mod tests {
 
     /// cladefs: a compaction of a corrupt layer may write a key below the first of its block, which
     /// the writer's delta encoding has no way to write.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_writer_refuses_keys_below_their_block() {
         let handle = FakeObjectHandle::new(Arc::new(FakeObject::new()));
         let writer = Writer::new(&handle).await;
@@ -2329,7 +2224,7 @@ mod tests {
     }
 
     /// cladefs: a writer dropped with items in it is no panic: a compaction that failed drops one.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_writer_dropped_with_items() {
         let handle = FakeObjectHandle::new(Arc::new(FakeObject::new()));
         let writer = Writer::new(&handle).await;
@@ -2340,7 +2235,7 @@ mod tests {
         drop(writer);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_overlarge_block_size() {
         // At the upper end of the supported size.
         const BLOCK_SIZE: BlockSize = BlockSize::from_u64(MAX_BLOCK_SIZE.size() * 2).unwrap();
@@ -2351,7 +2246,7 @@ mod tests {
             .expect_err("Creating writer with overlarge block size.");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_seek_bound_excluded() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEM_COUNT: i32 = 10000;
@@ -2431,7 +2326,7 @@ mod tests {
 
     // Create a large spread of data across several blocks to ensure that no part of the range is
     // lost by the partial search using the layer seek table.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_block_seek_duplicate_leading_u64() {
         // At the upper end of the supported size.
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
@@ -2570,7 +2465,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_two_seek_blocks() {
         // At the upper end of the supported size.
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
@@ -2620,7 +2515,7 @@ mod tests {
 
     // Verifies behaviour around creating full seek blocks, to ensure that it is able to be opened
     // and parsed afterward.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_full_seek_block() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEMS_PER_PHASE: u64 = 50;
@@ -2663,7 +2558,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_ignore_bloom_filter_on_older_versions() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEMS_PER_PHASE: u64 = 50;
@@ -2758,7 +2653,7 @@ mod tests {
 
     /// cladefs: AllocatorKey, whose leading u64 changed in the older version, has no versions
     /// before 60, so TestKey stands in, whose leading u64 is its end.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_older_version_seek() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEM_COUNT: u64 = 100;
@@ -2820,7 +2715,7 @@ mod tests {
         assert_eq!(item.key, &target_key);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_key_exists_no_bloom_filter() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_8KIB;
         // Not enough items to trigger a bloom filter.
@@ -2857,7 +2752,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_key_exists_with_bloom_filter() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         // Enough items to trigger a bloom filter.
@@ -2902,7 +2797,7 @@ mod tests {
         assert!(missing_count > ITEM_COUNT / 2);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_load_large_bloom_filter_multi_chunk() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         // Sizing for 600_000 items creates a 2 MiB bloom filter (exceeding 1 MiB chunk size).
@@ -2938,7 +2833,7 @@ mod tests {
         assert!(false_count > WRITTEN_ITEMS / 2);
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_clear_cached_data() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         let handle = FakeObjectHandle::new(Arc::new(FakeObject::new()));
@@ -2969,7 +2864,6 @@ mod tests {
     struct SliceLayerObject {
         handle: FakeObjectHandle,
         slice: Vec<u8>,
-        io_error: AtomicBool,
         purged: AtomicBool,
         closed: AtomicBool,
     }
@@ -3005,9 +2899,6 @@ mod tests {
         fn as_slice(&self) -> Option<&[u8]> {
             Some(&self.slice)
         }
-        fn has_io_error(&self) -> bool {
-            self.io_error.load(Ordering::SeqCst)
-        }
         fn purge_cached_data(&self) {
             self.purged.store(true, Ordering::SeqCst);
         }
@@ -3016,7 +2907,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_sync_persistent_layer() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEM_COUNT: i32 = 1000;
@@ -3044,7 +2935,6 @@ mod tests {
         let slice_obj = Arc::new(SliceLayerObject {
             handle,
             slice: slice.clone(),
-            io_error: AtomicBool::new(false),
             purged: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         });
@@ -3092,7 +2982,6 @@ mod tests {
         let zeroed_obj = Arc::new(SliceLayerObject {
             handle: FakeObjectHandle::new(Arc::new(FakeObject::new())),
             slice: zeroed_slice,
-            io_error: AtomicBool::new(false),
             purged: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         });
@@ -3105,22 +2994,12 @@ mod tests {
         let zeroed_layer =
             PersistentLayer::<i32, i32>::open_layer(zeroed_obj.clone()).await.expect("open failed");
 
-        // When `has_io_error()` is false, corruption returns `FxfsError::Inconsistent`
-        // (`ZX_ERR_IO_DATA_INTEGRITY`).
+        // Corruption returns `FxfsError::Inconsistent`.
         let err = zeroed_layer.seek(Bound::Unbounded).await.err().expect("seek should fail");
         assert!(FxfsError::Inconsistent.matches(&err), "expected Inconsistent, got {err:?}");
-
-        // When `has_io_error()` is true (signaled by `SUPPLY_ZEROES_ON_ERROR`), it returns
-        // `zx_status::Status::IO` (`ZX_ERR_IO`).
-        zeroed_obj.io_error.store(true, Ordering::SeqCst);
-        let err = zeroed_layer.seek(Bound::Unbounded).await.err().expect("seek should fail");
-        assert_eq!(
-            err.root_cause().downcast_ref::<zx_status::Status>(),
-            Some(&zx_status::Status::IO)
-        );
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_layer_block_size_gt_4k_falls_back_to_async_persistent_layer() {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_8KIB;
         let handle = FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
@@ -3146,7 +3025,6 @@ mod tests {
         let slice_obj = Arc::new(SliceLayerObject {
             handle,
             slice,
-            io_error: AtomicBool::new(false),
             purged: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         });
@@ -3196,7 +3074,7 @@ mod kept_writer_tests {
         }
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_keeps_what_it_writes() {
         let kept = KeptContents::default();
         let mut writer = KeptWriter::new(NullWriter(0), 16, kept.clone());
@@ -3207,7 +3085,7 @@ mod kept_writer_tests {
         assert_eq!(kept.take(), Some(b"abc\0\0de".to_vec()));
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_keeps_nothing_past_its_limit() {
         let kept = KeptContents::default();
         let mut writer = KeptWriter::new(NullWriter(0), 4, kept.clone());
@@ -3259,10 +3137,10 @@ mod read_cost {
                 let range = index << 16..(index + 1) << 16;
                 let key = ObjectKey::extent(object_id, AttributeId::DATA, range.clone());
                 let value = if index % 2 == 0 {
-                    ObjectValue::extent(extent, range.start, 0)
+                    ObjectValue::extent(extent, range.start)
                 } else {
                     let sums = Checksums::fletcher((0..16).map(|sum| sum * object_id).collect());
-                    ObjectValue::extent_with_checksum(extent, range.start, sums, 0)
+                    ObjectValue::extent_with_checksum(extent, range.start, sums)
                 };
                 items.push(Item::new(key, value));
             }
@@ -3275,7 +3153,7 @@ mod read_cost {
         elapsed.as_nanos() as f64 / count as f64
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     #[ignore = "a benchmark (TASK-153.12): --run-ignored only, in release"]
     async fn layer_read_cost() {
         let items = items();

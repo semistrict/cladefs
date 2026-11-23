@@ -6,13 +6,13 @@ use crate::MutexGuard;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-#[cfg(not(any(target_os = "fuchsia", target_os = "none", feature = "shuttle")))]
+#[cfg(not(any(target_os = "none", feature = "shuttle")))]
 use parking_lot_core::{
     DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN, ParkResult, park, unpark_all, unpark_one,
 };
-#[cfg(not(any(target_os = "fuchsia", target_os = "none", feature = "shuttle")))]
+#[cfg(not(any(target_os = "none", feature = "shuttle")))]
 use std::sync::atomic::AtomicU32;
-#[cfg(not(any(target_os = "fuchsia", target_os = "none", feature = "shuttle")))]
+#[cfg(not(any(target_os = "none", feature = "shuttle")))]
 use std::time::Instant;
 
 /// A [condition variable][wikipedia] that integrates with [`fuchsia_sync::Mutex`].
@@ -101,50 +101,10 @@ impl WaitTimeoutResult {
     }
 }
 
-#[cfg(target_os = "fuchsia")]
-struct Futex(zx::Futex);
-
-#[cfg(target_os = "fuchsia")]
-impl Futex {
-    const fn new(value: u32) -> Self {
-        Self(zx::Futex::new(value as i32))
-    }
-
-    /// Returns the current value of the futex.
-    fn load(&self, order: Ordering) -> u32 {
-        self.0.load(order) as u32
-    }
-
-    fn fetch_add(&self, value: u32, order: Ordering) -> u32 {
-        self.0.fetch_add(value as i32, order) as u32
-    }
-
-    fn wake_one(&self) {
-        self.0.wake_single_owner();
-    }
-
-    fn wake_all(&self) {
-        self.0.wake_all();
-    }
-
-    fn wait(&self, current: u32, timeout: Option<Duration>) -> WaitTimeoutResult {
-        let deadline = timeout
-            .map(|t| zx::MonotonicInstant::after(t.into()))
-            .unwrap_or(zx::MonotonicInstant::INFINITE);
-        match self.0.wait(current as i32, None, deadline) {
-            // The count only goes up. If `current` isn't the current value, a notification
-            // was received in between reading `current` and waiting.
-            Ok(()) | Err(zx::Status::BAD_STATE) => WaitTimeoutResult { timed_out: false },
-            Err(zx::Status::TIMED_OUT) => WaitTimeoutResult { timed_out: true },
-            Err(e) => panic!("unexpected wait error {e:?}"),
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "fuchsia", target_os = "none", feature = "shuttle")))]
+#[cfg(not(any(target_os = "none", feature = "shuttle")))]
 struct Futex(AtomicU32);
 
-#[cfg(not(any(target_os = "fuchsia", target_os = "none", feature = "shuttle")))]
+#[cfg(not(any(target_os = "none", feature = "shuttle")))]
 impl Futex {
     const fn new(value: u32) -> Self {
         Self(AtomicU32::new(value))
@@ -207,14 +167,14 @@ impl Futex {
 // that its scheduler chooses every interleaving of a wait with a notification. A wait checks the
 // value and sleeps holding the futex's lock, which a notification takes, so none is lost. Shuttle's
 // waits don't time out.
-#[cfg(all(not(any(target_os = "fuchsia", target_os = "none")), feature = "shuttle"))]
+#[cfg(all(not(target_os = "none"), feature = "shuttle"))]
 struct Futex {
     value: std::sync::atomic::AtomicU32,
     lock: shuttle::sync::Mutex<()>,
     changed: shuttle::sync::Condvar,
 }
 
-#[cfg(all(not(any(target_os = "fuchsia", target_os = "none")), feature = "shuttle"))]
+#[cfg(all(not(target_os = "none"), feature = "shuttle"))]
 impl Futex {
     const fn new(value: u32) -> Self {
         Self {

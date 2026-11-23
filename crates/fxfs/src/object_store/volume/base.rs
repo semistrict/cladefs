@@ -29,7 +29,7 @@ impl RootVolume {
     pub async fn publish_volume(&self, name: &str) -> Result<Vec<u8>, Error> {
         let filesystem = &self.filesystem;
         let object_id = match self.volume_directory().lookup(name).await? {
-            Some((object_id, ObjectDescriptor::Volume, _)) => object_id,
+            Some((object_id, ObjectDescriptor::Volume)) => object_id,
             Some(_) => bail!(anyhow!(FxfsError::Inconsistent).context("Expected volume")),
             None => bail!(FxfsError::NotFound),
         };
@@ -85,13 +85,9 @@ impl RootVolume {
             matches!(self.volume_directory().lookup(name).await?, None),
             FxfsError::AlreadyExists
         );
-        handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await?;
+        handle =
+            ObjectStore::create_object(&root_store, &mut transaction, HandleOptions::default())
+                .await?;
         let object_id = handle.object_id();
         let mut serialized_info = Vec::new();
         info.serialize_with_version(&mut serialized_info)?;
@@ -126,7 +122,7 @@ mod tests {
     use crate::object_store::volume::tests::do_fsck;
     use crate::object_store::{
         DirectWriter, HandleOptions, LockKey, NewChildStoreOptions, ObjectKey, ObjectStore,
-        ObjectValue, StoreInfo, StoreOptions, tree,
+        ObjectValue, StoreInfo, tree,
     };
     use crate::serialized_types::{LATEST_VERSION, Version, VersionedLatest};
     use std::sync::Arc;
@@ -227,12 +223,12 @@ mod tests {
     /// ends and bloom filter, and nothing of what it holds.
     #[test_case(0, 3)]
     #[test_case(500, 4)]
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_reads_as_it_was(more: usize, opening_reads: u64) {
         let (base, manifest) = published(more).await;
         // What the base does next is not in the generation.
         let base_root = root_volume(base.clone()).await.expect("root_volume failed");
-        let base_store = base_root.volume("repo", StoreOptions::default()).await.expect("volume");
+        let base_store = base_root.volume("repo").await.expect("volume");
         let (filesystem, reads) = over(&base).await;
         write_file(&base, &base_store, "later", &[0xdd; 4096]).await;
 
@@ -253,14 +249,14 @@ mod tests {
         );
         assert!(filesystem.allocator().cells_of(&[store.store_object_id()]).is_empty());
         std::mem::drop((store, root, base_store, base_root));
-        do_fsck(&filesystem, Some("repo"), None).await;
+        do_fsck(&filesystem, Some("repo")).await;
         filesystem.close().await.expect("Close failed");
         base.close().await.expect("Close failed");
     }
 
     /// What a volume over a base writes, renames and deletes is its own, whatever compacts it, and
     /// frees nothing of the base (the fake device fails a free of what it reads through to).
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_changes_stay_private() {
         let (base, manifest) = published(0).await;
         let (filesystem, _reads) = over(&base).await;
@@ -283,7 +279,7 @@ mod tests {
         };
         check(&store).await;
 
-        let base_layers = store.store_info().unwrap().base_layers;
+        let base_layers = store.store_info().base_layers;
         assert_eq!(base_layers.len(), 1);
         for reason in [
             FlushReason::Journal(ForceMajor::False),
@@ -293,7 +289,7 @@ mod tests {
             store.flush_with_reason(reason).await.expect("flush failed");
             filesystem.graveyard().flush().await;
             check(&store).await;
-            let info = store.store_info().unwrap();
+            let info = store.store_info();
             assert_eq!(info.base_layers, base_layers);
             assert_eq!(info.layers.len(), 1);
         }
@@ -303,16 +299,16 @@ mod tests {
         let other = root.new_volume_over_base("other", &manifest).await.expect("over_base failed");
         check_originals(&other).await;
         std::mem::drop((store, other, root));
-        do_fsck(&filesystem, Some("repo"), None).await;
-        do_fsck(&filesystem, Some("other"), None).await;
+        do_fsck(&filesystem, Some("repo")).await;
+        do_fsck(&filesystem, Some("other")).await;
         filesystem.close().await.expect("Close failed");
-        do_fsck(&base, Some("repo"), None).await;
+        do_fsck(&base, Some("repo")).await;
         base.close().await.expect("Close failed");
     }
 
     /// No reservation pays for a base's layers, which no compaction rewrites: however much a base
     /// holds, a volume over it reserves what its own layers ask.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_layers_are_not_reserved() {
         let (base, manifest) = published(500).await;
         let (filesystem, _reads) = over(&base).await;
@@ -323,7 +319,7 @@ mod tests {
 
         write_file(&filesystem, &store, "new", &[0x11; 4096]).await;
         store.flush().await.expect("flush failed");
-        let info = store.store_info().unwrap();
+        let info = store.store_info();
         let root_store = filesystem.root_store();
         let size = root_store.get_file_size(info.layers[0]).await.expect("get_file_size failed");
         assert_eq!(
@@ -341,7 +337,7 @@ mod tests {
 
     /// Reflinks of a base's extents, and snapshots of a volume over a base, share them as
     /// reflinks and snapshots do, and whatever deletes them leaves the base be.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_reflinks_and_snapshots() {
         let (base, manifest) = published(0).await;
         let (filesystem, _reads) = over(&base).await;
@@ -374,8 +370,8 @@ mod tests {
         assert_eq!(read_file(&snapshot, "b").await, [0xbb; 8192]);
         filesystem.graveyard().flush().await;
         std::mem::drop((store, snapshot));
-        do_fsck(&filesystem, Some("repo"), None).await;
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("repo")).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
 
         // A volume over a base deletes as any does.
         let (_, transaction) = root
@@ -384,14 +380,14 @@ mod tests {
             .expect("acquire_transaction_for_remove_volume failed");
         root.delete_volume("repo", transaction, || {}).await.expect("delete_volume failed");
         std::mem::drop(root);
-        do_fsck(&filesystem, Some("snapshot"), None).await;
+        do_fsck(&filesystem, Some("snapshot")).await;
         filesystem.close().await.expect("Close failed");
         base.close().await.expect("Close failed");
     }
 
     /// A volume over a base survives a crash, with what it wrote since replayed over its base,
     /// and a clean mount leaves it closed, reading nothing of the base, until it is asked for.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_survives_crashes_and_stays_closed() {
         let (base, manifest) = published(0).await;
         let (filesystem, reads) = over(&base).await;
@@ -406,13 +402,13 @@ mod tests {
 
         let filesystem = FxFilesystem::open(crashed).await.expect("open failed");
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-        let store = root.volume("repo", StoreOptions::default()).await.expect("volume failed");
+        let store = root.volume("repo").await.expect("volume failed");
         assert_eq!(read_file(&store, "in-the-journal").await, [0x11; 4096]);
         assert!(!exists(&store, "a").await);
         assert_eq!(read_file(&store, "b").await, [0xbb; 8192]);
         filesystem.journal().force_compact().await.expect("compact failed");
         std::mem::drop((store, root));
-        do_fsck(&filesystem, Some("repo"), None).await;
+        do_fsck(&filesystem, Some("repo")).await;
         filesystem.close().await.expect("Close failed");
 
         let device = filesystem.take_device().await;
@@ -422,7 +418,7 @@ mod tests {
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
         assert!(!open_store(&filesystem, &root, "repo").await);
         assert_eq!(reads.load(Relaxed), 0);
-        let store = root.volume("repo", StoreOptions::default()).await.expect("volume failed");
+        let store = root.volume("repo").await.expect("volume failed");
         assert_ne!(reads.load(Relaxed), 0);
         assert_eq!(read_file(&store, "c").await, [0xcc; 8192]);
         std::mem::drop((store, root));
@@ -431,7 +427,7 @@ mod tests {
     }
 
     /// A volume over a base publishes as any does, its base layers below the ones it wrote.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_over_a_base() {
         let (base, manifest) = published(0).await;
         let (middle, _reads) = over(&base).await;
@@ -447,13 +443,13 @@ mod tests {
         let filesystem = FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new");
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
         let top = root.new_volume_over_base("repo", &upper).await.expect("over_base failed");
-        assert_eq!(top.store_info().unwrap().base_layers.len(), 2);
-        assert_eq!(top.store_info().unwrap().base_cells, [BASE, SANDBOX]);
+        assert_eq!(top.store_info().base_layers.len(), 2);
+        assert_eq!(top.store_info().base_cells, [BASE, SANDBOX]);
         assert_eq!(read_file(&top, "new").await, [0x11; 4096]);
         assert!(!exists(&top, "a").await);
         assert_eq!(read_file(&top, "b").await, [0xbb; 8192]);
         std::mem::drop((top, root));
-        do_fsck(&filesystem, Some("repo"), None).await;
+        do_fsck(&filesystem, Some("repo")).await;
         filesystem.close().await.expect("Close failed");
         middle.close().await.expect("Close failed");
         base.close().await.expect("Close failed");
@@ -462,12 +458,12 @@ mod tests {
     /// A base's layer of an older version is refused as the volume over it opens, the version
     /// named, as a mount refuses the filesystem's own: nothing is migrated (AGENTS.md), and a
     /// mount checks only the versions of the filesystem's own layers.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_layers_of_older_versions_refused() {
         const OLDER: Version = Version { major: LATEST_VERSION.major - 1, minor: 0 };
         let (base, _manifest) = published(0).await;
         let root = root_volume(base.clone()).await.expect("root_volume failed");
-        let store = root.volume("repo", StoreOptions::default()).await.expect("volume failed");
+        let store = root.volume("repo").await.expect("volume failed");
 
         // An empty layer of an older version at the bottom of the volume's tree.
         let root_store = base.root_store();
@@ -483,7 +479,6 @@ mod tests {
             &root_store,
             &mut transaction,
             HandleOptions { skip_journal_checks: true, ..Default::default() },
-            None,
         )
         .await
         .expect("create_object failed");
@@ -499,7 +494,7 @@ mod tests {
         .complete()
         .await
         .expect("complete failed");
-        store.store_info.lock().as_mut().unwrap().layers.push(handle.object_id());
+        store.store_info.lock().layers.push(handle.object_id());
         let manifest = store.manifest().await.expect("manifest failed");
         base.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
 
@@ -520,7 +515,7 @@ mod tests {
 
     /// A follower taking the layers its writer's flush wrote keeps the store's base layers below
     /// them: followers open every volume, so that a writer flushing one over a base gets here.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_layers_stay_as_followers_take_flushed_layers() {
         let (base, manifest) = published(0).await;
         let (filesystem, _reads) = over(&base).await;
@@ -542,11 +537,11 @@ mod tests {
 
     /// Manifests that can't be honoured leave no volume.
     /// A manifest says only what layers hold, so none is made while the journal holds more.
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_no_manifest_of_what_the_journal_holds() {
         let (filesystem, _) = published(0).await;
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-        let store = root.volume("repo", StoreOptions::default()).await.expect("volume failed");
+        let store = root.volume("repo").await.expect("volume failed");
         store.manifest().await.expect("manifest of a flushed volume failed");
 
         write_file(&filesystem, &store, "later", &[1; 4096]).await;
@@ -560,7 +555,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    #[fuchsia::test]
+    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_manifests_refused() {
         let (base, manifest) = published(0).await;
         let error = |result: Result<Arc<ObjectStore>, anyhow::Error>| {

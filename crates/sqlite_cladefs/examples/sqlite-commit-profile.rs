@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
-use storage_device::{Device, DeviceHolder, ExtentId, ReadOptions, WriteOptions};
+use storage_device::{Device, DeviceHolder, ExtentId, WriteOptions};
 
 /// The kinds of request timed.
 const KINDS: [&str; 7] = ["read", "write", "free", "commit_root", "flush", "map", "unmap"];
@@ -67,14 +67,13 @@ impl Device for Timing {
     fn block_count(&self) -> u64 {
         self.0.block_count()
     }
-    async fn read_with_opts(
+    async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
         buffer: MutableBufferRef<'_>,
-        opts: ReadOptions,
     ) -> Result<(), Error> {
-        timed(0, self.0.read_with_opts(extent, offset, buffer, opts)).await
+        timed(0, self.0.read(extent, offset, buffer)).await
     }
     async fn write_with_opts(
         &self,

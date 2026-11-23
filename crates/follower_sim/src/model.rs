@@ -156,7 +156,7 @@ impl Writer {
     pub async fn write_blocks(&self, name: &str, fill: u8, blocks: u64) {
         let store = self.fs.root_store();
         let id = self.object_id(name).await.expect("no file to write");
-        let handle = ObjectStore::open_object(&store, id, HandleOptions::default(), None)
+        let handle = ObjectStore::open_object(&store, id, HandleOptions::default())
             .await
             .expect("open failed");
         let mut buf = handle.allocate_buffer(BLOCK as usize).await;
@@ -170,7 +170,7 @@ impl Writer {
     pub async fn truncate(&self, name: &str, blocks: u64) {
         let store = self.fs.root_store();
         let id = self.object_id(name).await.expect("no file to truncate");
-        let handle = ObjectStore::open_object(&store, id, HandleOptions::default(), None)
+        let handle = ObjectStore::open_object(&store, id, HandleOptions::default())
             .await
             .expect("open failed");
         handle.truncate(blocks * BLOCK).await.expect("truncate failed");
@@ -197,7 +197,7 @@ impl Writer {
             }
             Op::Write(name, fill) => {
                 let id = object_id(name).await.expect("no file to write");
-                let handle = ObjectStore::open_object(&store, id, HandleOptions::default(), None)
+                let handle = ObjectStore::open_object(&store, id, HandleOptions::default())
                     .await
                     .expect("open failed");
                 let mut buf = handle.allocate_buffer((BLOCKS * BLOCK) as usize).await;
@@ -260,7 +260,7 @@ pub async fn observe(fs: &OpenFxFilesystem, name: &str) -> Result<Option<Content
 pub async fn read(fs: &OpenFxFilesystem, object_id: u64) -> Result<Contents, String> {
     let store = fs.root_store();
     let name = format!("object {object_id}");
-    let handle = ObjectStore::open_object(&store, object_id, HandleOptions::default(), None)
+    let handle = ObjectStore::open_object(&store, object_id, HandleOptions::default())
         .await
         .map_err(|error| format!("opening {name}: {error:#}"))?;
     let size = handle.get_size();

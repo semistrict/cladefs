@@ -21,20 +21,15 @@ commit = "90e54e090540aaac37a81494884f4b8a68bc269c"
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(detect_lock_cycles)',
     'cfg(madsim)',
-    'cfg(fuchsia_api_level_at_least, values(any()))',
-    'cfg(fuchsia_api_level_less_than, values(any()))',
     'cfg(fuzz)',
     'cfg(fuzz_target, values(any()))',
     'cfg(fuzzing)',
-    'cfg(vdso_next)',
 ] }
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-argh = "0.1.19"
 libc = { version = "0.2.189", features = ["extra_traits"] }
 aes = "0.9.1"
-aes-gcm-siv = "0.12.0-rc.3"
 # AES-256-GCM, AES-KW, HKDF and HMAC for encryption at rest (aws/aws-lc-rs, ISC AND (Apache-2.0 OR
 # ISC); backlog doc-16). Already in the build through object_store and rustls.
 aws-lc-rs = "1.18.2"
@@ -53,11 +48,8 @@ aws-sdk-kms = { version = "1.131.0", default-features = false, features = ["defa
 async-trait = "0.1.92"
 base64 = "0.22.1"
 byteorder = "1.5.0"
-cbc = "0.2.1"
 event-listener = "5.4.2"
 getrandom = "0.4.3"
-hex = { version = "0.4.3", features = ["serde"] }
-hmac = "0.13.0"
 log = { version = "0.4.29", features = ["kv", "std"] }
 num = { version = "0.4.3", features = ["rand"] }
 proptest = "1.11.0"
@@ -98,7 +90,6 @@ static_assertions = "1.1.0"
 test-case = "3.3.1"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 bitflags = { version = "2.13.0", features = ["serde", "std"] }
-bstr = { version = "1.13.1", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 futures = "=0.3.34"
 futures-lite = "2.6.1"
@@ -118,11 +109,9 @@ tokio = { package = "madsim-tokio", version = "=0.2.30", default-features = fals
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
 zeroize = "1.9.1"
 
-fidl = { path = "crates/fidl" }
 fprint = { path = "crates/fprint" }
 fuchsia-async = { path = "crates/fuchsia-async" }
 fuchsia-async-macro = { path = "crates/fuchsia-async-macro" }
-fuchsia-emulated-handle = { path = "crates/fuchsia-emulated-handle" }
 fuchsia-sync = { path = "crates/fuchsia-sync" }
 fxfs-unicode = { path = "crates/fxfs-unicode" }
 fxfs_trace = { path = "crates/fxfs_trace" }
@@ -131,20 +120,6 @@ storage_ptr_slice = { path = "crates/storage_ptr_slice" }
 storage_trace = { path = "crates/storage_trace" }
 storage_units = { path = "crates/storage_units" }
 storage_xts = { path = "crates/storage_xts" }
-zx-status = { path = "crates/zx-status" }
-zx-status-ext = { path = "crates/zx-status-ext" }
-zx-types = { path = "crates/zx-types" }
-zx-sys = { path = "crates/zx-sys" }
-zx = { path = "crates/zx" }
-fscrypt = { path = "crates/fscrypt" }
-fxfs-crypto = { path = "crates/fxfs-crypto" }
-fxfs-insecure-crypto = { path = "crates/fxfs-insecure-crypto" }
-fxfs_crypt_common = { path = "crates/fxfs_crypt_common" }
-fuchsia-hash = { path = "crates/fuchsia-hash" }
-fuchsia_merkle = { path = "crates/fuchsia_merkle" }
-fsverity_merkle = { path = "crates/fsverity_merkle" }
-blob_metadata = { path = "crates/blob_metadata" }
-block_protocol = { path = "crates/block_protocol" }
 storage_device = { path = "crates/storage_device" }
 block_device = { path = "crates/block_device" }
 local_cell = { path = "crates/local_cell" }
@@ -156,18 +131,9 @@ bucket_cell = { path = "crates/bucket_cell" }
 base32_id = { path = "crates/base32_id" }
 node_local = { path = "crates/node_local" }
 host_fs = { path = "crates/host_fs" }
-bssl-crypto = { path = "crates/bssl-crypto" }
-mundane = { path = "crates/mundane" }
-fidl-fuchsia-io = { path = "crates/fidl-fuchsia-io" }
-fidl-fuchsia-fxfs = { path = "crates/fidl-fuchsia-fxfs" }
 fxfs = { path = "crates/fxfs" }
 fxfs_macros = { path = "crates/fxfs_macros" }
 fxfs-posix = { path = "crates/fxfs-posix" }
-fuchsia-inspect = { path = "crates/fuchsia-inspect" }
-fuchsia = { path = "crates/fuchsia" }
-fuchsia-macro = { path = "crates/fuchsia-macro" }
-fidl-fuchsia-diagnostics-types = { path = "crates/fidl-fuchsia-diagnostics-types" }
-diagnostics-log = { path = "crates/diagnostics-log" }
 
 # bucket_cell's simulation (scripts/test.sh's part sim): optimized, as its seed searches, seconds
 # to minutes each so, took past 20 minutes each unoptimized and ran CI's workspace job out of time;

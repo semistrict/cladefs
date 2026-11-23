@@ -36,7 +36,7 @@ async fn read(fs: &OpenFxFilesystem, file: &str) -> Vec<u8> {
         .await
         .expect("open failed");
     let (object_id, ..) = root.lookup(file).await.expect("lookup failed").expect("no file");
-    let handle = ObjectStore::open_object(&root_store, object_id, HandleOptions::default(), None)
+    let handle = ObjectStore::open_object(&root_store, object_id, HandleOptions::default())
         .await
         .expect("open_object failed");
     let mut buf = handle.allocate_buffer(BLOCK).await;

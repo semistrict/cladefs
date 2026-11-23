@@ -178,7 +178,7 @@ mod tests {
     use super::{AllocatedRanges, RangeType};
     use std::ops::Range;
 
-    #[fuchsia::test]
+    #[test]
     fn test_allocated_ranges() {
         struct Case {
             applied_ranges: Vec<Range<u64>>,
@@ -230,7 +230,7 @@ mod tests {
         }
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_allocated_ranges_overlap() {
         let mut ranges = AllocatedRanges::new(&[]);
         // With no overwrite ranges recorded, all overlap calls should return the same range
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(ranges.overlap(0..100).collect::<Vec<_>>(), vec![RangeType::Overwrite(0..100)]);
     }
 
-    #[fuchsia::test]
+    #[test]
     fn test_trim_ranges() {
         struct Case {
             applied: Vec<Range<u64>>,
