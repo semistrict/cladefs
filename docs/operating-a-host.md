@@ -344,7 +344,7 @@ curl http://ZPAGES/z/log            # what it logs now
 curl -X POST http://ZPAGES/z/log    # back to CLADEFS_LOG_LEVEL's
 ```
 
-SIGQUIT logs every thread's stack, a record a thread, through eu-stack, killed past 10 s. SIGTERM,
+SIGQUIT logs every thread's stack, a record a thread, through eu-stack, killed past 30 s. SIGTERM,
 SIGINT and SIGHUP each drain the daemon (`CLADEFSD_DRAIN`) and end it: Ctrl-C in its terminal, or
 its terminal or ssh session closing, no longer kills it with every cell crashed (board 8567). A
 second signal while it drains changes nothing; SIGKILL ends it at once.

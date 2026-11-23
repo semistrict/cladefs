@@ -529,6 +529,8 @@ fn stacks_on_sigquit(child: &mut std::process::Child, waiting: &str) -> String {
             Err(err) => panic!("no stack naming {waiting} ({err}); it wrote:\n{printed}"),
         };
         // cladefs: a record of the log, after its time and level (board 8567).
+        // cladefs: eu-stack killed past its bound, which no waiting would see past (board 8567).
+        assert!(!line.contains("killed: no stacks"), "{line}\n{printed}");
         if heading.is_none() && line.contains(HEADING) {
             heading = Some(printed.len());
         }

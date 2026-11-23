@@ -23,8 +23,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// cladefs: how long eu-stack has to read the stacks, past which it is killed (board 8567): a
-/// daemon's few hundred threads take it about a second.
-const BOUND: Duration = Duration::from_secs(10);
+/// test daemon's take it about 7 s on an idle test host, most of it reading the binary's debug
+/// information, and past 10 s while a suite runs beside it, which a bound of 10 s killed.
+const BOUND: Duration = Duration::from_secs(30);
 
 /// What the log's records of the stacks begin with.
 const HEADING: &str = "cladefs: the threads' stacks, on SIGQUIT:";
