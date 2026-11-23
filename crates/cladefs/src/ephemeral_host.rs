@@ -336,27 +336,35 @@ impl Host {
     }
 }
 
-/// Why the cell directory at `dir` is not `entry`'s ephemeral cell, whole, if it is not: opened as
-/// its opening opens it, its description's format checked (`local_cell::Format`), its cell, the
-/// origin its local checkpoint names, and the bucket it names `entry`'s (board 8455). A migration's
-/// target takes a staged cell into place only if it is (`cladefsd::migration`): taken otherwise,
-/// a cell of another build's format, or one naming another bucket, would be accepted, its source
-/// then letting go of the only copy, and refused at its first opening here.
+/// The largest description of a cell directory [`not_its`] reads: a description is a few lines.
+const DESCRIPTION_MOST: u64 = 64 << 10;
+
+/// Why the cell directory at `dir` is not `entry`'s ephemeral cell, whole, if it is not: its
+/// description read as its opening reads it, its format checked (`local_cell::Format`), an
+/// ephemeral cell's, of `entry`'s cell, naming `entry`'s bucket (board 8455). A migration's target
+/// takes a staged cell into place only if it is (`cladefsd::migration`): taken otherwise, a cell
+/// of another build's format, or one naming another bucket, would be accepted, its source then
+/// letting go of the only copy, and refused at its first opening here.
+///
+/// What a peer staged is untrusted (AGENTS.md, Trust boundaries): only its description is read,
+/// and only if it is no larger than [`DESCRIPTION_MOST`], never opened as a `HostDir` (which would
+/// count its files in the host's disk, board 8455's review) nor its local checkpoint read whole,
+/// whose length the peer chose.
 pub(crate) fn not_its(dir: &Path, entry: &Entry) -> Result<Option<String>, Error> {
     if local_cell::unmade_host(dir) {
         return Ok(Some(format!("{} is no cell made whole", dir.display())));
     }
-    let Some(checkpoint) = local_cell::host_local_checkpoint(dir)? else {
+    let description = dir.join(local_cell::DESCRIPTION);
+    let len = host_fs::metadata(&description)?.len();
+    if len > DESCRIPTION_MOST {
+        return Ok(Some(format!("its description is {len} bytes, past {DESCRIPTION_MOST}")));
+    }
+    if !local_cell::host_ephemeral(dir)? {
         return Ok(Some(format!("{} is no ephemeral cell's", dir.display())));
-    };
+    }
     let cell = local_cell::host_cell(dir)?;
     if cell != entry.child {
         return Ok(Some(format!("{} is cell {cell}'s, not {}'s", dir.display(), entry.child)));
-    }
-    let parent = checkpoint.parent();
-    let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
-    if origin != entry.origin {
-        return Ok(Some(format!("its origin is {origin:?}, not {:?}", entry.origin)));
     }
     let bucket = local_cell::host_bucket(dir)?;
     if bucket.as_deref() != Some(entry.bucket.as_str()) {

@@ -196,7 +196,7 @@ impl CellFile {
 }
 
 /// The description's file.
-pub(crate) const DESCRIPTION: &str = "store";
+pub const DESCRIPTION: &str = "store";
 /// The directory of segments, a directory for each cell's.
 pub(crate) const SEGMENTS: &str = "segments";
 /// The directory of extents stored on their own, a directory for each cell's.

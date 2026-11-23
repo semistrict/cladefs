@@ -233,7 +233,7 @@ pub use host::{
     deleting_host, host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token,
     host_version, made_host, place, place_host, remove_cell_dir, unmade_host,
 };
-pub use layout::{Description, FORMAT, Format, Place};
+pub use layout::{DESCRIPTION, Description, FORMAT, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
 pub use on_disk::{CLEAR_LOG_MAGIC, ClearFile, OnDisk, on_disk};
 pub use raw::{RawFile, SECTOR};

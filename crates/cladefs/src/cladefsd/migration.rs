@@ -1735,10 +1735,12 @@ pub(super) mod target {
         }
 
         /// Board 8455: a hand-over naming every file it staged whole is refused if the cell they
-        /// make does not open as the cell prepared: here a cell directory of another build's
-        /// format, its description's first line another, which its first opening would refuse
-        /// (`ENOTSUP`) once its source let go of it. Nothing goes into place, and what it took
-        /// goes, its reference and entry with it.
+        /// make does not open as the cell prepared: a cell directory of another build's format,
+        /// its description's first line another, which its first opening would refuse (`ENOTSUP`)
+        /// once its source let go of it; and one whose description, of the cell prepared and this
+        /// format, is longer than a description is, which the check reads not (board 8455's
+        /// review: a staged file's length is the peer's to name). Nothing goes into place, and
+        /// what it took goes, its reference and entry with it.
         #[test]
         fn hand_overs_of_cells_that_do_not_open_are_refused() {
             let dir = tempfile::tempdir().unwrap();
@@ -1746,29 +1748,36 @@ pub(super) mod target {
             // Its writes of a file's pieces run off a runtime's workers.
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
             let runtime = runtime.unwrap();
-            let cell = root.join("vm");
-            let (incarnation, token) = runtime.block_on(prepare(prepare_of(0x21, &cell))).unwrap();
-            let staged = staging(&cell, 0x21);
-            assert!(staged.is_dir());
-            let description = b"cladefs extent store 15\nblock_size 4096\ncell 1/7\n".to_vec();
-            let len = description.len() as u64;
-            let crc = Some(extent_frame::crc(&description));
-            let piece = MigrateFileRequest {
-                migration: 0x21,
-                path: "store".into(),
-                offset: 0,
-                bytes: description,
-                len,
-                holes: Vec::new(),
-            };
-            runtime.block_on(file(piece)).unwrap();
-            let files = vec![FileDigest { path: "store".into(), len, crc }];
-            let request = MigrateHandOverRequest { migration: 0x21, incarnation, files, token };
-            assert_eq!(runtime.block_on(hand_over(request)).map_err(|s| s.code()), Ok(false));
-            assert!(!cell.exists(), "taken into place");
-            assert!(!staged.exists(), "what it took kept");
-            assert_eq!(host.entries().unwrap(), vec![], "its entry kept");
-            assert!(!host.accepted(0x21));
+            let other = b"cladefs extent store 15\nblock_size 4096\ncell 1/7\n".to_vec();
+            let child = CellId { tenant: 1, id: 7 };
+            let long = format!(
+                "{}\nblock_size 4096\ncell {child}\ncapacity 4096\nbucket memory:///cells\n\
+                 ephemeral yes\npadding {}\n",
+                local_cell::FORMAT,
+                "x".repeat(64 << 10)
+            );
+            for (migration, bytes) in [(0x21, other), (0x23, long.into_bytes())] {
+                let len = bytes.len() as u64;
+                let cell = root.join("vm");
+                let prepared = runtime.block_on(prepare(prepare_of(migration, &cell)));
+                let (incarnation, token) = prepared.unwrap();
+                let staged = staging(&cell, migration);
+                assert!(staged.is_dir());
+                let crc = Some(extent_frame::crc(&bytes));
+                let path = local_cell::DESCRIPTION.to_owned();
+                let holes = Vec::new();
+                let piece = MigrateFileRequest { migration, path, offset: 0, bytes, len, holes };
+                runtime.block_on(file(piece)).unwrap();
+                let path = local_cell::DESCRIPTION.to_owned();
+                let files = vec![FileDigest { path, len, crc }];
+                let request = MigrateHandOverRequest { migration, incarnation, files, token };
+                let answered = runtime.block_on(hand_over(request)).map_err(|s| s.code());
+                assert_eq!(answered, Ok(false), "{migration:x}");
+                assert!(!cell.exists(), "taken into place");
+                assert!(!staged.exists(), "what it took kept");
+                assert_eq!(host.entries().unwrap(), vec![], "its entry kept");
+                assert!(!host.accepted(migration));
+            }
         }
 
         /// Board 5374: a hand-over naming a file outside its staging directory lacks it, as named,
