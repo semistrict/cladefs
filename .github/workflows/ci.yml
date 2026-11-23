@@ -319,6 +319,29 @@ jobs:
           cargo nextest run -p cladefs --lib --cargo-profile sim --run-ignored all --no-capture
           -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
+  # board 8605: the dependencies' licences, bans and sources, as deny.toml allows them, of every lock
+  # (scripts/audit.sh policy), which only a commit changes: on each push. Their advisories are the
+  # nightly's, so that one published overnight fails no unrelated push.
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # With vendor/firecracker, whose lock is audited too, and a path dependency of the workspace's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      # Each audited workspace's Rust, as its rust-toolchain.toml pins it, as its builds have it.
+      - name: Rust, as each workspace's rust-toolchain.toml pins it
+        run: |
+          rustup toolchain install
+          (cd guest/rust && rustup toolchain install)
+          (cd vendor/firecracker && rustup toolchain install)
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-deny@0.22.0
+      - name: Licences, bans and sources of every lock
+        run: scripts/audit.sh policy
+
   # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
   # dropped) says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9): the
   # commit-msg hook asks it of a clone that installed scripts/hooks; this, of every push and pull
