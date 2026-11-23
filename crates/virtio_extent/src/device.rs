@@ -15,7 +15,7 @@ use log::{error, info};
 use zerocopy::FromZeros;
 
 use crate::config::{Config, private_max};
-use crate::notices::{ConfigInterrupt, Following, Notices};
+use crate::notices::{ConfigInterrupt, Notices};
 use crate::persist::{ConfigState, MappingState, Snapshot, SnapshotError, State};
 use crate::protocol::{
     Bounds, ConfigSpace, DAX_WINDOW_SHM_ID, MAX_EXTENT, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER,
@@ -34,8 +34,6 @@ pub type OnLost = Arc<dyn Fn() + Send + Sync>;
 pub enum Error {
     #[error("Cannot open the cell {0}: {1:#}")]
     Cell(String, cladefs::Error),
-    #[error("The read-only extent device {0} is restored from no snapshot: it takes none")]
-    ReadOnlyRestored(String),
     #[error("The tag {0:?} is longer than 36 bytes")]
     TagTooLong(String),
     #[error("Cannot make the DAX window: {0}")]
@@ -51,8 +49,6 @@ pub enum Error {
 /// Errors activating a device.
 #[derive(Debug, thiserror::Error)]
 pub enum ActivateError {
-    #[error("opening the cell anew: {0:#}")]
-    Reopen(cladefs::Error),
     #[error("creating the DAX window: {0:#}")]
     Window(cladefs::Error),
     #[error("mapping the snapshot's window again: {0}")]
@@ -81,8 +77,7 @@ pub struct Device {
     config: Config,
     // The cell before the window, whose host memory the cell's fault thread serves: the cell
     // is dropped first.
-    // cladefs: none from a follower's reset until it is activated again.
-    cell: Option<Arc<CellClient>>,
+    cell: Arc<CellClient>,
     window: Option<WindowMemory>,
     /// Whether the cell's window is created, which it is on the first activation.
     window_created: bool,
@@ -92,10 +87,6 @@ pub struct Device {
     /// The cell's capacity, as the daemon changes it; cladefs: and whether the guest's filesystem
     /// is frozen (`VIRTIO_EXTENT_T_FREEZE`), as a snapshot needs it.
     notices: Arc<Notices>,
-    /// cladefs: a follower's writer's commits, as the daemon tells of them.
-    following: Arc<Following>,
-    /// What the VMM does as the daemon goes, for each connection to it.
-    on_lost: OnLost,
     /// cladefs: the snapshot taken of the device's cell, or restored from (TASK-39.1).
     snapshot: Option<Snapshot>,
     /// cladefs: the window's mappings to map again as the window is created: those of the snapshot
@@ -172,9 +163,6 @@ impl Device {
         }
         config_space.tag[..tag.len()].copy_from_slice(tag);
 
-        if config.read_only && matches!(making, Making::Restore { .. }) {
-            return Err(Error::ReadOnlyRestored(config.id.clone()));
-        }
         // cladefs: a window's faults come through /dev/userfaultfd, which the device opens as the
         // driver activates it: a host that denies it fails the VM now, saying what it lacks, not
         // the guest's activation, after which the VM has no disk (TASK-308).
@@ -184,7 +172,6 @@ impl Device {
         }
         let cell = connect(&config.cladefsd_socket, &config.id, &on_lost)
             .and_then(|daemon| match &making {
-                Making::Boot if config.read_only => daemon.open_read_only(&config.path_on_host),
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
                 Making::Restore { snapshot, .. } => {
                     daemon.open_forked(&config.path_on_host, snapshot.version, config.capacity)
@@ -199,8 +186,6 @@ impl Device {
         let changes = notices.clone();
         cell.on_capacity(move |capacity, ask| changes.resizing.changed(capacity, ask));
         hear_stats_asks(&cell, &notices);
-        let following = Arc::new(Following::default());
-        hear_commits(&cell, &following);
 
         let window = match config.dax_window_size {
             Some(size) => {
@@ -212,12 +197,9 @@ impl Device {
                     }
                 };
                 let window = WindowMemory::new(vm, size, at)?;
-                // cladefs: a writer's window copies on write (backlog doc-13); a follower's copies
-                // nothing.
-                if !config.read_only {
-                    config_space.private_max =
-                        private_max(window.len(), config.dax_private_max_bytes).to_le();
-                }
+                // cladefs: the window copies on write (backlog doc-13).
+                config_space.private_max =
+                    private_max(window.len(), config.dax_private_max_bytes).to_le();
                 Some(window)
             }
             None => None,
@@ -225,14 +207,12 @@ impl Device {
 
         Ok(Self {
             config,
-            cell: Some(Arc::new(cell)),
+            cell: Arc::new(cell),
             window,
             window_created: false,
             prefault: None,
             config_space,
             notices,
-            following,
-            on_lost,
             snapshot: None,
             mappings: Vec::new(),
         })
@@ -268,23 +248,21 @@ impl Device {
 
     /// Reads `data.len()` bytes of the configuration space at `offset`, as the driver does, past
     /// its end zeros. cladefs: the cell's capacity, and the shrink the guest is asked to take, as
-    /// they are now; and a follower's writer's latest commit; and the daemon's latest ask for the
-    /// guest's stats.
+    /// they are now; and the daemon's latest ask for the guest's stats.
     pub fn read_config(&self, offset: u64, data: &mut [u8]) {
         let (capacity, asked) = self.notices.resizing.known();
         let config = ConfigSpace {
             capacity: capacity.to_le(),
             asked: asked.to_le(),
-            committed: self.following.latest().to_le(),
             stats_asked: self.notices.stats.latest().to_le(),
             ..self.config_space
         };
         config.read(offset, data);
     }
 
-    /// Its cell: open, but from a follower's reset until it is activated again.
+    /// Its cell.
     fn cell(&self) -> &Arc<CellClient> {
-        self.cell.as_ref().expect("the device's cell is closed")
+        &self.cell
     }
 
     /// The requests of one of its queues, served with its cell, while the device is activated:
@@ -308,8 +286,7 @@ impl Device {
     }
 
     /// Activates the device, the driver having taken features `acked`, every one offered, and its
-    /// transport set up the queues: opens the cell anew if a follower's reset let it go, makes the
-    /// DAX window, maps again the mappings of the snapshot it was restored from, and has
+    /// transport set up the queues: makes the DAX window, maps again the mappings of the snapshot it was restored from, and has
     /// `interrupt` tell the guest of the daemon's notices. The VMM's workers then serve the queues
     /// ([`Device::requests`]). On a thread under the VMM's seccomp filter, rather than the vCPU's
     /// whose write activates the device: its work, opening the DAX window's userfaultfd and the
@@ -319,40 +296,18 @@ impl Device {
         acked: u64,
         interrupt: Arc<dyn ConfigInterrupt>,
     ) -> Result<(), ActivateError> {
-        // cladefs: once the queues are, so that an activation failing on them leaves the cell
-        // closed, to open anew at the next (TASK-79.8), its guest remounting on a new view
-        // (doc-4).
-        if self.cell.is_none() {
-            self.reopen().map_err(ActivateError::Reopen)?;
-        }
         self.create_dax_window().map_err(ActivateError::Window)?;
         self.map_again().map_err(ActivateError::MapAgain)?;
         self.notices.resizing.set_interrupt(Some(interrupt.clone()));
-        self.following.set_interrupt(Some(interrupt.clone()));
         // cladefs: the guest is asked for its stats if its driver takes asks (TASK-111.4).
         let asks = acked & (1 << VIRTIO_EXTENT_F_STATS) != 0;
         self.notices.stats.set_interrupt(asks.then_some(interrupt));
         Ok(())
     }
 
-    /// Resets the device, its VMM's workers stopped: as before the driver activated it. cladefs: a
-    /// follower lets go of its cell now, not as it is activated again: a cell its writer
-    /// retired, going with writes uncommitted, opens only once it is gone, for its follower or a
-    /// new writer, and the guest may not mount for a while (TASK-79.24). Its guest leaves its
-    /// window mapped as it unmounts, for the device's going to unmap: this process would go on
-    /// mapping pages the daemon, its connection gone, gives others, so they go first, the daemon's
-    /// stage operations made as the reply comes (TASK-79.100). On a thread under the VMM's
-    /// seccomp filter, as activation.
+    /// Resets the device, its VMM's workers stopped: as before the driver activated it. On a
+    /// thread under the VMM's seccomp filter, as activation.
     pub fn reset(&mut self) {
-        if self.config.read_only {
-            if let (Some(cell), Some(window), true) =
-                (&self.cell, &self.window, self.window_created)
-                && let Err(err) = cell.unmap(0, window.len())
-            {
-                error!("extent device {}: unmapping its window: {err:#}", self.config.id);
-            }
-            self.cell = None;
-        }
         // cladefs: no guest is asked for its stats until a driver activates it again, the cell
         // answering meanwhile (TASK-111.4).
         self.notices.stats.set_interrupt(None);
@@ -367,31 +322,11 @@ impl Device {
         if self.window_created {
             return Ok(());
         }
-        // cladefs: a writer's copies on write, of `private_max` pages at most; a follower's, of
-        // none, copies nothing (backlog doc-13).
+        // cladefs: it copies on write, of `private_max` pages at most (backlog doc-13).
         let private_max = u64::from_le(self.config_space.private_max);
-        let cell = self.cell.as_ref().expect("the device's cell is closed");
-        // SAFETY: The cell is dropped before the window, as the fields are in that order, and
-        // replaced only once its window's connection went (`reset`, `reopen`).
-        unsafe { window.create(cell, self.prefault.clone(), private_max) }?;
+        // SAFETY: The cell is dropped before the window, as the fields are in that order.
+        unsafe { window.create(&self.cell, self.prefault.clone(), private_max) }?;
         self.window_created = true;
-        Ok(())
-    }
-
-    /// cladefs: opens a follower's cell anew, as of its writer's latest commit, with a window of
-    /// its own, created as the driver activates the device: after a reset, its guest remounting
-    /// on a new view, as it does once it was cut off (`ESTALE`). The old connection went as it
-    /// reset ([`Device::reset`]), with its window's faults, before the new one creates its window
-    /// in the same memory, which it left inaccessible meanwhile (TASK-79.8).
-    fn reopen(&mut self) -> Result<(), cladefs::Error> {
-        let cell = connect(&self.config.cladefsd_socket, &self.config.id, &self.on_lost)?
-            .open_read_only(&self.config.path_on_host)?;
-        self.following = Arc::new(Following::default());
-        hear_commits(&cell, &self.following);
-        hear_stats_asks(&cell, &self.notices);
-        self.config_space.cell = cell.cell().to_le();
-        self.cell = Some(Arc::new(cell));
-        self.window_created = false;
         Ok(())
     }
 
@@ -424,9 +359,6 @@ impl Device {
     /// guest's freeze writes them back and rebinds them first, so none is left but one it couldn't.
     pub fn take_snapshot(&mut self, quiesce: impl FnOnce()) -> Result<(), SnapshotError> {
         let id = self.config.id.clone();
-        if self.config.read_only {
-            return Err(SnapshotError::ReadOnly(id));
-        }
         if !self.notices.frozen() {
             return Err(SnapshotError::NotFrozen(id));
         }
@@ -509,13 +441,6 @@ fn connect(
         on_lost();
     });
     Ok(daemon)
-}
-
-/// cladefs: has `following` hear of the commits of the writer of `cell`, a follower's, from the
-/// one its view is as of.
-fn hear_commits(cell: &CellClient, following: &Arc<Following>) {
-    let heard = following.clone();
-    following.committed(cell.on_committed(move |commit| heard.committed(commit)));
 }
 
 /// cladefs: has the daemon's asks for the stats of `cell`'s VM process and guest ask the guest,

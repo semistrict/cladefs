@@ -21,11 +21,6 @@
 //! cladefs: frozen with its filesystem (`Freezer`), the device takes no writes, frees or commits
 //! until it thaws: those wait at its `Gate`, as a snapshot of the VM is taken, which a VM restored
 //! from, with a cell of its own, thaws in (TASK-39.1).
-//!
-//! cladefs: a follower's device (doc-4's F_READ_ONLY, backlog doc-8) reads a cell another VM
-//! writes, as of one of its commits, which it advances to the writer's latest (`Device::advance`),
-//! letting go of the commits before once the follower is done with them, and keeps single extents
-//! (`Device::pin`). It writes nothing.
 
 use anyhow::{Error, anyhow};
 use async_trait::async_trait;
@@ -45,8 +40,8 @@ use std::time::Instant;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
 use storage_device::{
-    Device, ExtentId, NoExtent, OpenExtents, OtherCell, Previous, ReadOptions, SealedExtent,
-    WriteFlags, WriteOptions,
+    Device, ExtentId, NoExtent, OpenExtents, OtherCell, ReadOptions, SealedExtent, WriteFlags,
+    WriteOptions,
 };
 
 mod ffi {
@@ -92,7 +87,6 @@ mod ffi {
             capacity: *mut u64,
             asked: *mut u64,
         ) -> c_int;
-        pub fn cladefs_device_committed(dev: *mut Device) -> u64;
         pub fn cladefs_device_seal_begin(dev: *mut Device);
         pub fn cladefs_device_seal_end(dev: *mut Device);
         pub fn cladefs_device_submit(
@@ -113,10 +107,6 @@ const T_ROOT: u32 = 7;
 const T_INFO: u32 = 8;
 const T_RESIZED: u32 = 9;
 const T_FREEZE: u32 = 10;
-const T_ADVANCE: u32 = 11;
-const T_LET_GO: u32 = 12;
-const T_PIN: u32 = 13;
-const T_UNPIN: u32 = 14;
 const RESIZED_TOOK: u32 = 1 << 0;
 const FREEZE_FROZEN: u32 = 1 << 0;
 const WRITE_BARRIER: u32 = 1 << 0;
@@ -129,7 +119,6 @@ const FREE_MANY: u32 = 1 << 0;
 // `struct cladefs_device_info`'s flags (device.h).
 const DEVICE_WRITE_COMMIT: u32 = 1 << 0;
 const DEVICE_FREEZE: u32 = 1 << 1;
-const DEVICE_READ_ONLY: u32 = 1 << 2;
 const DEVICE_FREE_MANY: u32 = 1 << 3;
 
 /// cladefs: the most extents a `FREE` names with `FREE_MANY`: its arguments' one, and its data's,
@@ -157,14 +146,6 @@ struct InfoReply {
     sequence_floor: u64,
     /// `DEVICE_FREEZE`: the cell the guest mints extents of.
     cell: u64,
-}
-
-/// `struct virtio_extent_commit_number`: little-endian.
-#[repr(C)]
-#[derive(Default)]
-struct CommitNumberReply {
-    commit: u64,
-    reserved: u64,
 }
 
 /// What a request's future and the device's completion share.
@@ -235,9 +216,7 @@ pub struct ExtentDevice {
     gate: Arc<Gate>,
     /// cladefs: the guest's cell, which thawing may change (`Freezer`).
     cell: Arc<AtomicU64>,
-    /// cladefs: the number of the commit a follower's device last advanced to (`Device::advance`).
-    advanced: Arc<AtomicU64>,
-    /// cladefs: whether its filesystem writes nothing, mounted read-only (-o ro, or a follower's):
+    /// cladefs: whether its filesystem writes nothing, mounted read-only (-o ro):
     /// then it commits nothing either, as it flushes or closes (`writing_nothing`).
     writes_nothing: bool,
 }
@@ -519,7 +498,6 @@ impl ExtentDevice {
             uploading: Arc::default(),
             gate: Arc::default(),
             cell: Arc::new(AtomicU64::new(info.cell)),
-            advanced: Arc::default(),
             writes_nothing: false,
         };
         let info = this.info().await?;
@@ -534,8 +512,8 @@ impl ExtentDevice {
     }
 
     /// cladefs: the device, for a filesystem mounted on it read-only, which writes nothing: it
-    /// commits nothing either, as it flushes or closes. `Filesystem::open` decides it, a
-    /// follower's device among them (TASK-160.26).
+    /// commits nothing either, as it flushes or closes. `Filesystem::open` decides it
+    /// (TASK-160.26).
     pub fn writing_nothing(mut self) -> Self {
         self.writes_nothing = true;
         self
@@ -575,22 +553,6 @@ impl ExtentDevice {
     /// What makes the device's commits uploaded.
     pub fn uploading(&self) -> Uploading {
         Uploading(self.uploading.clone())
-    }
-
-    /// cladefs: whether it is a follower's device, which reads a cell another VM writes
-    /// (DEVICE_READ_ONLY): its filesystem is read-only.
-    pub fn follows(&self) -> bool {
-        self.info.flags & DEVICE_READ_ONLY != 0
-    }
-
-    /// cladefs: what tells a follower of its writer's commits.
-    pub fn commits(&self) -> Commits {
-        Commits { device: self.device }
-    }
-
-    /// cladefs: the number of the commit a follower's device last advanced to, as it advances.
-    pub fn advanced(&self) -> Arc<AtomicU64> {
-        self.advanced.clone()
     }
 
     /// Whether the cell holds nothing yet: no root, so no filesystem.
@@ -795,57 +757,6 @@ impl Resizer {
     }
 }
 
-/// cladefs: a follower's device's writer's commits, as its configuration says.
-pub struct Commits {
-    device: NonNull<ffi::Device>,
-}
-
-// SAFETY: The device's configuration reads from any thread.
-unsafe impl Send for Commits {}
-// SAFETY: As above.
-unsafe impl Sync for Commits {}
-
-impl Commits {
-    /// The number of the writer's latest commit.
-    pub fn latest(&self) -> u64 {
-        // SAFETY: The device is bound while the filesystem is mounted.
-        unsafe { ffi::cladefs_device_committed(self.device.as_ptr()) }
-    }
-}
-
-/// cladefs: lets go of what a follower's device's view held of the commits before the one it
-/// advanced to, `commit`, when dropped: a request not waited for, which names its commit, as the
-/// device may serve it after the next advance (doc-4's LET_GO).
-struct LetGo {
-    device: NonNull<ffi::Device>,
-    commit: u64,
-}
-
-// SAFETY: The device's requests work from any thread.
-unsafe impl Send for LetGo {}
-// SAFETY: As above.
-unsafe impl Sync for LetGo {}
-
-/// Called once the device has let go: from its interrupt.
-extern "C" fn let_go_done(_arg: *mut c_void, status: c_int) {
-    if status != 0 {
-        log::error!("the extent store failed to let go of commits: errno {}", -status);
-    }
-}
-
-impl Drop for LetGo {
-    fn drop(&mut self) {
-        let op = op(T_LET_GO, 0, None, self.commit, std::ptr::null_mut(), 0);
-        // SAFETY: The device is bound while the filesystem is mounted, and `op` has no data.
-        let ret = unsafe {
-            ffi::cladefs_device_submit(self.device.as_ptr(), &op, let_go_done, std::ptr::null_mut())
-        };
-        if ret != 0 {
-            log::error!("letting go of commits before commit {}: errno {}", self.commit, -ret);
-        }
-    }
-}
-
 /// What the cell holds (`INFO`).
 fn info(device: NonNull<ffi::Device>) -> impl Future<Output = Result<InfoReply, Error>> + Send {
     let mut reply = Box::new(InfoReply::default());
@@ -977,8 +888,8 @@ impl std::fmt::Display for DeviceError {
 
 impl std::error::Error for DeviceError {}
 
-/// Whether `error` is the device's saying that it was cut off from its cell: a follower's, which
-/// its guest remounts.
+/// Whether `error` is the device's saying that its cell is held elsewhere now, as a later placement
+/// holds it (ESTALE, TASK-39.7): an errno the guest gives as it is.
 pub(crate) fn is_stale(error: &(dyn std::error::Error + 'static)) -> bool {
     error.downcast_ref::<DeviceError>().is_some_and(|error| error.errno == ESTALE)
 }
@@ -1207,28 +1118,6 @@ impl Device for ExtentDevice {
     /// (`local_cell`, doc-4, board 7537), so Fxfs needs no `PRE_BARRIER` before journal writes.
     fn atomic_commits(&self) -> bool {
         true
-    }
-
-    async fn advance(&self) -> Result<Previous, Error> {
-        let mut reply = Box::new(CommitNumberReply::default());
-        let data = &mut *reply as *mut CommitNumberReply as *mut c_void;
-        let len = size_of::<CommitNumberReply>() as u32;
-        self.call(op(T_ADVANCE, 0, None, 0, data, len), None).await?;
-        let commit = u64::from_le(reply.commit);
-        self.advanced.store(commit, Ordering::Release);
-        Ok(Previous::new(LetGo { device: self.device, commit }))
-    }
-
-    async fn pin(&self, extent: ExtentId) -> Result<(), Error> {
-        self.call(op(T_PIN, 0, Some(extent), 0, std::ptr::null_mut(), 0), Some(extent)).await
-    }
-
-    async fn unpin(&self, extent: ExtentId) {
-        let unpinned =
-            self.call(op(T_UNPIN, 0, Some(extent), 0, std::ptr::null_mut(), 0), Some(extent));
-        if let Err(error) = unpinned.await {
-            log::error!("unpinning {extent:?}: {error:#}");
-        }
     }
 }
 

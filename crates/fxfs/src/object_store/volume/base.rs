@@ -518,28 +518,6 @@ mod tests {
         base.close().await.expect("Close failed");
     }
 
-    /// A follower taking the layers its writer's flush wrote keeps the store's base layers below
-    /// them: followers open every volume, so that a writer flushing one over a base gets here.
-    #[fuchsia::test]
-    async fn test_base_layers_stay_as_followers_take_flushed_layers() {
-        let (base, manifest) = published(0).await;
-        let (filesystem, _reads) = over(&base).await;
-        let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-        let store = root.new_volume_over_base("repo", &manifest).await.expect("over_base failed");
-        write_file(&filesystem, &store, "new", &[0x11; 4096]).await;
-        store.flush().await.expect("flush failed");
-        let layers = store.tree.immutable_layer_set().layers.len();
-
-        store.take_flushed_layers().await.expect("take_flushed_layers failed");
-        assert_eq!(store.tree.immutable_layer_set().layers.len(), layers);
-        assert_eq!(store.base_layer_count(), 1);
-        assert_eq!(read_file(&store, "new").await, [0x11; 4096]);
-        check_originals(&store).await;
-        std::mem::drop((store, root));
-        filesystem.close().await.expect("Close failed");
-        base.close().await.expect("Close failed");
-    }
-
     /// Manifests that can't be honoured leave no volume.
     /// A manifest says only what layers hold, so none is made while the journal holds more.
     #[fuchsia::test]

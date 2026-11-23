@@ -183,7 +183,7 @@ pub(super) fn test_show_options(dax: bool) {
         .unwrap_or_else(|| panic!("{MNT} not in /proc/mounts: {mounts}"));
     let options: Vec<&str> = line.split(' ').nth(3).unwrap().split(',').collect();
     assert_eq!(options.contains(&"dax"), dax, "{line}");
-    assert!(options.contains(&"rw") && !options.contains(&"follow"), "{line}");
+    assert!(options.contains(&"rw"), "{line}");
 }
 
 /// TASK-26.19: what programs see of what Fxfs does not do (docs/code.md, "Guest Fxfs: what it

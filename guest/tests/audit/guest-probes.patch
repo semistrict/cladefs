@@ -1,6 +1,6 @@
 --- a/guest/linux/fs/cladefs/super.c
 +++ b/guest/linux/fs/cladefs/super.c
-@@ -222,6 +222,9 @@
+@@ -202,6 +202,9 @@
   * Writes what the kernel keeps of `inode` to Fxfs: its mode, owner and times, and with
   * CLADEFS_SET_SIZE in `valid`, its size.
   */
@@ -10,7 +10,7 @@
  static int cladefs_vfs_store_attr(struct inode *inode, u32 valid, u32 flags, struct timespec64 ctime)
  {
  	struct timespec64 atime = inode_get_atime(inode), mtime = inode_get_mtime(inode);
-@@ -237,6 +240,8 @@
+@@ -217,6 +220,8 @@
  		.ctime_ns = timespec64_to_ns(&ctime),
  	};
  
@@ -19,7 +19,7 @@
  	return cladefs_nofs(cladefs_write_inode(cladefs_vfs_fs(inode->i_sb), inode->i_ino, &set));
  }
  
-@@ -948,6 +953,11 @@
+@@ -882,6 +887,11 @@
  }
  
  /* Limit the number of pieces copied per lookup, irrespective of the distance between them. */
@@ -31,18 +31,18 @@
  #define CLADEFS_EXTENT_BATCH 256
  
  /*
-@@ -970,6 +980,8 @@
+@@ -902,6 +912,8 @@
+ 		u64 len = end - at;
+ 		ssize_t count, i;
  
- 		/* cladefs: a follower's window as of one state; `fn` may copy out, which may fault. */
- 		cladefs_vfs_fill_begin(inode->i_sb);
 +		if (READ_ONCE(audit_seek_tid) == current->pid)
 +			audit_seek_calls++;
  		count = cladefs_nofs(cladefs_extent_batch(cladefs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
  						   extents, CLADEFS_EXTENT_BATCH));
- 		cladefs_vfs_fill_end(inode->i_sb);
+ 		if (count < 0) {
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -200,7 +200,29 @@
+@@ -199,7 +199,29 @@
  	 * (cladefs_dax_write_back).
  	 */
  	CLADEFS_DAX_STEP_COUNTED = 10,
@@ -72,7 +72,7 @@
  static unsigned long cladefs_dax_pause_steps;
  module_param_named(dax_pause, cladefs_dax_pause_steps, ulong, 0644);
  MODULE_PARM_DESC(dax_pause, "Steps (bits) of the DAX protocol tasks wait at, until cleared (pause points)");
-@@ -2333,8 +2355,11 @@
+@@ -2316,8 +2338,11 @@
  	size_t dirty = 0;
  
  	lockdep_assert_held(&file->sem);
@@ -85,7 +85,7 @@
  	return dirty;
  }
  
-@@ -2371,6 +2396,10 @@
+@@ -2354,6 +2379,10 @@
  	 * them, and an fsync returns only once they are durable. Returning at once, as no page was
  	 * dirty, an fsync met by the worker's writeback sealed none of its pages (guest/sim, seed 962).
  	 */
@@ -96,7 +96,7 @@
  	mutex_lock(&file->wb_lock);
  	if (!atomic_long_read(&file->dirty_pages))
  		goto out;
-@@ -2383,6 +2412,13 @@
+@@ -2366,6 +2395,13 @@
  		goto out;
  	}
  	down_read(&file->sem);
@@ -110,7 +110,7 @@
  	most = cladefs_dax_dirty_ranges(file);
  	up_read(&file->sem);
  	/*
-@@ -2412,6 +2448,8 @@
+@@ -2395,6 +2431,8 @@
  		most = now;
  	}
  	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0) {
@@ -119,7 +119,7 @@
  		xa_clear_mark(&file->ranges, chunk, XA_MARK_0);
  		batch[nr].range = range;
  		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */
-@@ -2436,6 +2474,8 @@
+@@ -2419,6 +2457,8 @@
  		cladefs_dax_put_range(dax, batch[i].range);
  	atomic64_inc(&dax->writebacks);
  	written = pages - kept;
@@ -128,7 +128,7 @@
  	atomic64_add(written, &dax->written);
  	/*
  	 * As the page cache's writeback: what an I/O error stopped is clean, the error the file's
-@@ -2552,12 +2592,23 @@
+@@ -2535,12 +2575,23 @@
  	struct cladefs_dax_file *file;
  	size_t nr = 0, most = 0;
  	unsigned long ino;
@@ -153,11 +153,10 @@
  	if (most)
  		*files = cladefs_nofs(kvmalloc_array(most, sizeof(**files), GFP_KERNEL));
  	if (*files) {
-@@ -2568,6 +2619,15 @@
- 				(*files)[nr++] = file;
+@@ -2552,6 +2603,15 @@
  			}
  		}
-+	}
+ 	}
 +	if (observe) {
 +		size_t i;
 +		bool selected = false;
@@ -166,9 +165,10 @@
 +			selected |= (*files)[i]->ino == READ_ONCE(audit_old_ino);
 +		WRITE_ONCE(audit_old_selected, selected);
 +		WRITE_ONCE(audit_collections, audit_collections + 1);
- 	}
++	}
  	mutex_unlock(&dax->files_lock);
  	return most && !*files ? -ENOMEM : nr;
+ }
 --- a/guest/tests/test_cases/src/test_fxfs_guest_checks/guest/mod.rs
 +++ b/guest/tests/test_cases/src/test_fxfs_guest_checks/guest/mod.rs
 @@ -22,6 +22,8 @@

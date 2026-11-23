@@ -5,8 +5,8 @@
 # The guest suites, as production runs them, on GitHub's runners, which have KVM (TASK-284):
 # Firecracker in its jailer under its seccomp filter, and branches kept in object storage, an S3
 # bucket on the runner (RustFS, scripts/test-e2e-rustfs.sh). The nightly suite (`runner list --tag
-# nightly`): the default suite's cases and the guest kernel's, which it lacked (followers,
-# snapshots, volumes, pjdfstest), the others cheap on a release kernel (TASK-160.29), and xfstests'
+# nightly`): the default suite's cases and the guest kernel's, which it lacked (snapshots,
+# volumes, pjdfstest), the others cheap on a release kernel (TASK-160.29), and xfstests'
 # generic/quick with DAX and without, its known failures checked (TASK-149.20.1). Built once, its
 # artifacts and kernel shared by a matrix of jobs, each a part of the suite (`--shard K/N`), within
 # a runner's time and its 16 GB; their results each job's artifact. And guest/sim whole, which CI

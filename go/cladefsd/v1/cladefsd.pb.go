@@ -2109,9 +2109,9 @@ type StatCellResponse struct {
 	// alone charges it (TASK-49).
 	Own uint64 `protobuf:"varint,7,opt,name=own,proto3" json:"own,omitempty"`
 	// Those of the extents it inherited from the branches it was forked from, which may still share
-	// them. Views of followers may keep more, freed: used is at least own and inherited.
+	// them: used is own and inherited.
 	Inherited uint64 `protobuf:"varint,8,opt,name=inherited,proto3" json:"inherited,omitempty"`
-	// The commit number of its latest commit: what a follower of it advances to.
+	// The commit number of its latest commit.
 	Committed uint64 `protobuf:"varint,9,opt,name=committed,proto3" json:"committed,omitempty"`
 	// Whether its commits upload to the daemon's bucket now: while a VM process has it open, as
 	// writer. If not, the fields below are zero (TASK-50.5).
@@ -2570,8 +2570,8 @@ type GetCountersResponse struct {
 	Reads uint64 `protobuf:"varint,8,opt,name=reads,proto3" json:"reads,omitempty"`
 	// The bytes they read.
 	ReadBytes uint64 `protobuf:"varint,9,opt,name=read_bytes,json=readBytes,proto3" json:"read_bytes,omitempty"`
-	// Of those, the bytes read straight from local cells or object storage: of open extents, and
-	// followers'. Sealed extents' are read through the extent cache, whose page-ins count them.
+	// Of those, the bytes read straight from local cells or object storage: of open extents. Sealed
+	// extents' are read through the extent cache, whose page-ins count them.
 	ReadStoredBytes uint64 `protobuf:"varint,10,opt,name=read_stored_bytes,json=readStoredBytes,proto3" json:"read_stored_bytes,omitempty"`
 	// Parts of extents fetched into the host's cache ahead of forks' guests, as their versions' read
 	// evidence predicted them, not found kept there.
@@ -2895,14 +2895,12 @@ func (x *GetStatsResponse) GetVms() []*VmStats {
 type VmStats struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its connection's number, the daemon's count of connections as it connected: what tells apart
-	// a cell's writer and its followers, of one cell.
+	// a cell's writers over time.
 	Connection uint64 `protobuf:"varint,1,opt,name=connection,proto3" json:"connection,omitempty"`
 	// Its cell.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
 	// Its cell's directory, without symbolic links.
 	Path string `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
-	// Whether it follows its cell, read-only, or writes it.
-	Follower bool `protobuf:"varint,4,opt,name=follower,proto3" json:"follower,omitempty"`
 	// The commit it said it was built of, empty if it didn't.
 	Build string `protobuf:"bytes,5,opt,name=build,proto3" json:"build,omitempty"`
 	// Its counters: its window's stage operations, `stage_ops`, their nanoseconds, `stage_ns`, and
@@ -2974,13 +2972,6 @@ func (x *VmStats) GetPath() string {
 		return x.Path
 	}
 	return ""
-}
-
-func (x *VmStats) GetFollower() bool {
-	if x != nil {
-		return x.Follower
-	}
-	return false
 }
 
 func (x *VmStats) GetBuild() string {
@@ -4771,14 +4762,13 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
 	"\vGaugesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x81\x05\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xeb\x04\n" +
 	"\aVmStats\x12\x1e\n" +
 	"\n" +
 	"connection\x18\x01 \x01(\x04R\n" +
 	"connection\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x12\n" +
-	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1a\n" +
-	"\bfollower\x18\x04 \x01(\bR\bfollower\x12\x14\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x14\n" +
 	"\x05build\x18\x05 \x01(\tR\x05build\x12F\n" +
 	"\bcounters\x18\x06 \x03(\v2*.cladefs.cladefsd.v1.VmStats.CountersEntryR\bcounters\x12@\n" +
 	"\x06gauges\x18\a \x03(\v2(.cladefs.cladefsd.v1.VmStats.GaugesEntryR\x06gauges\x12@\n" +
@@ -4796,7 +4786,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\vWindowEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01B\b\n" +
-	"\x06_guest\"\xda\x02\n" +
+	"\x06_guestJ\x04\b\x04\x10\x05\"\xda\x02\n" +
 	"\n" +
 	"GuestStats\x12\x14\n" +
 	"\x05build\x18\x01 \x01(\tR\x05build\x12I\n" +

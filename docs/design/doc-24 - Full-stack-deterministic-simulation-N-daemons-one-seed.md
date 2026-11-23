@@ -303,7 +303,7 @@ converts a path end to end, smallest first:
 6. The cell's open and close with its uploader: `upload::open_async`, `Uploader::stop`, and
    `OpenCell`'s and `host_cell`'s open, create, take and close in async forms.
 7. The control handlers on the async forms: `blocking()` keeps only disk work.
-8. VM OPEN (writer and follower), bases, VERSION, DROP_VERSION and FORK as futures.
+8. VM OPEN, bases, VERSION, DROP_VERSION and FORK as futures.
 9. An explicit async close for every cell the daemon has open, and under madsim an assert in
    `Drop` that it was closed. The ordering rules of TASK-54, TASK-79.34 and TASK-129 rest on
    today's close in `Drop`.
@@ -404,8 +404,7 @@ fail `scripts/test.sh` there, so it has none. The rest found none: `local_cell::
 steps aimed at the protocol's races over 20,000 seeds, where a full-stack seed reaches them
 seldom; aiming the full stack's faults at those races is adoption 5 below. `local_cell::Rules`
 (the open cell's concurrency) found none either: its framings', flushes' and frees' rules over
-2,000 seeds of their profiles, and its views' and writes' rules guard a follower and a writer
-racing its own commits, which one simulated guest, its requests one at a time, never is; Shuttle's
+2,000 seeds of their profiles, and its writes' rules guard a writer racing its own commits, which one simulated guest, its requests one at a time, never is; Shuttle's
 searches find them (`crates/local_cell/tests/shuttle`).
 
 **What it found**: cladefsd's drain counters were process statics, so each simulated host waited

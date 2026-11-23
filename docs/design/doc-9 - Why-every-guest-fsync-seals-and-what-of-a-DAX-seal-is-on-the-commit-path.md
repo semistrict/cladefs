@@ -34,7 +34,7 @@ extents were rejected. What depends on it:
   (doc-4, The host's storage; doc-7). An extent still open after a local commit would have bytes
   in one segment and later bytes in another, and the index, the collector and the bucket would have
   to version extents.
-- **Sharing is by ID.** Forks, snapshots and followers name the extents they share; the host's
+- **Sharing is by ID.** Forks and snapshots name the extents they share; the host's
   extent cache maps one copy of an extent into every VM that reads it. Both are safe only because an
   extent never changes once a commit has named it. An extent left open past a commit is one the
   writer can still change under whoever shares it.
@@ -48,7 +48,7 @@ Fxfs never rewrites a committed block in place, so a *committed-but-open* stagin
 conceivable: commit its written prefix, keep the rest writable, seal on fork, snapshot, reclaim or
 when it is full. It would save the restage (a new staging extent and its MAP) and the evacuation
 after each fsync. It costs an extent store format whose extents grow across commits, prefix-level
-protection of window pages, and seal-on-share in forks, snapshots and followers. Not worth it
+protection of window pages, and seal-on-share in forks and snapshots. Not worth it
 while the cheaper items below remain; revisit if they don't close the gap.
 
 ## 2. Can the seal's MAPs leave the commit path?

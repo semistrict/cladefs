@@ -95,12 +95,6 @@
 //! leave freed takes none of the cell's room, however much, which the writer could neither make
 //! room for nor know of.
 //!
-//! **Views.** [`LocalCell::view`] gives a [`View`] of the cell as of its latest commit, which a
-//! follower reads through ([`LocalCell::read_view`]) while the writer goes on (doc-8, TASK-42.2):
-//! the extents it frees after a view's commit are kept while the view lives, and those a view pins,
-//! and count as used. Views never wait for a commit. One that lags too long, or keeps too much, is
-//! cut off ([`CutOff`]).
-//!
 //! **Reading.** Reads of open extents read their raw files, which no CRC covers; reads of sealed
 //! ones read the parts their bytes are in, whole, checked against their CRCs, and decompress those
 //! stored compressed. The parts unpacked lately are kept, as reads are mostly of their
@@ -204,7 +198,6 @@ pub use timings::{DURABLE_PHASES, FLUSH_PHASES, FRAMING_PHASES, Phases, Timed, T
 mod untrusted;
 pub mod upload;
 mod uploads;
-mod views;
 mod wal;
 mod written;
 pub use written::{Written, written};
@@ -243,4 +236,3 @@ pub use sync::Rules;
 #[cfg(feature = "shuttle")]
 pub use sync::{rules, set_rules};
 pub use uploads::Closed;
-pub use views::{CutOff, NotHeld, TooManyPins, View, ViewStats};

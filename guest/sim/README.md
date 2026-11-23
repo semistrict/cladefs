@@ -116,7 +116,7 @@ It can't find:
 - **Fxfs.** Journal, compaction, crash recovery, and whatever the model gets wrong that
   `crates/fxfs-sim-diff`, which runs the model beside Fxfs, doesn't find ("The model against Fxfs").
 - **Lock order inversions that no seed plays out:** there is no lockdep graph.
-- **The followers and private mappings**, which the sim doesn't reach yet.
+- **Private mappings**, which the sim doesn't reach yet.
 - **Copy on write's host side**: userfaultfd, KVM's async page faults resolved as reads, a source
   evicting its pages, a snapshot refused while pages are private. The model copies pages at a
   `PRIVATE` alone, in the request, and nothing else of the host's runs meanwhile.

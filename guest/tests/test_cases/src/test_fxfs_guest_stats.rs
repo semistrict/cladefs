@@ -84,7 +84,6 @@ mod host {
         let vm = (vms.iter())
             .find(|vm| vm["path"].as_str().map(PathBuf::from).as_deref() == Some(cell_dir))
             .with_context(|| format!("no VM of {}", cell_dir.display()))?;
-        ensure!(vm["follower"] == false, "a writer: {vm}");
         ensure!(vm["answered"] == true, "it answered: {vm}");
         ensure!(vm["vmm"]["build"].as_str() == Some(build), "the VM process's build: {vm}");
         ensure!(vm["vmm"]["counters"]["stage_ops"].as_u64() > Some(0), "stage operations: {vm}");

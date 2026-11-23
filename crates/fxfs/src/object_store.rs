@@ -2537,14 +2537,6 @@ impl ObjectStore {
         self.store_info.lock().as_ref().unwrap().mutations_key.is_some()
     }
 
-    /// cladefs: the information of a new store that is a snapshot of this one, which must be
-    /// unencrypted: this store's persistent layers and root and graveyard directories as they
-    /// are, the object ids it has used so far, and a new guid.
-    /// cladefs: how many layers of a base the store's tree has, at its bottom.
-    pub(crate) fn base_layer_count(&self) -> usize {
-        self.store_info.lock().as_ref().map_or(0, |info| info.base_layers.len())
-    }
-
     /// cladefs: what describes the store to a filesystem that reads its extents (backlog doc-10): a
     /// `StoreInfo` with no layers of its own, as its layers are base layers there. `Unavailable` if
     /// the journal holds anything of the store, which layers alone wouldn't say. The caller keeps

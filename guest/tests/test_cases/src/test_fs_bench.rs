@@ -106,12 +106,6 @@ pub enum Backend {
     Ext4DaxPmemFork,
     /// cladefs: as `Ext4DaxPmemFork`, without DAX, the files in the guest's page cache.
     Ext4PmemFork,
-    /// cladefs: as `FxfsGuestDax`, with two follower VMs following its cell, reading what it writes
-    /// as it does (TASK-42.7): what followers cost their writer.
-    FxfsGuestDaxFollowed,
-    /// cladefs: as `FxfsGuestDaxFollowed`, but its followers read nothing: they follow, applying
-    /// its commits, and no more: what following costs a writer, without its followers' reading.
-    FxfsGuestDaxFollowedIdle,
 }
 
 #[cfg_attr(feature = "guest", allow(dead_code))]
@@ -136,20 +130,11 @@ impl Backend {
     fn forks_image(self) -> bool {
         matches!(self, Backend::Ext4DaxPmemFork | Backend::Ext4PmemFork)
     }
-
-    /// Whether the case boots a writer VM and followers of its cell.
-    fn followed(self) -> bool {
-        matches!(self, Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle)
-    }
 }
 
-/// cladefs: what a VM of a fork case is: the base, or a fork (`CLADEFS_FORK_BENCH_ROLE`); or of the
-/// followed case: the writer, or a follower (`follower1`, `follower2`).
+/// cladefs: what a VM of a fork case is: the base, or a fork (`CLADEFS_FORK_BENCH_ROLE`).
 #[cfg_attr(feature = "host", allow(dead_code))]
 const ROLE: &str = "CLADEFS_FORK_BENCH_ROLE";
-
-/// cladefs: the vsock port the followed case's writer says it is ready on, its filesystem mounted.
-const FOLLOW_READY_PORT: u32 = 5055;
 
 /// cladefs: the cell of a fork case's VM, the base's or a fork's.
 #[cfg_attr(feature = "guest", allow(dead_code))]
@@ -531,151 +516,6 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
         Ok(())
     }
 
-    /// cladefs: the followed case's VMs (TASK-42.7), each a Firecracker this process drives: the
-    /// writer, which runs the workloads as `FxfsGuestDax` does, and its followers, which read what
-    /// it writes as it does, each with a root image of its own, on a core of the host's of their
-    /// own, and the writer on the rest, so that what the followers cost the writer is what
-    /// following does, not their reading's taking its CPUs: theirs from its SMT siblings too. The
-    /// followers start once the writer has mounted its filesystem, its workloads once they have,
-    /// and they must still be following when it is done; what they read, and how many of their
-    /// reads failed, are observations.
-    mod followed {
-        use super::*;
-        use crate::vm::Firecracker;
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixListener;
-        use std::path::Path;
-
-        const FOLLOWERS: [&str; 2] = ["follower1", "follower2"];
-
-        pub fn run(test_setup: &TestSetup) -> anyhow::Result<()> {
-            let mut cores = host_cores()?;
-            anyhow::ensure!(cores.len() >= 2, "the followers need a core of their own: {cores:?}");
-            let theirs = cores.pop().expect("two or more");
-            let writers = cores.concat();
-            let root = setup_rootfs(test_setup)?;
-            let cell_dir = test_setup.tmp_dir.join("extents");
-            let uds =
-                std::env::temp_dir().join(format!("cladefs-followed-{}.vsock", std::process::id()));
-            let ready = format!("{}_{FOLLOW_READY_PORT}", uds.display());
-            let listener = UnixListener::bind(&ready)?;
-            let mut writer = spawn(test_setup, &root, "writer", &cell_dir, Some(&uds), &writers)?;
-            // Until the writer says its filesystem is mounted, unless it is gone first.
-            let mut stream = writer.accept(&listener)?;
-            let mut said = String::new();
-            BufReader::new(&stream).read_line(&mut said)?;
-            anyhow::ensure!(said == "ready\n", "the writer said {said:?}");
-            let followers = FOLLOWERS
-                .iter()
-                .map(|role| spawn(test_setup, &root, role, &cell_dir, None, &theirs))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            // The writer's workloads wait for its followers' root images, which spawning them
-            // makes and syncs, onto the host's filesystem its cell is on too (TASK-92.38).
-            stream.write_all(b"go\n")?;
-            let (status, console) = writer.wait()?;
-            // The writer's output is the case's.
-            crate::vm::split_console(std::fs::File::open(&console)?)?;
-            for (role, mut follower) in FOLLOWERS.iter().zip(followers) {
-                anyhow::ensure!(follower.running()?, "{role} stopped before the writer was done");
-                let console = test_setup.tmp_dir.join(format!("{role}.console.txt"));
-                follower.kill()?;
-                observe(role, &console)?;
-            }
-            let _ = std::fs::remove_file(&ready);
-            let _ = std::fs::remove_file(&uds);
-            anyhow::ensure!(status.success(), "the writer's VM exited {status}");
-            Ok(())
-        }
-
-        /// Boots `role`'s VM on the cell at `cell_dir`, on the host's CPUs `cpus`: the writer's,
-        /// which says it is ready over the vsock at `uds`, or a follower's.
-        fn spawn(
-            test_setup: &TestSetup,
-            root: &Path,
-            role: &str,
-            cell_dir: &Path,
-            uds: Option<&Path>,
-            cpus: &[usize],
-        ) -> anyhow::Result<Firecracker> {
-            let writer = role == "writer";
-            // The followers take less of the host from the writer.
-            let mut vm = if writer { Vm::new(2, 2048)? } else { Vm::new(1, 1024)? };
-            vm.guest_kernel()?;
-            vm.cpus(cpus);
-            vm.root_image(&format!("{role}.rootfs.ext4"));
-            if writer {
-                vm.cell(
-                    "bench",
-                    cell_dir,
-                    IMAGE_SIZE,
-                    crate::common::dax_window(crate::common::Window::Large)?,
-                )?;
-            } else {
-                vm.cell_following(
-                    "bench",
-                    cell_dir,
-                    crate::common::dax_window(crate::common::Window::Large)?,
-                )?;
-            }
-            if let Some(uds) = uds {
-                vm.vsock(uds);
-            }
-            vm.env(&CString::new(format!("{ROLE}={role}"))?);
-            workloads_env(&mut vm)?;
-            let api = Vm::api_socket(role);
-            vm.spawn_api(root, &test_setup.test_case, role, &api)
-        }
-
-        /// The host's cores, each its CPUs (SMT siblings), in order.
-        fn host_cores() -> anyhow::Result<Vec<Vec<usize>>> {
-            let mut cores = Vec::new();
-            for entry in std::fs::read_dir("/sys/devices/system/cpu")? {
-                let path = entry?.path();
-                let siblings = path.join("topology/thread_siblings_list");
-                let is_cpu = path
-                    .file_name()
-                    .and_then(|name| name.to_str()?.strip_prefix("cpu"))
-                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-                if is_cpu && siblings.exists() {
-                    let core = cpu_list(std::fs::read_to_string(&siblings)?.trim())?;
-                    if !cores.contains(&core) {
-                        cores.push(core);
-                    }
-                }
-            }
-            cores.sort();
-            Ok(cores)
-        }
-
-        /// The CPUs of a CPU list as the kernel writes one: `0-3,8,10-11`.
-        fn cpu_list(list: &str) -> anyhow::Result<Vec<usize>> {
-            let mut cpus = Vec::new();
-            for range in list.split(',') {
-                let (first, last) = range.split_once('-').unwrap_or((range, range));
-                cpus.extend(first.parse::<usize>()?..=last.parse::<usize>()?);
-            }
-            Ok(cpus)
-        }
-
-        /// Reports what the follower `role` said last on its console at `console`: the files it
-        /// read, and its reads that failed, other than those its writer's changes raced.
-        fn observe(role: &str, console: &Path) -> anyhow::Result<()> {
-            let console = std::fs::read(console)?;
-            let console = String::from_utf8_lossy(&console);
-            let last = console.lines().filter_map(|line| line.split_once("FOLLOWED ")).last();
-            let Some((_, counts)) = last else {
-                anyhow::bail!("{role} never said what it read");
-            };
-            let [reads, raced, failed] = counts.split_whitespace().collect::<Vec<_>>()[..] else {
-                anyhow::bail!("{role} said {counts:?}");
-            };
-            println!("OBSERVED {role}-reads {reads}");
-            println!("OBSERVED {role}-raced-reads {raced}");
-            println!("OBSERVED {role}-failed-reads {failed}");
-            Ok(())
-        }
-    }
-
     impl TestFsBench {
         fn name(&self) -> &'static str {
             match self.backend {
@@ -693,8 +533,6 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 Backend::FxfsGuestForkWarm => "fxfs-guest-fork-warm",
                 Backend::Ext4DaxPmemFork => "ext4-dax-pmem-fork",
                 Backend::Ext4PmemFork => "ext4-pmem-fork",
-                Backend::FxfsGuestDaxFollowed => "fxfs-guest-dax-followed",
-                Backend::FxfsGuestDaxFollowedIdle => "fxfs-guest-dax-followed-idle",
             }
         }
     }
@@ -724,9 +562,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 | Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold
                 | Backend::FxfsGuestDaxForkPredicted
-                | Backend::FxfsGuestForkWarm
-                | Backend::FxfsGuestDaxFollowed
-                | Backend::FxfsGuestDaxFollowedIdle => cladefs_guest_should_run(),
+                | Backend::FxfsGuestForkWarm => cladefs_guest_should_run(),
                 Backend::Ext4GuestKernel
                 | Backend::Ext4Loop
                 | Backend::Ext4LoopUnsafe
@@ -750,8 +586,8 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if self.backend.forks() && std::env::var_os(ROLE).is_none() {
                 return forks::run(self.backend, &test_setup);
             }
-            // With CLADEFS_BENCH_PERF set, this process, which becomes the VMM, or drives a
-            // followed case's VMs, runs again under perf, which samples all its threads, its
+            // With CLADEFS_BENCH_PERF set, this process, which becomes the VMM, runs again under
+            // perf, which samples all its threads, its
             // vCPUs', its devices' and cladefs's, or counts events.
             let perf = std::env::var("CLADEFS_BENCH_PERF").unwrap_or_default();
             if !perf.is_empty() && std::env::var_os("CLADEFS_BENCH_PERF_RUNNING").is_none() {
@@ -782,10 +618,6 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     .env("CLADEFS_BENCH_PERF_RUNNING", "1")
                     .exec();
                 return Err(error.into());
-            }
-            // The followed cases drive their VMs, each a Firecracker of its own, from here.
-            if self.backend.followed() {
-                return followed::run(&test_setup);
             }
             let root_dir = setup_rootfs(&test_setup)?;
 
@@ -827,9 +659,6 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     let image = std::env::var_os(CELL_DIR).context("no image for a fork case")?;
                     vm.env(&CString::new(format!("{ROLE}={}", std::env::var(ROLE)?))?);
                     Some(vm.pmem("bench", std::path::Path::new(&image))?)
-                }
-                Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle => {
-                    unreachable!("followed::run boots its VMs")
                 }
                 Backend::Ext4DaxPmem | Backend::Ext4Pmem => {
                     let image = test_setup.tmp_dir.join("pmem.img");
@@ -903,7 +732,7 @@ mod guest {
     use std::fs;
     use std::io::Write;
     use std::process::Command;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     const MNT: &str = "/mnt/bench";
     /// The file the I/O workloads use.
@@ -958,98 +787,6 @@ mod guest {
             )
         };
         assert_eq!(ret, 0, "mount: {}", std::io::Error::last_os_error());
-    }
-
-    /// cladefs: the followed case's writer says it is ready, its filesystem mounted and synced, for
-    /// its followers to start, and waits for the host to say they have (`go`), so that its
-    /// workloads do not run beside the making of their root images (TASK-92.38).
-    fn ready() {
-        use nix::sys::socket::{AddressFamily, SockFlag, SockType, VsockAddr, connect, socket};
-        use std::io::BufRead as _;
-        use std::os::fd::AsRawFd as _;
-        let socket = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-            .expect("a vsock socket");
-        connect(socket.as_raw_fd(), &VsockAddr::new(2, FOLLOW_READY_PORT))
-            .expect("connecting to the host");
-        let mut host = fs::File::from(socket);
-        host.write_all(b"ready\n").unwrap();
-        let mut said = String::new();
-        std::io::BufReader::new(host).read_line(&mut said).unwrap();
-        assert_eq!(said, "go\n", "the host said {said:?}");
-    }
-
-    /// cladefs: a follower of a followed case reads what its writer writes, as it does, if `read`,
-    /// until the host stops it: it walks the filesystem, reading each file whole, and says each
-    /// second how many files it read, and how many of its reads failed: as the writer's changes
-    /// raced them (a file gone, ENOENT, or changed under it, ESTALE), or not. Otherwise it only
-    /// follows, saying it read nothing.
-    fn follow_reads(read: bool) -> ! {
-        let mut counts = FollowReads::default();
-        let mut said = Instant::now();
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            if read {
-                follow_dir(std::path::Path::new(MNT), &mut buf, &mut counts);
-            } else {
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            if said.elapsed().as_secs() >= 1 {
-                println!("FOLLOWED {} {} {}", counts.reads, counts.raced, counts.failed);
-                said = Instant::now();
-            }
-        }
-    }
-
-    /// cladefs: a follower's reads: the files read whole, and those that failed, as the writer's
-    /// changes raced them or not.
-    #[derive(Default)]
-    struct FollowReads {
-        reads: u64,
-        raced: u64,
-        failed: u64,
-    }
-
-    impl FollowReads {
-        fn failed(&mut self, err: &std::io::Error, path: &std::path::Path) {
-            match err.raw_os_error() {
-                Some(libc::ENOENT | libc::ESTALE) => self.raced += 1,
-                _ => {
-                    self.failed += 1;
-                    eprintln!("follower: {}: {err}", path.display());
-                }
-            }
-        }
-    }
-
-    /// Reads the files under `dir`, into `buf`, counting in `counts`.
-    fn follow_dir(dir: &std::path::Path, buf: &mut [u8], counts: &mut FollowReads) {
-        use std::io::Read;
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(err) => return counts.failed(&err, dir),
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => return counts.failed(&err, dir),
-            };
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => follow_dir(&path, buf, counts),
-                Ok(kind) if kind.is_file() => {
-                    let read = fs::File::open(&path).and_then(|mut file| {
-                        while file.read(buf)? > 0 {}
-                        Ok(())
-                    });
-                    match read {
-                        Ok(()) => counts.reads += 1,
-                        Err(err) => counts.failed(&err, &path),
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => counts.failed(&err, &path),
-            }
-        }
     }
 
     /// The device of the filesystem the host made, which it names.
@@ -2457,16 +2194,6 @@ mod guest {
                 }
                 Backend::FxfsGuest | Backend::FxfsGuestDax | Backend::FxfsGuestDaxUnsafe => {
                     mount("bench", "cladefs", "")
-                }
-                // cladefs: the writer runs the workloads once its followers have started; they
-                // read, or only follow.
-                Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle => {
-                    mount("bench", "cladefs", "");
-                    if std::env::var(ROLE).unwrap() != "writer" {
-                        follow_reads(self.backend == Backend::FxfsGuestDaxFollowed);
-                    }
-                    unsafe { libc::sync() };
-                    ready();
                 }
                 Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold

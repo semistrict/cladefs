@@ -79,7 +79,7 @@ Built: `mount -t cladefs -o volume=NAME tag path`. One Fxfs on the device, one s
 volume, so each repo has a native `st_dev` and `EXDEV`, and attaching needs no new device.
 
 - `struct fxfs_vfs_filesystem` holds what a device's superblocks share, and in Rust `Filesystem`,
-  which the last unmount closes. A follower still mounts its default volume alone.
+  which the last unmount closes.
 - The DAX window is the device's. Each volume has its own table of files, as inode numbers collide
   across volumes. An unmount with others staying drops its ranges and leaves the private pages'
   budget worker running for them.
@@ -87,7 +87,7 @@ volume, so each repo has a native `st_dev` and `EXDEV`, and attaching needs no n
   unmounts, and thaws with the first. No volume mounts while it is frozen (`EBUSY`).
 - Stores' tree caches share one budget. Over it, each cache gives up its oldest item in turn, so
   idle volumes empty and active ones keep the room.
-- With `Options::lazy_volumes`, on for the guest but not followers, a mount opens only volumes the
+- With `Options::lazy_volumes`, on for the guest, a mount opens only volumes the
   journal tail names, and the rest open when mounted. A closed volume holds nothing in the journal.
   What opening adds to the metadata reservation is reserved then, not borrowed: a borrow persists,
   and the next mount's reservation, without that volume, would be less than what is borrowed.
@@ -296,11 +296,11 @@ untracked file kept, and through a snapshot's restore and a reboot.
 
 An in-place swap would replace a volume's base layers under the live mount on a fast-forward, so
 that those layers stop growing and old generations unpin. Part of it exists: `set_layers` already
-installs layers under readers (`crates/fxfs/src/object_store/flush.rs:362`), and a follower's change
-sets drop what the kernel caches and hold open files (doc-8), on read-only mounts. It would still
-need stable object IDs across generations, object ID ranges that publisher and sandboxes don't
+installs layers under readers (`crates/fxfs/src/object_store/flush.rs:362`); live followers' change
+sets, which dropped what the kernel caches and held open files on read-only mounts (doc-8), went
+with them (board 8237). It would still need stable object IDs across generations, object ID ranges that publisher and sandboxes don't
 share, a record-level three-way check (`.git/index` and directory attributes conflict on nearly
-every swap), writable mounts taking the follower's barrier, pins kept for extents the writable layers
+every swap), writable mounts taking a barrier like a follower's fill barrier, pins kept for extents the writable layers
 still name, and a format change. Publishers updating one volume in place keep this open.
 
 ## Proof

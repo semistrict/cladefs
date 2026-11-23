@@ -141,5 +141,6 @@ mutants, dead-ends, the perf gate.
 2. **Local disk becomes the bucket's WAL and cache**, after the DAX work. TASK-165.
 3. **No radical spike:** improve cladefs as it is.
 4. **Scope:** multi-host points and shared git volumes continue; live followers and TASK-96's
-   store layer are frozen (TASK-42.11, 92.30, 92.31, 96 at low priority).
+   store layer are frozen (TASK-42.11, 92.30, 92.31, 96 at low priority). Live followers were
+   removed outright on 2026-11-22 (board 8237).
 5. Density target: not yet asked.

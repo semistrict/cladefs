@@ -11,9 +11,6 @@ license.workspace = true
 migration = []
 # Hooks for benchmarks.
 benchmark = []
-# cladefs: the follower's rules settable (`follower::set_rules`), for the mutation tests of the
-# followers' simulation (crates/follower_sim), which runs under Shuttle.
-shuttle = []
 
 [dependencies]
 anyhow.workspace = true

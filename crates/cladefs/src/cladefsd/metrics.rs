@@ -11,9 +11,9 @@
 //! - `cladefsd_build_info{commit}`, 1: the commit the daemon was built of
 //!   (`crate::BUILD_COMMIT`); `cladefsd_vm_build_info{cell,commit}`: the VM processes
 //!   connected, by their cell, in base 32, and the commit they said they were built
-//!   of (`wire::BUILD`), a writer and its followers counted together (TASK-111.7).
-//! - `cladefsd_connections`, `cladefsd_stores_open` and `cladefsd_follower_views`:
-//!   the VM processes connected, the cells their connections write, and the followers' views.
+//!   of (`wire::BUILD`) (TASK-111.7).
+//! - `cladefsd_connections` and `cladefsd_stores_open`: the VM processes connected, and the cells
+//!   their connections write.
 //! - `cladefsd_extent_cache_pinned_entries` and `cladefsd_extent_cache_idle_entries`: the sealed
 //!   extents cached that something but the cache holds, and those nothing else does
 //!   (`crate::cache::entries`); `cladefsd_window_mappings`, `cladefsd_window_mapped_bytes` and
@@ -23,8 +23,8 @@
 //!   VM processes say (doc-26), and `cladefsd_window_open_maps_refused_total`, the `MAP`s of open extents refused, which no
 //!   guest makes (backlog doc-13).
 //! - cladefs: of each VM process connected that opened a cell, by its cell, in
-//!   base 32, and its connection's number (`connection`), which tells a writer and its
-//!   followers apart (TASK-111.5): `cladefsd_vm_window_mappings`,
+//!   base 32, and its connection's number (`connection`), which tells its writers over time apart
+//!   (TASK-111.5): `cladefsd_vm_window_mappings`,
 //!   `cladefsd_vm_window_mapped_bytes`, `cladefsd_vm_window_pages` and
 //!   `cladefsd_vm_window_private_pages`, its window's, as the gauges above count all windows';
 //!   `cladefsd_vm_host_mappings`, the runs of pages its window's second stage has installed in
@@ -99,7 +99,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// The kinds of request metrics are kept of, and their names.
-const KINDS: [(u32, &str); 22] = [
+const KINDS: [(u32, &str); 18] = [
     (OPEN, "open"),
     (READ, "read"),
     (WRITE, "write"),
@@ -114,10 +114,6 @@ const KINDS: [(u32, &str); 22] = [
     (FORK, "fork"),
     (RESIZED, "resized"),
     (MAPPINGS, "mappings"),
-    (ADVANCE, "advance"),
-    (LET_GO, "let_go"),
-    (PIN, "pin"),
-    (UNPIN, "unpin"),
     (TRANSFER, "transfer"),
     (FREE_MANY, "free_many"),
     // cladefs: TASK-111.4.
@@ -678,7 +674,6 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
             "Cells VM processes' connections write.",
             super::cells::open_count() as u64,
         ),
-        ("follower_views", "Followers' views of cells.", super::cells::follower_views() as u64),
         (
             "extent_cache_pinned_entries",
             "Sealed extents cached that a window's mapping, a read or a page-in holds.",

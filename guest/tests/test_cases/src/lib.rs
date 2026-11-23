@@ -63,12 +63,6 @@ mod test_cells_per_host;
 use test_cells_per_host::TestCellsPerHost;
 mod test_fxfs_guest_daemon_lost;
 use test_fxfs_guest_daemon_lost::TestFxfsGuestDaemonLost;
-mod test_fxfs_guest_follow;
-use test_fxfs_guest_follow::TestFxfsGuestFollow;
-mod test_fxfs_guest_follow_remount;
-use test_fxfs_guest_follow_remount::TestFxfsGuestFollowRemount;
-mod test_fxfs_guest_follow_torture;
-use test_fxfs_guest_follow_torture::{Mutant, TestFxfsGuestFollowTorture};
 mod test_fxfs_guest_import;
 use test_fxfs_guest_import::TestFxfsGuestImport;
 mod test_fxfs_guest_automount;
@@ -228,7 +222,7 @@ tags! {
     SoakChecks = "soak-checks",
     /// scripts/soak-workloads-host.sh's sanitized group, on the debug kernel.
     SoakSanitized = "soak-sanitized",
-    /// scripts/soak-workloads-host.sh's replicas group: followers, snapshots and migrations.
+    /// scripts/soak-workloads-host.sh's replicas group: snapshots and migrations.
     SoakReplicas = "soak-replicas",
     /// scripts/soak-workloads-host.sh's mixed group: VMs on forks of a base under mixed load for
     /// hours, through VMs, the daemon and the host crashing and uploads failing.
@@ -556,61 +550,6 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestFxfsGuestDaemonLost),
         ),
         TestCase::new("runner-deadlock", &[Tag::Manual], Box::new(TestRunnerDeadlock)),
-        TestCase::new(
-            "fxfs-guest-follow",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollow { dax: false }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollow { dax: true }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-remount",
-            &[Tag::Nightly],
-            Box::new(TestFxfsGuestFollowRemount { dax: false }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-remount-dax",
-            &[Tag::Nightly, Tag::SoakReplicas],
-            Box::new(TestFxfsGuestFollowRemount { dax: true }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture",
-            &[Tag::Kernel, Tag::Nightly, Tag::SoakReplicas],
-            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: None }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture-dax",
-            &[Tag::Kernel, Tag::Nightly, Tag::SoakReplicas],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: None }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture-mutant",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Drop) }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture-mutant-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Drop) }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture-mutant-faults-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::DropFaults) }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture-mutant-barrier-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Barrier) }),
-        ),
-        TestCase::new(
-            "fxfs-guest-follow-torture-mutant-nested-dax",
-            &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Nested) }),
-        ),
         TestCase::new(
             "fxfs-guest-import",
             &[Tag::Kernel, Tag::Nightly],
@@ -946,17 +885,6 @@ pub fn test_cases() -> Vec<TestCase> {
             "bench-fs-fxfs-guest-dax",
             &[Tag::Bench],
             Box::new(TestFsBench { backend: BenchBackend::FxfsGuestDax }),
-        ),
-        #[cfg(any(feature = "host", target_os = "linux"))]
-        TestCase::new(
-            "bench-fs-fxfs-guest-dax-followed",
-            &[Tag::Manual],
-            Box::new(TestFsBench { backend: BenchBackend::FxfsGuestDaxFollowed }),
-        ),
-        TestCase::new(
-            "bench-fs-fxfs-guest-dax-followed-idle",
-            &[Tag::Manual],
-            Box::new(TestFsBench { backend: BenchBackend::FxfsGuestDaxFollowedIdle }),
         ),
         #[cfg(any(feature = "host", target_os = "linux"))]
         TestCase::new(

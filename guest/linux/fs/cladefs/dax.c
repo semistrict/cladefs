@@ -43,8 +43,7 @@
  * go as its data does (unlinked, truncated); others are reclaimed, least recently used, when the
  * window runs out.
  *
- * Locks are taken in this order: an inode's lock (read and write); cladefs: a follower's fill
- * barrier (vfs.h), which a batch takes holding no inode's lock; an inode's invalidate_lock
+ * Locks are taken in this order: an inode's lock (read and write); an inode's invalidate_lock
  * (faults, truncation and reclaim); its file's writeback lock (`wb_lock`); then its file's DAX
  * semaphore. Another inode's are only tried, when reclaiming its ranges.
  */
@@ -391,11 +390,6 @@ struct cladefs_dax {
 	u64 regions_at;
 	/* cladefs: the window's size, which no page's place is past (cladefs_dax_page_offset). */
 	u64 window_len;
-	/*
-	 * cladefs: whether the device follows a store another VM writes (CLADEFS_DEVICE_READ_ONLY): its
-	 * window takes no store, nor maps zeros, its holes left unmapped.
-	 */
-	bool read_only;
 	/*
 	 * cladefs: how often the window had no room for a range, or for a region in their own space,
 	 * how many ranges were reclaimed for room, and how many regions there are (TASK-91.7);
@@ -757,7 +751,7 @@ static long cladefs_dax_mapped(struct cladefs_dax *dax, struct cladefs_dax_range
 /*
  * cladefs: maps the `count` maps `maps`, of `range`'s pages, in as few requests as the device takes,
  * or one by one if that fails, to say which: a sealed extent the device doesn't hold (-ENOENT),
- * never written, as zeros, a hole, as Fxfs reads it, or, a follower's, left unmapped, a hole. An
+ * never written, as zeros, a hole, as Fxfs reads it. An
  * extent open still (-EPERM: the window maps none), Fxfs having taken it for sealed, as one minted
  * before a seal and written after it is (storage_device's OpenExtents), fails them, unless a
  * `rebind`'s, when it is left as it is, its pages private. Has the range say what it mapped, and a
@@ -804,8 +798,6 @@ static long cladefs_dax_map_all(struct cladefs_dax *dax, struct cladefs_dax_rang
 				  cladefs_device_map(dax->dev, map->cell, map->sequence, map->offset,
 						  map->len, map->window_offset, map->prefault);
 
-			if (one == -ENOENT && !map->zeros && dax->read_only)
-				continue;
 			if (one == -ENOENT && !map->zeros) {
 				map->zeros = true;
 				one = cladefs_device_map_zeros(dax->dev, map->window_offset, map->len);
@@ -868,8 +860,8 @@ static ssize_t cladefs_dax_sealed_extents(struct cladefs_dax *dax, struct cladef
 /*
  * cladefs: the maps of `range`'s pages `first` to `last`, exclusive, in `maps`, from the pieces
  * `found` of the file's bytes there, `count` of them, sorted, which may reach past them: each
- * sealed piece's pages from its extent, zeros where the file has none, a hole or past its end, but
- * on a follower's window, which leaves those unmapped. Prefaults (MAP_PREFAULT) if `prefault`. As
+ * sealed piece's pages from its extent, zeros where the file has none, a hole or past its end.
+ * Prefaults (MAP_PREFAULT) if `prefault`. As
  * many as 2 * (`last` - `first`) + 1 at most: how many.
  */
 static size_t cladefs_dax_maps_of(struct cladefs_dax *dax, struct cladefs_dax_range *range,
@@ -890,7 +882,7 @@ static size_t cladefs_dax_maps_of(struct cladefs_dax *dax, struct cladefs_dax_ra
 		if (e)
 			from = clamp_t(unsigned long, (e->offset - start) >> PAGE_SHIFT, page, last);
 		/* The hole before it, or past the last: zeros. */
-		if (from > page && !dax->read_only)
+		if (from > page)
 			maps[n++] = (struct cladefs_device_map) {
 				.window_offset = cladefs_dax_page_offset(range, page),
 				.len = (u64)(from - page) << PAGE_SHIFT,
@@ -917,8 +909,7 @@ static size_t cladefs_dax_maps_of(struct cladefs_dax *dax, struct cladefs_dax_ra
  * cladefs: maps `range`'s pages `first` to `last`, exclusive, read-only (doc-13): each from the
  * sealed extent holding the file's bytes there, or zeros where it has none, holes and pages past
  * its end, so that every page of a range has a window page, which the iomap that dirties it makes
- * private, and no write is new (IOMAP_F_NEW); a follower's window leaves those unmapped, holes, as
- * it takes no store. Nothing maps an open extent: what is open is sealed first (cladefs_fsync), as a
+ * private, and no write is new (IOMAP_F_NEW). Nothing maps an open extent: what is open is sealed first (cladefs_fsync), as a
  * page-cache inode's writes read in before their seal, or a growth's copy of the last block, may
  * leave; rebinding private pages, as their writeback left them, is cladefs_dax_rebind_range's, which
  * leaves those whose extent is open private. 0, or a -errno. With the file's semaphore held for
@@ -1921,8 +1912,7 @@ static void cladefs_dax_hole(struct iomap *iomap, loff_t length)
  * Before any iomap of such a page, a read's as a write's: a read's hole has a fault map the
  * kernel's zero page, which nothing takes away, no write being new (IOMAP_F_NEW), so that a load
  * read zeros where read(2) read a write's bytes, and a write from the mapping copied them (guest/sim,
- * failures seed 1669). Not a follower's, whose holes have none, as it takes no write. Prefaulted
- * if `prefault`, a read's (cladefs_dax_map_pages).
+ * failures seed 1669). Prefaulted if `prefault`, a read's (cladefs_dax_map_pages).
  */
 static int cladefs_dax_map_missing(struct inode *inode, struct cladefs_dax_range *range,
 				unsigned long first, unsigned long last, bool prefault)
@@ -1935,8 +1925,7 @@ static int cladefs_dax_map_missing(struct inode *inode, struct cladefs_dax_range
 
 	for (;;) {
 		down_read(&file->sem);
-		if (dax->read_only ||
-		    cladefs_dax_pages_next_unmapped(range->state, first, last) == last)
+		if (cladefs_dax_pages_next_unmapped(range->state, first, last) == last)
 			return 0;
 		up_read(&file->sem);
 		down_write(&file->sem);
@@ -1987,12 +1976,6 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 			return PTR_ERR(range);
 		down_read(&file->sem);
 	}
-	/* cladefs: the window between a follower's extents read and its mapping, widened in tests. */
-	if (cladefs_vfs_follows(inode->i_sb) && cladefs_follow_iomap_delay_us) {
-		up_read(&file->sem);
-		fsleep(cladefs_follow_iomap_delay_us);
-		down_read(&file->sem);
-	}
 	start = cladefs_dax_chunk_start(range);
 	page = (pos - start) >> PAGE_SHIFT;
 	/* A range covers the file's chunk as its size grows (cladefs_dax_fit). */
@@ -2002,7 +1985,7 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 		return -EIO;
 	}
 	/* cladefs: a page of the file with no window page is no hole: mapped first. */
-	if (!dax->read_only && !cladefs_dax_pages_mapped(range->state, page)) {
+	if (!cladefs_dax_pages_mapped(range->state, page)) {
 		up_read(&file->sem);
 		err = cladefs_dax_map_missing(inode, range, page,
 					   min_t(u64, range->pages,
@@ -3046,9 +3029,6 @@ static int cladefs_dax_iomap_begin(struct inode *inode, loff_t pos, loff_t lengt
 	iomap->bdev = NULL;
 	iomap->dax_dev = cladefs_dax_of(inode)->dax_dev;
 	if (flags & (IOMAP_WRITE | IOMAP_ZERO)) {
-		/* cladefs: a follower's filesystem is read-only: nothing writes. */
-		if (WARN_ON_ONCE(cladefs_vfs_follows(inode->i_sb)))
-			return -EROFS;
 		/*
 		 * cladefs: its pages made private and dirty, nothing moved (doc-13). A write(2)'s timed,
 		 * and no other iomap's: a read's two clock reads, for nothing, were 1-2% of a 91k-file
@@ -3152,12 +3132,7 @@ static ssize_t cladefs_dax_read_faulting_between(struct kiocb *iocb, struct iov_
 	return done ?: ret;
 }
 
-/*
- * A read(2), holding the inode's lock shared. cladefs: a follower's, a chunk at a time under its
- * fill barrier, taken after the inode's lock, whose copies to the reader's memory don't fault
- * (cladefs_vfs_follower_read): no batch drops the extents it copies from, nor applies, until it is
- * done with them.
- */
+/* A read(2), holding the inode's lock shared. */
 static ssize_t cladefs_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -3171,10 +3146,7 @@ static ssize_t cladefs_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	} else {
 		inode_lock_shared(inode);
 	}
-	if (cladefs_vfs_follows(inode->i_sb))
-		ret = cladefs_vfs_follower_read(iocb, to, cladefs_dax_read);
-	else
-		ret = cladefs_dax_read_faulting_between(iocb, to);
+	ret = cladefs_dax_read_faulting_between(iocb, to);
 	inode_unlock_shared(inode);
 	file_accessed(iocb->ki_filp);
 	return ret;
@@ -3545,12 +3517,9 @@ static vm_fault_t cladefs_dax_do_fault(struct vm_fault *vmf, unsigned int order,
 		 */
 		cond_resched();
 		error = 0;
-		/* cladefs: a follower's extents read and mapped under its fill barrier, as of one state. */
-		cladefs_vfs_fill_begin(sb);
 		filemap_invalidate_lock_shared(inode->i_mapping);
 		ret = dax_iomap_fault(vmf, order, &pfn, &error, &cladefs_dax_iomap_ops);
 		filemap_invalidate_unlock_shared(inode->i_mapping);
-		cladefs_vfs_fill_end(sb);
 		if (!(ret & VM_FAULT_ERROR))
 			break;
 		/*
@@ -3685,8 +3654,7 @@ static const struct address_space_operations cladefs_dax_aops = {
 };
 
 static const struct file_operations cladefs_dax_file_operations = {
-	.open = cladefs_vfs_file_open,
-	.release = cladefs_vfs_file_release,
+	.open = generic_file_open,
 	.llseek = cladefs_vfs_llseek,
 	.read_iter = cladefs_dax_read_iter,
 	.write_iter = cladefs_dax_write_iter,
@@ -3845,14 +3813,12 @@ struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 	struct dax_device *dax_dev;
 	struct cladefs_dax *dax;
 	u64 window_len;
-	bool read_only;
 
 	dax_dev = cladefs_device_dax(dev, &window_len);
 	if (!dax_dev || window_len < CLADEFS_DAX_SIZE)
 		return NULL;
-	/* cladefs: a few iomaps' worth of private pages at least, but for a follower's (doc-13). */
-	read_only = cladefs_device_read_only(dev);
-	if (!read_only && cladefs_device_private_max(dev) < 8) {
+	/* cladefs: a few iomaps' worth of private pages at least (doc-13). */
+	if (cladefs_device_private_max(dev) < 8) {
 		pr_warn("cladefs: the DAX window holds %llu private pages: no DAX\n",
 			cladefs_device_private_max(dev));
 		return NULL;
@@ -3881,7 +3847,6 @@ struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 	}
 	dax->filesystem = filesystem;
 	dax->dev = dev;
-	dax->read_only = read_only;
 	WRITE_ONCE(cladefs_dax_stray_dax, dax);
 	/* cladefs: the trace, if asked for, of the filesystem mounted last (TASK-121). */
 	if (cladefs_dax_tracing) {
@@ -4247,68 +4212,6 @@ void cladefs_dax_evict(struct inode *inode)
 	if (forgotten)
 		cladefs_dax_put_file(dax, file);
 	cladefs_vfs_inode(inode)->dax.file = NULL;
-}
-
-int cladefs_dax_shrunk(struct inode *inode, loff_t size)
-{
-	return cladefs_dax_break_layouts(inode, round_up(size, PAGE_SIZE));
-}
-
-int cladefs_dax_changed(struct cladefs_dax *dax, struct cladefs_dax_volume *volume, struct inode *inode,
-		     u64 ino, loff_t start, loff_t end)
-{
-	pgoff_t first = start >> CLADEFS_DAX_SHIFT, last = end >> CLADEFS_DAX_SHIFT;
-	struct cladefs_dax_file *file;
-	struct cladefs_dax_range *range;
-	unsigned long chunk;
-	bool forgotten;
-	int err;
-
-	if (inode) {
-		if (!IS_DAX(inode) || !cladefs_dax_file(inode))
-			return 0;
-		return cladefs_dax_drop(inode, first, last, -1);
-	}
-	for (;;) {
-		mutex_lock(&dax->files_lock);
-		file = xa_load(&volume->files, ino);
-		if (file)
-			refcount_inc(&file->refs);
-		mutex_unlock(&dax->files_lock);
-		if (!file)
-			return 0;
-		/* As reclaim locks them: the file's semaphore, then the files lock. */
-		down_write(&file->sem);
-		mutex_lock(&dax->files_lock);
-		if (!file->inode)
-			break;
-		/* An inode read in since: through it, once it is had, or gone. */
-		inode = igrab(file->inode);
-		mutex_unlock(&dax->files_lock);
-		up_write(&file->sem);
-		cladefs_dax_put_file(dax, file);
-		if (inode) {
-			filemap_invalidate_lock(inode->i_mapping);
-			err = cladefs_dax_changed(dax, volume, inode, ino, start, end);
-			filemap_invalidate_unlock(inode->i_mapping);
-			iput(inode);
-			return err;
-		}
-		cond_resched();
-	}
-	/* No inode: nothing uses its ranges but the window, nor can, the files lock held. */
-	xa_for_each_range(&file->ranges, chunk, range, first, last) {
-		if (WARN_ON_ONCE(atomic_read(&range->users)))
-			continue;
-		cladefs_dax_unmap_range(dax, range);
-	}
-	forgotten = cladefs_dax_forget_file(dax, file);
-	mutex_unlock(&dax->files_lock);
-	up_write(&file->sem);
-	if (forgotten)
-		cladefs_dax_put_file(dax, file);
-	cladefs_dax_put_file(dax, file);
-	return 0;
 }
 
 /* Waits for a page in use, without the invalidate_lock, as fuse_wait_dax_page. */

@@ -1820,34 +1820,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "follower"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "shuttle",
-]
-
-[[package]]
-name = "follower_history"
-version = "0.1.0"
-
-[[package]]
-name = "follower_sim"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "follower",
- "follower_history",
- "fuchsia-async",
- "fuchsia-sync",
- "fxfs",
- "local_cell",
- "shuttle",
- "storage_device",
-]
-
-[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1938,7 +1910,6 @@ dependencies = [
  "madsim",
  "pin-project-lite",
  "rand 0.10.3",
- "shuttle",
  "smallvec",
  "tokio",
 ]
@@ -2007,9 +1978,8 @@ version = "0.1.0"
 dependencies = [
  "crossbeam",
  "lock_api",
+ "parking_lot",
  "parking_lot_core",
- "shuttle",
- "shuttle-parking_lot",
 ]
 
 [[package]]
@@ -4721,28 +4691,6 @@ dependencies = [
  "rand_pcg 0.3.1",
  "scoped-tls",
  "smallvec",
- "tracing",
-]
-
-[[package]]
-name = "shuttle-parking_lot"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e19861a540ea53c42c73b8c81d09c9e83cc6894a720e7a16fb490c5a5297b4"
-dependencies = [
- "cfg-if",
- "parking_lot",
- "shuttle-parking_lot-impl",
-]
-
-[[package]]
-name = "shuttle-parking_lot-impl"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83649866f516cae855c071848fd27cc9d0615aaadbc755238ae8261bd7873393"
-dependencies = [
- "lock_api",
- "shuttle",
  "tracing",
 ]
 

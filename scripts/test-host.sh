@@ -27,14 +27,14 @@
 # debug, kasan, coverage or rust-checks) has the test host build one from the source, or take the
 # one built before from the same sources (host_kernel, scripts/lib/linux-host-setup.sh), a release
 # one if neither is set; CLADEFS_GUEST_CMDLINE adds to its arguments (such as
-# cladefs.follow_apply_delay_us=200). CLADEFS_TEST_HOST_LIMIT caps the run's time on the test host
+# cladefs.dax_delay_us=200). CLADEFS_TEST_HOST_LIMIT caps the run's time on the test host
 # (timeout's DURATION, default 6h). CLADEFS_WORKSPACE_TESTS=0 runs the guest tests alone,
 # CLADEFS_GUEST_TESTS=0 the workspace's alone, as an arm64 test host runs them (the guest tests boot
 # an x86-64 guest kernel: host_need_arch), and CLADEFS_TEST_ARGS are cargo nextest's arguments for
 # the workspace's, such as a filter. CLADEFSD_BUCKET, if set, names a bucket the guest tests' extent
 # daemons keep their cells in (a bucket's URL the test host reaches), under a prefix
 # of the run's own. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches the
-# test host too (scripts/lib/host.sh), such as CLADEFS_FOLLOW_SECONDS and CLADEFS_PJDFSTEST_TESTS,
+# test host too (scripts/lib/host.sh), such as CLADEFS_PJDFSTEST_TESTS,
 # and the run's CLADEFS_TEST_HOST_* settings are scripts/lib/host.sh's.
 set -euo pipefail
 [[ ${CLADEFS_E2E_TEST:-} =~ ^[a-z0-9\ -]*$ ]] || { echo "CLADEFS_E2E_TEST selects test cases" >&2; exit 2; }

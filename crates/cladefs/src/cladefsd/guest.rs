@@ -151,7 +151,7 @@ async fn receive(mut receiver: AsyncReceiver, sender: Arc<AsyncSender>, waiting:
             Ok(Told::Capacity { capacity, ask: true }) => {
                 Request::Resized { capacity, took: false }
             }
-            Ok(Told::Capacity { ask: false, .. } | Told::Committed { .. }) => continue,
+            Ok(Told::Capacity { ask: false, .. }) => continue,
             Ok(Told::Stage(stage)) => {
                 log::error!(
                     "a simulated guest, with no window, told of a stage operation: {stage:?}"

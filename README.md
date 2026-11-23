@@ -189,8 +189,8 @@ Storage protocols fail on rare interleavings, crashes and degraded networks, so 
 at several layers ([docs/testing.md](docs/testing.md)):
 
 - **Formal specifications:** TLA+ models (`specs/`) cover the bucket protocol, head slots,
-  multi-bucket mirroring, replication, ephemeral hand-over, DAX copy-on-write, the journal and
-  followers—each paired with spec mutations that TLC must reject (`make check-tla`).
+  multi-bucket mirroring, replication, ephemeral hand-over, DAX copy-on-write and the journal—each
+  paired with spec mutations that TLC must reject (`make check-tla`).
 - **Deterministic simulation:** single-threaded seeded simulations test both the storage engine
   (`local_cell::sim`) and multi-daemon clusters under `madsim` ([doc-24](<docs/design/doc-24 - Full-stack-deterministic-simulation-N-daemons-one-seed.md>)), injecting crashes, torn disks, network partitions and failing buckets.
 - **Concurrency and memory ordering:** `shuttle` explores thread schedules and `loom` verifies
@@ -218,7 +218,9 @@ candidate for the next pin is qualified against the current one under their load
   better design, and new code refuses old data instead of converting it.
 - **No single-node mode:** the daemon needs a bucket and a fencing token to start. For development
   the bucket may be a directory (`file:///DIR`).
-- **Built but frozen:** live read-only followers of a mounted disk ([doc-8](<docs/design/doc-8 - Live-read-only-followers-of-a-mounted-Fxfs.md>)).
+- **No live followers:** read-only mounts tailing a disk another VM writes were built, frozen and
+  removed (2026-11-22, board 8237; [doc-8](<docs/design/doc-8 - Live-read-only-followers-of-a-mounted-Fxfs.md>)).
+  A cell reads through to attached bases, frozen forks ([doc-10](<docs/design/doc-10 - Shared-volumes-Fxfs-volumes-over-read-only-bases.md>)).
 
 ## Try it
 

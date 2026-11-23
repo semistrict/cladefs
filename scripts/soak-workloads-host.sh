@@ -12,7 +12,7 @@
 #   checks    the guest checks, with delays and on a small window
 #   sanitized the DAX checks and allocations failing, on the debug kernel (lockdep, KCSAN), too
 #             slow for the delays' and the small window's within their cases' timeouts
-#   replicas  followers under torture and remounting, snapshots, suspending and migrating
+#   replicas  snapshots, suspending and migrating
 #   shapes    DAX pgbench over guest memory, vCPUs and windows (scripts/soak-host.sh)
 #   mixed     VMs on forks of a base under writers, fsx-style scripts and pgbench for hours, each
 #             repeat through VMs killed, the daemon killed, uploads failing and late, the host or
@@ -43,17 +43,16 @@ factor=${CLADEFS_SOAK_REPEATS:-1}
 cap=${CLADEFS_SOAK_CAP:-}
 [[ -z $cap || $cap =~ ^[1-9][0-9]*$ ]] || { echo "CLADEFS_SOAK_CAP is a count" >&2; exit 2; }
 
-# Runs `group`'s suite: its repeats, its kernel, its seconds of following. The mixed group's, some
-# 5 minutes a repeat, its daemons built to fail uploads.
+# Runs `group`'s suite: its repeats and its kernel. The mixed group's, some 5 minutes a repeat, its
+# daemons built to fail uploads.
 soak() {
-    local group=$1 repeats=$(($2 * factor)) kernel=$3 seconds=$4 own=()
+    local group=$1 repeats=$(($2 * factor)) kernel=$3 own=()
     if [[ -n $cap ]] && (( repeats > cap )); then repeats=$cap; fi
     if [[ $group == mixed ]]; then
         own=(CLADEFSD_FAILPOINTS=1)
     fi
     env ${own[@]+"${own[@]}"} CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST="--tag soak-$group" \
         CLADEFS_E2E_REPEATS=$repeats CLADEFS_GUEST_KERNEL_BUILD=$kernel \
-        CLADEFS_FOLLOW_SECONDS=$seconds \
         "$repo/scripts/test-host.sh" "$results/$group" > "$results/$group.log" 2>&1
 }
 
@@ -63,11 +62,11 @@ status=0
 for group in "${groups[@]}"; do
     soaked=0
     case $group in
-        crash) soak crash 50 release 20 || soaked=$? ;;
-        checks) soak checks 10 release 20 || soaked=$? ;;
-        sanitized) soak sanitized 10 debug 20 || soaked=$? ;;
-        replicas) soak replicas 5 release 600 || soaked=$? ;;
-        mixed) soak mixed 40 release 0 || soaked=$? ;;
+        crash) soak crash 50 release || soaked=$? ;;
+        checks) soak checks 10 release || soaked=$? ;;
+        sanitized) soak sanitized 10 debug || soaked=$? ;;
+        replicas) soak replicas 5 release || soaked=$? ;;
+        mixed) soak mixed 40 release || soaked=$? ;;
         shapes)
             CLADEFS_SOAK_REPEATS=$((3 * factor)) "$repo/scripts/soak-host.sh" "$results/shapes" \
                 > "$results/shapes.log" 2>&1 || soaked=$?

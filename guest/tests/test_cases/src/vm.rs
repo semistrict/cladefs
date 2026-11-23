@@ -169,23 +169,6 @@ impl Vm {
         Ok(())
     }
 
-    /// cladefs: adds an extent-store device tagged `tag` that follows the cell at `path`, which
-    /// another VM writes, read-only (backlog doc-8), with a DAX window of `window` bytes if not 0.
-    /// The extent daemon at CLADEFSD serves the cell.
-    pub fn cell_following(&mut self, tag: &str, path: &Path, window: u64) -> anyhow::Result<()> {
-        let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-        self.cell_following_served(tag, path, window, Path::new(&cladefsd));
-        Ok(())
-    }
-
-    /// Adds a device as [`Vm::cell_following`] does, served by the extent daemon at
-    /// `cladefsd`.
-    pub fn cell_following_served(&mut self, tag: &str, path: &Path, window: u64, cladefsd: &Path) {
-        self.cell_served(tag, path, 0, window, cladefsd);
-        let devices = self.config["cladefs"].as_array_mut().expect("an array");
-        devices.last_mut().expect("the device added")["read_only"] = true.into();
-    }
-
     /// cladefs: has the extent-store device added last answer the guest's asks for durability once
     /// ordered (`cache_type` Unsafe, TASK-363), as a drive whose flushes the host drops does.
     pub fn cell_unsafe(&mut self) {
@@ -1458,8 +1441,7 @@ const KCSAN_REVIEWED_PEERS: [(&str, u64); 6] = [
 /// lockless bitmap, of fs/cladefs's DAX window), folio_batch_move_lru / folios_put_refs (a folio's
 /// flags); at unknown origin, kthread_is_per_cpu, wq_worker_running and kick_pool (a task's flags,
 /// CPU time and wake CPU, which the scheduler writes), process_one_work (a work item of
-/// fs/cladefs's Rust runtime, rt.c, as the Rust writes it: looked into apart from the followers'
-/// torture test), virtqueue_enable_cb, virtqueue_get_buf_ctx_split and vring_interrupt (the used
+/// fs/cladefs's Rust runtime, rt.c, as the Rust writes it), virtqueue_enable_cb, virtqueue_get_buf_ctx_split and vring_interrupt (the used
 /// ring's index, which the device, the host, writes as virtio has it).
 fn ours(function: &str) -> bool {
     function.contains("cladefs")

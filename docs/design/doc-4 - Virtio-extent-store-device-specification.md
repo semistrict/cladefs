@@ -86,17 +86,18 @@ Settled in a design review on 2026-10-13:
 ### Version
 
 The configuration's first field, `version`, is the device's protocol version, `VIRTIO_EXTENT_VERSION`,
-1 (TASK-141.3). A change to any request, flag, feature, configuration field or what it means makes a
-new one: cladefs migrates nothing (AGENTS.md), so a driver and a device of different versions refuse
-each other rather than serve with what both happen to know. The driver reads `version` first, as it
+2 (TASK-141.3; 2 since live followers went, board 8237). A change to any request, flag, feature,
+configuration field or what it means makes a new one: cladefs migrates nothing (AGENTS.md), so a
+driver and a device of different versions refuse each other rather than serve with what both happen
+to know. The driver reads `version` first, as it
 probes, and refuses a device of another, naming both (`-EPROTONOSUPPORT`). No version moves it.
 A VMM restoring a snapshot refuses one whose device was of another version: its guest's driver goes
 on as of that one.
 
 ### Features
 
-The features are no negotiation: they say what the device is configured as, a writer or a
-follower, with a window or not. A driver takes every feature the device offers; the device refuses
+The features are no negotiation: they say what the device is configured as, with a window or
+not. A driver takes every feature the device offers; the device refuses
 its activation otherwise (`DEVICE_NEEDS_RESET`, both named in the VMM's log), and the driver fails
 its probe on seeing so after `DRIVER_OK`.
 
@@ -106,22 +107,22 @@ its probe on seeing so after `DRIVER_OK`.
 | 2 | `VIRTIO_EXTENT_F_WRITE_COMMIT` | `WRITE` takes `WRITE_COMMIT`: a commit follows the write. |
 | 3 | `VIRTIO_EXTENT_F_RESIZE` | The configuration holds `capacity` and `asked`, which change while the device runs (Resizing); the guest answers a shrink with `RESIZED`. |
 | 4 | `VIRTIO_EXTENT_F_FREEZE` | `FREEZE` works (Snapshots). |
-| 5 | `VIRTIO_EXTENT_F_READ_ONLY` | The device follows a store another VM writes, read-only (Followers): `ADVANCE`, `LET_GO`, `PIN` and `UNPIN` work, and the configuration holds `committed`, which changes while the device runs. Excludes `WRITE_COMMIT` and `RESIZE`. With `DAX`, its window copies nothing: a store to it is refused, `PRIVATE` and `MAP_ZEROS` fail with `EINVAL`, and `private_max` is 0. |
-| 6 | `VIRTIO_EXTENT_F_FREE_MANY` | `FREE` takes `FREE_MANY`: its data names more extents to free (TASK-41). Excludes `READ_ONLY`. |
+| 6 | `VIRTIO_EXTENT_F_FREE_MANY` | `FREE` takes `FREE_MANY`: its data names more extents to free (TASK-41). |
 | 7 | `VIRTIO_EXTENT_F_MAP_MANY` | `MAP` takes `MAP_MANY`: its data holds more maps (TASK-91.4). Needs `DAX`. |
 | 8 | `VIRTIO_EXTENT_F_MAP_PREFAULT` | `MAP`, and each of its further maps, takes `MAP_PREFAULT`: the guest accesses the pages next (TASK-112.1). Needs `DAX`. |
-| 11 | `VIRTIO_EXTENT_F_STATS` | The configuration holds `stats_asked`, which changes while the device runs: the host asks for the guest's stats, which it answers with `STATS` (Stats, TASK-111.4). A follower's too. |
+| 11 | `VIRTIO_EXTENT_F_STATS` | The configuration holds `stats_asked`, which changes while the device runs: the host asks for the guest's stats, which it answers with `STATS` (Stats, TASK-111.4). |
 | 29 | `VIRTIO_RING_F_EVENT_IDX` | The ring's notification suppression: the device offers it, so that a guest's requests queued while it takes them, and its completions while the driver takes them, cost no exit each. |
 | 32 | `VIRTIO_F_VERSION_1` | Required. |
 
 Bits 1, 9 and 10 were `DAX_WRITE`, `SEAL` and `DAX_COW` (copy on write beside writable mappings,
-2026-11-04), which went as copying on write became the only DAX.
+2026-11-04), which went as copying on write became the only DAX. Bit 5 was `READ_ONLY`, a live
+follower's device (doc-8), which went with followers (2026-11-22, board 8237). None is reused.
 
 ### Configuration space
 
 ```c
 struct virtio_extent_config {
-	le32 version;             /* VIRTIO_EXTENT_VERSION, 1: first in every version (Version) */
+	le32 version;             /* VIRTIO_EXTENT_VERSION, 2: first in every version (Version) */
 	u8 tag[36];               /* the filesystem's name, NUL-padded: the mount's source */
 	le32 num_request_queues;  /* at least 1 */
 	le32 block_size;          /* 4096: the alignment of offsets and lengths */
@@ -133,15 +134,14 @@ struct virtio_extent_config {
 	le64 max_extent;          /* the most bytes one extent holds: at least 64 MiB */
 	le64 capacity;            /* F_RESIZE: the cell's capacity, as INFO's */
 	le64 asked;               /* F_RESIZE: the shrink the guest is asked to take, or 0 */
-	le64 committed;           /* F_READ_ONLY: the number of the writer's latest commit */
 	le64 private_max;         /* F_DAX: the most private pages the window holds at once, in
-	                             pages of map_alignment; 0 with F_READ_ONLY */
+	                             pages of map_alignment */
 	le64 stats_asked;         /* F_STATS: the host's latest ask for the guest's stats, or 0 */
 };
 ```
 
 The configuration never changes while the device runs, but for `capacity` and `asked`, with
-`F_RESIZE`, `committed`, with `F_READ_ONLY`, and `stats_asked`, with `F_STATS`. The host sets
+`F_RESIZE`, and `stats_asked`, with `F_STATS`. The host sets
 `private_max` as it opens the device, and reserves that much memory for the VM then, so that a write never waits for memory.
 
 ### Resizing
@@ -235,14 +235,12 @@ struct virtio_extent_resp {
 | 8 | `INFO` | none | device writes `struct virtio_extent_info` |
 | 9 | `RESIZED` | `le64 capacity;` (the `asked` it answers); flag `RESIZED_TOOK` (bit 0): it took it | none |
 | 10 | `FREEZE` | none; flag `FREEZE_FROZEN` (bit 0): frozen, else thawed | none |
-| 11 | `ADVANCE` | none | device writes `struct virtio_extent_commit_number` |
-| 12 | `LET_GO` | `struct virtio_extent_commit_number` | none |
-| 13 | `PIN` | `struct virtio_extent_id id;` | none |
-| 14 | `UNPIN` | `struct virtio_extent_id id;` | none |
 | 16 | `PRIVATE` | `le64 window_offset; le64 len;` | none |
 | 17 | `STATS` | `le64 asked;` (the `stats_asked` it answers) | device reads the guest's stats, text, the rest of the request's data (Stats) |
 
 Type 15 was writable DAX's `SEALED`, and `MAP`'s flag bit 0 its `MAP_WRITE`: retired, not reused.
+Types 11 to 14 were a live follower's `ADVANCE`, `LET_GO`, `PIN` and `UNPIN`, and `struct
+virtio_extent_commit_number` theirs (doc-8): gone with followers (board 8237), not reused.
 
 ### `WRITE`
 
@@ -311,8 +309,7 @@ multiples of `map_alignment`, and the range lies within the window.
 - The mapping is read-only to the extent: a write to one of its pages makes the page private
   (Shared memory), and the extent never changes.
 - With `MAP_ZEROS` (bit 3), the range maps zeros, `id` and `offset` ignored: holes, and pages past
-  a file's end, which a write then makes private pages of zeros, with nothing to copy. A
-  follower's window takes no `MAP_ZEROS` (`EINVAL`).
+  a file's end, which a write then makes private pages of zeros, with nothing to copy.
 - A `MAP` replaces whatever the window held there, freeing its private pages.
 
 With `MAP_MANY` (bit 1, `F_MAP_MANY`), the data holds more maps, each a
@@ -335,7 +332,7 @@ pages.
 none, and prefaults them, as `MAP_PREFAULT` does: a guest about to
 write many pages that aren't private yet, as a `write(2)` of them, makes them so in one round trip,
 rather than a fault of the host's each. Pages already private stay as they are. It fails with
-`ENOMEM` past `private_max`, and with `EINVAL` where nothing is mapped, or of a follower's window.
+`ENOMEM` past `private_max`, and with `EINVAL` where nothing is mapped.
 
 Every VM on a host that maps the same extent maps the same host pages, which is safe because
 extents never change once sealed.
@@ -413,62 +410,10 @@ its own count and the floor there may be 2^40 numbers.
 | `EPERM` (1) | A write to a sealed extent, or to another branch's; a `MAP` of an open extent; a `WRITE`, `FREE` or `COMMIT` of a public base's cell (TASK-43). |
 | `ENOENT` (2) | A `READ` or `MAP` of an extent that does not exist, or was freed. |
 | `EIO` (5) | The cell failed to read or write. |
-| `EINVAL` (22) | An unknown type or flag, a misaligned or out-of-range offset, length or window offset, or a feature's flag the device does not offer. With `F_READ_ONLY`, a `PRIVATE`, or a `MAP_ZEROS`. |
+| `EINVAL` (22) | An unknown type or flag, a misaligned or out-of-range offset, length or window offset, or a feature's flag the device does not offer. |
 | `ENOMEM` (12) | A `PRIVATE` past `private_max`. |
 | `ENOSPC` (28) | The cell cannot hold more for this branch. |
-| `EROFS` (30) | The store stopped taking writes for this branch: another host took its head (milestone 4), or the host is shutting it down. Reads still work. With `F_READ_ONLY`, every `WRITE`, `FREE`, `COMMIT` and `RESIZED`. |
-| `ESTALE` (116) | `F_READ_ONLY`: the follower was cut off (Followers). |
-
-With `F_READ_ONLY`, a `READ` or `MAP` of an extent the follower's view let go of (freed before
-the commit it holds since, unpinned) fails with `EIO`, not `ENOENT`, and the host logs it: the
-guest's follower reads only what its commits hold, so such a read is a bug, which fails loudly
-(doc-8). One of an extent written after the view's commit fails with `ENOENT`, as the guest's
-journal replay reads on to the first extent its commit doesn't hold.
-
-## Followers
-
-*Added 2026-10-18 (TASK-42.3, doc-8).* A VM on the writer's host follows a cell another VM
-writes, read-only, with a device offering `F_READ_ONLY`: its guest mounts the filesystem as of a
-commit of the writer's, and applies the writer's commits after it as they come, while the writer
-goes on and never waits for it. The host serves it the same extents, from the same memory.
-
-- **Its view.** The device reads the cell as of a commit, named by its **commit number**: what that commit holds,
-  its sealed extents and root, and nothing the writer wrote after it. The writer's frees after it
-  are kept while the view may read them. `ROOT` is the view's commit's root. A device starts as of
-  the writer's latest commit, or the cell's last, if no VM writes it.
-- **Commits.** Each commit of the writer's after the view's sets `committed` to its number and
-  raises a configuration change (the latest of a run of commits, at least once).
-- **`ADVANCE`** moves the view to the writer's latest commit, and returns its number:
-
-  ```c
-  struct virtio_extent_commit_number {
-  	le64 commit;
-  	le64 reserved;
-  };
-  ```
-
-  The view still holds what the commits between held, as the guest's follower reads them while
-  it applies those commits, and its readers may be reading them still, until `LET_GO`.
-- **`LET_GO`** lets go of what the commits before the one its commit number names held, an
-  `ADVANCE`'s: the writer's frees up to that commit go, but for what the view pins. The device
-  serves requests in any order, so a `LET_GO` may be served after the next `ADVANCE`: naming its
-  commit, it lets go of no more than it meant to, and one naming an earlier commit than the view
-  already let go of changes nothing.
-- **`PIN`** keeps extent `id`, which the view holds, whatever commit it advances to, until
-  `UNPIN`: what the guest holds open that the writer deletes (doc-8's graveyard).
-- **Cut off.** A follower too far behind (a lag in time, or in bytes of frees it keeps), or whose
-  writer went with writes uncommitted, is cut off: its `READ`s, `MAP`s, `ADVANCE`s and `PIN`s
-  fail with `ESTALE` until its guest remounts, with the device reset.
-- **Reset.** A follower's device holds its cell open from `DRIVER_OK` to a reset. Its guest
-  resets the device as it unmounts, which lets go of the cell for a next writer, and sets
-  `DRIVER_OK` again as it mounts: the device opens the cell anew, as of its writer's latest
-  commit, and `branch` says what it opened. A device that can't open it yet asks for a reset
-  (`NEEDS_RESET`), and its guest's next mount tries again.
-
-The host serves a follower's cell to its writer as it would without followers: a writer that
-went with nothing open (its last commit all it wrote) leaves its followers following, and the
-next writer takes the cell over; one that went with writes uncommitted cuts them off, and no VM
-opens the cell again until they are gone.
+| `EROFS` (30) | The store stopped taking writes for this branch: another host took its head (milestone 4), or the host is shutting it down. Reads still work. |
 
 ## Ordering and durability
 

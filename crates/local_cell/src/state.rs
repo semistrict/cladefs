@@ -7,8 +7,8 @@
 //! room its extents take ([`Space`]), what it changed since its last commit ([`Uncommitted`]), the
 //! gate writes pass ([`Gate`]), its segments ([`Segments`]), its extents' own files
 //! ([`OwnFiles`]), what its next commit makes unreferenced ([`Unreferenced`]); cladefs: its
-//! write-ahead log's segments not yet acknowledged in the bucket ([`Queue`], TASK-165.9), the
-//! frees it keeps ([`KeptExtents`]), and what views refuse ([`Sealed`]). cladefs: the state locked
+//! write-ahead log's segments not yet acknowledged in the bucket ([`Queue`], TASK-165.9) and the
+//! frees it keeps ([`KeptExtents`]). cladefs: the state locked
 //! ([`Locked`]), which the builds of the tests audit as it lets it go ([`State::audit`],
 //! TASK-160.16).
 
@@ -29,7 +29,6 @@ use crate::segments::Recount;
 use crate::segments::{Segments, Unframed};
 use crate::shared::Shared;
 use crate::sync::{MutexGuard, rules};
-use crate::views::{Keeping, NotHeld, Sealed};
 use crate::wal::Queue;
 use anyhow::{Error, bail};
 use extent_frame::segment::CellId;
@@ -73,8 +72,6 @@ pub(crate) struct State<F> {
     pub version: bool,
     /// cladefs: the extents freed whose data stays.
     pub kept: KeptExtents,
-    /// cladefs: the extents views refuse, sealed after their commits.
-    pub sealed: Sealed,
     /// cladefs: where the cell is in its life: open, closed, or failed, and why ([`Standing`],
     /// TASK-160.19), which its guards read ([`Guarded`]).
     pub standing: Standing,
@@ -164,15 +161,12 @@ impl<F> Framing<F> {
     }
 }
 
-/// Whom a read is for: the cell's own, of what it holds; of what it holds or keeps, freed, for
-/// views or for the bucket ([`LocalCell::read_kept`](crate::LocalCell::read_kept)); or a view's, as
-/// of the commit of `epoch`, of what that commit and those since `since` held, which the cell holds
-/// or keeps, and of what it pins, if `pinned`: decided in the critical section that locates it.
+/// Whom a read is for: the cell's own, of what it holds; or of what it holds or keeps, freed, for
+/// the bucket ([`LocalCell::read_kept`](crate::LocalCell::read_kept)).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reader {
     Own,
     Kept,
-    View { epoch: u64, since: u64, pinned: bool },
 }
 
 /// cladefs: where an extent is in its life, as the cell's state has it, found in one place
@@ -184,7 +178,7 @@ pub(crate) enum Life<'a> {
     Open(Option<Entry<'a>>),
     /// Sealed, and held.
     Held(Entry<'a>),
-    /// Freed by a commit, and kept: for the bucket, views or pins ([`Kept`]).
+    /// Freed by a commit, and kept: for the bucket ([`Kept`]).
     Kept(&'a Kept),
     /// Sealed once, and freed, and not kept: its number the cell writes no more (TASK-79.6).
     Spent,
@@ -238,30 +232,11 @@ impl<F: File> State<F> {
     }
 
     /// `extent`'s entry, which `reader` may read: of what the cell holds, or keeps, if not the
-    /// cell's own; a view's, of what its commits hold (not open, not sealed after its commit, not
-    /// freed before the one it holds since), or it pins. Fails with `NoExtent` otherwise.
+    /// cell's own. Fails with `NoExtent` otherwise.
     pub fn entry_for(&self, extent: ExtentId, reader: Reader) -> Result<Extent, Error> {
-        let life = self.life(extent);
-        if let Reader::View { epoch, .. } = reader
-            && (matches!(life, Life::Open(_)) || self.sealed.after(extent, epoch))
-        {
-            bail!(NoExtent(extent));
-        }
-        let readable = |kept: &Kept| match reader {
-            Reader::Own => false,
-            Reader::Kept => true,
-            // Freed by a commit after the one the view holds since, which held it; or pinned.
-            Reader::View { since, pinned, .. } => {
-                pinned || kept.freed > since || !rules().views_hold_their_commit
-            }
-        };
-        match life {
+        match self.life(extent) {
             Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.to_extent()),
-            Life::Kept(kept) if readable(kept) => Ok(kept.entry.clone()),
-            // Kept for another, freed before what the view holds: what it let go of.
-            Life::Kept(_) if matches!(reader, Reader::View { .. }) => {
-                Err(Error::new(NoExtent(extent)).context(NotHeld(extent)))
-            }
+            Life::Kept(kept) if reader == Reader::Kept => Ok(kept.entry.clone()),
             Life::Open(None) | Life::Kept(_) | Life::Spent | Life::Unknown => {
                 bail!(NoExtent(extent))
             }
@@ -270,7 +245,6 @@ impl<F: File> State<F> {
 
     /// Lets the data of `extent`, freed, go.
     pub fn forget(&mut self, extent: ExtentId, entry: Extent) {
-        self.sealed.forget(extent);
         match entry.data {
             Data::Pieces(pieces) => {
                 for piece in &pieces {
@@ -391,26 +365,24 @@ impl<F: File> State<F> {
     /// Fails with [`NoSpace`] unless a write may add `grows` bytes, and write over `overwrites`.
     pub fn check_room(&self, grows: u64, overwrites: u64) -> anyhow::Result<()> {
         let wasted = self.uncommitted.wasted() + overwrites;
-        self.space.check(grows, self.kept.for_views(), wasted)
+        self.space.check(grows, wasted)
     }
 
     /// cladefs: the bucket needs the frees of the commits up to `epoch` no more, acknowledged
-    /// there: trims let them go once views need them no more either.
+    /// there: trims let them go.
     pub fn release_kept(&mut self, epoch: u64) {
         self.kept.release(epoch);
     }
 
     /// What the cell holds, as doc-4's `INFO` reports it.
     pub fn info(&self) -> Info {
-        self.space.info(self.next_sequence, self.kept.for_views(), self.uncommitted.wasted())
+        self.space.info(self.next_sequence, self.uncommitted.wasted())
     }
 
-    /// Lets the kept extents freed by commits up to `published`, the last published to views, go
-    /// that no one needs any more: neither the uploader, nor views, as `keeping` says.
-    /// Those freed since are for the commit that frees them to decide: a view may yet open as of
-    /// the last.
-    pub fn trim_kept(&mut self, keeping: &Keeping, published: u64) {
-        for (extent, kept) in self.kept.trim(keeping, published) {
+    /// Lets the kept extents freed by commits up to `published`, the last committed, go that the
+    /// uploader needs no more. Those freed since are for the commit that frees them to decide.
+    pub fn trim_kept(&mut self, published: u64) {
+        for (extent, kept) in self.kept.trim(published) {
             self.forget(extent, kept.entry);
         }
     }
@@ -561,8 +533,8 @@ pub(crate) struct Locked<'a, F: File> {
     guard: Option<StateGuard<'a, F>>,
 }
 
-/// cladefs: the state's lock held, shared beyond one cell, as its followers share it with its
-/// writer, which a panic holding aborts the extent daemon (`crate::shared`, TASK-149.24).
+/// cladefs: the state's lock held, shared beyond one cell, as the cells a base is attached to share
+/// it, which a panic holding aborts the extent daemon (`crate::shared`, TASK-149.24).
 pub(crate) type StateGuard<'a, F> = Shared<MutexGuard<'a, State<F>>>;
 
 impl<'a, F: File> Locked<'a, F> {
@@ -697,8 +669,8 @@ impl<F: File> State<F> {
 
 /// The room a cell's extents take: the most they may hold, as its record says
 /// ([`LocalCell::set_capacity`](crate::LocalCell::set_capacity)), the bytes they hold, and those
-/// writes in progress may add. A write takes room only if what they hold and may add, with what
-/// views keep of the frees, which counts as used, fits. cladefs: and with what writes since the
+/// writes in progress may add. A write takes room only if what they hold and may add fits.
+/// cladefs: and with what writes since the
 /// last commit wasted past the capacity's worth, which counts as used too (TASK-79.2): what they
 /// wrote over, in segments, and what frees of extents open let go of, and writes dropped, of what
 /// they wrote. That is its writer's own, which no commit held, and which its next commit takes
@@ -785,10 +757,9 @@ impl Space {
     }
 
     /// Fails with [`NoSpace`], saying the numbers (TASK-79.105), unless a write may add `grows`
-    /// bytes, views keeping `kept_for_views` of the frees, and writes since the last commit, this
-    /// one's included, wasting `wasted` bytes.
-    pub fn check(&self, grows: u64, kept_for_views: u64, wasted: u64) -> anyhow::Result<()> {
-        let used = self.holding.all.bytes + kept_for_views + self.past_slack(wasted);
+    /// bytes, writes since the last commit, this one's included, wasting `wasted` bytes.
+    pub fn check(&self, grows: u64, wasted: u64) -> anyhow::Result<()> {
+        let used = self.holding.all.bytes + self.past_slack(wasted);
         if used + self.reserved + grows > self.capacity {
             return Err(anyhow::Error::new(NoSpace).context(format!(
                 "{used} bytes used, {} reserved and {grows} written past the capacity's {}",
@@ -843,12 +814,11 @@ impl Space {
     }
 
     /// What the cell holds, as doc-4's `INFO` reports it: `next_sequence` its next sequence
-    /// number, views keeping `kept_for_views` of the frees, which take room as the extents did,
-    /// and writes since the last commit wasting `wasted` bytes, what is past the capacity's worth
-    /// of which room is not available either.
-    pub fn info(&self, next_sequence: u64, kept_for_views: u64, wasted: u64) -> Info {
+    /// number, and writes since the last commit wasting `wasted` bytes, what is past the
+    /// capacity's worth of which room is not available either.
+    pub fn info(&self, next_sequence: u64, wasted: u64) -> Info {
         let Holding { all, own } = self.holding;
-        let used = all.bytes + kept_for_views;
+        let used = all.bytes;
         let unavailable = used + self.past_slack(wasted) + self.reserved;
         Info {
             capacity: self.capacity,

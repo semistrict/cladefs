@@ -4,8 +4,7 @@
 
 // Fuchsia's `src/storage/fxfs/src/filesystem.rs`, without trimming (the trim task, its options and
 // the power manager it waited for a charger with): the device is an extent store (backlog doc-4),
-// whose extents Fxfs frees whole once nothing refers to them. A read-only mount can follow its
-// writer (crate::follower, backlog doc-8), whose state it holds. cladefs: a commit holds back a
+// whose extents Fxfs frees whole once nothing refers to them. cladefs: a commit holds back a
 // snapshot of a store it changes, and waits for one (`LockKey::Commits`, TASK-241).
 
 use crate::errors::FxfsError;
@@ -522,7 +521,6 @@ impl FxFilesystemBuilder {
                 in_flight_transactions: AtomicU64::new(0),
                 transaction_limit_event: Event::new(),
                 layer_pager: self.layer_pager,
-                follower: Default::default(),
                 _stores_node: metrics::register_fs(move || {
                     let weak = weak.clone();
                     Box::pin(async move {
@@ -666,9 +664,6 @@ pub struct FxFilesystem {
 
     layer_pager: Option<Arc<dyn LayerPager>>,
 
-    // cladefs: a read-only mount's following of its writer (crate::follower).
-    follower: crate::follower::Follower,
-
     // NOTE: This *must* go last so that when users take the device from a closed filesystem, the
     // filesystem has dropped all other members first (Rust drops members in declaration order).
     device: DeviceHolder,
@@ -768,10 +763,6 @@ impl FxFilesystem {
     /// be called before any allocations can take place.
     pub fn enable_allocations(&self) {
         self.allocator().enable_allocations();
-    }
-
-    pub(crate) fn follower(&self) -> &crate::follower::Follower {
-        &self.follower
     }
 
     pub fn object_manager(&self) -> &Arc<ObjectManager> {

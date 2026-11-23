@@ -292,7 +292,7 @@ pub(crate) struct WriteBody {
     pub data_len: u64,
 }
 
-/// Inline body of [`FREE`], [`FREE_MANY`], [`PIN`] and [`UNPIN`].
+/// Inline body of [`FREE`] and [`FREE_MANY`].
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
@@ -361,15 +361,6 @@ pub(crate) struct DropVersionBody {
 pub(crate) struct ResizedBody {
     pub capacity: u64,
     pub took: u64,
-}
-
-/// Inline body of [`LET_GO`], [`COMMITTED`] and an [`ADVANCE`] reply.
-#[repr(C)]
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
-)]
-pub(crate) struct CommitBody {
-    pub commit: u64,
 }
 
 /// Inline body of [`TRANSFER`].
@@ -447,10 +438,10 @@ pub(crate) struct StageMapBody {
 )]
 pub(crate) struct OpenedBody {
     pub cell: u64,
-    pub commit: u64,
     pub max_map_count: u64,
     pub arena: u32,
-    pub reserved: u32,
+    /// cladefs: where a follower's commit number was, up to `version`'s fixed offset (board 8237).
+    pub reserved: [u32; 3],
     pub version: u64,
 }
 
@@ -563,8 +554,9 @@ const _: () = {
 /// private pages; a [`STAGE_UNMAP`] keeps the private pages there with [`STAGE_KEEP_PRIVATE`];
 /// [`STAGE_COUNTS`] says the private pages. Version 14: typed `#[repr(C)]` `zerocopy` inline
 /// message bodies replace positional `args: [u64; 5]`, refusing non-zero trailing/reserved bytes
-/// (board 6917).
-pub(crate) const VERSION: u64 = 14;
+/// (board 6917). Version 15: no followers (board 8237): no `OPEN_READ_ONLY`, `ADVANCE`, `LET_GO`,
+/// `PIN`, `UNPIN` nor `COMMITTED`, and an [`OPEN`]'s reply says no commit.
+pub(crate) const VERSION: u64 = 15;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -583,8 +575,7 @@ pub(crate) const REQUEST_BYTES: usize = 8;
 /// (TASK-79.84), of `args[0]` bytes: a fork into a cell of the connection's tenant, of another
 /// tenant's version only if it is shared (`EACCES` otherwise), `ENOENT` if the bucket has no such
 /// version. The reply's `args[0]` is its cell, and it carries the kernel's physical memory.
-/// cladefs: with [`OPEN_READ_ONLY`], a follower of the cell (backlog doc-8), as of its latest
-/// commit, whose commit number is the reply's `args[2]`. The reply's `args[3]` is how many mappings
+/// cladefs: the reply says how many mappings
 /// the host lets a process make, 0 if it doesn't limit them, which a VM process in a jail without
 /// /proc can't read (TASK-172). cladefs: its `args[4]` is the VM process's wire [`VERSION`], and
 /// its reply's the daemon's.
@@ -616,9 +607,8 @@ pub(crate) const INFO: u32 = 9;
 /// Creates the cell's window, of `args[0]` bytes, which the VM process maps in its own memory as
 /// the daemon's [stage operations](STAGE_MAP) say. cladefs: a writer's copies on write (backlog
 /// doc-13), [`WINDOW_COPYING`], in its VM process, which bounds its private pages, its own memory
-/// (doc-26): a write to a page makes the page private there, which the daemon knows nothing of. A
-/// follower's copies nothing, refusing every write (`EINVAL` otherwise, as a writer's that doesn't
-/// copy). `args[1]` is 0. `args[2]` is how many runs of pages the VM process keeps installed at most, each a mapping
+/// (doc-26): a write to a page makes the page private there, which the daemon knows nothing of.
+/// `args[1]` is 0. `args[2]` is how many runs of pages the VM process keeps installed at most, each a mapping
 /// of its own, by the mappings the host lets it make ([`OPEN`]'s reply): 0 if it doesn't say, which
 /// the daemon's metrics show (TASK-111.5).
 pub(crate) const WINDOW: u32 = 10;
@@ -653,19 +643,8 @@ pub(crate) const MAPPINGS: u32 = 17;
 pub(crate) const MAPPING_BYTES: u64 = 6 * 8;
 // 14, 15 and 18 to 20 were requests the host's tools made, of the daemon's stats, and to resize,
 // fork, delete and sync cells by path: the control API's now (TASK-43.5), not reused.
-/// cladefs: moves a follower's view to the writer's latest commit, whose number is the reply's
-/// `args[0]`, holding what the commits since the one it was as of held, until [`LET_GO`]
-/// ([`OpenCell::advance`](crate::OpenCell::advance)).
-pub(crate) const ADVANCE: u32 = 21;
-/// cladefs: lets go of what a follower's view held of the commits before commit number
-/// `args[0]`, which an [`ADVANCE`] returned ([`OpenCell::let_go`](crate::OpenCell::let_go)):
-/// the commit named, a let-go served after the next advance lets go of no more.
-pub(crate) const LET_GO: u32 = 22;
-/// cladefs: keeps extent `args[0..2]`, which a follower's view holds, whatever commit it advances
-/// to, until [`UNPIN`] ([`OpenCell::pin`](crate::OpenCell::pin)).
-pub(crate) const PIN: u32 = 23;
-/// cladefs: lets go of extent `args[0..2]`, pinned.
-pub(crate) const UNPIN: u32 = 24;
+// cladefs: 21 to 24, a follower's `ADVANCE`, `LET_GO`, `PIN` and `UNPIN`, are not reused (board
+// 8237).
 /// The connection's transfer area, the shared memory it carries, of `args[0]` bytes: what
 /// `READ`s and `WRITE`s with [`READ_TRANSFER`] and [`WRITE_TRANSFER`] move their data through,
 /// rather than the stream, whose sending and receiving copy it twice more (TASK-26.18.6). The VM
@@ -744,7 +723,7 @@ pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::
 
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;
 pub(crate) const OPEN_FORK: u32 = 1 << 1;
-pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
+// cladefs: 1 << 2, a follower's `OPEN_READ_ONLY`, is not reused (board 8237).
 /// cladefs: with [`OPEN_CREATE`], the cell made is a SQLite cell, which the
 /// sqlite_cladefs VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
@@ -810,9 +789,7 @@ pub(crate) const STAGE_MAPPED: u32 = 106;
 /// answers ([`RESIZED`]).
 pub(crate) const CAPACITY: u32 = 104;
 pub(crate) const CAPACITY_ASK: u32 = 1 << 0;
-/// cladefs: the writer of a follower's cell committed: its latest commit's number is `args[0]`,
-/// which the follower may [`ADVANCE`] to. Sent once for each run of commits.
-pub(crate) const COMMITTED: u32 = 105;
+// cladefs: 105, a follower's `COMMITTED`, is not reused (board 8237).
 /// cladefs: asks the VM process for its stats and its guest's, as of now: ask `args[0]`, which its
 /// [`STATS`] answers, those asked before it among them (TASK-111.4).
 pub(crate) const STATS_ASK: u32 = 109;
@@ -985,9 +962,6 @@ struct Queued {
     payload: Vec<u8>,
     /// How many of its bytes, its header's then its payload's, were sent.
     sent: usize,
-    /// cladefs: its kind, if it says the latest of what its kind says, which one of its kind sent
-    /// after it replaces, unless its sending began ([`AsyncSender::send_latest`]).
-    latest: Option<u32>,
 }
 
 impl Queued {
@@ -1075,15 +1049,7 @@ impl AsyncSender {
         payload: Vec<u8>,
         fds: &[BorrowedFd<'_>],
     ) -> io::Result<()> {
-        self.queue(header, payload, fds, false)
-    }
-
-    /// cladefs: sends `header`, a message of no payload that says the latest of what its kind says,
-    /// as [`AsyncSender::send`] does: or, one of its kind waiting in the queue, its sending not
-    /// begun, in its place (TASK-79.9). So what the other end, not reading, is told of again and
-    /// again takes one message of the queue, the latest, not one each time.
-    pub fn send_latest(self: &std::sync::Arc<Self>, header: Header) -> io::Result<()> {
-        self.queue(header, Vec::new(), &[], true)
+        self.queue(header, payload, fds)
     }
 
     /// cladefs: sends `headers`, messages of no payload, as [`AsyncSender::send`] would one after
@@ -1097,52 +1063,40 @@ impl AsyncSender {
     ) -> io::Result<()> {
         let mut queue = self.queue.lock().unwrap();
         for header in headers() {
-            self.push(&mut queue, header, Vec::new(), Vec::new(), false)?;
+            self.push(&mut queue, header, Vec::new(), Vec::new())?;
         }
         self.flush(&mut queue)
     }
 
-    /// Sends `header`, `payload` and `fds`, as [`AsyncSender::send`] does, in place of a message
-    /// of its kind waiting if it is the `latest` of what its kind says.
+    /// Sends `header`, `payload` and `fds`, as [`AsyncSender::send`] does.
     fn queue(
         self: &std::sync::Arc<Self>,
         header: Header,
         payload: Vec<u8>,
         fds: &[BorrowedFd<'_>],
-        latest: bool,
     ) -> io::Result<()> {
         assert!(fds.len() <= MAX_FDS, "too many descriptors for a message");
         // The descriptors are the queue's until it sends them, with the message's first bytes.
         let fds = fds.iter().map(|fd| fd.try_clone_to_owned()).collect::<io::Result<_>>()?;
         let mut queue = self.queue.lock().unwrap();
-        self.push(&mut queue, header, payload, fds, latest)?;
+        self.push(&mut queue, header, payload, fds)?;
         self.flush(&mut queue)
     }
 
-    /// Puts `header`, `payload` and `fds` at the end of `queue`, or, if it is the `latest` of what
-    /// its kind says, in place of a message of its kind waiting; fails once the socket failed.
+    /// Puts `header`, `payload` and `fds` at the end of `queue`; fails once the socket failed.
     fn push(
         &self,
         queue: &mut Queue,
         mut header: Header,
         payload: Vec<u8>,
         fds: Vec<OwnedFd>,
-        latest: bool,
     ) -> io::Result<()> {
         header.len = payload.len() as u64;
         header.fds = fds.len() as u32;
-        let latest = latest.then_some(header.kind);
         let header = header.as_bytes().try_into().unwrap();
-        let message = Queued { header, payload, sent: 0, latest };
+        let message = Queued { header, payload, sent: 0 };
         if let Some(failed) = queue.failed {
             return Err(failed.into());
-        }
-        if latest.is_some()
-            && let Some((queued, _)) = (queue.messages.iter_mut().rev())
-                .find(|(queued, _)| queued.latest == latest && queued.sent == 0)
-        {
-            queued.header = message.header;
-            return Ok(());
         }
         self.queue_more(message.left());
         queue.messages.push_back((message, fds));

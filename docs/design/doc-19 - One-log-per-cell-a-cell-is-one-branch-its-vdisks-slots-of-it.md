@@ -88,8 +88,6 @@ No migration (AGENTS.md): the formats change and refuse the old.
   segment filled stops taking writes as now.
 - **Space:** each vdisk has its capacity, which its guest is told; holding is counted per vdisk
   (its namespace's own extents). The cell's room is the sum.
-- **Followers** of a vdisk follow the cell's commits, of every vdisk: a batch of commits that
-  changed nothing of theirs applies nothing. Simplest; filtered wakeups are a later optimisation.
 - **One vdisk's panic halts the open cell**, and so the cell: the cell is the unit that fails.
 
 ## The daemon

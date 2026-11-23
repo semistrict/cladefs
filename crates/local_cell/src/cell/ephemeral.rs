@@ -646,8 +646,8 @@ impl<D: Dir> LocalCell<D> {
             logs.by_segment.remove(&segment(*number));
         }
 
-        // Acknowledge covered segments so freed runs are punched once views release them, and
-        // empty segments are reaped uniformly with bucket cells.
+        // Acknowledge covered segments so freed runs are punched once released, and empty
+        // segments are reaped uniformly with bucket cells.
         let (reaped, punches, raw) = {
             let mut state = self.state()?;
             let state = &mut *state;
@@ -662,7 +662,7 @@ impl<D: Dir> LocalCell<D> {
                     state.release_kept(footer_last(&queued.footer));
                 }
             }
-            state.trim_kept(&self.views.keeping(), state.epoch);
+            state.trim_kept(state.epoch);
             let reaped = state.segments.reap();
             let punches = state.segments.take_punches();
             let raw = state.segments.raw(durable);

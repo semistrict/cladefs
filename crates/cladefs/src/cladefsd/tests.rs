@@ -39,20 +39,6 @@ fn connect(path: &Path, capacity: u64) -> (CellClient, JoinHandle<()>) {
     (CellClient::over(stream, path, Opening::Create(capacity, Kind::Fxfs)).unwrap(), served)
 }
 
-/// cladefs: a daemon serving one connection, on a thread, and its client, a follower of the cell
-/// at `path` (backlog doc-8).
-fn follow(path: &Path) -> Result<(CellClient, JoinHandle<()>), Option<Errno>> {
-    let (stream, server) = UnixStream::pair().unwrap();
-    let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    match CellClient::over(stream, path, Opening::ReadOnly) {
-        Ok(client) => Ok((client, served)),
-        Err(error) => {
-            served.join().unwrap();
-            Err(error.errno())
-        }
-    }
-}
-
 /// `len` bytes of `byte` plus their offset modulo 251.
 fn pattern(byte: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| byte ^ (i % 251) as u8).collect()
@@ -129,8 +115,8 @@ fn protection_of(addr: usize) -> String {
 
 /// cladefs TASK-79.8: a window whose connection goes maps none of the daemon's pages from then on,
 /// which the daemon frees for other VMs' extents, nor anything the guest can reach, until another
-/// connection's window takes its memory over: a follower's device, reset and activated again,
-/// failing before its new window was made, left its guest the pages of other VMs.
+/// connection's window takes its memory over: a device reset and activated again, failing before
+/// its new window was made, once left its guest the pages of other VMs.
 #[test]
 fn windows_let_go_of_the_daemons_pages_as_their_connection_goes() {
     host();
@@ -241,12 +227,11 @@ async fn keeps_cells_in_the_buckets_their_descriptions_name() {
     served.join().unwrap();
 }
 
-/// cladefs: the daemon keeps what its bucket did, its requests and bytes, what the cells'
-/// followers are, how many and how far behind, what serving the cells cost, and the requests it
-/// served, in the file `CLADEFSD_STATS` names, soon after each change: the bench reports it
-/// (`scripts/bench-report.py`).
+/// cladefs: the daemon keeps what its bucket did, its requests and bytes, what serving the cells
+/// cost, and the requests it served, in the file `CLADEFSD_STATS` names, soon after each change:
+/// the bench reports it (`scripts/bench-report.py`).
 #[test]
-fn keeps_object_storage_and_follower_stats() {
+fn keeps_object_storage_and_daemon_stats() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("stats.txt");
@@ -260,8 +245,6 @@ fn keeps_object_storage_and_follower_stats() {
     client.commit(Some(b"root")).unwrap();
     let bucket = super::cells::daemon_bucket().unwrap();
     assert!(bucket.stats().uploaded(bucket_cell::object_bucket::Upload::Segments) > 0);
-    // A follower two commits behind, keeping what the writer freed.
-    let (follower, followed) = follow(&path).unwrap();
     client.free(extent(1)).unwrap();
     client.commit(None).unwrap();
     client.commit(None).unwrap();
@@ -278,23 +261,14 @@ fn keeps_object_storage_and_follower_stats() {
     let start = std::time::Instant::now();
     let kept = loop {
         let kept = std::fs::read_to_string(&file).unwrap_or_default();
-        let behind = fields(&kept, 1, "followers").and_then(|f| count(&f, "max-behind"));
-        let commits = fields(&kept, 2, "daemon").and_then(|f| count(&f, "commits"));
-        if kept.lines().next() == Some(&bucket.stats().line())
-            && behind == Some(2)
-            && commits == Some(3)
-        {
+        let commits = fields(&kept, 1, "daemon").and_then(|f| count(&f, "commits"));
+        if kept.lines().next() == Some(&bucket.stats().line()) && commits == Some(3) {
             break kept;
         }
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "kept {kept:?}");
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
-    let followers = fields(&kept, 1, "followers").unwrap();
-    let names: Vec<_> = followers.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["views", "max-views", "max-behind", "max-stale-ms", "max-kept"]);
-    let counts = (followers[0].1, followers[1].1, followers[4].1);
-    assert_eq!(counts, (1, 1, 2 * BLOCK as u64), "{kept}");
-    let daemon = fields(&kept, 2, "daemon").unwrap();
+    let daemon = fields(&kept, 1, "daemon").unwrap();
     let names: Vec<_> = daemon.iter().map(|(name, _)| name.to_owned()).collect();
     // Its counters, then how long its cells' commits waited to be made durable (TASK-165.9).
     let mut expected: Vec<String> =
@@ -361,7 +335,7 @@ fn keeps_object_storage_and_follower_stats() {
     assert!(count(&daemon, "written_log_bytes") > Some(0), "{kept}");
     // The three commits, each a COMMIT request: a request's time holds its commit's, which
     // holds its phases'.
-    let requests = fields(&kept, 3, "requests").unwrap();
+    let requests = fields(&kept, 2, "requests").unwrap();
     assert_eq!(count(&requests, "commit"), Some(3), "{kept}");
     let ns = |fields: &[(String, u64)], name: &str| count(fields, name).unwrap();
     assert!(ns(&requests, "commit-ns") >= ns(&daemon, "commit-ns"), "{kept}");
@@ -370,10 +344,8 @@ fn keeps_object_storage_and_follower_stats() {
         ns(&daemon, "commit-ns") >= phases.map(|phase| ns(&daemon, phase)).iter().sum::<u64>(),
         "{kept}"
     );
-    for (client, served) in [(follower, followed), (client, served)] {
-        drop(client);
-        served.join().unwrap();
-    }
+    drop(client);
+    served.join().unwrap();
 }
 
 /// Runs `call`, a cell operation of the control API's, on a runtime of its own, as the API does:
@@ -2029,27 +2001,6 @@ async fn fenced_cells_answer_ordered_commits_erofs() {
     assert_eq!(first.free(extent(1)), Err(Errno::EROFS));
 }
 
-/// TASK-588: a follower pins what its view holds, as doc-4 has it, and nothing else: an ID its VM
-/// process made up is refused, which the daemon held for the view's life before, as many as it
-/// was asked.
-#[test]
-fn followers_pin_only_what_their_views_hold() {
-    host();
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("cladefsd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || serve(listener));
-    let path = dir.path().join("store");
-    let writer = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let held = ExtentId { cell: writer.cell(), sequence: 1 };
-    write(&writer, held, 0, &pattern(1, BLOCK)).unwrap();
-    writer.commit(None).unwrap();
-    let follower = CellClient::connect_read_only(&socket, &path).unwrap();
-    assert_eq!(follower.pin(held), Ok(()));
-    let made_up = ExtentId { cell: writer.cell(), sequence: 999 };
-    assert_eq!(follower.pin(made_up), Err(Errno::ENOENT));
-}
-
 /// A transfer area of `len` bytes, its first half written as the slots a VM process used, given
 /// to a daemon serving a connection of its cell: the area's memory and mapping, and the connection.
 struct ServedArea {
@@ -2264,10 +2215,10 @@ fn vm_processes_drop_the_versions_they_made_alone() {
     assert_eq!(versions(), [managers].into());
 }
 
-/// cladefs: a writer that goes with writes uncommitted cuts its followers off (ESTALE), and no
-/// writer or follower opens its cell until they are gone: then it opens as of its last commit.
+/// cladefs: a writer that goes with writes uncommitted leaves its cell as of its last commit, which
+/// the next writer opens.
 #[test]
-fn writers_that_go_with_writes_uncommitted_cut_their_followers_off() {
+fn writers_that_go_with_writes_uncommitted_leave_their_last_commit() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -2276,61 +2227,14 @@ fn writers_that_go_with_writes_uncommitted_cut_their_followers_off() {
     let extent = move |sequence| ExtentId { cell, sequence };
     write(&client, extent(1), 0, &pattern(1, BLOCK)).unwrap();
     client.commit(None).unwrap();
-    let (follower, followed) = follow(&path).unwrap();
     write(&client, extent(2), 0, &pattern(2, BLOCK)).unwrap();
     drop(client);
     served.join().unwrap();
 
-    assert_eq!(read(&follower, extent(1), 0, BLOCK), Err(Errno::ESTALE));
-    assert_eq!(follower.advance(), Err(Errno::ESTALE));
-    assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
-    let (stream, server) = UnixStream::pair().unwrap();
-    let busy = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    let opened = CellClient::over(stream, &path, Opening::Create(1 << 20, Kind::Fxfs));
-    assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-    busy.join().unwrap();
-
-    drop(follower);
-    followed.join().unwrap();
     let (client, served) = connect(&path, 1 << 20);
     assert_eq!(read(&client, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
     assert_eq!(read(&client, extent(2), 0, BLOCK), Err(Errno::ENOENT));
     drop(client);
-    served.join().unwrap();
-}
-
-/// cladefs: a connection opens no cell open in an arena not its own (TASK-79.36), whose pages its
-/// VM process's window could not map, or not as it maps them: neither a follower of the default
-/// tenant's a cell a granted tenant's writer has open, nor a granted tenant's writer one that
-/// followers of the default tenant's have open (EBUSY), until the other is gone.
-#[test]
-fn cells_open_in_another_arena_are_busy() {
-    host();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store");
-    let tenant = super::Tenant::new(1, dir.path()).unwrap();
-    let open_as_tenant = || {
-        let (stream, server) = UnixStream::pair().unwrap();
-        let tenant = tenant.clone();
-        let served = std::thread::spawn(move || serve_connection(server, tenant));
-        (CellClient::over(stream, &path, Opening::Create(1 << 20, Kind::Fxfs)), served)
-    };
-    let (client, served) = open_as_tenant();
-    let client = client.unwrap();
-    write(&client, ExtentId { cell: client.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
-    client.commit(None).unwrap();
-    assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
-    drop(client);
-    served.join().unwrap();
-
-    let (follower, followed) = follow(&path).unwrap();
-    let (opened, busy) = open_as_tenant();
-    assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-    busy.join().unwrap();
-    drop(follower);
-    followed.join().unwrap();
-    let (client, served) = open_as_tenant();
-    drop(client.unwrap());
     served.join().unwrap();
 }
 
@@ -3531,7 +3435,7 @@ fn forks_of_a_version_right_after_its_writer_went_sync_the_cell_still_closing() 
     made.commit(Some(b"root")).unwrap();
     let version = made.make_version().unwrap();
     let key = super::cells::cell_dir_key(&cell_dir);
-    let lingering = super::cells::table().instance(&key).map(|(open_cell, _)| open_cell);
+    let lingering = super::cells::table().instance(&key);
     assert!(lingering.is_some(), "the cell is not open");
     drop(made);
     let forked = control(super::cells::fork_of_version(
@@ -3628,7 +3532,7 @@ fn versions_shared_right_after_their_writer_went_use_the_cell_still_closing() {
     made.commit(Some(b"root")).unwrap();
     let version = made.make_version().unwrap();
     let key = super::cells::cell_dir_key(&cell_dir);
-    let lingering = super::cells::table().instance(&key).map(|(open_cell, _)| open_cell);
+    let lingering = super::cells::table().instance(&key);
     assert!(lingering.is_some(), "the cell is not open");
     drop(made);
     let shared = control(super::cells::share_version(cell_dir.clone(), version.version, true));
@@ -3735,8 +3639,7 @@ fn daemons_of_other_wire_versions_are_refused() {
                     reply.set_body(&OpenedBody {
                         cell: 7,
                         arena: 1,
-                        reserved: 0,
-                        commit: 0,
+                        reserved: [0; 3],
                         max_map_count: 0,
                         version: 0,
                     });
@@ -3848,7 +3751,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
 /// its own, as of the default tenant, and its wire version this one.
 fn opened_body(cell: u64) -> super::wire::OpenedBody {
     let arena = crate::pages::ArenaId(1);
-    super::codec::Opened { cell, arena, commit: 0, max_map_count: None }.to_body()
+    super::codec::Opened { cell, arena, max_map_count: None }.to_body()
 }
 
 /// TASK-216: a VM booted again on the cell its VM crashed out of opens it at once, while what
@@ -4179,64 +4082,6 @@ fn restores_wait_for_a_version_however_long_its_opening_takes() {
     for (n, (root, _)) in restored.iter().enumerate() {
         assert_eq!(root, &Ok(b"snapshot".to_vec()), "restore {n}");
     }
-}
-
-/// TASK-79.9: a follower's VM process that stops reading, frozen as SIGSTOP freezes it, holds as
-/// much of the daemon's memory as a message telling it of its writer's commits, whatever the
-/// writer commits meanwhile: told of the latest once it reads again, rather than of each, which the
-/// daemon kept for it without end, as it sends without waiting (TASK-79.9).
-#[test]
-fn followers_that_stop_reading_are_told_of_the_latest_commit() {
-    use super::wire::*;
-    const ROUNDS: u8 = 200;
-    host();
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("cladefsd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || serve(listener));
-    let path = dir.path().join("store");
-    let writer = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    // The follower's VM process, by hand, which reads its opening's reply, and nothing more until
-    // its writer is done.
-    let stream = UnixStream::connect(&socket).unwrap();
-    let (sender, mut receiver) = (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream));
-    let open = Header::new(OPEN, 1)
-        .with_body(&OpenBody { version: VERSION, ..Default::default() })
-        .with_flags(OPEN_READ_ONLY);
-    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
-    let opened = receiver.receive(|| 0).unwrap().unwrap();
-    assert_eq!(opened.header.status, 0);
-    let mut commit = opened.header.read_body::<OpenedBody>().commit;
-
-    // Commits, many times what its socket holds, each told of as the writer makes it, each of an
-    // extent of its own.
-    let mut sequence = 0;
-    for round in 0..ROUNDS {
-        for _ in 0..16 {
-            sequence += 1;
-            let extent = ExtentId { cell: writer.cell(), sequence };
-            write(&writer, extent, 0, &pattern(round, BLOCK)).unwrap();
-            writer.commit_ordered(None).unwrap();
-        }
-        let queued = super::server::most_queued();
-        assert!(queued <= size_of::<Header>() as u64, "{queued} bytes queued for VM processes");
-    }
-    let key = super::cells::cell_dir_key(&path);
-    let holder = super::cells::table().writer(&key).unwrap();
-    let latest = holder.cell().unwrap().committed().unwrap();
-    // Each commit it is told of after the last, the latest last.
-    let told = within(std::time::Duration::from_secs(10), move || {
-        while commit < latest {
-            let told = receiver.receive(|| 0).unwrap().unwrap();
-            assert_eq!(told.header.kind, COMMITTED);
-            let next = told.header.read_body::<CommitBody>().commit;
-            assert!(next > commit, "told of {next} after {commit}");
-            commit = next;
-        }
-        commit
-    });
-    assert_eq!(told, Ok(latest), "the follower wasn't told of its writer's latest commit");
-    drop((sender, writer));
 }
 
 /// Sends `header` and `payload`, a request, through `sender`, and returns its reply, which
@@ -4662,18 +4507,16 @@ fn cells_held_through_their_connections_are_let_go_once_they_are() {
     assert_eq!(resizing.join().unwrap(), Err(Errno::ETIMEDOUT));
 }
 
-/// TASK-160.8: `OPEN`s of a cell, to write it and to follow it, all at once as the VM process
-/// writing it exits, each tried again on `EBUSY` until it opens the cell, or, to write it, another
-/// connection writes it: one writes it, as the first lets it go, holding it until all are done, the
-/// others refused (`EBUSY`); each follower follows it, the first's, a follower's or the next
-/// writer's; all read what the first committed. Once all are gone, nothing holds the cell, nor
-/// has it open, and it opens again.
+/// TASK-160.8: `OPEN`s of a cell, all at once as the VM process writing it exits, each tried again
+/// on `EBUSY` until it opens the cell, or another connection writes it: one writes it, as the
+/// first lets it go, holding it until all are done, the others refused (`EBUSY`); it reads what the
+/// first committed. Once all are gone, nothing holds the cell, nor has it open, and it opens
+/// again.
 #[test]
 fn opens_race_the_exit_of_the_vm_process_writing_their_cell() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier, RwLock, mpsc};
     const WRITERS: usize = 4;
-    const FOLLOWERS: usize = 4;
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -4687,7 +4530,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_cell() {
     };
     // All at once; those that open the cell keep it until all are done: until the test lets go
     // of `done`.
-    let start = Arc::new(Barrier::new(WRITERS + FOLLOWERS + 1));
+    let start = Arc::new(Barrier::new(WRITERS + 1));
     let done = Arc::new(RwLock::new(()));
     let all_done = done.write().unwrap();
     let won = Arc::new(AtomicBool::new(false));
@@ -4727,32 +4570,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_cell() {
             })
         })
         .collect();
-    let (followed, follows) = mpsc::channel();
-    let followers: Vec<_> = (0..FOLLOWERS)
-        .map(|_| {
-            let (path, start, done, followed) =
-                (path.clone(), start.clone(), done.clone(), followed.clone());
-            std::thread::spawn(move || {
-                start.wait();
-                let following = loop {
-                    match follow(&path) {
-                        Err(errno) if !tried(errno) => {}
-                        following => break following,
-                    }
-                };
-                match following {
-                    Ok((follower, served)) => {
-                        followed.send(Ok(read(&follower, extent, 0, BLOCK))).unwrap();
-                        drop(done.read().unwrap());
-                        drop(follower);
-                        served.join().unwrap();
-                    }
-                    Err(errno) => followed.send(Err(errno)).unwrap(),
-                }
-            })
-        })
-        .collect();
-    drop((wrote, followed));
+    drop(wrote);
     // Its VM process exits.
     start.wait();
     drop(first);
@@ -4761,17 +4579,13 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_cell() {
     let wait = std::time::Duration::from_secs(60);
     let writes: Vec<_> =
         (0..WRITERS).map(|_| writes.recv_timeout(wait).expect("a writer said nothing")).collect();
-    let follows: Vec<_> = (0..FOLLOWERS)
-        .map(|_| follows.recv_timeout(wait).expect("a follower said nothing"))
-        .collect();
     drop(all_done);
-    for thread in writers.into_iter().chain(followers) {
+    for thread in writers {
         thread.join().unwrap();
     }
     let (opened, refused): (Vec<_>, Vec<_>) = writes.into_iter().partition(Result::is_ok);
     assert_eq!(opened, vec![Ok(Ok(pattern(1, BLOCK)))]);
     assert_eq!(refused, vec![Err(Some(Errno::EBUSY)); WRITERS - 1]);
-    assert_eq!(follows, vec![Ok(Ok(pattern(1, BLOCK))); FOLLOWERS]);
     assert!(super::cells::table().is_empty(), "the cell is held or open once all are gone");
     let (again, served) = connect(&path, 1 << 24);
     assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
@@ -4974,10 +4788,11 @@ fn whatever_a_vm_process_says_harms_no_other() {
         RESIZED,
         // cladefs: and 29 and 107, writable DAX's asks to seal and their answers, retired.
         MAPPINGS,
-        ADVANCE,
-        LET_GO,
-        PIN,
-        UNPIN,
+        // cladefs: and 21 to 24, a follower's, gone (board 8237).
+        21,
+        22,
+        23,
+        24,
         TRANSFER,
         FREE_MANY,
         STAGE_COUNTS,
@@ -5388,7 +5203,7 @@ fn a_panic_holding_a_cells_lock_halts_it_alone() {
 
 /// The locks shared beyond one cell a VM process's requests take ([`child_panics_holding`]): the
 /// extent cache's and its extents', a window's and its change's, its connection's, and those of
-/// `local_cell`'s cell, which its followers share with its writer (TASK-149.24).
+/// `local_cell`'s cell, which the cells a base is attached to share (TASK-149.24).
 const SHARED_LOCKS: &[&str] = &[
     "extent cache",
     "cached extent holders",

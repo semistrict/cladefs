@@ -47,7 +47,6 @@ not (
         | test(=bucket::tests::uploads_a_bucket_takes_none_of_hold_no_more_than_their_budget)
         | test(=bucket::tests::uploads_waited_for_end_with_their_segment_closed_for_room)
         | test(=open_cell::tests::bases_attached_open_when_read)
-        | test(=open_cell::tests::followers_are_cut_off_once_the_collector_reclaims_what_they_read)
         | test(=open_cell::tests::holding_follows_the_extents)
         | test(=open_cell::tests::memory_run_out_evicts_the_least_used_extents)
         | test(=open_cell::tests::serves_whatever_a_guest_asks)
@@ -66,9 +65,7 @@ not (
         | test(=cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it)
         | test(=cladefsd::tests::window_mappings_are_answered_beside_the_stream_data_in_flight)
         | test(=cladefsd::tests::hostile::mappings_asked_for_past_the_credit_let_their_vm_process_go)
-        | test(=cladefsd::tests::followers_that_stop_reading_are_told_of_the_latest_commit)
         | test(=cladefsd::tests::forks_opening_reads_nothing_more_of_a_larger_base)
-        | test(=cladefsd::tests::counting_followers_walks_no_extents)
         | test(=cladefsd::tests::restores_wait_for_a_version_however_long_its_opening_takes)))
     | (binary_id(cladefs::fuse_mount) & test(=a_cell_mounted_is_not_mounted_again))
     | (binary_id(cladefs::control) & (

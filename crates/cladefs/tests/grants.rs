@@ -279,7 +279,7 @@ fn revoked_tenants_take_no_new_connections() {
 
 /// TASK-79.36: a tenant revoked whose VM processes live on, granted again, is the tenant they are
 /// of: the VM processes it connects share its arena with them, and with it the pages of the cells
-/// they have open, which they follow.
+/// they have open.
 #[test]
 fn tenants_granted_again_while_alive_go_on() {
     let dir = tempfile::tempdir().unwrap();
@@ -293,8 +293,8 @@ fn tenants_granted_again_while_alive_go_on() {
 
     daemon.revoke(1).unwrap();
     let socket = daemon.grant(1, &acme, None).unwrap();
-    let follower = CellClient::connect_read_only(&socket, acme.join("vm")).unwrap();
-    assert_eq!(copies(follower.physical_memory(), &bytes), 1, "the VM's pages, in its memory");
+    let other = CellClient::connect(&socket, acme.join("other"), CAPACITY).unwrap();
+    assert_eq!(copies(other.physical_memory(), &bytes), 1, "the VM's pages, in its memory");
 }
 
 /// The environment of this test's process run in a jail ([`jailed`]): the socket's path there,

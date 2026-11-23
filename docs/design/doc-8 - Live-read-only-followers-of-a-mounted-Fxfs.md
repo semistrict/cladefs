@@ -7,6 +7,15 @@ updated_date: '2026-11-17 01:09'
 ---
 # Live read-only followers of a mounted Fxfs
 
+**Status: removed, 2026-11-22 (board 8237).** Live followers are deleted: their crates
+(`follower`, `follower_sim`, `follower_history`), the cell views (`local_cell::views`), Fxfs's
+follower, the guest's `follow.rs`, fill barrier and follower invalidation, the device's
+`F_READ_ONLY` with `ADVANCE`, `LET_GO`, `PIN` and `UNPIN` (doc-4, protocol version 2), the
+daemon's follower requests, CLI, metrics, specs (`specs/follower`) and tests. They had no customer
+(docs/reviews/2026-11-04-first-principles.md, decision 4). Attached bases (doc-10), frozen forks a
+cell reads through to, are unaffected: their extents never change, so they need nothing of this.
+What follows is the design as it was, kept as history.
+
 Status: planned, 2026-10-17; the protocol's TLA+ spec written and checked (TASK-42.8, testing 0);
 cell views built (TASK-42.2, 2026-10-18); the simulation (TASK-42.1), the follower in Fxfs
 (TASK-42.4), its protocol under Shuttle (TASK-42.5, the host's side) and cladefsd's followers

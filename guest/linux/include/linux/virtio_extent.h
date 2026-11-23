@@ -22,15 +22,14 @@
  * every one the device offers, and the device refuses its activation otherwise. Firecracker's
  * device's is VIRTIO_EXTENT_VERSION in vendor/firecracker's virtio/extent/mod.rs.
  */
-#define VIRTIO_EXTENT_VERSION 1
+#define VIRTIO_EXTENT_VERSION 2
 
 /*
  * Shared memory region 0 is a DAX window, and MAP and UNMAP work. cladefs: the window copies on write
  * (cladefs's doc-13): it maps sealed extents and zeros alone, read-only, and a store to one of its
  * pages gives the device a private page holding what the page held, at the same address, until a
  * MAP or UNMAP over it; at most the configuration's `private_max` of them. MAP takes MAP_ZEROS, and
- * PRIVATE works. A follower's window (READ_ONLY) takes no store, nor PRIVATE. Bits 1, 9 and 10,
- * which were writable DAX's, are unused.
+ * PRIVATE works. Bits 1, 9 and 10, which were writable DAX's, are unused.
  */
 #define VIRTIO_EXTENT_F_DAX 0
 /* WRITE takes WRITE_COMMIT: a COMMIT follows the write, in one request. */
@@ -47,12 +46,7 @@
  * INFO says, as its filesystem thaws (cladefs's TASK-39.1).
  */
 #define VIRTIO_EXTENT_F_FREEZE 4
-/*
- * The device follows a store another VM writes, read-only (cladefs's doc-8): ADVANCE, LET_GO, PIN
- * and UNPIN work, and the configuration's `committed` changes as the writer commits, telling the
- * guest with a configuration change. The driver sends nothing that writes.
- */
-#define VIRTIO_EXTENT_F_READ_ONLY 5
+/* Bit 5 was a live follower's, READ_ONLY, unused. */
 /*
  * FREE takes FREE_MANY: its data names more extents to free, each a struct virtio_extent_id,
  * after the one its arguments do: a flush's dead extents in one request (cladefs's TASK-41).
@@ -84,17 +78,7 @@
 #define VIRTIO_EXTENT_T_INFO 8
 #define VIRTIO_EXTENT_T_RESIZED 9
 #define VIRTIO_EXTENT_T_FREEZE 10
-/* F_READ_ONLY: the follower's view moves to the writer's latest commit, and says its number. */
-#define VIRTIO_EXTENT_T_ADVANCE 11
-/*
- * F_READ_ONLY: the view lets go of what the commits before the one a commit number names held,
- * which an ADVANCE said: served after the next ADVANCE, it lets go of no more.
- */
-#define VIRTIO_EXTENT_T_LET_GO 12
-/* F_READ_ONLY: keeps an extent the view holds, whatever commit it advances to, until UNPIN. */
-#define VIRTIO_EXTENT_T_PIN 13
-#define VIRTIO_EXTENT_T_UNPIN 14
-/* 15 was writable DAX's SEALED, unused. */
+/* 11 to 14 were a live follower's ADVANCE, LET_GO, PIN and UNPIN; 15 writable DAX's SEALED: unused. */
 /*
  * F_DAX: makes the window's pages its arguments name private now, as stores would, and maps
  * them for the guest ahead of its accesses: a write(2) of many pages in one round trip, rather than
@@ -104,7 +88,6 @@
 /*
  * F_STATS: the guest's stats, its data, text of VIRTIO_EXTENT_MAX_STATS bytes at most, lines of a
  * name and a value: the answer to the ask its arguments name (stats_asked), and those before it.
- * Followers answer too: it writes nothing.
  */
 #define VIRTIO_EXTENT_T_STATS 17
 /* The last request type. */
@@ -157,8 +140,6 @@ struct virtio_extent_config {
 	/* F_RESIZE: the store's capacity, and the shrink the guest is asked to take, or 0. */
 	__le64 capacity;
 	__le64 asked;
-	/* F_READ_ONLY: the number of the writer's latest commit. */
-	__le64 committed;
 	/* F_DAX: the most private pages the device holds at once (pages of map_alignment). */
 	__le64 private_max;
 	/* F_STATS: the host's latest ask for the guest's stats, or 0 before the first. */
@@ -234,15 +215,6 @@ struct virtio_extent_stats {
 	__le64 asked;
 };
 
-/*
- * ADVANCE: the number of the commit the view is as of now. LET_GO: the commit number it lets go up
- * to.
- */
-struct virtio_extent_commit_number {
-	__le64 commit;
-	__le64 reserved;
-};
-
 struct virtio_extent_info {
 	__le64 capacity;
 	__le64 used;
@@ -294,13 +266,12 @@ struct vext_request {
 	/* The request: one of VIRTIO_EXTENT_T_*, and its flags. */
 	u32 type;
 	u32 flags;
-	/* READ, WRITE, FREE, MAP, PIN, UNPIN: the extent. */
+	/* READ, WRITE, FREE, MAP: the extent. */
 	struct vext_id id;
 	/*
 	 * READ, WRITE, MAP: where in the extent. MAP, UNMAP, PRIVATE: how much (len), and where in
 	 * the window.
-	 * RESIZED: the capacity asked (offset). LET_GO: the commit number (offset). STATS: the ask
-	 * answered (offset).
+	 * RESIZED: the capacity asked (offset). STATS: the ask answered (offset).
 	 */
 	u64 offset;
 	u64 len;
@@ -309,9 +280,8 @@ struct vext_request {
 	 * The data, of data_len bytes: READ's buffer; WRITE's data; COMMIT's root, with
 	 * VIRTIO_EXTENT_COMMIT_ROOT; FREE's further extents, with VIRTIO_EXTENT_FREE_MANY; MAP's
 	 * further maps, with VIRTIO_EXTENT_MAP_MANY; ROOT's buffer, of max_root bytes and a struct
-	 * virtio_extent_root_len after them; INFO's struct virtio_extent_info; ADVANCE's struct
-	 * virtio_extent_commit_number; STATS's text. cladefs: READ's and WRITE's length too: one
-	 * length for all data (TASK-160.7).
+	 * virtio_extent_root_len after them; INFO's struct virtio_extent_info; STATS's text. cladefs:
+	 * READ's and WRITE's length too: one length for all data (TASK-160.7).
 	 */
 	void *data;
 	u32 data_len;
@@ -340,7 +310,6 @@ struct vext_request {
 		struct virtio_extent_private private;
 		struct virtio_extent_commit commit;
 		struct virtio_extent_resized resized;
-		struct virtio_extent_commit_number commit_number;
 		struct virtio_extent_stats stats;
 	} args;
 	struct virtio_extent_resp resp;
@@ -383,23 +352,6 @@ bool virtio_extent_free_many(struct virtio_extent *vext);
 bool virtio_extent_map_many(struct virtio_extent *vext);
 /* Whether a MAP, and each of its further maps, may carry MAP_PREFAULT (F_MAP_PREFAULT). */
 bool virtio_extent_map_prefault(struct virtio_extent *vext);
-/*
- * Whether the device follows a store another VM writes, read-only (F_READ_ONLY): the driver
- * refuses what would write (-EROFS), and the filesystem mounts read-only.
- */
-bool virtio_extent_read_only(struct virtio_extent *vext);
-/* F_READ_ONLY: the number of the writer's latest commit, as the configuration says now. */
-u64 virtio_extent_committed(struct virtio_extent *vext);
-/*
- * cladefs: F_READ_ONLY: a follower's device has a connection to its store, which keeps its writer
- * from opening it once it was cut off (doc-4). virtio_extent_close, as its filesystem unmounts,
- * nothing in flight that any task waits for, resets the device, which lets the store go.
- * virtio_extent_open, as one mounts, has the device open the store anew, as of its writer's latest
- * commit, and reads its cell again: 0, or -EBUSY if it couldn't, which another call may yet.
- * Neither does anything to a writer's device, nor to one open or closed already.
- */
-void virtio_extent_close(struct virtio_extent *vext);
-int virtio_extent_open(struct virtio_extent *vext);
 
 /*
  * The store's capacity, and the shrink the guest is asked to take, or 0, as the configuration
@@ -408,7 +360,7 @@ int virtio_extent_open(struct virtio_extent *vext);
 bool virtio_extent_capacity(struct virtio_extent *vext, u64 *capacity, u64 *asked);
 /*
  * Has the driver call `changed(arg)` as the device's configuration changes, its capacity or a
- * shrink asked, or its writer's latest commit; or none, if `changed` is NULL.
+ * shrink asked; or none, if `changed` is NULL.
  * Called from the device's interrupt: it must not sleep.
  */
 typedef void (*vext_config_changed_t)(void *arg);

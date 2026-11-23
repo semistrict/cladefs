@@ -41,12 +41,13 @@ practice below has the same gate: **no reproducer in one of the project's oracle
   coverage of the target against AFL's 92%.
 - SysMoBench (ICLR 2026): LLMs model "the textbook protocol, not the implementation" (15%
   conformance on etcd raft): models must be checked against code, never trusted.
-- cladefs has this for followers only (specs/follower/trace, crates/follower/src/shuttle_trace.rs).
+- cladefs had this for followers only (specs/follower/trace, crates/follower/src/shuttle_trace.rs),
+  gone with them (board 8237).
   Bucket is TASK-44.5, To Do. Journal and dax-cow have none.
 
 **Memory ordering.** Shuttle models every atomic as SeqCst (its docs, and it warns at runtime), so
 no cladefs test can see an Acquire/Release/Relaxed bug. The host crates (cladefs, physmem,
-extent_store, extent_bucket, follower, virtio_extent) hold 450 non-SeqCst orderings. LLMs reason
+extent_store, extent_bucket, follower, virtio_extent, as of this writing) hold 450 non-SeqCst orderings. LLMs reason
 poorly about weak memory (arXiv 2501.14326), so an audit alone is not evidence; loom (MIT) is the
 disposer. AtomVChecker's classes (ordering too weak to publish related state; AtomicPtr data
 unsynchronised; stronger than needed) give the audit a shape. A fence-deletion mutant left one
@@ -111,8 +112,8 @@ item 10 is TASK-149.4, filed before.
 
 1. **Trace-validate the journal and dax-cow specs against the code; generate tests from the
    specs' state graphs** (with TASK-44.5 for the bucket). Nothing today checks that the code is the
-   spec; TLC and the spec mutations check only the designs. The follower trace machinery is the
-   template. dax-cow's traces come from guest/sim seeds, the journal's from the model test's power
+   spec; TLC and the spec mutations check only the designs. The follower trace machinery (in git
+   history since board 8237) is the template. dax-cow's traces come from guest/sim seeds, the journal's from the model test's power
    cuts. Agents may change code or spec, but a spec change must still pass TLC and every spec
    mutation (Specula's anti-overfitting rule). Where a spec makes atomic what the code does in two
    steps, split the action first (MongoDB's failure).

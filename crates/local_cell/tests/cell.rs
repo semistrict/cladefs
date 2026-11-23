@@ -30,8 +30,6 @@ const OPTIONS: Options = Options {
     segment_age: std::time::Duration::from_secs(3600),
     large_extent: 32 << 10,
     open_files: 2,
-    view_lag: None,
-    view_kept_bytes: None,
     held_most: 256 << 10,
 };
 
@@ -193,7 +191,7 @@ async fn extents_of_the_last_sequence_are_refused() {
 }
 
 /// cladefs: an extent freed once sealed is written no more, nor opened, though the cell holds it
-/// no longer, nor once it opens again, from its deltas or its checkpoint: forks, views and caches
+/// no longer, nor once it opens again, from its deltas or its checkpoint: forks and caches
 /// that hold it by its ID would take another's data for it (TASK-79.6). One freed while open,
 /// which nothing but its writer saw, may be written again; and one never written, though below
 /// the cell's next sequence number, as Fxfs's journal writes the tail it minted ahead in an
@@ -439,9 +437,10 @@ async fn extents_the_cell_opened_with_relocate() {
 }
 
 /// cladefs: doc-27 (board 6214): a guest's free, not yet committed when its writer's relocation
-/// commits, is freed by the guest's next commit, not the relocation's: a view as of the
-/// relocation's commit holds the extent, as that commit does. A free was numbered as the next
-/// commit's when made, which the relocation's took (the reviews of 6a7f60008; a resize's did too).
+/// commits, is freed by the guest's next commit, not the relocation's: kept for the uploader once
+/// the relocation's commit is acknowledged, as the commit freeing it is not. A free was numbered as
+/// the next commit's when made, which the relocation's took (the reviews of 6a7f60008; a resize's
+/// did too).
 #[tokio::test(flavor = "multi_thread")]
 async fn frees_pending_across_a_relocation_are_the_next_commits() {
     let dir = MemDir::new();
@@ -457,12 +456,14 @@ async fn frees_pending_across_a_relocation_are_the_next_commits() {
     cell.free(extent(0)).unwrap();
     let relocating = Relocating { extent: extent(1), from, data: pattern(1, 0, BLOCK) };
     assert_eq!(cell.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
-    let view = cell.view();
-    assert_eq!(cell.view_extent(&view, extent(0)).unwrap(), BLOCK as u64);
-    cell.commit(None).await.unwrap();
-    assert_eq!(cell.view_extent(&view, extent(0)).unwrap(), BLOCK as u64, "freed after its commit");
-    let after = cell.view();
-    error_is(cell.view_extent(&after, extent(0)).map(drop), NoExtent(extent(0)));
+    assert!(cell.close_now().await.unwrap());
+    let relocated = closed_one(&cell).await;
+    cell.acknowledged(relocated.number).await.unwrap();
+    assert_eq!(
+        cell.usage().unwrap().kept_bytes,
+        BLOCK as u64,
+        "freed after the relocation's commit"
+    );
 }
 
 /// cladefs: doc-27 (board 6214): a relocation between the guest's commits leaves what the guest
@@ -2611,7 +2612,7 @@ const SEGMENT_LIMIT: u64 = 128 << 10;
 /// of the frees it keeps for the bucket alone, until acknowledged there (TASK-165.9).
 fn dead_bytes(cell: &LocalCell<MemDir>) -> u64 {
     let usage = cell.usage().unwrap();
-    usage.segment_bytes - usage.live_bytes + usage.kept_bytes - usage.kept_for_views
+    usage.segment_bytes - usage.live_bytes + usage.kept_bytes
 }
 
 /// The bytes of data of each of the cell's segments in `dir`: open ones' raw files,
@@ -3447,21 +3448,6 @@ async fn shrinks_count_writes_in_progress() {
     );
     cell.set_capacity(held).await.unwrap();
     drop(write);
-}
-
-/// cladefs: a follower waiting for a commit after the one it has hears of the latest, or, if none
-/// came, of none.
-#[tokio::test(flavor = "multi_thread")]
-async fn newer_commits_are_heard_of() {
-    let cell = create(MemDir::new(), 1 << 20);
-    for _ in 0..3 {
-        cell.commit(None).await.unwrap();
-    }
-    let epoch = cell.last_commit().unwrap();
-    assert_eq!(cell.newer(epoch, std::time::Duration::ZERO).await, None);
-    cell.commit(None).await.unwrap();
-    cell.commit(None).await.unwrap();
-    assert_eq!(cell.newer(epoch, std::time::Duration::ZERO).await, Some(epoch + 2));
 }
 
 /// cladefs: ordered commits wait for a flush to make them durable, and say so.

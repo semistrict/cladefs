@@ -112,8 +112,7 @@ if [[ $arch == x86_64 && ${CLADEFS_GUEST_KERNEL_PROFILE:-} == 1 ]]; then
         --enable UNWINDER_FRAME_POINTER
 fi
 # cladefs: with CLADEFS_GUEST_KERNEL_DEBUG=1, a kernel that checks its locking (lockdep, sleeping in
-# atomic context) and, with KCSAN, its data races, as the followers' torture test runs it
-# (TASK-42.7, doc-8 testing 6), and that fails allocations as a test asks, through debugfs
+# atomic context) and, with KCSAN, its data races, and that fails allocations as a test asks, through debugfs
 # (failslab, fail_page_alloc: fxfs-guest-faults-dax, TASK-44.10): slow, so built with its own
 # CLADEFS_GUEST_KERNEL_WORK.
 if [[ ${CLADEFS_GUEST_KERNEL_DEBUG:-} == 1 ]]; then

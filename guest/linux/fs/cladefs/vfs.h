@@ -8,10 +8,8 @@
 #define _FS_CLADEFS_VFS_H
 
 #include <linux/fs.h>
-#include <linux/jump_label.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
-#include <linux/rwsem.h>
 #include <linux/sched/mm.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
@@ -49,7 +47,7 @@ struct cladefs_vfs_filesystem {
 	struct cladefs_dax *dax;
 	/* cladefs: /proc/fs/cladefs/<its device's tag>, what it waited on (cladefs_vfs_stats_show). */
 	struct proc_dir_entry *stats;
-	/* cladefs: readahead's reads, off their readers (cladefs_vfs_readahead); a follower has none. */
+	/* cladefs: readahead's reads, off their readers (cladefs_vfs_readahead). */
 	struct workqueue_struct *readahead;
 	/* cladefs: takes the size the host resizes the store to (cladefs_resize), off the interrupt. */
 	struct work_struct resize;
@@ -95,56 +93,7 @@ struct cladefs_vfs_info {
 	 * cladefs_vfs_freeze_super and cladefs_vfs_thaw_super find it frozen or not (TASK-202).
 	 */
 	bool frozen;
-	/*
-	 * cladefs: a follower's (cladefs_follows, backlog doc-8): applies its writer's commits, as its
-	 * device tells of them, off the interrupt (cladefs_follow).
-	 */
-	bool follows;
-	struct work_struct follow;
-	/*
-	 * cladefs: the commits a follower's state is as of, as its readers may find it: every batch up
-	 * to `follow_settled`'s commit settled, none past `follow_applied`'s applied
-	 * (CLADEFS_IOC_FOLLOW_COMMITS). Written by its batches alone.
-	 */
-	u64 follow_settled;
-	u64 follow_applied;
-	/*
-	 * cladefs: a follower's fill barrier (TASK-42.10, doc-8): what readers hold shared as they
-	 * read its trees and fill the kernel's caches from them (cladefs_vfs_fill_begin), and a batch
-	 * exclusively, from before it drops what the kernel keeps of what it changes until it has
-	 * applied the change and set what the kernel keeps anew: no reader finds, or caches, part of
-	 * a batch, nor a cache stale after one it found. Taken after an inode's i_rwsem, which the
-	 * VFS holds as it calls in (a directory's, to look up or read it) and a read(2) takes, and
-	 * mmap_lock, which a fault holds, and before an inode's invalidate_lock; a batch takes no
-	 * i_rwsem. How long batches waited for it, and how many did (CLADEFS_IOC_FOLLOW_STATS).
-	 */
-	struct rw_semaphore fill_barrier;
-	u64 follow_batches;
-	u64 fill_barrier_wait_ns;
-	u64 fill_barrier_wait_max_ns;
 };
-
-/*
- * cladefs: CLADEFS_IOC_FOLLOW_COMMITS, on a follower's directory: the commits its state is as of. A
- * read between two calls was of a state as of a commit from the first's `settled` to the second's
- * `applied` (the followers' history checker, TASK-42.7).
- */
-struct cladefs_follow_commits {
-	__u64 settled;
-	__u64 applied;
-};
-#define CLADEFS_IOC_FOLLOW_COMMITS _IOR('x', 0x42, struct cladefs_follow_commits)
-
-/*
- * cladefs: CLADEFS_IOC_FOLLOW_STATS, on a follower's directory: its batches, and how long they waited
- * for its fill barrier, all told and at most, in nanoseconds.
- */
-struct cladefs_follow_stats {
-	__u64 batches;
-	__u64 barrier_wait_ns;
-	__u64 barrier_wait_max_ns;
-};
-#define CLADEFS_IOC_FOLLOW_STATS _IOR('x', 0x43, struct cladefs_follow_stats)
 
 /*
  * cladefs: CLADEFS_IOC_CACHED_OBJECTS, on any directory: how many records Fxfs caches, which the
@@ -154,7 +103,7 @@ struct cladefs_follow_stats {
 
 /*
  * cladefs: what publishes a shared volume, and makes one over it (backlog doc-10, Publishing). All
- * take CAP_SYS_ADMIN, on a directory, and none a follower (-EROFS).
+ * take CAP_SYS_ADMIN, on a directory.
  *
  * CLADEFS_IOC_FLUSH, on the volume's: puts all it holds in one layer, with its writers stopped by
  * FIFREEZE on it, to stay so. -EBUSY with the filesystem frozen, as with no other volume mounted.
@@ -192,73 +141,6 @@ static inline struct cladefs *cladefs_vfs_fs(struct super_block *sb)
 {
 	return cladefs_vfs_info(sb)->fs;
 }
-
-/*
- * cladefs: whether any filesystem follows its writer: a static key, so that a writer's mounts, with
- * no follower mounted, take no cell for the follower's paths.
- */
-DECLARE_STATIC_KEY_FALSE(cladefs_vfs_followers);
-
-/*
- * cladefs: the followers' torture test's knobs (TASK-42.7, doc-8 testing 6), module parameters
- * (cladefs.NAME=VALUE on the kernel's command line): delays, in microseconds, that widen the windows
- * the protocol closes; and mutations, each switching off the rule that closes one, which the test
- * must catch: a follower's batches dropping and settling nothing; its readers' fill barrier not
- * taken; its read(2)s' copies faulting, holding the barrier. All 0 but in the test.
- * follow_fail_batch has its batches fail once applied, as a read of the store would (TASK-79.23).
- */
-extern unsigned int cladefs_follow_apply_delay_us;
-extern unsigned int cladefs_follow_iomap_delay_us;
-extern bool cladefs_follow_skip_drop;
-extern bool cladefs_follow_skip_barrier;
-extern bool cladefs_follow_read_faults;
-extern bool cladefs_follow_fail_batch;
-
-/* cladefs: whether `sb`'s filesystem follows its writer. */
-static inline bool cladefs_vfs_follows(struct super_block *sb)
-{
-	return static_branch_unlikely(&cladefs_vfs_followers) && cladefs_vfs_info(sb)->follows;
-}
-
-/*
- * cladefs: a reader of a follower's `sb` holds its fill barrier shared from before it reads the
- * trees until what it read is in the kernel's caches, or copied out (vfs.h's cladefs_vfs_info); on a
- * writer, nothing.
- */
-static inline void cladefs_vfs_fill_begin(struct super_block *sb)
-{
-	if (cladefs_vfs_follows(sb) && !cladefs_follow_skip_barrier)
-		down_read(&cladefs_vfs_info(sb)->fill_barrier);
-}
-
-/* As cladefs_vfs_fill_begin, but only if no batch holds the barrier, or waits for it. */
-static inline bool cladefs_vfs_fill_try(struct super_block *sb)
-{
-	return !cladefs_vfs_follows(sb) || cladefs_follow_skip_barrier ||
-	       down_read_trylock(&cladefs_vfs_info(sb)->fill_barrier);
-}
-
-static inline void cladefs_vfs_fill_end(struct super_block *sb)
-{
-	if (cladefs_vfs_follows(sb) && !cladefs_follow_skip_barrier)
-		up_read(&cladefs_vfs_info(sb)->fill_barrier);
-}
-
-/*
- * cladefs: a follower's read(2) of `iocb`'s file into `to` by `read`, a read_iter, its fill barrier
- * held a chunk at a time (super.c). A copy to the reader's memory that would fault, which may be a
- * mapping of a follower's file whose fault takes the barrier, stops short instead; the barrier let
- * go, the reader's pages are faulted in, and the read goes on.
- */
-ssize_t cladefs_vfs_follower_read(struct kiocb *iocb, struct iov_iter *to,
-			       ssize_t (*read)(struct kiocb *iocb, struct iov_iter *to));
-
-/*
- * cladefs: a regular file's open and release, which hold it on a follower (cladefs_hold), for DAX or
- * not (super.c).
- */
-int cladefs_vfs_file_open(struct inode *inode, struct file *file);
-int cladefs_vfs_file_release(struct inode *inode, struct file *file);
 
 /* llseek(2), with SEEK_DATA and SEEK_HOLE, for regular files, DAX or not (super.c). */
 loff_t cladefs_vfs_llseek(struct file *file, loff_t offset, int whence);
@@ -337,11 +219,6 @@ struct cladefs_vfs_inode {
 	/* cladefs: what holds its data, if it is a regular file. */
 	const struct cladefs_data_ops *data;
 	struct cladefs_dax_inode dax;
-	/*
-	 * cladefs: a follower's directory's generation: how many batches changed its entries, which
-	 * its dentries were looked up at (d_time) and revalidate against.
-	 */
-	atomic64_t gen;
 	/* cladefs: a directory's entries, kept while it is cached, under i_lock (super.c). */
 	struct cladefs_vfs_dir_listing *listing;
 	/* Its attribute flags (FS_*_FL), which Fxfs keeps in its mode (CLADEFS_MODE_*). */
@@ -422,30 +299,7 @@ void cladefs_dax_written(struct inode *inode);
  * fiemap and the like (doc-13): 0, or a -errno. Nothing for another file.
  */
 int cladefs_dax_write_back(struct inode *inode);
-/*
- * cladefs: a follower's writer changed file `ino`'s data from byte `start` to `end`, inclusive,
- * which the window's ranges of its chunks there may map as it was: drops them, to be mapped again
- * as needed. Through `inode`, the file's, if one is read in, whose invalidate_lock the caller
- * holds for writing: it breaks the inode's mappings of them first.
- */
-int cladefs_dax_changed(struct cladefs_dax *dax, struct cladefs_dax_volume *volume, struct inode *inode,
-		     u64 ino, loff_t start, loff_t end);
-/*
- * cladefs: a follower's DAX file, shrunk by its writer to `size`, its new size set: the guest's
- * mappings of its pages past it go, as a truncate's do. With its inode's invalidate_lock held for
- * writing.
- */
-int cladefs_dax_shrunk(struct inode *inode, loff_t size);
 #else
-static inline int cladefs_dax_changed(struct cladefs_dax *dax, struct cladefs_dax_volume *volume,
-				   struct inode *inode, u64 ino, loff_t start, loff_t end)
-{
-	return 0;
-}
-static inline int cladefs_dax_shrunk(struct inode *inode, loff_t size)
-{
-	return 0;
-}
 static inline struct cladefs_dax *cladefs_dax_create(struct cladefs_filesystem *filesystem)
 {
 	return NULL;

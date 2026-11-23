@@ -147,9 +147,7 @@ sealed data. From then on it is an ordinary commit:
 
 No new kind of object, key or protocol step exists.
 
-**Followers** (doc-8) apply the writer's commits. A relocation changes no extent's bytes and no
-root, so a follower's view takes it as a commit that changed nothing it reads. **Forks and
-versions** read immutable states that relocation never touches. **Ephemeral cells** (doc-25) are
+**Forks and versions** read immutable states that relocation never touches. **Ephemeral cells** (doc-25) are
 never uploaded and keep their segments raw on the host, so they relocate nothing.
 
 ### Choosing what to relocate

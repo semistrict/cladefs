@@ -5,8 +5,8 @@
 //! cladefs: locks shared beyond one cell, whose poison no halt contains (TASK-149.24). A cell's
 //! own locks halt the cell a panic holding one went through (cladefs's `halt`): it fails each
 //! request after with `EIO`, the others serve on. A lock shared beyond it, as the process's cache
-//! of extents, a cell's state, which its followers share with its writer, or a window's, which its
-//! connection and the guest's faults share, would be found poisoned by every user after, one panic
+//! of extents, a cell's state, which the cells a base is attached to share (doc-10), or a window's,
+//! which its connection and the guest's faults share, would be found poisoned by every user after, one panic
 //! each, or read half changed. So the extent daemon stops instead: a panic on a thread holding one
 //! of these aborts the process, at the panic, before anything unwinds, once [`abort_on_panics`]
 //! asks, as the daemon does as it starts. Its VMs' cells open anew as of their last commits, as

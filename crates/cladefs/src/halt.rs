@@ -6,8 +6,7 @@
 //! serves nothing more, each request failing with `EIO`, rather than panicking at its locks'
 //! poison, as every request after the first did in TASK-104, TASK-105 and TASK-150.20; and nothing
 //! reads what the panic left half done. Its guest's filesystem meets `EIO` and stops, its VM with
-//! it. The connection's end closes it as a writer's that went with writes uncommitted, and the next
-//! to open it has it as of its last commit: an open cell is usable again opened anew, as after a
+//! it. The connection's end closes it, and the next to open it has it as of its last commit: an open cell is usable again opened anew, as after a
 //! crash.
 //!
 //! An open cell's locks are [`CellMutex`]es and [`CellRwLock`]s, locked only through its [`Halt`]:
@@ -26,8 +25,8 @@
 //! (`Error::Fenced`).
 //!
 //! A lock shared beyond one open cell, which no halt contains, as the process's cache of extents, a
-//! window's, a connection's, or `local_cell`'s open cell's, which its followers share with its
-//! writer, is an `local_cell::shared::SharedLock`: a panic holding one stops the daemon
+//! window's, a connection's, or `local_cell`'s open cell's, which the cells a base is attached to
+//! share, is an `local_cell::shared::SharedLock`: a panic holding one stops the daemon
 //! (TASK-149.24).
 
 use crate::CellId;

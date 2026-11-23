@@ -35,7 +35,7 @@ class LicenseHeadersTest(unittest.TestCase):
         for path in (
             "crates/cladefs/mutants/tenants-disks-unlimited.patch",
             "guest/mutants/task-149.33-chunks-only-aligned.patch",
-            "crates/cladefs/loom-mutants/latest-rises-relaxed.patch",
+            "crates/cladefs/loom-mutants/occurrence-happens-relaxed.patch",
         ):
             self.assertTrue(headers.MUTANT.search(path), path)
         for path in ("guest/linux/patches/0001-dax.patch", "crates/cladefs/src/mutants.rs"):

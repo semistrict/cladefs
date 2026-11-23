@@ -237,14 +237,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "event-listener",
- "follower",
  "futures",
  "fxfs",
  "fxfs-posix",
  "getrandom",
  "linux-rt",
  "log",
- "rustc-hash",
  "storage_device",
 ]
 
@@ -374,13 +372,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "follower"
-version = "0.1.0"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
 name = "fprint"
 version = "0.1.0"
 dependencies = [
@@ -483,8 +474,8 @@ name = "fuchsia-sync"
 version = "0.1.0"
 dependencies = [
  "lock_api",
+ "parking_lot",
  "parking_lot_core",
- "shuttle-parking_lot",
 ]
 
 [[package]]
@@ -1151,16 +1142,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
-]
-
-[[package]]
-name = "shuttle-parking_lot"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e19861a540ea53c42c73b8c81d09c9e83cc6894a720e7a16fb490c5a5297b4"
-dependencies = [
- "cfg-if",
- "parking_lot",
 ]
 
 [[package]]

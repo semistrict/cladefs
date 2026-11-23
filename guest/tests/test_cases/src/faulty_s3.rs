@@ -135,11 +135,9 @@ async fn answer(
             Some((StatusCode::UNAUTHORIZED, "Unauthorized", "The credentials are no longer valid"))
         }
         Failing::Forbidden => Some((StatusCode::FORBIDDEN, "AccessDenied", "Access Denied")),
-        Failing::ExpiredToken => Some((
-            StatusCode::BAD_REQUEST,
-            "ExpiredToken",
-            "The provided token has expired.",
-        )),
+        Failing::ExpiredToken => {
+            Some((StatusCode::BAD_REQUEST, "ExpiredToken", "The provided token has expired."))
+        }
         Failing::Not | Failing::NoSpace => None,
     };
     if let Some((status, code, message)) = failure {

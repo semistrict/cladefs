@@ -51,7 +51,7 @@ made again, not upgraded.
 2. **Move its VMs off, or stop them.** Move each by snapshot and restore through the bucket, as
    `scripts/migrate-host.sh` does, to a host whose build has the VM's formats (above); the
    integrator guide's "Restoring a snapshot" has the calls. Stop a VM whose tenant accepts that.
-   Followers go with or after their writer. When the host is empty, its daemon's `/metrics` says
+   When the host is empty, its daemon's `/metrics` says
    `cladefsd_connections 0`.
 3. **Stop the daemon with SIGTERM.** It drains, then exits (`cladefs::cladefsd::drain`, TASK-141.4):
    - its health service reports NOT_SERVING;

@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::protocol::{
     DAX_WINDOW_ALIGNMENT, MAX_TAG_LEN, VIRTIO_EXTENT_F_DAX, VIRTIO_EXTENT_F_FREE_MANY,
     VIRTIO_EXTENT_F_FREEZE, VIRTIO_EXTENT_F_MAP_MANY, VIRTIO_EXTENT_F_MAP_PREFAULT,
-    VIRTIO_EXTENT_F_READ_ONLY, VIRTIO_EXTENT_F_RESIZE, VIRTIO_EXTENT_F_STATS,
-    VIRTIO_EXTENT_F_WRITE_COMMIT,
+    VIRTIO_EXTENT_F_RESIZE, VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_F_WRITE_COMMIT,
 };
 
 /// cladefs: what the device does with the guest's asks for uploaded commits, as a block device's
@@ -57,21 +56,17 @@ pub struct Config {
     /// files' data from: none without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_window_size: Option<u64>,
-    /// cladefs: the most bytes of private pages a writer's window holds, as it copies on write
+    /// cladefs: the most bytes of private pages the window holds, as it copies on write
     /// (doc-4's `DAX`, cladefs's backlog doc-13): pages the guest wrote and has not written back
     /// yet, the VM process's memory, for which cladefs's extent daemon reserves nothing
     /// (TASK-501). A multiple of the page size, a page at least, the window's size at most;
     /// [`PRIVATE_MAX_DEFAULT`] without it, or the window's if less, whatever its size (TASK-227).
     /// The VM manager sizes it per VM (TASK-502); a page count was `dax_private_max`, which is
-    /// refused now, not read as bytes. A follower's window copies nothing.
+    /// refused now, not read as bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_private_max_bytes: Option<u64>,
     /// The socket of cladefs's extent daemon, which serves the cell.
     pub cladefsd_socket: String,
-    /// cladefs: whether the device follows the cell, read-only, as another VM writes it (cladefs's
-    /// backlog doc-8): the cell must exist, and the guest mounts it read-only.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub read_only: bool,
     /// cladefs: what the device does with the guest's asks for uploaded commits, as a block
     /// device's `cache_type` does with its flushes (TASK-363): `Writeback`, the default, waits for
     /// each, the cell's commits uploaded as the extent daemon makes them; `Unsafe` answers them
@@ -114,22 +109,15 @@ impl Config {
     }
 
     /// The device's own features, as configured; its transport's (`VIRTIO_F_VERSION_1`,
-    /// `VIRTIO_RING_F_EVENT_IDX`) are the VMM's to add. A follower's device writes nothing
-    /// (doc-4's `F_READ_ONLY`); the daemon asks the guest for its stats, a follower's as a
-    /// writer's (TASK-111.4); a window's MAP may carry a chunk's pieces (`MAP_MANY`, TASK-91.4) and
-    /// say the guest reads them next (`MAP_PREFAULT`, TASK-112.1).
+    /// `VIRTIO_RING_F_EVENT_IDX`) are the VMM's to add. The daemon asks the guest for its stats
+    /// (TASK-111.4); a window's MAP may carry a chunk's pieces (`MAP_MANY`, TASK-91.4) and say the
+    /// guest reads them next (`MAP_PREFAULT`, TASK-112.1).
     pub fn features(&self) -> u64 {
-        let mut features = if self.read_only {
-            (1 << VIRTIO_EXTENT_F_FREEZE)
-                | (1 << VIRTIO_EXTENT_F_READ_ONLY)
-                | (1 << VIRTIO_EXTENT_F_STATS)
-        } else {
-            (1 << VIRTIO_EXTENT_F_WRITE_COMMIT)
-                | (1 << VIRTIO_EXTENT_F_RESIZE)
-                | (1 << VIRTIO_EXTENT_F_FREEZE)
-                | (1 << VIRTIO_EXTENT_F_FREE_MANY)
-                | (1 << VIRTIO_EXTENT_F_STATS)
-        };
+        let mut features = (1 << VIRTIO_EXTENT_F_WRITE_COMMIT)
+            | (1 << VIRTIO_EXTENT_F_RESIZE)
+            | (1 << VIRTIO_EXTENT_F_FREEZE)
+            | (1 << VIRTIO_EXTENT_F_FREE_MANY)
+            | (1 << VIRTIO_EXTENT_F_STATS);
         if self.dax_window_size.is_some() {
             features |= (1 << VIRTIO_EXTENT_F_DAX)
                 | (1 << VIRTIO_EXTENT_F_MAP_MANY)
@@ -139,7 +127,7 @@ impl Config {
     }
 }
 
-/// cladefs: the most private pages a writer's window of `len` bytes holds as it copies on write
+/// cladefs: the most private pages a window of `len` bytes holds as it copies on write
 /// (backlog doc-13), as `WINDOW` names them: `configured` bytes' pages, if given; otherwise
 /// [`PRIVATE_MAX_DEFAULT`]'s, or the window's if fewer, one at least (TASK-227; half its pages
 /// before, TASK-164.11).
@@ -148,7 +136,7 @@ pub fn private_max(len: u64, configured: Option<u64>) -> u64 {
     (bytes / cladefs::pages::page_size()).max(1)
 }
 
-/// cladefs: the bytes of private pages a writer's window holds at most unless configured
+/// cladefs: the bytes of private pages a window holds at most unless configured
 /// (`dax_private_max_bytes`), whatever its size (TASK-227): enough for a forked pgbench's working
 /// set at 2 vCPUs (GCE r804, forked-dax 0.91). The VM manager sizes it per VM (TASK-502).
 pub const PRIVATE_MAX_DEFAULT: u64 = 1 << 30;
@@ -166,7 +154,6 @@ mod tests {
             dax_window_size: Some(64 << 20),
             dax_private_max_bytes: None,
             cladefsd_socket: "/cladefsd.sock".into(),
-            read_only: false,
             cache_type: CacheType::Writeback,
         }
     }
@@ -183,9 +170,9 @@ mod tests {
         }"#;
         let parsed: Config = serde_json::from_str(json).unwrap();
         assert_eq!(parsed, config("extents"));
+        // cladefs: a follower's, which devices are no more (board 8237), refused.
         let read_only = json.replace('}', r#", "read_only": true }"#);
-        let parsed: Config = serde_json::from_str(&read_only).unwrap();
-        assert_eq!(parsed, Config { read_only: true, ..config("extents") });
+        assert!(serde_json::from_str::<Config>(&read_only).is_err());
         let unknown = json.replace('}', r#", "dax": true }"#);
         assert!(serde_json::from_str::<Config>(&unknown).is_err());
         // cladefs TASK-502: the cap in bytes; its page count, as it was, refused, not read as

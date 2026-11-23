@@ -136,8 +136,8 @@ service Cladefsd {
   // many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
   // branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
   rpc StatCell(StatCellRequest) returns (StatCellResponse);
-  // Lists the cells the daemon serves: those VM processes have open, as writers or followers,
-  // with what StatCell says of each (TASK-50.5).
+  // Lists the cells the daemon serves: those VM processes write, and those open for others, such
+  // as bases attached, with what StatCell says of each (TASK-50.5).
   rpc ListCells(ListCellsRequest) returns (ListCellsResponse);
   // What the daemon did since it started: counters, which only grow.
   rpc GetCounters(GetCountersRequest) returns (GetCountersResponse);
@@ -583,9 +583,9 @@ message StatCellResponse {
   // alone charges it (TASK-49).
   uint64 own = 7;
   // Those of the extents it inherited from the branches it was forked from, which may still share
-  // them. Views of followers may keep more, freed: used is at least own and inherited.
+  // them: used is own and inherited.
   uint64 inherited = 8;
-  // The commit number of its latest commit: what a follower of it advances to.
+  // The commit number of its latest commit.
   uint64 committed = 9;
   // Whether its commits upload to the daemon's bucket now: while a VM process has it open, as
   // writer. If not, the fields below are zero (TASK-50.5).
@@ -676,8 +676,8 @@ message GetCountersResponse {
   uint64 reads = 8;
   // The bytes they read.
   uint64 read_bytes = 9;
-  // Of those, the bytes read straight from local cells or object storage: of open extents, and
-  // followers'. Sealed extents' are read through the extent cache, whose page-ins count them.
+  // Of those, the bytes read straight from local cells or object storage: of open extents. Sealed
+  // extents' are read through the extent cache, whose page-ins count them.
   uint64 read_stored_bytes = 10;
   // Parts of extents fetched into the host's cache ahead of forks' guests, as their versions' read
   // evidence predicted them, not found kept there.
@@ -731,14 +731,14 @@ message GetStatsResponse {
 // A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
 message VmStats {
   // Its connection's number, the daemon's count of connections as it connected: what tells apart
-  // a cell's writer and its followers, of one cell.
+  // a cell's writers over time.
   uint64 connection = 1;
   // Its cell.
   uint64 cell = 2;
   // Its cell's directory, without symbolic links.
   string path = 3;
-  // Whether it follows its cell, read-only, or writes it.
-  bool follower = 4;
+  // cladefs: 4, whether it followed its cell, read-only, is not reused (board 8237).
+  reserved 4;
   // The commit it said it was built of, empty if it didn't.
   string build = 5;
   // Its counters: its window's stage operations, `stage_ops`, their nanoseconds, `stage_ns`, and

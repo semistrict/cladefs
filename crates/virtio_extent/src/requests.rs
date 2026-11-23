@@ -188,8 +188,8 @@ async fn serve<S: Backend>(
         }
         VIRTIO_EXTENT_T_MAP => {
             let args: MapArgs = reader.obj()?;
-            // cladefs: every map is read-only; a window that copies on write, a writer's, maps
-            // zeros, and a follower's none (backlog doc-13).
+            // cladefs: every map is read-only; a window that copies on write maps zeros too
+            // (backlog doc-13).
             let map_flags = VIRTIO_EXTENT_MAP_PREFAULT
                 | if cell.copies_on_write() { VIRTIO_EXTENT_MAP_ZEROS } else { 0 };
             if flags & !(map_flags | VIRTIO_EXTENT_MAP_MANY) != 0 {
@@ -251,8 +251,7 @@ async fn serve<S: Backend>(
             cell.unmap(window_offset, len).await?;
             Ok(0)
         }
-        // cladefs: a window that copies on write's, a writer's (backlog doc-13), its arguments
-        // UNMAP's.
+        // cladefs: a window that copies on write's (backlog doc-13), its arguments UNMAP's.
         VIRTIO_EXTENT_T_PRIVATE => {
             if !cell.copies_on_write() {
                 return Err(Errno::EINVAL);
@@ -326,30 +325,6 @@ async fn serve<S: Backend>(
             let took = flags & VIRTIO_EXTENT_RESIZED_TOOK != 0;
             notices.resizing.answered(capacity, took);
             cell.resized(capacity, took).await?;
-            Ok(0)
-        }
-        // cladefs: a follower's (doc-4's F_READ_ONLY); a writer's cell refuses them (EINVAL).
-        VIRTIO_EXTENT_T_ADVANCE => {
-            if room < size_of::<CommitNumber>() {
-                return Err(Errno::EINVAL);
-            }
-            let number = CommitNumber { commit: cell.advance().await?.to_le(), reserved: 0 };
-            writer.obj(0, &number);
-            Ok(size_of::<CommitNumber>())
-        }
-        VIRTIO_EXTENT_T_LET_GO => {
-            let number: CommitNumber = reader.obj()?;
-            cell.let_go(u64::from_le(number.commit)).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_PIN => {
-            let id: ExtentIdLe = reader.obj()?;
-            cell.pin(id.decode()?).await?;
-            Ok(0)
-        }
-        VIRTIO_EXTENT_T_UNPIN => {
-            let id: ExtentIdLe = reader.obj()?;
-            cell.unpin(id.decode()?).await?;
             Ok(0)
         }
         _ => Err(Errno::EINVAL),
@@ -775,22 +750,6 @@ mod tests {
             self.state().resized.push((capacity, took));
             Ok(())
         }
-
-        async fn advance(&self) -> Result<u64, Errno> {
-            Err(Errno::EINVAL)
-        }
-
-        async fn let_go(&self, _commit: u64) -> Result<(), Errno> {
-            Err(Errno::EINVAL)
-        }
-
-        async fn pin(&self, _extent: ExtentId) -> Result<(), Errno> {
-            Err(Errno::EINVAL)
-        }
-
-        async fn unpin(&self, _extent: ExtentId) -> Result<(), Errno> {
-            Err(Errno::EINVAL)
-        }
     }
 
     /// The bytes of a request's header and arguments, followed by `data`.
@@ -1021,9 +980,9 @@ mod tests {
 
         // Without a window that copies on write, zeros are refused; and a flag unknown, writable
         // DAX's MAP_WRITE among them (backlog doc-13).
-        let follower = FakeBackend::default();
+        let unwindowed = FakeBackend::default();
         let zeros = bytes(VIRTIO_EXTENT_T_MAP, VIRTIO_EXTENT_MAP_ZEROS, Some(map(0, 0, 1, 0)), &[]);
-        assert_eq!(request(&follower, &zeros, RESPONSE).1, errno(Errno::EINVAL));
+        assert_eq!(request(&unwindowed, &zeros, RESPONSE).1, errno(Errno::EINVAL));
         for unknown in [1 << 0, 1 << 4] {
             let map = bytes(VIRTIO_EXTENT_T_MAP, unknown, Some(map(1, 0, 1, 0)), &[]);
             assert_eq!(request(&cell, &map, RESPONSE).1, errno(Errno::EINVAL));
@@ -1172,9 +1131,9 @@ mod tests {
         );
         assert_eq!(cell.state().unmapped, vec![(4096, 8192)]);
         assert_eq!(cell.state().private, vec![(4096, 8192)]);
-        let follower = FakeBackend::default();
+        let unwindowed = FakeBackend::default();
         let private = bytes(VIRTIO_EXTENT_T_PRIVATE, 0, Some(range), &[]);
-        assert_eq!(request(&follower, &private, RESPONSE).1, errno(Errno::EINVAL));
+        assert_eq!(request(&unwindowed, &private, RESPONSE).1, errno(Errno::EINVAL));
     }
 
     /// A request with no room for its response is returned with nothing written; one of an
@@ -1323,8 +1282,6 @@ mod tests {
                 ),
                 0,
             ),
-            ("pin", bytes(VIRTIO_EXTENT_T_PIN, 0, Some(bad), &[]), 0),
-            ("unpin", bytes(VIRTIO_EXTENT_T_UNPIN, 0, Some(bad), &[]), 0),
         ];
         for (name, req, room) in cases {
             assert_eq!(request(&cell, &req, room + RESPONSE).1, errno(Errno::EINVAL), "{name}");

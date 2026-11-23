@@ -309,14 +309,6 @@ struct device_node;
 #define devres_find(dev, release, match, data) ((void *)NULL)
 #define devres_release(dev, release, match, data) (-ENOENT)
 
-/* Static keys: a flag. */
-struct static_key_false {
-	bool enabled;
-};
-#define DECLARE_STATIC_KEY_FALSE(name) extern struct static_key_false name
-#define DEFINE_STATIC_KEY_FALSE(name) struct static_key_false name
-#define static_branch_unlikely(key) unlikely((key)->enabled)
-
 typedef int (*sim_initcall_t)(void);
 #define fs_initcall(fn) \
 	static sim_initcall_t __sim_init_##fn __used __section("sim_initcalls") = fn

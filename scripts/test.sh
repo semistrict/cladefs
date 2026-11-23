@@ -59,8 +59,8 @@ if part clippy; then
     (cd "$root" && cargo fmt --check)
     UCD_ZIP="$zip" cargo clippy --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p local_cell -p cladefs \
-        -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
+    cargo clippy --manifest-path "$root/Cargo.toml" -p local_cell -p cladefs --features shuttle \
+        --tests -- -A clippy::all -D warnings
     cargo clippy --manifest-path "$root/Cargo.toml" -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
@@ -119,10 +119,6 @@ if part shuttle; then
         shuttle_tests::
     cargo nextest run --manifest-path "$root/Cargo.toml" -p cladefs --features shuttle --lib \
         shuttle_tests::
-    # The followers' concurrency protocol, under Shuttle (TASK-42.5).
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p follower --features shuttle
-    # The followers' simulation: Fxfs as writer and followers on an extent store (TASK-42.1).
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p follower_sim --features shuttle
     # The protocols of atomics under loom, each crate's `loom` feature, whose every interleaving
     # and weak ordering Shuttle, seeing every atomic as SeqCst, can't run (docs/memory-ordering.md,
     # TASK-444.2).

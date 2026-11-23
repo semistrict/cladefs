@@ -39,9 +39,8 @@ There is no handover of a running daemon's state, which holds physical memory, o
 
 1. Mark the host unschedulable. New VMs go elsewhere.
 2. Move each VM off, by snapshot and restore through the bucket, as `scripts/migrate-host.sh` does (TASK-28.11), to a host whose release reads its formats; or stop it, if its tenant accepts that.
-3. Followers go with or after their writer.
-4. SIGTERM the daemon, which drains (`cladefsd::drain`, TASK-141.4): its health service reports NOT_SERVING, it takes no more connections nor control calls, cuts off what VMs are left, closes every cell, local, and waits for their uploads, within `CLADEFSD_DRAIN` seconds (60): exit 0 drained, 1 past the bound.
-5. Install the daemon and VMM, start the daemon, check `/metrics` shows the new build (TASK-111.7) and uncordon.
+3. SIGTERM the daemon, which drains (`cladefsd::drain`, TASK-141.4): its health service reports NOT_SERVING, it takes no more connections nor control calls, cuts off what VMs are left, closes every cell, local, and waits for their uploads, within `CLADEFSD_DRAIN` seconds (60): exit 0 drained, 1 past the bound.
+4. Install the daemon and VMM, start the daemon, check `/metrics` shows the new build (TASK-111.7) and uncordon.
 
 A guest kernel upgrades as its VM next boots, with the VMM it then runs on: it isn't part of a host drain.
 

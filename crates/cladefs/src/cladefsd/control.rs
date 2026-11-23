@@ -133,7 +133,6 @@ fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
         connection: vm.connection,
         cell: vm.cell,
         path: vm.path.to_string_lossy().into_owned(),
-        follower: vm.follower,
         build: vm.build.clone().unwrap_or_default(),
         counters: named(&vm.counters()),
         gauges: named(&vm.gauges()),

@@ -33,7 +33,6 @@ use crate::state::{
 use crate::sync::{AsyncMutex, AsyncMutexGuard, Event, Mutex, rules};
 use crate::timings::{self, Flush, Waits, flush};
 use crate::uploads::Closed;
-use crate::views::{Limits, Sealed, View, Views};
 use crate::wal::{
     LOG_HEADER, LogRecord, Queue, Queued, Recovered, ReplicaLog, Runs, SegmentLog, StartFile,
     log_salt,
@@ -133,12 +132,6 @@ pub struct Options {
     pub large_extent: u64,
     /// How many segments' files the cell keeps open between reads.
     pub open_files: usize,
-    /// cladefs: how long a view ([`LocalCell::view`]) may lag behind the commits after its own
-    /// before it is cut off, if it may not lag for ever.
-    pub view_lag: Option<Duration>,
-    /// cladefs: how many bytes of frees views may keep, past which the oldest is cut off, if any
-    /// limit.
-    pub view_kept_bytes: Option<u64>,
     /// cladefs: the most bytes of runs a flush's commits seal for their records to hold them, and
     /// the flush to sync its logs alone (`wal::LogRecord`, TASK-301): what a guest's journal, or
     /// a database's transaction, commits at a time, not a bulk load's.
@@ -163,8 +156,6 @@ impl Default for Options {
             segment_age: Duration::from_secs(60),
             large_extent: 4 << 20,
             open_files: 64,
-            view_lag: None,
-            view_kept_bytes: None,
             held_most: 256 << 10,
         }
     }
@@ -208,10 +199,8 @@ pub struct Usage {
     /// The bytes the cell's segments' files and the extents' own files take: closed segments and
     /// sealed extents compressed (`extent_frame`).
     pub disk_bytes: u64,
-    /// cladefs: the bytes of extents freed whose data stays, for the uploader or views.
+    /// cladefs: the bytes of extents freed whose data stays, for the uploader.
     pub kept_bytes: u64,
-    /// cladefs: those of them views keep, which count as used ([`Info::used`]).
-    pub kept_for_views: u64,
 }
 
 /// cladefs: a cell directory, taken and claimed for its opening, until it closes.
@@ -262,8 +251,6 @@ pub struct LocalCell<D: Dir> {
     /// [`LocalCell::close_now`] and the writes it holds up wait for; cladefs: and as each framing
     /// of a segment ends, which flushes, the uploader, forks and the cell's closing wait for.
     idle: Arc<Event>,
-    /// cladefs: its views, which followers read it through ([`LocalCell::view`]).
-    views: Arc<Views>,
     /// cladefs: its keys, which its segments and extents stored on their own are encrypted and
     /// read under (TASK-411.3).
     keys: Arc<Ring>,
@@ -1431,7 +1418,6 @@ impl<D: Dir> LocalCell<D> {
             replay.capacity = (!restate).then_some(capacity);
             replay
         };
-        let views = Views::new(epoch, &root);
         LocalCell {
             dir,
             block_size,
@@ -1463,7 +1449,6 @@ impl<D: Dir> LocalCell<D> {
                     wal: queue,
                     version: at_version,
                     kept: KeptExtents::default(),
-                    sealed: Sealed::default(),
                     standing: Standing::Open,
                     deferred: Vec::new(),
                     framing: Framing::default(),
@@ -1486,7 +1471,6 @@ impl<D: Dir> LocalCell<D> {
             cache,
             held: held.unwrap_or_default(),
             idle: Arc::new(Event::new()),
-            views,
             keys,
             replicator: std::sync::Mutex::new(None),
             kept_logs: std::sync::Mutex::new(BTreeSet::new()),
@@ -2482,8 +2466,8 @@ impl<D: Dir> LocalCell<D> {
         }
         state.space.removed(entry.len, extent.cell == self.cell.id);
         state.uncommitted.push(Change::Free(extent));
-        // A sealed one's data stays until the uploader has what it needs of it, and until the
-        // commit that frees it decides whether views keep it. cladefs: an open one's goes at once:
+        // A sealed one's data stays until the uploader has what it needs of it. cladefs: an open
+        // one's goes at once:
         // no commit held it, so that no reader needs it, and what it took of segments is dead
         // space, counted so (TASK-79.2). Of a file of its own it has none, which its seal would
         // have made, but its raw file, which goes with the next commit: nothing else of it to let
@@ -2512,7 +2496,7 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for
-    /// views, or for the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
+    /// the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
     pub fn read_kept(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
         self.read_into_entry(extent, offset, buf, Reader::Kept)
     }
@@ -2619,7 +2603,7 @@ impl<D: Dir> LocalCell<D> {
 
     /// cladefs: the steps of a relocation's commit ([`LocalCell::relocate`]): each extent the cell
     /// holds still where it was read, copied into one run of the open segment, then the commit,
-    /// which names them there, published to views as the cell's state, its root unchanged.
+    /// which names them there, its root unchanged.
     fn relocate_in(
         &self,
         state: &mut State<D::File>,
@@ -2659,7 +2643,7 @@ impl<D: Dir> LocalCell<D> {
             return Ok((0, failed));
         }
         let epoch = state.epoch + 1;
-        self.publish(state, epoch, None, &[]);
+        state.trim_kept(epoch);
         let next_sequence = state.next_sequence;
         let records = state.segments.record_moves(
             epoch,
@@ -2720,29 +2704,28 @@ impl<D: Dir> LocalCell<D> {
     fn commit_in(&self, state: &mut State<D::File>, root: Option<&[u8]>) -> Result<(), Error> {
         let epoch = state.epoch + 1;
         let seal = trace::Span::start("commit.seal");
-        let sealing = seal.run(|| self.seal_open(state, &seal))?;
+        seal.run(|| self.seal_open(state, &seal))?;
         drop(seal);
         let write = trace::Span::start("commit.write");
         write.set_count(trace::COMMIT, epoch);
-        write.run(|| self.write_commit(state, epoch, root, &sealing))
+        write.run(|| self.write_commit(state, epoch, root))
     }
 
-    /// Writes commit `epoch`, which sets `root`, if any, and seals `sealing`, sealed: publishes it
-    /// to views, records it in the open segment, and queues its flush.
+    /// Writes commit `epoch`, which sets `root`, if any, its open extents sealed: lets go of the
+    /// frees the uploader needs no more, records it in the open segment, and queues its flush.
     fn write_commit(
         &self,
         state: &mut State<D::File>,
         epoch: u64,
         root: Option<&[u8]>,
-        sealing: &[ExtentId],
     ) -> Result<(), Error> {
         // cladefs: the frees it makes are its, by its number, from now on: kept as freed by a
-        // commit to come until one makes them, which views as of the commits before keep,
-        // whichever commits come between (a relocation's, doc-27).
+        // commit to come until one makes them, whichever commits come between (a relocation's,
+        // doc-27).
         for extent in state.uncommitted.frees().collect::<Vec<_>>() {
             state.kept.freed_by(extent, epoch);
         }
-        self.publish(state, epoch, root, sealing);
+        state.trim_kept(epoch);
         let (changes, capacity) = (state.uncommitted.take(), state.uncommitted.take_capacity());
         self.count_open(state);
         // The open segment's footer records them, before the segment closes; cladefs: and its log,
@@ -2815,13 +2798,8 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// Seals the extents open, as a commit does, each in one run, or a file of its own if large
-    /// (doc-7, Segments), and returns them; cladefs: saying on `span` how many, and the bytes it
-    /// copied.
-    fn seal_open(
-        &self,
-        state: &mut State<D::File>,
-        span: &trace::Span,
-    ) -> Result<Vec<ExtentId>, Error> {
+    /// (doc-7, Segments); cladefs: saying on `span` how many, and the bytes it copied.
+    fn seal_open(&self, state: &mut State<D::File>, span: &trace::Span) -> Result<(), Error> {
         let sealing = state.uncommitted.open_extents();
         // cladefs: what sealing copied, which the commit's flush syncs: said once past 8 MiB, which
         // the flush of cladefsd's turn writes at once (TASK-221).
@@ -2854,7 +2832,7 @@ impl<D: Dir> LocalCell<D> {
         }
         span.set_count(trace::EXTENTS, sealing.len() as u64);
         span.set_count(trace::BYTES, copied);
-        Ok(sealing)
+        Ok(())
     }
 
     /// cladefs: why sealing `extent` copies it, or not, its length and how many pieces it is in;
@@ -2875,28 +2853,6 @@ impl<D: Dir> LocalCell<D> {
             }
             _ => None,
         }
-    }
-
-    /// Publishes commit `epoch`, which sets `root`, if any, and seals `sealing`, to views, which
-    /// open as of it from now on, deciding at once what of the frees they keep: those of views as
-    /// of earlier commits (see `Views`).
-    fn publish(
-        &self,
-        state: &mut State<D::File>,
-        epoch: u64,
-        root: Option<&[u8]>,
-        sealing: &[ExtentId],
-    ) {
-        let published = root.unwrap_or(&state.root).to_vec();
-        let limits =
-            Limits { lag: self.options.view_lag, kept_bytes: self.options.view_kept_bytes };
-        let kept = &mut state.kept;
-        let keeping =
-            self.views.publish(epoch, &published, limits, |keeping| kept.views_bytes(keeping));
-        state.trim_kept(&keeping, epoch);
-        // What it sealed, as views older than it, if any lives, must refuse; what all of them
-        // were sealed by is theirs.
-        state.sealed.published(keeping.oldest(), sealing, epoch);
     }
 
     /// Closes the open segment after commit `epoch`, once no write is in progress in it, if it is
@@ -3503,7 +3459,7 @@ impl<D: Dir> LocalCell<D> {
             for queued in &whole {
                 state.release_kept(footer_last(&queued.footer));
             }
-            state.trim_kept(&self.views.keeping(), state.epoch);
+            state.trim_kept(state.epoch);
             let mut leaving = Vec::new();
             for queued in whole {
                 let footer = &queued.footer;
@@ -3559,8 +3515,8 @@ impl<D: Dir> LocalCell<D> {
             timings::flushed(self.cell.id, &timed);
             span.set_count(trace::COMMITS, timed.commits as u64);
             flushed?;
-            // cladefs: an ephemeral cell's closed segments covered as they add up, and what its
-            // views let go of given back (TASK-698.2).
+            // cladefs: an ephemeral cell's closed segments covered as they add up, and what they
+            // let go of given back (TASK-698.2).
             if self.ephemeral.is_some() {
                 self.checkpoint(false).await?;
                 let punches = self.state()?.segments.take_punches();
@@ -4063,7 +4019,7 @@ impl<D: Dir> LocalCell<D> {
                 state.space.set_capacity(capacity);
                 state.uncommitted.take_capacity();
                 let epoch = state.epoch + 1;
-                self.publish(state, epoch, None, &[]);
+                state.trim_kept(epoch);
                 let (changed, next_sequence) = ((None, Some(capacity)), state.next_sequence);
                 let records =
                     state.segments.record(epoch, &[], changed, &state.extents, next_sequence)?;
@@ -4109,83 +4065,8 @@ impl<D: Dir> LocalCell<D> {
                 .sum(),
             disk_bytes: segments.disk_bytes + state.own_files.bytes(),
             kept_bytes: state.kept.bytes(),
-            kept_for_views: state.kept.for_views(),
             ..segments
         })
-    }
-
-    /// cladefs: the bytes of frees views keep, which count as used ([`Usage::kept_for_views`]):
-    /// found as [`LocalCell::info`] finds what it says, at once, without [`LocalCell::usage`]'s
-    /// walk of every extent the cell holds, its local checkpoint's with them, which holds the state
-    /// meanwhile (TASK-92.17).
-    pub fn kept_for_views(&self) -> Result<u64, Error> {
-        Ok(self.state()?.kept.for_views())
-    }
-
-    /// cladefs: a view of the cell as of its latest commit, which a follower reads through
-    /// ([`LocalCell::read_view`]) while the writer goes on. It waits for no commit.
-    pub fn view(&self) -> View {
-        self.views.open()
-    }
-
-    /// cladefs: awaits, holding no thread, at most `timeout` for a commit after the commit of
-    /// `epoch`, returning the latest commit's epoch, if one came: what tells the cell's followers
-    /// (board 2944).
-    pub async fn newer(&self, epoch: u64, timeout: Duration) -> Option<u64> {
-        self.views.newer(epoch, timeout).await
-    }
-
-    /// cladefs: what the cell's live views are: how many, how far behind (TASK-42.7).
-    pub fn view_stats(&self) -> crate::ViewStats {
-        self.views.stats()
-    }
-
-    /// cladefs: cuts the cell's views off: their reads, advances and pins fail with
-    /// [`CutOff`](crate::CutOff), and the commits after keep nothing for them.
-    pub fn cut_views(&self) {
-        self.views.cut_all()
-    }
-
-    /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, which `view`, of this cell, holds:
-    /// held still, or freed since and kept. Fails with [`CutOff`](crate::CutOff) if the view was
-    /// cut off, and with `NoExtent` if its commit doesn't hold `extent`: one open, or sealed by a
-    /// later commit. So a follower's journal replay, which reads the journal on until it finds
-    /// nothing, ends at the view's commit.
-    pub fn read_view(
-        &self,
-        view: &View,
-        extent: ExtentId,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> Result<(), Error> {
-        self.views.check(view)?;
-        self.read_into_entry(extent, offset, buf, self.view_reader(view, extent))
-    }
-
-    /// cladefs: where the `len` bytes at `offset` in `extent`, which `view` holds, are, as
-    /// [`LocalCell::locate`] says.
-    pub fn locate_view(
-        &self,
-        view: &View,
-        extent: ExtentId,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<Located<D::File>>, Error> {
-        self.views.check(view)?;
-        self.locate_entry(extent, offset, len, self.view_reader(view, extent))
-    }
-
-    /// cladefs: `extent`'s length, as of `view`'s commit, or as `view` pins it. Fails as
-    /// [`LocalCell::read_view`] does.
-    pub fn view_extent(&self, view: &View, extent: ExtentId) -> Result<u64, Error> {
-        self.views.check(view)?;
-        let state = self.state()?;
-        Ok(state.entry_for(extent, self.view_reader(view, extent))?.len)
-    }
-
-    /// `view`'s reads of `extent`.
-    fn view_reader(&self, view: &View, extent: ExtentId) -> Reader {
-        Reader::View { epoch: view.commit(), since: view.since(), pinned: view.pins(extent) }
     }
 
     /// `extent`'s length, and whether it is open (written since the last commit), if the cell
@@ -4347,32 +4228,6 @@ mod tests {
     mod shuttle_tests {
         use super::*;
 
-        /// cladefs: opening, advancing, pinning and dropping a view take none of the locks a commit
-        /// holds, so a follower never waits for the writer: under Shuttle, whose waits that can't
-        /// end are deadlocks it reports, they complete while this thread holds both.
-        #[test]
-        fn views_never_wait_for_the_writer() {
-            let mut config = shuttle::Config::new();
-            config.stack_size = 4 << 20;
-            let scheduler = shuttle::scheduler::RandomScheduler::new(1);
-            shuttle::Runner::new(scheduler, config).run(|| {
-                let description = Description {
-                    block_size: 4096,
-                    capacity: 1 << 20,
-                    cell: bucket_cell::layout::test_cell(1),
-                };
-                let cell = LocalCell::create(crate::MemDir::new(), description, Options::default())
-                    .unwrap();
-                let _committing = shuttle::future::block_on(cell.committing.lock());
-                let _state = cell.state.with(Mutex::lock);
-                let mut view = cell.view();
-                view.advance().unwrap();
-                view.pin(ExtentId::new(1, 1)).unwrap();
-                view.unpin(ExtentId::new(1, 1));
-                drop(view);
-            });
-        }
-
         /// cladefs: a segment a commit closes while the host refuses threads is framed on the
         /// committing thread, rather than panic, as `thread::spawn` does, through the locks the
         /// commit holds, which every later call would find poisoned: the commit goes on, and its
@@ -4452,37 +4307,6 @@ mod tests {
         send(cell.unreplicate());
         send(cell.checkpoint(true));
         send(cell.close());
-    }
-
-    /// cladefs: what commits sealed is recorded for the views older than them alone: commits no
-    /// view follows record none, and a view's records go once it does.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sealed_records_are_for_views() {
-        let description = Description {
-            block_size: 4096,
-            capacity: 1 << 20,
-            cell: bucket_cell::layout::test_cell(1),
-        };
-        let cell =
-            LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
-        // Whether extent `sequence` is recorded as sealed after commit `epoch`.
-        let sealed_after = |sequence, epoch| {
-            cell.state.with(Mutex::lock).sealed.after(ExtentId::new(1, sequence), epoch)
-        };
-        let commit = async |sequence| {
-            cell.write(ExtentId::new(1, sequence), 0, &[1; 4096]).await.unwrap();
-            cell.commit(None).await.unwrap();
-        };
-        commit(1).await;
-        commit(2).await;
-        assert!(!sealed_after(2, 1));
-        let view = cell.view();
-        commit(3).await;
-        assert!(sealed_after(3, view.commit()));
-        drop(view);
-        commit(4).await;
-        assert!(!sealed_after(3, 2));
-        assert!(!sealed_after(4, 3));
     }
 
     /// cladefs: a count drifted from what it counts, as a change that missed it leaves it, is found

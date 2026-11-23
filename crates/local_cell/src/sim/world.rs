@@ -255,8 +255,6 @@ fn cell_options() -> crate::Options {
         segment_age: Duration::from_secs(1 << 30),
         large_extent: 3 * BLOCK,
         open_files: 4,
-        view_lag: None,
-        view_kept_bytes: None,
         // Flushes of either kind: records holding their runs, and checking them (TASK-301).
         held_most: 2 * BLOCK,
     }

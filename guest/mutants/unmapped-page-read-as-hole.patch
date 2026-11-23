@@ -19,7 +19,7 @@
  		return -EIO;
 -	}
 -	/* cladefs: a page of the file with no window page is no hole: mapped first. */
--	if (!dax->read_only && !cladefs_dax_pages_mapped(range->state, page)) {
+-	if (!cladefs_dax_pages_mapped(range->state, page)) {
 -		up_read(&file->sem);
 -		err = cladefs_dax_map_missing(inode, range, page,
 -					   min_t(u64, range->pages,

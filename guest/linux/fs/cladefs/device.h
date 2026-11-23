@@ -19,11 +19,6 @@ struct cladefs_device;
 #define CLADEFS_DEVICE_WRITE_COMMIT (1 << 0)
 /* The device takes FREEZE, and INFO says the cell (VIRTIO_EXTENT_F_FREEZE). */
 #define CLADEFS_DEVICE_FREEZE (1 << 1)
-/*
- * cladefs: the device follows a store another VM writes, read-only (VIRTIO_EXTENT_F_READ_ONLY):
- * ADVANCE, LET_GO, PIN and UNPIN work, and nothing that writes.
- */
-#define CLADEFS_DEVICE_READ_ONLY (1 << 2)
 /* cladefs: a FREE may carry VIRTIO_EXTENT_FREE_MANY, more extents in its data. */
 #define CLADEFS_DEVICE_FREE_MANY (1 << 3)
 
@@ -50,12 +45,11 @@ struct cladefs_device *cladefs_device_find(const char *tag, size_t len, struct c
 void cladefs_device_put(struct cladefs_device *dev);
 
 /*
- * A request: its type (VIRTIO_EXTENT_T_*) and flags, the extent it names (READ, WRITE, FREE, PIN,
- * UNPIN), and where in it (READ, WRITE), or LET_GO's commit number (offset), and its data: READ's
- * buffer, WRITE's data, COMMIT's root, ROOT's buffer (max_root bytes, and a struct
- * virtio_extent_root_len after them), INFO's struct virtio_extent_info, or ADVANCE's struct
- * virtio_extent_commit_number. The data must be kmalloc'd or vmalloc'd, and stay until the request
- * is done. A WRITE with VIRTIO_EXTENT_WRITE_ROOT has a root too, which its commit sets, of root_len
+ * A request: its type (VIRTIO_EXTENT_T_*) and flags, the extent it names (READ, WRITE, FREE), and
+ * where in it (READ, WRITE), and its data: READ's buffer, WRITE's data, COMMIT's root, ROOT's
+ * buffer (max_root bytes, and a struct virtio_extent_root_len after them), or INFO's struct
+ * virtio_extent_info. The data must be kmalloc'd or vmalloc'd, and stay until the request is
+ * done. A WRITE with VIRTIO_EXTENT_WRITE_ROOT has a root too, which its commit sets, of root_len
  * bytes: kmalloc'd.
  */
 struct cladefs_device_op {
@@ -97,13 +91,11 @@ void cladefs_device_set_sealed(struct cladefs_device *dev, cladefs_device_sealed
 int cladefs_device_capacity(struct cladefs_device *dev, u64 *capacity, u64 *asked);
 /*
  * Has `changed(arg)` called as the device's configuration changes: the host resizes the store, or
- * a shrink is asked; or, a follower's (CLADEFS_DEVICE_READ_ONLY), its writer commits. Or nothing, if `changed` is NULL. Called from the device's interrupt: it
- * must not sleep.
+ * a shrink is asked. Or nothing, if `changed` is NULL. Called from the device's interrupt: it must
+ * not sleep.
  */
 typedef void (*cladefs_device_changed_t)(void *arg);
 void cladefs_device_set_changed(struct cladefs_device *dev, cladefs_device_changed_t changed, void *arg);
-/* cladefs: a follower's device's writer's latest commit, as its configuration says now. */
-u64 cladefs_device_committed(struct cladefs_device *dev);
 /* Waits for a seal in progress, if any, to end. */
 void cladefs_device_wait_unsealed(struct cladefs_device *dev);
 /*
@@ -119,17 +111,12 @@ struct dax_device;
 /*
  * The DAX window's dax_device, if files' data can be mapped from it, at the page size, which is a
  * block: cladefs: the window copies on write (doc-13), mapping sealed extents and zeros alone,
- * read-only, a store to a page making it the VM's own, private, until a MAP or UNMAP over it; or,
- * a follower's, takes no store. Sets `window_len`.
+ * read-only, a store to a page making it the VM's own, private, until a MAP or UNMAP over it. Sets
+ * `window_len`.
  */
 struct dax_device *cladefs_device_dax(struct cladefs_device *dev, u64 *window_len);
-/*
- * cladefs: the most private pages the device holds at once, past which a store stops the VM; and
- * whether it follows a store another VM writes, read-only (CLADEFS_DEVICE_READ_ONLY): its window
- * takes no store, nor maps zeros.
- */
+/* cladefs: the most private pages the device holds at once, past which a store stops the VM. */
 u64 cladefs_device_private_max(struct cladefs_device *dev);
-bool cladefs_device_read_only(struct cladefs_device *dev);
 /*
  * Maps `len` bytes at `offset` in the extent {cell, sequence} at `window_offset` in the window,
  * read-only (MAP), or unmaps `len` bytes there (UNMAP), and waits for the device. cladefs:

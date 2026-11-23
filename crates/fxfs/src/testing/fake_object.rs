@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/testing/fake_object.rs`. cladefs: JournalHandle manages
-// position-derived journal spans (`try_push_stream_span`, `sync_spans`, board 6923), which a fake
+// position-derived journal spans (`try_push_stream_span`, board 6923), which a fake
 // object, holding no extents, ignores.
 
 use crate::errors::FxfsError;
@@ -129,12 +129,6 @@ impl JournalHandle for FakeObjectHandle {
         _span: crate::object_store::journal::super_block::JournalSpan,
         _prev_cell: u64,
         _prev_end_sequence: u64,
-    ) -> Result<Option<u64>, Error> {
-        Ok(None)
-    }
-    fn sync_spans(
-        &mut self,
-        _spans: Vec<crate::object_store::journal::super_block::JournalSpan>,
     ) -> Result<Option<u64>, Error> {
         Ok(None)
     }

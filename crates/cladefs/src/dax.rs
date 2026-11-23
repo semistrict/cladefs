@@ -27,7 +27,7 @@
 //! process's own memory (`dax::uffd`), which the window knows nothing of. The mapping stays the
 //! source's. Only the guest's `MAP` or `UNMAP` over a private page ends it ([`Private::End`]):
 //! a source evicting its pages and a free mapping zeros leave it ([`Private::Keep`]), and so does
-//! a page mapped there anew. A window that doesn't copy, a follower's, refuses every write.
+//! a page mapped there anew. A window that doesn't copy, a host test's, refuses every write.
 
 pub(crate) mod failures;
 #[cfg(all(test, feature = "shuttle"))]

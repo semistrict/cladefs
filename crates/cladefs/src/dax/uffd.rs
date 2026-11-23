@@ -53,8 +53,7 @@
 //! write-protected here now, faults as one.
 //!
 //! Nor is a fault always for a page the guest still maps. While the worker faults the page in, the
-//! vCPU runs on, taking the guest's interrupts, and the guest may unmap the page meanwhile, as a
-//! follower drops the ranges its batches change; once the worker is done, KVM faults the page
+//! vCPU runs on, taking the guest's interrupts, and the guest may unmap the page meanwhile; once the worker is done, KVM faults the page
 //! again itself, before the vCPU next runs (`kvm_arch_async_page_ready`). A fault on a page the
 //! window maps nothing at withholds the page, which is made inaccessible here, so that the fault
 //! fails with `EFAULT`, which KVM drops. The guest's own access, made only to pages it maps, would
@@ -1663,7 +1662,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let offset = (addr - self.base) as u64;
         // The page as the access found it, which a fault the window does not resolve restricts.
         let seen = self.seen(addr);
-        // cladefs: a write to a window that doesn't copy on write, a follower's, is refused, as
+        // cladefs: a write to a window that doesn't copy on write, a test's, is refused, as
         // every page is mapped read-only: here, where the window names the page; once it has read
         // it in, where it names nothing yet, as the window is asked only to read (doc-26).
         let resolved = match access == Access::Write && !for_worker && self.named(addr) {

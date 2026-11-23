@@ -180,19 +180,19 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 | `block_device` | A block device kept straight on an extent device, with no filesystem between: one array of blocks a cell, what SQLite and memory cells hold. |
 | `sqlite_cladefs` | A SQLite cell's one database kept on its block device, each transaction one commit of the device. |
 | `fxfs-automount` | A guest's automounter of shared volumes (backlog doc-10), and `git-remote-fxfs`. |
-| `follower`, `follower_sim`, `follower_history` | Live read-only followers' concurrency protocol, its deterministic simulation and its history checker (backlog doc-8). |
 | `fxfs-sim-diff` | `guest/sim`'s model of Fxfs run beside Fxfs on the same operations, each file compared after each. |
 | `cladefs-examples` | cladefs's examples, benches and tools, in a package of their own so that a release build measures cladefs as its daemon has it. |
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `cladefs-v1.16.1-r11` of
+The VMM is a submodule: branch `cladefs-v1.16.1-r12` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker),
 Firecracker's v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one
 linear series, each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2,
 TASK-273, the one with the extent device over virtio-PCI alone; r8, TASK-437, r7
 renamed, the releases before it named `fxdax-v1.16.1-rN`; r10, TASK-503, r8 with
-its API saying cladefs; r11, TASK-671, r10's 31 commits as 4). A commit is an
+its API saying cladefs; r11, TASK-671, r10's 31 commits as 4; r12, board 8237, r11 with no
+follower's device). A commit is an
 upstream submission: upstream's dependency bumps, backported; the general
 fixes, which apply to v1.16.1 alone; the PCI transport's shared memory regions
 and device IDs past 63; and the `cladefs` feature, everything else, so that a
@@ -298,9 +298,6 @@ suites' `unsupported` check pins deduplication's and `MAP_SYNC`'s):
 - Fxfs's in-memory layers of its trees, bounded by its journal's size, are not
   shrunk under the guest's memory pressure; its cached records and its page
   cache are.
-- A follower's files not on DAX are cached in 4 KiB folios, not large ones,
-  as its batches drop ranges of them: more overhead per byte in large
-  sequential I/O. A writer's are in large folios (TASK-26.19.11).
 
 ## Updating from upstream
 

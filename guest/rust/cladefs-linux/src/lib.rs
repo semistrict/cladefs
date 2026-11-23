@@ -9,7 +9,6 @@
 //! the kernel's workers.
 
 mod device;
-mod follow;
 mod fs;
 
 use anyhow::Error;
@@ -40,12 +39,9 @@ fn xattr_errno(error: &Error) -> c_int {
     stale(error).unwrap_or_else(|| fxfs_posix::xattr_errno(error)).raw()
 }
 
-/// cladefs: ESTALE for a follower that follows no more, or was cut off, until it remounts: doc-4,
-/// doc-8.
+/// cladefs: ESTALE for a device whose cell a later placement holds (doc-4, TASK-39.7).
 fn stale(error: &Error) -> Option<Errno> {
-    let stale =
-        error.chain().any(|cause| cause.is::<follower::Failed>() || device::is_stale(cause));
-    stale.then_some(Errno::ESTALE)
+    error.chain().any(device::is_stale).then_some(Errno::ESTALE)
 }
 
 /// Copies `data` to `buf`, which has room for `size` bytes, and returns its length: or only its
@@ -80,7 +76,7 @@ pub unsafe extern "C" fn cladefs_getxattr(
 ) -> isize {
     // SAFETY: As the caller promises.
     let (fs, name) = unsafe { (&*fs, bytes(name, len)) };
-    match block_on(fs.reading(|| fs.get_xattr(ino, name))) {
+    match block_on(fs.get_xattr(ino, name)) {
         // SAFETY: As the caller promises.
         Ok(value) => unsafe { copy_out(&value, buf, size) },
         Err(error) => -(xattr_errno(&error) as isize),
@@ -132,7 +128,7 @@ pub unsafe extern "C" fn cladefs_listxattr(
 ) -> isize {
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
-    match block_on(fs.reading(|| fs.list_xattrs(ino))) {
+    match block_on(fs.list_xattrs(ino)) {
         Ok(names) => {
             // Each name, and a NUL after it, as listxattr(2) has them.
             let mut list = Vec::new();
@@ -264,15 +260,13 @@ pub unsafe extern "C" fn cladefs_close(filesystem: *const Filesystem) {
 
 /// # Safety
 ///
-/// `filesystem` is open, `volume` holds `len` bytes, `fs` and `root` are writable, and `vfs` is the
-/// superblock, whose follower's primitives (vfs.h) outlive the volume.
+/// `filesystem` is open, `volume` holds `len` bytes, and `fs` and `root` are writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cladefs_mount(
     filesystem: *const Filesystem,
     volume: *const c_char,
     len: usize,
     read_only: bool,
-    vfs: *mut c_void,
     fs: *mut *mut Fxfs,
     root: *mut Attr,
 ) -> c_int {
@@ -280,7 +274,7 @@ pub unsafe extern "C" fn cladefs_mount(
     let (filesystem, volume) = unsafe { (self::filesystem(filesystem), bytes(volume, len)) };
     let mounted = block_on(async {
         let volume = str::from_utf8(volume).map_err(|_| FxfsError::InvalidArgs)?;
-        let mounted = filesystem.mount(volume, read_only, vfs).await?;
+        let mounted = filesystem.mount(volume, read_only).await?;
         match mounted.root().await {
             Ok(attr) => Ok((mounted, attr)),
             Err(error) => {
@@ -325,18 +319,7 @@ pub extern "C" fn cladefs_set_fail_commits(count: u64) {
         .store(count, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// cladefs: whether a volume mounted on `filesystem` follows its device's writer.
-///
-/// # Safety
-///
-/// `filesystem` is open.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cladefs_filesystem_follows(filesystem: *const Filesystem) -> bool {
-    // SAFETY: As the caller promises.
-    unsafe { (*filesystem).follows() }
-}
-
-/// cladefs: whether `fs` is mounted read-only, and whether it follows its device's writer.
+/// cladefs: whether `fs` is mounted read-only.
 ///
 /// # Safety
 ///
@@ -345,55 +328,6 @@ pub unsafe extern "C" fn cladefs_filesystem_follows(filesystem: *const Filesyste
 pub unsafe extern "C" fn cladefs_read_only(fs: *const Fxfs) -> bool {
     // SAFETY: As the caller promises.
     unsafe { (*fs).read_only() }
-}
-
-/// # Safety
-///
-/// `fs` is mounted.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cladefs_follows(fs: *const Fxfs) -> bool {
-    // SAFETY: As the caller promises.
-    unsafe { (*fs).follows() }
-}
-
-/// cladefs: a follower's batch (`Fxfs::follow`): 0, or a -errno.
-///
-/// # Safety
-///
-/// `fs` is mounted, and follows its device's writer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cladefs_follow(fs: *const Fxfs) -> c_int {
-    // SAFETY: As the caller promises.
-    match block_on(unsafe { (*fs).follow() }) {
-        Ok(()) => 0,
-        Err(error) => -errno(&error),
-    }
-}
-
-/// cladefs: holds the file `ino`, which the kernel opens, on a follower (`Fxfs::hold`): 0, or a
-/// -errno (-ENOENT if a batch deleted it).
-///
-/// # Safety
-///
-/// `fs` is mounted.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cladefs_hold(fs: *const Fxfs, ino: u64) -> c_int {
-    // SAFETY: As the caller promises.
-    match block_on(unsafe { (*fs).hold(ino) }) {
-        Ok(()) => 0,
-        Err(error) => -errno(&error),
-    }
-}
-
-/// cladefs: lets go of the file `ino`, which the kernel closes.
-///
-/// # Safety
-///
-/// `fs` is mounted.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cladefs_release(fs: *const Fxfs, ino: u64) {
-    // SAFETY: As the caller promises.
-    unsafe { (*fs).release(ino) }
 }
 
 /// The device `filesystem` is on, as device.h has it.
@@ -444,7 +378,7 @@ pub unsafe extern "C" fn cladefs_dax_extents(
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     let range = offset..offset.saturating_add(len);
-    let result = block_on(fs.reading(|| fs.dax_extents(ino, range.clone())));
+    let result = block_on(fs.dax_extents(ino, range));
     // SAFETY: As the caller promises.
     unsafe { copy_extents(result, out, max) }
 }
@@ -464,7 +398,7 @@ pub unsafe extern "C" fn cladefs_extent_batch(
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     let range = offset..offset.saturating_add(len);
-    let result = block_on(fs.reading(|| fs.dax_extent_batch(ino, range.clone(), max)));
+    let result = block_on(fs.dax_extent_batch(ino, range, max));
     // SAFETY: As the caller promises.
     unsafe { copy_extents(result, out, max) }
 }
@@ -690,7 +624,7 @@ pub unsafe extern "C" fn cladefs_getattr(fs: *const Fxfs, ino: u64, attr: *mut A
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     // SAFETY: As the caller promises.
-    unsafe { write_attr(block_on(fs.reading(|| fs.attr_by_handle(ino))), attr) }
+    unsafe { write_attr(block_on(fs.attr_by_handle(ino)), attr) }
 }
 
 /// cladefs: the attributes of the object `ino`, as `cladefs_getattr`'s, but of one no name links
@@ -704,7 +638,7 @@ pub unsafe extern "C" fn cladefs_attr_of_open(fs: *const Fxfs, ino: u64, attr: *
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     // SAFETY: As the caller promises.
-    unsafe { write_attr(block_on(fs.reading(|| fs.attr(ino))), attr) }
+    unsafe { write_attr(block_on(fs.attr(ino)), attr) }
 }
 
 /// cladefs: how far the journal is written (`Journal::file_offset`).
@@ -737,7 +671,11 @@ pub unsafe extern "C" fn cladefs_statfs(fs: *const Fxfs, statfs: *mut StatFs) ->
 ///
 /// `fs` is mounted, and `set` readable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cladefs_write_inode(fs: *const Fxfs, ino: u64, set: *const SetAttr) -> c_int {
+pub unsafe extern "C" fn cladefs_write_inode(
+    fs: *const Fxfs,
+    ino: u64,
+    set: *const SetAttr,
+) -> c_int {
     // SAFETY: As the caller promises.
     match unsafe { block_on((*fs).setattr(ino, &*set)) } {
         Ok(()) => 0,
@@ -824,7 +762,7 @@ pub unsafe extern "C" fn cladefs_readlink(
 ) -> isize {
     // SAFETY: As the caller promises.
     let (fs, buf) = unsafe { (&*fs, core::slice::from_raw_parts_mut(buf.cast::<u8>(), len)) };
-    match block_on(fs.reading(|| fs.readlink(ino))) {
+    match block_on(fs.readlink(ino)) {
         Ok(target) => {
             let copied = target.len().min(len);
             buf[..copied].copy_from_slice(&target[..copied]);
@@ -1147,7 +1085,7 @@ pub unsafe extern "C" fn cladefs_lookup(
     // SAFETY: As the caller promises.
     let (fs, name) = unsafe { (&*fs, bytes(name, len)) };
     // SAFETY: As the caller promises.
-    unsafe { write_attr(block_on(fs.reading(|| fs.lookup(dir, name))), attr) }
+    unsafe { write_attr(block_on(fs.lookup(dir, name)), attr) }
 }
 
 /// What `cladefs_readdir` calls for each entry, until it returns false.

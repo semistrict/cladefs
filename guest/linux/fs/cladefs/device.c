@@ -99,7 +99,6 @@ struct cladefs_device *cladefs_device_find(const char *tag, size_t len, struct c
 		.max_root = config->max_root,
 		.flags = (virtio_extent_write_commit(vext) ? CLADEFS_DEVICE_WRITE_COMMIT : 0) |
 			 (virtio_extent_freeze(vext) ? CLADEFS_DEVICE_FREEZE : 0) |
-			 (virtio_extent_read_only(vext) ? CLADEFS_DEVICE_READ_ONLY : 0) |
 			 (virtio_extent_free_many(vext) ? CLADEFS_DEVICE_FREE_MANY : 0),
 		.cell = config->cell,
 		.max_extent = config->max_extent,
@@ -170,11 +169,6 @@ int cladefs_device_capacity(struct cladefs_device *dev, u64 *capacity, u64 *aske
 void cladefs_device_set_changed(struct cladefs_device *dev, cladefs_device_changed_t changed, void *arg)
 {
 	virtio_extent_set_config_changed(dev->vext, changed, arg);
-}
-
-u64 cladefs_device_committed(struct cladefs_device *dev)
-{
-	return virtio_extent_committed(dev->vext);
 }
 
 void cladefs_device_wait_unsealed(struct cladefs_device *dev)
@@ -347,11 +341,6 @@ int cladefs_device_private(struct cladefs_device *dev, u64 window_offset, u64 le
 u64 cladefs_device_private_max(struct cladefs_device *dev)
 {
 	return virtio_extent_private_max(dev->vext);
-}
-
-bool cladefs_device_read_only(struct cladefs_device *dev)
-{
-	return virtio_extent_read_only(dev->vext);
 }
 
 /* cladefs: the most maps one MAP_MANY request holds: its further ones a page's worth. */

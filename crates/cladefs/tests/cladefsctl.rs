@@ -467,7 +467,7 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     let vm = &json["vms"][0];
     assert_eq!(vm["path"], path.canonicalize().unwrap().to_str().unwrap());
     assert_eq!(vm["cell"], base32_id::Short(client.cell()).to_string());
-    assert_eq!((&vm["follower"], &vm["answered"]), (&false.into(), &true.into()));
+    assert_eq!(vm["answered"], true);
     assert_eq!(vm["vmm"]["build"], cladefs::BUILD_COMMIT);
     assert_eq!(vm["vmm"]["counters"]["stage_ops"], 0);
     assert_eq!(vm["window"], serde_json::Value::Null);

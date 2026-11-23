@@ -7,14 +7,14 @@
 
 pub(crate) use super::codec::Opening;
 use super::codec::{
-    Advanced, Area, Data, Encoded, Fault, Forked, Info, Made, Opened, PrivateCosts, ReadInto,
-    Request, StageCounts, StageOp, Told, stream_bytes,
+    Area, Data, Encoded, Fault, Forked, Info, Made, Opened, PrivateCosts, ReadInto, Request,
+    StageCounts, StageOp, Told, stream_bytes,
 };
 use super::wire::*;
 use crate::dax::Faults;
 use crate::dax::uffd::{FaultThread, UffdSecondStage};
 use crate::error::{Errno, Error, Result};
-use crate::hearing::{Latest, Occurrence};
+use crate::hearing::Occurrence;
 use crate::{
     CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage,
     VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
@@ -44,8 +44,6 @@ pub struct CellClient {
     /// cladefs: what resolves the window's faults through the daemon, once the window is created,
     /// which a `PRIVATE` reads its pages in with too ([`CellClient::make_private`], doc-26).
     window_faults: std::sync::OnceLock<Arc<DaemonFaults>>,
-    /// cladefs: whether it is a follower's, read-only (backlog doc-8).
-    read_only: bool,
     /// Its transfer area, which reads and writes move their data through ([`TRANSFER`]).
     transfer: Arc<Transfer>,
     /// cladefs: whether its window copies on write (backlog doc-13), once created so.
@@ -82,15 +80,6 @@ impl CellClient {
         DaemonConnection::connect(socket)?.open_forked(cell_dir, from, capacity)
     }
 
-    /// cladefs: a follower of the cell at `cell_dir` that the daemon listening at `socket` serves
-    /// ([`DaemonConnection::open_read_only`]).
-    pub fn connect_read_only(
-        socket: impl AsRef<Path>,
-        cell_dir: impl AsRef<Path>,
-    ) -> Result<Self, Error> {
-        DaemonConnection::connect(socket)?.open_read_only(cell_dir)
-    }
-
     /// The cell at `cell_dir`, served over `stream` ([`DaemonConnection::opening`]).
     #[cfg(test)]
     pub(crate) fn over(
@@ -104,7 +93,6 @@ impl CellClient {
     /// Opens the cell at `cell_dir` over `client`'s connection ([`DaemonConnection::opening`]): its
     /// `OPEN`, the VM process's build, and its transfer area.
     fn open(client: Arc<Client>, cell_dir: &Path, opening: Opening) -> Result<Self, Error> {
-        let read_only = matches!(opening, Opening::ReadOnly);
         let open = Request::Open { path: cell_dir.to_owned(), opening };
         let reply = client.request_blocking(&open).map_err(|errno| match errno {
             Errno::EPROTONOSUPPORT => Error::new(anyhow::Error::new(errno).context(format!(
@@ -120,15 +108,13 @@ impl CellClient {
             ))),
             errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
         })?;
-        let Opened { cell, arena, commit, max_map_count } = opened;
+        let Opened { cell, arena, max_map_count } = opened;
         let mut fds = reply.fds.into_iter();
         let (Some(own), Some(public)) = (fds.next(), fds.next()) else {
             return Err(Error::msg("the daemon sent no physical memory"));
         };
         // Its tenant's arena, and the default one, read-only.
         let memories = vec![(arena, own), (crate::pages::ArenaId::DEFAULT, public)];
-        // A follower's view's commit, which it has heard of.
-        client.committed.rise(commit);
         // cladefs: its build, which the daemon's metrics show (TASK-111.7).
         client.request_blocking(&Request::Build(crate::BUILD_COMMIT)).map_err(|errno| {
             Error::new(anyhow::Error::new(errno).context("saying this VM process's build"))
@@ -138,83 +124,7 @@ impl CellClient {
             .into();
         let copying = std::sync::atomic::AtomicBool::new(false);
         let (faults, window_faults) = (Mutex::new(None), std::sync::OnceLock::new());
-        Ok(Self {
-            client,
-            cell,
-            memories,
-            faults,
-            window_faults,
-            read_only,
-            transfer,
-            copying,
-            max_map_count,
-        })
-    }
-
-    /// cladefs: whether it is a follower's, read-only ([`CellClient::connect_read_only`]).
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
-    /// cladefs: the number of the latest commit of a follower's writer it has heard of: its view's,
-    /// or one after ([`CellClient::on_committed`]).
-    pub fn committed(&self) -> u64 {
-        self.client.committed.latest()
-    }
-
-    /// cladefs: calls `committed` with the number of each commit of a follower's writer it hears
-    /// of from now on: the latest of each run of them, which the follower may advance to. Returns
-    /// the latest heard of as it began: each commit is heard of from one or the other, or a later
-    /// one, one as it begins perhaps from both; a second read, of
-    /// [`CellClient::committed`], might miss one that the call misses (TASK-444.2.2). Once,
-    /// of a cell.
-    pub fn on_committed(&self, committed: impl Fn(u64) + Send + Sync + 'static) -> u64 {
-        self.client.committed.listen(Box::new(committed))
-    }
-
-    /// cladefs: moves a follower's view to its writer's latest commit, holding what the commits
-    /// since the one it was as of held until it lets go of them ([`CellClient::let_go`]),
-    /// and returns the commit's number (`ADVANCE`). `ESTALE` once it was cut off.
-    pub fn advance(&self) -> Result<u64> {
-        blocking(self.advance_async())
-    }
-
-    /// [`CellClient::advance`], waiting for the daemon holding no thread.
-    pub async fn advance_async(&self) -> Result<u64> {
-        let reply = self.client.request(&Request::Advance).await?;
-        Ok(Advanced::decode(&reply.header).map_err(|_| Errno::EIO)?.commit)
-    }
-
-    /// cladefs: lets go of what a follower's view held of the commits before the one
-    /// numbered `commit`, which an advance returned (`LET_GO`).
-    pub fn let_go(&self, commit: u64) -> Result<()> {
-        blocking(self.let_go_async(commit))
-    }
-
-    /// [`CellClient::let_go`], waiting for the daemon holding no thread.
-    pub async fn let_go_async(&self, commit: u64) -> Result<()> {
-        self.client.request(&Request::LetGo { commit }).await.map(drop)
-    }
-
-    /// cladefs: keeps `extent`, which a follower's view holds, whatever commit it advances to,
-    /// until unpinned (`PIN`).
-    pub fn pin(&self, extent: ExtentId) -> Result<()> {
-        blocking(self.pin_async(extent))
-    }
-
-    /// [`CellClient::pin`], waiting for the daemon holding no thread.
-    pub async fn pin_async(&self, extent: ExtentId) -> Result<()> {
-        self.client.request(&Request::Pin(extent)).await.map(drop)
-    }
-
-    /// cladefs: lets go of `extent`, pinned (`UNPIN`).
-    pub fn unpin(&self, extent: ExtentId) -> Result<()> {
-        blocking(self.unpin_async(extent))
-    }
-
-    /// [`CellClient::unpin`], waiting for the daemon holding no thread.
-    pub async fn unpin_async(&self, extent: ExtentId) -> Result<()> {
-        self.client.request(&Request::Unpin(extent)).await.map(drop)
+        Ok(Self { client, cell, memories, faults, window_faults, transfer, copying, max_map_count })
     }
 
     /// Calls `changed` with the cell's capacity each time the daemon resizes it (the control API's
@@ -582,7 +492,7 @@ impl CellClient {
         self.client.stage.get().map_or(0, |stage| stage.private_pages())
     }
 
-    /// cladefs: whether its window copies on write, a writer's
+    /// cladefs: whether it has a window, which copies on write
     /// ([`create_dax_window_in_host_memory`](Self::create_dax_window_in_host_memory)).
     pub fn copies_on_write(&self) -> bool {
         self.copying.load(Ordering::Acquire)
@@ -644,8 +554,7 @@ impl CellClient {
     /// `private_max` private pages at most, one at least, this process's memory, which it bounds
     /// itself, and the daemon reserves nothing for (TASK-501, doc-26): a write to a page, by the
     /// guest's own threads ([`crate::guest_thread_started`]), or one of a page mapped here, makes
-    /// the page private, a copy of what the daemon maps there. A follower's copies nothing,
-    /// refusing every write, its `private_max` 0 (`EINVAL` otherwise, as a writer's of 0).
+    /// the page private, a copy of what the daemon maps there. `EINVAL` of a `private_max` of 0.
     ///
     /// # Safety
     ///
@@ -696,8 +605,7 @@ impl CellClient {
         private_max: u64,
         unmapped: Option<Arc<dyn Unmapped>>,
     ) -> Result<(), Error> {
-        let copying = private_max != 0;
-        if copying == self.read_only {
+        if private_max == 0 {
             return Err(Error::new(Errno::EINVAL));
         }
         let mut faults = self.faults.lock().unwrap();
@@ -713,9 +621,7 @@ impl CellClient {
         let stage = unsafe {
             UffdSecondStage::new(base.as_ptr() as usize, size, phys, prefault, self.max_map_count)
         }?;
-        if copying {
-            stage.copy_on_write(private_max)?;
-        }
+        stage.copy_on_write(private_max)?;
         // cladefs: a VM's memory's window, every write a guest's (TASK-456.3).
         if unmapped.is_some() {
             stage.writes_are_guests();
@@ -725,8 +631,8 @@ impl CellClient {
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
         // (TASK-111.5).
         let budget = stage.budget() as u64;
-        self.client.request_blocking(&Request::Window { size, copying, budget })?;
-        self.copying.store(copying, Ordering::Release);
+        self.client.request_blocking(&Request::Window { size, copying: true, budget })?;
+        self.copying.store(true, Ordering::Release);
         let faults_of = Arc::new(DaemonFaults { client: self.client.clone(), size, unmapped });
         self.window_faults.set(faults_of.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         *faults = Some(stage.serve(faults_of)?);
@@ -827,14 +733,6 @@ impl DaemonConnection {
         self.opening(cell_dir.as_ref(), Opening::ForkOf { tenant, cell, version, capacity })
     }
 
-    /// cladefs: a follower of the cell at `cell_dir` (backlog doc-8): read-only, as of the latest
-    /// commit of its writer, another VM's, which goes on, or of the cell as of its last commit, if
-    /// no VM writes it; and which it moves to the writer's latest as it advances
-    /// ([`CellClient::advance`]).
-    pub fn open_read_only(self, cell_dir: impl AsRef<Path>) -> Result<CellClient, Error> {
-        self.opening(cell_dir.as_ref(), Opening::ReadOnly)
-    }
-
     /// The cell at `cell_dir`, opened as `opening` says. cladefs: by a daemon of this VM process's
     /// wire version alone, which takes every request there is (TASK-141.3): one of another, or
     /// that refuses any of what opening asks, the connection is closed on, failing; and one that
@@ -932,9 +830,6 @@ struct Client {
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
     /// cladefs: what the daemon's asks for stats go to ([`CellClient::on_stats_asked`]).
     stats_asked: OnceLock<Box<dyn Fn(u64) -> bool + Send + Sync>>,
-    /// cladefs: the latest commit of a follower's writer heard of, and what hears of the next
-    /// ([`CellClient::on_committed`]).
-    committed: Latest,
     /// Whether the VM process is closing the connection itself ([`Client::close`]).
     closing: std::sync::atomic::AtomicBool,
     /// Whether the daemon went, closing the connection, and what is told of it
@@ -954,7 +849,6 @@ impl Client {
             stage_counts: StageCosts::default(),
             capacity: OnceLock::new(),
             stats_asked: OnceLock::new(),
-            committed: Latest::new(),
             closing: Default::default(),
             lost: Occurrence::new(),
         });
@@ -1142,10 +1036,6 @@ impl Client {
                         }
                         None => {}
                     }
-                    continue;
-                }
-                Ok(Told::Committed { commit }) => {
-                    self.committed.rise(commit);
                     continue;
                 }
                 // cladefs: no guest asked, it answers with none (TASK-111.4).

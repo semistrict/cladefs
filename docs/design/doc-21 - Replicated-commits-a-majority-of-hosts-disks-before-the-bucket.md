@@ -340,7 +340,7 @@ configuration's logs once the head names a greater configuration, or the cell is
   making one, and a freeze, still wait for Uploaded.
 - **Unmount** and the daemon closing a cell wait for Replicated. A cell closing for good (drain,
   TASK-141.4) uploads everything, then sends `Drop`.
-- **Followers** (doc-8) and forks see only what is uploaded, as before.
+- **Forks** see only what is uploaded, as before.
 ## The spec (TASK-537.2)
 
 `specs/replication/Replication.tla` holds the writers, the members' logs, drops, promises and

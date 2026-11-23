@@ -1,7 +1,7 @@
 # Memory orderings of the host crates' atomics
 
 For whoever changes an atomic in `crates/cladefs`, `local_cell`, `bucket_cell`,
-`follower`, `virtio_extent` or the extent device in `vendor/firecracker`: what each atomic that is
+`virtio_extent` or the extent device in `vendor/firecracker`: what each atomic that is
 not `SeqCst` publishes, which access pairs with which, why that is enough, and which loom model
 shows it. A change to one of these orderings, or a new atomic that orders anything but itself,
 belongs here, with a model if it carries an argument.
@@ -43,7 +43,6 @@ about 90 more in their tests.
 | Atomic | Publishes | Pairing and argument | Model | Mutants |
 |---|---|---|---|---|
 | `cladefs::hearing::Occurrence::state`: cladefsd client's daemon-lost news (`Client::lost`) | its listener (`OnceLock`), to `happen` | `listen`: set the listener, then `fetch_or(LISTENING, Release)`. `happen`: `fetch_or(HAPPENED, Acquire)`. Two RMWs of one atomic: the later one sees the earlier one's bit and calls the listener, exactly once. If `happen` sees `LISTENING`, its Acquire reads from `listen`'s Release, so the listener's write happens before `get`. `happened()` is `Relaxed`: its readers come after a request failure, which `happen` precedes on the receiving thread. | `hearing::loom::occurrences_are_told_once` | `occurrence-happens-relaxed`, `occurrence-listens-relaxed`: killed. `occurrence-told-by-a-store-and-a-load` (TASK-444.2.1 put back): killed |
-| `cladefs::hearing::Latest::latest`: a follower's writer's latest commit (`Client::committed`) | its listener, to `rise` | `listen`: set the listener, then `fetch_max(0, Release)`, an RMW whose result it returns. `rise`: `fetch_max(value, Acquire)`. If the rise's RMW comes first, `listen` returns at least its value. If it comes after, it reads from `listen`'s RMW (or a later RMW in its release sequence), so it sees the listener. `latest()` is `Relaxed`: only the value. | `hearing::loom::listeners_hear_of_every_rise` | `latest-rises-relaxed`, `latest-listens-relaxed`: killed. `latest-listening-loads` (TASK-444.2.2 put back): killed |
 | `virtio_extent::notices::Resizing::{capacity, asked}` | in `answered`, the ask cleared, to a driver reading the capacity it took | `answered` (under `changing`): `asked.store(0)`, then `capacity.store(c, Release)`. `Resizing::known`, the driver's read (`Device::read_config`): `capacity.load(Acquire)`, then `asked`. A read of the taken capacity is ordered after the ask's clearing, so the guest never reads the capacity it took together with the ask it answered (TASK-79.41). Nothing orders `changed`'s pair of stores against a read in this way: a read may take the new capacity with the old ask. The configuration interrupt that `changed` raises afterwards has the driver read both again. | `notices::loom::capacities_taken_are_read_with_their_asks_answered` | `answers-release-no-capacity`, `capacities-read-relaxed`: killed. `answers-clear-asks-relaxed`, `asks-read-relaxed`: equivalent (class 3) |
 
 The slabs (`cladefs::slabs`, doc-26) have no protocol of atomics: what a run was staged to is under
@@ -116,7 +115,7 @@ The atomics in test modules (`#[cfg(test)]`), in Shuttle builds (whose atomics a
 whatever they ask) and in `tests/` are switches a test sets before the threads it affects start,
 or counters a test reads after joining them. Examples: `cladefs::bucket`'s `Gated` bucket (`shut`,
 `full`, `held`, `went`, `writes`), `cladefsd::tests`, `cell_table`'s and `cell_requests`' Shuttle
-tests, `follower`'s test listener, and `bucket_cell::{cell, collector, fetch}` tests. The join
+tests, and `bucket_cell::{cell, collector, fetch}` tests. The join
 or channel that ends the test orders the read after the writes.
 
 ## What the audit found
@@ -127,5 +126,5 @@ or channel that ends the test orders the read after the writes.
   meant two concurrent `process::exit` calls in Firecracker's listener. Fixed by `Occurrence`.
 - TASK-444.2.2: a follower's device read the latest commit with a load after setting its
   listener, the same pattern against the rise. loom showed a commit heard by neither. Fixed by
-  `Latest::listen`, which returns the value through an RMW (`CellClient::on_committed`
-  now returns it).
+  `Latest::listen`, which returned the value through an RMW (`CellClient::on_committed`
+  returned it). Both went with live followers (board 8237).

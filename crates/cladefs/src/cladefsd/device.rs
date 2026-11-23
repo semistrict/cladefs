@@ -139,6 +139,6 @@ impl Device for DaemonDevice {
     }
 
     fn is_read_only(&self) -> bool {
-        self.client.is_read_only()
+        false
     }
 }

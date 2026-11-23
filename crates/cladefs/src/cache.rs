@@ -71,7 +71,7 @@ pub(crate) struct Cached {
 /// The cells a cached extent's pages are read from (TASK-79.7): each that asked for it, as forks
 /// of a base share it, held weakly, so that the cache keeps none open, nor its files and disk
 /// space, once it closes. A page-in reads through the first open still that holds the extent, or
-/// keeps it for a follower's view: a cell that frees an extent its siblings map, or closes,
+/// keeps it, freed, for its uploader: a cell that frees an extent its siblings map, or closes,
 /// leaves them reading it through theirs. Each holds the same data by its ID, which its cell
 /// writes once (TASK-79.6).
 struct Holders(SharedLock<Mutex<Vec<Holder>>>);
@@ -805,7 +805,7 @@ impl Contents for StoredExtent {
 }
 
 /// cladefs: reads `buf.len()` bytes at `offset` in `id`, as `local` holds it: an extent freed
-/// since it was mapped, which a follower's view keeps, reads as kept (doc-8). One `local` holds
+/// since it was mapped, which its uploader keeps, reads as kept. One `local` holds
 /// in the bucket fails with [`local_cell::BucketData`], saying where.
 fn read_local(
     local: &LocalCell<HostDir>,

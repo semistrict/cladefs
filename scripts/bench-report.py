@@ -9,11 +9,11 @@ Reads the JSON each benchmark case wrote to a results directory (see scripts/ben
 for each workload, each filesystem's median with its spread (minimum to maximum), and how many
 times slower than its baseline the others are: their median time over the baseline's, or the
 baseline's median rate over theirs. The guest kernel's Fxfs compares with ext4 with DAX on pmem,
-or ext4 on virtio-blk, booted on the same kernel; a warm fork with a cold one; a writer with
-followers with one alone (scripts/bench_results.py, which scripts/bench-history.py shares). Ratios
-over 2 are in bold. Runs before cladefs left libkrun (TASK-40) measured the default kernel's ext4 on
-virtio-blk and libkrun's virtio-fs device too, which the others compared with: the report still
-reads them.
+or ext4 on virtio-blk, booted on the same kernel; a warm fork with a cold one
+(scripts/bench_results.py, which scripts/bench-history.py shares). Ratios over 2 are in bold. Runs
+before cladefs left libkrun (TASK-40) measured the default kernel's ext4 on virtio-blk and libkrun's
+virtio-fs device too, which the others compared with, and runs before live followers went (board
+8237) a writer with followers: the report still reads them.
 
 When the extent daemon kept cells in a bucket (CLADEFSD_BUCKET), a section after the table
 counts its requests by kind, with their estimated cost, and the bytes it uploaded and downloaded,
@@ -62,8 +62,7 @@ def daemon_stats(directory, kind):
     """The extent daemon's stats of `kind`, by name, if it kept them: its stats file
     (CLADEFSD_STATS, which scripts/test-e2e.sh sets), a line of `NAME=COUNT` after `KIND:`
     for each kind: object-store (what it did with object storage, if it kept cells there),
-    followers (what the cells' followers were), daemon (what serving the cells cost it) and
-    requests (the VM processes' requests it served, by kind)."""
+    daemon (what serving the cells cost it) and requests (the VM processes' requests it served, by kind)."""
     logs = Path(directory) / "logs"
     # A run of a tree from before TASK-503 names it for the daemon's old name, extent[d].
     path = next(logs.glob("cladefsd-stats.txt"), None) or next(logs.glob("extent[d]-stats.txt"),
@@ -122,18 +121,6 @@ def object_storage(stats):
             "cladefsd.log says why."
         )
     return lines
-
-
-def followers(stats):
-    """The section of the report on followers (backlog doc-8), of `stats`, as lines: if any
-    followed."""
-    if not stats.get("max-views", 0):
-        return []
-    return [
-        f"Followers: at most {stats['max-views']} at once, at most {stats['max-behind']} commits and "
-        f"{stats['max-stale-ms']:,} ms behind their writer, keeping at most "
-        f"{size(stats['max-kept'])} of its frees.",
-    ]
 
 
 def served(requests, daemon):
@@ -259,10 +246,6 @@ def main():
     stats = object_store_stats(sys.argv[1])
     if stats is not None:
         print("\n".join(object_storage(stats)))
-        print()
-    following = followers(daemon_stats(sys.argv[1], "followers") or {})
-    if following:
-        print("\n".join(following))
         print()
     requests = daemon_stats(sys.argv[1], "requests") or {}
     serving = served(requests, daemon_stats(sys.argv[1], "daemon") or {})

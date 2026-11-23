@@ -201,7 +201,7 @@ GCM's authentication key. A salt per object makes every subkey new, whatever key
 | Process | Keys | Why |
 |---|---|---|
 | cladefsd, a cell's holder | the cell's KEK; its vdisks' DEKs; inherited DEKs | reads and writes the vdisks |
-| A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
+| A host opening a point | the DEKs of the branch and its ancestors | reads only |
 | `cladefs-gc`, marking | none | reads metadata only |
 | `cladefs-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
 | `cladefs-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was encrypted under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |

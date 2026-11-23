@@ -32,19 +32,6 @@ extent_keys kms::names::tests::templates_name_every_tenant_apart
 extent_keys kms::names::tests::tenants_are_named_by_the_template_unless_overridden
 extent_keys tests::secrets_print_no_bytes
 extent_keys xts::tests::ieee_1619_vectors_encrypt_and_decrypt_as_they_say
-follower_history tests::held_files_deleted_read_as_before_fail
-follower_history tests::held_files_read_as_their_last_model
-follower_history tests::held_files_read_past_their_commit_fail
-follower_history tests::models_follow_their_commits
-follower_history tests::operations_leaving_models_change_what_they_change
-follower_history tests::readers_move_forward_across_files
-follower_history tests::readers_see_prefixes_moving_forward
-follower_history tests::reads_between_commits_find_either
-follower_history tests::reads_between_commits_past_the_last_fail
-follower_history tests::reads_going_back_fail
-follower_history tests::reads_no_model_may_show_fail
-follower_history tests::reads_past_their_commit_fail
-follower_history tests::renames_keep_their_object
 virtio_extent buffers::tests::chains_writing_past_u32_are_refused
 virtio_extent buffers::tests::headers_are_the_first_bytes
 virtio_extent buffers::tests::requests_read_and_write_across_descriptors
@@ -55,7 +42,6 @@ virtio_extent config::tests::features_are_as_configured
 virtio_extent config::tests::invalid_configurations_are_refused
 virtio_extent notices::tests::answers_to_shrinks_no_longer_asked_change_nothing
 virtio_extent notices::tests::capacities_changed_raise_the_interrupt_once_activated
-virtio_extent notices::tests::followers_hear_of_later_commits_alone
 virtio_extent notices::tests::stats_are_asked_of_guests_that_take_asks
 virtio_extent persist::tests::configurations_come_back_a_writers
 virtio_extent persist::tests::mappings_come_back_as_saved

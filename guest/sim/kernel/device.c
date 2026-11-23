@@ -667,11 +667,6 @@ bool virtio_extent_map_prefault(struct virtio_extent *vext)
 	return false;
 }
 
-bool virtio_extent_read_only(struct virtio_extent *vext)
-{
-	return false;
-}
-
 bool virtio_extent_write_commit(struct virtio_extent *vext)
 {
 	return false;

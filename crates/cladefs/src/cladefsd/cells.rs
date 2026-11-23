@@ -12,13 +12,10 @@
 //! another process's lock of it, and its cell's take from object storage.
 //!
 //! Who holds a cell, and what is open of it, is the daemon's one table's (`crate::cell_table`,
-//! TASK-160.8), each hold a value that lets the cell go as it is dropped. cladefs: a cell open for
-//! connections is one instance ([`OpenCell`]), its writer's, if a connection writes it, and its
-//! followers', which follow it (backlog doc-8). Followers that find no writer open it as a writer
-//! would, and a writer opening it then takes it over ([`OpenCell::take_over`]), as it does a
-//! writer's that went while followers followed it, if nothing is open in it. A writer that went
-//! with writes uncommitted retires its cell: its followers are cut off, and neither a writer nor
-//! a follower opens it until they are gone.
+//! TASK-160.8), each hold a value that lets the cell go as it is dropped. cladefs: a cell open is
+//! one instance ([`OpenCell`]): its writer's, if a connection writes it, which the daemon's work
+//! through it shares; or the one the cells a base is attached to share (backlog doc-10). No writer
+//! opens a cell others have open (`EBUSY`).
 
 use super::server::Connection;
 use crate::cell_requests::{self, Capacity, Close};
@@ -62,71 +59,12 @@ pub(super) async fn hold_to_write(key: &Path, connection: Weak<Connection>) -> R
     Ok(hold)
 }
 
-/// cladefs: the cell followers have open at the key `hold` holds for a writer, or a writer's that
-/// went, which the writer takes over ([`OpenCell::take_over`]), if one is: `EBUSY` if it is
-/// open in an arena not `arena` ([`in_arena`]), retired, or something is open in it; and as the
-/// cell refuses a writer, a kept cell or a public base ([`crate::CellAccess::may_write`]).
-pub(super) fn take_over(hold: &Hold, arena: &Arc<Arena>) -> Result<Option<Arc<OpenCell>>, Errno> {
-    let Some((open_cell, retired)) = hold.instance() else { return Ok(None) };
-    let key = hold.key();
-    if let Err(errno) = in_arena(&open_cell, arena) {
-        log::warn!("cladefsd: {} is open for followers in another arena: {errno}", key.display());
-        return Err(errno);
-    }
-    match if retired { Err(Errno::EBUSY) } else { open_cell.take_over() } {
-        Ok(()) => Ok(Some(open_cell)),
-        Err(Errno::EBUSY) => {
-            log::warn!(
-                "cladefsd: {} is open for followers, which its writer that went left writes \
-                 uncommitted in",
-                key.display()
-            );
-            Err(Errno::EBUSY)
-        }
-        Err(errno) => Err(errno),
-    }
-}
-
-/// cladefs: retires `open_cell`, which the connection holding it as `hold` wrote, gone with writes
-/// uncommitted: marked so, and then its followers cut off ([`Hold::retire`]), and no connection
-/// opens it until they are gone.
-pub(super) fn retire(hold: &Hold, open_cell: &OpenCell) {
-    hold.retire(|| open_cell.cut_followers());
-}
-
-/// cladefs: a follower of the cell at `path` (backlog doc-8): of the one a writer's connection, or
-/// followers', have open ([`crate::cell_table::CellTable::follow`]); or, if none has, of the
-/// cell opened as of its last commit, as a writer opens it, its pages of `arena`, which a writer
-/// opening it then takes over. `EBUSY` while a writer is opening it, or it is retired, or as it is
-/// followed, or open in another arena ([`in_arena`]).
-pub(super) async fn followed(path: &Path, arena: &Arc<Arena>) -> Result<OpenCell, Errno> {
-    let follow =
-        |open_cell: &Arc<OpenCell>| in_arena(open_cell, arena).map(|()| open_cell.follow());
-    let key = cell_dir_key(path);
-    if let Some(follower) = table().follow(&key, follow)? {
-        return Ok(follower);
-    }
-    // No other opens it meanwhile: a follower, a writer, or the daemon's work; nor retires it,
-    // which only its writer does.
-    let hold = hold(&key).await?;
-    match hold.instance() {
-        Some((_, true)) => return Err(Errno::EBUSY),
-        Some((open_cell, false)) => return follow(&open_cell),
-        None => {}
-    }
-    if !host_fs::exists(&path) {
-        return Err(Errno::ENOENT);
-    }
-    let open_cell = Arc::new(open_cell_at(path, None, Some(arena)).await?);
-    hold.open(&open_cell)?;
-    Ok(open_cell.follow())
-}
-
 /// cladefs: `EBUSY` unless `open_cell`'s own pages are of `arena`: the connection's, which its VM
 /// process holds (TASK-79.36). Its window maps no other arena's pages, and the default's read-only
 /// alone, its tenant's being its own.
-fn in_arena(open_cell: &OpenCell, arena: &Arc<Arena>) -> Result<(), Errno> {
-    if open_cell.arena() == arena.id() { Ok(()) } else { Err(Errno::EBUSY) }
+fn in_arena(open_cell: &OpenCell, arena: Option<&Arc<Arena>>) -> Result<(), Errno> {
+    let own = arena.map_or(crate::pages::ArenaId::DEFAULT, |arena| arena.id());
+    if open_cell.arena() == own { Ok(()) } else { Err(Errno::EBUSY) }
 }
 
 /// How long holding a cell waits for a connection whose VM process is gone to let it go: as a VM
@@ -156,7 +94,7 @@ pub(super) fn cell_dir_key(path: &Path) -> PathBuf {
 /// cladefs: holds the cell at `path` for the daemon's FUSE mount of cells, which attaches it
 /// (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM process opening
 /// it, or the control API working on it, fails with `EBUSY` at once. `EBUSY` if a connection not
-/// going writes it, or followers have it open; waits for one going, or the daemon's work, at most
+/// going writes it, or others have it open; waits for one going, or the daemon's work, at most
 /// [`CLOSING_WAIT`]. The cell kept open of it for forks, if any, closed. Awaited, holding no
 /// thread (board 2946). Linux's alone, as the mount is.
 #[cfg(target_os = "linux")]
@@ -191,9 +129,7 @@ async fn hold_to_fork(path: &Path) -> Result<Hold, Errno> {
     table().hold_async(&cell_dir_key(path), CLOSING_WAIT).await
 }
 
-/// Holds the cell at `path` for the daemon, as [`hold`] does: `EBUSY` while followers have it
-/// open too.
-/// cladefs: holds the cell at `path`, which no connection has open (`EBUSY` otherwise), as a live
+/// cladefs: holds the cell at `path`, which nothing has open (`EBUSY` otherwise), as a live
 /// migration's hand-over does (TASK-698.4).
 pub(super) async fn hold_cell_alone(path: &Path) -> Result<Hold, Errno> {
     hold_alone(path).await
@@ -473,8 +409,8 @@ where
     (**open_cell).borrow().set_capacity(capacity).await
 }
 
-/// The cell a fork forks ([`Here`]), and whether connections have it open: their writer's,
-/// live, or their followers' (backlog doc-8), rather than opened here.
+/// The cell a fork forks ([`Here`]), and whether it is open elsewhere: its writer's, live, or
+/// others', rather than opened here.
 struct Forked {
     here: Here,
     live: bool,
@@ -498,13 +434,13 @@ where
 
 /// The cell a connection has open at `path`, if one has, whose VM process isn't gone: one going
 /// is let go once its last commits are durable, which [`hold`] waits for. cladefs: or, with no
-/// writer's connection, its followers' (backlog doc-8).
+/// writer's connection, the one others have open, a base's or its writer's that went.
 fn open_by_connection(path: &Path) -> Option<Arc<OpenCell>> {
     let key = cell_dir_key(path);
     match table().writer(&key) {
         Some(writer) if writer.going() => None,
         Some(writer) => writer.cell().cloned(),
-        None => table().instance(&key).map(|(open_cell, _)| open_cell),
+        None => table().instance(&key),
     }
 }
 
@@ -559,13 +495,9 @@ pub(super) async fn open_cell_at(
 /// arena, if public, or `arena`: `EBUSY` in another's, whose pages the connection's VM process
 /// doesn't hold.
 async fn base(path: &Path, arena: Option<&Arc<Arena>>) -> Result<Arc<OpenCell>, Errno> {
-    let open = |found: Option<(Arc<OpenCell>, bool)>| match found {
-        Some((_, true)) => Err(Errno::EBUSY),
-        Some((open_cell, false)) if open_cell.is_public() => Ok(Some(open_cell)),
-        Some((open_cell, false)) => {
-            let own = arena.map_or(crate::pages::ArenaId::DEFAULT, |arena| arena.id());
-            if open_cell.arena() == own { Ok(Some(open_cell)) } else { Err(Errno::EBUSY) }
-        }
+    let open = |found: Option<Arc<OpenCell>>| match found {
+        Some(open_cell) if open_cell.is_public() => Ok(Some(open_cell)),
+        Some(open_cell) => in_arena(&open_cell, arena).map(|()| Some(open_cell)),
         None => Ok(None),
     };
     let key = cell_dir_key(path);
@@ -599,7 +531,7 @@ pub(super) async fn attach(
         _ => Errno::EIO,
     })?;
     let (public, ancestry) = match table().instance(&cell_dir_key(&base)) {
-        Some((open_cell, _)) => (open_cell.is_public(), open_cell.ancestry()),
+        Some(open_cell) => (open_cell.is_public(), open_cell.ancestry()),
         None => {
             let here = Here::open(&base, hold(&base).await?).await?;
             let what = (here.held().open_cell.is_public(), here.held().open_cell.ancestry());
@@ -1047,7 +979,7 @@ enum Opened {
 /// cladefs: the kept cell at `from` for a restore to fork, of `capacity` bytes if the daemon takes
 /// its cell from its bucket into the cell there ([`take_cell`]), which forks fork at once
 /// (TASK-92.5): the cell kept open, if one is ([`kept`]); or, under the daemon's hold of its path,
-/// which no connection opens it meanwhile, the cell followers have open, forked as it is, held
+/// which no connection opens it meanwhile, the cell others have open, forked as it is, held
 /// until the fork is done; or the kept cell opened, kept open from then on ([`keep`]). And when it
 /// was opened. A restore waiting for another's opening of it holds no thread.
 async fn kept_or_open(from: &Path, capacity: u64) -> Result<(Arc<HeldCell>, Opened), Errno> {
@@ -1060,7 +992,7 @@ async fn kept_or_open(from: &Path, capacity: u64) -> Result<(Arc<HeldCell>, Open
     if let Some(kept) = kept(hold.key()) {
         return Ok((kept, Opened::Now));
     }
-    if let Some((open_cell, _)) = hold.instance() {
+    if let Some(open_cell) = hold.instance() {
         return Ok((Arc::new(HeldCell::new(open_cell, Some(hold))), Opened::Now));
     }
     // cladefs: awaited, holding no worker of the control runtime's (TASK-688).
@@ -1068,7 +1000,7 @@ async fn kept_or_open(from: &Path, capacity: u64) -> Result<(Arc<HeldCell>, Open
 }
 
 /// Forks the cell at `from` to a new cell at `to`, and returns its cell: live, if a connection has
-/// it open, once nothing is open (`EBUSY` otherwise); or its followers, with no writer; or the cell
+/// it open, once nothing is open (`EBUSY` otherwise); or others', with no writer; or the cell
 /// kept open of it, as restores fork it (TASK-92.5), opened here if none is, and kept open for the
 /// forks after it. Its commits' uploads, which the fork follows, are waited for first, holding no
 /// thread; the fork, as of then, is made on a blocking thread. The cell at `to` is held throughout,
@@ -1105,7 +1037,7 @@ async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Ce
         Some(Forked { here: Here::of(connection.cell()?.clone(), None), live: true })
     };
     let open = |hold: Option<Hold>| async {
-        if let Some((open_cell, _)) = table().instance(key) {
+        if let Some(open_cell) = table().instance(key) {
             return Ok(Forked { here: Here::of(open_cell, hold), live: true });
         }
         // Opened by a restore that held it before.
@@ -1160,7 +1092,7 @@ async fn with_cell<T>(
     // A cell its connection let go of may live on a while, its last reference dropped on a
     // blocking thread: worked on as it is, under the hold, never opened a second time beside it,
     // as sync does (board 2730, board 2922).
-    if let Some((open_cell, _)) = held.instance() {
+    if let Some(open_cell) = held.instance() {
         let done = work(&open_cell).await;
         // Closed here, if this was its last reference, holding no thread.
         release(open_cell).await;
@@ -1225,7 +1157,7 @@ pub(super) async fn sync(path: PathBuf) -> Result<(), Errno> {
     // A cell its connection let go of may live on a while, its last reference dropped on a
     // blocking thread: synced as it is, under the hold, never opened a second time beside it,
     // which this process's claim on its directory refuses (TASK-648).
-    if let Some((open_cell, _)) = held.instance() {
+    if let Some(open_cell) = held.instance() {
         let synced = uploaded(&open_cell).await;
         release(open_cell).await;
         return synced;
@@ -1288,11 +1220,11 @@ pub(super) async fn resize(path: PathBuf, capacity: u64) -> Result<(), Errno> {
     let open = |hold: Option<Hold>| {
         let key = key.clone();
         async move {
-            // cladefs: open for followers, it grows as it is; the cell kept open of it for forks,
+            // cladefs: open for others, it grows as it is; the cell kept open of it for forks,
             // it opens anew, closed first (TASK-92.5): attached, as any cell the daemon opens,
             // which says whether it is a kept cell (TASK-160.10).
             let open_cell = match table().instance(&key) {
-                Some((open_cell, _)) => open_cell,
+                Some(open_cell) => open_cell,
                 None => {
                     close_kept(hold.as_ref().and_then(Hold::take_kept)).await;
                     if !host_fs::exists(&key) {
@@ -1373,7 +1305,7 @@ fn state_of(open_cell: &OpenCell, open: bool) -> Result<CellState, Errno> {
     })
 }
 
-/// The cells connections have open, writers' and followers', by their paths, with what each is
+/// The cells open, writers' and others', by their paths, with what each is
 /// and holds (TASK-50.5).
 pub(super) fn list() -> Result<Vec<(PathBuf, CellState)>, Errno> {
     let cells = table().instances();
@@ -1433,7 +1365,7 @@ pub(super) fn open_count() -> usize {
     table().writers()
 }
 
-/// cladefs: the cells open for connections, writers' and followers'.
+/// cladefs: the cells open, writers' and others'.
 fn open_instances() -> Vec<Arc<OpenCell>> {
     table().instances().into_iter().map(|(_, open_cell)| open_cell).collect()
 }
@@ -1445,12 +1377,6 @@ pub(super) fn upload_statuses() -> Vec<(CellId, local_cell::upload::UploadStatus
     (open_instances().iter())
         .filter_map(|open_cell| Some((open_cell.cell(), open_cell.upload_status().ok()??)))
         .collect()
-}
-
-/// How many views followers have of the cells open for connections (`metrics`): counted of the
-/// views alone, which hold none of the cells' state, their guests' (TASK-92.17).
-pub(super) fn follower_views() -> usize {
-    open_instances().iter().map(|open_cell| open_cell.view_stats().views).sum()
 }
 
 /// cladefs: the bucket `CLADEFSD_BUCKET` names, which the cells opened are kept in:
@@ -1512,50 +1438,8 @@ const STATS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// and memory, which change each poll: what its file says of the process is no older than this.
 const PROCESS_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// cladefs: what the cells' followers are (backlog doc-8, TASK-42.7): their views now, and the
-/// most views, commits behind, time behind and bytes of frees kept for them seen since the daemon
-/// started, which the followers' measurements report.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct FollowerStats {
-    views: usize,
-    max_views: usize,
-    max_behind: u64,
-    max_stale_ms: u64,
-    max_kept: u64,
-}
-
-impl FollowerStats {
-    /// Takes the cells open for connections as they are now: those followers view alone, as
-    /// those no follower views keep nothing for them, whose state their guests' requests hold is
-    /// then taken for the bytes of frees views keep alone, which it counts (TASK-92.17).
-    fn update(&mut self) {
-        self.views = 0;
-        for open_cell in open_instances() {
-            let views = open_cell.view_stats();
-            if views.views == 0 {
-                continue;
-            }
-            self.views += views.views;
-            self.max_behind = self.max_behind.max(views.behind);
-            self.max_stale_ms = self.max_stale_ms.max(views.stale_for.as_millis() as u64);
-            if let Ok(kept) = open_cell.kept_for_views() {
-                self.max_kept = self.max_kept.max(kept);
-            }
-        }
-        self.max_views = self.max_views.max(self.views);
-    }
-
-    fn line(&self) -> String {
-        format!(
-            "followers: views={} max-views={} max-behind={} max-stale-ms={} max-kept={}",
-            self.views, self.max_views, self.max_behind, self.max_stale_ms, self.max_kept
-        )
-    }
-}
-
 /// cladefs: keeps what `bucket` did, its requests by kind and its bytes up and down
-/// (`bucket_cell::object_bucket::Stats::line`), what the cells' followers are ([`FollowerStats`]),
-/// what serving the cells cost ([`daemon_line`]), the requests served
+/// (`bucket_cell::object_bucket::Stats::line`), what serving the cells cost ([`daemon_line`]), the requests served
 /// (`super::metrics::requests_line`), what its uploads hold ([`uploads_line`]) and what its process
 /// holds and spent (`super::process::line`, sampled every poll, as the metrics report it, file or
 /// not), while it lives: in the file `CLADEFSD_STATS` names, if it names one, a line each,
@@ -1566,7 +1450,6 @@ fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::RoutedBucket>
     let file = node_local::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let mut logged = Stats::default();
-    let mut followers = FollowerStats::default();
     let mut written = Vec::new();
     let (mut at, mut at_process) = (std::time::Instant::now(), std::time::Instant::now());
     // cladefs: a thread of its own, or under madsim a task (`super::run`, doc-24); a turn every
@@ -1583,10 +1466,8 @@ fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::RoutedBucket>
             // (TASK-330.2).
             super::process::sample();
             if let Some(file) = &file {
-                followers.update();
                 let lines = [
                     stats.line(),
-                    followers.line(),
                     daemon_line(),
                     super::metrics::requests_line(),
                     uploads_line(),

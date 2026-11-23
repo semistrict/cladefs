@@ -5,26 +5,25 @@
 //! The extent daemon's cells (`crate::cladefsd`), by the keys that name them
 //! (`cladefsd::cells::cell_dir_key`): one table, whose entry for a key says all there is of its
 //! cell (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what
-//! is open of it for others: the cell its writer's connection, or its followers', have open, or a
-//! kept cell the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
-//! holders, the cells open for connections and whether retired, the cells kept, a connection's
-//! own fields, and a cell's following of its writer's; which TASK-79.34, 150.5, 54, 79.84,
-//! 79.95, 92.5, 79.103 and 79.36 came of.
+//! is open of it for others: the cell its writer's connection has open, which the daemon's work
+//! through it shares, or the cells a base is attached to share (backlog doc-10), or a kept cell the
+//! daemon keeps open for forks. Five owners said so before, kept in step by hand, which TASK-79.34,
+//! 150.5, 54, 79.84, 79.95, 92.5, 79.103 and 79.36 came of.
 //!
 //! A cell has one holder at a time, whose hold ([`Hold`]) is a value that lets the cell go as it
 //! is dropped: a connection's, from its `OPEN` until it is gone and its cell closed; the daemon's,
 //! while it forks, syncs or resizes a cell no connection writes. A connection whose VM process is
 //! gone, still holding its cell, lets it go to the next that asks, as a VM restored from a
 //! snapshot at once opens its VM's cell (TASK-39.1). What is open of a cell outlives its holder:
-//! a cell followers follow, read-only (backlog doc-8), as long as one has it, which a writer
-//! holding it then takes over, unless its writer retired it, gone with writes uncommitted; a kept
+//! a cell others share, as long as one has it, which no writer, nor the mount, holds meanwhile
+//! (`EBUSY`), as one cell is open once at a time, and writes go to no cell others read; a kept
 //! cell kept open for forks, until a writer holds the cell, which closes it first (TASK-92.5). A
 //! connection holds no kept cell: its entry ([`Entry::Writer`]) has no room for one.
 //!
 //! Generic over its connections, cells and kept cells, so that its tests run it with models of
 //! them: under Shuttle (awslabs/shuttle), with the `shuttle` feature, whose scheduler chooses every
-//! interleaving of the threads writing, following, retiring and keeping kept cells of a cell as its
-//! writer's VM process goes (TASK-44.6).
+//! interleaving of the threads writing, sharing and keeping kept cells of a cell as its writer's VM
+//! process goes (TASK-44.6).
 
 use crate::Errno;
 use event_listener::{Event, EventListener};
@@ -46,15 +45,11 @@ pub(crate) struct Rules {
     pub one_holder: bool,
     /// Letting a cell go wakes those waiting to hold it.
     pub release_wakes: bool,
-    /// What is open of a cell, the cell followers have open or a cell kept, stays as its holder
-    /// lets the cell go.
+    /// What is open of a cell, the cell others share or a cell kept, stays as its holder lets the
+    /// cell go.
     pub open_outlives_holders: bool,
-    /// A cell retired stays so while followers have it.
-    pub retirement: bool,
-    /// A cell is marked retired before its followers are cut off.
-    pub marks_before_cutting: bool,
-    /// A follower made looks again for the cell retired, as it was made.
-    pub followers_look_again: bool,
+    /// A writer holds no cell others have open: it fails with `EBUSY` while they do.
+    pub writers_refuse_shared: bool,
 }
 
 impl Rules {
@@ -62,9 +57,7 @@ impl Rules {
         one_holder: true,
         release_wakes: true,
         open_outlives_holders: true,
-        retirement: true,
-        marks_before_cutting: true,
-        followers_look_again: true,
+        writers_refuse_shared: true,
     };
 }
 
@@ -149,9 +142,10 @@ struct Inner<C, S, P> {
 
 /// A key's entry: who holds its cell, and what is open of it meanwhile.
 enum Entry<C, S, P> {
-    /// A connection writes it, from its `OPEN` on: its cell, once open, which followers may follow
-    /// too; and what to call as a writer waits for it, going ([`Hold::when_wanted`]).
-    Writer { connection: Weak<C>, cell: Instance<S>, wanted: Option<Wanted> },
+    /// A connection writes it, from its `OPEN` on: its cell, once open, which the daemon's work
+    /// through it, and the cells it is attached to as a base, may share; and what to call as a
+    /// writer waits for it, going ([`Hold::when_wanted`]).
+    Writer { connection: Weak<C>, cell: Weak<S>, wanted: Option<Wanted> },
     /// The daemon holds it, to work on it, over what is open of it, which stays.
     Daemon(Open<S, P>),
     /// None holds it: what is open of it, never [`Open::Nothing`].
@@ -165,8 +159,9 @@ enum Entry<C, S, P> {
 /// What is open of a cell, for others than its holder.
 enum Open<S, P> {
     Nothing,
-    /// The cell connections have open, its followers', its writer gone or never there.
-    Followed(Instance<S>),
+    /// The cell others have open: the cells it is attached to as a base (backlog doc-10), or the
+    /// daemon's work through its writer, gone; while one has it.
+    Shared(Weak<S>),
     /// A cell kept open for forks (TASK-92.5).
     Kept(P),
 }
@@ -175,13 +170,6 @@ enum Open<S, P> {
 /// VM process gone (TASK-216): a callback of its own, which outlives the connection, as letting
 /// the cell go comes after its last reference does.
 pub(crate) type Wanted = Arc<dyn Fn() + Send + Sync>;
-
-/// The cell connections have open, a writer's or followers', while one of them has it: retired
-/// once its writer went with writes uncommitted, which neither a writer nor a follower opens then.
-struct Instance<S> {
-    cell: Weak<S>,
-    retired: bool,
-}
 
 /// Who asks to hold a cell.
 enum Claim<C> {
@@ -211,15 +199,15 @@ enum Refused<C> {
     /// A connection going holds it, or the daemon, which lets it go soon; and what a going
     /// connection has called as a writer waits for it, if anything.
     Wait(Option<Arc<C>>, Option<Wanted>),
-    /// cladefs: the mount has it attached, which it lets go only as asked to; or, to the mount,
-    /// followers have it open: `EBUSY`, at once (TASK-475.3).
+    /// cladefs: the mount has it attached, which it lets go only as asked to (TASK-475.3); or, to a
+    /// writer or the mount, others have it open: `EBUSY`, at once.
     Now,
 }
 
 /// A cell held, by a connection writing it or by the daemon working on it, which nothing else
 /// holds until it is dropped: it lets the cell go then, and those waiting to hold it may. What is
 /// open of the cell stays ([`Rules::open_outlives_holders`]): the cell its connection had open,
-/// if followers have it still.
+/// if others have it still.
 #[must_use = "a cell held is let go as its hold is dropped"]
 pub(crate) struct Hold<'t, C, S, P> {
     table: &'t CellTable<C, S, P>,
@@ -236,23 +224,11 @@ pub(crate) enum Holding<'t, C, S, P> {
     Held(Hold<'t, C, S, P>),
 }
 
-impl<S> Instance<S> {
-    /// No cell yet: a writer's, as it opens it.
-    fn none() -> Self {
-        Self { cell: Weak::new(), retired: false }
-    }
-
-    /// The cell, if one has it still, and whether retired.
-    fn get(&self) -> Option<(Arc<S>, bool)> {
-        Some((self.cell.upgrade()?, self.retired))
-    }
-}
-
 impl<S, P> Open<S, P> {
     /// As it is, but a cell none has open any more, which is nothing.
     fn live(self) -> Self {
         match self {
-            Open::Followed(instance) if instance.cell.strong_count() == 0 => Open::Nothing,
+            Open::Shared(cell) if cell.strong_count() == 0 => Open::Nothing,
             open => open,
         }
     }
@@ -265,9 +241,14 @@ impl<S, P> Open<S, P> {
     fn is_closed(&self) -> bool {
         match self {
             Open::Nothing => true,
-            Open::Followed(instance) => instance.cell.strong_count() == 0,
+            Open::Shared(cell) => cell.strong_count() == 0,
             Open::Kept(_) => false,
         }
+    }
+
+    /// Whether others have the cell open.
+    fn is_shared(&self) -> bool {
+        matches!(self, Open::Shared(_)) && !self.is_closed()
     }
 }
 
@@ -288,21 +269,21 @@ impl<C: Writer, S, P> Entry<C, S, P> {
 }
 
 impl<C, S, P> Entry<C, S, P> {
-    /// What is open of the cell, its holder gone: the cell a writer had open, followers' now.
+    /// What is open of the cell, its holder gone: the cell a writer had open, others' now.
     fn into_open(self) -> Open<S, P> {
         match self {
-            Entry::Writer { cell, .. } => Open::Followed(cell).live(),
+            Entry::Writer { cell, .. } => Open::Shared(cell).live(),
             Entry::Daemon(open) | Entry::Unheld(open) => open.live(),
             Entry::Mounted => Open::Nothing,
         }
     }
 
-    /// The cell connections have open, its writer's or followers', if one is.
-    fn instance(&mut self) -> Option<&mut Instance<S>> {
+    /// The cell open of it, its writer's or others', if one is.
+    fn instance(&self) -> Option<&Weak<S>> {
         match self {
             Entry::Writer { cell, .. }
-            | Entry::Daemon(Open::Followed(cell))
-            | Entry::Unheld(Open::Followed(cell)) => Some(cell),
+            | Entry::Daemon(Open::Shared(cell))
+            | Entry::Unheld(Open::Shared(cell)) => Some(cell),
             _ => None,
         }
     }
@@ -315,16 +296,17 @@ impl<C, S, P> Entry<C, S, P> {
         }
     }
 
-    /// Whether it is followers' cell, none having it any more: a stale entry.
+    /// Whether it is others' cell, none having it any more: a stale entry.
     fn is_stale(&self) -> bool {
-        matches!(self, Entry::Unheld(Open::Followed(instance)) if instance.cell.strong_count() == 0)
+        matches!(self, Entry::Unheld(Open::Shared(cell)) if cell.strong_count() == 0)
     }
 }
 
 impl<C: Writer, S, P> Inner<C, S, P> {
     /// Holds the cell `key` names for `claim`, if it may now: unless a connection not going
-    /// writes it, which fails, or a connection going holds it, or the daemon, which is waited for.
-    /// A writer takes over the cell followers have open, and the cell kept open, to close.
+    /// writes it, which fails, or a connection going holds it, or the daemon, which is waited for;
+    /// or, to a writer or the mount, others have it open, which fails. A writer takes the cell kept
+    /// open, to close.
     fn claim(&mut self, key: &Path, claim: &Claim<C>) -> Result<Claimed<C, P>, Refused<C>> {
         let passed = match (self.entries.get(key).and_then(Entry::holder), claim) {
             (Some(Refused::Busy(writer)), Claim::DaemonOrWriter) => {
@@ -335,38 +317,34 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             (Some(refused), _) => return Err(refused),
             (None, _) => None,
         };
-        // cladefs: the mount opens a cell of its own, where followers have none open.
-        let followed = |entry: &Entry<C, S, P>| match entry {
-            Entry::Daemon(open) | Entry::Unheld(open) => {
-                matches!(open, Open::Followed(_)) && !open.is_closed()
-            }
+        // A writer, and the mount, open a cell of their own, where others have none open.
+        let refuses_shared = match claim {
+            Claim::Writer(_) => rules().writers_refuse_shared,
+            Claim::Mount => true,
+            Claim::Daemon | Claim::DaemonOrWriter => false,
+        };
+        let shared = |entry: &Entry<C, S, P>| match entry {
+            Entry::Daemon(open) | Entry::Unheld(open) => open.is_shared(),
             _ => false,
         };
-        if matches!(claim, Claim::Mount) && self.entries.get(key).is_some_and(followed) {
+        if refuses_shared && self.entries.get(key).is_some_and(shared) {
             return Err(Refused::Now);
         }
         let open = self.entries.remove(key).map_or(Open::Nothing, Entry::into_open);
         let (entry, evicted) = match claim {
             Claim::Writer(connection) => {
-                let connection = connection.clone();
-                match open {
-                    Open::Followed(cell) => {
-                        (Entry::Writer { connection, cell, wanted: None }, None)
-                    }
-                    Open::Kept(kept) => {
-                        let cell = Instance::none();
-                        (Entry::Writer { connection, cell, wanted: None }, Some(kept))
-                    }
-                    Open::Nothing => {
-                        let cell = Instance::none();
-                        (Entry::Writer { connection, cell, wanted: None }, None)
-                    }
-                }
+                let (cell, evicted) = match open {
+                    // Past the rule alone: a cell others have open.
+                    Open::Shared(cell) => (cell, None),
+                    Open::Kept(kept) => (Weak::new(), Some(kept)),
+                    Open::Nothing => (Weak::new(), None),
+                };
+                (Entry::Writer { connection: connection.clone(), cell, wanted: None }, evicted)
             }
             Claim::Daemon | Claim::DaemonOrWriter => (Entry::Daemon(open), None),
             Claim::Mount => match open {
                 Open::Kept(kept) => (Entry::Mounted, Some(kept)),
-                Open::Nothing | Open::Followed(_) => (Entry::Mounted, None),
+                Open::Nothing | Open::Shared(_) => (Entry::Mounted, None),
             },
         };
         self.entries.insert(key.to_owned(), entry);
@@ -387,30 +365,9 @@ impl<C, S, P> CellTable<C, S, P> {
         }
     }
 
-    /// The cell connections have open at `key`, its writer's or followers', if one is, and
-    /// whether it is retired.
-    pub fn instance(&self, key: &Path) -> Option<(Arc<S>, bool)> {
-        self.inner.lock().unwrap().entries.get_mut(key)?.instance()?.get()
-    }
-
-    /// A follower of the cell connections have open at `key`, as `follow` makes it, if one is:
-    /// `EBUSY` if it is retired, or was retired as `follow` made it, which its writer's retirement
-    /// may not have cut off ([`Hold::retire`]).
-    pub fn follow<F>(
-        &self,
-        key: &Path,
-        follow: impl FnOnce(&Arc<S>) -> Result<F, Errno>,
-    ) -> Result<Option<F>, Errno> {
-        let Some((cell, retired)) = self.instance(key) else { return Ok(None) };
-        if retired {
-            return Err(Errno::EBUSY);
-        }
-        let follower = follow(&cell)?;
-        let retired = |(now, retired): (Arc<S>, bool)| retired && Arc::ptr_eq(&now, &cell);
-        if rules().followers_look_again && self.instance(key).is_some_and(retired) {
-            return Err(Errno::EBUSY);
-        }
-        Ok(Some(follower))
+    /// The cell open at `key`, its writer's or others', if one is.
+    pub fn instance(&self, key: &Path) -> Option<Arc<S>> {
+        self.inner.lock().unwrap().entries.get(key)?.instance()?.upgrade()
     }
 
     /// `f`'s of the cell kept open at `key`, if one is: under the table's lock, which `f` takes
@@ -419,11 +376,11 @@ impl<C, S, P> CellTable<C, S, P> {
         self.inner.lock().unwrap().entries.get_mut(key)?.kept().map(f)
     }
 
-    /// The cells connections have open, writers' and followers', by their keys.
+    /// The cells open, writers' and others', by their keys.
     pub fn instances(&self) -> Vec<(PathBuf, Arc<S>)> {
-        let mut inner = self.inner.lock().unwrap();
-        (inner.entries.iter_mut())
-            .filter_map(|(key, entry)| Some((key.clone(), entry.instance()?.cell.upgrade()?)))
+        let inner = self.inner.lock().unwrap();
+        (inner.entries.iter())
+            .filter_map(|(key, entry)| Some((key.clone(), entry.instance()?.upgrade()?)))
             .collect()
     }
 
@@ -504,8 +461,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
 
     /// Holds the cell `key` names, for `connection` to write it, as [`CellTable::hold_async`]
     /// does; with the cell kept open of it, if one was, which the connection closes before it
-    /// opens the cell. The cell followers have open, it takes over, or finds retired
-    /// ([`Hold::instance`]).
+    /// opens the cell. `EBUSY` at once while others have the cell open.
     pub async fn hold_to_write(
         &self,
         key: &Path,
@@ -542,7 +498,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
 
     /// cladefs: holds the cell `key` names for the daemon's FUSE mount, to attach it (TASK-475.3),
     /// as [`CellTable::hold`] holds it for the daemon, waiting at most `wait`: `EBUSY` at once if a
-    /// connection not going writes it, followers have it open, or the mount has it already. With
+    /// connection not going writes it, others have it open, or the mount has it already. With
     /// the cell kept open of it, if one was, to close. Until the hold is dropped, every claim of
     /// it fails with `EBUSY` at once, waiting for nothing: the mount lets it go only as it
     /// detaches its cell. Awaited, holding no thread (board 2946).
@@ -649,32 +605,31 @@ impl<C, S, P> Hold<'_, C, S, P> {
         &self.key
     }
 
-    /// The cell connections have open at its key, if one is, and whether it is retired: its
-    /// writer's, or followers', which a writer holding it takes over.
-    pub fn instance(&self) -> Option<(Arc<S>, bool)> {
+    /// The cell open at its key, if one is: its writer's, or others'.
+    pub fn instance(&self) -> Option<Arc<S>> {
         self.table.instance(&self.key)
     }
 
-    /// `cell` is the cell connections have open at its key from now on, while one has it: the
-    /// writer's holding it, or, held by the daemon, followers'. `EBUSY`, and nothing changed, if
-    /// a cell is open there, or a cell kept: what holds the cell opens it only where it found
-    /// nothing open, or takes over what it found ([`Hold::instance`]).
+    /// `cell` is the cell open at its key from now on, while one has it: the writer's holding it,
+    /// or, held by the daemon, others' to share. `EBUSY`, and nothing changed, if a cell is open
+    /// there, or a cell kept: what holds the cell opens it only where it found nothing open, or
+    /// works on what it found ([`Hold::instance`]).
     ///
     /// Its methods change its entry only if it is its holder's, which nothing but a claim past
     /// [`Rules::one_holder`] takes from it, and only as they say, refusing otherwise: none panics,
     /// which, under the table's lock, would poison every cell's entry, as under Shuttle it would
     /// abort the run (TASK-55).
     pub fn open(&self, cell: &Arc<S>) -> Result<(), Errno> {
-        let instance = Instance { cell: Arc::downgrade(cell), retired: false };
+        let opened = Arc::downgrade(cell);
         let mut inner = self.table.inner.lock().unwrap();
         inner.entries.retain(|_, entry| !entry.is_stale());
         match inner.entries.get_mut(&self.key) {
-            Some(Entry::Writer { cell, .. }) if cell.cell.strong_count() == 0 => {
-                *cell = instance;
+            Some(Entry::Writer { cell, .. }) if cell.strong_count() == 0 => {
+                *cell = opened;
                 Ok(())
             }
             Some(Entry::Daemon(open)) if open.is_closed() => {
-                *open = Open::Followed(instance);
+                *open = Open::Shared(opened);
                 Ok(())
             }
             _ => Err(Errno::EBUSY),
@@ -689,27 +644,6 @@ impl<C, S, P> Hold<'_, C, S, P> {
         if let Some(Entry::Writer { wanted: slot, .. }) = inner.entries.get_mut(&self.key) {
             *slot = Some(wanted);
         }
-    }
-
-    /// Retires the cell connections have open at its key, its writer gone with writes
-    /// uncommitted: `cut` cuts its followers off, without the table's lock, and neither a writer
-    /// nor a follower opens it while followers have it.
-    ///
-    /// Marked first, then cut (TASK-160.8): a follower made before the cut is cut off, and one made
-    /// after finds it marked as it looks again ([`CellTable::follow`]). Cut first, a follower
-    /// finding it unmarked between the two followed a cell retired, never cut off.
-    pub fn retire(&self, cut: impl FnOnce()) {
-        let mut cut = Some(cut);
-        if !rules().marks_before_cutting {
-            cut.take().map(|cut| cut());
-        }
-        if rules().retirement {
-            let mut inner = self.table.inner.lock().unwrap();
-            if let Some(instance) = inner.entries.get_mut(&self.key).and_then(Entry::instance) {
-                instance.retired = true;
-            }
-        }
-        cut.map(|cut| cut());
     }
 
     /// Keeps `kept` open at its key for forks, after its hold too: the daemon's, which found
@@ -750,22 +684,21 @@ impl<C, S, P> Drop for Hold<'_, C, S, P> {
     }
 }
 
-/// The table under Shuttle: a VM's connection writing a cell, whose VM process goes, with
-/// writes uncommitted or not; as it goes, the VM restored from its snapshot opening the cell to
-/// write it, and followers following it, before and after it went; and a fork of the cell at any
+/// The table under Shuttle: a VM's connection writing a cell, whose VM process goes; as it goes,
+/// the VM restored from its snapshot opening the cell to write it; a cell attaching the cell as a
+/// base, sharing what is open of it, before and after its writer went; and a fork of the cell at any
 /// kept cell, which keeps it open as a kept cell if nothing has it open. Every interleaving of them
 /// Shuttle's scheduler chooses (TASK-160.8). Waits are unbounded, so that a holder that never
 /// wakes those waiting is a deadlock, which Shuttle reports, rather than a wait of `CLOSING_WAIT`.
-/// Invariants: one holder at a time; the cell open once at a time, as a writer's, followers' or a
-/// kept cell; no follower following the cell once its writer retired it. Each rule turned off
-/// fails.
+/// Invariants: one holder at a time; the cell open once at a time, as a writer's, a base's or a
+/// kept cell; no writer writing a cell others have open. Each rule turned off fails.
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use super::*;
     use crate::shuttle_testing::{config, fails_with, runs};
     use shuttle::future::block_on;
     use shuttle::scheduler::{PctScheduler, RandomScheduler};
-    use shuttle::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use shuttle::sync::atomic::{AtomicBool, Ordering};
     use shuttle::sync::mpsc;
     use shuttle::{Runner, thread};
 
@@ -807,27 +740,26 @@ mod shuttle_tests {
     }
 
     /// What a run counts: the cell's openings open at once, and the most at once; its holders at
-    /// once, and whether ever two. Checked once the run is done: a task panicking unwinds through
-    /// the holds it has, whose drops take Shuttle's locks, which fail in a failed run with panics
-    /// that abort (TASK-55). Not Shuttle's atomics, whose every access the scheduler may switch
-    /// threads at: a cell's closing is counted as its last holder drops it, rather than after
-    /// another thread found it gone and opened it anew, which the table doesn't order: the cell's
-    /// own lock of its files does (`OpenCell::open`).
+    /// once, and whether ever two; whether a writer ever wrote a cell others had open. Checked once
+    /// the run is done: a task panicking unwinds through the holds it has, whose drops take
+    /// Shuttle's locks, which fail in a failed run with panics that abort (TASK-55). Not Shuttle's
+    /// atomics, whose every access the scheduler may switch threads at: a cell's closing is counted
+    /// as its last holder drops it, rather than after another thread found it gone and opened it
+    /// anew, which the table doesn't order: the cell's own lock of its files does
+    /// (`OpenCell::open`).
     #[derive(Default)]
     struct Counts {
         open: std::sync::atomic::AtomicUsize,
         most_open: std::sync::atomic::AtomicUsize,
         holders: std::sync::atomic::AtomicUsize,
         two_holders: std::sync::atomic::AtomicBool,
+        wrote_shared: std::sync::atomic::AtomicBool,
     }
 
-    /// The cell, opened: counted open until it is dropped, closed; dirty once its writer went
-    /// with writes uncommitted; and how many times its followers were cut off. A kept cell's says
-    /// it is closed, dropping what does.
+    /// The cell, opened: counted open until it is dropped, closed. A kept cell's says it is closed,
+    /// dropping what does.
     struct ModelCell {
         counts: Arc<Counts>,
-        dirty: AtomicBool,
-        cuts: AtomicUsize,
         _closing: Option<mpsc::Sender<()>>,
     }
 
@@ -839,8 +771,7 @@ mod shuttle_tests {
         fn opened(counts: &Arc<Counts>, closing: Option<mpsc::Sender<()>>) -> Arc<Self> {
             let others = counts.open.fetch_add(1, Ordering::SeqCst);
             counts.most_open.fetch_max(others + 1, Ordering::SeqCst);
-            let (dirty, cuts) = (AtomicBool::new(false), AtomicUsize::new(0));
-            Arc::new(ModelCell { counts: counts.clone(), dirty, cuts, _closing: closing })
+            Arc::new(ModelCell { counts: counts.clone(), _closing: closing })
         }
     }
 
@@ -941,27 +872,22 @@ mod shuttle_tests {
     }
 
     /// Opens the cell for `conn` to write, as a connection does (`cladefsd::server`): holding it,
-    /// closing the cell kept of it, taking over the cell followers have open, unless it is
-    /// retired, or not quiescent, its writer gone with writes uncommitted (`OpenCell::take_over`);
-    /// or opening it. The connection has it from then on.
+    /// closing the cell kept of it, and opening it: `EBUSY` while others have it open. The
+    /// connection has it from then on. A cell found open, which only a claim past
+    /// [`Rules::writers_refuse_shared`] finds, is counted as written while shared.
     fn write(table: &'static Table, counts: &Arc<Counts>, conn: &Arc<Conn>) -> Result<(), Errno> {
+        let held =
+            block_on(table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX));
         let (hold, kept) =
-            block_on(table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX))?;
+            held.inspect_err(|_| reached("a writer found the cell open for others"))?;
         let hold = Counted::new(counts, hold);
         if kept.is_some() {
             reached("a writer closed a cell kept");
         }
         close(kept);
         let cell = match hold.hold().instance() {
-            Some((_, true)) => {
-                reached("a writer found the cell retired");
-                return Err(Errno::EBUSY);
-            }
-            Some((cell, false)) if cell.dirty.load(Ordering::SeqCst) => {
-                return Err(Errno::EBUSY);
-            }
-            Some((cell, false)) => {
-                reached("a writer took the cell over");
+            Some(cell) => {
+                counts.wrote_shared.store(true, Ordering::SeqCst);
                 cell
             }
             None => {
@@ -974,55 +900,28 @@ mod shuttle_tests {
         Ok(())
     }
 
-    /// A follower of the cell, as `OpenCell::follow` makes one: its view of it, which a cut of
-    /// its followers made after it cuts off.
-    struct Follower {
-        cell: Arc<ModelCell>,
-        cuts: usize,
-    }
-
-    impl Follower {
-        fn of(cell: Arc<ModelCell>) -> Self {
-            let cuts = cell.cuts.load(Ordering::SeqCst);
-            Follower { cell, cuts }
-        }
-
-        /// Whether it follows a cell its writer retired, gone with writes uncommitted, without
-        /// having been cut off.
-        fn uncut_of_retired(&self) -> bool {
-            self.cell.dirty.load(Ordering::SeqCst)
-                && self.cell.cuts.load(Ordering::SeqCst) == self.cuts
-        }
-    }
-
-    /// Follows the cell, as a follower does (`cladefsd::cells::followed`): the cell connections
-    /// have open, unless retired ([`CellTable::follow`]); or, held by the daemon, which no writer
-    /// retires a cell under, its kept cell closed, the cell opened.
-    fn follow(table: &Table, counts: &Arc<Counts>) -> Result<Follower, Errno> {
-        let open = |found: Option<(Arc<ModelCell>, bool)>| match found {
-            Some((_, true)) => Err(Errno::EBUSY),
-            Some((cell, false)) => Ok(Some(cell)),
-            None => Ok(None),
-        };
-        let follow = |cell: &Arc<ModelCell>| Ok(Follower::of(cell.clone()));
-        if let Some(follower) = table.follow(Path::new(KEY), follow)? {
-            reached("a follower followed the cell open");
-            return Ok(follower);
+    /// Attaches the cell as a base, as the daemon does (`cladefsd::cells::base`): the cell open,
+    /// its writer's or others', shared; or, held by the daemon, its kept cell closed, the cell
+    /// opened, for others to share.
+    fn attach(table: &Table, counts: &Arc<Counts>) -> Result<Arc<ModelCell>, Errno> {
+        if let Some(cell) = table.instance(Path::new(KEY)) {
+            reached("a base shared the cell open");
+            return Ok(cell);
         }
         let hold = Counted::new(counts, table.hold(Path::new(KEY), None)?);
         close(hold.hold().take_kept());
-        if let Some(cell) = open(hold.hold().instance())? {
-            return Ok(Follower::of(cell));
+        if let Some(cell) = hold.hold().instance() {
+            return Ok(cell);
         }
-        reached("a follower opened the cell");
+        reached("a base opened the cell");
         let cell = ModelCell::open(counts);
         hold.open(&cell)?;
-        Ok(Follower::of(cell))
+        Ok(cell)
     }
 
     /// Forks the cell, as the daemon does (`cladefsd::cells::fork`): through its writer, or the
-    /// cell followers have open, live; or the cell kept, or else the cell opened, kept open as
-    /// a kept cell, which it holds while it forks it, as a restore's fork does, its hold let go.
+    /// cell others have open, live; or the cell kept, or else the cell opened, kept open as a kept
+    /// cell, which it holds while it forks it, as a restore's fork does, its hold let go.
     fn fork(table: &Table, counts: &Arc<Counts>) -> Result<(), Errno> {
         let kept = |kept: &mut Kept| kept.cell.clone();
         let forking = match table.kept(Path::new(KEY), kept) {
@@ -1054,56 +953,38 @@ mod shuttle_tests {
         Ok(())
     }
 
-    /// The run, its first writer going with writes uncommitted if `dirty`.
-    fn run(dirty: bool) {
+    /// The run.
+    fn run() {
         let table: &'static Table = Box::leak(Box::new(CellTable::new()));
         let counts = Arc::new(Counts::default());
-        let (followed_tx, followed) = mpsc::channel::<()>();
-        let (later_tx, later) = mpsc::channel::<()>();
+        let (wrote_tx, wrote) = mpsc::channel::<()>();
         let (going_tx, going) = mpsc::channel::<()>();
-        let released = Arc::new(AtomicBool::new(false));
-        // That the first went, its cell retired if it is to be, to each follower.
-        let (gone_to_follower, gone_follower) = mpsc::channel::<()>();
-        let (gone_to_later, gone_later) = mpsc::channel::<()>();
+        // That the first went, to the base.
+        let (gone_tx, gone) = mpsc::channel::<()>();
 
         // The VM's connection, whose VM process goes while it writes the cell.
         let first = {
-            let (counts, released) = (counts.clone(), released.clone());
+            let counts = counts.clone();
             thread::spawn(move || {
                 let conn = Conn::new();
                 // Refused only if another holder took the cell from under it, which the run's
                 // check of the holders reports.
-                let wrote = match write(table, &counts, &conn) {
-                    Ok(()) => true,
-                    Err(refused) => {
-                        let two = counts.two_holders.load(Ordering::SeqCst);
-                        assert!(two, "the first writer was refused: {refused:?}");
-                        false
-                    }
-                };
-                followed_tx.send(()).unwrap();
-                later_tx.send(()).unwrap();
+                if let Err(refused) = write(table, &counts, &conn) {
+                    let two = counts.two_holders.load(Ordering::SeqCst);
+                    assert!(two, "the first writer was refused: {refused:?}");
+                }
+                wrote_tx.send(()).unwrap();
                 conn.going.store(true, Ordering::SeqCst);
                 going_tx.send(()).unwrap();
-                if dirty && wrote {
-                    let writing = conn.writing.lock().unwrap();
-                    let Writing { cell, hold } = writing.as_ref().unwrap();
-                    cell.dirty.store(true, Ordering::SeqCst);
-                    hold.hold().retire(|| {
-                        cell.cuts.fetch_add(1, Ordering::SeqCst);
-                    });
-                }
                 // The last of it, unless a claim of the cell has it as it meets it: it lets the
                 // cell go then, outside the table's lock.
                 drop(conn);
-                released.store(true, Ordering::SeqCst);
-                // Unheard by a follower that follows nothing.
-                let _ = gone_to_follower.send(());
-                let _ = gone_to_later.send(());
+                // Unheard by a base that attached nothing.
+                let _ = gone_tx.send(());
             })
         };
         // The VM restored from its snapshot, opening the cell as the first goes: it gets it
-        // once the first lets it go, unless followers have the first's cell, retired.
+        // once the first lets it go, unless a base has the cell open.
         let second = {
             let counts = counts.clone();
             thread::spawn(move || {
@@ -1115,34 +996,14 @@ mod shuttle_tests {
                 drop(conn);
             })
         };
-        // A follower of the first's cell, following it until the first went: cut off, if it
-        // retired it.
-        let follower = {
+        // A cell attaching the cell as a base, once the first wrote it, until the first went.
+        let base = {
             let counts = counts.clone();
             thread::spawn(move || {
-                followed.recv().unwrap();
-                if let Ok(follower) = follow(table, &counts) {
-                    gone_follower.recv().unwrap();
-                    let uncut = follower.uncut_of_retired();
-                    drop(follower);
-                    assert!(!uncut, "a follower of a cell its writer retired wasn't cut off");
-                }
-            })
-        };
-        // A follower, following the cell as the first goes: never its cell once it retired it,
-        // and, before or as it does, cut off.
-        let following_later = {
-            let (counts, released) = (counts.clone(), released.clone());
-            thread::spawn(move || {
-                later.recv().unwrap();
-                let after = released.load(Ordering::SeqCst);
-                if let Ok(follower) = follow(table, &counts) {
-                    let retired = after && follower.cell.dirty.load(Ordering::SeqCst);
-                    gone_later.recv().unwrap();
-                    let uncut = follower.uncut_of_retired();
-                    drop(follower);
-                    assert!(!retired, "a follower followed a cell its writer retired");
-                    assert!(!uncut, "a follower of a cell its writer retired wasn't cut off");
+                wrote.recv().unwrap();
+                if let Ok(cell) = attach(table, &counts) {
+                    let _ = gone.recv();
+                    drop(cell);
                 }
             })
         };
@@ -1151,7 +1012,7 @@ mod shuttle_tests {
             let counts = counts.clone();
             thread::spawn(move || fork(table, &counts).unwrap())
         };
-        for thread in [first, second, follower, following_later, forking] {
+        for thread in [first, second, base, forking] {
             thread.join().unwrap();
         }
         // The kept cell a fork kept, closed, as it is once no fork forks it.
@@ -1162,117 +1023,72 @@ mod shuttle_tests {
         assert!(!two, "two holders hold the cell at once");
         let most = counts.most_open.load(Ordering::SeqCst);
         assert!(most <= 1, "the cell is open twice at once: {most} at most");
+        let shared = counts.wrote_shared.load(Ordering::SeqCst);
+        assert!(!shared, "a writer wrote a cell others have open");
         assert!(table.is_empty(), "the cell is held or open once all let it go");
     }
 
-    fn randomly(dirty: bool) {
-        Runner::new(RandomScheduler::new(runs(3000)), config()).run(move || run(dirty));
+    fn randomly() {
+        Runner::new(RandomScheduler::new(runs(3000)), config()).run(run);
     }
 
-    fn by_pct(dirty: bool) {
-        Runner::new(PctScheduler::new(3, runs(3000)), config()).run(move || run(dirty));
+    fn by_pct() {
+        Runner::new(PctScheduler::new(3, runs(3000)), config()).run(run);
     }
 
-    /// What runs of a writer going quiescent reach: its cell taken over, followed, and kept cells
-    /// kept and closed.
-    const QUIESCENT: &[&str] = &[
-        "a writer took the cell over",
+    /// What runs reach: a cell shared by a base, a writer refused it, kept cells kept and closed.
+    const WAYS: &[&str] = &[
+        "a writer found the cell open for others",
         "a writer closed a cell kept",
         "a kept closed waited for a fork of it",
         "a claim waited for a writer gone",
-        "a follower followed the cell open",
-        "a follower opened the cell",
+        "a base shared the cell open",
+        "a base opened the cell",
         "a fork kept a kept",
     ];
 
-    /// What runs of a writer going with writes uncommitted reach besides: its cell retired.
-    const UNCOMMITTED: &[&str] =
-        &["a writer found the cell retired", "a follower followed the cell open"];
-
     #[test]
-    fn writers_going_quiescent_randomly() {
+    fn writers_going_randomly() {
         set_rules(Rules::ALL);
-        reaching(QUIESCENT, || randomly(false));
+        reaching(WAYS, randomly);
     }
 
     #[test]
-    fn writers_going_quiescent_by_pct() {
+    fn writers_going_by_pct() {
         set_rules(Rules::ALL);
-        reaching(QUIESCENT, || by_pct(false));
-    }
-
-    #[test]
-    fn writers_going_with_writes_uncommitted_randomly() {
-        set_rules(Rules::ALL);
-        reaching(UNCOMMITTED, || randomly(true));
-    }
-
-    #[test]
-    fn writers_going_with_writes_uncommitted_by_pct() {
-        set_rules(Rules::ALL);
-        reaching(UNCOMMITTED, || by_pct(true));
+        reaching(WAYS, by_pct);
     }
 
     /// Runs the schedules with `rules`, expecting one to fail with a panic saying `expected`.
-    fn fails_without(rules: Rules, dirty: bool, expected: &str) {
+    fn fails_without(rules: Rules, expected: &str) {
         set_rules(rules);
-        fails_with(expected, || randomly(dirty));
+        fails_with(expected, randomly);
     }
 
     #[test]
     fn needs_one_holder() {
-        let rules = Rules { one_holder: false, ..Rules::ALL };
-        fails_without(rules, false, "two holders hold the cell");
-    }
-
-    /// CI run 42234149254's schedule: a claim past the rule took the first writer's cell from
-    /// under it, whose opening it then refused (`EBUSY`), which the writer met, and the run
-    /// reported, before its check of the holders. Counted as two holders as it shows, it is.
-    #[test]
-    fn needs_one_holder_where_the_first_writer_meets_the_second() {
-        set_rules(Rules { one_holder: false, ..Rules::ALL });
-        fails_with("two holders hold the cell", || {
-            let scheduler = RandomScheduler::new_from_seed(4791423815028538899, 1);
-            Runner::new(scheduler, config()).run(|| run(false));
-        });
+        fails_without(Rules { one_holder: false, ..Rules::ALL }, "two holders hold the cell");
     }
 
     /// The resize that let the cell go without waking those waiting for it (fixed by having it
     /// release through `release`): they waited `CLOSING_WAIT` out.
     #[test]
     fn needs_releases_to_wake() {
-        fails_without(Rules { release_wakes: false, ..Rules::ALL }, false, "deadlock!");
+        fails_without(Rules { release_wakes: false, ..Rules::ALL }, "deadlock!");
     }
 
-    /// A writer's cell followers have, forgotten as it goes, is opened anew by the next.
+    /// A writer's cell a base shares, forgotten as its writer goes, is opened anew by the next.
     #[test]
     fn needs_what_is_open_to_outlive_its_holders() {
         let rules = Rules { open_outlives_holders: false, ..Rules::ALL };
-        fails_without(rules, false, "open twice at once");
+        fails_without(rules, "open twice at once");
     }
 
-    /// A cell its writer retired, forgotten as such, is followed after, and on, uncut, by a
-    /// follower made as it was retired: whichever a schedule meets first.
+    /// A writer that holds the cell a base shares writes what the base reads.
     #[test]
-    fn needs_retirement() {
-        let rules = Rules { retirement: false, ..Rules::ALL };
-        fails_without(rules, true, "a cell its writer retired");
-    }
-
-    /// TASK-160.8: a cell's followers cut off before it is marked retired, a follower finding it
-    /// unmarked between the two is followed on, uncut (`cladefsd::cells::retire` did so).
-    #[test]
-    fn needs_retirement_to_mark_before_cutting() {
-        let rules = Rules { marks_before_cutting: false, ..Rules::ALL };
-        fails_without(rules, true, "retired wasn't cut off");
-    }
-
-    /// A follower that found the cell unmarked before its writer retired it, and was made after
-    /// its followers were cut off, follows a retired cell on, uncut, unless it looks again.
-    #[test]
-    fn needs_followers_to_look_again() {
-        let rules = Rules { followers_look_again: false, ..Rules::ALL };
-        fails_without(rules, true, "retired wasn't cut off");
+    fn needs_writers_to_refuse_cells_open_for_others() {
+        let rules = Rules { writers_refuse_shared: false, ..Rules::ALL };
+        fails_without(rules, "a writer wrote a cell others have open");
     }
 }
 
@@ -1392,53 +1208,33 @@ mod tests {
         assert_eq!(table.writers(), 1);
     }
 
-    /// A writer's cell outlives its writer while followers have it: the next writer takes it
-    /// over; gone once none has it, it is nothing, and the next opens its own.
+    /// A writer's cell outlives its writer while others have it, as a base attached shares it:
+    /// the next writer is refused it, at once; gone once none has it, it is nothing, and the next
+    /// opens its own.
     #[test]
-    fn cells_followers_have_outlive_their_writers() {
+    fn cells_others_have_outlive_their_writers_who_refuse_them() {
         let table = Table::new();
         let key = Path::new("cell");
         let (writer, next) = (connection(false), connection(false));
         let (held, _) = write(&table, key, &writer).unwrap();
         let cell = Arc::new("writer's");
         held.open(&cell).unwrap();
-        let followed = table.instance(key).unwrap().0;
+        let shared = table.instance(key).unwrap();
         writer.0.store(true, Ordering::Relaxed);
         drop((held, cell));
-        assert_eq!(
-            table.instance(key).map(|(cell, retired)| (*cell, retired)),
-            Some(("writer's", false))
-        );
-        let (held, _) = write(&table, key, &next).unwrap();
-        assert!(Arc::ptr_eq(&held.instance().unwrap().0, &followed));
-        drop(held);
-        drop(followed);
+        assert_eq!(table.instance(key).map(|cell| *cell), Some("writer's"));
+        let wait = Duration::from_secs(60);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let started = Instant::now();
+        let refused = runtime.block_on(table.hold_to_write(key, Arc::downgrade(&next), wait));
+        assert_eq!(refused.err(), Some(Errno::EBUSY));
+        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
+        assert_eq!(runtime.block_on(table.hold_mounted(key, wait)).err(), Some(Errno::EBUSY));
+        drop(shared);
         assert_eq!(table.instance(key), None);
         assert!(table.is_empty());
         let (held, _) = write(&table, key, &next).unwrap();
         assert_eq!(held.instance(), None);
-    }
-
-    /// A cell retired, its writer gone with writes uncommitted, is so while followers have it:
-    /// to the next writer, and to the daemon.
-    #[test]
-    fn cells_retired_stay_retired_while_followed() {
-        let table = Table::new();
-        let key = Path::new("cell");
-        let writer = connection(false);
-        let (held, _) = write(&table, key, &writer).unwrap();
-        let cell = Arc::new("writer's");
-        held.open(&cell).unwrap();
-        held.retire(|| ());
-        drop(held);
-        assert_eq!(table.instance(key).map(|(_, retired)| retired), Some(true));
-        let held = table.hold(key, None).unwrap();
-        assert_eq!(held.instance().map(|(_, retired)| retired), Some(true));
-        drop(held);
-        let (held, _) = write(&table, key, &connection(false)).unwrap();
-        assert_eq!(held.instance().map(|(_, retired)| retired), Some(true));
-        drop((held, cell));
-        assert!(table.is_empty());
     }
 
     /// A cell kept open outlives the daemon's hold, which forks see; the daemon's next holds keep
@@ -1467,7 +1263,7 @@ mod tests {
     }
 
     /// A cell opened where one is open, or a cell kept, is refused, and changes nothing: its
-    /// holder takes over what it found, or works on it, rather than open it twice.
+    /// holder works on what it found, rather than open it twice.
     #[test]
     fn cells_opened_where_something_is_open_are_refused() {
         let table = Table::new();
@@ -1479,7 +1275,7 @@ mod tests {
         drop(held);
         let held = table.hold(key, None).unwrap();
         assert_eq!(held.open(&second), Err(Errno::EBUSY));
-        assert!(Arc::ptr_eq(&held.instance().unwrap().0, &first));
+        assert!(Arc::ptr_eq(&held.instance().unwrap(), &first));
         drop((held, first));
         let held = table.hold(key, None).unwrap();
         held.keep("kept").unwrap();
@@ -1487,7 +1283,7 @@ mod tests {
         assert_eq!(held.instance(), None);
         assert_eq!(held.take_kept(), Some("kept"));
         held.open(&second).unwrap();
-        assert!(Arc::ptr_eq(&held.instance().unwrap().0, &second));
+        assert!(Arc::ptr_eq(&held.instance().unwrap(), &second));
     }
 
     /// A cell kept where one is kept already, or a cell is open, or by a writer, is refused,

@@ -1054,7 +1054,7 @@ mod tests {
             "knobs": {
                 "CLADEFS_E2E_TEST": "--tag dax-gate",
                 "CLADEFS_E2E_REPEATS": "5",
-                "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200 quiet",
+                "CLADEFS_GUEST_CMDLINE": "cladefs.dax_fail_maps=1 quiet",
                 "CLADEFS_WORKSPACE_TESTS": "0",
             },
         });
@@ -1075,12 +1075,12 @@ mod tests {
                 "limit_secs": 180,
                 "commit": "abc123",
                 "replay": "CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST=fxfs-guest-checks-dax \
-                    CLADEFS_E2E_REPEATS=5 CLADEFS_GUEST_CMDLINE='cladefs.follow_apply_delay_us=200 quiet' \
+                    CLADEFS_E2E_REPEATS=5 CLADEFS_GUEST_CMDLINE='cladefs.dax_fail_maps=1 quiet' \
                     CLADEFS_SEED=77 scripts/test-host.sh",
                 "knobs": {
                     "CLADEFS_E2E_REPEATS": "5",
                     "CLADEFS_E2E_TEST": "--tag dax-gate",
-                    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200 quiet",
+                    "CLADEFS_GUEST_CMDLINE": "cladefs.dax_fail_maps=1 quiet",
                     "CLADEFS_SEED": "77",
                     "CLADEFS_WORKSPACE_TESTS": "0",
                 },

@@ -202,8 +202,7 @@ impl WindowMemory {
     }
 
     /// Creates `cell`'s DAX window in the window's host memory, which its connection takes over:
-    /// a writer's copies on write, of `private_max` pages at most; a follower's, of none, copies
-    /// nothing (backlog doc-13). `prefault` maps the window's pages for the guest as the cell maps
+    /// it copies on write, of `private_max` pages at most (backlog doc-13). `prefault` maps the window's pages for the guest as the cell maps
     /// them, if given.
     ///
     /// # Safety

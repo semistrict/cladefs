@@ -3,14 +3,7 @@
 # of several lines; FUNCTION the one spatch's hunk names (scripts/cocci-guest.py).
 unwoken.cocci device.c cladefs_device_seal_begin: dev->sealing = true; -- the seal begins: the waits on dev->wait are for !sealing, which this makes false, so none is due a wake
 unwoken.cocci driver.c vext_find_queues: queue->vq = vqs[i]; -- with queue->closed = false after it, the queues found again as the device opens or resets: vext_close_queues woke every wait on queue->room, each of which saw closed and ended, and the waits are for closed or room, which this makes false
-lock-not-held.cocci super.c cladefs_vfs_fill_folio: cladefs_vfs_assert_filling(inode); -- the address space's read_folio, which the page cache calls with the follower's fill barrier its caller took (read(2), splice, fadvise, a fault: cladefs_vfs_fill_begin), as the assertion's comment says
-lock-not-held.cocci super.c cladefs_vfs_readahead: cladefs_vfs_assert_filling(inode); -- the address space's readahead: as read_folio, the fill barrier its caller took
-lock-not-held.cocci super.c cladefs_vfs_drop_file: if (!cladefs_vfs_changing(sb)) -- a callback of the follower's batch (cladefs.h), which cladefs_vfs_follow_barrier_take holds the fill barrier for, in the Rust that calls it
-lock-not-held.cocci super.c cladefs_vfs_settle_file: if (!cladefs_vfs_changing(sb) || (!attr && !gone)) -- as cladefs_vfs_drop_file: a callback of the follower's batch, the fill barrier held by the Rust that calls it
-lock-not-held.cocci super.c cladefs_vfs_drop_entries: if (!cladefs_vfs_changing(sb)) -- as cladefs_vfs_drop_file: a callback of the follower's batch, the fill barrier held by the Rust that calls it
 lock-not-held.cocci super.c cladefs_vfs_reconfigure: err = cladefs_vfs_settle_frozen(sb); -- the VFS calls reconfigure with s_umount held (reconfigure_super)
 lock-not-held.cocci dax.c cladefs_dax_iomap_write: err = cladefs_dax_dirty(inode, range, first, pages, zero, -- cladefs_dax_get_range returned holding the file's semaphore shared, as its comment says: a lock taken by a callee for its caller, which the rule can't see
-lock-not-held.cocci dax.c cladefs_dax_changed: cladefs_dax_unmap_range(dax, range); -- after its for (;;) breaks holding the file's semaphore and the files lock: Coccinelle takes the loop for one that may not run
-lock-not-held.cocci dax.c cladefs_dax_changed: forgotten = cladefs_dax_forget_file(dax, file); -- as the line before: the loop breaks holding the files lock
 guarded-fields.cocci dax.c cladefs_dax_put_region: if (region->mapped) -- its last reference dropped and the region out of the hash, under the regions lock: nothing else can reach it to change mapped
 lock-not-held.cocci dax.c cladefs_dax_write_back_keeping: pages += cladefs_dax_range_swap(range, batch[nr].pages); -- after its for (;;) breaks holding the file's semaphore for writing: Coccinelle takes the loop for one that may not run

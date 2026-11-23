@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: how long a cell's hot paths take a call, each looking up an extent's life: a page-in's
-//! `locate`, a view's `locate_view`, a write's opening and finish, and a free; the cell holding
+//! `locate`, a write's opening and finish, and a free; the cell holding
 //! tens of thousands of extents, keeping as many freed, and having spent their numbers
 //! (TASK-160.18). A measurement, not a check: ignored, run in release,
 //! `cargo nextest run --release -p local_cell --test hot_path --run-ignored only --no-capture`.
@@ -49,19 +49,12 @@ async fn hot_paths() {
         cell.free(extent(sequence)).unwrap();
     }
     cell.commit(None).await.unwrap();
-    let view = cell.view();
     let held = || (1..=EXTENTS).map(extent);
     let mut results = Vec::new();
     for _ in 0..ROUNDS {
         let locate = timed(EXTENTS, async || {
             for extent in held() {
                 cell.locate(extent, 0, BLOCK as u64).unwrap();
-            }
-        })
-        .await;
-        let viewed = timed(EXTENTS, async || {
-            for extent in held() {
-                cell.locate_view(&view, extent, 0, BLOCK as u64).unwrap();
             }
         })
         .await;
@@ -72,7 +65,7 @@ async fn hot_paths() {
             }
         })
         .await;
-        results.push((locate, viewed, refused));
+        results.push((locate, refused));
     }
     // Writes of new extents, opened and finished, and frees of them, open: once each.
     let first = 2 * EXTENTS + 1;
@@ -89,12 +82,11 @@ async fn hot_paths() {
     })
     .await;
     let best =
-        |pick: fn(&(f64, f64, f64)) -> f64| results.iter().map(pick).fold(f64::INFINITY, f64::min);
+        |pick: fn(&(f64, f64)) -> f64| results.iter().map(pick).fold(f64::INFINITY, f64::min);
     eprintln!(
-        "ns a call, best of {ROUNDS}: locate {:.0}, locate_view {:.0}, begin_write refused {:.0}; \
+        "ns a call, best of {ROUNDS}: locate {:.0}, begin_write refused {:.0}; \
          once: write (open, write, finish) {written:.0}, free (open) {freed:.0}",
         best(|r| r.0),
         best(|r| r.1),
-        best(|r| r.2),
     );
 }

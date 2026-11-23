@@ -14,11 +14,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// to any of its requests, flags, features, configuration or what they mean makes a new one, which
 /// the driver refuses a device of another of at probe, naming both, as AGENTS.md's rule, no
 /// migrations, has every format refuse another. Its features are not a negotiation: they say what
-/// the device is configured as (a follower, a window), and a driver takes every one offered, or its
+/// the device is configured as (a window, its stats asked), and a driver takes every one offered, or its
 /// activation is refused ([`check_acked`]). Where it is, the configuration's first four bytes, no
 /// version moves. Its driver's is `VIRTIO_EXTENT_VERSION`
 /// (guest/linux/include/linux/virtio_extent.h).
-pub const VIRTIO_EXTENT_VERSION: u32 = 1;
+/// cladefs: version 2 dropped the followers' `F_READ_ONLY`, `ADVANCE`, `LET_GO`, `PIN`, `UNPIN`
+/// and the configuration's `committed` (board 8237).
+pub const VIRTIO_EXTENT_VERSION: u32 = 2;
 
 /// The device's virtio device type: `0x4658`, "FX" (backlog doc-4).
 pub const VIRTIO_ID_EXTENT: u32 = 0x4658;
@@ -28,8 +30,8 @@ pub const VIRTIO_ID_EXTENT: u32 = 0x4658;
 /// writer's copies on write: a write to a page of it gives the device a private page holding what
 /// the page held, mapped writable at the same address, until a `MAP` or `UNMAP` over it; past the
 /// configuration's `private_max` private pages a write is refused, and the VM stops. `MAP_ZEROS`
-/// maps zeros, and `PRIVATE` makes pages private ahead of writes. A follower's (`READ_ONLY`) maps
-/// no zeros, and refuses every write. Bit 1, writable DAX's, is not reused.
+/// maps zeros, and `PRIVATE` makes pages private ahead of writes. Bit 1, writable DAX's, is not
+/// reused.
 pub const VIRTIO_EXTENT_F_DAX: u32 = 0;
 /// `WRITE` takes `WRITE_COMMIT`: a commit follows the write, in one request.
 pub const VIRTIO_EXTENT_F_WRITE_COMMIT: u32 = 2;
@@ -41,10 +43,7 @@ pub const VIRTIO_EXTENT_F_RESIZE: u32 = 3;
 /// a snapshot of the VM is taken frozen, and a VM restored from it, with a cell of its own, learns
 /// its cell, which `INFO` says, as its filesystem thaws (TASK-39.1).
 pub const VIRTIO_EXTENT_F_FREEZE: u32 = 4;
-/// cladefs: the device follows a cell another VM writes, read-only (backlog doc-8): `ADVANCE`,
-/// `LET_GO`, `PIN` and `UNPIN` work, and the configuration's `committed` changes as the writer
-/// commits, telling the guest with a configuration change (TASK-42.3).
-pub const VIRTIO_EXTENT_F_READ_ONLY: u32 = 5;
+// cladefs: bit 5, a follower's `READ_ONLY` (backlog doc-8), is not reused (board 8237).
 /// cladefs: `FREE` frees, with `FREE_MANY`, the extents its data names too, after the one its
 /// arguments do: a flush's dead extents in one request rather than one each (TASK-41).
 pub const VIRTIO_EXTENT_F_FREE_MANY: u32 = 6;
@@ -79,20 +78,12 @@ pub const VIRTIO_EXTENT_RESIZED_TOOK: u32 = 1 << 0;
 /// nothing written until it thaws; or thawed, without.
 pub const VIRTIO_EXTENT_T_FREEZE: u32 = 10;
 pub const VIRTIO_EXTENT_FREEZE_FROZEN: u32 = 1 << 0;
-/// cladefs (`VIRTIO_EXTENT_F_READ_ONLY`): moves the follower's view to its writer's latest commit,
-/// holding what the commits between held until `LET_GO`, and writes its number (`CommitNumber`).
-pub const VIRTIO_EXTENT_T_ADVANCE: u32 = 11;
-/// cladefs: lets go of what the follower's view held of the commits before the one a `CommitNumber`
-/// names, which an `ADVANCE` wrote: served after the next `ADVANCE`, it lets go of no more.
-pub const VIRTIO_EXTENT_T_LET_GO: u32 = 12;
-/// cladefs: keeps an extent the view holds, whatever commit it advances to, until `UNPIN`.
-pub const VIRTIO_EXTENT_T_PIN: u32 = 13;
-pub const VIRTIO_EXTENT_T_UNPIN: u32 = 14;
+// cladefs: 11 to 14, a follower's `ADVANCE`, `LET_GO`, `PIN` and `UNPIN`, are not reused (board
+// 8237).
 // cladefs: 15 was the guest's answer to an ask to seal, writable DAX's, not reused.
 /// cladefs (`VIRTIO_EXTENT_F_DAX`, a writer's): makes the window's `len` bytes at `window_offset`
 /// private now, as writes would, mapped for the guest ahead of its accesses: `ENOMEM`, none made
-/// private, past `private_max`; `EINVAL` where nothing is mapped, or of a follower's window
-/// (`UnmapArgs` are its arguments).
+/// private, past `private_max`; `EINVAL` where nothing is mapped (`UnmapArgs` are its arguments).
 pub const VIRTIO_EXTENT_T_PRIVATE: u32 = 16;
 /// cladefs (`VIRTIO_EXTENT_F_STATS`): the guest's answer to the ask its `StatsArgs` name, and those
 /// before it: its stats, the request's data, UTF-8 text of [`MAX_STATS`] bytes at most (`EINVAL`
@@ -231,10 +222,6 @@ pub fn known_flags(type_: u32) -> Option<u32> {
         | VIRTIO_EXTENT_T_UNMAP
         | VIRTIO_EXTENT_T_ROOT
         | VIRTIO_EXTENT_T_INFO
-        | VIRTIO_EXTENT_T_ADVANCE
-        | VIRTIO_EXTENT_T_LET_GO
-        | VIRTIO_EXTENT_T_PIN
-        | VIRTIO_EXTENT_T_UNPIN
         | VIRTIO_EXTENT_T_PRIVATE
         | VIRTIO_EXTENT_T_STATS => 0,
         _ => return None,
@@ -417,17 +404,6 @@ pub struct Info {
     pub cell: u64,
 }
 
-/// What `ADVANCE` writes, the number of the commit the follower's view is as of now, and `LET_GO`
-/// reads.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
-)]
-#[repr(C)]
-pub struct CommitNumber {
-    pub commit: u64,
-    pub reserved: u64,
-}
-
 /// `VIRTIO_EXTENT_T_RESIZED`'s arguments: the capacity the guest was asked to shrink to.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
@@ -458,11 +434,7 @@ pub struct ConfigSpace {
     /// (`VIRTIO_EXTENT_F_RESIZE`).
     pub capacity: u64,
     pub asked: u64,
-    /// cladefs: the number of the latest commit of a follower's writer
-    /// (`VIRTIO_EXTENT_F_READ_ONLY`).
-    pub committed: u64,
-    /// cladefs: the most private pages a writer's window holds (`VIRTIO_EXTENT_F_DAX`, backlog
-    /// doc-13): 0 of a follower's, which copies nothing.
+    /// cladefs: the most private pages the window holds (`VIRTIO_EXTENT_F_DAX`, backlog doc-13).
     pub private_max: u64,
     /// cladefs: the latest of the extent daemon's asks for the guest's stats, 0 before the first
     /// (`VIRTIO_EXTENT_F_STATS`, TASK-111.4).
@@ -539,7 +511,6 @@ mod tests {
         assert_eq!(size_of::<MapEntry>(), 48);
         assert_eq!(size_of::<UnmapArgs>(), 16);
         assert_eq!(size_of::<Info>(), 48);
-        assert_eq!(size_of::<CommitNumber>(), 16);
         assert_eq!(size_of::<ResizedArgs>(), 8);
     }
 
@@ -554,7 +525,7 @@ mod tests {
         config.read(0, &mut data);
         assert_eq!(data, VIRTIO_EXTENT_VERSION.to_le_bytes());
         let mut data = [0xa5; 12];
-        config.read(112, &mut data);
+        config.read(104, &mut data);
         assert_eq!(data[..8], 0x1122_3344_5566_7788u64.to_le_bytes());
         assert_eq!(data[8..], [0; 4]);
         let mut data = [0xa5; 4];

@@ -63,18 +63,18 @@ class Filter(unittest.TestCase):
     def test_the_guest_kernels_module_is_cladefs_at_its_interface(self):
         renamed = subprocess.run(
             [SCRIPT, "--filter"], capture_output=True, text=True, check=True,
-            env={**os.environ, "GUEST_PARAMS": "dax_delay_us|follow_skip_drop",
+            env={**os.environ, "GUEST_PARAMS": "dax_delay_us|dax_pause",
                  "GUEST_SYMBOLS": "fxfs_dax_map|fxfs_vfs_fs|FXFS_IOC_IMPORT"},
             input="guest/linux/fs/fxfs/fxfs.h guest/sim/fxfs/fxfs.c guest/rust/fxfs-linux "
                   "libfxfs_linux.a include/linux/fxfs_tls.h 0004-fxfs.patch\n"
-                  "fxfs.dax_delay_us=5 /sys/module/fxfs/parameters/follow_skip_drop "
+                  "fxfs.dax_delay_us=5 /sys/module/fxfs/parameters/dax_pause "
                   "/proc/fs/fxfs/build mount -t fxfs CONFIG_FXFS_FS=y FXFS_IOC_IMPORT\n"
                   "tracepoint:fxfs:fxfs_dax_map events/fxfs fxfs:* fxfs_vfs_fs(dir)\n").stdout
         self.assertEqual(
             renamed,
             "guest/linux/fs/cladefs/cladefs.h guest/sim/cladefs/cladefs.c guest/rust/cladefs-linux "
             "libcladefs_linux.a include/linux/cladefs_tls.h 0004-cladefs.patch\n"
-            "cladefs.dax_delay_us=5 /sys/module/cladefs/parameters/follow_skip_drop "
+            "cladefs.dax_delay_us=5 /sys/module/cladefs/parameters/dax_pause "
             "/proc/fs/cladefs/build mount -t cladefs CONFIG_CLADEFS_FS=y CLADEFS_IOC_IMPORT\n"
             "tracepoint:cladefs:cladefs_dax_map events/cladefs cladefs:* cladefs_vfs_fs(dir)\n")
 

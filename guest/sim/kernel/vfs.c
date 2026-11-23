@@ -52,6 +52,11 @@ ssize_t noop_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	return -EINVAL;
 }
 
+int generic_file_open(struct inode *inode, struct file *file)
+{
+	return 0;
+}
+
 /*
  * fs/remap_range.c's, for files within a test's: no checks, and both ranges written back, as the
  * VFS writes them back before a filesystem shares their blocks.

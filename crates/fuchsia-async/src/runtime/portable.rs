@@ -4,22 +4,15 @@
 
 pub mod scope;
 
-// cladefs: with the `shuttle` feature, its tasks, executors and timers are Shuttle's (TASK-42.1).
-#[cfg(feature = "shuttle")]
-mod shuttle;
-#[cfg(feature = "shuttle")]
-pub use self::shuttle::{executor, task, timer};
-
 // cladefs: the runtime tasks and timers are on: tokio's; or, under the madsim simulation, madsim's,
 // so that what spawns them there, Fxfs, runs on the simulated host's one thread, its time the
 // simulation's (doc-24, board 5687). The executors below are tokio's either way: outside the
 // simulation, which runs no threads of its own.
-#[cfg(all(not(feature = "shuttle"), madsim))]
+#[cfg(madsim)]
 use madsim as rt;
-#[cfg(all(not(feature = "shuttle"), not(madsim)))]
+#[cfg(not(madsim))]
 use tokio as rt;
 
-#[cfg(not(feature = "shuttle"))]
 pub mod task {
     use super::rt;
     use core::task::{Context, Poll};
@@ -194,7 +187,6 @@ pub mod task {
     }
 }
 
-#[cfg(not(feature = "shuttle"))]
 pub mod executor {
     use crate::Timer;
     use crate::runtime::WakeupTime;
@@ -449,7 +441,6 @@ pub mod executor {
     }
 }
 
-#[cfg(not(feature = "shuttle"))]
 pub mod timer {
     use super::rt;
     use crate::WakeupTime;
@@ -499,7 +490,7 @@ pub mod timer {
     }
 }
 
-#[cfg(all(test, not(feature = "shuttle")))]
+#[cfg(test)]
 mod tests {
     use super::executor::{LocalExecutorBuilder, SendExecutorBuilder};
     use super::task::Task;

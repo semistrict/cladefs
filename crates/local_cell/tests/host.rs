@@ -20,8 +20,6 @@ const OPTIONS: Options = Options {
     segment_age: std::time::Duration::from_secs(3600),
     large_extent: 32 << 10,
     open_files: 2,
-    view_lag: None,
-    view_kept_bytes: None,
     held_most: 256 << 10,
 };
 

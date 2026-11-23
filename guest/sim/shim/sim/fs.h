@@ -219,6 +219,7 @@ void setattr_copy(struct mnt_idmap *idmap, struct inode *inode, const struct iat
 loff_t inode_get_bytes(struct inode *inode);
 bool noop_dirty_folio(struct address_space *mapping, struct folio *folio);
 ssize_t noop_direct_IO(struct kiocb *iocb, struct iov_iter *iter);
+int generic_file_open(struct inode *inode, struct file *file);
 unsigned long thp_get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 				    unsigned long pgoff, unsigned long flags);
 ssize_t copy_splice_read(struct file *in, loff_t *ppos, void *pipe, size_t len,

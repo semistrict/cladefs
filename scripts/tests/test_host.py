@@ -116,7 +116,6 @@ class HostCommand(unittest.TestCase):
         self.assertEqual(
             self.host_command(
                 {
-                    "CLADEFS_FOLLOW_SECONDS": "600",
                     "CLADEFS_PJDFSTEST_TESTS": "chmod chown",
                     "CLADEFS_BENCH_WATCHDOG_SECS": "900",
                     "CLADEFS_ZSTD_LEVEL": "3",
@@ -136,7 +135,6 @@ class HostCommand(unittest.TestCase):
                 sorted(BASE + [
                     "CLADEFS_BENCH_PGBENCH_SCALE=50",
                     "CLADEFS_BENCH_WATCHDOG_SECS=900",
-                    "CLADEFS_FOLLOW_SECONDS=600",
                     "CLADEFS_TEST_HOST_RUN=r1040",
                     "CLADEFS_PJDFSTEST_TESTS=chmod chown",
                     "CLADEFS_BUCKET_LATENCY_MS=25",

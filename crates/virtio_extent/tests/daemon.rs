@@ -364,60 +364,6 @@ fn roots_and_info() {
     assert_eq!(request(&cell, &uncommitted, RESPONSE).1, errno(Errno::EINVAL));
 }
 
-/// cladefs: a follower's device reads its writer's cell as of its view's commit, advances to the
-/// writer's latest, lets go of the commits before and pins extents; what the writer wrote since it
-/// reads as ENOENT, and what would write, it refuses (EROFS). A writer's device refuses a
-/// follower's requests (EINVAL).
-#[test]
-fn follows_a_writer() {
-    let (cell, dir) = a_cell();
-    let follower = CellClient::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
-    let (heard, commits) = mpsc::channel();
-    follower.on_committed(move |committed| {
-        // Unheard once the test stops listening.
-        let _ = heard.send(committed);
-    });
-    let data = vec![7; BLOCK];
-    let id = cladefs::ExtentId { cell: cell.cell(), sequence: 1 };
-    cell.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
-    cell.commit(None).unwrap();
-    let committed = commits.recv().unwrap();
-    let read_ = bytes(VIRTIO_EXTENT_T_READ, 0, Some(io(&cell, 1, 0, BLOCK)), &[]);
-    assert_eq!(
-        request(&follower, &read_, BLOCK + RESPONSE),
-        (vec![0; BLOCK], errno(Errno::ENOENT))
-    );
-    let advance = bytes::<CommitNumber>(VIRTIO_EXTENT_T_ADVANCE, 0, None, &[]);
-    let (written, status) = request(&follower, &advance, size_of::<CommitNumber>() + RESPONSE);
-    assert_eq!(status, 0);
-    assert_eq!(
-        read::<CommitNumber>(&written),
-        CommitNumber { commit: committed.to_le(), reserved: 0 }
-    );
-    assert_eq!(request(&follower, &read_, BLOCK + RESPONSE), (data.clone(), 0));
-    let let_go = bytes(
-        VIRTIO_EXTENT_T_LET_GO,
-        0,
-        Some(CommitNumber { commit: committed.to_le(), reserved: 0 }),
-        &[],
-    );
-    assert_eq!(request(&follower, &let_go, RESPONSE), (vec![], 0));
-    let id = io(&cell, 1, 0, 0).id;
-    for type_ in [VIRTIO_EXTENT_T_PIN, VIRTIO_EXTENT_T_UNPIN] {
-        let pin = bytes(type_, 0, Some(id), &[]);
-        assert_eq!(request(&follower, &pin, RESPONSE), (vec![], 0));
-        assert_eq!(request(&cell, &pin, RESPONSE).1, errno(Errno::EINVAL));
-    }
-    let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io(&cell, 2, 0, BLOCK)), &data);
-    assert_eq!(request(&follower, &write, RESPONSE).1, errno(Errno::EROFS));
-    let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
-    assert_eq!(request(&follower, &commit, RESPONSE).1, errno(Errno::EROFS));
-    assert_eq!(
-        request(&cell, &advance, size_of::<CommitNumber>() + RESPONSE).1,
-        errno(Errno::EINVAL)
-    );
-}
-
 /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and flags
 /// it may name, of extents of its cell or another's, at offsets near the cell's ends or at the
 /// ends of a u64, the device answers it, with a status, no more than the room it was given
@@ -612,7 +558,6 @@ fn config(dir: &TestDir, path: &str) -> Config {
         dax_window_size: None,
         dax_private_max_bytes: None,
         cladefsd_socket: dir.socket().display().to_string(),
-        read_only: false,
         cache_type: CacheType::Writeback,
     }
 }

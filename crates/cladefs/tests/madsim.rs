@@ -809,8 +809,8 @@ fn needed(name: &str, off: fn(), profile: Profile, seeds: u64) {
 // macOS's, whose schedules differ: no search, as a search that one platform's seeds miss fails
 // scripts/test.sh there. The rest of bucket_cell::Rules found none: local_cell::sim's searches find
 // each, its steps aimed at the protocol's races with 20,000 seeds, where a full-stack seed reaches
-// them seldom. local_cell::Rules' framings, flushes and frees found none either; its views' rules
-// are a follower's, and its writes' a writer's racing its own commits, which one simulated guest,
+// them seldom. local_cell::Rules' framings, flushes and frees found none either; its writes' rules
+// are a writer's racing its own commits, which one simulated guest,
 // its requests one at a time, never does: Shuttle's searches find those (tests/shuttle).
 //
 // A zombie writer, its head swap unconditional, writes the head over its successor's, whose blocks

@@ -53,7 +53,8 @@ BASELINES = {
     "fxfs-guest-dax": ["ext4-dax-pmem", "ext4-guest-kernel"],
     # Unsafe against unsafe: ext4 on a loop image cached unsafely, the setup TASK-350 compares with.
     "fxfs-guest-dax-unsafe": ["ext4-loop-unsafe", "fxfs-guest-dax"],
-    # A writer with followers attached, reading or not, against one alone (TASK-42.7).
+    # A writer with followers attached, reading or not, against one alone (TASK-42.7): runs from
+    # before live followers went (board 8237), which the history still reads.
     "fxfs-guest-dax-followed": ["fxfs-guest-dax"],
     "fxfs-guest-dax-followed-idle": ["fxfs-guest-dax"],
     # A fork booted with its base's data in the extent daemon's memory, against one without.

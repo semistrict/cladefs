@@ -5,27 +5,26 @@
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -1032,10 +1032,16 @@
-         let follower = matches!(opened, Phase::Following);
+@@ -1152,11 +1152,15 @@
+         }
          let key = cell_dir_key(path);
          drop(self.0.named.set(key.to_string_lossy().into()));
--        self.0.report.opened(key, open_cell.cell().id, follower);
+-        self.0.report.opened(key, open_cell.cell().id);
 -        assert!(self.0.open_cell.set(open_cell).is_ok(), "a connection opened a second cell");
 +        let cell = open_cell.cell().id;
 +        if self.0.open_cell.set(open_cell).is_err() {
-+            if let Phase::Writing(hold) = opened {
-+                std::mem::forget(hold);
-+            }
++            std::mem::forget(hold);
 +            return;
 +        }
-+        self.0.report.opened(key, cell, follower);
++        self.0.report.opened(key, cell);
+         let opened = Phase::Writing(Arc::new(hold));
          let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);
 -        assert!(matches!(was, Phase::Opening), "a connection opened a cell not opening one");
 +        let _ = was;
      }
  }
  
-@@ -1545,11 +1551,11 @@
+@@ -1728,11 +1732,11 @@
      fn opening(&self) -> Result<Opening<'_>, Errno> {
          let mut phase = self.phase.with(Mutex::lock);
          match *phase {
@@ -34,8 +33,8 @@
                  *phase = Phase::Opening;
                  Ok(Opening(self))
              }
--            Phase::Opening | Phase::Writing(_) | Phase::Following => Err(Errno::EBUSY),
-+            Phase::Writing(_) | Phase::Following => Err(Errno::EBUSY),
+-            Phase::Opening | Phase::Writing(_) => Err(Errno::EBUSY),
++            Phase::Writing(_) => Err(Errno::EBUSY),
          }
      }
  

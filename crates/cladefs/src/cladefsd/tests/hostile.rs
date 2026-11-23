@@ -471,10 +471,11 @@ fn message() -> BoxedStrategy<Said> {
         FORK,
         RESIZED,
         MAPPINGS,
-        ADVANCE,
-        LET_GO,
-        PIN,
-        UNPIN,
+        // A follower's, gone (board 8237).
+        21,
+        22,
+        23,
+        24,
         TRANSFER,
         FREE_MANY,
         STAGE_COUNTS,
@@ -487,7 +488,8 @@ fn message() -> BoxedStrategy<Said> {
         // `STAGE_PRIVATE`'s.
         108,
         CAPACITY,
-        COMMITTED,
+        // A follower's `COMMITTED`, gone (board 8237).
+        105,
         29,
         0xffff_ffff,
     ];
@@ -606,8 +608,8 @@ fn message() -> BoxedStrategy<Said> {
         1 => (theirs(), sequence(), page()).prop_map(move |(whose, extent, to)| {
             said(MAP, 0, [whose, extent, Is(0), Is(ps), to], Payload::Bytes(Vec::new()))
         }),
-        1 => (theirs(), sequence(), prop_oneof![Just(FREE), Just(PIN), Just(UNPIN)]).prop_map(|(whose, extent, kind)| {
-            said(kind, 0, [whose, extent, Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
+        1 => (theirs(), sequence()).prop_map(|(whose, extent)| {
+            said(FREE, 0, [whose, extent, Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
         }),
         1 => (theirs(), sequence()).prop_map(move |(whose, extent)| {
             said(WRITE, 0, [whose, extent, Is(0), Is(0), Is(0)], Payload::Filled(0x66, ps as usize))
@@ -624,7 +626,8 @@ fn message() -> BoxedStrategy<Said> {
             .prop_map(|version| {
                 said(FORK, FORK_DROP, [version, Is(0), Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
             }),
-        3 => (place(), prop_oneof![Just(0), Just(OPEN_CREATE), Just(OPEN_READ_ONLY)]).prop_map(|(at, flags)| {
+        // cladefs: and a follower's flag, 1 << 2, gone (board 8237).
+        3 => (place(), prop_oneof![Just(0), Just(OPEN_CREATE), Just(1 << 2)]).prop_map(|(at, flags)| {
             said(OPEN, flags, [Is(CELL_BYTES), Is(0), Is(0), Is(0), Is(VERSION)], Payload::Path(at))
         }),
         // Forks of its own cell to anywhere it names.
@@ -1525,7 +1528,7 @@ fn receive(
             if header.status == 0 {
                 seen.served += 1;
                 match request {
-                    Some(request) if request.kind == OPEN && request.flags != OPEN_READ_ONLY => {
+                    Some(request) if request.kind == OPEN => {
                         shared.own.store(header.read_body::<OpenedBody>().cell, Ordering::Relaxed);
                         shared.writer.store(true, Ordering::Relaxed);
                         seen.wrote = shared.paths.lock().unwrap().get(&header.id).cloned();
@@ -1567,7 +1570,7 @@ fn receive(
                 return seen;
             }
         }
-        if header.kind == REPLY || header.kind == COMMITTED || header.kind == CAPACITY {
+        if header.kind == REPLY || header.kind == CAPACITY {
             continue;
         }
         let ack = |id| {

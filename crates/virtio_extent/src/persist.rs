@@ -39,8 +39,7 @@ pub struct State {
     pub frozen: bool,
 }
 
-/// A device's configuration ([`Config`]), as a snapshot holds it: a writer's, as a follower's
-/// device takes no snapshot.
+/// A device's configuration ([`Config`]), as a snapshot holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigState {
     pub id: String,
@@ -73,8 +72,6 @@ impl From<&Config> for ConfigState {
     }
 }
 
-// cladefs: a follower's device takes no snapshot (`SnapshotError::ReadOnly`): a snapshot's is a
-// writer's.
 impl From<&ConfigState> for Config {
     fn from(config: &ConfigState) -> Self {
         Self {
@@ -87,7 +84,6 @@ impl From<&ConfigState> for Config {
                 .dax_private_max
                 .map(|pages| pages * cladefs::pages::page_size()),
             cladefsd_socket: config.cladefsd_socket.clone(),
-            read_only: false,
             cache_type: config.cache_type,
         }
     }
@@ -171,8 +167,6 @@ pub enum SnapshotError {
          snapshot, and thaw it after)"
     )]
     NotFrozen(String),
-    #[error("Extent device {0}: it follows a cell read-only, which a snapshot doesn't hold")]
-    ReadOnly(String),
     #[error("Extent device {0}: cannot make a version of its cell: {1}")]
     Version(String, cladefs::Errno),
     #[error("Extent device {0}: cannot list its DAX window's mappings: {1}")]

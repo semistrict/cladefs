@@ -9,10 +9,7 @@
 //! The VFS checks what it can before calling: names exist or not, types match, and permissions
 //! allow. Each change is one of Fxfs's transactions, locking the objects it changes.
 //!
-//! cladefs: mounted read-only, it changes nothing; on a follower's device, it follows the store's
-//! writer (the guest's `follow`, backlog doc-8): its tree reads are made under the follower's fill
-//! barrier, which no batch applies under (`reading`), and it keeps no handles to objects, whose
-//! sizes a batch would leave stale.
+//! cladefs: mounted read-only, it changes nothing.
 //!
 //! What a VFS gives its callers for an error is [`errno`]'s, the one table of Fxfs's errors'.
 
@@ -70,17 +67,6 @@ pub trait Platform: Send + Sync + Sized + 'static {
     /// Runs `future`, one of the filesystem's background workers, at a high priority, until it
     /// completes.
     fn spawn_urgent(&self, future: impl Future<Output = ()> + Send + 'static);
-
-    /// cladefs: on a follower, checks that the fill barrier is held, in a debug kernel (lockdep),
-    /// and that the trees can be read: not, once a batch failed (crates/follower).
-    fn filling(&self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    /// cladefs: whether the filesystem follows its device's writer: it then keeps no handles.
-    fn follows(&self) -> bool {
-        false
-    }
 
     /// cladefs: where the volume counts its fsyncs: the platform's own, to count those of all a
     /// filesystem's volumes together.
@@ -533,7 +519,7 @@ pub struct Fxfs<P: Platform> {
     /// cladefs: fsyncs, and those another's sync covered (`fsync`).
     sync_counts: Arc<SyncCounts>,
     /// cladefs: whether it is mounted read-only, which changes nothing: with `-o ro`, or its
-    /// filesystem is (`FxFilesystem::options`, on a follower's device too). Derived at `new`, the
+    /// filesystem is (`FxFilesystem::options`). Derived at `new`, the
     /// one place it is decided, from the filesystem's, which owns it (TASK-160.26).
     read_only: bool,
 }
@@ -601,11 +587,6 @@ impl<P: Platform> Fxfs<P> {
         self.read_only
     }
 
-    /// cladefs: whether it follows its device's writer (the guest's `follow`).
-    pub fn follows(&self) -> bool {
-        self.platform.follows()
-    }
-
     /// The filesystem the volume is of.
     pub fn filesystem(&self) -> &Arc<FxFilesystem> {
         &self.filesystem
@@ -614,16 +595,6 @@ impl<P: Platform> Fxfs<P> {
     /// The store of the volume it serves.
     pub fn volume_id(&self) -> u64 {
         self.volume.store_object_id()
-    }
-
-    /// cladefs: `read`, a read of its trees: a follower's under its fill barrier, which the kernel's
-    /// call in holds (fs/cladefs, vfs.h), so that it sees whole batches; checked, in a debug kernel.
-    pub async fn reading<T, R: Future<Output = Result<T, Error>>>(
-        &self,
-        read: impl FnOnce() -> R,
-    ) -> Result<T, Error> {
-        self.platform.filling()?;
-        read().await
     }
 
     /// cladefs: frees the blocks of the file `ino` within `range`, which is block-aligned, which
@@ -789,8 +760,8 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Calls `emit` for the entries of the directory `dir` from `start` on, with each one's name,
-    /// inode and type (as `S_IFMT` bits of a mode), until it returns false. cladefs: a follower's
-    /// under its fill barrier (`reading`), as of one state. Each type is its entry's, which says
+    /// inode and type (as `S_IFMT` bits of a mode), until it returns false. cladefs: each type is
+    /// its entry's, which says
     /// which special file a file is (`ObjectDescriptor::Special`), so that no record is looked up:
     /// a FIFO was listed as a regular file (`DT_REG`), which `find -type p` and `ls` take a
     /// listing's word for (TASK-149.36), and then cost a lookup of each file's record (TASK-236).
@@ -800,7 +771,6 @@ impl<P: Platform> Fxfs<P> {
         start: ReaddirStart<'_>,
         mut emit: impl FnMut(&str, u64, u32) -> bool,
     ) -> Result<(), Error> {
-        self.platform.filling()?;
         self.begin(Op::Readdir, Some(dir)).await?;
         let dir = self.directory(dir).await?;
         let layer_set = dir.store().tree().layer_set();
@@ -827,10 +797,8 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Reads up to `buf.len()` bytes of the file `ino` at `offset`, returning how many it read:
-    /// fewer only at the end of the file. cladefs: a follower's under its fill barrier (`reading`),
-    /// which keeps the extents it reads until it is done.
+    /// fewer only at the end of the file.
     pub async fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
-        self.platform.filling()?;
         let file = self.file(ino).await?;
         let end = file.get_size().min(offset.saturating_add(buf.len() as u64));
         if offset >= end {
@@ -853,7 +821,6 @@ impl<P: Platform> Fxfs<P> {
         parts: &mut [&mut [u8]],
     ) -> Result<usize, Error> {
         const CHUNK: u64 = 1 << 20;
-        self.platform.filling()?;
         let file = self.file(ino).await?;
         let len = parts.iter().map(|part| part.len() as u64).sum::<u64>();
         let end = file.get_size().min(offset.saturating_add(len));
@@ -1330,7 +1297,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Closes the inode `ino`, which the kernel evicts, and frees its object if no name links it.
-    /// cladefs: mounted read-only, it frees nothing: a follower's writer frees what it unlinked.
+    /// cladefs: mounted read-only, it frees nothing.
     pub fn evict(&self, ino: u64, unlinked: bool) {
         self.directories.lock().unwrap().remove(&ino);
         self.files.lock().unwrap().remove(&ino);
@@ -1800,10 +1767,6 @@ impl<P: Platform> Fxfs<P> {
 
     /// The directory `ino`'s handle: the inode's, opened if it isn't yet.
     async fn directory(&self, ino: u64) -> Result<Arc<Directory<ObjectStore>>, Error> {
-        // A follower's open for each read: a batch would leave one kept stale.
-        if self.platform.follows() {
-            return Ok(Arc::new(Directory::open(&self.volume, ino).await?));
-        }
         if let Some(directory) = self.directories.lock().unwrap().get(&ino) {
             return Ok(directory.clone());
         }
@@ -1820,10 +1783,6 @@ impl<P: Platform> Fxfs<P> {
     /// The file `ino`'s handle: the inode's, opened if it isn't yet.
     async fn file(&self, ino: u64) -> Result<Arc<DataObjectHandle<ObjectStore>>, Error> {
         let file = ObjectStore::open_object(&self.volume, ino, HandleOptions::default(), None);
-        // A follower's open for each read: a batch would leave its size stale.
-        if self.platform.follows() {
-            return Ok(Arc::new(file.await?));
-        }
         if let Some(file) = self.files.lock().unwrap().get(&ino) {
             return Ok(file.clone());
         }

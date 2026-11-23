@@ -37,8 +37,6 @@ const OPTIONS: Options = Options {
     segment_age: Duration::from_secs(3600),
     large_extent: 24 << 10,
     open_files: 3,
-    view_lag: None,
-    view_kept_bytes: None,
     held_most: 8 << 10,
 };
 

@@ -35,7 +35,7 @@
 //!
 //! - **Threads.** One small runtime receives every connection's messages, and works behind their
 //!   cells: commits made durable within 50 ms, on threads every cell's flushes share, 32 at
-//!   most (TASK-92.49), followers told of commits. Requests run on a pool of threads every
+//!   most (TASK-92.49). Requests run on a pool of threads every
 //!   connection shares, as many as run at once, up to 16 a processor (`pool`), a connection's 8
 //!   at most, the rest waiting their turn; a fault waiting for the pager holds neither a thread
 //!   nor one of the 8 (TASK-92.20), nor does an opening waiting for a cell, or for a restore's
@@ -53,13 +53,6 @@
 //!
 //! `serves_hundreds_of_forks_of_a_base` (tests.rs) opens 300 forks of a base at once, each reading
 //! it, and bounds the daemon's threads, and each fork's open files and resident memory.
-//!
-//! **Followers (TASK-42.3, backlog doc-8).** A VM process opening a cell read-only
-//! ([`wire::OPEN_READ_ONLY`]) follows it: a view of the cell another connection writes, or, with
-//! none, of the cell as of its last commit, which a writer opening it then takes over. It reads and
-//! maps what the view's commit holds, and nothing else (`EIO`, logged); hears of the writer's
-//! commits ([`wire::COMMITTED`]); advances to them, lets go of the commits before, and pins what
-//! its guest holds open ([`wire::ADVANCE`] and the others). The writer never waits for it.
 //!
 //! **Control (TASK-43.3).** The host's VM manager, which launches the VMMs, makes, imports, forks,
 //! places, syncs, resizes and deletes cells through the daemon's control API, gRPC over a Unix

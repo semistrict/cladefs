@@ -337,7 +337,7 @@ The number of a taking: a writer's of a cell, a placement's, a pass's of its col
 _Avoid_: epoch for a commit's number, generation
 
 **Commit number**:
-Which commit of a cell, as a follower's view or an open cell's stats name it.
+Which commit of a cell, as an open cell's stats name it.
 _Avoid_: epoch
 
 **Placement**:
@@ -430,7 +430,7 @@ _Avoid_: ensemble, replica set (in code, say configuration)
 
 **Member**:
 A host in an incarnation, holding a configuration's log; the writer is one.
-_Avoid_: replica (alone), follower (a follower reads, doc-8)
+_Avoid_: replica (alone), follower
 
 **Incarnation**:
 A random number a daemon's replica directory is made with, new when its disk is lost: a member is a host in one incarnation, so a host that lost its disk, and its promises with it, is no longer that member. Erlang's node creation; BookKeeper's cookie. Ephemeral cells' references name it too (doc-25).
@@ -459,46 +459,6 @@ What a daemon does on SIGTERM: every open cell closed and its commits uploaded b
 
 **Format**:
 The version an on-disk, bucket or wire format names; a reader refuses every other, and nothing migrates.
-
-### Followers
-
-**Follower**:
-A read-only mount of a cell another VM on the host writes, applying that writer's commits as they come.
-_Avoid_: replica, secondary, reader
-
-**Writer** (of a mount):
-The one read-write mount whose commits followers apply.
-
-**Reader**:
-A task in a follower's guest reading its files.
-
-**View**:
-An open cell as of one commit, which keeps what later commits free until let go.
-
-**Advance**:
-Moving a follower's view to the writer's latest commit.
-
-**Let go**:
-Releasing the view a follower advanced from.
-
-**Pin**:
-Keeping one extent past a follower's view, for a file it holds open.
-
-**Cut off**:
-Ending a follower that fell too far behind; its operations fail with `ESTALE`.
-
-**Batch**:
-The writer's commits a follower applies at once, under its fill barrier.
-
-**Fill barrier**:
-A follower's lock: readers hold it shared while filling the kernel's caches, a batch exclusively.
-
-**Settle**:
-After a batch, the kernel's inodes taking the attributes it changed.
-
-**Follower's graveyard**:
-What keeps a held file readable after its writer deleted it.
-_Avoid_: graveyard alone (Fxfs has its own)
 
 ### Encryption
 
@@ -614,8 +574,8 @@ code does not have yet are said so.
   its **block device** (`block_device::BlockDevice`).
 - **snapshot**: VMs' (Firecracker's) and Fxfs's alone. A cell's named state is a **version**; the daemon's counters are **stats** (no `GetSnapshot`).
 - **version**: a cell's past state alone; a format's is its **format**, a tool's a **pinned version**.
-- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
-  StatCell's `committed`, `LocalCell::last_commit_held`, `View::commit` and the trace's `cladefs.commit`.
+- **epoch**: a taking's number alone. A commit's number is a **commit number**, in StatCell's
+  `committed`, `LocalCell::last_commit_held` and the trace's `cladefs.commit`.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). An open cell stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; writers have none since TASK-407.
 - **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,
@@ -631,10 +591,9 @@ code does not have yet are said so.
   the `cladefs` tracepoints); cases keep `fxfs-guest-*`, named for what they test.
 - **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
 - **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
-- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`pinned_version`).
+- **pin**: LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`pinned_version`).
 - **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too
   (`CLADEFS_E2E_REPEATS`, `repeat-K.json`).
 - **room**: a segment's free space alone. A tenant's is its **in-flight** budget (`SetTenantInFlight`); a peer stream's, its **credit**.
 - **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
-- **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.
 - **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.

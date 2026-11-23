@@ -30,7 +30,7 @@ Verdicts: **kept** (still justified, reason named), **fixed** (stale: runs again
 |---|---|---|
 | scripts/test.sh workspace part `-E "not (package(extent_store) & test(/^sim::/))"` | The simulation is a part of its own, optimized (TASK-188) | kept |
 | firecracker part `-E 'test(/extent::/) \| test(/vcpu::tests::(efaults_\|test_exit_code_)/)'` | The VMM's tests cladefs adds to; the rest are upstream's, some need KVM | kept |
-| shuttle part: extent_store, physmem, cladefs, follower, follower_sim | Every crate whose Shuttle tests exist; fuchsia-async, fuchsia-sync and fxfs have the feature as plumbing alone | kept |
+| shuttle part: extent_store, physmem, cladefs | Every crate whose Shuttle tests exist | kept |
 | hunt.yml's `-E` filters | Hunting jobs aim at the model and corrupt tests, and one test's seeds | kept |
 | No nextest config, no default-filter | — | — |
 | `#![cfg(target_os = "linux")]` on 12 cladefs integration tests (cladefsd, FUSE, seccomp…) | Linux-only features; CI runs Linux | kept |

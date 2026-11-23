@@ -1299,8 +1299,6 @@ mod tests {
         open_cell.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
         open_cell.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
         checkpointed(&open_cell, &bucket).await;
-        // A follower of the open cell, which reads what the open cell names.
-        let follower = open_cell.follow();
         // The segment goes, no state naming it there; the moves are compacted, then go too.
         collect(3);
         collect(4);
@@ -1321,7 +1319,7 @@ mod tests {
         let twice = bucket_cell::layout::moves_under(&once).unwrap();
         assert!(keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
-        // The open cell, open all along, reads it there, and so does its follower.
+        // The open cell, open all along, reads it there.
         let extent = ExtentId { cell: cell.id, sequence: 1 };
         let reads = async |open_cell: &OpenCell| {
             let mut data = vec![0; EXTENT];
@@ -1330,11 +1328,7 @@ mod tests {
                 .await;
             read.map(|()| data == noise(1, EXTENT))
         };
-        assert_eq!(
-            [reads(&open_cell).await, reads(&follower).await],
-            [Ok(true), Ok(true)],
-            "cached: {cached}"
-        );
+        assert_eq!(reads(&open_cell).await, Ok(true), "cached: {cached}");
     }
 
     /// The footers of `cell`'s segments in `bucket`, in order.

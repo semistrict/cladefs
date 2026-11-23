@@ -93,7 +93,7 @@ void cladefs_init(void);
  * Opens Fxfs on the extent-store device tagged with the `len` bytes of `source`, formatting it if
  * its store holds nothing yet, with an empty default volume: 0, or a -errno (-ENOENT if there is no
  * such device). Fxfs sizes what it keeps in memory by the `memory` bytes the kernel has. cladefs:
- * read-only if `read_only`, or if the device follows a store another VM writes.
+ * read-only if `read_only`.
  */
 int cladefs_open(const char *source, size_t len, u64 memory, bool read_only,
 	      struct cladefs_filesystem **filesystem);
@@ -102,69 +102,12 @@ void cladefs_close(struct cladefs_filesystem *filesystem);
 /*
  * Mounts the volume named with the `len` bytes of `volume`, and fills in its root directory's
  * attributes: 0, or a -errno (-ENOENT if there is no such volume). cladefs: read-only if `read_only`,
- * or if the filesystem is. On a follower's device only the default volume mounts (-EINVAL): it
- * follows that writer (cladefs_follow) on the superblock `vfs`'s primitives (cladefs_vfs_follow_*, below).
+ * or if the filesystem is.
  */
 int cladefs_mount(struct cladefs_filesystem *filesystem, const char *volume, size_t len, bool read_only,
-	       void *vfs, struct cladefs **fs, struct cladefs_attr *root);
-/* cladefs: whether a volume mounted on the filesystem follows its device's writer. */
-bool cladefs_filesystem_follows(struct cladefs_filesystem *filesystem);
-/* cladefs: whether the filesystem is mounted read-only, and whether it follows its writer. */
+	       struct cladefs **fs, struct cladefs_attr *root);
+/* cladefs: whether the filesystem is mounted read-only. */
 bool cladefs_read_only(struct cladefs *fs);
-bool cladefs_follows(struct cladefs *fs);
-/*
- * cladefs: a follower's batch (backlog doc-8): the writer's commits since those applied, fetched;
- * holding the fill barrier, what the kernel caches of what they change dropped
- * (cladefs_vfs_drop_file), the commits applied, and the kernel's inodes settled
- * (cladefs_vfs_settle_file); then the commit it was as of let go of. 0, or a -errno (-ESTALE once
- * the follower is cut off: it remounts).
- */
-int cladefs_follow(struct cladefs *fs);
-/*
- * cladefs: holds the file `ino`, which the kernel opens, on a follower: one the writer deletes reads
- * as it was until the last open closes (cladefs_release). 0, or a -errno: -ENOENT if a batch deleted
- * it since the open looked it up, which holds nothing.
- */
-int cladefs_hold(struct cladefs *fs, u64 ino);
-void cladefs_release(struct cladefs *fs, u64 ino);
-
-/*
- * cladefs: a follower's primitives, of the superblock `vfs` (super.c), which the filesystem's Rust
- * runs its protocol on (crates/follower): its fill barrier, held shared by a reader's fill, each
- * cladefs_vfs_fill_*_extern the inline cladefs_vfs_fill_* (vfs.h) out of line, for the Rust; and which
- * a tree read checks is held, in a debug kernel.
- */
-void cladefs_vfs_fill_begin_extern(void *vfs);
-void cladefs_vfs_fill_end_extern(void *vfs);
-void cladefs_vfs_fill_barrier_assert_held(void *vfs);
-/* The follower's state is as of a commit no later than `commit`'s: its batch applied. */
-#define CLADEFS_FOLLOW_APPLIED 0
-/* The follower's state is as of a commit no earlier than `commit`'s: its batch settled. */
-#define CLADEFS_FOLLOW_SETTLED 1
-void cladefs_vfs_follow_commit(void *vfs, u32 which, u64 commit);
-/* cladefs: whether the tests have a follower's batches fail (vfs.h). */
-bool cladefs_vfs_follow_failing(void);
-/*
- * cladefs: a follower's batch takes its fill barrier exclusively, waiting for the readers holding it,
- * from before it drops what it changes until it has applied and settled it; and lets go of it.
- */
-void cladefs_vfs_fill_barrier_take(void *vfs);
-void cladefs_vfs_fill_barrier_release(void *vfs);
-
-/* cladefs: bytes of a follower's file a batch changed, from `start` to `end`, exclusive. */
-struct cladefs_range {
-	u64 start;
-	u64 end;
-};
-/*
- * cladefs: a follower's batch, holding its fill barrier (cladefs_vfs_fill_barrier_take), drops what
- * the kernel keeps of what it changes before it applies the change: the `count` `ranges` of the
- * file `ino`'s data; the dentries of the directory `ino`, which revalidate. Once applied, the file
- * `ino`'s inode takes its attributes, `attr`, or, `gone`, none, no name linking it.
- */
-void cladefs_vfs_drop_file(void *vfs, u64 ino, const struct cladefs_range *ranges, size_t count);
-void cladefs_vfs_drop_entries(void *vfs, u64 ino);
-void cladefs_vfs_settle_file(void *vfs, u64 ino, const struct cladefs_attr *attr, bool gone);
 /* Unmounts the volume, applying what it queued. The filesystem stays open. */
 void cladefs_unmount(struct cladefs *fs);
 /* Makes what the filesystem holds durable: sync, syncfs. */

@@ -94,15 +94,11 @@ impl JournalHandle for ExtentObjectHandle {
     ) -> Result<Option<u64>, Error> {
         bail!(anyhow!(FxfsError::Inconsistent).context("Unexpected span on super-block handle"));
     }
-
-    fn sync_spans(&mut self, _spans: Vec<JournalSpan>) -> Result<Option<u64>, Error> {
-        Ok(None)
-    }
 }
 
 /// Maps contiguous journal byte offsets directly to position-derived extent IDs via a list of
 /// [`JournalSpan`]s. Shared via `Clone` (`Arc` interior) between `Journal` and readers (e.g.
-/// `read_transactions_for_object`), or owned per-reader during replay / follower `read_on`.
+/// `read_transactions_for_object`), or owned per-reader during replay.
 #[derive(Clone)]
 pub struct JournalExtentHandle {
     device: Arc<dyn Device>,
@@ -396,77 +392,6 @@ impl JournalHandle for JournalExtentHandle {
         // Otherwise this span was either already persisted in `Root` or superseded by a later
         // mount/thaw rotation whose `Root` is authoritative.
         Ok(None)
-    }
-
-    fn sync_spans(&mut self, root_spans: Vec<JournalSpan>) -> Result<Option<u64>, Error> {
-        let mut spans = self.spans.lock();
-        let Some(root_last_end) = root_spans.last().map(JournalSpan::end_offset) else {
-            return Ok(None);
-        };
-        if spans.is_empty() {
-            *spans = root_spans;
-            return Ok(Some(0));
-        }
-        // Keep any prefix before `root_spans[0].start_offset` (in case a follower hasn't caught up
-        // to the writer's latest compaction prune yet), and replace from `root_spans[0].start_offset`
-        // onwards with `root_spans` if `root_spans` changed or extended the mapping.
-        let root_start = root_spans[0].start_offset;
-        let mut merged = Vec::new();
-        for s in spans.iter() {
-            if s.start_offset >= root_start {
-                break;
-            }
-            let mut prefix = s.clone();
-            if prefix.end_offset() > root_start {
-                prefix.block_count = (root_start - prefix.start_offset) / BLOCK_SIZE.get();
-            }
-            if prefix.block_count > 0 {
-                merged.push(prefix);
-            }
-        }
-        // Check contiguity: if the follower fell behind past a prune gap where we didn't have the
-        // prefix, only update if contiguous.
-        if let Some(last_prefix) = merged.last() {
-            if last_prefix.end_offset() != root_start {
-                return Ok(None);
-            }
-        }
-        // Only replace if `root_spans` actually differs or extends past what we have.
-        let root_tail_key = root_spans.last().map(|s| (s.cell, s.end_sequence()));
-        let old_tail_key = spans
-            .iter()
-            .find(|s| s.end_offset() == root_last_end)
-            .map(|s| (s.cell, s.end_sequence()));
-        let mut candidate = merged;
-        candidate.extend(root_spans);
-        // Preserve in-stream spans we already discovered past `root_last_end` ONLY if the span
-        // ending at `root_last_end` was not rotated to a different `(cell, end_sequence)`.
-        if root_tail_key.is_some() && root_tail_key == old_tail_key {
-            for s in spans.iter() {
-                if s.start_offset >= root_last_end {
-                    if let Some(last) = candidate.last() {
-                        if last.end_offset() == s.start_offset {
-                            candidate.push(s.clone());
-                        }
-                    }
-                }
-            }
-        }
-        if *spans == candidate {
-            return Ok(None);
-        }
-        // Find earliest offset where mapping changed so `JournalReader` forgets stale read-ahead.
-        let mut changed_at = candidate.first().map_or(0, |s| s.start_offset);
-        for (a, b) in spans.iter().zip(candidate.iter()) {
-            if a == b {
-                changed_at = a.end_offset();
-            } else {
-                changed_at = a.start_offset.min(b.start_offset);
-                break;
-            }
-        }
-        *spans = candidate;
-        Ok(Some(changed_at))
     }
 }
 

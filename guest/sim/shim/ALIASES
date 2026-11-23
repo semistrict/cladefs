@@ -6,7 +6,7 @@ sim/atomic.h: linux/atomic.h linux/refcount.h
 sim/bitops.h: linux/bitmap.h linux/bitops.h linux/log2.h linux/find.h
 sim/rcu.h: linux/rcupdate.h
 sim/lockdep.h: linux/lockdep.h
-sim/sched.h: linux/sched.h linux/sched/signal.h linux/sched/mm.h linux/sched/debug.h linux/sched/task.h linux/mutex.h linux/rwsem.h linux/spinlock.h linux/spinlock_types.h asm/current.h linux/preempt.h linux/irqflags.h linux/jump_label.h
+sim/sched.h: linux/sched.h linux/sched/signal.h linux/sched/mm.h linux/sched/debug.h linux/sched/task.h linux/mutex.h linux/rwsem.h linux/spinlock.h linux/spinlock_types.h asm/current.h linux/preempt.h linux/irqflags.h
 sim/time.h: linux/delay.h linux/timekeeping.h linux/ktime.h linux/jiffies.h
 sim/workqueue.h: linux/workqueue.h
 sim/slab.h: linux/slab.h linux/gfp.h linux/gfp_types.h linux/vmalloc.h

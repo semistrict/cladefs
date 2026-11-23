@@ -66,7 +66,6 @@ statfs-counts-nothing-used: arithmetic (a term left out)
 truncate-gives-up-on-its-tail: a retry taken out whole
 writeback-pays-for-nothing-with-its-room: one call for another (without its reservation)
 xattrs-refuse-the-largest-value: a comparison off by one
-latest-listening-loads: a read-modify-write replaced by a load, no ordering weaker: loom's (hearing::loom), which no syntactic rule can judge
 occurrence-told-by-a-store-and-a-load: a read-modify-write replaced by a store and a load, no ordering weaker: loom's (hearing::loom), which no syntactic rule can judge
 answers-clear-asks-relaxed: equivalent (its Fate): mixed-orderings would ask its Relaxed for a reason, which docs/memory-ordering.md gives
 asks-read-relaxed: equivalent (its Fate): mixed-orderings would ask its Relaxed for a reason, which docs/memory-ordering.md gives

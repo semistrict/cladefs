@@ -7,8 +7,7 @@
 # tests of it (guest/tests) on this host, Linux with KVM, in cladefs's Firecracker: the kernel suite
 # (`runner list --tag kernel`), the guest's Fxfs as its every feature is used, with a DAX window
 # and without: formats, crashes, resizes, live forks, volumes side by side and shared, a lost
-# daemon, followers and their torture tests' mutants, imports, snapshots, suspends and
-# migrations, the checks, the extent-store device's driver, and pjdfstest, whose rootfs podman
+# daemon, imports, snapshots, suspends and migrations, the checks, the extent-store device's driver, and pjdfstest, whose rootfs podman
 # builds. On macOS it runs in Lima (scripts/lib/lima.sh). The kernel is kept in
 # $CLADEFS_E2E_RESULTS (default: a new temporary directory), with the tests' logs.
 set -euo pipefail

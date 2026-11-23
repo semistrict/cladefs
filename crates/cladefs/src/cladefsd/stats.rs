@@ -51,15 +51,13 @@ pub(crate) struct HostStats {
 /// A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Vm {
-    /// Its connection's number, which the daemon gives each in turn: what tells a cell's writer
-    /// and followers apart, of one cell.
+    /// Its connection's number, which the daemon gives each in turn: what tells a cell's writers
+    /// over time apart.
     pub connection: u64,
     /// Its cell.
     pub cell: u64,
     /// Its cell's directory, as the daemon has it: without symbolic links.
     pub path: PathBuf,
-    /// Whether it follows its cell (backlog doc-8), or writes it.
-    pub follower: bool,
     /// The commit it said it was built of, if it did ([`super::wire::BUILD`]).
     pub build: Option<String>,
     /// Its window's second stage, as it said ([`super::wire::STAGE_COUNTS`]).
@@ -208,7 +206,7 @@ pub(super) fn vms() -> Vec<Vm> {
 }
 
 /// The builds the VM processes connected said, by their cells, each with how many said
-/// it (`metrics`, TASK-111.7): a writer and its followers are of one cell. In order of cell and
+/// it (`metrics`, TASK-111.7). In order of cell and
 /// commit.
 pub(super) fn vm_builds() -> Vec<((u64, String), usize)> {
     let mut counted = BTreeMap::new();
@@ -253,8 +251,6 @@ struct Opened {
     /// Its directory, without symbolic links.
     path: PathBuf,
     cell: u64,
-    /// Whether the connection follows it (backlog doc-8), or writes it.
-    follower: bool,
 }
 
 /// An ask a VM process has yet to answer ([`Report::ask`]): its number, when it was made, and
@@ -307,10 +303,9 @@ impl Report {
         report
     }
 
-    /// The connection opened the cell of `cell` at `path`, which it follows if `follower`, once
-    /// for good.
-    pub fn opened(&self, path: PathBuf, cell: u64, follower: bool) {
-        let opened = self.opened.set(Opened { path, cell, follower });
+    /// The connection opened the cell of `cell` at `path`, once for good.
+    pub fn opened(&self, path: PathBuf, cell: u64) {
+        let opened = self.opened.set(Opened { path, cell });
         assert!(opened.is_ok(), "a connection opened a second cell");
     }
 
@@ -370,7 +365,7 @@ impl Report {
 
     /// Its VM process, as the daemon has it now, if it opened a cell: not yet answered.
     fn vm(&self) -> Option<Vm> {
-        let Opened { path, cell, follower } = self.opened.get()?;
+        let Opened { path, cell } = self.opened.get()?;
         let costs = self.costs.each_ref().map(|count| count.load(Ordering::Relaxed));
         let installed = self.installed.load(Ordering::Relaxed);
         let private = self.private.load(Ordering::Relaxed);
@@ -379,7 +374,6 @@ impl Report {
             connection: self.id,
             cell: *cell,
             path: path.clone(),
-            follower: *follower,
             build: self.build.get().cloned(),
             stage: StageCounts { costs, installed, private },
             budget: window.and_then(|(_, budget)| (*budget != 0).then_some(*budget)),

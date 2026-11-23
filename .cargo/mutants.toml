@@ -5,7 +5,6 @@ exclude_globs = [
     "crates/cladefs/src/bin/cladefs-gets.rs",
     "**/shuttle_tests.rs",
     "crates/cladefs/src/import/testing.rs",
-    "crates/follower/src/shuttle_*.rs",
 ]
 # The same modules written inline.
 exclude_re = ["shuttle_tests::"]

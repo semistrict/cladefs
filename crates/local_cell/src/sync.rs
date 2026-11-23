@@ -85,8 +85,8 @@ pub fn wait_here<F: std::future::Future>(future: F) -> F::Output {
 
 /// cladefs: a lock its takers await, holding no thread meanwhile (board 2944): for the cell's
 /// locks held across work others wait for, its commit's and its flush's. Taken by one at a time;
-/// its guard, dropped, lets the next take it. Shared beyond one cell, as its followers share its
-/// writer's: a panic holding it aborts the extent daemon, as one holding a `SharedLock` does
+/// its guard, dropped, lets the next take it. Shared beyond one cell, as the cells a base is
+/// attached to share it: a panic holding it aborts the extent daemon, as one holding a `SharedLock` does
 /// ([`crate::shared::Awaited`], board 1228).
 pub(crate) struct AsyncMutex<T> {
     /// What the log calls it.
@@ -268,14 +268,6 @@ pub struct Rules {
     /// may never come, to frame them, as the commit an uploader waits for is in them (TASK-150.2,
     /// TASK-153.8, TASK-92.41).
     pub framings_end_themselves: bool,
-    /// A free of an extent sealed before keeps its data while a view older than the free lives.
-    pub keep_frees_for_views: bool,
-    /// A free of an extent a view pins keeps its data while it does.
-    pub keep_pins: bool,
-    /// A view refuses extents sealed after its commit.
-    pub views_refuse_later_extents: bool,
-    /// A view reads, of the frees kept, only those after its commit, and those it pins.
-    pub views_hold_their_commit: bool,
 }
 
 impl Rules {
@@ -288,10 +280,6 @@ impl Rules {
         close_waits_for_flushes: true,
         close_waits_for_framings: true,
         framings_end_themselves: true,
-        keep_frees_for_views: true,
-        keep_pins: true,
-        views_refuse_later_extents: true,
-        views_hold_their_commit: true,
     };
 }
 

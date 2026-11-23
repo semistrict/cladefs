@@ -15,9 +15,6 @@
 //!
 //! CASE is one of:
 //!
-//! - `lagging-view`: N commits (20,000), each writing an extent and freeing the one before, with a
-//!   view that never advances, which keeps their frees: the time of each thousand commits, as the
-//!   view lags more (TASK-92.29).
 //! - `segments`: a cell of N closed segments (2,000), each holding an extent: the time of a
 //!   thousand commits after them, and of opening the cell, and the bytes opening it reads
 //!   (TASK-92.16).
@@ -113,34 +110,6 @@ async fn commit(cell: &LocalCell<MemDir>, extent: ExtentId, freed: Option<Extent
         cell.flush().await.unwrap();
     }
     elapsed
-}
-
-/// `commits` commits, each writing an extent and freeing the one before, with a view that never
-/// advances if `viewing`: the time each takes, by five thousands.
-async fn commits_freeing(commits: u64, viewing: bool) {
-    let cell = create(MemDir::new(), Options::default());
-    commit(&cell, extent(0), None).await;
-    let view = viewing.then(|| cell.view());
-    let mut elapsed = Duration::ZERO;
-    for sequence in 1..=commits {
-        elapsed += commit(&cell, extent(sequence), Some(extent(sequence - 1))).await;
-        if sequence.is_multiple_of(5000) {
-            let first = sequence - 4999;
-            println!("commits {first:>6} to {sequence:>6}: {:8.1} µs each", each(elapsed, 5000));
-            elapsed = Duration::ZERO;
-        }
-    }
-    let stats = cell.view_stats();
-    let kept = cell.usage().unwrap().kept_for_views;
-    println!("views: {}, {} commits behind, keeping {kept} bytes", stats.views, stats.behind);
-    drop(view);
-}
-
-async fn lagging_view(commits: u64) {
-    println!("with no view:");
-    commits_freeing(commits, false).await;
-    println!("with a view that never advances:");
-    commits_freeing(commits, true).await;
 }
 
 async fn segments(count: u64) {
@@ -713,7 +682,6 @@ fn main() {
     // The bench's runtime, as a daemon's: its cells' uploaders run on it, and its steps.
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     match args.get(1).map(String::as_str) {
-        Some("lagging-view") => runtime.block_on(lagging_view(n(20_000))),
         Some("segments") => runtime.block_on(segments(n(2_000))),
         Some("close-now") => runtime.block_on(close_now(n(32))),
         Some("burst") => runtime.block_on(burst(n(256))),
@@ -722,7 +690,7 @@ fn main() {
         Some("writes") => runtime.block_on(writes(n(256))),
         _ => {
             eprintln!(
-                "usage: cell-bench lagging-view|segments|close-now|burst|durable|framing|writes \
+                "usage: cell-bench segments|close-now|burst|durable|framing|writes \
                  [N]"
             );
             std::process::exit(2);

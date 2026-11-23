@@ -31,9 +31,9 @@ pub struct Stats {
     pub reads: u64,
     /// The bytes `READ` requests read.
     pub read_bytes: u64,
-    /// Of those, the bytes read straight from the local cell or object storage: of open extents,
-    /// and followers'. Sealed extents' are read through the extent cache, whose page-ins count what
-    /// it reads of them (TASK-32).
+    /// Of those, the bytes read straight from the local cell or object storage: of open extents.
+    /// Sealed extents' are read through the extent cache, whose page-ins count what it reads of
+    /// them (TASK-32).
     pub read_stored_bytes: u64,
     /// cladefs: parts of extents fetched into the host's cache ahead of forks' guests, as their
     /// versions' read evidence predicted them, not found kept (TASK-702.3).

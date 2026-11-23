@@ -46,8 +46,7 @@ fi
 
 if (( ${#crates[@]} == 0 )); then
     crates=(virtio_extent block_device extent_frame extent_store extent_remote extent_keys
-            fxfs-posix follower follower_history sqlite_cladefs fxfs-sim-diff fxfs-automount
-            cladefs-examples cladefs)
+            fxfs-posix sqlite_cladefs fxfs-sim-diff fxfs-automount cladefs-examples cladefs)
 fi
 logs=${CLADEFS_MIRI_LOGS:-$(mktemp -d)}
 mkdir -p "$logs"

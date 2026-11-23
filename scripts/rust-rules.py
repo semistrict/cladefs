@@ -296,9 +296,8 @@ def off_host_fs(path, text):
 # cladefs: the crates whose code falls back silently at its peril: the daemon's, and what it is
 # built of, cladefs's own. Fuchsia's crates are upstream's; the simulations and examples are tests.
 FALLBACK_CRATES = (
-    "block_device", "bucket_cell", "cladefs", "extent_frame", "extent_keys", "follower",
-    "follower_history", "fxfs-automount", "fxfs-posix", "host_fs", "local_cell", "node_local",
-    "sqlite_cladefs", "virtio_extent",
+    "block_device", "bucket_cell", "cladefs", "extent_frame", "extent_keys", "fxfs-automount",
+    "fxfs-posix", "host_fs", "local_cell", "node_local", "sqlite_cladefs", "virtio_extent",
 )
 # An error dropped: a pattern of any `Err`, its error unnamed; a `Result` made an `Option`; a
 # closure given the error that ignores it; a `Result` awaited and made a value at once.
@@ -486,8 +485,8 @@ RULES = [
     (silent_fallback, []),
     (process_wide_static, []),
     (mixed_orderings, [
-        "latest-listens-relaxed", "latest-rises-relaxed", "occurrence-happens-relaxed",
-        "occurrence-listens-relaxed", "answers-release-no-capacity", "capacities-read-relaxed",
+        "occurrence-happens-relaxed", "occurrence-listens-relaxed", "answers-release-no-capacity",
+        "capacities-read-relaxed",
     ]),
     (pattern_rule(
         "unbounded-semaphore", r"Semaphore::MAX_PERMITS",

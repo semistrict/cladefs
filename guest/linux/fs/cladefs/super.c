@@ -15,7 +15,6 @@
 
 #include <linux/backing-dev.h>
 #include <linux/dax.h>
-#include <linux/delay.h>
 #include <linux/exportfs.h>
 #include <linux/fiemap.h>
 #include <linux/sizes.h>
@@ -58,15 +57,9 @@ static const struct inode_operations cladefs_vfs_dir_inode_operations;
 static const struct inode_operations cladefs_vfs_file_inode_operations;
 static const struct inode_operations cladefs_vfs_symlink_inode_operations;
 static const struct inode_operations cladefs_vfs_special_inode_operations;
-static const struct inode_operations cladefs_vfs_follower_dir_inode_operations;
-static const struct inode_operations cladefs_vfs_follower_file_inode_operations;
-static const struct inode_operations cladefs_vfs_follower_symlink_inode_operations;
-static const struct inode_operations cladefs_vfs_follower_special_inode_operations;
 static const struct file_operations cladefs_vfs_dir_operations;
 static const struct file_operations cladefs_vfs_file_operations;
-static const struct file_operations cladefs_vfs_follower_file_operations;
 static const struct address_space_operations cladefs_vfs_aops;
-static const struct dentry_operations cladefs_vfs_follower_dentry_operations;
 
 static struct kmem_cache *cladefs_vfs_inode_cache;
 
@@ -142,16 +135,11 @@ static void cladefs_vfs_set_attr(struct inode *inode, const struct cladefs_attr 
 	inode_set_ctime_to_ts(inode, ns_to_timespec64(attr->ctime_ns));
 }
 
-/*
- * The inode `attr` describes, read in if it is not cached, or cladefs: `created` just now. A follower's
- * with operations of its own, which take its fill barrier where a writer's have nothing to (vfs.h):
- * a writer's are as they would be without followers.
- */
+/* The inode `attr` describes, read in if it is not cached, or cladefs: `created` just now. */
 static struct inode *cladefs_vfs_iget_as(struct super_block *sb, const struct cladefs_attr *attr,
 				      bool created)
 {
 	struct inode *inode = iget_locked(sb, attr->ino);
-	bool follows = cladefs_vfs_follows(sb);
 
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
@@ -160,15 +148,12 @@ static struct inode *cladefs_vfs_iget_as(struct super_block *sb, const struct cl
 	cladefs_vfs_set_attr(inode, attr);
 	switch (attr->mode & S_IFMT) {
 	case S_IFDIR:
-		inode->i_op = follows ? &cladefs_vfs_follower_dir_inode_operations :
-					&cladefs_vfs_dir_inode_operations;
+		inode->i_op = &cladefs_vfs_dir_inode_operations;
 		inode->i_fop = &cladefs_vfs_dir_operations;
 		break;
 	case S_IFREG:
-		inode->i_op = follows ? &cladefs_vfs_follower_file_inode_operations :
-					&cladefs_vfs_file_inode_operations;
-		inode->i_fop = follows ? &cladefs_vfs_follower_file_operations :
-					 &cladefs_vfs_file_operations;
+		inode->i_op = &cladefs_vfs_file_inode_operations;
+		inode->i_fop = &cladefs_vfs_file_operations;
 		inode->i_mapping->a_ops = &cladefs_vfs_aops;
 		/*
 		 * Small files too: they share extents, and the window's mappings of them. cladefs:
@@ -178,20 +163,15 @@ static struct inode *cladefs_vfs_iget_as(struct super_block *sb, const struct cl
 			break;
 		/*
 		 * In the page cache, in large folios, up to what one write to Fxfs takes
-		 * (cladefs_vfs_writepages). cladefs: a follower's in pages, which its batches drop
-		 * ranges of, a page's alone where a large folio's would be split or kept.
+		 * (cladefs_vfs_writepages).
 		 */
-		if (!follows)
-			mapping_set_folio_order_range(inode->i_mapping, 0,
-						      ilog2(CLADEFS_IO_MAX / PAGE_SIZE));
+		mapping_set_folio_order_range(inode->i_mapping, 0, ilog2(CLADEFS_IO_MAX / PAGE_SIZE));
 		break;
 	case S_IFLNK:
-		inode->i_op = follows ? &cladefs_vfs_follower_symlink_inode_operations :
-					&cladefs_vfs_symlink_inode_operations;
+		inode->i_op = &cladefs_vfs_symlink_inode_operations;
 		break;
 	default:
-		inode->i_op = follows ? &cladefs_vfs_follower_special_inode_operations :
-					&cladefs_vfs_special_inode_operations;
+		inode->i_op = &cladefs_vfs_special_inode_operations;
 		init_special_inode(inode, inode->i_mode, new_decode_dev(attr->rdev));
 		break;
 	}
@@ -254,32 +234,20 @@ int cladefs_vfs_write_attr(struct inode *inode, u32 valid)
 static struct dentry *cladefs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 				      unsigned int flags)
 {
-	/* cladefs: a follower's dentry is as of its directory's generation before the lookup. */
-	unsigned long gen = atomic64_read(&cladefs_vfs_inode(dir)->gen);
 	struct cladefs_attr attr;
 	struct inode *inode = NULL;
-	struct dentry *found;
 	int err;
 
 	/* Which keeps names longer than Linux's out of Fxfs, which has no limit of its own. */
 	if (dentry->d_name.len > NAME_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
-	/* cladefs: a follower's name, and its inode, as of one state, cached before a batch. */
-	cladefs_vfs_fill_begin(dir->i_sb);
 	err = cladefs_nofs(cladefs_lookup(cladefs_vfs_fs(dir->i_sb), dir->i_ino, dentry->d_name.name,
 				    dentry->d_name.len, &attr));
 	if (!err)
 		inode = cladefs_vfs_iget(dir->i_sb, &attr);
-	if (err && err != -ENOENT) {
-		cladefs_vfs_fill_end(dir->i_sb);
+	if (err && err != -ENOENT)
 		return ERR_PTR(err);
-	}
-	WRITE_ONCE(dentry->d_time, gen);
-	found = d_splice_alias(inode, dentry);
-	if (!IS_ERR_OR_NULL(found))
-		WRITE_ONCE(found->d_time, gen);
-	cladefs_vfs_fill_end(dir->i_sb);
-	return found;
+	return d_splice_alias(inode, dentry);
 }
 
 /* cladefs: the attribute flags statx says of `inode`, as lsattr does (xfstests generic/424). */
@@ -351,37 +319,6 @@ static int cladefs_vfs_getattr(struct mnt_idmap *idmap, const struct path *path,
 }
 
 /*
- * cladefs: a follower's inode's attributes, which its batches set as they apply
- * (cladefs_vfs_settle_file), read under its fill barrier: none as of a batch half settled.
- */
-static int cladefs_vfs_follower_getattr(struct mnt_idmap *idmap, const struct path *path,
-				     struct kstat *stat, u32 request_mask, unsigned int flags)
-{
-	struct inode *inode = d_inode(path->dentry);
-
-	cladefs_vfs_fill_begin(inode->i_sb);
-	generic_fillattr(idmap, request_mask, inode, stat);
-	cladefs_vfs_stat_flags(inode, stat);
-	cladefs_vfs_fill_end(inode->i_sb);
-	return 0;
-}
-
-/*
- * cladefs: a follower's dentry is valid while its directory's entries are as they were when it was
- * looked up: a batch that changed them bumps the directory's generation (cladefs_vfs_drop_entries), and
- * the dentry is looked up again, as FUSE's and NFS's are. Its name, or its absence, may be gone.
- */
-static int cladefs_vfs_d_revalidate(struct inode *dir, const struct qstr *name,
-				 struct dentry *dentry, unsigned int flags)
-{
-	return READ_ONCE(dentry->d_time) == (unsigned long)atomic64_read(&cladefs_vfs_inode(dir)->gen);
-}
-
-static const struct dentry_operations cladefs_vfs_follower_dentry_operations = {
-	.d_revalidate = cladefs_vfs_d_revalidate,
-};
-
-/*
  * Instantiates `dentry`, a new name in `dir`, with the inode `attr` describes, and `dir` as
  * `dir_attr` describes it: or, without `dir_attr`, as Fxfs left it, but for its times, which are
  * the kernel's, written back with it (write_inode).
@@ -449,13 +386,10 @@ static struct posix_acl *cladefs_vfs_get_acl(struct inode *inode, int type, bool
 		return ERR_PTR(-ECHILD);
 	if (!name)
 		return ERR_PTR(-EINVAL);
-	/* cladefs: a follower's size and value, as of one state. */
-	cladefs_vfs_fill_begin(inode->i_sb);
 	size = cladefs_nofs(cladefs_getxattr(fs, inode->i_ino, name, strlen(name), NULL, 0));
 	value = size > 0 ? kmalloc(size, GFP_KERNEL) : NULL;
 	if (value)
 		size = cladefs_nofs(cladefs_getxattr(fs, inode->i_ino, name, strlen(name), value, size));
-	cladefs_vfs_fill_end(inode->i_sb);
 	if (size == -ENODATA || size == 0) {
 		kfree(value);
 		return NULL;
@@ -602,7 +536,7 @@ static int cladefs_vfs_acl_xattr(struct posix_acl *acl, int type, umode_t mode,
  * that way against ext4 on virtio-pmem's 83 ms, and 62 ms kept (GCE r904, r905, TASK-230). The
  * kernel holds the directory's lock exclusively as its entries change, and shared as they are
  * read: they are kept as a read under the shared lock found them, and dropped as a change begins
- * (cladefs_vfs_dir_changes). A follower's entries change under it: it keeps none.
+ * (cladefs_vfs_dir_changes).
  */
 struct cladefs_vfs_dir_listing {
 	refcount_t refs;
@@ -968,11 +902,8 @@ static int cladefs_vfs_each_extent(struct inode *inode, loff_t start, loff_t end
 		u64 len = end - at;
 		ssize_t count, i;
 
-		/* cladefs: a follower's window as of one state; `fn` may copy out, which may fault. */
-		cladefs_vfs_fill_begin(inode->i_sb);
 		count = cladefs_nofs(cladefs_extent_batch(cladefs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
 						   extents, CLADEFS_EXTENT_BATCH));
-		cladefs_vfs_fill_end(inode->i_sb);
 		if (count < 0) {
 			ret = count;
 			break;
@@ -1133,10 +1064,8 @@ static int cladefs_vfs_xattr_get(const struct xattr_handler *handler, struct den
 	ssize_t ret;
 
 	/* cladefs: into the kernel's buffer, which the VFS copies out once this returns. */
-	cladefs_vfs_fill_begin(inode->i_sb);
 	ret = cladefs_nofs(cladefs_getxattr(cladefs_vfs_fs(inode->i_sb), inode->i_ino, full, strlen(full),
 				      buf, size));
-	cladefs_vfs_fill_end(inode->i_sb);
 	return ret;
 }
 
@@ -1191,9 +1120,7 @@ static ssize_t cladefs_vfs_listxattr(struct dentry *dentry, char *buf, size_t si
 	struct inode *inode = d_inode(dentry);
 	ssize_t ret;
 
-	cladefs_vfs_fill_begin(inode->i_sb);
 	ret = cladefs_nofs(cladefs_listxattr(cladefs_vfs_fs(inode->i_sb), inode->i_ino, buf, size));
-	cladefs_vfs_fill_end(inode->i_sb);
 	return ret;
 }
 
@@ -1209,10 +1136,8 @@ static const char *cladefs_vfs_get_link(struct dentry *dentry, struct inode *ino
 	target = kmalloc(PATH_MAX, GFP_KERNEL);
 	if (!target)
 		return ERR_PTR(-ENOMEM);
-	cladefs_vfs_fill_begin(inode->i_sb);
 	len = cladefs_nofs(cladefs_readlink(cladefs_vfs_fs(inode->i_sb), inode->i_ino, target,
 				      PATH_MAX - 1));
-	cladefs_vfs_fill_end(inode->i_sb);
 	if (len < 0 || len >= PATH_MAX) {
 		kfree(target);
 		return ERR_PTR(len < 0 ? len : -ENAMETOOLONG);
@@ -1277,15 +1202,13 @@ static bool cladefs_vfs_buffer_entry(void *arg, const char *name, size_t len, u6
 
 /*
  * Keeps the entries in the cursor's buffer as the directory's listing: all of them, read from the
- * start, under the directory's lock shared, which no change of them holds meanwhile. Not a
- * follower's, whose entries change under it. Kept if it can be: a read without is only slower.
+ * start, under the directory's lock shared, which no change of them holds meanwhile. Kept if it
+ * can be: a read without is only slower.
  */
 static void cladefs_vfs_dir_keep(struct inode *inode, struct cladefs_vfs_dir_cursor *cursor)
 {
 	struct cladefs_vfs_dir_listing *listing;
 
-	if (cladefs_vfs_follows(inode->i_sb))
-		return;
 	listing = kvmalloc(struct_size(listing, entries, cursor->buffered), GFP_KERNEL);
 	if (!listing)
 		return;
@@ -1331,15 +1254,9 @@ static int cladefs_vfs_dir_fill(struct inode *inode, struct cladefs_vfs_dir_curs
 			return -ENOMEM;
 	}
 	cursor->entries = cursor->buffer;
-	/*
-	 * cladefs: a follower's entries as of one state, under its fill barrier; dir_emit copies them
-	 * out once it is let go of, as a copy may fault.
-	 */
-	cladefs_vfs_fill_begin(inode->i_sb);
 	err = cladefs_nofs(cladefs_readdir(cladefs_vfs_fs(inode->i_sb), inode->i_ino, pos - 2,
 				     resume ? cursor->name : NULL, cursor->len,
 				     cladefs_vfs_buffer_entry, cursor));
-	cladefs_vfs_fill_end(inode->i_sb);
 	/* Whatever didn't fit is still to read. */
 	cursor->last = !err && cursor->buffered + cladefs_vfs_dir_entry_size(NAME_MAX) <=
 			       CLADEFS_DIR_BUFFER;
@@ -1405,17 +1322,6 @@ static int cladefs_vfs_iterate(struct file *file, struct dir_context *ctx)
 	}
 }
 
-/*
- * cladefs: a follower's pages are read in under its fill barrier, which what reads them in takes
- * (read(2), splice, fadvise, a fault): before the invalidate_lock, which the page cache holds as it
- * calls in.
- */
-static void cladefs_vfs_assert_filling(struct inode *inode)
-{
-	if (cladefs_vfs_follows(inode->i_sb) && !cladefs_follow_skip_barrier)
-		lockdep_assert_held(&cladefs_vfs_info(inode->i_sb)->fill_barrier);
-}
-
 /* Fills `folio` with file `inode`'s data, and zeros past its end. */
 static int cladefs_vfs_fill_folio(struct inode *inode, struct folio *folio)
 {
@@ -1423,7 +1329,6 @@ static int cladefs_vfs_fill_folio(struct inode *inode, struct folio *folio)
 	void *addr = folio_address(folio);
 	ssize_t n;
 
-	cladefs_vfs_assert_filling(inode);
 	n = cladefs_nofs(cladefs_read(cladefs_vfs_fs(inode->i_sb), inode->i_ino, folio_pos(folio), addr,
 				size));
 	if (n < 0)
@@ -1491,20 +1396,17 @@ static void cladefs_vfs_read_work(struct work_struct *work)
  * Reads the folios of `rac` with one read, from the device's transfer buffer straight into them.
  * cladefs: off the reader, on the filesystem's readahead workqueue, which `rac`'s reader then waits
  * for only on reaching a folio it hasn't filled yet: before, each window blocked the reader for
- * a round trip, and two copies through buffers as large as it (TASK-92.9). A follower's in its
- * reader, under its fill barrier. Folios it can't have the memory for are read one at a time
- * (cladefs_vfs_read_folio).
+ * a round trip, and two copies through buffers as large as it (TASK-92.9). Folios it can't have
+ * the memory for are read one at a time (cladefs_vfs_read_folio).
  */
 static void cladefs_vfs_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
 	struct cladefs_vfs_info *info = cladefs_vfs_info(inode->i_sb);
-	struct workqueue_struct *readahead = info->filesystem->readahead;
 	unsigned int nr = readahead_count(rac), i = 0;
 	struct cladefs_vfs_read *read;
 	struct folio *folio;
 
-	cladefs_vfs_assert_filling(inode);
 	/* Folios at least a page each: room for as many folios as pages. */
 	read = kmalloc(struct_size(read, parts, nr) + nr * sizeof(*read->folios), GFP_NOFS);
 	if (!read)
@@ -1520,13 +1422,8 @@ static void cladefs_vfs_readahead(struct readahead_control *rac)
 		i++;
 	}
 	read->nr = i;
-	if (!readahead) {
-		cladefs_vfs_read_folios(read);
-		kfree(read);
-		return;
-	}
 	INIT_WORK(&read->work, cladefs_vfs_read_work);
-	queue_work(readahead, &read->work);
+	queue_work(info->filesystem->readahead, &read->work);
 }
 
 /*
@@ -2061,8 +1958,7 @@ static int cladefs_vfs_writepages(struct address_space *mapping, struct writebac
  * O_DIRECT's reads and writes of a file in the page cache: straight to and from Fxfs, through a
  * buffer, CLADEFS_IO_MAX bytes at a time, once the VFS has written back and dropped the page cache's
  * range (generic_file_read_iter, generic_file_direct_write). They needn't be aligned. A DAX file's
- * reads and writes are direct already (cladefs_dax_file_operations). cladefs: a follower's are refused,
- * as they would read outside its fill barrier (vfs.h).
+ * reads and writes are direct already (cladefs_dax_file_operations).
  */
 static ssize_t cladefs_vfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
@@ -2074,8 +1970,6 @@ static ssize_t cladefs_vfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	size_t past_end = 0;
 	void *buf;
 
-	if (cladefs_vfs_follows(inode->i_sb))
-		return -EINVAL;
 	if (!write) {
 		if (pos >= size)
 			return 0;
@@ -2175,86 +2069,50 @@ int cladefs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	return err;
 }
 
-/*
- * Each kind of inode's operations, a writer's; cladefs: and a follower's, which read its attributes
- * under its fill barrier (cladefs_vfs_follower_getattr).
- */
-#define CLADEFS_VFS_DIR_INODE_OPERATIONS		\
-	.lookup = cladefs_vfs_lookup,		\
-	.create = cladefs_vfs_create,		\
-	.mkdir = cladefs_vfs_mkdir,		\
-	.mknod = cladefs_vfs_mknod,		\
-	.symlink = cladefs_vfs_symlink,		\
-	.link = cladefs_vfs_link,			\
-	.unlink = cladefs_vfs_unlink,		\
-	.rmdir = cladefs_vfs_unlink,		\
-	.rename = cladefs_vfs_rename,		\
-	.tmpfile = cladefs_vfs_tmpfile,		\
-	.setattr = cladefs_vfs_setattr,		\
-	.listxattr = cladefs_vfs_listxattr,	\
-	.get_inode_acl = cladefs_vfs_get_acl,	\
-	.set_acl = cladefs_vfs_set_acl,		\
-	.fileattr_get = cladefs_vfs_fileattr_get,	\
-	.fileattr_set = cladefs_vfs_fileattr_set
-
-#define CLADEFS_VFS_FILE_INODE_OPERATIONS		\
-	.setattr = cladefs_vfs_setattr,		\
-	.listxattr = cladefs_vfs_listxattr,	\
-	.fiemap = cladefs_vfs_fiemap,		\
-	.get_inode_acl = cladefs_vfs_get_acl,	\
-	.set_acl = cladefs_vfs_set_acl,		\
-	.fileattr_get = cladefs_vfs_fileattr_get,	\
-	.fileattr_set = cladefs_vfs_fileattr_set
-
-#define CLADEFS_VFS_SYMLINK_INODE_OPERATIONS	\
-	.get_link = cladefs_vfs_get_link,		\
-	.setattr = cladefs_vfs_setattr,		\
-	.listxattr = cladefs_vfs_listxattr
-
-#define CLADEFS_VFS_SPECIAL_INODE_OPERATIONS	\
-	.setattr = cladefs_vfs_setattr,		\
-	.listxattr = cladefs_vfs_listxattr,	\
-	.get_inode_acl = cladefs_vfs_get_acl,	\
-	.set_acl = cladefs_vfs_set_acl
-
 static const struct inode_operations cladefs_vfs_dir_inode_operations = {
-	CLADEFS_VFS_DIR_INODE_OPERATIONS,
+	.lookup = cladefs_vfs_lookup,
+	.create = cladefs_vfs_create,
+	.mkdir = cladefs_vfs_mkdir,
+	.mknod = cladefs_vfs_mknod,
+	.symlink = cladefs_vfs_symlink,
+	.link = cladefs_vfs_link,
+	.unlink = cladefs_vfs_unlink,
+	.rmdir = cladefs_vfs_unlink,
+	.rename = cladefs_vfs_rename,
+	.tmpfile = cladefs_vfs_tmpfile,
+	.setattr = cladefs_vfs_setattr,
 	.getattr = cladefs_vfs_getattr,
+	.listxattr = cladefs_vfs_listxattr,
+	.get_inode_acl = cladefs_vfs_get_acl,
+	.set_acl = cladefs_vfs_set_acl,
+	.fileattr_get = cladefs_vfs_fileattr_get,
+	.fileattr_set = cladefs_vfs_fileattr_set,
 };
 
 static const struct inode_operations cladefs_vfs_file_inode_operations = {
-	CLADEFS_VFS_FILE_INODE_OPERATIONS,
+	.setattr = cladefs_vfs_setattr,
 	.getattr = cladefs_vfs_getattr,
+	.listxattr = cladefs_vfs_listxattr,
+	.fiemap = cladefs_vfs_fiemap,
+	.get_inode_acl = cladefs_vfs_get_acl,
+	.set_acl = cladefs_vfs_set_acl,
+	.fileattr_get = cladefs_vfs_fileattr_get,
+	.fileattr_set = cladefs_vfs_fileattr_set,
 };
 
 static const struct inode_operations cladefs_vfs_symlink_inode_operations = {
-	CLADEFS_VFS_SYMLINK_INODE_OPERATIONS,
+	.get_link = cladefs_vfs_get_link,
+	.setattr = cladefs_vfs_setattr,
 	.getattr = cladefs_vfs_getattr,
+	.listxattr = cladefs_vfs_listxattr,
 };
 
 static const struct inode_operations cladefs_vfs_special_inode_operations = {
-	CLADEFS_VFS_SPECIAL_INODE_OPERATIONS,
+	.setattr = cladefs_vfs_setattr,
 	.getattr = cladefs_vfs_getattr,
-};
-
-static const struct inode_operations cladefs_vfs_follower_dir_inode_operations = {
-	CLADEFS_VFS_DIR_INODE_OPERATIONS,
-	.getattr = cladefs_vfs_follower_getattr,
-};
-
-static const struct inode_operations cladefs_vfs_follower_file_inode_operations = {
-	CLADEFS_VFS_FILE_INODE_OPERATIONS,
-	.getattr = cladefs_vfs_follower_getattr,
-};
-
-static const struct inode_operations cladefs_vfs_follower_symlink_inode_operations = {
-	CLADEFS_VFS_SYMLINK_INODE_OPERATIONS,
-	.getattr = cladefs_vfs_follower_getattr,
-};
-
-static const struct inode_operations cladefs_vfs_follower_special_inode_operations = {
-	CLADEFS_VFS_SPECIAL_INODE_OPERATIONS,
-	.getattr = cladefs_vfs_follower_getattr,
+	.listxattr = cladefs_vfs_listxattr,
+	.get_inode_acl = cladefs_vfs_get_acl,
+	.set_acl = cladefs_vfs_set_acl,
 };
 
 static long cladefs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
@@ -2269,147 +2127,6 @@ static const struct file_operations cladefs_vfs_dir_operations = {
 	.unlocked_ioctl = cladefs_vfs_dir_ioctl,
 	.compat_ioctl = compat_ptr_ioctl,
 };
-
-int cladefs_vfs_file_open(struct inode *inode, struct file *file)
-{
-	int err = generic_file_open(inode, file);
-	unsigned int nofs;
-
-	if (!err && cladefs_vfs_follows(inode->i_sb)) {
-		cladefs_vfs_fill_begin(inode->i_sb);
-		nofs = memalloc_nofs_save();
-		err = cladefs_hold(cladefs_vfs_fs(inode->i_sb), inode->i_ino);
-		memalloc_nofs_restore(nofs);
-		cladefs_vfs_fill_end(inode->i_sb);
-	}
-	return err;
-}
-
-int cladefs_vfs_file_release(struct inode *inode, struct file *file)
-{
-	unsigned int nofs;
-
-	if (cladefs_vfs_follows(inode->i_sb)) {
-		nofs = memalloc_nofs_save();
-		cladefs_release(cladefs_vfs_fs(inode->i_sb), inode->i_ino);
-		memalloc_nofs_restore(nofs);
-	}
-	return 0;
-}
-
-/* The most a follower's read(2) copies holding its fill barrier: what a batch waits for at most. */
-#define CLADEFS_FOLLOW_READ_CHUNK (1 << 20)
-
-ssize_t cladefs_vfs_follower_read(struct kiocb *iocb, struct iov_iter *to,
-			       ssize_t (*read)(struct kiocb *iocb, struct iov_iter *to))
-{
-	struct inode *inode = file_inode(iocb->ki_filp);
-	ssize_t done = 0, ret;
-
-	for (;;) {
-		size_t count = iov_iter_count(to), chunk = min_t(size_t, count, CLADEFS_FOLLOW_READ_CHUNK);
-		size_t left;
-		bool faults;
-
-		if (!(iocb->ki_flags & IOCB_NOWAIT)) {
-			cladefs_vfs_fill_begin(inode->i_sb);
-		} else if (!cladefs_vfs_fill_try(inode->i_sb)) {
-			ret = -EAGAIN;
-			break;
-		}
-		iov_iter_truncate(to, chunk);
-		faults = READ_ONCE(cladefs_follow_read_faults);
-		if (!faults)
-			pagefault_disable();
-		ret = read(iocb, to);
-		if (!faults)
-			pagefault_enable();
-		cladefs_vfs_fill_end(inode->i_sb);
-		left = iov_iter_count(to);
-		iov_iter_reexpand(to, left + count - chunk);
-		if (ret > 0)
-			done += ret;
-		else if (ret != -EFAULT)
-			break;
-		if (!iov_iter_count(to))
-			break;
-		if (!left)
-			continue;
-		/* Short of the chunk: at the file's end, or at a page of the reader's not in. */
-		if (ret > 0 && iocb->ki_pos >= i_size_read(inode))
-			break;
-		if (!user_backed_iter(to) || fault_in_iov_iter_writeable(to, left) == left) {
-			ret = -EFAULT;
-			break;
-		}
-	}
-	return done ? done : ret;
-}
-
-/*
- * cladefs: a follower's read(2) of a file in the page cache, under its fill barrier, which its pages
- * are read in, and copied from, under (cladefs_vfs_follower_read).
- */
-static ssize_t cladefs_vfs_follower_read_iter(struct kiocb *iocb, struct iov_iter *to)
-{
-	return cladefs_vfs_follower_read(iocb, to, generic_file_read_iter);
-}
-
-/* cladefs: a follower's pages, read in and spliced under its fill barrier: kernel copies only. */
-static ssize_t cladefs_vfs_follower_splice_read(struct file *in, loff_t *ppos,
-					     struct pipe_inode_info *pipe, size_t len,
-					     unsigned int flags)
-{
-	struct super_block *sb = file_inode(in)->i_sb;
-	ssize_t ret;
-
-	cladefs_vfs_fill_begin(sb);
-	ret = filemap_splice_read(in, ppos, pipe, len, flags);
-	cladefs_vfs_fill_end(sb);
-	return ret;
-}
-
-/* cladefs: a follower's readahead (fadvise, madvise, readahead(2)), under its fill barrier. */
-static int cladefs_vfs_follower_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
-{
-	struct super_block *sb = file_inode(file)->i_sb;
-	int ret;
-
-	cladefs_vfs_fill_begin(sb);
-	ret = generic_fadvise(file, offset, len, advice);
-	cladefs_vfs_fill_end(sb);
-	return ret;
-}
-
-/*
- * cladefs: a follower's fault of a page of a file in the page cache, read in under its fill barrier,
- * taken before the invalidate_lock filemap_fault takes. Pages already cached are mapped as they
- * are (filemap_map_pages): a batch drops those it changes before it applies.
- */
-static vm_fault_t cladefs_vfs_follower_fault(struct vm_fault *vmf)
-{
-	struct super_block *sb = file_inode(vmf->vma->vm_file)->i_sb;
-	vm_fault_t ret;
-
-	cladefs_vfs_fill_begin(sb);
-	ret = filemap_fault(vmf);
-	cladefs_vfs_fill_end(sb);
-	return ret;
-}
-
-static const struct vm_operations_struct cladefs_vfs_follower_vm_ops = {
-	.fault = cladefs_vfs_follower_fault,
-	.map_pages = filemap_map_pages,
-};
-
-static int cladefs_vfs_follower_mmap(struct file *file, struct vm_area_struct *vma)
-{
-	int err = generic_file_mmap(file, vma);
-
-	if (!err)
-		vma->vm_ops = &cladefs_vfs_follower_vm_ops;
-	return err;
-}
 
 /*
  * cladefs: a store through a shared mapping to a folio of a file in the page cache, which dirties it
@@ -2532,8 +2249,7 @@ static const struct cladefs_data_ops cladefs_vfs_cache_data = {
 };
 
 static const struct file_operations cladefs_vfs_file_operations = {
-	.open = cladefs_vfs_file_open,
-	.release = cladefs_vfs_file_release,
+	.open = generic_file_open,
 	.llseek = cladefs_vfs_llseek,
 	.read_iter = generic_file_read_iter,
 	.write_iter = generic_file_write_iter,
@@ -2543,18 +2259,6 @@ static const struct file_operations cladefs_vfs_file_operations = {
 	.fsync = cladefs_vfs_fsync,
 	.fallocate = cladefs_data_fallocate,
 	.remap_file_range = cladefs_data_remap_file_range,
-};
-
-/* cladefs: a follower's regular files, in the page cache: read-only, under its fill barrier. */
-static const struct file_operations cladefs_vfs_follower_file_operations = {
-	.open = cladefs_vfs_file_open,
-	.release = cladefs_vfs_file_release,
-	.llseek = cladefs_vfs_llseek,
-	.read_iter = cladefs_vfs_follower_read_iter,
-	.mmap = cladefs_vfs_follower_mmap,
-	.fadvise = cladefs_vfs_follower_fadvise,
-	.splice_read = cladefs_vfs_follower_splice_read,
-	.fsync = cladefs_vfs_fsync,
 };
 
 /*
@@ -2719,10 +2423,8 @@ static int cladefs_vfs_filesystem_thaw(struct cladefs_vfs_filesystem *filesystem
 	 * cladefs: a store resized while the VM was away, snapshotted, told it nothing: what the device
 	 * says now it takes as if told, before anything thawed sees the filesystem's size.
 	 */
-	if (!cladefs_filesystem_follows(filesystem->filesystem)) {
-		schedule_work(&filesystem->resize);
-		flush_work(&filesystem->resize);
-	}
+	schedule_work(&filesystem->resize);
+	flush_work(&filesystem->resize);
 	return 0;
 }
 
@@ -2803,8 +2505,7 @@ static int cladefs_vfs_unfreeze_fs(struct super_block *sb)
  * VFS freezes and thaws one without a call to the filesystem (freeze_super calls no freeze_fs for
  * it), whose freeze, waiting for every superblock, would otherwise never come, and its VM never be
  * snapshotted, though each fsfreeze returned 0 (TASK-202). A writable one's freeze_fs and
- * unfreeze_fs keep. A follower's isn't: its device can't be snapshotted, and its batches go on.
- * Returns 1 if it froze or thawed the volume, 0 if not, or a -errno: a thaw that failed leaves the
+ * unfreeze_fs keep. Returns 1 if it froze or thawed the volume, 0 if not, or a -errno: a thaw that failed leaves the
  * filesystem frozen, for the next to go on. With the superblock's s_umount held, which keeps what
  * the VFS says of it.
  */
@@ -2816,7 +2517,7 @@ static int cladefs_vfs_settle_frozen(struct super_block *sb)
 	int err = 0;
 
 	lockdep_assert_held(&sb->s_umount);
-	if (!sb_rdonly(sb) || info->follows)
+	if (!sb_rdonly(sb))
 		return 0;
 	mutex_lock(&filesystem->lock);
 	if (frozen && !info->frozen)
@@ -2871,9 +2572,7 @@ static int cladefs_vfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct cladefs_statfs statfs;
 	int err;
 
-	cladefs_vfs_fill_begin(dentry->d_sb);
 	err = cladefs_nofs(cladefs_statfs(cladefs_vfs_fs(dentry->d_sb), &statfs));
-	cladefs_vfs_fill_end(dentry->d_sb);
 	if (err)
 		return err;
 	buf->f_type = CLADEFS_MAGIC;
@@ -2897,7 +2596,6 @@ static struct inode *cladefs_vfs_alloc_inode(struct super_block *sb)
 	/* cladefs: in the page cache, unless it is made a DAX inode (cladefs_dax_set_inode). */
 	fi->data = &cladefs_vfs_cache_data;
 	cladefs_dax_inode_init(&fi->dax);
-	atomic64_set(&fi->gen, 0);
 	fi->listing = NULL;
 	mutex_init(&fi->attr_lock);
 	fi->fsflags = 0;
@@ -2917,8 +2615,8 @@ static void cladefs_vfs_inode_init_once(void *fi)
 
 /*
  * What the mount is, as /proc/mounts shows it: the volume, if it isn't the default (volume), the
- * one option Fxfs takes; files map their data from the device's DAX window, if it has one (dax),
- * and the filesystem follows another VM's writes, if its device is a follower's (follow).
+ * one option Fxfs takes; and files map their data from the device's DAX window, if it has one
+ * (dax).
  */
 static int cladefs_vfs_show_options(struct seq_file *m, struct dentry *root)
 {
@@ -2928,8 +2626,6 @@ static int cladefs_vfs_show_options(struct seq_file *m, struct dentry *root)
 		seq_show_option(m, "volume", info->volume);
 	if (info->dax)
 		seq_puts(m, ",dax");
-	if (info->follows)
-		seq_puts(m, ",follow");
 	return 0;
 }
 
@@ -2995,10 +2691,8 @@ static struct dentry *cladefs_vfs_fh_to_dentry(struct super_block *sb, struct fi
 		return NULL;
 	inode = ilookup(sb, fid->i64.ino);
 	if (!inode) {
-		cladefs_vfs_fill_begin(sb);
 		err = cladefs_nofs(cladefs_getattr(cladefs_vfs_fs(sb), fid->i64.ino, &attr));
 		inode = err ? ERR_PTR(err == -ENOENT ? -ESTALE : err) : cladefs_vfs_iget(sb, &attr);
-		cladefs_vfs_fill_end(sb);
 		if (IS_ERR(inode))
 			return ERR_CAST(inode);
 	}
@@ -3029,121 +2723,6 @@ static void cladefs_vfs_changed(void *arg)
 	struct cladefs_vfs_filesystem *filesystem = arg;
 
 	schedule_work(&filesystem->resize);
-}
-
-DEFINE_STATIC_KEY_FALSE(cladefs_vfs_followers);
-
-/* cladefs: the torture test's knobs (vfs.h). */
-unsigned int cladefs_follow_apply_delay_us;
-module_param_named(follow_apply_delay_us, cladefs_follow_apply_delay_us, uint, 0644);
-MODULE_PARM_DESC(follow_apply_delay_us,
-		 "A follower's delay between applying a batch and settling it (tests)");
-unsigned int cladefs_follow_iomap_delay_us;
-module_param_named(follow_iomap_delay_us, cladefs_follow_iomap_delay_us, uint, 0644);
-MODULE_PARM_DESC(follow_iomap_delay_us,
-		 "A follower's delay between an iomap's extents and its mapping (tests)");
-bool cladefs_follow_skip_drop;
-module_param_named(follow_skip_drop, cladefs_follow_skip_drop, bool, 0644);
-MODULE_PARM_DESC(follow_skip_drop,
-		 "A follower's batch drops and settles nothing: a mutation the tests catch");
-/* Read-only once booted: a reader takes the barrier, and lets go of it, as it was set. */
-bool cladefs_follow_skip_barrier;
-module_param_named(follow_skip_barrier, cladefs_follow_skip_barrier, bool, 0444);
-MODULE_PARM_DESC(follow_skip_barrier,
-		 "A follower's readers take no fill barrier: a mutation the tests catch");
-bool cladefs_follow_read_faults;
-module_param_named(follow_read_faults, cladefs_follow_read_faults, bool, 0644);
-MODULE_PARM_DESC(follow_read_faults,
-		 "A follower's read(2) copies fault under its fill barrier: a mutation the tests catch");
-bool cladefs_follow_fail_batch;
-module_param_named(follow_fail_batch, cladefs_follow_fail_batch, bool, 0644);
-MODULE_PARM_DESC(follow_fail_batch, "A follower's batches fail once applied (tests)");
-
-/* cladefs: a follower's batch, as its device tells of its writer's commits. */
-static void cladefs_vfs_follow_work(struct work_struct *work)
-{
-	struct cladefs_vfs_info *info = container_of(work, struct cladefs_vfs_info, follow);
-	int err = cladefs_nofs(cladefs_follow(info->fs));
-
-	if (err)
-		pr_warn_ratelimited("cladefs: following the writer: %d\n", err);
-}
-
-/* cladefs: a follower's device tells of its writer's commits: from its interrupt. */
-static void cladefs_vfs_committed(void *arg)
-{
-	struct cladefs_vfs_info *info = arg;
-
-	schedule_work(&info->follow);
-}
-
-/* cladefs: a follower's primitives (cladefs.h), of the superblock `vfs`. */
-static struct cladefs_vfs_info *cladefs_vfs_follow_info(void *vfs)
-{
-	return cladefs_vfs_info(vfs);
-}
-
-/* cladefs: vfs.h's inline fill barrier shims, out of line for the follower's Rust. */
-void cladefs_vfs_fill_begin_extern(void *vfs)
-{
-	cladefs_vfs_fill_begin(vfs);
-}
-
-void cladefs_vfs_fill_end_extern(void *vfs)
-{
-	cladefs_vfs_fill_end(vfs);
-}
-
-void cladefs_vfs_fill_barrier_assert_held(void *vfs)
-{
-	if (!cladefs_follow_skip_barrier)
-		lockdep_assert_held(&cladefs_vfs_follow_info(vfs)->fill_barrier);
-}
-
-/*
- * cladefs: a follower's batch takes its fill barrier, once its readers holding it are done, and
- * keeps new ones waiting until it lets go (vfs.h): how long it waited is counted.
- */
-void cladefs_vfs_fill_barrier_take(void *vfs)
-{
-	struct cladefs_vfs_info *info = cladefs_vfs_follow_info(vfs);
-	u64 start = ktime_get_ns(), waited;
-
-	down_write(&info->fill_barrier);
-	waited = ktime_get_ns() - start;
-	WRITE_ONCE(info->follow_batches, info->follow_batches + 1);
-	WRITE_ONCE(info->fill_barrier_wait_ns, info->fill_barrier_wait_ns + waited);
-	if (waited > info->fill_barrier_wait_max_ns)
-		WRITE_ONCE(info->fill_barrier_wait_max_ns, waited);
-}
-
-void cladefs_vfs_fill_barrier_release(void *vfs)
-{
-	up_write(&cladefs_vfs_follow_info(vfs)->fill_barrier);
-}
-
-bool cladefs_vfs_follow_failing(void)
-{
-	return READ_ONCE(cladefs_follow_fail_batch);
-}
-
-void cladefs_vfs_follow_commit(void *vfs, u32 which, u64 commit)
-{
-	struct cladefs_vfs_info *info = cladefs_vfs_follow_info(vfs);
-	u64 *at = which == CLADEFS_FOLLOW_APPLIED ? &info->follow_applied : &info->follow_settled;
-
-	/* The window between a batch applied and settled, widened in tests. */
-	if (which == CLADEFS_FOLLOW_APPLIED && cladefs_follow_apply_delay_us)
-		fsleep(cladefs_follow_apply_delay_us);
-
-	/*
-	 * Its batches alone write it, and the commits they apply only move on; a batch settles what
-	 * it applied, never past it (doc-8, testing 1).
-	 */
-	WARN_ON_ONCE(commit < READ_ONCE(*at));
-	WARN_ON_ONCE(which == CLADEFS_FOLLOW_SETTLED && commit > READ_ONCE(info->follow_applied));
-	if (commit > READ_ONCE(*at))
-		smp_store_release(at, commit);
 }
 
 /* cladefs: CLADEFS_IOC_FLUSH (vfs.h). The lock keeps the filesystem from freezing under the flush. */
@@ -3219,9 +2798,6 @@ static long cladefs_vfs_ioc_import(struct super_block *sb, struct cladefs_import
 static long cladefs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct cladefs_vfs_info *info = cladefs_vfs_info(sb);
-	struct cladefs_follow_commits commits;
-	struct cladefs_follow_stats stats;
 	u64 cached;
 
 	switch (cmd) {
@@ -3233,166 +2809,14 @@ static long cladefs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned 
 	case CLADEFS_IOC_IMPORT:
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
-		if (cladefs_vfs_follows(sb))
-			return -EROFS;
 		if (cmd == CLADEFS_IOC_FLUSH)
 			return cladefs_vfs_ioc_flush(sb);
 		if (cmd == CLADEFS_IOC_MANIFEST)
 			return cladefs_vfs_ioc_manifest(sb, (void __user *)arg);
 		return cladefs_vfs_ioc_import(sb, (void __user *)arg);
-	}
-	if (!cladefs_vfs_follows(sb))
-		return -ENOTTY;
-	switch (cmd) {
-	case CLADEFS_IOC_FOLLOW_COMMITS:
-		commits.settled = smp_load_acquire(&info->follow_settled);
-		commits.applied = smp_load_acquire(&info->follow_applied);
-		return copy_to_user((void __user *)arg, &commits, sizeof(commits)) ? -EFAULT : 0;
-	case CLADEFS_IOC_FOLLOW_STATS:
-		stats.batches = READ_ONCE(info->follow_batches);
-		stats.barrier_wait_ns = READ_ONCE(info->fill_barrier_wait_ns);
-		stats.barrier_wait_max_ns = READ_ONCE(info->fill_barrier_wait_max_ns);
-		return copy_to_user((void __user *)arg, &stats, sizeof(stats)) ? -EFAULT : 0;
 	default:
 		return -ENOTTY;
 	}
-}
-
-/*
- * cladefs: a follower's file `ino`, `inode` if one is read in, whose data a batch changes from
- * `start` to `end`, exclusive: what the window maps of it, or the page cache holds, goes. Under the
- * fill barrier, which the batch holds, and with an inode, its invalidate_lock held for writing.
- */
-static void cladefs_vfs_drop_data(struct super_block *sb, struct inode *inode, u64 ino, u64 start,
-			       u64 end)
-{
-	struct cladefs_vfs_info *info = cladefs_vfs_info(sb);
-	struct cladefs_dax *dax = info->dax;
-	loff_t first = min_t(u64, start, LLONG_MAX);
-	loff_t last = end > LLONG_MAX ? LLONG_MAX : (loff_t)end - 1;
-	int err;
-
-	if (last < first)
-		return;
-	if (inode)
-		lockdep_assert_held_write(&inode->i_mapping->invalidate_lock);
-	/* cladefs: as the inode has its data: one that got no file stays in the page cache (TASK-79.97). */
-	if (dax && (!inode || IS_DAX(inode))) {
-		err = cladefs_dax_changed(dax, info->dax_volume, inode, ino, first, last);
-		if (err)
-			pr_warn("cladefs: dropping inode %llu's window mappings: %d\n", ino, err);
-		return;
-	}
-	if (!inode || !S_ISREG(inode->i_mode))
-		return;
-	err = invalidate_inode_pages2_range(inode->i_mapping, first >> PAGE_SHIFT,
-					    last >> PAGE_SHIFT);
-	if (err)
-		pr_warn("cladefs: invalidating inode %llu's pages: %d\n", ino, err);
-}
-
-/*
- * cladefs: a follower's inode takes the attributes `attr` a batch left its object with; or, gone, no
- * name links it. With its invalidate_lock held for writing, as a writer's truncate holds it: a
- * fault, holding it shared, checks its page against the size, then maps the file's chunk as large
- * as the size is. A file grown has its window's ranges past its old end dropped first, which were
- * as large as the file was (cladefs_dax_fit); a file shrunk, its mappings past its new end, as a
- * truncate's (truncate_setsize), so that a load there faults past the end. Not its i_rwsem, which
- * the VFS holds as it calls in (a directory's, as it looks up), and readers take before the fill
- * barrier (read(2)): the barrier keeps readers out.
- */
-static void cladefs_vfs_settle_attr(struct super_block *sb, struct inode *inode, u64 ino,
-				 const struct cladefs_attr *attr)
-{
-	bool resized, grows;
-
-	if (!attr) {
-		clear_nlink(inode);
-		return;
-	}
-	if ((attr->mode & S_IFMT) != (inode->i_mode & S_IFMT)) {
-		pr_warn("cladefs: inode %llu changed type\n", ino);
-		clear_nlink(inode);
-		return;
-	}
-	resized = S_ISREG(inode->i_mode) && attr->size != i_size_read(inode);
-	grows = resized && attr->size > i_size_read(inode);
-	if (grows)
-		cladefs_vfs_drop_data(sb, inode, ino, i_size_read(inode), U64_MAX);
-	cladefs_vfs_set_attr(inode, attr);
-	/* Read anew, as the writer may have changed them with what it changed (TASK-79.30). */
-	forget_all_cached_acls(inode);
-	if (resized && !grows) {
-		int err = IS_DAX(inode) ? cladefs_dax_shrunk(inode, attr->size) : 0;
-
-		if (err)
-			pr_warn("cladefs: unmapping inode %llu past its end: %d\n", ino, err);
-		truncate_pagecache(inode, attr->size);
-	}
-}
-
-/*
- * Only a follower's batches change what the kernel keeps under it, holding its fill barrier, which
- * readers wait for.
- */
-static bool cladefs_vfs_changing(struct super_block *sb)
-{
-	if (WARN_ON_ONCE(!cladefs_vfs_follows(sb)) || cladefs_follow_skip_drop)
-		return false;
-	lockdep_assert_held_write(&cladefs_vfs_info(sb)->fill_barrier);
-	return true;
-}
-
-void cladefs_vfs_drop_file(void *vfs, u64 ino, const struct cladefs_range *ranges, size_t count)
-{
-	struct super_block *sb = vfs;
-	struct inode *inode;
-	size_t i;
-
-	if (!cladefs_vfs_changing(sb))
-		return;
-	inode = ilookup(sb, ino);
-	if (inode)
-		filemap_invalidate_lock(inode->i_mapping);
-	for (i = 0; i < count; i++)
-		cladefs_vfs_drop_data(sb, inode, ino, ranges[i].start, ranges[i].end);
-	if (inode) {
-		filemap_invalidate_unlock(inode->i_mapping);
-		iput(inode);
-	}
-}
-
-void cladefs_vfs_settle_file(void *vfs, u64 ino, const struct cladefs_attr *attr, bool gone)
-{
-	struct super_block *sb = vfs;
-	struct inode *inode;
-
-	if (!cladefs_vfs_changing(sb) || (!attr && !gone))
-		return;
-	inode = ilookup(sb, ino);
-	if (!inode) {
-		/* Its window's ranges were as large as it was. */
-		if (attr && S_ISREG(attr->mode))
-			cladefs_vfs_drop_data(sb, NULL, ino, 0, U64_MAX);
-		return;
-	}
-	filemap_invalidate_lock(inode->i_mapping);
-	cladefs_vfs_settle_attr(sb, inode, ino, attr);
-	filemap_invalidate_unlock(inode->i_mapping);
-	iput(inode);
-}
-
-void cladefs_vfs_drop_entries(void *vfs, u64 ino)
-{
-	struct super_block *sb = vfs;
-	struct inode *inode;
-
-	if (!cladefs_vfs_changing(sb))
-		return;
-	inode = ilookup(sb, ino);
-	if (inode)
-		atomic64_inc(&cladefs_vfs_inode(inode)->gen);
-	iput(inode);
 }
 
 /* cladefs: /proc/fs/cladefs, where each filesystem says what it waited on, by its device's tag. */
@@ -3510,8 +2934,6 @@ static void cladefs_vfs_filesystem_close(struct cladefs_vfs_filesystem *filesyst
 	if (filesystem->dax)
 		cladefs_dax_destroy(filesystem->dax);
 	filesystem->dax = NULL;
-	/* cladefs: a follower lets go of its store, which keeps a writer from it once it was cut off. */
-	virtio_extent_close(filesystem->vext);
 }
 
 /* Opens the filesystem on the extent-store device the mount's source names by its tag. */
@@ -3521,24 +2943,18 @@ static int cladefs_vfs_filesystem_open(struct cladefs_vfs_filesystem *filesystem
 	struct cladefs_dax *dax;
 	int err;
 
-	/* cladefs: a follower's device, closed as it last unmounted, opens on a new view of its store. */
-	err = virtio_extent_open(filesystem->vext);
-	if (err)
-		goto err_close;
 	err = cladefs_nofs(cladefs_open(fc->source, strlen(fc->source),
 				  (u64)totalram_pages() << PAGE_SHIFT, fc->sb_flags & SB_RDONLY,
 				  &fs));
 	if (err)
 		goto err_close;
 	filesystem->filesystem = fs;
-	/* cladefs: readahead off the reader; a follower's in it (cladefs_vfs_readahead). */
-	if (!cladefs_filesystem_follows(fs)) {
-		cladefs_device_set_changed(cladefs_dax_device(fs), cladefs_vfs_changed, filesystem);
-		filesystem->readahead = alloc_workqueue("cladefs-read", WQ_UNBOUND, 0);
-		if (!filesystem->readahead) {
-			err = -ENOMEM;
-			goto err_close;
-		}
+	cladefs_device_set_changed(cladefs_dax_device(fs), cladefs_vfs_changed, filesystem);
+	/* cladefs: readahead off the reader (cladefs_vfs_readahead). */
+	filesystem->readahead = alloc_workqueue("cladefs-read", WQ_UNBOUND, 0);
+	if (!filesystem->readahead) {
+		err = -ENOMEM;
+		goto err_close;
 	}
 	dax = cladefs_dax_create(fs);
 	if (IS_ERR(dax)) {
@@ -3646,26 +3062,18 @@ static int cladefs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	 */
 	sb->s_bdi->ra_pages = CLADEFS_IO_MAX / PAGE_SIZE;
 	sb->s_bdi->io_pages = CLADEFS_IO_MAX / PAGE_SIZE;
-	/* cladefs: what a follower's batches and readers keep, readied before it mounts. */
-	init_rwsem(&info->fill_barrier);
-	INIT_WORK(&info->follow, cladefs_vfs_follow_work);
 	err = cladefs_vfs_filesystem_join(info, fc);
 	if (err)
 		return err;
 	filesystem = info->filesystem->filesystem;
 	err = cladefs_nofs(cladefs_mount(filesystem, info->volume, strlen(info->volume),
-				   fc->sb_flags & SB_RDONLY, sb, &fs, &attr));
+				   fc->sb_flags & SB_RDONLY, &fs, &attr));
 	if (err)
 		return err;
 	info->fs = fs;
-	/* cladefs: read-only, it writes nothing; a follower's device tells of its writer's commits. */
+	/* cladefs: read-only, it writes nothing. */
 	if (cladefs_read_only(fs))
 		sb->s_flags |= SB_RDONLY;
-	info->follows = cladefs_follows(fs);
-	if (info->follows) {
-		static_branch_inc(&cladefs_vfs_followers);
-		set_default_d_op(sb, &cladefs_vfs_follower_dentry_operations);
-	}
 	if (info->dax) {
 		struct cladefs_dax_volume *volume = cladefs_dax_add_volume(info->dax, fs);
 
@@ -3706,15 +3114,6 @@ static int cladefs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_root = d_make_root(root);
 	if (!sb->s_root)
 		return -ENOMEM;
-	/*
-	 * cladefs: a follower hears of its writer's commits, and follows those since its device's view
-	 * opened, once all a batch uses is here: its DAX state, and the root, which it settles
-	 * (TASK-79.54).
-	 */
-	if (info->follows) {
-		cladefs_device_set_changed(cladefs_dax_device(filesystem), cladefs_vfs_committed, info);
-		schedule_work(&info->follow);
-	}
 	return 0;
 }
 
@@ -3793,7 +3192,7 @@ static int cladefs_vfs_get_tree(struct fs_context *fc)
 }
 
 /*
- * cladefs: a filesystem mounted read-only, or following its writer, stays so, and a volume itself.
+ * cladefs: a filesystem mounted read-only stays so, and a volume itself.
  * A volume remounted read-only is synced first, as ext4's and XFS's are, leaving nothing dirty: the
  * VFS freezes a read-only superblock without syncing it, and its filesystem's freeze waits for
  * nothing of it (TASK-202). One remounted writable that its filesystem counts frozen, which an
@@ -3806,7 +3205,7 @@ static int cladefs_vfs_reconfigure(struct fs_context *fc)
 	int err;
 
 	if (!read_only && cladefs_read_only(cladefs_vfs_fs(sb)))
-		return invalf(fc, "cladefs: mounted read-only, or following a writer: it stays so");
+		return invalf(fc, "cladefs: mounted read-only: it stays so");
 	if (fc->fs_private && strcmp(fc->fs_private, cladefs_vfs_info(sb)->volume))
 		return invalf(fc, "cladefs: a mount's volume stays its own");
 	if (read_only && !sb_rdonly(sb))
@@ -3865,14 +3264,6 @@ static void cladefs_vfs_kill_sb(struct super_block *sb)
 	struct cladefs_vfs_info *info = cladefs_vfs_info(sb);
 
 	/*
-	 * No writer's commit comes once unmounting: a follower's batch, which invalidates inodes,
-	 * ends before they go.
-	 */
-	if (info->follows) {
-		cladefs_device_set_changed(cladefs_dax_device(info->filesystem->filesystem), NULL, NULL);
-		cancel_work_sync(&info->follow);
-	}
-	/*
 	 * cladefs: the DAX's budget's worker holds no inode of the volume as the VFS
 	 * evicts them all: it is started again as the volume leaves, if others stay.
 	 */
@@ -3881,8 +3272,6 @@ static void cladefs_vfs_kill_sb(struct super_block *sb)
 	kill_anon_super(sb);
 	if (info->filesystem)
 		cladefs_vfs_filesystem_leave(info);
-	if (info->follows)
-		static_branch_dec(&cladefs_vfs_followers);
 	cladefs_vfs_info_free(info);
 }
 

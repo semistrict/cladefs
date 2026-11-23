@@ -4,9 +4,8 @@
 # found in the LICENSE file.
 
 # Model-check cladefs's TLA+ specs with TLC (tlaplus/tlaplus, MIT): each directory of specs/ holds
-# one spec (its .tla) and its models (backlog doc-8 testing 0; TASK-42.8, TASK-44):
+# one spec (its .tla) and its models (TASK-44):
 #
-# - specs/follower: live read-only followers' protocol (doc-8);
 # - specs/dax-cow: the guest Fxfs's DAX, copying on write: the window mapping sealed extents and
 #   zeros, a write's page private on the host, written back and rebound (guest/linux/fs/cladefs/dax.c,
 #   doc-13, TASK-164.4). Writable DAX's specs (dax, dax-region, extent-open) went with it
@@ -53,10 +52,6 @@
 #
 # A deep model, its configuration tagged `\* deep`, an occasional check of hours in all, runs only
 # by name, or with any others as `deep`, its covers with it.
-#
-# Trace validation (TASK-42.1): runs of crates/follower's Shuttle tests, traced, are behaviors of
-# specs/follower (specs/follower/trace): each trace must be matched to its end. It runs with every
-# model, or alone as follower/traces.
 #
 # TLC runs on Java: $JAVA, or java if it runs, or Homebrew's openjdk. Its jar, the release pinned
 # below, is fetched once into ~/.cache/cladefs/tla and checked against its SHA-256. v1.8.0 is a
@@ -144,7 +139,6 @@ find_cfg() {
 with_part() {
     printf '%s\n' "$2" | tr ';' '\n' | sed 's/^ */    /' | sed "/^CONSTANTS\$/r /dev/stdin" "$1"
 }
-traces=0
 if [[ ${1:-} == cover ]]; then
     (( $# >= 2 )) || { echo "cover names a model" >&2; exit 2; }
     cover=$(find_cfg "$2")
@@ -154,13 +148,8 @@ elif (( $# == 0 )); then
     for cfg in "${configs[@]}"; do
         deep "$cfg" || choose "$cfg"
     done
-    traces=1
 else
     for model in "$@"; do
-        if [[ $model == follower/traces ]]; then
-            traces=1
-            continue
-        fi
         if [[ $model == deep ]]; then
             for cfg in "${configs[@]}"; do
                 if deep "$cfg"; then
@@ -345,49 +334,4 @@ for cfg in ${covering[@]+"${covering[@]}"}; do
     covered "$cfg" || status=1
 done
 
-# Each traced run's trace, matched to its end by specs/follower/trace/FollowerTrace.
-if (( traces )); then
-    runs="$work/traces"
-    FOLLOWER_TRACES="$runs" cargo nextest run --manifest-path "$root/Cargo.toml" -p follower \
-        --features shuttle --test shuttle -E 'test(traces_follow_the_spec)' > "$work/traces.log" 2>&1 ||
-        { echo "FAIL follower/traces: tracing the runs failed:"; cat "$work/traces.log"; exit 1; }
-    matched=0 unmatched=0
-    start=$SECONDS
-    for run in "$runs"/run-*; do
-        log="$run/tlc.log"
-        "$java" -XX:+UseParallelGC -DTLA-Library="$run:$specs/follower" -cp "$jar" tlc2.TLC \
-            -workers 1 -noGenerateSpecTE -metadir "$run/states" \
-            -config "$specs/follower/trace/FollowerTrace.cfg" \
-            "$specs/follower/trace/FollowerTrace.tla" > "$log" 2>&1 < /dev/null || true
-        if grep -q '^Error: Invariant TraceMatched is violated' "$log" < /dev/null; then
-            matched=$((matched + 1))
-        else
-            unmatched=$((unmatched + 1))
-            echo "FAIL follower/traces: $(basename "$run") is no behavior of the spec:"
-            grep -E '^Error|is violated|No error has been found' "$log" | sed -n 1,20p
-        fi
-    done
-    # The mutant's runs, whose batches drop nothing: none may be matched.
-    rejected=0
-    for run in "$runs"/mutant-*; do
-        log="$run/tlc.log"
-        "$java" -XX:+UseParallelGC -DTLA-Library="$run:$specs/follower" -cp "$jar" tlc2.TLC \
-            -workers 1 -noGenerateSpecTE -metadir "$run/states" \
-            -config "$specs/follower/trace/FollowerTrace.cfg" \
-            "$specs/follower/trace/FollowerTrace.tla" > "$log" 2>&1 < /dev/null || true
-        if grep -q '^Model checking completed. No error has been found' "$log" < /dev/null; then
-            rejected=$((rejected + 1))
-        else
-            unmatched=$((unmatched + 1))
-            echo "FAIL follower/traces: $(basename "$run"), which drops nothing, was matched:"
-            grep -E '^Error|is violated|No error has been found' "$log" < /dev/null | sed -n 1,20p
-        fi
-    done
-    if (( unmatched == 0 && matched > 0 && rejected > 0 )); then
-        echo "PASS follower/traces: $matched traced runs, each a behavior of the spec, and" \
-            "$rejected of a mutant's, none, $((SECONDS - start))s"
-    else
-        status=1
-    fi
-fi
 exit "$status"

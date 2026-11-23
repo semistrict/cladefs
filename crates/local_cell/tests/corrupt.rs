@@ -6,7 +6,7 @@
 //! disk damaged fails whatever reads it, rather than giving another byte, and goes nowhere under a
 //! CRC of its own (TASK-153.11): the cell's reads, which the guest's and the extent cache's
 //! page-ins are (`LocalCell::read`), the uploader's (`LocalCell::read_kept`, and the segments it
-//! takes as they are, `Closed::bytes`), a follower's (`LocalCell::read_view`), a fork's of what it
+//! takes as they are, `Closed::bytes`), a fork's of what it
 //! inherited, and the copies of a seal. Of parts stored compressed and stored raw alike: a raw part
 //! was read in place, unchecked, until TASK-153.11.
 
@@ -29,8 +29,6 @@ const OPTIONS: Options = Options {
     segment_age: std::time::Duration::from_secs(3600),
     large_extent: 8 << 20,
     open_files: 2,
-    view_lag: None,
-    view_kept_bytes: None,
     held_most: 256 << 10,
 };
 
@@ -117,7 +115,7 @@ fn corrupt<T>(result: Result<T, anyhow::Error>) {
 }
 
 /// A byte flipped in a part of a closed segment or of a sealed extent's own file, stored
-/// compressed or raw, fails the cell's reads of the part, its uploader's and a follower's, read
+/// compressed or raw, fails the cell's reads of the part, and its uploader's, read
 /// by a cell opened anew, which has none of it unpacked: of a block, or the whole extent. Its
 /// other parts read as written.
 #[tokio::test(flavor = "multi_thread")]
@@ -134,17 +132,15 @@ async fn flipped_bytes_fail_the_reads_of_their_parts() {
         drop(cell);
 
         let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-        let view = cell.view();
         let mut block = vec![0; BLOCK];
         corrupt(cell.read(extent, offset, &mut block));
-        corrupt(cell.read_view(&view, extent, offset, &mut block));
         corrupt(cell.read(extent, 0, &mut vec![0; data.len()]));
         // Its first block is in another part, whole.
         cell.read(extent, 0, &mut block).unwrap();
         assert!(block == data[..BLOCK], "{extent:?}'s first block");
 
         flip(&dir, &byte);
-        drop((view, cell));
+        drop(cell);
     }
     let cell = LocalCell::open(dir.clone(), OPTIONS).unwrap();
     for (extent, data, _) in contents() {

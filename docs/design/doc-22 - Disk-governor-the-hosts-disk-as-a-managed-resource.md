@@ -303,7 +303,7 @@ All tests live in the repo. Linux ones run on ubu1 through `fxjob`, one job at a
    - Random create, write, overwrite, link, rename, remove, give (accepted or refused), replace, `settle_for_write`, MemDisk `fail_after`, and `crash(seed)`.
    - After every step, `footprint == Σ round_up(len,4096)` over the distinct inodes of `files()`, plus directories; unframed equals the same sum over `open-*`.
    - A failed inner write raises the count to `size()`; a write after the last unlink charges nothing.
-2. **Sim world:** the same oracle after every step of `follower_sim`/local_cell scenarios, read from MemDisk after `write_back_all`. The write-back is the oracle's only, never production's.
+2. **Sim world:** the same oracle after every step of local_cell scenarios, read from MemDisk after `write_back_all`. The write-back is the oracle's only, never production's.
 3. **Ledger:**
    - reopen gives an equal count;
    - two HostDirs of one cell share one count;

@@ -99,31 +99,14 @@ Failed: 26 requests (create 25, update 1), each retried until answered; cladefsd
     def test_no_stats_no_section(self):
         self.assertNotIn("Object storage", report(self.results(None)))
 
-    def test_followers_are_reported_after_object_storage(self):
-        followers = "followers: views=0 max-views=2 max-behind=3 max-stale-ms=1250 max-kept=8192\n"
-        section = report(self.results(STATS + followers)).split("downloaded 45.0 KiB.", 1)[1]
-        self.assertEqual(
-            section,
-            """
-
-Followers: at most 2 at once, at most 3 commits and 1,250 ms behind their writer, keeping at most 8.0 KiB of its frees.
-
-""",
-        )
-
-    def test_no_followers_no_section(self):
-        followers = "followers: views=0 max-views=0 max-behind=0 max-stale-ms=0 max-kept=0\n"
-        self.assertNotIn("Followers", report(self.results(STATS + followers)))
-
     def test_requests_served_and_commits_by_phase_are_reported(self):
-        followers = "followers: views=0 max-views=0 max-behind=0 max-stale-ms=0 max-kept=0\n"
         daemon = (
             "daemon: maps=10 map-ns=2000000 commits=4 commit-ns=1200000 commit-write-ns=200000 "
             "commit-written-bytes=16384 commit-store-ns=200000 commit-seal-ns=600000 "
             "commit-wait-ns=100000 segment-closes=2 segment-close-ns=30000000\n"
         )
         requests = "requests: write=4 write-ns=1400000 map=10 map-ns=2500000\n"
-        section = report(self.results(STATS + followers + daemon + requests)).split(
+        section = report(self.results(STATS + daemon + requests)).split(
             "downloaded 45.0 KiB.", 1
         )[1]
         self.assertEqual(

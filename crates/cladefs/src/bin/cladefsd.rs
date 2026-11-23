@@ -120,7 +120,7 @@
 //! by default, 64 MiB at least: an extent, which goes alone), every cell's together (TASK-317).
 //! With `CLADEFSD_STATS` naming a file too, the daemon keeps there what it did with the
 //! bucket, its requests by kind and its bytes up and down
-//! (`bucket_cell::object_bucket::Stats::line`), what the cells' followers are, what serving the
+//! (`bucket_cell::object_bucket::Stats::line`), what serving the
 //! cells cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
 //! rewritten as they change.
 //!

@@ -190,8 +190,8 @@ type CladefsdClient interface {
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
 	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatCell(ctx context.Context, in *StatCellRequest, opts ...grpc.CallOption) (*StatCellResponse, error)
-	// Lists the cells the daemon serves: those VM processes have open, as writers or followers,
-	// with what StatCell says of each (TASK-50.5).
+	// Lists the cells the daemon serves: those VM processes write, and those open for others, such
+	// as bases attached, with what StatCell says of each (TASK-50.5).
 	ListCells(ctx context.Context, in *ListCellsRequest, opts ...grpc.CallOption) (*ListCellsResponse, error)
 	// What the daemon did since it started: counters, which only grow.
 	GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error)
@@ -714,8 +714,8 @@ type CladefsdServer interface {
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
 	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatCell(context.Context, *StatCellRequest) (*StatCellResponse, error)
-	// Lists the cells the daemon serves: those VM processes have open, as writers or followers,
-	// with what StatCell says of each (TASK-50.5).
+	// Lists the cells the daemon serves: those VM processes write, and those open for others, such
+	// as bases attached, with what StatCell says of each (TASK-50.5).
 	ListCells(context.Context, *ListCellsRequest) (*ListCellsResponse, error)
 	// What the daemon did since it started: counters, which only grow.
 	GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error)

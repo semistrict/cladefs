@@ -8,12 +8,10 @@
 //! VFS is the kernel's (`Guest`).
 //!
 //! cladefs: what only the guest has is here: its device's DAX, uploaded commits, resizes and
-//! freezes, and, on a follower's device, what follows the cell's writer (`follow`, backlog doc-8).
+//! freezes.
 
 use crate::device::{Dax, DeviceStats, ExtentDevice, Freezer, Resizer, Uploading, UploadingGuard};
-use crate::follow::{Following, GuestFollow};
 use anyhow::{Error, anyhow, ensure};
-use follower::{Failed, Kernel as _};
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::{
     FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions,
@@ -25,7 +23,7 @@ pub use fxfs_posix::{Attr, DaxExtent, ReaddirStart, SetAttr, StatFs};
 use fxfs_posix::{Platform, SyncCounts};
 use linux_rt::Task;
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage_device::DeviceHolder;
@@ -70,9 +68,6 @@ const SHRINK_HEADROOM: u64 = 16 << 20;
 pub struct Filesystem {
     /// The filesystem, which `close` closes, after the last unmount.
     filesystem: OpenFxFilesystem,
-    /// cladefs: on a follower's device, the number of the commit it last advanced to, as it
-    /// advances, and the commit its state is as of at the latest.
-    follower: Option<(Arc<AtomicU64>, u64)>,
     dax: Dax,
     /// What makes the device's commits uploaded, for `sync`.
     uploading: Uploading,
@@ -115,12 +110,9 @@ impl Frozen {
 /// (`Frozen::step`), which is 0 again then; 0, none.
 pub(crate) static FAIL_THAW_AT: AtomicU32 = AtomicU32::new(0);
 
-/// What the guest kernel gives a mounted volume: its filesystem's, and on a follower, what follows
-/// the writer.
+/// What the guest kernel gives a mounted volume: its filesystem's.
 pub struct Guest {
     filesystem: Arc<Filesystem>,
-    /// cladefs: on a follower's device, what follows its writer (doc-8).
-    following: Option<Following>,
 }
 
 impl Platform for Guest {
@@ -136,21 +128,6 @@ impl Platform for Guest {
         linux_rt::spawn_urgent(future).detach();
     }
 
-    fn filling(&self) -> Result<(), Error> {
-        if let Some(following) = &self.following {
-            let kernel = following.protocol().kernel();
-            kernel.assert_filling();
-            if kernel.failed() {
-                return Err(Failed.into());
-            }
-        }
-        Ok(())
-    }
-
-    fn follows(&self) -> bool {
-        self.following.is_some()
-    }
-
     fn sync_counts(&self) -> Arc<SyncCounts> {
         self.filesystem.sync_counts.clone()
     }
@@ -159,14 +136,9 @@ impl Platform for Guest {
 impl Filesystem {
     /// Opens the filesystem on `device`, sizing what it keeps in memory by the kernel's `memory`
     /// bytes. A device whose cell holds nothing yet is formatted, with an empty default volume,
-    /// first. cladefs: read-only, if `read_only` or the device is a follower's.
+    /// first. cladefs: read-only, if `read_only`: decided once, here, as the filesystem owns it
+    /// (`FxFilesystem::options`), whose volumes and device derive theirs from it (TASK-160.26).
     pub async fn open(device: ExtentDevice, memory: u64, read_only: bool) -> Result<Self, Error> {
-        let follows = device.follows();
-        // Decided once, here: the filesystem owns it (`FxFilesystem::options`), whose volumes and
-        // device derive theirs from it (TASK-160.26).
-        let read_only = read_only || follows;
-        // A follower's state is as of a commit no later than its writer's latest.
-        let follower = follows.then(|| (device.advanced(), device.commits().latest()));
         let format = !read_only && device.is_empty().await?;
         let device = if read_only { device.writing_nothing() } else { device };
         let dax = device.dax();
@@ -185,8 +157,7 @@ impl Filesystem {
         let filesystem = FxFilesystemBuilder::new()
             .read_only(read_only)
             .format(format)
-            // A follower applies its writer's commits to every volume they change.
-            .lazy_volumes(!follows)
+            .lazy_volumes(true)
             .object_cache_items((memory / CACHE_SHARE / CACHED_OBJECT_SIZE) as usize)
             .graveyard_batch_delay(GRAVEYARD_BATCH_DELAY)
             .journal_options(journal)
@@ -211,7 +182,6 @@ impl Filesystem {
         }
         Ok(Self {
             filesystem,
-            follower,
             dax,
             uploading,
             device_stats,
@@ -227,34 +197,18 @@ impl Filesystem {
         self.filesystem.close().await
     }
 
-    /// Mounts its volume `name`: read-only, if `read_only` or the filesystem is. A follower follows
-    /// its default volume alone, with the kernel's primitives of the superblock `vfs` (`follow`).
-    pub async fn mount(
-        self: &Arc<Self>,
-        name: &str,
-        read_only: bool,
-        vfs: *mut core::ffi::c_void,
-    ) -> Result<Fxfs, Error> {
-        ensure!(self.follower.is_none() || name == VOLUME, FxfsError::InvalidArgs);
+    /// Mounts its volume `name`: read-only, if `read_only` or the filesystem is.
+    pub async fn mount(self: &Arc<Self>, name: &str, read_only: bool) -> Result<Fxfs, Error> {
         let filesystem = (*self.filesystem).clone();
         let root_volume = root_volume(filesystem.clone()).await?;
         let volume = root_volume.volume(name, StoreOptions::default()).await?;
-        let following = self.follower.as_ref().map(|(advanced, latest)| {
-            Following::new(vfs, volume.store_object_id(), advanced.clone(), *latest)
-        });
-        let guest = Guest { filesystem: self.clone(), following };
+        let guest = Guest { filesystem: self.clone() };
         Ok(Fxfs::new(filesystem, volume, read_only, guest))
     }
 
-    /// Whether it changes nothing: mounted so first, or on a follower's device. The filesystem's
-    /// own, which it owns.
+    /// Whether it changes nothing: mounted so first. The filesystem's own, which it owns.
     pub fn read_only(&self) -> bool {
         self.filesystem.options().read_only
-    }
-
-    /// Whether a volume mounted on it follows its device's writer.
-    pub fn follows(&self) -> bool {
-        self.follower.is_some()
     }
 
     /// cladefs: makes the volume `name`, over the base `manifest` describes (backlog doc-10), which
@@ -495,22 +449,6 @@ pub(crate) trait GuestFxfs: Sized {
     /// stays open.
     async fn unmount(self);
 
-    /// cladefs: a follower's batch.
-    async fn follow(&self) -> Result<(), Error>;
-
-    /// cladefs: holds the file `ino`, which the kernel opens, on a follower.
-    async fn hold(&self, ino: u64) -> Result<(), Error>;
-
-    /// cladefs: lets go of the file `ino`, which the kernel closes.
-    fn release(&self, ino: u64);
-
-    /// cladefs: the attributes of `ino` as a follower's batch just left them, or none if it is
-    /// gone.
-    async fn attr_applied(&self, ino: u64) -> Result<Option<Attr>, Error>;
-
-    /// cladefs: what follows its writer, on a follower.
-    fn following(&self) -> Option<&Following>;
-
     /// cladefs: puts all the volume holds in one layer, so that the journal holds nothing of it,
     /// but for what comes after (backlog doc-10, Publishing).
     async fn flush_volume(&self) -> Result<(), Error>;
@@ -524,11 +462,9 @@ impl GuestFxfs for Fxfs {
     async fn unmount(self) {
         let (filesystem, volume) = (self.filesystem().clone(), self.volume_id());
         self.close().await;
-        // A follower's volumes, opened all at once, stay so. One in use, or that a read-only
-        // filesystem can't flush, stays open: it holds memory, and nothing else.
-        if filesystem.options().lazy_volumes
-            && let Err(error) = filesystem.object_manager().close_volume(volume).await
-        {
+        // One in use, or that a read-only filesystem can't flush, stays open: it holds memory, and
+        // nothing else.
+        if let Err(error) = filesystem.object_manager().close_volume(volume).await {
             log::info!("volume {volume} stays open as it unmounts: {error:#}");
         }
     }
@@ -547,54 +483,6 @@ impl GuestFxfs for Fxfs {
     async fn manifest(&self) -> Result<Vec<u8>, Error> {
         let objects = self.filesystem().object_manager();
         objects.store(self.volume_id()).ok_or(FxfsError::NotFound)?.manifest().await
-    }
-
-    /// cladefs: a follower's batch: the writer's commits since those it applied, fetched; what the
-    /// kernel caches of what they change dropped, the commits applied, and the kernel's inodes
-    /// settled, under the fill barrier; and the commit it was as of let go of.
-    async fn follow(&self) -> Result<(), Error> {
-        let following = self.following().ok_or(FxfsError::InvalidArgs)?;
-        following.protocol().batch(&GuestFollow(self)).await?;
-        Ok(())
-    }
-
-    /// cladefs: holds the file `ino`, which the kernel opens, on a follower: one its writer deletes
-    /// reads as it was until the last close. One a batch deleted since the open looked it up, which
-    /// a hold keeps nothing of, isn't held: NotFound, as an open racing a local unlink may fail.
-    /// Under the fill barrier, which the open holds: no batch comes between the hold and the look.
-    async fn hold(&self, ino: u64) -> Result<(), Error> {
-        let Some(following) = self.following() else { return Ok(()) };
-        self.platform().filling()?;
-        following.hold(ino, || self.filesystem().hold(self.volume_id(), ino));
-        if let Err(error) = self.attr(ino).await {
-            following.release(ino);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    /// cladefs: lets go of the file `ino`, which the kernel closes.
-    fn release(&self, ino: u64) {
-        if let Some(following) = self.following() {
-            following.release(ino);
-        }
-    }
-
-    /// cladefs: the attributes of `ino` as a follower's batch just left them, read as it applies,
-    /// or none if it is gone: read none, its inode would settle as gone (TASK-79.23).
-    async fn attr_applied(&self, ino: u64) -> Result<Option<Attr>, Error> {
-        match self.attr(ino).await {
-            Ok(attr) => Ok(Some(attr)),
-            Err(error) if FxfsError::NotFound.matches(&error) => Ok(None),
-            Err(error) if FxfsError::Deleted.matches(&error) => Ok(None),
-            Err(error) => {
-                Err(error.context(format!("the attributes of inode {ino}, which a batch changed")))
-            }
-        }
-    }
-
-    fn following(&self) -> Option<&Following> {
-        self.platform().following.as_ref()
     }
 }
 

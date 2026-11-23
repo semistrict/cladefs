@@ -19,7 +19,7 @@ guest_results = script.load("guest_results")
 # The knobs a run is given, and what says where it writes, which aren't knobs.
 GIVEN = {
     "CLADEFS_E2E_REPEATS": "3",
-    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_CMDLINE": "cladefs.dax_delay_us=200",
     "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
     "CLADEFS_GUEST_KERNEL": "/var/lib/fxdax-test/guest-kernel-release/out/x86_64/vmlinux",
@@ -28,7 +28,7 @@ GIVEN = {
 }
 KNOBS = {
     "CLADEFS_E2E_REPEATS": "3",
-    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_CMDLINE": "cladefs.dax_delay_us=200",
     "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
 }
@@ -112,7 +112,6 @@ class GuestResults(unittest.TestCase):
             "object-store: get=541 get-range=16 head=0 down=1000\n"
             "daemon: maps=1 page-ins=9 page-in-bytes=2000 fetched-bytes=3000 reads=1\n"
             "object-store: get=541 get-range=16 head=0 down=774037\n"
-            "followers: views=0\n"
             "daemon: maps=2 page-ins=123904 page-in-bytes=202076160 fetched-bytes=4728643584 "
             "reads=5523 read-bytes=226099200\n"
             "requests: open=2\n")

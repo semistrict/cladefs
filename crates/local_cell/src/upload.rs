@@ -3210,8 +3210,6 @@ mod shuttle_tests {
         segment_age: Duration::from_secs(3600),
         large_extent: 2 * BLOCK as u64,
         open_files: 2,
-        view_lag: None,
-        view_kept_bytes: None,
         held_most: 2 * BLOCK as u64,
     };
 

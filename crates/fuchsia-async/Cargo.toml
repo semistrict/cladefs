@@ -10,10 +10,6 @@ license.workspace = true
 # The sanitizer variants Fuchsia's build selects; never enabled here.
 variant_asan = []
 variant_hwasan = []
-# cladefs's: its tasks, executors and timers, and fuchsia-sync's locks, as Shuttle's
-# (awslabs/shuttle), whose scheduler then chooses every interleaving of their users', such as Fxfs's
-# in the follower simulation (TASK-42.1). Only for such tests.
-shuttle = ["dep:shuttle", "fuchsia-sync/shuttle"]
 
 [dependencies]
 fuchsia-async-macro.workspace = true
@@ -28,7 +24,6 @@ smallvec.workspace = true
 [target.'cfg(not(target_os = "none"))'.dependencies]
 # tokio itself, outside the madsim simulation (doc-24).
 tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"] }
-shuttle = { workspace = true, optional = true }
 
 # cladefs: under the madsim simulation, its tasks and timers are madsim's, so that Fxfs runs in it
 # (doc-24, board 5687); its executors stay tokio's, outside it.

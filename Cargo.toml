@@ -148,8 +148,6 @@ block_protocol = { path = "crates/block_protocol" }
 storage_device = { path = "crates/storage_device" }
 block_device = { path = "crates/block_device" }
 local_cell = { path = "crates/local_cell" }
-follower = { path = "crates/follower" }
-follower_history = { path = "crates/follower_history" }
 extent_frame = { path = "crates/extent_frame" }
 extent_keys = { path = "crates/extent_keys" }
 bucket_cell = { path = "crates/bucket_cell" }

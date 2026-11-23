@@ -54,7 +54,7 @@ use shuttle::thread;
 use shuttle::{Config, Runner};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use storage_device::{ExtentId, NoExtent};
+use storage_device::ExtentId;
 
 mod crash;
 mod stalling;
@@ -71,8 +71,6 @@ const OPTIONS: Options = Options {
     segment_age: std::time::Duration::from_secs(3600),
     large_extent: 4 * BLOCK as u64,
     open_files: 2,
-    view_lag: None,
-    view_kept_bytes: None,
     // cladefs: flushes of either kind, holding their runs or checking them (TASK-301).
     held_most: 8 << 10,
 };
@@ -83,11 +81,6 @@ const WRITER: Chain = Chain::new(CELL, 0, 0, 0);
 fn runs() -> usize {
     let soak: usize = std::env::var("SHUTTLE_SOAK").map_or(1, |soak| soak.parse().unwrap());
     1500 * soak
-}
-
-/// `Ok` if `holds`, or else what `failure` says went wrong.
-fn check(holds: bool, failure: impl FnOnce() -> String) -> Result<(), String> {
-    if holds { Ok(()) } else { Err(failure()) }
 }
 
 fn extent(sequence: u64) -> ExtentId {
@@ -128,43 +121,11 @@ const STEPS: &[Step] = &[
     Step::Commit { durable: true },
 ];
 
-/// How the follower follows: advancing its view, and pinning an extent, or dropping its view and
-/// opening another, which no view may be live between.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Follow {
-    Advance,
-    Reopen,
-}
-
-/// A run of the writer, the closer, the uploader and a follower: the writer's steps, and how the
-/// follower follows.
-#[derive(Clone, Copy)]
-struct Run {
-    steps: &'static [Step],
-    follow: Follow,
-}
-
-/// The writer, the closer, the uploader and a follower.
-const RUN: Run = Run { steps: STEPS, follow: Follow::Advance };
-
-/// One run: the writer, the closer, the uploader and a follower, then the checks.
-fn run() {
-    run_with(RUN);
-}
-
-/// One run of the writer, the closer, the uploader and a follower: cladefs: the uploader
+/// One run: the writer, the closer and the uploader, then the checks. cladefs: the uploader
 /// acknowledging what it takes, the bucket keeps nothing of the frees past their segments'
-/// acknowledgements, so that views alone keep them then (TASK-165.9).
-fn following() {
-    run_with(RUN);
-}
-
-/// One run as [`following`]'s, its follower reopening its view.
-fn reopening() {
-    run_with(Run { follow: Follow::Reopen, ..RUN });
-}
-
-fn run_with(Run { steps, follow }: Run) {
+/// acknowledgements (TASK-165.9).
+fn run() {
+    let steps = STEPS;
     let dir = MemDir::new();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let cell = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
@@ -350,115 +311,9 @@ fn run_with(Run { steps, follow }: Run) {
         })
     };
 
-    // A follower (TASK-42.2): reads, through a view, every extent the commit it is of holds, as
-    // the writer recorded it, though freed since; advances; and pins an extent the writer frees
-    // later, which reads as it was written after the view advances past its free.
-    let follower = {
-        let (cell, history, written) = (cell.clone(), history.clone(), written.clone());
-        let bucket = bucket.clone();
-        thread::spawn(move || {
-            block_on(async move {
-                let pinned = extent(2);
-                let mut pin = None;
-                let mut view = Some(cell.view());
-                // What it finds wrong, it panics with once its view is gone: a task panicking
-                // unwinds through what it holds, whose drops take Shuttle's locks, which fail in a
-                // failed run with panics that abort the process (board 336).
-                let followed = (|| -> Result<(), String> {
-                    loop {
-                        let current = view.as_mut().unwrap();
-                        let done = written.load(Ordering::SeqCst);
-                        // A view opens as of a commit as it is made: its record may come later.
-                        let holds = loop {
-                            if let Some(holds) =
-                                history.lock().unwrap().get(current.commit() as usize)
-                            {
-                                break holds.clone();
-                            }
-                            thread::yield_now();
-                        };
-                        for (extent, data) in &holds {
-                            let mut read = vec![0; data.len()];
-                            let viewed =
-                                |read: &mut [u8]| cell.read_view(current, *extent, 0, read);
-                            bucket.read(&mut read, viewed).map_err(|error| {
-                                format!(
-                                    "a view's read of {extent:?} at {}: {error:#}",
-                                    current.commit()
-                                )
-                            })?;
-                            check(&read == data, || {
-                                format!("a view's read of {extent:?} reads other data")
-                            })?;
-                        }
-                        // An extent its commit doesn't hold, and it doesn't pin, it refuses:
-                        // written since, or freed before, kept for others (the uploader) or not.
-                        for sequence in 1..=5 {
-                            let extent = extent(sequence);
-                            let pinning = pin.is_some() && extent == pinned;
-                            if holds.contains_key(&extent) || pinning {
-                                continue;
-                            }
-                            let mut read = vec![0; BLOCK];
-                            let result = cell.read_view(current, extent, 0, &mut read);
-                            check(
-                                matches!(&result, Err(error) if error.downcast_ref::<NoExtent>().is_some()),
-                                || {
-                                    format!(
-                                        "a view at {} read {extent:?}, which its commit doesn't hold: {result:?}",
-                                        current.commit()
-                                    )
-                                },
-                            )?;
-                        }
-                        if follow == Follow::Advance
-                            && pin.is_none()
-                            && let Some(data) = holds.get(&pinned)
-                        {
-                            current.pin(pinned).map_err(|error| format!("pinning: {error:#}"))?;
-                            pin = Some(data.clone());
-                        }
-                        if let Some(data) = &pin {
-                            let mut read = vec![0; data.len()];
-                            let viewed = |read: &mut [u8]| cell.read_view(current, pinned, 0, read);
-                            bucket.read(&mut read, viewed).map_err(|error| {
-                                format!(
-                                    "a view's read of pinned {pinned:?} at {}: {error:#}",
-                                    current.commit()
-                                )
-                            })?;
-                            check(&read == data, || {
-                                format!("a view's read of pinned {pinned:?} reads other data")
-                            })?;
-                        }
-                        if done {
-                            return Ok(());
-                        }
-                        match follow {
-                            Follow::Advance => current
-                                .advance()
-                                .map_err(|error| format!("advancing: {error:#}"))?,
-                            Follow::Reopen => {
-                                view = None;
-                                thread::yield_now();
-                                view = Some(cell.view());
-                            }
-                        }
-                        thread::yield_now();
-                    }
-                })();
-                drop(view);
-                if let Err(failure) = followed {
-                    panic!("{failure}");
-                }
-            })
-        })
-    };
-
     writer.join().unwrap();
     closer.join().unwrap();
     uploader.join().unwrap();
-    follower.join().unwrap();
 
     // The cell holds what the writer's last commit left, and nothing it freed.
     let holds = history.lock().unwrap().last().unwrap().clone();
@@ -1470,18 +1325,6 @@ fn requests_served_during_a_flush_by_pct() {
     Runner::new(PctScheduler::new(3, runs()), config()).run(serving_during_a_flush);
 }
 
-#[test]
-fn writer_and_follower_by_pct() {
-    set_rules(Rules::ALL);
-    Runner::new(PctScheduler::new(3, runs()), config()).run(following);
-}
-
-#[test]
-fn writer_and_follower_reopening_by_pct() {
-    set_rules(Rules::ALL);
-    Runner::new(PctScheduler::new(3, runs()), config()).run(reopening);
-}
-
 /// Replays the schedule the file `SHUTTLE_REPLAY` names holds, as a failing run prints it, if set:
 /// with this test's configuration, which `shuttle::replay`'s default stacks are too small for; and
 /// with the rules `SHUTTLE_RULES_OFF` names (separated by commas) off, as a `needs_` test had them.
@@ -1500,10 +1343,6 @@ fn replay() {
             "close_waits_for_flushes" => rules.close_waits_for_flushes = false,
             "close_waits_for_framings" => rules.close_waits_for_framings = false,
             "framings_end_themselves" => rules.framings_end_themselves = false,
-            "keep_frees_for_views" => rules.keep_frees_for_views = false,
-            "keep_pins" => rules.keep_pins = false,
-            "views_refuse_later_extents" => rules.views_refuse_later_extents = false,
-            "views_hold_their_commit" => rules.views_hold_their_commit = false,
             other => panic!("SHUTTLE_RULES_OFF names no rule {other:?}"),
         }
     }
@@ -1512,8 +1351,6 @@ fn replay() {
     let scheduler = ReplayScheduler::new_from_encoded(schedule.trim());
     // The scenario it is of: `SHUTTLE_SCENARIO`, by its function's name.
     let scenario = match std::env::var("SHUTTLE_SCENARIO").as_deref() {
-        Ok("following") => following,
-        Ok("reopening") => reopening,
         Ok("racing") => racing,
         Ok("rolling_over") => rolling_over,
         Ok("freeing_during_a_write") => freeing_during_a_write,
@@ -1595,8 +1432,8 @@ fn needs_frees_kept() {
 #[test]
 fn needs_closes_to_wait_for_writers() {
     let rules = Rules { close_waits_for_writers: false, ..Rules::ALL };
-    // Caught by a reader or by a view, whichever reads it first.
-    fails_without(rules, &["other data than was written", "reads other data"], run);
+    // Caught by the uploader or the run's checks, whichever reads it first.
+    fails_without(rules, &["other data than was written"], run);
 }
 
 /// Commits sealing extents writes in progress write to: what they write lands after the seal, in
@@ -1662,34 +1499,4 @@ fn needs_closes_to_wait_for_framings() {
 fn needs_framings_to_end_themselves() {
     let rules = Rules { framings_end_themselves: false, ..Rules::ALL };
     fails_without(rules, &["no commit's segment"], uploading_what_a_spanning_commit_closed);
-}
-
-/// Frees not kept for views: a view's read of an extent its commit holds finds it gone, or, the
-/// follower having pinned it too late, its read of it pinned.
-#[test]
-fn needs_frees_kept_for_views() {
-    let rules = Rules { keep_frees_for_views: false, ..Rules::ALL };
-    fails_without(rules, &["a view's read of"], following);
-}
-
-#[test]
-fn needs_pins_kept() {
-    let rules = Rules { keep_pins: false, ..Rules::ALL };
-    fails_without(rules, &["a view's read of pinned"], following);
-}
-
-/// Views reading frees kept for others from before their commits: a follower, reading what its
-/// commit doesn't hold, would take another's data for its own.
-#[test]
-fn needs_views_to_hold_only_their_commit() {
-    let rules = Rules { views_hold_their_commit: false, ..Rules::ALL };
-    fails_without(rules, &["which its commit doesn't hold"], following);
-}
-
-/// Views reading extents sealed after their commits: a follower's journal replay would go on past
-/// its view's commit.
-#[test]
-fn needs_views_to_refuse_later_extents() {
-    let rules = Rules { views_refuse_later_extents: false, ..Rules::ALL };
-    fails_without(rules, &["which its commit doesn't hold"], following);
 }

@@ -328,6 +328,7 @@ A follower's view (doc-8) holds the branch's state as of a commit (an `Arc`) and
 names until it is let go. Extents freed after its
 commit are read where its state says, in the WAL or the bucket; the collector may reclaim one a
 grace period after its free, which cuts the view off (`CutOff`), as lagging too long does now.
+*Views went with live followers (2026-11-22, board 8237).*
 
 ## The local-filesystem bucket
 

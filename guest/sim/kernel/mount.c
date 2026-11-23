@@ -15,11 +15,6 @@
 #include "../../linux/fs/cladefs/vfs.h"
 #include "../../linux/fs/cladefs/device.h"
 
-/* What vfs.h declares of the followers' tests: off, and followers not built. */
-DEFINE_STATIC_KEY_FALSE(cladefs_vfs_followers);
-unsigned int cladefs_follow_iomap_delay_us;
-bool cladefs_follow_skip_barrier;
-
 static struct mm_struct sim_mm = { .next = 1UL << 32 };
 
 /* A file opened, as the mount keeps it: whether its inode is evicted. */
@@ -524,12 +519,3 @@ unsigned long sim_mmap(struct file *file, loff_t offset, size_t len)
 	return sim_mm_map(&sim_mm, file, offset >> PAGE_SHIFT, len);
 }
 
-int cladefs_vfs_file_open(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-int cladefs_vfs_file_release(struct inode *inode, struct file *file)
-{
-	return 0;
-}

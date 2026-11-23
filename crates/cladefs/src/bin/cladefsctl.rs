@@ -109,7 +109,7 @@
 //! counted, as of one moment, each with the commit it was built of (the control API's
 //! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `cladefsd`
 //! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `cell` (base 32),
-//! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
+//! `path`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
 //! path through that object and a value, `vms.0.guest.counters.seals 12`. Counters only grow: a
 //! measurement is the difference of two.
@@ -949,7 +949,6 @@ fn stats_json(stats: &cladefs::cladefsd::control::proto::GetStatsResponse) -> se
             "connection": vm.connection,
             "cell": base32_id::Short(vm.cell).to_string(),
             "path": vm.path,
-            "follower": vm.follower,
             "vmm": {
                 "build": nonempty(&vm.build),
                 "counters": named(&vm.counters),

@@ -73,14 +73,6 @@ pub trait Backend: Send + Sync {
     ) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `RESIZED`: the guest took the shrink to `capacity` bytes it was asked to, if `took`.
     fn resized(&self, capacity: u64, took: bool) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `ADVANCE`: a follower's view moves to its writer's latest commit: its number.
-    fn advance(&self) -> impl Future<Output = Result<u64, Errno>> + Send;
-    /// `LET_GO`: lets go of what the view held of the commits before the one numbered `commit`.
-    fn let_go(&self, commit: u64) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `PIN`: keeps `extent` whatever commit the view advances to.
-    fn pin(&self, extent: ExtentId) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `UNPIN`: lets go of `extent`'s pin.
-    fn unpin(&self, extent: ExtentId) -> impl Future<Output = Result<(), Errno>> + Send;
 }
 
 #[cfg(target_os = "linux")]
@@ -169,21 +161,5 @@ impl Backend for cladefs::CellClient {
 
     fn resized(&self, capacity: u64, took: bool) -> impl Future<Output = Result<(), Errno>> + Send {
         self.resized_async(capacity, took)
-    }
-
-    fn advance(&self) -> impl Future<Output = Result<u64, Errno>> + Send {
-        self.advance_async()
-    }
-
-    fn let_go(&self, commit: u64) -> impl Future<Output = Result<(), Errno>> + Send {
-        self.let_go_async(commit)
-    }
-
-    fn pin(&self, extent: ExtentId) -> impl Future<Output = Result<(), Errno>> + Send {
-        self.pin_async(extent)
-    }
-
-    fn unpin(&self, extent: ExtentId) -> impl Future<Output = Result<(), Errno>> + Send {
-        self.unpin_async(extent)
     }
 }

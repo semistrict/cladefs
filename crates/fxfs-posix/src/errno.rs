@@ -63,7 +63,7 @@ errnos! {
     EISDIR = 21,
     /// Invalid argument.
     EINVAL = 22,
-    /// Too many open files: cladefs, a follower pinning more than it may (TASK-588).
+    /// Too many open files.
     EMFILE = 24,
     /// File too large.
     EFBIG = 27,
@@ -110,8 +110,7 @@ errnos! {
     ETIMEDOUT = 110,
     /// Connection refused.
     ECONNREFUSED = 111,
-    /// Stale handle: a later placement of a store holds its cell (TASK-39.7); a follower cut
-    /// off (doc-8).
+    /// Stale handle: a later placement of a store holds its cell (TASK-39.7).
     ESTALE = 116,
     /// Structure needs cleaning: metadata found inconsistent, as ext4's and XFS's `EFSCORRUPTED`.
     EUCLEAN = 117,

@@ -1371,7 +1371,6 @@ impl<F: File> Segments<F> {
             own_bytes: 0,
             disk_bytes: all().map(|segment| segment.size).sum(),
             kept_bytes: 0,
-            kept_for_views: 0,
         }
     }
 

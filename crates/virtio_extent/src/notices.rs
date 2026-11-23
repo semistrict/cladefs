@@ -3,8 +3,7 @@
 // found in the LICENSE file.
 
 //! What the device's guest and the extent daemon tell each other beside requests: the cell's
-//! capacity and the shrinks the guest is asked to take, a follower's writer's commits, the
-//! daemon's asks for the guest's stats, and whether the guest's filesystem is frozen. The device
+//! capacity and the shrinks the guest is asked to take, the daemon's asks for the guest's stats, and whether the guest's filesystem is frozen. The device
 //! tells the guest of a change with a configuration change interrupt, which the VMM raises
 //! ([`ConfigInterrupt`]); the configuration space reads the values as they are
 //! ([`Device::read_config`](crate::Device::read_config)).
@@ -125,43 +124,6 @@ impl Resizing {
     }
 }
 
-/// cladefs: what a follower's device knows of its writer's commits (`VIRTIO_EXTENT_F_READ_ONLY`,
-/// `CellClient::on_committed`): the latest commit's number, and how the guest is told, once
-/// the driver activates the device.
-#[derive(Default)]
-pub struct Following {
-    committed: AtomicU64,
-    interrupt: Mutex<Option<Arc<dyn ConfigInterrupt>>>,
-}
-
-impl std::fmt::Debug for Following {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Following").field("committed", &self.committed).finish_non_exhaustive()
-    }
-}
-
-impl Following {
-    /// The number of the writer's latest commit the guest is told of.
-    pub fn latest(&self) -> u64 {
-        self.committed.load(Ordering::Acquire)
-    }
-
-    /// Has `interrupt` tell the guest of commits from here on.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn set_interrupt(&self, interrupt: Option<Arc<dyn ConfigInterrupt>>) {
-        *self.interrupt.lock().expect("Poisoned lock") = interrupt;
-    }
-
-    /// The writer made commit `commit`: the guest is told, with a configuration change, if it is
-    /// after what it was told before.
-    pub fn committed(&self, commit: u64) {
-        if self.committed.fetch_max(commit, Ordering::AcqRel) >= commit {
-            return;
-        }
-        raise(&self.interrupt);
-    }
-}
-
 /// cladefs: the extent daemon's asks for the guest's stats (`VIRTIO_EXTENT_F_STATS`, TASK-111.4):
 /// the latest, which the configuration's `stats_asked` says, and how the guest is told, while the
 /// driver that activated the device takes asks.
@@ -233,20 +195,7 @@ impl Notices {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::atomic::AtomicUsize;
-
     use super::*;
-
-    /// A configuration change interrupt that counts how often it is raised.
-    #[derive(Default)]
-    pub(crate) struct Counted(pub(crate) AtomicUsize);
-
-    impl ConfigInterrupt for Counted {
-        fn config_changed(&self) -> Result<(), BoxError> {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-    }
 
     /// cladefs TASK-79.41: the guest's answer to a shrink it was asked to take, once a newer shrink
     /// was asked, is that of a shrink no longer asked: the newer stays asked, and the capacity is
@@ -267,20 +216,6 @@ pub(crate) mod tests {
         resizing.changed(4, false);
         resizing.answered(2, true);
         assert_eq!(known(&resizing), (4, 0));
-    }
-
-    /// A follower's guest is told of commits after the latest it was told of alone.
-    #[test]
-    fn followers_hear_of_later_commits_alone() {
-        let following = Following::default();
-        let interrupt = Arc::new(Counted::default());
-        following.set_interrupt(Some(interrupt.clone()));
-        following.committed(3);
-        following.committed(2);
-        following.committed(3);
-        following.committed(5);
-        assert_eq!(following.latest(), 5);
-        assert_eq!(interrupt.0.load(Ordering::Relaxed), 2);
     }
 }
 

@@ -6,7 +6,7 @@
 //! each encoded and decoded here alone (TASK-160.9, board 6917): the requests a VM process makes
 //! ([`Request`]), what it says of the stage operations it made ([`Made`]), what the daemon tells
 //! it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what replies say
-//! besides their status ([`Opened`], [`Info`], [`Advanced`], [`Forked`], [`mappings`]).
+//! besides their status ([`Opened`], [`Info`], [`Forked`], [`mappings`]).
 //!
 //! An [`OPEN`] and its reply carry their sender's wire [`VERSION`] at [`VERSION_OFFSET`] inside
 //! [`Header::body`] ([`version`], TASK-141.3): one of another version is refused
@@ -63,7 +63,7 @@ pub(crate) enum Request<'a> {
     /// [`INFO`].
     Info,
     /// [`WINDOW`]: of `size` bytes, [`MAX_WINDOW`] at most; cladefs: whose VM process copies on
-    /// write if `copying` ([`WINDOW_COPYING`]), a writer's, or not, a follower's. Its VM process
+    /// write if `copying` ([`WINDOW_COPYING`]). Its VM process
     /// keeps `budget` runs of pages installed at most, 0 if it doesn't say (TASK-111.5).
     Window { size: u64, copying: bool, budget: u64 },
     /// [`FAULT`].
@@ -78,14 +78,6 @@ pub(crate) enum Request<'a> {
     Resized { capacity: u64, took: bool },
     /// [`MAPPINGS`].
     Mappings,
-    /// [`ADVANCE`].
-    Advance,
-    /// [`LET_GO`].
-    LetGo { commit: u64 },
-    /// [`PIN`].
-    Pin(ExtentId),
-    /// [`UNPIN`].
-    Unpin(ExtentId),
     /// [`TRANSFER`]: the area, of `len` bytes.
     Transfer { len: u64, area: Area<'a> },
     /// [`BUILD`]: the commit the VM process was built of, a label's characters, [`MAX_BUILD`] at
@@ -107,8 +99,6 @@ pub(crate) enum Opening {
     /// To write, forked from the version `version` of the cell `cell` of `tenant`'s if it doesn't
     /// exist, of `capacity` bytes ([`OPEN_FORK`]): a VM restored from a snapshot.
     ForkOf { tenant: u64, cell: u64, version: u64, capacity: u64 },
-    /// cladefs: followed, read-only (backlog doc-8, [`OPEN_READ_ONLY`]).
-    ReadOnly,
 }
 
 /// Where a [`READ`]'s bytes go.
@@ -198,7 +188,7 @@ impl<'a> Encoded<'a> {
 /// The flags requests of `kind` know: `EINVAL` for a kind no request is of.
 fn known_flags(kind: u32) -> Result<u32, Errno> {
     Ok(match kind {
-        OPEN => OPEN_CREATE | OPEN_FORK | OPEN_READ_ONLY | OPEN_SQLITE | OPEN_MEMORY,
+        OPEN => OPEN_CREATE | OPEN_FORK | OPEN_SQLITE | OPEN_MEMORY,
         READ => READ_TRANSFER,
         WRITE => crate::protocol::WRITE_SHARED_FLAGS | WRITE_TRANSFER | WRITE_LOCAL,
         MAP => MAP_ZEROS,
@@ -207,8 +197,8 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         WINDOW => WINDOW_COPYING,
         FORK => FORK_QUIESCENT | FORK_DROP,
         STATS => STATS_GUEST,
-        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | MAPPINGS | ADVANCE | LET_GO | PIN
-        | UNPIN | TRANSFER | BUILD | MAP_MANY => 0,
+        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | MAPPINGS | TRANSFER | BUILD
+        | MAP_MANY => 0,
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -248,10 +238,6 @@ impl<'a> Request<'a> {
             Request::Fork { .. } | Request::Version | Request::DropVersion { .. } => FORK,
             Request::Resized { .. } => RESIZED,
             Request::Mappings => MAPPINGS,
-            Request::Advance => ADVANCE,
-            Request::LetGo { .. } => LET_GO,
-            Request::Pin(_) => PIN,
-            Request::Unpin(_) => UNPIN,
             Request::Transfer { .. } => TRANSFER,
             Request::Build(_) => BUILD,
             Request::Stats { .. } => STATS,
@@ -319,9 +305,6 @@ impl<'a> Request<'a> {
                             version: VERSION,
                         },
                     ),
-                    Opening::ReadOnly => {
-                        (OPEN_READ_ONLY, OpenBody { version: VERSION, ..Default::default() })
-                    }
                 };
                 Encoded::with_body(OPEN, flags, &body).carrying(path)
             }
@@ -360,9 +343,9 @@ impl<'a> Request<'a> {
                         .carrying(barriers.root.unwrap_or_default())
                 }
             },
-            Request::Free(extent) | Request::Pin(extent) | Request::Unpin(extent) => {
+            Request::Free(extent) => {
                 let body = ExtentBody { cell: extent.cell, sequence: extent.sequence };
-                Encoded::with_body(self.kind(), 0, &body)
+                Encoded::with_body(FREE, 0, &body)
             }
             Request::FreeMany { first, rest } => {
                 let body = ExtentBody { cell: first.cell, sequence: first.sequence };
@@ -400,9 +383,7 @@ impl<'a> Request<'a> {
                     | flag(*commit == Commit::Uploaded, COMMIT_UPLOADED);
                 Encoded::empty(COMMIT, flags).carrying(root.unwrap_or_default())
             }
-            Request::Root | Request::Info | Request::Mappings | Request::Advance => {
-                Encoded::empty(self.kind(), 0)
-            }
+            Request::Root | Request::Info | Request::Mappings => Encoded::empty(self.kind(), 0),
             Request::Window { size, copying, budget } => {
                 let body = WindowBody { size: *size, budget: *budget };
                 Encoded::with_body(WINDOW, flag(*copying, WINDOW_COPYING), &body)
@@ -419,9 +400,6 @@ impl<'a> Request<'a> {
             Request::Resized { capacity, took } => {
                 let body = ResizedBody { capacity: *capacity, took: u64::from(*took) };
                 Encoded::with_body(RESIZED, 0, &body)
-            }
-            Request::LetGo { commit } => {
-                Encoded::with_body(LET_GO, 0, &CommitBody { commit: *commit })
             }
             Request::Transfer { len, area } => Encoded {
                 fd: Some(area.0),
@@ -485,7 +463,6 @@ impl<'a> Request<'a> {
                     flags if flags == OPEN_CREATE | OPEN_MEMORY => {
                         Opening::Create(body.capacity, Kind::Memory)
                     }
-                    OPEN_READ_ONLY => Opening::ReadOnly,
                     OPEN_FORK => Opening::ForkOf {
                         tenant: body.tenant,
                         cell: body.cell,
@@ -541,15 +518,10 @@ impl<'a> Request<'a> {
                 let extent = check_extent_id(body.cell, body.sequence)?;
                 Request::Write { extent, offset: body.offset, data, barriers }
             }
-            FREE | PIN | UNPIN => {
+            FREE => {
                 nothing()?;
                 let body: ExtentBody = header.decode_body()?;
-                let extent = check_extent_id(body.cell, body.sequence)?;
-                match kind {
-                    FREE => Request::Free(extent),
-                    PIN => Request::Pin(extent),
-                    _ => Request::Unpin(extent),
-                }
+                Request::Free(check_extent_id(body.cell, body.sequence)?)
             }
             FREE_MANY => {
                 let body: ExtentBody = header.decode_body()?;
@@ -603,14 +575,13 @@ impl<'a> Request<'a> {
                 };
                 Request::Commit { commit, root }
             }
-            ROOT | INFO | MAPPINGS | ADVANCE => {
+            ROOT | INFO | MAPPINGS => {
                 nothing()?;
                 header.decode_empty()?;
                 match kind {
                     ROOT => Request::Root,
                     INFO => Request::Info,
-                    MAPPINGS => Request::Mappings,
-                    _ => Request::Advance,
+                    _ => Request::Mappings,
                 }
             }
             WINDOW => {
@@ -660,11 +631,6 @@ impl<'a> Request<'a> {
                     _ => return Err(Errno::EINVAL),
                 };
                 Request::Resized { capacity: body.capacity, took }
-            }
-            LET_GO => {
-                nothing()?;
-                let body: CommitBody = header.decode_body()?;
-                Request::LetGo { commit: body.commit }
             }
             TRANSFER => {
                 nothing()?;
@@ -880,8 +846,6 @@ pub(crate) enum Told {
     /// [`CAPACITY`]: the cell's capacity is `capacity` bytes now; or, if `ask`, the guest is asked
     /// to shrink to it ([`CAPACITY_ASK`]).
     Capacity { capacity: u64, ask: bool },
-    /// cladefs: [`COMMITTED`].
-    Committed { commit: u64 },
     /// cladefs: [`STATS_ASK`].
     Stats { ask: u64 },
 }
@@ -893,9 +857,6 @@ impl Told {
             Told::Capacity { capacity, ask } => Header::new(CAPACITY, 0)
                 .with_flags(if ask { CAPACITY_ASK } else { 0 })
                 .with_body(&CapacityBody { capacity }),
-            Told::Committed { commit } => {
-                Header::new(COMMITTED, 0).with_body(&CommitBody { commit })
-            }
             Told::Stats { ask } => Header::new(STATS_ASK, 0).with_body(&StatsBody { ask }),
         }
     }
@@ -913,11 +874,6 @@ impl Told {
                 known(CAPACITY_ASK)?;
                 let body: CapacityBody = header.decode_body()?;
                 Ok(Told::Capacity { capacity: body.capacity, ask: flags & CAPACITY_ASK != 0 })
-            }
-            COMMITTED => {
-                known(0)?;
-                let body: CommitBody = header.decode_body()?;
-                Ok(Told::Committed { commit: body.commit })
             }
             STATS_ASK => {
                 known(0)?;
@@ -1055,8 +1011,6 @@ pub(crate) struct Opened {
     pub cell: u64,
     /// The arena of the memory it carries first: the VM process's tenant's.
     pub arena: ArenaId,
-    /// cladefs: a follower's view's commit number; 0 of a cell opened to write.
-    pub commit: u64,
     /// cladefs: how many mappings the host lets a process make, if it limits them
     /// (`pages::max_map_count`), which the VM process's window budgets its own by: the daemon
     /// reads it for the VM process, which can't in a jail without /proc (TASK-172). 0 if it
@@ -1069,10 +1023,9 @@ impl Opened {
     pub fn to_body(self) -> OpenedBody {
         OpenedBody {
             cell: self.cell,
-            commit: self.commit,
             max_map_count: self.max_map_count.unwrap_or(0),
             arena: self.arena.0,
-            reserved: 0,
+            reserved: [0; 3],
             version: VERSION,
         }
     }
@@ -1085,11 +1038,11 @@ impl Opened {
             return Err(Errno::EPROTONOSUPPORT);
         }
         let body: OpenedBody = header.decode_body()?;
-        if body.reserved != 0 {
+        if body.reserved != [0; 3] {
             return Err(Errno::EINVAL);
         }
         let max_map_count = (body.max_map_count != 0).then_some(body.max_map_count);
-        Ok(Self { cell: body.cell, arena: ArenaId(body.arena), commit: body.commit, max_map_count })
+        Ok(Self { cell: body.cell, arena: ArenaId(body.arena), max_map_count })
     }
 }
 
@@ -1108,25 +1061,6 @@ impl Info {
         let InfoBody { capacity, used, available, next_sequence, sequence_floor } =
             header.decode_body()?;
         Ok(Self(ExtentInfo { capacity, used, available, next_sequence, sequence_floor }))
-    }
-}
-
-/// cladefs: what a reply to an [`ADVANCE`] says: the number of the commit the view moved to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Advanced {
-    pub commit: u64,
-}
-
-impl Advanced {
-    pub fn to_body(self) -> CommitBody {
-        CommitBody { commit: self.commit }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    pub fn decode(header: &Header) -> Result<Self, Errno> {
-        let CommitBody { commit } = header.decode_body()?;
-        Ok(Self { commit })
     }
 }
 
@@ -1342,7 +1276,6 @@ mod tests {
             open(Opening::Create(a, Kind::Sqlite)),
             open(Opening::Create(a, Kind::Memory)),
             open(Opening::ForkOf { tenant: c, cell: b, version: d, capacity: a }),
-            open(Opening::ReadOnly),
             read(d % (MAX_PAYLOAD + 1), ReadInto::Reply),
             read(d, ReadInto::Transfer { at: e }),
             write(Data::Inline(&fields.data[..])),
@@ -1379,10 +1312,6 @@ mod tests {
             Request::DropVersion { version: a },
             Request::Resized { capacity: a, took: one },
             Request::Mappings,
-            Request::Advance,
-            Request::LetGo { commit: a },
-            Request::Pin(extent),
-            Request::Unpin(other),
             Request::Transfer { len: a, area: Area(area) },
             Request::Build(&fields.build),
             Request::Stats { ask: a, guest: None },
@@ -1440,14 +1369,12 @@ mod tests {
             }),
             vec![7; 4096],
         );
-        for kind in [FREE, PIN, UNPIN] {
-            check(
-                Header::new(kind, 1).with_body(&ExtentBody { cell: 1, sequence: 1 }),
-                Header::new(kind, 1).with_body(&ExtentBody { cell: 1, sequence: last }),
-                Header::new(kind, 1).with_body(&ExtentBody { cell: 1, sequence: last - 1 }),
-                vec![],
-            );
-        }
+        check(
+            Header::new(FREE, 1).with_body(&ExtentBody { cell: 1, sequence: 1 }),
+            Header::new(FREE, 1).with_body(&ExtentBody { cell: 1, sequence: last }),
+            Header::new(FREE, 1).with_body(&ExtentBody { cell: 1, sequence: last - 1 }),
+            vec![],
+        );
         check(
             Header::new(READ, 1).with_body(&ReadBody {
                 cell: 1,
@@ -1555,9 +1482,9 @@ mod tests {
     }
 
     /// Every kind of request.
-    const KINDS: [u32; 23] = [
+    const KINDS: [u32; 19] = [
         OPEN, READ, WRITE, FREE, MAP, UNMAP, COMMIT, ROOT, INFO, WINDOW, FAULT, FORK, RESIZED,
-        MAPPINGS, ADVANCE, LET_GO, PIN, UNPIN, TRANSFER, FREE_MANY, BUILD, STATS, MAP_MANY,
+        MAPPINGS, TRANSFER, FREE_MANY, BUILD, STATS, MAP_MANY,
     ];
 
     /// `request`, as its receiver receives it: of ID `id`.
@@ -1690,8 +1617,8 @@ mod tests {
             assert_eq!(Request::decode(&message).err(), Some(Errno::EINVAL), "{kind}, {flags:#x}");
         };
         refused(OPEN, OPEN_CREATE | OPEN_FORK, b"store");
-        refused(OPEN, OPEN_CREATE | OPEN_READ_ONLY, b"store");
-        refused(OPEN, OPEN_FORK | OPEN_READ_ONLY, b"store");
+        // cladefs: a follower's `OPEN_READ_ONLY`, gone (board 8237).
+        refused(OPEN, 1 << 2, b"store");
         refused(WRITE, WRITE_UPLOADED, b"data");
         refused(WRITE, WRITE_LOCAL, b"data");
         refused(WRITE, WRITE_ROOT, b"data");
@@ -1706,11 +1633,10 @@ mod tests {
             StageOp::Unmap { offset: 0, len: 4096, keep_private: true },
             StageOp::Mapped { offset: 0, len: 4096 },
         ];
-        let told = ops.map(|op| Told::Stage(Stage { id: 1, op })).into_iter().chain([
-            Told::Capacity { capacity: 4096, ask: false },
-            Told::Committed { commit: 1 },
-            Told::Stats { ask: 1 },
-        ]);
+        let told = ops
+            .map(|op| Told::Stage(Stage { id: 1, op }))
+            .into_iter()
+            .chain([Told::Capacity { capacity: 4096, ask: false }, Told::Stats { ask: 1 }]);
         for told in told {
             let header = told.encode();
             assert_eq!(Told::decode(&header), Ok(told));
@@ -1813,7 +1739,6 @@ mod tests {
         refused(Header::new(MAP_MANY, 1), zeros_many.as_bytes(), vec![]);
         for (flags, body) in [
             (0, OpenBody { tenant: 1, ..Default::default() }),
-            (OPEN_READ_ONLY, OpenBody { capacity: 4096, ..Default::default() }),
             (OPEN_CREATE, OpenBody { capacity: 4096, cell: 1, ..Default::default() }),
         ] {
             let body = OpenBody { version: VERSION, ..body };
@@ -1868,13 +1793,6 @@ mod tests {
                     tenant: 2,
                     version: VERSION,
                 }),
-                b"s".to_vec(),
-            ),
-            (
-                Request::Open { path: "s".into(), opening: Opening::ReadOnly },
-                Header::new(OPEN, 0)
-                    .with_flags(OPEN_READ_ONLY)
-                    .with_body(&OpenBody { version: VERSION, ..Default::default() }),
                 b"s".to_vec(),
             ),
             (
@@ -2118,7 +2036,6 @@ mod tests {
             ];
             let told = stages.map(|op| Told::Stage(Stage { id, op })).into_iter().chain([
                 Told::Capacity { capacity: a, ask },
-                Told::Committed { commit: a },
                 Told::Stats { ask: b },
             ]);
             for told in told {
@@ -2146,7 +2063,7 @@ mod tests {
             mappings_of in proptest::collection::vec((any::<[u64; 5]>(), any::<bool>()), 0..16),
         ) {
             let max_map_count = (c != 0).then_some(c);
-            let opened = Opened { cell: a, arena: ArenaId(arena), commit: b, max_map_count };
+            let opened = Opened { cell: a, arena: ArenaId(arena), max_map_count };
             let header = Header::new(REPLY, 1).with_body(&opened.to_body());
             prop_assert_eq!(Opened::decode(&header), Ok(opened));
             let info = Info(ExtentInfo {
@@ -2158,9 +2075,6 @@ mod tests {
             });
             let header = Header::new(REPLY, 1).with_body(&info.to_body());
             prop_assert_eq!(Info::decode(&header), Ok(info));
-            let advanced = Advanced { commit: a };
-            let header = Header::new(REPLY, 1).with_body(&advanced.to_body());
-            prop_assert_eq!(Advanced::decode(&header), Ok(advanced));
             let forked = Forked { cell: a, version: b, tenant: c };
             let header = Header::new(REPLY, 1).with_body(&forked.to_body());
             prop_assert_eq!(Forked::decode(&header), Ok(forked));
@@ -2192,17 +2106,16 @@ mod tests {
     fn replies_malformed_are_refused() {
         let mut bad_opened = OpenedBody {
             cell: 1,
-            commit: 0,
             max_map_count: 0,
             arena: 1,
-            reserved: 1,
+            reserved: [0, 0, 1],
             version: VERSION,
         };
         assert_eq!(
             Opened::decode(&Header::new(REPLY, 1).with_body(&bad_opened)).err(),
             Some(Errno::EINVAL)
         );
-        bad_opened.reserved = 0;
+        bad_opened.reserved = [0; 3];
         assert!(Opened::decode(&Header::new(REPLY, 1).with_body(&bad_opened)).is_ok());
 
         let bad_stage = Header::new(STAGE_MAP, 1).with_body(&StageMapBody {
@@ -2257,14 +2170,14 @@ mod tests {
                 }
             }
         });
-        let opened = Opened { cell: 1, arena: ArenaId::DEFAULT, commit: 0, max_map_count: None };
+        let opened = Opened { cell: 1, arena: ArenaId::DEFAULT, max_map_count: None };
         assert_eq!(version(&Header::new(REPLY, 1).with_body(&opened.to_body())), VERSION);
         for other in [0, VERSION - 1, VERSION + 1] {
             let body = OpenedBody { version: other, ..opened.to_body() };
             let header = Header::new(REPLY, 1).with_body(&body);
             assert_eq!(Opened::decode(&header).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
             // Before its reserved field, which another version may use otherwise.
-            let body = OpenedBody { reserved: u32::MAX, version: other, ..opened.to_body() };
+            let body = OpenedBody { reserved: [u32::MAX; 3], version: other, ..opened.to_body() };
             let header = Header::new(REPLY, 1).with_body(&body);
             assert_eq!(Opened::decode(&header).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
         }
@@ -2279,7 +2192,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (14, 0xd329aff7f4e6c6e8);
+        const WIRE: (u64, u64) = (15, 0xd329aff7f4e6c6e8);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -2337,11 +2250,7 @@ mod tests {
         ]
         .map(|op| Told::Stage(Stage { id: 2, op }))
         .into_iter()
-        .chain([
-            Told::Capacity { capacity: 1 << 30, ask: true },
-            Told::Committed { commit: 12 },
-            Told::Stats { ask: 6 },
-        ]);
+        .chain([Told::Capacity { capacity: 1 << 30, ask: true }, Told::Stats { ask: 6 }]);
         for told in told {
             header(&mut hashed, told.encode());
         }
@@ -2353,7 +2262,7 @@ mod tests {
         for made in [Made::Ack { id: 2, counts }, Made::Counts(other), private] {
             header(&mut hashed, made.encode());
         }
-        let opened = Opened { cell: 3, arena: ArenaId(6), commit: 12, max_map_count: Some(65530) };
+        let opened = Opened { cell: 3, arena: ArenaId(6), max_map_count: Some(65530) };
         let info = ExtentInfo {
             capacity: 1 << 30,
             used: 4096,
@@ -2364,7 +2273,6 @@ mod tests {
         let forked = Forked { cell: 3, version: 4, tenant: 5 };
         hashed(opened.to_body().as_bytes());
         hashed(Info(info).to_body().as_bytes());
-        hashed(Advanced { commit: 12 }.to_body().as_bytes());
         hashed(forked.to_body().as_bytes());
         let extent =
             MappingContents::Extent { extent: ExtentId { cell: 3, sequence: 4 }, offset: 8192 };

@@ -124,7 +124,7 @@ window's changes take; 3 and 4 are the guest's, unchanged.
 - **`VIRTIO_EXTENT_F_DAX` copies on write** (bit 0; `DAX_WRITE`, bit 1, went; stages 1-3 offered
   this as `DAX_COW`, bit 10, beside it, gone too at stage 4): a write to a page of the window gives
   the device a private page holding what the page held, mapped writable at the same address, until
-  a `MAP` or `UNMAP` replaces it. Not with `READ_ONLY`: a follower's writes stay refused.
+  a `MAP` or `UNMAP` replaces it.
 - **`private_max`** (configuration, with `DAX`): the most private pages the device holds at
   once. A write past it is refused, and the VM stops (159). The host sets it as it opens the device.
   *TASK-501:* nothing is reserved for it: the pages are the VM process's memory, which the bound and
@@ -146,7 +146,7 @@ window's changes take; 3 and 4 are the guest's, unchanged.
 - **Sealing** (`F_SEAL`, `seal_asked`, `SEALED`) goes: nothing a guest holds pins what another
   needs.
 - **`COMMIT`** seals as before; it changes nothing in any window.
-- `WRITE`, `READ`, `FREE`, `MAP_MANY`, `MAP_PREFAULT`, `UNMAP`, followers, snapshots unchanged, but
+- `WRITE`, `READ`, `FREE`, `MAP_MANY`, `MAP_PREFAULT`, `UNMAP`, snapshots unchanged, but
   for: a snapshot is refused while the device has a private page (the guest's freeze rebinds them
   all, below), so a snapshot's window still maps only extents and zeros. *As built:* the cell
   refuses a snapshot's point (`EBUSY`, saying how many), and the window's mappings, while its window
@@ -372,7 +372,8 @@ kernel's dax.c, Fxfs, the host, and the tests, simulator, specs, scripts and doc
   vendor/firecracker's device and the driver.
 - **Specs:** `specs/dax` (DaxSeal: seals against writes) and `specs/dax-region` (DaxRegion: writable
   regions) go; `specs/extent-open` loses its MAP half (an extent opened by a mapping), which leaves
-  nothing a spec is needed for: it goes. `specs/follower` stays. New: `specs/dax-cow`, below.
+  nothing a spec is needed for: it goes. `specs/follower` stayed (gone since with followers, board
+  8237). New: `specs/dax-cow`, below.
 - **guest/sim** (9,110 lines of C): stays as the harness, `fs/dax.c` and dax.c compiled as they are.
   Its Fxfs model loses open extents, staging, moves and seals' effects; its host gains copy-on-write
   (the memfd page by page, a write to a read-only page copying instead of SIGSEGV, past
@@ -390,7 +391,7 @@ kernel's dax.c, Fxfs, the host, and the tests, simulator, specs, scripts and doc
 
 The read path whole: `MAP_MANY` (a chunk's pieces in one round trip), `MAP_PREFAULT` (pages
 prefaulted ahead of first accesses), PMD read faults, slices of sealed extents for small files,
-ranges outliving inodes, LRU reclaim of ranges, the window pool, followers. They are why DAX reads are
+ranges outliving inodes, LRU reclaim of ranges, the window pool. They are why DAX reads are
 3.8x faster than no-DAX's first reads and cost the guest no memory.
 
 ## A spec: `specs/dax-cow`

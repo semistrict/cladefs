@@ -17,7 +17,7 @@
 //! Its pages are read from any of the open cells that asked for it, open still, that hold it
 //! (TASK-79.7). Reads of sealed extents read it too (TASK-32): the guest's filesystem reads its
 //! metadata, which it maps not, so a fork reads what its base's other forks read before from
-//! memory, not the open cell. Reads of open extents, and a follower's, go to the open cell. The
+//! memory, not the open cell. Reads of open extents go to the open cell. The
 //! open cell's files bypass the host's page cache.
 //!
 //! cladefs: windows map sealed extents and zeros alone, read-only (backlog doc-13): an open extent
@@ -30,7 +30,7 @@ use crate::cell_dir;
 use crate::dax::{Dax, DaxMapping, DaxWindow, SecondStage, Source};
 use crate::error::{Errno, Error, Result};
 use crate::faults::failpoint;
-use crate::halt::{CellGuard, CellMutex, CellRwLock, Halt};
+use crate::halt::{CellMutex, CellRwLock, Halt};
 use crate::host_cell::{self, CellOf};
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId, page_size};
@@ -39,12 +39,12 @@ use bucket_cell::cell::Kind;
 use bucket_cell::layout::CellId;
 use bucket_cell::trace;
 use local_cell::{
-    HostDir, LocalCell, NoSpace, NotHeld, NotQuiescent, SpentExtent, TooLong, TooSmall, Unaligned,
+    HostDir, LocalCell, NoSpace, NotQuiescent, SpentExtent, TooLong, TooSmall, Unaligned,
     Unsectored,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock, PoisonError};
 use storage_device::{ExtentId, NoExtent, OtherCell, SealedExtent};
 
 /// What an open cell holds, as doc-4's `INFO` reports it.
@@ -134,8 +134,6 @@ pub struct CellAccess {
 pub enum CellRole {
     /// Its writer: a guest's filesystem, or the work on it of whatever opened it.
     Writer,
-    /// None: it is a follower's (backlog doc-8), reading its writer's commits through a view.
-    Follower,
     /// None: it is a version (doc-7, Versions), the name of a state, which any number of hosts read
     /// and fork at once.
     Version,
@@ -143,33 +141,30 @@ pub enum CellRole {
 
 impl CellAccess {
     /// `Ok` if what the open cell holds may change: its extents and commits, which only its
-    /// writer's do, and of no public base. A follower's and a version refuse with `EROFS`; a
+    /// writer's do, and of no public base. A version refuses with `EROFS`; a
     /// public base with `EPERM`, as what changed would be every tenant's that forks it (TASK-43).
     pub fn may_write(self) -> Result<()> {
         match self {
-            Self { role: CellRole::Follower, .. } => Err(Errno::EROFS),
             Self { public: true, .. } => Err(Errno::EPERM),
             Self { role: CellRole::Version, .. } => Err(Errno::EROFS),
             Self { role: CellRole::Writer, public: false } => Ok(()),
         }
     }
 
-    /// `Ok` if the open cell's capacity may change, its writer's alone: `EROFS` for a follower's,
-    /// and for a version, whose forks take it as it is. A public base's grows, as no fork it made
+    /// `Ok` if the open cell's capacity may change, its writer's alone: `EROFS` for a version,
+    /// whose forks take it as it is. A public base's grows, as no fork it made
     /// shares it.
     pub fn may_resize(self) -> Result<()> {
         match self.role {
             CellRole::Writer => Ok(()),
-            CellRole::Follower | CellRole::Version => Err(Errno::EROFS),
+            CellRole::Version => Err(Errno::EROFS),
         }
     }
 
     /// `Ok` if the open cell may be forked, made public or have a base attached, which changes none
-    /// of its extents, as a version and a public base may: `EROFS` for a follower's, whose view is
-    /// all it has of the open cell.
+    /// of its extents, as a version and a public base may.
     pub fn may_manage(self) -> Result<()> {
         match self.role {
-            CellRole::Follower => Err(Errno::EROFS),
             CellRole::Writer | CellRole::Version => Ok(()),
         }
     }
@@ -205,8 +200,8 @@ pub struct OpenCell {
     /// ([`cell_dir::ancestry`]).
     forked_from: Arc<Vec<(u64, std::path::PathBuf)>>,
     /// cladefs: the uploader of the cell to object storage, which opened it, taking its
-    /// head, or holds its version: what doc-4's `COMMIT_UPLOADED` commits wait for.
-    /// None for a follower, whose writer's it is (TASK-165.9).
+    /// head, or holds its version: what doc-4's `COMMIT_UPLOADED` commits wait for (TASK-165.9);
+    /// none once its close took it.
     uploader: Option<local_cell::upload::Uploader<HostDir>>,
     /// cladefs: of an ephemeral cell's open cell, its keys held among the host's while it is open,
     /// as an uploader holds a bucket cell's (doc-25, TASK-698.7).
@@ -219,11 +214,6 @@ pub struct OpenCell {
     /// cladefs: held, shared, by writes, which open extents, and alone by a fork only once nothing
     /// is open, which none comes between ([`OpenCell::fork_quiescent`]).
     opening: CellRwLock<()>,
-    /// cladefs: a follower's (backlog doc-8), what it follows ([`OpenCell::follow`]).
-    following: Option<Following>,
-    /// cladefs: notified as it commits, for its followers' daemon to tell them, holding no thread
-    /// meanwhile (TASK-34).
-    committed: event_listener::Event,
     /// cladefs: the window's latest changes, which a refused fault's log tells of the page it was
     /// on ([`OpenCell::refused`], TASK-44.12).
     changes: CellMutex<WindowChanges>,
@@ -430,13 +420,6 @@ impl WindowChanges {
     }
 }
 
-/// A follower's part of its open cell: the writer's open cell it follows, and the view it reads it
-/// through.
-struct Following {
-    writer: Arc<OpenCell>,
-    view: CellMutex<local_cell::View>,
-}
-
 /// The barriers a write is ordered with (doc-4's `WRITE` flags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WriteBarriers<'a> {
@@ -501,10 +484,19 @@ fn upload_errno(failure: local_cell::upload::Failure) -> Errno {
     })
 }
 
+/// cladefs: the errno of a read from the bucket that failed with `error`: the uploader's failure's,
+/// or the open cell's (TASK-165.8).
+fn fetch_errno(error: anyhow::Error) -> Errno {
+    match error.downcast::<local_cell::upload::Failure>() {
+        Ok(failure) => upload_errno(failure),
+        Err(error) => errno(error),
+    }
+}
+
 /// cladefs: lets `cell` go, and, if this was its last reference, closes it ([`OpenCell::close`]),
 /// holding no thread as it waits: as every holder of the daemon's open cells lets one go (doc-24,
 /// step 9), so that whichever holds it last, a connection's teardown, a request, a fork or the open
-/// cell following it, closes it, awaited, and none closes it in its drop, which blocks.
+/// cell a base is attached to, closes it, awaited, and none closes it in its drop, which blocks.
 pub async fn release(cell: Arc<OpenCell>) {
     if let Some(cell) = Arc::into_inner(cell) {
         // Boxed: an open cell's close releases its writer and bases, which release theirs.
@@ -522,25 +514,12 @@ fn upload_wait(epoch: u64) -> trace::Span {
 
 /// The errno of the open cell's error, as doc-4 has them: each of the open cell's errors its own,
 /// and any other the open cell failing to read or write, `EIO`, logged. The one list of them, which
-/// a writer's requests and a follower's share.
+/// every request shares.
 pub(crate) fn errno(error: anyhow::Error) -> Errno {
     if let Some(&errno) = error.downcast_ref::<Errno>() {
         // cladefs: one said already, as a halt's (`crate::halt`), passed on as it was.
         errno
-    } else if error.is::<local_cell::CutOff>() {
-        // A follower too far behind its writer (doc-8, decision 7): it remounts.
-        Errno::ESTALE
-    } else if let Some(NotHeld(extent)) = error.downcast_ref::<NotHeld>() {
-        // cladefs: a follower's request for an extent its view's commits don't hold and it doesn't
-        // pin: a bug of its guest's follower, never a stale read (doc-8, testing 1).
-        log::error!("cladefs: a follower's request for {extent:?}, outside its view: {error:#}");
-        Errno::EIO
-    } else if error.is::<local_cell::TooManyPins>() {
-        // cladefs: a follower pinning more than it may hold open (TASK-588).
-        Errno::EMFILE
     } else if error.is::<NoExtent>() {
-        // A follower's too, of one written after its view's commit: as Fxfs's journal replay
-        // finds the end of the commit.
         Errno::ENOENT
     } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherCell>() {
         Errno::EPERM
@@ -599,20 +578,15 @@ impl Drop for OpenCell {
         // cladefs: its guest's boot, measured and written behind it as its evidence goes.
         drop(self.evidence.take());
         // cladefs: its uploader first, which closes its open segment, uploads what it made local
-        // and stops (TASK-192); then the open cell. A follower's open cell is its writer's. Closing
-        // from the first: what waits for the close, as a fork of a version it made does, waits for
-        // its uploads too (TASK-644).
-        if self.following.is_none() {
-            self.local.closing();
-            fail::fail_point!("open_cell::closing");
-        }
+        // and stops (TASK-192); then the open cell. Closing from the first: what waits for the
+        // close, as a fork of a version it made does, waits for its uploads too (TASK-644).
+        self.local.closing();
+        fail::fail_point!("open_cell::closing");
         drop(self.uploader.take());
         // cladefs: dropped unclosed, outside the simulation, closed here, waiting on the dropping
         // thread, as its uploader's drop waits (board 2944): what closes an open cell awaits its
         // close ([`release`]).
-        if self.following.is_none()
-            && let Err(err) = local_cell::wait_here(self.local.close())
-        {
+        if let Err(err) = local_cell::wait_here(self.local.close()) {
             log::error!("cladefs: closing an extent store: {err:#}");
         }
     }
@@ -628,25 +602,17 @@ impl OpenCell {
         if let Some(evidence) = self.evidence.take() {
             evidence.close().await;
         }
-        let following = self.following.is_some();
-        if !following {
-            local_cell::upload::blocking(|| self.local.closing());
-        }
-        if !following {
-            fail::fail_point!("open_cell::closing");
-        }
+        local_cell::upload::blocking(|| self.local.closing());
+        fail::fail_point!("open_cell::closing");
         if let Some(uploader) = self.uploader.take() {
             uploader.close().await;
         }
-        if !following && let Err(err) = self.local.close().await {
+        if let Err(err) = self.local.close().await {
             log::error!("cladefs: closing an extent store: {err:#}");
         }
         self.closed = true;
-        // cladefs: then what it held open: a follower's writer, and the bases attached to it,
-        // each closed if this was its last (doc-24, step 9).
-        if let Some(following) = self.following.take() {
-            release(following.writer).await;
-        }
+        // cladefs: then what it held open: the bases attached to it, each closed if this was its
+        // last (doc-24, step 9).
         if let Some(bases) = Arc::into_inner(std::mem::take(&mut self.bases)) {
             let by_cell = bases.by_cell.into_inner().unwrap_or_else(PoisonError::into_inner);
             for base in by_cell.into_values().flatten().filter_map(Arc::into_inner) {
@@ -927,8 +893,6 @@ impl OpenCell {
             uploader,
             keys: None,
             opening: CellRwLock::new("opening", ()),
-            following: None,
-            committed: event_listener::Event::new(),
             changes: CellMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
             halt: Halt::new(path, cell),
@@ -937,49 +901,11 @@ impl OpenCell {
         })
     }
 
-    /// cladefs: a follower of the open cell (backlog doc-8): an open cell of its own, read-only,
-    /// with a window of its own, which reads the open cell, and maps its extents' cached pages, as
-    /// of its latest commit, through a view of it, while the open cell's writer goes on. Anything
-    /// outside its view's commits and its pins it refuses with `EIO`, logged; what would change the
-    /// open cell, with `EROFS`. Its view moves to the writer's latest commit as it advances.
-    pub fn follow(self: &Arc<Self>) -> OpenCell {
-        let view = CellMutex::new("view", self.local.view());
-        let following = Following { writer: self.clone(), view };
-        Self {
-            evidence: None,
-            arenas: self.arenas.clone(),
-            forked_from: self.forked_from.clone(),
-            local: self.local.clone(),
-            bucket: self.bucket.clone(),
-            path: self.path.clone(),
-            bases: self.bases.clone(),
-            dax: CellMutex::new("dax", None),
-            uploader: None,
-            keys: None,
-            opening: CellRwLock::new("opening", ()),
-            following: Some(following),
-            committed: event_listener::Event::new(),
-            changes: CellMutex::new("changes", WindowChanges::default()),
-            flush_turns: Default::default(),
-            halt: Halt::new(&self.path, self.cell()),
-            fetcher: self.fetcher.clone(),
-            closed: false,
-        }
-    }
-
     /// cladefs: what it is, which says what may be done to it ([`CellAccess`]).
     pub fn access(&self) -> CellAccess {
-        let role = match &self.following {
-            Some(_) => CellRole::Follower,
-            None if self
-                .uploader
-                .as_ref()
-                .is_some_and(local_cell::upload::Uploader::is_at_version) =>
-            {
-                CellRole::Version
-            }
-            None => CellRole::Writer,
-        };
+        let at_version =
+            self.uploader.as_ref().is_some_and(local_cell::upload::Uploader::is_at_version);
+        let role = if at_version { CellRole::Version } else { CellRole::Writer };
         CellAccess { role, public: self.is_public() }
     }
 
@@ -1008,25 +934,6 @@ impl OpenCell {
         self.halt.errno()
     }
 
-    /// cladefs: makes the open cell a new writer's, which its followers go on following: one opened
-    /// for followers alone, or a writer's that went. `EBUSY` unless nothing is open in it
-    /// ([`OpenCell::is_quiescent`]): what a writer that went had written since its last commit
-    /// its new writer's filesystem doesn't know of. The window goes, which was the writer's that
-    /// went: the new one creates its own.
-    pub fn take_over(&self) -> Result<()> {
-        self.admit(Changing::Contents)?;
-        if !self.is_quiescent()? {
-            return Err(Errno::EBUSY);
-        }
-        let window = self.dax.lock(&self.halt)?.take();
-        drop(window);
-        // cladefs: its uploader goes on, its going no writer's to wait for (TASK-216).
-        if let Some(uploader) = &self.uploader {
-            uploader.drain_on_stop();
-        }
-        Ok(())
-    }
-
     /// cladefs: what has its uploader, once it stops, stop at once, uploading nothing more, which
     /// its write-ahead log keeps for its next opening (TASK-216): what cladefsd has a writer that
     /// waits for its going connection's open cell to close call. None for an open cell with no
@@ -1036,98 +943,14 @@ impl OpenCell {
         Some(std::sync::Arc::new(uploader.cut_short()))
     }
 
-    /// cladefs: cuts the open cell's followers off: their reads, advances and pins fail with
-    /// `ESTALE` from now on, until they follow it anew. What its writer's going with writes
-    /// uncommitted does: the open cell is no new writer's ([`OpenCell::take_over`]) while they
-    /// follow it.
-    pub fn cut_followers(&self) {
-        self.local.cut_views();
-    }
-
-    /// cladefs: a follower's view, or `EINVAL` if it is a writer's open cell.
-    fn view(&self) -> Result<CellGuard<'_, MutexGuard<'_, local_cell::View>>> {
-        let following = self.following.as_ref().ok_or(Errno::EINVAL)?;
-        following.view.lock(&self.halt)
-    }
-
-    /// The number of the open cell's latest commit: its writer's, if a follower's.
+    /// The number of the open cell's latest commit.
     pub fn committed(&self) -> Result<u64> {
         self.local.last_commit().map_err(errno)
     }
 
-    /// cladefs: the number of the commit a follower's view is as of.
-    pub fn view_commit(&self) -> Result<u64> {
-        Ok(self.view()?.commit())
-    }
-
-    /// cladefs: moves a follower's view to the writer's latest commit, holding what the commits
-    /// since the one it was as of held, until it lets go of them ([`OpenCell::let_go`]): what
-    /// its guest's follower reads as it applies them. Returns the commit's number.
-    pub fn advance(&self) -> Result<u64> {
-        let mut view = self.view()?;
-        view.advance_keeping().map_err(errno)?;
-        Ok(view.commit())
-    }
-
-    /// cladefs: lets go of what a follower's view held of the commits before the one
-    /// numbered `commit`, at most its own: their frees go, but for its pins. One of an earlier
-    /// commit than it holds since, coming after its next advance, changes nothing.
-    pub fn let_go(&self, commit: u64) -> Result<()> {
-        self.view()?.let_go(commit);
-        Ok(())
-    }
-
-    /// cladefs: keeps `extent`, which a follower's view holds, whatever commit it advances to,
-    /// until unpinned: what its guest holds open that the writer deletes.
-    pub fn pin(&self, extent: ExtentId) -> Result<()> {
-        // cladefs: nothing the writer does takes a base's extents away.
-        if self.bases.routes(extent.cell) {
-            return Ok(());
-        }
-        // cladefs: one its view holds, as doc-4 has it, not any ID a VM process makes up, each of
-        // which the daemon would hold for as long as the view (TASK-588).
-        let view = self.view()?;
-        self.local.view_extent(&view, extent).map_err(errno)?;
-        view.pin(extent).map_err(errno)
-    }
-
-    /// cladefs: lets go of `extent`, pinned.
-    pub fn unpin(&self, extent: ExtentId) -> Result<()> {
-        self.view()?.unpin(extent);
-        Ok(())
-    }
-
-    /// cladefs: awaits, holding no thread, at most `timeout` for a commit of the open cell after
-    /// the one numbered `commit`, returning the latest commit's number, if one came: what tells its
-    /// followers (board 2944).
-    pub async fn newer(&self, commit: u64, timeout: std::time::Duration) -> Option<u64> {
-        self.local.newer(commit, timeout).await
-    }
-
-    /// cladefs: what says when the open cell's writer next commits ([`OpenCell::newer`] then has
-    /// it), through the writer's open cell, if a follower's: a future, which holds no thread.
-    pub fn commits(&self) -> event_listener::EventListener {
-        match &self.following {
-            Some(following) => following.writer.committed.listen(),
-            None => self.committed.listen(),
-        }
-    }
-
-    /// cladefs: what the open cell's followers are (TASK-42.7): their views, how far behind, found
-    /// without the open cell's state (TASK-92.17).
-    pub fn view_stats(&self) -> local_cell::ViewStats {
-        self.local.view_stats()
-    }
-
-    /// cladefs: the bytes of frees the open cell's followers' views keep, which count as used
-    /// (TASK-42.7).
-    pub fn kept_for_views(&self) -> Result<u64> {
-        self.local.kept_for_views().map_err(errno)
-    }
-
     /// cladefs: what reads the extents the open cell holds whose data is in the bucket, at their
     /// locations there, keeping what it fetches in the host's cache, if its uploader has one
-    /// (TASK-165.8): a follower's, its writer's.
+    /// (TASK-165.8).
     fn fetcher(&self) -> Arc<crate::bucket::HostFetcher> {
         self.fetcher.clone()
     }
@@ -1179,8 +1002,8 @@ impl OpenCell {
     }
 
     /// cladefs: a fork's child, the cell of a new cell of `tenant`'s, its ID the open cell's
-    /// bucket's to give. A follower's uploader
-    /// is its writer's, which forks nothing of it (`EROFS`). An open cell with a writer forks to no
+    /// bucket's to give. One with no uploader forks nothing (`EROFS`). An open cell with a writer
+    /// forks to no
     /// cell of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_cell::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
     async fn new_child(&self, tenant: u64) -> Result<CellId, Error> {
@@ -1220,7 +1043,6 @@ impl OpenCell {
         cell: CellId,
         quiescent: bool,
     ) -> Result<(), Error> {
-        // A follower's uploader is its writer's, which forks nothing of it.
         let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
@@ -1553,12 +1375,9 @@ impl OpenCell {
 
     /// cladefs: reads `extent`'s bytes at `offset` from the extent cache, if it is sealed: which
     /// pages them in from the open cell, or object storage, unless they are in memory already, read
-    /// by any open cell or fork before (TASK-32). Returns whether it read them: not a follower's,
-    /// whose view decides what it holds, nor an open extent's, nor one the open cell doesn't hold.
+    /// by any open cell or fork before (TASK-32). Returns whether it read them: not an open
+    /// extent's, nor one the open cell doesn't hold.
     async fn read_cached(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<bool> {
-        if self.following.is_some() {
-            return Ok(false);
-        }
         let Some((len, false)) = self.local.extent(extent).map_err(errno)? else {
             return Ok(false);
         };
@@ -1588,7 +1407,7 @@ impl OpenCell {
     /// open cell holds it without its data.
     async fn read_stored(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<()> {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
-        match self.read_held(extent, offset, data) {
+        match self.local.read(extent, offset, data) {
             Err(ref error)
                 if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
@@ -1596,10 +1415,10 @@ impl OpenCell {
                 // cladefs: what the cell holds of it now, if a relocation moved it meanwhile
                 // (doc-27), read as first, into a buffer of its own.
                 let mut here = vec![0; data.len()];
-                let again = || self.read_held(extent, offset, &mut here);
+                let again = || self.local.read(extent, offset, &mut here);
                 let fetcher = self.fetcher();
                 let followed = fetcher.read_following(extent, location, (offset, len), again);
-                match followed.await.map_err(|error| self.fetch_errno(extent, error))? {
+                match followed.await.map_err(fetch_errno)? {
                     crate::bucket::Followed::Fetched(fetched) => {
                         data[..fetched.len()].copy_from_slice(&fetched);
                         data[fetched.len()..].fill(0);
@@ -1609,36 +1428,6 @@ impl OpenCell {
                 Ok(())
             }
             read => read.map_err(errno),
-        }
-    }
-
-    /// cladefs: reads `data.len()` bytes at `offset` in `extent` as the cell holds it: as its
-    /// follower's view does, if it follows; failing with [`local_cell::BucketData`] if in the
-    /// bucket.
-    fn read_held(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> anyhow::Result<()> {
-        match &self.following {
-            Some(following) => {
-                let view = following.view.lock(&self.halt).map_err(anyhow::Error::new)?;
-                self.local.read_view(&view, extent, offset, data)
-            }
-            None => self.local.read(extent, offset, data),
-        }
-    }
-
-    /// cladefs: the errno of a read of `extent` from the bucket that failed with `error`: a
-    /// follower's of an extent its writer freed since its view's commit, which the bucket's
-    /// collector reclaimed, is cut off, as one too far behind its writer is (doc-8, decision 7;
-    /// TASK-165.8).
-    fn fetch_errno(&self, extent: ExtentId, error: anyhow::Error) -> Errno {
-        match error.downcast::<local_cell::upload::Failure>() {
-            Ok(local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(ref lost)))
-                if self.following.is_some() =>
-            {
-                log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
-                Errno::ESTALE
-            }
-            Ok(failure) => upload_errno(failure),
-            Err(error) => errno(error),
         }
     }
 
@@ -1874,7 +1663,6 @@ impl OpenCell {
         }
         let committing = std::time::Instant::now();
         self.local.commit_ordered(root).await.map_err(errno)?;
-        self.committed.notify(usize::MAX);
         stats::add_since(Counter::CommitStoreNs, committing);
         let waiting = std::time::Instant::now();
         // cladefs: in a replicated cell (doc-21, TASK-537.3.3), the guest's fsync waits for the
@@ -1935,10 +1723,7 @@ impl OpenCell {
 
     /// The root as of the last commit, empty if none set one (`ROOT`).
     pub fn root(&self) -> Result<Vec<u8>> {
-        match &self.following {
-            Some(following) => Ok(following.view.lock(&self.halt)?.root().to_vec()),
-            None => self.local.root().map_err(errno),
-        }
+        self.local.root().map_err(errno)
     }
 
     /// Creates the DAX window of `size` bytes that [`map`](Self::map) maps extents into, each
@@ -1946,8 +1731,7 @@ impl OpenCell {
     /// memory: the extent daemon's connection to the VM process (`crate::cladefsd`), which makes it
     /// in the VM's memory. The guest's faults on the window must be passed to
     /// [`DaxWindow::fault`], as the daemon passes those its VM process reports. An open cell has
-    /// one window. cladefs: it refuses every open cell, as a follower's must; a writer's guest
-    /// takes one that copies on write
+    /// one window. cladefs: it refuses every write; a guest takes one that copies on write
     /// ([`create_copying_dax_window`](Self::create_copying_dax_window)).
     pub fn create_dax_window(
         &self,
@@ -1960,8 +1744,8 @@ impl OpenCell {
     /// cladefs: creates the DAX window as [`create_dax_window`](Self::create_dax_window) does, one
     /// whose `second_stage` copies on write (backlog doc-13): a write to a page gives the page a
     /// private copy there, its VM process's memory, which it bounds, and the daemon knows nothing
-    /// of (TASK-501, doc-26). A cell whose extents can't change, a follower's, a version or a
-    /// public base, takes none (as [`CellAccess::may_write`]).
+    /// of (TASK-501, doc-26). A cell whose extents can't change, a version or a public base, takes
+    /// none (as [`CellAccess::may_write`]).
     pub fn create_copying_dax_window(
         &self,
         size: u64,
@@ -2039,16 +1823,11 @@ impl OpenCell {
         self.dax_range_checked(window_offset, len)?;
         // cladefs: a base's is of the cache's one copy of it.
         let base = self.base_holding(extent).await?;
-        let extent_len = match (&base, &self.following) {
-            (Some((_, len)), _) => *len,
-            // A follower's view holds sealed extents alone.
-            (None, Some(following)) => {
-                let view = following.view.lock(&self.halt)?;
-                self.local.view_extent(&view, extent).map_err(errno)?
-            }
+        let extent_len = match &base {
+            Some((_, len)) => *len,
             // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
             // (`open_maps_refused`).
-            (None, None) => match self.local.extent(extent).map_err(errno)? {
+            None => match self.local.extent(extent).map_err(errno)? {
                 Some((_, true)) => return Err(refuse_open_map(extent)),
                 Some((len, false)) => len,
                 None => return Err(Errno::ENOENT),
@@ -2616,8 +2395,8 @@ impl Base {
 #[derive(Default)]
 struct Bases {
     open: OnceLock<OpenBase>,
-    /// Shared by an open cell and its followers; unlike their locks, not halted
-    /// ([`crate::halt`]): nothing that may panic is called holding it.
+    /// Unlike the open cell's locks, not halted ([`crate::halt`]): nothing that may panic is
+    /// called holding it.
     by_cell: std::sync::RwLock<HashMap<u64, Vec<Arc<Base>>>>,
 }
 
@@ -2641,6 +2420,7 @@ impl Bases {
     }
 
     /// Whether extents of `cell` are read through to what is attached.
+    #[cfg(test)]
     fn routes(&self, cell: u64) -> bool {
         self.by_cell.read().unwrap().contains_key(&cell)
     }
@@ -2679,16 +2459,14 @@ mod tests {
         local_cell::BucketData { extent, location }
     }
 
-    /// Each of the open cell's errors has its errno, as doc-4 has them, a follower's among them, in
-    /// context or not; any other is EIO (TASK-160.12).
+    /// Each of the open cell's errors has its errno, as doc-4 has them, in context or not; any other
+    /// is EIO (TASK-160.12).
     #[test]
     fn each_open_cell_error_has_its_errno() {
         let extent = ExtentId { cell: 1, sequence: 2 };
-        let cases: [(anyhow::Error, Errno); 15] = [
+        let cases: [(anyhow::Error, Errno); 13] = [
             // cladefs: one said already, a halt's, as it was (the review of 8cf431e95).
             (anyhow::Error::new(Errno::EACCES), Errno::EACCES),
-            (local_cell::CutOff.into(), Errno::ESTALE),
-            (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
             (SealedExtent(extent).into(), Errno::EPERM),
             (SpentExtent(extent).into(), Errno::EPERM),
@@ -2994,13 +2772,13 @@ mod tests {
 
     /// TASK-411.3: an open cell of a tenant whose KEK the host's KMS holds (`CLADEFS_KMS`, set here
     /// as the test's process's): its cell made encrypted, its cell given a DEK, and no byte of what
-    /// it wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork
+    /// it wrote in its bucket; read back, and opened again. TASK-411.4: its fork
     /// into a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what
     /// it inherits. TASK-411.28: a tenant with no KEK there gets no open cell, refused as destroyed
     /// (`EACCES`), and the open cell, the common tenant's, forks into no cell of its (`EACCES`),
     /// nothing made.
     #[tokio::test(flavor = "multi_thread")]
-    async fn encrypted_cells_serve_follow_reopen_and_fork_into_encrypted_cells_alone() {
+    async fn encrypted_cells_serve_reopen_and_fork_into_encrypted_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
@@ -3015,8 +2793,6 @@ mod tests {
         let data = crate::test_data::noise(1, 2 * BLOCK);
         write(&cell, a, 0, &data).await.unwrap();
         cell.commit(Some(b"root")).await.unwrap();
-        let follower = cell.follow();
-        assert_eq!(read(&follower, a, 0, 2 * BLOCK).await, Ok(data.clone()));
         assert_eq!(read(&cell, a, 0, 2 * BLOCK).await, Ok(data.clone()));
         // Nothing of it in the bucket: every file under the open cell's own, as on the disk, what
         // the open cell's page cache holds written there first (TASK-433).
@@ -3045,7 +2821,6 @@ mod tests {
         let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
         assert_eq!((record.deks.len(), inherited), (1, vec![cell.cell()]));
         drop(fork);
-        drop(follower);
         let cell_id = cell.cell();
         drop(Arc::into_inner(cell).unwrap());
         let cell = OpenCell::open(&path).await.unwrap();
@@ -3165,49 +2940,6 @@ mod tests {
         );
     }
 
-    /// TASK-165.8: a follower reads what its view's commit holds that the writer freed after it in
-    /// the bucket, the segment holding it having left the open cell once acknowledged there; and
-    /// once the bucket's collector has reclaimed it, which no later commit holds, the follower is
-    /// cut off (`ESTALE`), as one too far behind its writer is, rather than fail its guest (`EIO`).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn followers_are_cut_off_once_the_collector_reclaims_what_they_read() {
-        let (cell, dir) = cell(1 << 20).await;
-        let cell = Arc::new(cell);
-        let a = id(&cell, 1);
-        write(&cell, a, 0, &pattern(1, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        let follower = cell.follow();
-        cell.free(a).unwrap();
-        cell.commit(None).await.unwrap();
-        let segments =
-            dir.path().join("store/segments").join(base32_id::Padded(cell.cell().id).to_string());
-        assert_eq!(host_fs::read_dir(&segments).unwrap().count(), 0, "segments left in the cell");
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Ok(pattern(1, BLOCK)));
-        // Commits, each of a segment, until the uploader checkpoints the cell, which then holds
-        // the history the collector goes by: an extent written, and freed by the next; the
-        // checkpoint in the bucket before the collector lists it (TASK-339).
-        crate::test_checkpoints::after(&cell, cell.bucket(), async || {
-            for sequence in 2..2 + local_cell::upload::CHECKPOINT_EVERY {
-                write(&cell, id(&cell, sequence), 0, &pattern(sequence as u8, BLOCK))
-                    .await
-                    .unwrap();
-                cell.commit(None).await.unwrap();
-                cell.free(id(&cell, sequence)).unwrap();
-            }
-            cell.commit(None).await.unwrap();
-        })
-        .await;
-        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
-        let collected = bucket_cell::collector::collect(&**cell.bucket(), 1, &options);
-        let report = futures::executor::block_on(collected).unwrap();
-        // All the checkpoint covers but the writer's fence, which the collector keeps (TASK-371).
-        assert_eq!(
-            report,
-            bucket_cell::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
-        );
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Err(Errno::ESTALE));
-    }
-
     /// Races `steps` on one extent, `rounds` times, a fresh extent each: `prepare` alone first,
     /// then each step on a thread of its own, all released at once, then a commit, after which the
     /// extent reads `expected` (TASK-119.19). The steps are ones whose outcome is the same
@@ -3278,9 +3010,8 @@ mod tests {
         assert_eq!(cell.map(sealed, 0, ps, ps).await, Err(Errno::EIO));
         assert_eq!(cell.unmap(0, ps), Err(Errno::EIO));
         assert_eq!(cell.window_mappings(), Err(Errno::EIO));
-        // Not quiescent, as far as anyone knows: its connection's end retires it.
+        // Not quiescent, as far as anyone knows.
         assert_eq!(cell.is_quiescent(), Err(Errno::EIO));
-        assert_eq!(cell.take_over(), Err(Errno::EIO));
         // Nor what the control API changes of it: its capacity, its versions (TASK-611).
         let committed = cell.local.last_commit().unwrap();
         assert_eq!(cell.set_capacity(1 << 27).await, Err(Errno::EIO));
@@ -4034,26 +3765,6 @@ mod tests {
         assert_eq!(take(), [("unmap", ps)]);
     }
 
-    /// TASK-79.45: a writer taking an open cell over maps zeros through a window of its own,
-    /// however much larger than the window of the writer before it: zeros as many as its own
-    /// window's.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn writers_taking_over_map_zeros_across_windows_of_their_own() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let ps = page_size();
-        let _window = cell.create_dax_window(2 * ps, None).unwrap();
-        cell.map_zeros_at(0, ps).unwrap();
-        cell.take_over().unwrap();
-        let window = cell.create_dax_window(8 * ps, None).unwrap();
-        cell.map_zeros_at(6 * ps, 2 * ps).unwrap();
-        block_on(window.fault(7 * ps, Access::Read)).unwrap();
-        // SAFETY: The test faulted the page in, and nothing else accesses it.
-        let page = unsafe {
-            std::slice::from_raw_parts(window.host_base().add(7 * ps as usize), ps as usize)
-        };
-        assert!(page.iter().all(|byte| *byte == 0), "the window's last page isn't zeros");
-    }
-
     /// TASK-79.6: an extent freed once sealed is mapped, and written, no more: a fork
     /// that shares its pages through the cache, by its ID, would read what its writer stored in
     /// them as its own.
@@ -4610,22 +4321,6 @@ mod tests {
         drop(bases);
     }
 
-    /// doc-10: a follower reads what its writer has attached, which it pins as nothing, as nothing
-    /// takes it away.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn followers_read_through_to_what_their_writers_have_attached() {
-        let (cell, dir) = cell(1 << 20).await;
-        let base = dir.path().join("base");
-        let (extent, ancestry) = generation(&base, &pattern(8, BLOCK)).await;
-        let cell = Arc::new(cell);
-        cell.commit(None).await.unwrap();
-        let follower = cell.follow();
-        cell.attach_base(&base, &ancestry).unwrap();
-        assert_eq!(read(&follower, extent, 0, BLOCK).await, Ok(pattern(8, BLOCK)));
-        assert_eq!(follower.pin(extent), Ok(()));
-        assert_eq!(follower.unpin(extent), Ok(()));
-    }
-
     /// doc-10: an open cell's ancestors are never routed: what it inherited it holds, or freed.
     #[tokio::test(flavor = "multi_thread")]
     async fn bases_are_not_routed_for_what_a_cell_inherited() {
@@ -4671,8 +4366,8 @@ mod tests {
 
     /// cladefs TASK-164.1 (backlog doc-13): a window whose stage copies on write maps sealed
     /// extents and zeros alone, read-only: an extent written since the last commit it refuses to
-    /// map (`EPERM`), the open extent's bytes left in the open cell. A cell has one window, and a
-    /// follower takes no such window (`EROFS`). Its writes, private pages, are its VM process's
+    /// map (`EPERM`), the open extent's bytes left in the open cell. A cell has one window. Its
+    /// writes, private pages, are its VM process's
     /// (doc-26: `dax::uffd`'s tests).
     #[tokio::test(flavor = "multi_thread")]
     async fn copying_windows_map_sealed_extents_alone() {
@@ -4693,9 +4388,6 @@ mod tests {
 
         let again = cell.create_copying_dax_window(ps, stage());
         assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
-        let follower = Arc::new(cell).follow();
-        let following = follower.create_copying_dax_window(ps, stage());
-        assert_eq!(following.err().and_then(|error| error.errno()), Some(Errno::EROFS));
     }
 
     /// board 7409: on a replicated cell configured with `Fsync::Local`, `WRITE_BARRIER`

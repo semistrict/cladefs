@@ -14,7 +14,7 @@ adapter) and libmachine.
 - **Configuration** (`Config`): a device's, as a VMM's user gives it, serializable, with its
   validation and the features it makes.
 - **The device** (`Device`, Linux): opens its cell in cladefs's extent daemon, builds and reads
-  its configuration space, hears the daemon's notices (capacity, a follower's commits, asks for
+  its configuration space, hears the daemon's notices (capacity, asks for
   the guest's stats) and has the VMM raise a configuration change interrupt for them, makes and
   creates the DAX window, and takes snapshots of the store and restores from them.
 - **Requests** (`Buffers`, `handle`, `Requests`, `Workers`): a request's buffers, built from its
