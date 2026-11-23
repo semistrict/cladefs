@@ -1,0 +1,122 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Prometheus alerting rules for hosts' extent daemons, scraped as the job `cladefsd` at
+# CLADEFSD_METRICS's /metrics (docs/operating-a-host.md, "Alerts", board 8609). Severities:
+# `critical`, guests are failing or about to; `warning`, an operator should look within the day.
+# scripts/check-alerts.sh checks them with promtool, against cladefsd-alerts.test.yml, and
+# scripts/tests/test_ops_examples.py that each metric they name is one the daemon serves.
+
+groups:
+  - name: cladefsd
+    rules:
+      # Every VM on the host exited 158 (CladefsdLost) as the daemon went.
+      - alert: CladefsdDown
+        expr: up{job="cladefsd"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }} is down: its host's VMs have exited"
+      # A restart, which took the host's VMs with it: its CPU time's counter started again.
+      - alert: CladefsdRestarted
+        expr: resets(cladefsd_process_cpu_seconds_total{job="cladefsd"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }} restarted: its host's VMs exited 158"
+      # Its commits waited for the upload lag (1 GiB a cell) to shrink: the guests' syncs stall
+      # behind the bucket.
+      - alert: CladefsdCommitsStalled
+        expr: increase(cladefsd_upload_stalls_total{job="cladefsd"}[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "cell {{ $labels.cell }} on {{ $labels.instance }}: commits wait for uploads"
+      # Commits upload within a second: a minute behind, the bucket is failing or slow.
+      - alert: CladefsdUploadsBehind
+        expr: cladefsd_upload_oldest_pending_seconds{job="cladefsd"} > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cell {{ $labels.cell }} on {{ $labels.instance }}: uploads a minute behind"
+      - alert: CladefsdBucketFailing
+        expr: sum by (instance) (rate(cladefsd_object_storage_failures_total{job="cladefsd"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }}: requests to the bucket failing for 10 minutes"
+      # Arenas whose relief found nothing to free: what they allocate fails, the guests' reads with
+      # it (ENOMEM, an I/O error to them).
+      - alert: CladefsdMemoryExhausted
+        expr: cladefsd_memory_exhausted_arenas{job="cladefsd"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }}: {{ $value }} arenas out of memory"
+      # Never, unless a bug: runs freed whose hole punch failed, still counted.
+      - alert: CladefsdMemoryLeaked
+        expr: cladefsd_memory_leaked_bytes{job="cladefsd"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }} leaked {{ $value }} bytes of its memory: a bug"
+      # Its anonymous memory past what its design bounds it by (cladefsd_process_anon_budget_bytes),
+      # which a memory.max sized by that budget meets with the cgroup's OOM killer.
+      - alert: CladefsdHeapOverBudget
+        expr: increase(cladefsd_process_anon_over_budget_total{job="cladefsd"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }}: its heap is past its budget"
+      - alert: CladefsdVmProcessesWedged
+        expr: cladefsd_vm_processes_wedged{job="cladefsd"} > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }}: {{ $value }} VM processes killed and not gone"
+      # Near the allowance: uploads urged, each tenant held to its share.
+      - alert: CladefsdDiskPressure
+        expr: cladefsd_host_disk_pressure{job="cladefsd"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "disk {{ $labels.device }} on {{ $labels.instance }} under pressure for 10 minutes"
+      # The filesystem's free space under the headroom the governor keeps: something else writes
+      # there (cladefsd_host_disk_other_bytes), and the guests' writes are refused ENOSPC soon.
+      - alert: CladefsdDiskFull
+        expr: cladefsd_host_disk_free_bytes{job="cladefsd"} < cladefsd_host_disk_headroom_bytes{job="cladefsd"}
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "disk {{ $labels.device }} on {{ $labels.instance }}: free space under its headroom"
+      # Fewer than f members take the writer's commits, or none, its commits waiting for the bucket.
+      - alert: CladefsdReplicationDegraded
+        expr: cladefsd_replication_degraded{job="cladefsd"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cell {{ $labels.cell }} on {{ $labels.instance }}: replication degraded"
+      # A build no commit names (a dirty tree's, or of no checkout): not what was qualified.
+      - alert: CladefsdUnqualifiedBuild
+        expr: cladefsd_build_info{job="cladefsd", commit=~".*-dirty|unknown"} == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd on {{ $labels.instance }} runs build {{ $labels.commit }}"
+      # Hosts of two builds for a day: an upgrade left part way (docs/upgrading-a-host.md).
+      - alert: CladefsdBuildsDiffer
+        expr: count(count by (commit) (cladefsd_build_info{job="cladefsd"})) > 1
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "cladefsd hosts run {{ $value }} builds"

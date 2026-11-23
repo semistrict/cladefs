@@ -342,6 +342,16 @@ jobs:
       - name: Licences, bans and sources of every lock
         run: scripts/audit.sh policy
 
+  # board 8609: the reference alerting rules (docs/examples/cladefsd-alerts.yml) load in Prometheus,
+  # and fire as their tests say, by promtool (scripts/check-alerts.sh).
+  ops-examples:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The alerting rules, by promtool
+        run: scripts/check-alerts.sh
+
   # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
   # dropped) says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9): the
   # commit-msg hook asks it of a clone that installed scripts/hooks; this, of every push and pull

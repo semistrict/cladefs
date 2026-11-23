@@ -1,0 +1,72 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# promtool's tests of cladefsd-alerts.yml (scripts/check-alerts.sh): each rule fires on the series
+# it is for, and not before its `for`.
+
+rule_files:
+  - cladefsd-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cladefsd", instance="h1"}'
+        values: '1 0 0 0'
+      - series: 'cladefsd_process_cpu_seconds_total{job="cladefsd", instance="h1"}'
+        values: '10 20 30 1 2'
+      - series: 'cladefsd_upload_stalls_total{job="cladefsd", instance="h1", cell="a/b"}'
+        values: '0 0 3 3'
+      - series: 'cladefsd_host_disk_free_bytes{job="cladefsd", instance="h1", device="8:0"}'
+        values: '9 9 1 1 1 1 1 1'
+      - series: 'cladefsd_host_disk_headroom_bytes{job="cladefsd", instance="h1", device="8:0"}'
+        values: '4 4 4 4 4 4 4 4'
+      - series: 'cladefsd_build_info{job="cladefsd", instance="h1", commit="0123abcd-dirty"}'
+        values: '1 1'
+      - series: 'cladefsd_build_info{job="cladefsd", instance="h2", commit="4567cdef"}'
+        values: '1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CladefsdDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: CladefsdDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cladefsd, instance: h1}
+            exp_annotations:
+              summary: "cladefsd on h1 is down: its host's VMs have exited"
+      - eval_time: 2m
+        alertname: CladefsdRestarted
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: CladefsdRestarted
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cladefsd, instance: h1}
+            exp_annotations:
+              summary: "cladefsd on h1 restarted: its host's VMs exited 158"
+      - eval_time: 1m
+        alertname: CladefsdCommitsStalled
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: CladefsdCommitsStalled
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cladefsd, instance: h1, cell: a/b}
+            exp_annotations:
+              summary: "cell a/b on h1: commits wait for uploads"
+      - eval_time: 6m
+        alertname: CladefsdDiskFull
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: CladefsdDiskFull
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cladefsd, instance: h1, device: "8:0"}
+            exp_annotations:
+              summary: "disk 8:0 on h1: free space under its headroom"
+      - eval_time: 1m
+        alertname: CladefsdUnqualifiedBuild
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cladefsd, instance: h1, commit: 0123abcd-dirty}
+            exp_annotations:
+              summary: "cladefsd on h1 runs build 0123abcd-dirty"
