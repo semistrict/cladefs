@@ -474,13 +474,17 @@ fn hot_buffers_are_counted_and_evicted_by_global_budget() {
     }
     assert_eq!(seeded.hot_bytes(), seed_len as u64);
 
-    // Re-enabling peers lets them catch up cleanly from MemSource.
+    // Re-enabling peers lets them catch up cleanly from MemSource: each of them, though one, as f
+    // is, tells the commit replicated (board 7641: the other, still catching up, held none of it).
     for (ms, (rep, log)) in all_members.iter().zip(&replicators) {
         for m in ms {
             m.fail(None);
         }
-        until("caught up from source", || rep.replicated() == 1);
-        assert_eq!(ms[0].log(*log).len(), chunk.len());
+        until("replicated", || rep.replicated() == 1);
+        until("caught up from source", || ms.iter().all(|m| m.log(*log).len() == chunk.len()));
+        for m in ms {
+            assert_eq!(m.log(*log), chunk);
+        }
     }
 
     // Acknowledging the seed drops its pinned bytes from global accounting too.
