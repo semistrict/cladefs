@@ -45,6 +45,16 @@ void *kmalloc(size_t size, gfp_t gfp);
 void *kcalloc(size_t n, size_t size, gfp_t gfp);
 void *krealloc(void *p, size_t size, gfp_t gfp);
 void kfree(const void *p);
+/*
+ * guest/sim's check of an allocation's reclaim against the locks held (kernel/lib.c, TASK-559):
+ * here no lock ever waits, so reclaim can wait on none.
+ */
+static inline void sim_might_reclaim(gfp_t gfp, const char *file, int line)
+{
+	(void)gfp;
+	(void)file;
+	(void)line;
+}
 
 struct mutex {
 	bool held;
