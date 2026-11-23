@@ -30,6 +30,8 @@
 //! cladefsctl shred-cell TENANT/CELL
 //! cladefsctl forget-tenant-keys TENANT
 //! cladefsctl shred-tenant TENANT
+//! cladefsctl decommission-host [--none-ok] INCARNATION
+//! cladefsctl ephemeral-hosts
 //! cladefsctl mount attach TENANT CELL [TOKEN]
 //! cladefsctl mount create TENANT CAPACITY [TOKEN]
 //! cladefsctl mount detach [--force] TENANT CELL
@@ -108,7 +110,8 @@
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
 //! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `cladefsd`
-//! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `cell` (base 32),
+//! (`build`, `counters`, `gauges`, and `incarnation`, its ephemeral cells' directory's, in base
+//! 32, null if it keeps none) and `vms`, each VM process's `connection`, `cell` (base 32),
 //! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
 //! path through that object and a value, `vms.0.guest.counters.seals 12`. Counters only grow: a
@@ -141,6 +144,19 @@
 //! versions until a lifecycle rule expires them. A daemon of another KMS refuses it: destroy the
 //! tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
 //! value` a line.
+//!
+//! `decommission-host` and `ephemeral-hosts`, through the daemon alone, are the control API's
+//! `DecommissionHost` and `ListEphemeralHosts` (doc-25, boards 8517, 8519, 8521).
+//! `decommission-host` decommissions the host of incarnation INCARNATION (base 32, as the daemon's
+//! log, `stats` and `ephemeral-hosts` print it), gone for good, its disk lost: no host of it forks
+//! an ephemeral cell, or starts, from then on, and the references of its ephemeral cells, in
+//! every bucket, are retired, so that the collector reclaims what they kept. It calls again while
+//! the daemon says it left some, and prints `retired N`; having retired none, it says
+//! `retired 0: no references of that incarnation` and fails, a wrong INCARNATION the likely cause,
+//! unless `--none-ok`. The daemon refuses its own incarnation (`EINVAL`). `ephemeral-hosts` prints
+//! every incarnation whose ephemeral cells have references in the buckets, or that was
+//! decommissioned, a line each, `INCARNATION REFERENCES`, then `decommissioned` after one that
+//! was: a lost host's incarnation, found without its disk or its log.
 //!
 //! `format-bucket`, `add-bucket` and `buckets` act on buckets themselves, with or without the
 //! daemon (TASK-633.9, backlog doc-23). A bucket's number is in the high bits of every cell ID it
@@ -184,6 +200,24 @@ fn id(what: &str, given: &str) -> anyhow::Result<u64> {
     base32_id::parse(given).with_context(|| format!("{what} must be in base 32"))
 }
 
+/// cladefs: a host's incarnation, in base 32, as the daemon's log, `stats` and `ephemeral-hosts`
+/// print it (board 8521, hotbed question 480).
+fn incarnation(given: &str) -> anyhow::Result<u64> {
+    id("INCARNATION", given)
+}
+
+/// cladefs: what `ephemeral-hosts` prints of `hosts`: a line each, `INCARNATION REFERENCES`, in
+/// base 32 and decimal, then `decommissioned` after one that was (board 8521).
+#[cfg(target_os = "linux")]
+fn ephemeral_hosts_lines(hosts: &[cladefs::cladefsd::control::proto::EphemeralHost]) -> String {
+    let line = |host: &cladefs::cladefsd::control::proto::EphemeralHost| {
+        let decommissioned = if host.decommissioned { " decommissioned" } else { "" };
+        let incarnation = base32_id::Short(host.incarnation);
+        format!("{incarnation} {}{decommissioned}\n", host.references)
+    };
+    hosts.iter().map(line).collect()
+}
+
 /// A version's ID, in hexadecimal, as `version` prints it.
 fn version(id: &str) -> anyhow::Result<u64> {
     u64::from_str_radix(id, 16).map_err(|_| anyhow::anyhow!("bad version {id:?}: hexadecimal"))
@@ -212,6 +246,7 @@ fn usage() -> anyhow::Error {
          cladefsctl stats [--json] | cladefsctl grant TENANT DIR [UID [GID]] | \
          cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
          cladefsctl forget-tenant-keys TENANT | cladefsctl shred-tenant TENANT | \
+         cladefsctl decommission-host [--none-ok] INCARNATION | cladefsctl ephemeral-hosts | \
          cladefsctl mount attach TENANT CELL [TOKEN] | \
          cladefsctl mount create TENANT CAPACITY [TOKEN] | \
          cladefsctl mount detach [--force] TENANT CELL | cladefsctl mount list | \
@@ -345,6 +380,15 @@ enum Command {
     ShredTenant {
         tenant: u64,
     },
+    /// cladefs: a host of incarnation `incarnation` decommissioned, retiring none refused unless
+    /// `none_ok` (boards 8519, 8521).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    DecommissionHost {
+        incarnation: u64,
+        none_ok: bool,
+    },
+    /// cladefs: the incarnations of hosts with ephemeral cells' references (board 8521).
+    EphemeralHosts,
     /// cladefs: the daemon's FUSE mount of cells (TASK-475.2).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Mount(Mount),
@@ -519,6 +563,13 @@ impl Command {
             }
             ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
             ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
+            ["decommission-host", given] => {
+                Self::DecommissionHost { incarnation: incarnation(given)?, none_ok: false }
+            }
+            ["decommission-host", "--none-ok", given] => {
+                Self::DecommissionHost { incarnation: incarnation(given)?, none_ok: true }
+            }
+            ["ephemeral-hosts"] => Self::EphemeralHosts,
             ["mount", ref rest @ ..] => Self::Mount(Mount::parse(rest)?),
             ["format-bucket", url, ref rest @ ..] => {
                 let (details, asked) = details(rest)?;
@@ -612,6 +663,33 @@ impl Command {
                 let (now, forgotten) = daemon.shred_tenant(tenant)?;
                 print!("shredded_now {}\n{}", u8::from(now), forgotten_lines(&forgotten));
             }
+            Self::DecommissionHost { incarnation, none_ok } => {
+                // Called again while the daemon left some, each call retiring its most (board
+                // 8523); one that retired none, of a listing it says is not empty, would never end.
+                let mut retired = 0;
+                loop {
+                    let done = daemon.decommission_host(incarnation, 0)?;
+                    retired += done.retired;
+                    if done.left == 0 || done.retired == 0 {
+                        break;
+                    }
+                    eprintln!("retired {retired}, {} left", done.left);
+                }
+                match retired {
+                    0 => {
+                        println!("retired 0: no references of that incarnation");
+                        if !none_ok {
+                            bail!(
+                                "incarnation {}: nothing retired, a wrong INCARNATION the likely \
+                                 cause (cladefsctl ephemeral-hosts lists them; --none-ok takes it)",
+                                base32_id::Short(incarnation)
+                            );
+                        }
+                    }
+                    retired => println!("retired {retired}"),
+                }
+            }
+            Self::EphemeralHosts => print!("{}", ephemeral_hosts_lines(&daemon.ephemeral_hosts()?)),
             Self::Mount(_)
             | Self::FormatBucket { .. }
             | Self::AddBucket { .. }
@@ -671,6 +749,9 @@ impl Command {
             Self::Grant { .. } | Self::Revoke { .. } => Some("tenants' grants are"),
             Self::ShredCell { .. } | Self::ForgetTenantKeys { .. } | Self::ShredTenant { .. } => {
                 Some("shredding and forgetting keys are")
+            }
+            Self::DecommissionHost { .. } | Self::EphemeralHosts => {
+                Some("decommissioning hosts, and listing them, are")
             }
             Self::Mount(_) => Some("its FUSE mount of cells is"),
             _ => None,
@@ -817,6 +898,8 @@ impl Command {
             | Self::ShredCell { .. }
             | Self::ForgetTenantKeys { .. }
             | Self::ShredTenant { .. }
+            | Self::DecommissionHost { .. }
+            | Self::EphemeralHosts
             | Self::Mount(_)
             | Self::FormatBucket { .. }
             | Self::AddBucket { .. }
@@ -967,6 +1050,9 @@ fn stats_json(stats: &cladefs::cladefsd::control::proto::GetStatsResponse) -> se
             "build": stats.build,
             "counters": named(&stats.counters),
             "gauges": named(&stats.gauges),
+            // cladefs: in base 32, as `decommission-host` takes it (board 8521).
+            "incarnation": (stats.incarnation != 0)
+                .then(|| base32_id::Short(stats.incarnation).to_string()),
         },
         "vms": vms.collect::<Vec<_>>(),
     })

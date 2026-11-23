@@ -291,7 +291,7 @@ Moving an ephemeral cell's writing from one host to another in a live migration:
 _Avoid_: take (a bucket cell's, by its head), failover
 
 **Decommission** (a host):
-The VM manager's saying a host is gone for good, which retires every reference naming its incarnation.
+The VM manager's saying a host is gone for good, which retires every reference naming its incarnation, in every bucket, and leaves its tombstone there, which refuses that incarnation's references from then on.
 _Avoid_: forget (a shredded tenant's or cell's keys), evict
 
 **Origin**:

@@ -685,7 +685,8 @@ pub(crate) async fn fork_through(
 }
 
 /// cladefs: the error of a fork to `cell` that failed with `err`: `EEXIST` for an ID another cell
-/// has, `ENOENT` for a version deleted, `EACCES` for another tenant's version not shared.
+/// has, `ENOENT` for a version deleted, `EACCES` for another tenant's version not shared; and
+/// `ESTALE` for an ephemeral fork of a host whose incarnation was decommissioned (board 8519).
 fn fork_failure(cell: CellId, err: Failure) -> anyhow::Error {
     match err {
         Failure::Bucket(bucket_cell::Error::IdTaken(_)) => taken(cell),
@@ -694,6 +695,9 @@ fn fork_failure(cell: CellId, err: Failure) -> anyhow::Error {
         // cladefs: another tenant's version, not shared (TASK-395.7).
         Failure::Bucket(refused @ bucket_cell::Error::NotShared(_)) => {
             anyhow::Error::new(Errno::EACCES).context(format!("forking to cell {cell}: {refused}"))
+        }
+        Failure::Bucket(refused @ bucket_cell::Error::Decommissioned(_)) => {
+            anyhow::Error::new(Errno::ESTALE).context(format!("forking to cell {cell}: {refused}"))
         }
         err => anyhow::anyhow!("forking to cell {cell}: {err}"),
     }

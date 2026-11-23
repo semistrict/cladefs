@@ -392,7 +392,9 @@ func (*HandOverCellResponse) Descriptor() ([]byte, []int) {
 type DecommissionHostRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The incarnation of the host's ephemeral cells' directory (CLADEFSD_EPHEMERAL).
-	Incarnation   uint64 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Incarnation uint64 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// The most references to retire in this call: 0 for the daemon's default, 10,000.
+	Most          uint64 `protobuf:"varint,2,opt,name=most,proto3" json:"most,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -434,11 +436,20 @@ func (x *DecommissionHostRequest) GetIncarnation() uint64 {
 	return 0
 }
 
+func (x *DecommissionHostRequest) GetMost() uint64 {
+	if x != nil {
+		return x.Most
+	}
+	return 0
+}
+
 // What was retired.
 type DecommissionHostResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// How many references of its ephemeral cells.
-	Retired       uint64 `protobuf:"varint,1,opt,name=retired,proto3" json:"retired,omitempty"`
+	Retired uint64 `protobuf:"varint,1,opt,name=retired,proto3" json:"retired,omitempty"`
+	// How many it found and left, past `most`: a call again retires them.
+	Left          uint64 `protobuf:"varint,2,opt,name=left,proto3" json:"left,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -478,6 +489,160 @@ func (x *DecommissionHostResponse) GetRetired() uint64 {
 		return x.Retired
 	}
 	return 0
+}
+
+func (x *DecommissionHostResponse) GetLeft() uint64 {
+	if x != nil {
+		return x.Left
+	}
+	return 0
+}
+
+// Asks for the incarnations of hosts with ephemeral cells' references in the buckets.
+type ListEphemeralHostsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEphemeralHostsRequest) Reset() {
+	*x = ListEphemeralHostsRequest{}
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEphemeralHostsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEphemeralHostsRequest) ProtoMessage() {}
+
+func (x *ListEphemeralHostsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEphemeralHostsRequest.ProtoReflect.Descriptor instead.
+func (*ListEphemeralHostsRequest) Descriptor() ([]byte, []int) {
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{6}
+}
+
+// The incarnations of hosts with ephemeral cells' references in the buckets, in order.
+type ListEphemeralHostsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Each incarnation, by its number.
+	Hosts         []*EphemeralHost `protobuf:"bytes,1,rep,name=hosts,proto3" json:"hosts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEphemeralHostsResponse) Reset() {
+	*x = ListEphemeralHostsResponse{}
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEphemeralHostsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEphemeralHostsResponse) ProtoMessage() {}
+
+func (x *ListEphemeralHostsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEphemeralHostsResponse.ProtoReflect.Descriptor instead.
+func (*ListEphemeralHostsResponse) Descriptor() ([]byte, []int) {
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ListEphemeralHostsResponse) GetHosts() []*EphemeralHost {
+	if x != nil {
+		return x.Hosts
+	}
+	return nil
+}
+
+// A host's incarnation, as the buckets hold it.
+type EphemeralHost struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Its incarnation (DecommissionHostRequest's).
+	Incarnation uint64 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// How many references of its ephemeral cells the buckets' index names.
+	References uint64 `protobuf:"varint,2,opt,name=references,proto3" json:"references,omitempty"`
+	// Whether it was decommissioned (DecommissionHost).
+	Decommissioned bool `protobuf:"varint,3,opt,name=decommissioned,proto3" json:"decommissioned,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *EphemeralHost) Reset() {
+	*x = EphemeralHost{}
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EphemeralHost) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EphemeralHost) ProtoMessage() {}
+
+func (x *EphemeralHost) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EphemeralHost.ProtoReflect.Descriptor instead.
+func (*EphemeralHost) Descriptor() ([]byte, []int) {
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *EphemeralHost) GetIncarnation() uint64 {
+	if x != nil {
+		return x.Incarnation
+	}
+	return 0
+}
+
+func (x *EphemeralHost) GetReferences() uint64 {
+	if x != nil {
+		return x.References
+	}
+	return 0
+}
+
+func (x *EphemeralHost) GetDecommissioned() bool {
+	if x != nil {
+		return x.Decommissioned
+	}
+	return false
 }
 
 // Makes an empty cell.
@@ -520,7 +685,7 @@ type CreateCellRequest struct {
 
 func (x *CreateCellRequest) Reset() {
 	*x = CreateCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -532,7 +697,7 @@ func (x *CreateCellRequest) String() string {
 func (*CreateCellRequest) ProtoMessage() {}
 
 func (x *CreateCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -545,7 +710,7 @@ func (x *CreateCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateCellRequest.ProtoReflect.Descriptor instead.
 func (*CreateCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{6}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CreateCellRequest) GetPath() string {
@@ -624,7 +789,7 @@ type CreateCellResponse struct {
 
 func (x *CreateCellResponse) Reset() {
 	*x = CreateCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[7]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -636,7 +801,7 @@ func (x *CreateCellResponse) String() string {
 func (*CreateCellResponse) ProtoMessage() {}
 
 func (x *CreateCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[7]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -649,7 +814,7 @@ func (x *CreateCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateCellResponse.ProtoReflect.Descriptor instead.
 func (*CreateCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{7}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CreateCellResponse) GetTenant() uint64 {
@@ -688,7 +853,7 @@ type ImportImageRequest struct {
 
 func (x *ImportImageRequest) Reset() {
 	*x = ImportImageRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[8]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +865,7 @@ func (x *ImportImageRequest) String() string {
 func (*ImportImageRequest) ProtoMessage() {}
 
 func (x *ImportImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[8]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +878,7 @@ func (x *ImportImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportImageRequest.ProtoReflect.Descriptor instead.
 func (*ImportImageRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{8}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ImportImageRequest) GetPath() string {
@@ -764,7 +929,7 @@ type ImportImageResponse struct {
 
 func (x *ImportImageResponse) Reset() {
 	*x = ImportImageResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -776,7 +941,7 @@ func (x *ImportImageResponse) String() string {
 func (*ImportImageResponse) ProtoMessage() {}
 
 func (x *ImportImageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -789,7 +954,7 @@ func (x *ImportImageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportImageResponse.ProtoReflect.Descriptor instead.
 func (*ImportImageResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{9}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ImportImageResponse) GetTenant() uint64 {
@@ -839,7 +1004,7 @@ type ForkCellRequest struct {
 
 func (x *ForkCellRequest) Reset() {
 	*x = ForkCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[10]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -851,7 +1016,7 @@ func (x *ForkCellRequest) String() string {
 func (*ForkCellRequest) ProtoMessage() {}
 
 func (x *ForkCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[10]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -864,7 +1029,7 @@ func (x *ForkCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkCellRequest.ProtoReflect.Descriptor instead.
 func (*ForkCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{10}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ForkCellRequest) GetFrom() string {
@@ -922,7 +1087,7 @@ type ForkCellResponse struct {
 
 func (x *ForkCellResponse) Reset() {
 	*x = ForkCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -934,7 +1099,7 @@ func (x *ForkCellResponse) String() string {
 func (*ForkCellResponse) ProtoMessage() {}
 
 func (x *ForkCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -947,7 +1112,7 @@ func (x *ForkCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkCellResponse.ProtoReflect.Descriptor instead.
 func (*ForkCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{11}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ForkCellResponse) GetTenant() uint64 {
@@ -975,7 +1140,7 @@ type DeleteCellRequest struct {
 
 func (x *DeleteCellRequest) Reset() {
 	*x = DeleteCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -987,7 +1152,7 @@ func (x *DeleteCellRequest) String() string {
 func (*DeleteCellRequest) ProtoMessage() {}
 
 func (x *DeleteCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1000,7 +1165,7 @@ func (x *DeleteCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteCellRequest.ProtoReflect.Descriptor instead.
 func (*DeleteCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{12}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DeleteCellRequest) GetPath() string {
@@ -1019,7 +1184,7 @@ type DeleteCellResponse struct {
 
 func (x *DeleteCellResponse) Reset() {
 	*x = DeleteCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[13]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1031,7 +1196,7 @@ func (x *DeleteCellResponse) String() string {
 func (*DeleteCellResponse) ProtoMessage() {}
 
 func (x *DeleteCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[13]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1044,7 +1209,7 @@ func (x *DeleteCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteCellResponse.ProtoReflect.Descriptor instead.
 func (*DeleteCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{13}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{16}
 }
 
 // Deletes this host's copy of a cell.
@@ -1058,7 +1223,7 @@ type DropCellRequest struct {
 
 func (x *DropCellRequest) Reset() {
 	*x = DropCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[14]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1235,7 @@ func (x *DropCellRequest) String() string {
 func (*DropCellRequest) ProtoMessage() {}
 
 func (x *DropCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[14]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1248,7 @@ func (x *DropCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropCellRequest.ProtoReflect.Descriptor instead.
 func (*DropCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{14}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *DropCellRequest) GetPath() string {
@@ -1102,7 +1267,7 @@ type DropCellResponse struct {
 
 func (x *DropCellResponse) Reset() {
 	*x = DropCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[15]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1114,7 +1279,7 @@ func (x *DropCellResponse) String() string {
 func (*DropCellResponse) ProtoMessage() {}
 
 func (x *DropCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[15]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1127,7 +1292,7 @@ func (x *DropCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropCellResponse.ProtoReflect.Descriptor instead.
 func (*DropCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{15}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{18}
 }
 
 // Sets a cell's capacity.
@@ -1143,7 +1308,7 @@ type ResizeCellRequest struct {
 
 func (x *ResizeCellRequest) Reset() {
 	*x = ResizeCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[16]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1155,7 +1320,7 @@ func (x *ResizeCellRequest) String() string {
 func (*ResizeCellRequest) ProtoMessage() {}
 
 func (x *ResizeCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[16]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1168,7 +1333,7 @@ func (x *ResizeCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResizeCellRequest.ProtoReflect.Descriptor instead.
 func (*ResizeCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{16}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ResizeCellRequest) GetPath() string {
@@ -1194,7 +1359,7 @@ type ResizeCellResponse struct {
 
 func (x *ResizeCellResponse) Reset() {
 	*x = ResizeCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[17]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1206,7 +1371,7 @@ func (x *ResizeCellResponse) String() string {
 func (*ResizeCellResponse) ProtoMessage() {}
 
 func (x *ResizeCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[17]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1219,7 +1384,7 @@ func (x *ResizeCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResizeCellResponse.ProtoReflect.Descriptor instead.
 func (*ResizeCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{17}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{20}
 }
 
 // Places a cell.
@@ -1241,7 +1406,7 @@ type PlaceCellRequest struct {
 
 func (x *PlaceCellRequest) Reset() {
 	*x = PlaceCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[18]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1253,7 +1418,7 @@ func (x *PlaceCellRequest) String() string {
 func (*PlaceCellRequest) ProtoMessage() {}
 
 func (x *PlaceCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[18]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1266,7 +1431,7 @@ func (x *PlaceCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceCellRequest.ProtoReflect.Descriptor instead.
 func (*PlaceCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{18}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PlaceCellRequest) GetPath() string {
@@ -1299,7 +1464,7 @@ type PlaceCellResponse struct {
 
 func (x *PlaceCellResponse) Reset() {
 	*x = PlaceCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[19]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1311,7 +1476,7 @@ func (x *PlaceCellResponse) String() string {
 func (*PlaceCellResponse) ProtoMessage() {}
 
 func (x *PlaceCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[19]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1324,7 +1489,7 @@ func (x *PlaceCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceCellResponse.ProtoReflect.Descriptor instead.
 func (*PlaceCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{19}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{22}
 }
 
 // Makes a version of a cell.
@@ -1341,7 +1506,7 @@ type MakeVersionRequest struct {
 
 func (x *MakeVersionRequest) Reset() {
 	*x = MakeVersionRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[20]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1353,7 +1518,7 @@ func (x *MakeVersionRequest) String() string {
 func (*MakeVersionRequest) ProtoMessage() {}
 
 func (x *MakeVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[20]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1366,7 +1531,7 @@ func (x *MakeVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakeVersionRequest.ProtoReflect.Descriptor instead.
 func (*MakeVersionRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{20}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *MakeVersionRequest) GetPath() string {
@@ -1394,7 +1559,7 @@ type MakeVersionResponse struct {
 
 func (x *MakeVersionResponse) Reset() {
 	*x = MakeVersionResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[21]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1406,7 +1571,7 @@ func (x *MakeVersionResponse) String() string {
 func (*MakeVersionResponse) ProtoMessage() {}
 
 func (x *MakeVersionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[21]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1419,7 +1584,7 @@ func (x *MakeVersionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakeVersionResponse.ProtoReflect.Descriptor instead.
 func (*MakeVersionResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{21}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *MakeVersionResponse) GetVersion() uint64 {
@@ -1440,7 +1605,7 @@ type ListVersionsRequest struct {
 
 func (x *ListVersionsRequest) Reset() {
 	*x = ListVersionsRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[22]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1452,7 +1617,7 @@ func (x *ListVersionsRequest) String() string {
 func (*ListVersionsRequest) ProtoMessage() {}
 
 func (x *ListVersionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[22]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1465,7 +1630,7 @@ func (x *ListVersionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVersionsRequest.ProtoReflect.Descriptor instead.
 func (*ListVersionsRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{22}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ListVersionsRequest) GetPath() string {
@@ -1490,7 +1655,7 @@ type Version struct {
 
 func (x *Version) Reset() {
 	*x = Version{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[23]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1502,7 +1667,7 @@ func (x *Version) String() string {
 func (*Version) ProtoMessage() {}
 
 func (x *Version) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[23]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1515,7 +1680,7 @@ func (x *Version) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Version.ProtoReflect.Descriptor instead.
 func (*Version) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{23}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Version) GetId() uint64 {
@@ -1550,7 +1715,7 @@ type ListVersionsResponse struct {
 
 func (x *ListVersionsResponse) Reset() {
 	*x = ListVersionsResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[24]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1562,7 +1727,7 @@ func (x *ListVersionsResponse) String() string {
 func (*ListVersionsResponse) ProtoMessage() {}
 
 func (x *ListVersionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[24]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1575,7 +1740,7 @@ func (x *ListVersionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVersionsResponse.ProtoReflect.Descriptor instead.
 func (*ListVersionsResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{24}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ListVersionsResponse) GetVersions() []*Version {
@@ -1598,7 +1763,7 @@ type DropVersionsRequest struct {
 
 func (x *DropVersionsRequest) Reset() {
 	*x = DropVersionsRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[25]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1610,7 +1775,7 @@ func (x *DropVersionsRequest) String() string {
 func (*DropVersionsRequest) ProtoMessage() {}
 
 func (x *DropVersionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[25]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1623,7 +1788,7 @@ func (x *DropVersionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropVersionsRequest.ProtoReflect.Descriptor instead.
 func (*DropVersionsRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{25}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *DropVersionsRequest) GetPath() string {
@@ -1649,7 +1814,7 @@ type DropVersionsResponse struct {
 
 func (x *DropVersionsResponse) Reset() {
 	*x = DropVersionsResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[26]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1661,7 +1826,7 @@ func (x *DropVersionsResponse) String() string {
 func (*DropVersionsResponse) ProtoMessage() {}
 
 func (x *DropVersionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[26]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1674,7 +1839,7 @@ func (x *DropVersionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropVersionsResponse.ProtoReflect.Descriptor instead.
 func (*DropVersionsResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{26}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{29}
 }
 
 // Shares a version, or no longer.
@@ -1692,7 +1857,7 @@ type ShareVersionRequest struct {
 
 func (x *ShareVersionRequest) Reset() {
 	*x = ShareVersionRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[27]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1704,7 +1869,7 @@ func (x *ShareVersionRequest) String() string {
 func (*ShareVersionRequest) ProtoMessage() {}
 
 func (x *ShareVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[27]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1717,7 +1882,7 @@ func (x *ShareVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShareVersionRequest.ProtoReflect.Descriptor instead.
 func (*ShareVersionRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{27}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ShareVersionRequest) GetPath() string {
@@ -1750,7 +1915,7 @@ type ShareVersionResponse struct {
 
 func (x *ShareVersionResponse) Reset() {
 	*x = ShareVersionResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[28]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1762,7 +1927,7 @@ func (x *ShareVersionResponse) String() string {
 func (*ShareVersionResponse) ProtoMessage() {}
 
 func (x *ShareVersionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[28]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1775,7 +1940,7 @@ func (x *ShareVersionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShareVersionResponse.ProtoReflect.Descriptor instead.
 func (*ShareVersionResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{28}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{31}
 }
 
 // Makes a cell a public base.
@@ -1792,7 +1957,7 @@ type MakePublicRequest struct {
 
 func (x *MakePublicRequest) Reset() {
 	*x = MakePublicRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[29]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1804,7 +1969,7 @@ func (x *MakePublicRequest) String() string {
 func (*MakePublicRequest) ProtoMessage() {}
 
 func (x *MakePublicRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[29]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1817,7 +1982,7 @@ func (x *MakePublicRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakePublicRequest.ProtoReflect.Descriptor instead.
 func (*MakePublicRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{29}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *MakePublicRequest) GetPath() string {
@@ -1843,7 +2008,7 @@ type MakePublicResponse struct {
 
 func (x *MakePublicResponse) Reset() {
 	*x = MakePublicResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1855,7 +2020,7 @@ func (x *MakePublicResponse) String() string {
 func (*MakePublicResponse) ProtoMessage() {}
 
 func (x *MakePublicResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1868,7 +2033,7 @@ func (x *MakePublicResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakePublicResponse.ProtoReflect.Descriptor instead.
 func (*MakePublicResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{30}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{33}
 }
 
 // Attaches a fork to a cell.
@@ -1884,7 +2049,7 @@ type AttachBaseRequest struct {
 
 func (x *AttachBaseRequest) Reset() {
 	*x = AttachBaseRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[31]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1896,7 +2061,7 @@ func (x *AttachBaseRequest) String() string {
 func (*AttachBaseRequest) ProtoMessage() {}
 
 func (x *AttachBaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[31]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1909,7 +2074,7 @@ func (x *AttachBaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachBaseRequest.ProtoReflect.Descriptor instead.
 func (*AttachBaseRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{31}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *AttachBaseRequest) GetPath() string {
@@ -1935,7 +2100,7 @@ type AttachBaseResponse struct {
 
 func (x *AttachBaseResponse) Reset() {
 	*x = AttachBaseResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[32]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1947,7 +2112,7 @@ func (x *AttachBaseResponse) String() string {
 func (*AttachBaseResponse) ProtoMessage() {}
 
 func (x *AttachBaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[32]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1960,7 +2125,7 @@ func (x *AttachBaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachBaseResponse.ProtoReflect.Descriptor instead.
 func (*AttachBaseResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{32}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{35}
 }
 
 // Waits for a cell's commits to be in object storage.
@@ -1974,7 +2139,7 @@ type SyncCellRequest struct {
 
 func (x *SyncCellRequest) Reset() {
 	*x = SyncCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[33]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1986,7 +2151,7 @@ func (x *SyncCellRequest) String() string {
 func (*SyncCellRequest) ProtoMessage() {}
 
 func (x *SyncCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[33]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1999,7 +2164,7 @@ func (x *SyncCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncCellRequest.ProtoReflect.Descriptor instead.
 func (*SyncCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{33}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *SyncCellRequest) GetPath() string {
@@ -2018,7 +2183,7 @@ type SyncCellResponse struct {
 
 func (x *SyncCellResponse) Reset() {
 	*x = SyncCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[34]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2030,7 +2195,7 @@ func (x *SyncCellResponse) String() string {
 func (*SyncCellResponse) ProtoMessage() {}
 
 func (x *SyncCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[34]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2043,7 +2208,7 @@ func (x *SyncCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncCellResponse.ProtoReflect.Descriptor instead.
 func (*SyncCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{34}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{37}
 }
 
 // Asks what a cell is, and holds.
@@ -2057,7 +2222,7 @@ type StatCellRequest struct {
 
 func (x *StatCellRequest) Reset() {
 	*x = StatCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[35]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2069,7 +2234,7 @@ func (x *StatCellRequest) String() string {
 func (*StatCellRequest) ProtoMessage() {}
 
 func (x *StatCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[35]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2082,7 +2247,7 @@ func (x *StatCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatCellRequest.ProtoReflect.Descriptor instead.
 func (*StatCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{35}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *StatCellRequest) GetPath() string {
@@ -2163,7 +2328,7 @@ type StatCellResponse struct {
 
 func (x *StatCellResponse) Reset() {
 	*x = StatCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[36]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2175,7 +2340,7 @@ func (x *StatCellResponse) String() string {
 func (*StatCellResponse) ProtoMessage() {}
 
 func (x *StatCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[36]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2188,7 +2353,7 @@ func (x *StatCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatCellResponse.ProtoReflect.Descriptor instead.
 func (*StatCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{36}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *StatCellResponse) GetCapacity() uint64 {
@@ -2382,7 +2547,7 @@ type ListCellsRequest struct {
 
 func (x *ListCellsRequest) Reset() {
 	*x = ListCellsRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[37]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2394,7 +2559,7 @@ func (x *ListCellsRequest) String() string {
 func (*ListCellsRequest) ProtoMessage() {}
 
 func (x *ListCellsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[37]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2407,7 +2572,7 @@ func (x *ListCellsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCellsRequest.ProtoReflect.Descriptor instead.
 func (*ListCellsRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{37}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{40}
 }
 
 // The cells the daemon serves, in no order.
@@ -2421,7 +2586,7 @@ type ListCellsResponse struct {
 
 func (x *ListCellsResponse) Reset() {
 	*x = ListCellsResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[38]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2433,7 +2598,7 @@ func (x *ListCellsResponse) String() string {
 func (*ListCellsResponse) ProtoMessage() {}
 
 func (x *ListCellsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[38]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2446,7 +2611,7 @@ func (x *ListCellsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCellsResponse.ProtoReflect.Descriptor instead.
 func (*ListCellsResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{38}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ListCellsResponse) GetStores() []*ListedCell {
@@ -2469,7 +2634,7 @@ type ListedCell struct {
 
 func (x *ListedCell) Reset() {
 	*x = ListedCell{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[39]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2481,7 +2646,7 @@ func (x *ListedCell) String() string {
 func (*ListedCell) ProtoMessage() {}
 
 func (x *ListedCell) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[39]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2494,7 +2659,7 @@ func (x *ListedCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListedCell.ProtoReflect.Descriptor instead.
 func (*ListedCell) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{39}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ListedCell) GetPath() string {
@@ -2520,7 +2685,7 @@ type GetCountersRequest struct {
 
 func (x *GetCountersRequest) Reset() {
 	*x = GetCountersRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[40]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2532,7 +2697,7 @@ func (x *GetCountersRequest) String() string {
 func (*GetCountersRequest) ProtoMessage() {}
 
 func (x *GetCountersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[40]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2545,7 +2710,7 @@ func (x *GetCountersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCountersRequest.ProtoReflect.Descriptor instead.
 func (*GetCountersRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{40}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{43}
 }
 
 // What the daemon did since it started: counters, which only grow, so that a measurement is the
@@ -2599,7 +2764,7 @@ type GetCountersResponse struct {
 
 func (x *GetCountersResponse) Reset() {
 	*x = GetCountersResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[41]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2611,7 +2776,7 @@ func (x *GetCountersResponse) String() string {
 func (*GetCountersResponse) ProtoMessage() {}
 
 func (x *GetCountersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[41]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2624,7 +2789,7 @@ func (x *GetCountersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCountersResponse.ProtoReflect.Descriptor instead.
 func (*GetCountersResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{41}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *GetCountersResponse) GetMaps() uint64 {
@@ -2771,7 +2936,7 @@ type GetStatsRequest struct {
 
 func (x *GetStatsRequest) Reset() {
 	*x = GetStatsRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[42]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2783,7 +2948,7 @@ func (x *GetStatsRequest) String() string {
 func (*GetStatsRequest) ProtoMessage() {}
 
 func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[42]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2796,7 +2961,7 @@ func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsRequest.ProtoReflect.Descriptor instead.
 func (*GetStatsRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{42}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *GetStatsRequest) GetWaitMs() uint32 {
@@ -2821,14 +2986,17 @@ type GetStatsResponse struct {
 	// Its gauges: those its metrics name cladefsd_NAME.
 	Gauges map[string]uint64 `protobuf:"bytes,4,rep,name=gauges,proto3" json:"gauges,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	// Its VM processes that opened a cell, in the order they connected.
-	Vms           []*VmStats `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
+	Vms []*VmStats `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
+	// The incarnation of its ephemeral cells' directory (CLADEFSD_EPHEMERAL), which their
+	// references name and DecommissionHost takes (board 8521): 0 if it keeps none.
+	Incarnation   uint64 `protobuf:"varint,6,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetStatsResponse) Reset() {
 	*x = GetStatsResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[43]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2840,7 +3008,7 @@ func (x *GetStatsResponse) String() string {
 func (*GetStatsResponse) ProtoMessage() {}
 
 func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[43]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2853,7 +3021,7 @@ func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsResponse.ProtoReflect.Descriptor instead.
 func (*GetStatsResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{43}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *GetStatsResponse) GetTakenUnixNs() uint64 {
@@ -2889,6 +3057,13 @@ func (x *GetStatsResponse) GetVms() []*VmStats {
 		return x.Vms
 	}
 	return nil
+}
+
+func (x *GetStatsResponse) GetIncarnation() uint64 {
+	if x != nil {
+		return x.Incarnation
+	}
+	return 0
 }
 
 // A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
@@ -2927,7 +3102,7 @@ type VmStats struct {
 
 func (x *VmStats) Reset() {
 	*x = VmStats{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[44]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2939,7 +3114,7 @@ func (x *VmStats) String() string {
 func (*VmStats) ProtoMessage() {}
 
 func (x *VmStats) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[44]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2952,7 +3127,7 @@ func (x *VmStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VmStats.ProtoReflect.Descriptor instead.
 func (*VmStats) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{44}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *VmStats) GetConnection() uint64 {
@@ -3047,7 +3222,7 @@ type GuestStats struct {
 
 func (x *GuestStats) Reset() {
 	*x = GuestStats{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[45]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3059,7 +3234,7 @@ func (x *GuestStats) String() string {
 func (*GuestStats) ProtoMessage() {}
 
 func (x *GuestStats) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[45]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3072,7 +3247,7 @@ func (x *GuestStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestStats.ProtoReflect.Descriptor instead.
 func (*GuestStats) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{45}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *GuestStats) GetBuild() string {
@@ -3107,7 +3282,7 @@ type Histogram struct {
 
 func (x *Histogram) Reset() {
 	*x = Histogram{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[46]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3119,7 +3294,7 @@ func (x *Histogram) String() string {
 func (*Histogram) ProtoMessage() {}
 
 func (x *Histogram) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[46]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3132,7 +3307,7 @@ func (x *Histogram) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Histogram.ProtoReflect.Descriptor instead.
 func (*Histogram) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{46}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *Histogram) GetBuckets() []uint64 {
@@ -3162,7 +3337,7 @@ type ObjectStorageStats struct {
 
 func (x *ObjectStorageStats) Reset() {
 	*x = ObjectStorageStats{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[47]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3174,7 +3349,7 @@ func (x *ObjectStorageStats) String() string {
 func (*ObjectStorageStats) ProtoMessage() {}
 
 func (x *ObjectStorageStats) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[47]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3187,7 +3362,7 @@ func (x *ObjectStorageStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObjectStorageStats.ProtoReflect.Descriptor instead.
 func (*ObjectStorageStats) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{47}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *ObjectStorageStats) GetRequests() map[string]uint64 {
@@ -3240,7 +3415,7 @@ type GrantRequest struct {
 
 func (x *GrantRequest) Reset() {
 	*x = GrantRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[48]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3252,7 +3427,7 @@ func (x *GrantRequest) String() string {
 func (*GrantRequest) ProtoMessage() {}
 
 func (x *GrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[48]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3265,7 +3440,7 @@ func (x *GrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantRequest.ProtoReflect.Descriptor instead.
 func (*GrantRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{48}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *GrantRequest) GetTenant() uint64 {
@@ -3307,7 +3482,7 @@ type GrantResponse struct {
 
 func (x *GrantResponse) Reset() {
 	*x = GrantResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[49]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3319,7 +3494,7 @@ func (x *GrantResponse) String() string {
 func (*GrantResponse) ProtoMessage() {}
 
 func (x *GrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[49]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3332,7 +3507,7 @@ func (x *GrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantResponse.ProtoReflect.Descriptor instead.
 func (*GrantResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{49}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *GrantResponse) GetSocket() string {
@@ -3353,7 +3528,7 @@ type RevokeRequest struct {
 
 func (x *RevokeRequest) Reset() {
 	*x = RevokeRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[50]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3365,7 +3540,7 @@ func (x *RevokeRequest) String() string {
 func (*RevokeRequest) ProtoMessage() {}
 
 func (x *RevokeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[50]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3378,7 +3553,7 @@ func (x *RevokeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeRequest.ProtoReflect.Descriptor instead.
 func (*RevokeRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{50}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *RevokeRequest) GetTenant() uint64 {
@@ -3397,7 +3572,7 @@ type RevokeResponse struct {
 
 func (x *RevokeResponse) Reset() {
 	*x = RevokeResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[51]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3409,7 +3584,7 @@ func (x *RevokeResponse) String() string {
 func (*RevokeResponse) ProtoMessage() {}
 
 func (x *RevokeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[51]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3422,7 +3597,7 @@ func (x *RevokeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeResponse.ProtoReflect.Descriptor instead.
 func (*RevokeResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{51}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{54}
 }
 
 // Limits the memory of a tenant, or of every tenant.
@@ -3442,7 +3617,7 @@ type SetMemoryLimitRequest struct {
 
 func (x *SetMemoryLimitRequest) Reset() {
 	*x = SetMemoryLimitRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[52]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3454,7 +3629,7 @@ func (x *SetMemoryLimitRequest) String() string {
 func (*SetMemoryLimitRequest) ProtoMessage() {}
 
 func (x *SetMemoryLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[52]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3467,7 +3642,7 @@ func (x *SetMemoryLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryLimitRequest.ProtoReflect.Descriptor instead.
 func (*SetMemoryLimitRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{52}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *SetMemoryLimitRequest) GetTenant() uint64 {
@@ -3493,7 +3668,7 @@ type SetMemoryLimitResponse struct {
 
 func (x *SetMemoryLimitResponse) Reset() {
 	*x = SetMemoryLimitResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[53]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3505,7 +3680,7 @@ func (x *SetMemoryLimitResponse) String() string {
 func (*SetMemoryLimitResponse) ProtoMessage() {}
 
 func (x *SetMemoryLimitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[53]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3518,7 +3693,7 @@ func (x *SetMemoryLimitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryLimitResponse.ProtoReflect.Descriptor instead.
 func (*SetMemoryLimitResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{53}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{56}
 }
 
 // Weighs a tenant's memory.
@@ -3535,7 +3710,7 @@ type SetMemoryWeightRequest struct {
 
 func (x *SetMemoryWeightRequest) Reset() {
 	*x = SetMemoryWeightRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[54]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3547,7 +3722,7 @@ func (x *SetMemoryWeightRequest) String() string {
 func (*SetMemoryWeightRequest) ProtoMessage() {}
 
 func (x *SetMemoryWeightRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[54]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3560,7 +3735,7 @@ func (x *SetMemoryWeightRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryWeightRequest.ProtoReflect.Descriptor instead.
 func (*SetMemoryWeightRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{54}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *SetMemoryWeightRequest) GetTenant() uint64 {
@@ -3586,7 +3761,7 @@ type SetMemoryWeightResponse struct {
 
 func (x *SetMemoryWeightResponse) Reset() {
 	*x = SetMemoryWeightResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[55]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3598,7 +3773,7 @@ func (x *SetMemoryWeightResponse) String() string {
 func (*SetMemoryWeightResponse) ProtoMessage() {}
 
 func (x *SetMemoryWeightResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[55]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3611,7 +3786,7 @@ func (x *SetMemoryWeightResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryWeightResponse.ProtoReflect.Descriptor instead.
 func (*SetMemoryWeightResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{55}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{58}
 }
 
 // Sets the bytes in flight of a tenant's connections.
@@ -3630,7 +3805,7 @@ type SetTenantInFlightRequest struct {
 
 func (x *SetTenantInFlightRequest) Reset() {
 	*x = SetTenantInFlightRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[56]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3642,7 +3817,7 @@ func (x *SetTenantInFlightRequest) String() string {
 func (*SetTenantInFlightRequest) ProtoMessage() {}
 
 func (x *SetTenantInFlightRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[56]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3655,7 +3830,7 @@ func (x *SetTenantInFlightRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetTenantInFlightRequest.ProtoReflect.Descriptor instead.
 func (*SetTenantInFlightRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{56}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *SetTenantInFlightRequest) GetTenant() uint64 {
@@ -3681,7 +3856,7 @@ type SetTenantInFlightResponse struct {
 
 func (x *SetTenantInFlightResponse) Reset() {
 	*x = SetTenantInFlightResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[57]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3693,7 +3868,7 @@ func (x *SetTenantInFlightResponse) String() string {
 func (*SetTenantInFlightResponse) ProtoMessage() {}
 
 func (x *SetTenantInFlightResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[57]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3706,7 +3881,7 @@ func (x *SetTenantInFlightResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetTenantInFlightResponse.ProtoReflect.Descriptor instead.
 func (*SetTenantInFlightResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{57}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{60}
 }
 
 // Evicts pages toward a target.
@@ -3722,7 +3897,7 @@ type ShrinkMemoryRequest struct {
 
 func (x *ShrinkMemoryRequest) Reset() {
 	*x = ShrinkMemoryRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[58]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3734,7 +3909,7 @@ func (x *ShrinkMemoryRequest) String() string {
 func (*ShrinkMemoryRequest) ProtoMessage() {}
 
 func (x *ShrinkMemoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[58]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3747,7 +3922,7 @@ func (x *ShrinkMemoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShrinkMemoryRequest.ProtoReflect.Descriptor instead.
 func (*ShrinkMemoryRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{58}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ShrinkMemoryRequest) GetTenant() uint64 {
@@ -3775,7 +3950,7 @@ type ShrinkMemoryResponse struct {
 
 func (x *ShrinkMemoryResponse) Reset() {
 	*x = ShrinkMemoryResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[59]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3787,7 +3962,7 @@ func (x *ShrinkMemoryResponse) String() string {
 func (*ShrinkMemoryResponse) ProtoMessage() {}
 
 func (x *ShrinkMemoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[59]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3800,7 +3975,7 @@ func (x *ShrinkMemoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShrinkMemoryResponse.ProtoReflect.Descriptor instead.
 func (*ShrinkMemoryResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{59}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ShrinkMemoryResponse) GetBytes() uint64 {
@@ -3825,7 +4000,7 @@ type SetDiskLimitRequest struct {
 
 func (x *SetDiskLimitRequest) Reset() {
 	*x = SetDiskLimitRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[60]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3837,7 +4012,7 @@ func (x *SetDiskLimitRequest) String() string {
 func (*SetDiskLimitRequest) ProtoMessage() {}
 
 func (x *SetDiskLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[60]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3850,7 +4025,7 @@ func (x *SetDiskLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDiskLimitRequest.ProtoReflect.Descriptor instead.
 func (*SetDiskLimitRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{60}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *SetDiskLimitRequest) GetTenant() uint64 {
@@ -3876,7 +4051,7 @@ type SetDiskLimitResponse struct {
 
 func (x *SetDiskLimitResponse) Reset() {
 	*x = SetDiskLimitResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[61]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3888,7 +4063,7 @@ func (x *SetDiskLimitResponse) String() string {
 func (*SetDiskLimitResponse) ProtoMessage() {}
 
 func (x *SetDiskLimitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[61]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3901,7 +4076,7 @@ func (x *SetDiskLimitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDiskLimitResponse.ProtoReflect.Descriptor instead.
 func (*SetDiskLimitResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{61}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{64}
 }
 
 // Weighs a tenant's disk.
@@ -3918,7 +4093,7 @@ type SetDiskWeightRequest struct {
 
 func (x *SetDiskWeightRequest) Reset() {
 	*x = SetDiskWeightRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[62]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3930,7 +4105,7 @@ func (x *SetDiskWeightRequest) String() string {
 func (*SetDiskWeightRequest) ProtoMessage() {}
 
 func (x *SetDiskWeightRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[62]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3943,7 +4118,7 @@ func (x *SetDiskWeightRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDiskWeightRequest.ProtoReflect.Descriptor instead.
 func (*SetDiskWeightRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{62}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *SetDiskWeightRequest) GetTenant() uint64 {
@@ -3969,7 +4144,7 @@ type SetDiskWeightResponse struct {
 
 func (x *SetDiskWeightResponse) Reset() {
 	*x = SetDiskWeightResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[63]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3981,7 +4156,7 @@ func (x *SetDiskWeightResponse) String() string {
 func (*SetDiskWeightResponse) ProtoMessage() {}
 
 func (x *SetDiskWeightResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[63]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3994,7 +4169,7 @@ func (x *SetDiskWeightResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDiskWeightResponse.ProtoReflect.Descriptor instead.
 func (*SetDiskWeightResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{63}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{66}
 }
 
 // The hosts sharing the daemon's bucket.
@@ -4009,7 +4184,7 @@ type SetPeersRequest struct {
 
 func (x *SetPeersRequest) Reset() {
 	*x = SetPeersRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[64]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4021,7 +4196,7 @@ func (x *SetPeersRequest) String() string {
 func (*SetPeersRequest) ProtoMessage() {}
 
 func (x *SetPeersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[64]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4034,7 +4209,7 @@ func (x *SetPeersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPeersRequest.ProtoReflect.Descriptor instead.
 func (*SetPeersRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{64}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *SetPeersRequest) GetAddresses() []string {
@@ -4053,7 +4228,7 @@ type SetPeersResponse struct {
 
 func (x *SetPeersResponse) Reset() {
 	*x = SetPeersResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[65]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4065,7 +4240,7 @@ func (x *SetPeersResponse) String() string {
 func (*SetPeersResponse) ProtoMessage() {}
 
 func (x *SetPeersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[65]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4078,7 +4253,7 @@ func (x *SetPeersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPeersResponse.ProtoReflect.Descriptor instead.
 func (*SetPeersResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{65}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{68}
 }
 
 // Asks what a tenant's disk takes.
@@ -4092,7 +4267,7 @@ type GetTenantDiskRequest struct {
 
 func (x *GetTenantDiskRequest) Reset() {
 	*x = GetTenantDiskRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[66]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4104,7 +4279,7 @@ func (x *GetTenantDiskRequest) String() string {
 func (*GetTenantDiskRequest) ProtoMessage() {}
 
 func (x *GetTenantDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[66]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4117,7 +4292,7 @@ func (x *GetTenantDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTenantDiskRequest.ProtoReflect.Descriptor instead.
 func (*GetTenantDiskRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{66}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *GetTenantDiskRequest) GetTenant() uint64 {
@@ -4144,7 +4319,7 @@ type GetTenantDiskResponse struct {
 
 func (x *GetTenantDiskResponse) Reset() {
 	*x = GetTenantDiskResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[67]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4156,7 +4331,7 @@ func (x *GetTenantDiskResponse) String() string {
 func (*GetTenantDiskResponse) ProtoMessage() {}
 
 func (x *GetTenantDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[67]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4169,7 +4344,7 @@ func (x *GetTenantDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTenantDiskResponse.ProtoReflect.Descriptor instead.
 func (*GetTenantDiskResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{67}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *GetTenantDiskResponse) GetBytes() uint64 {
@@ -4206,7 +4381,7 @@ type ShredCellRequest struct {
 
 func (x *ShredCellRequest) Reset() {
 	*x = ShredCellRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[68]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4218,7 +4393,7 @@ func (x *ShredCellRequest) String() string {
 func (*ShredCellRequest) ProtoMessage() {}
 
 func (x *ShredCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[68]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4231,7 +4406,7 @@ func (x *ShredCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShredCellRequest.ProtoReflect.Descriptor instead.
 func (*ShredCellRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{68}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ShredCellRequest) GetTenant() uint64 {
@@ -4262,7 +4437,7 @@ type ShredCellResponse struct {
 
 func (x *ShredCellResponse) Reset() {
 	*x = ShredCellResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[69]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4274,7 +4449,7 @@ func (x *ShredCellResponse) String() string {
 func (*ShredCellResponse) ProtoMessage() {}
 
 func (x *ShredCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[69]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4287,7 +4462,7 @@ func (x *ShredCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShredCellResponse.ProtoReflect.Descriptor instead.
 func (*ShredCellResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{69}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *ShredCellResponse) GetKeksRemoved() uint32 {
@@ -4317,7 +4492,7 @@ type ForgetTenantKeysRequest struct {
 
 func (x *ForgetTenantKeysRequest) Reset() {
 	*x = ForgetTenantKeysRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[70]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4329,7 +4504,7 @@ func (x *ForgetTenantKeysRequest) String() string {
 func (*ForgetTenantKeysRequest) ProtoMessage() {}
 
 func (x *ForgetTenantKeysRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[70]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4342,7 +4517,7 @@ func (x *ForgetTenantKeysRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForgetTenantKeysRequest.ProtoReflect.Descriptor instead.
 func (*ForgetTenantKeysRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{70}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *ForgetTenantKeysRequest) GetTenant() uint64 {
@@ -4370,7 +4545,7 @@ type ForgetTenantKeysResponse struct {
 
 func (x *ForgetTenantKeysResponse) Reset() {
 	*x = ForgetTenantKeysResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[71]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4382,7 +4557,7 @@ func (x *ForgetTenantKeysResponse) String() string {
 func (*ForgetTenantKeysResponse) ProtoMessage() {}
 
 func (x *ForgetTenantKeysResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[71]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4395,7 +4570,7 @@ func (x *ForgetTenantKeysResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForgetTenantKeysResponse.ProtoReflect.Descriptor instead.
 func (*ForgetTenantKeysResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{71}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *ForgetTenantKeysResponse) GetForgotten() *Forgotten {
@@ -4416,7 +4591,7 @@ type ShredTenantRequest struct {
 
 func (x *ShredTenantRequest) Reset() {
 	*x = ShredTenantRequest{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[72]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4428,7 +4603,7 @@ func (x *ShredTenantRequest) String() string {
 func (*ShredTenantRequest) ProtoMessage() {}
 
 func (x *ShredTenantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[72]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4441,7 +4616,7 @@ func (x *ShredTenantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShredTenantRequest.ProtoReflect.Descriptor instead.
 func (*ShredTenantRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{72}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *ShredTenantRequest) GetTenant() uint64 {
@@ -4464,7 +4639,7 @@ type ShredTenantResponse struct {
 
 func (x *ShredTenantResponse) Reset() {
 	*x = ShredTenantResponse{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[73]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4476,7 +4651,7 @@ func (x *ShredTenantResponse) String() string {
 func (*ShredTenantResponse) ProtoMessage() {}
 
 func (x *ShredTenantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[73]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4489,7 +4664,7 @@ func (x *ShredTenantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShredTenantResponse.ProtoReflect.Descriptor instead.
 func (*ShredTenantResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{73}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *ShredTenantResponse) GetShreddedNow() bool {
@@ -4525,7 +4700,7 @@ type Forgotten struct {
 
 func (x *Forgotten) Reset() {
 	*x = Forgotten{}
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[74]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4537,7 +4712,7 @@ func (x *Forgotten) String() string {
 func (*Forgotten) ProtoMessage() {}
 
 func (x *Forgotten) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[74]
+	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4550,7 +4725,7 @@ func (x *Forgotten) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Forgotten.ProtoReflect.Descriptor instead.
 func (*Forgotten) Descriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{74}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *Forgotten) GetStores() uint32 {
@@ -4601,11 +4776,22 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\tmigration\x18\x01 \x01(\x04R\tmigration\")\n" +
 	"\x13HandOverCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x16\n" +
-	"\x14HandOverCellResponse\";\n" +
+	"\x14HandOverCellResponse\"O\n" +
 	"\x17DecommissionHostRequest\x12 \n" +
-	"\vincarnation\x18\x01 \x01(\x04R\vincarnation\"4\n" +
+	"\vincarnation\x18\x01 \x01(\x04R\vincarnation\x12\x12\n" +
+	"\x04most\x18\x02 \x01(\x04R\x04most\"H\n" +
 	"\x18DecommissionHostResponse\x12\x18\n" +
-	"\aretired\x18\x01 \x01(\x04R\aretired\"\xce\x02\n" +
+	"\aretired\x18\x01 \x01(\x04R\aretired\x12\x12\n" +
+	"\x04left\x18\x02 \x01(\x04R\x04left\"\x1b\n" +
+	"\x19ListEphemeralHostsRequest\"V\n" +
+	"\x1aListEphemeralHostsResponse\x128\n" +
+	"\x05hosts\x18\x01 \x03(\v2\".cladefs.cladefsd.v1.EphemeralHostR\x05hosts\"y\n" +
+	"\rEphemeralHost\x12 \n" +
+	"\vincarnation\x18\x01 \x01(\x04R\vincarnation\x12\x1e\n" +
+	"\n" +
+	"references\x18\x02 \x01(\x04R\n" +
+	"references\x12&\n" +
+	"\x0edecommissioned\x18\x03 \x01(\bR\x0edecommissioned\"\xce\x02\n" +
 	"\x11CreateCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x19\n" +
@@ -4759,13 +4945,14 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x10segment_close_ns\x18\x16 \x01(\x04R\x0esegmentCloseNsB\x11\n" +
 	"\x0f_object_storageJ\x04\b\x10\x10\x11J\x04\b\x11\x10\x12J\x04\b\x13\x10\x14R\x0fcommit_write_nsR\x14commit_written_bytesR\x0ecommit_seal_ns\"*\n" +
 	"\x0fGetStatsRequest\x12\x17\n" +
-	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\x90\x03\n" +
+	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\xb2\x03\n" +
 	"\x10GetStatsResponse\x12\"\n" +
 	"\rtaken_unix_ns\x18\x01 \x01(\x04R\vtakenUnixNs\x12\x14\n" +
 	"\x05build\x18\x02 \x01(\tR\x05build\x12O\n" +
 	"\bcounters\x18\x03 \x03(\v23.cladefs.cladefsd.v1.GetStatsResponse.CountersEntryR\bcounters\x12I\n" +
 	"\x06gauges\x18\x04 \x03(\v21.cladefs.cladefsd.v1.GetStatsResponse.GaugesEntryR\x06gauges\x12.\n" +
-	"\x03vms\x18\x05 \x03(\v2\x1c.cladefs.cladefsd.v1.VmStatsR\x03vms\x1a;\n" +
+	"\x03vms\x18\x05 \x03(\v2\x1c.cladefs.cladefsd.v1.VmStatsR\x03vms\x12 \n" +
+	"\vincarnation\x18\x06 \x01(\x04R\vincarnation\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
@@ -4912,7 +5099,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\bCellKind\x12\x12\n" +
 	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +
 	"\x10CELL_KIND_SQLITE\x10\x01\x12\x14\n" +
-	"\x10CELL_KIND_MEMORY\x10\x022\xf9\x19\n" +
+	"\x10CELL_KIND_MEMORY\x10\x022\xf0\x1a\n" +
 	"\bCladefsd\x12]\n" +
 	"\n" +
 	"CreateCell\x12&.cladefs.cladefsd.v1.CreateCellRequest\x1a'.cladefs.cladefsd.v1.CreateCellResponse\x12`\n" +
@@ -4950,7 +5137,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\tShredCell\x12%.cladefs.cladefsd.v1.ShredCellRequest\x1a&.cladefs.cladefsd.v1.ShredCellResponse\x12o\n" +
 	"\x10ForgetTenantKeys\x12,.cladefs.cladefsd.v1.ForgetTenantKeysRequest\x1a-.cladefs.cladefsd.v1.ForgetTenantKeysResponse\x12`\n" +
 	"\vShredTenant\x12'.cladefs.cladefsd.v1.ShredTenantRequest\x1a(.cladefs.cladefsd.v1.ShredTenantResponse\x12o\n" +
-	"\x10DecommissionHost\x12,.cladefs.cladefsd.v1.DecommissionHostRequest\x1a-.cladefs.cladefsd.v1.DecommissionHostResponse\x12`\n" +
+	"\x10DecommissionHost\x12,.cladefs.cladefsd.v1.DecommissionHostRequest\x1a-.cladefs.cladefsd.v1.DecommissionHostResponse\x12u\n" +
+	"\x12ListEphemeralHosts\x12..cladefs.cladefsd.v1.ListEphemeralHostsRequest\x1a/.cladefs.cladefsd.v1.ListEphemeralHostsResponse\x12`\n" +
 	"\vMigrateCell\x12'.cladefs.cladefsd.v1.MigrateCellRequest\x1a(.cladefs.cladefsd.v1.MigrateCellResponse\x12c\n" +
 	"\fHandOverCell\x12(.cladefs.cladefsd.v1.HandOverCellRequest\x1a).cladefs.cladefsd.v1.HandOverCellResponseB9Z7github.com/semistrict/cladefs/go/cladefsd/v1;cladefsdv1b\x06proto3"
 
@@ -4967,193 +5155,199 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP() []byte {
 }
 
 var file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes = make([]protoimpl.MessageInfo, 85)
+var file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes = make([]protoimpl.MessageInfo, 88)
 var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
-	(FsyncLevel)(0),                   // 0: cladefs.cladefsd.v1.FsyncLevel
-	(CellKind)(0),                     // 1: cladefs.cladefsd.v1.CellKind
-	(*MigrateCellRequest)(nil),        // 2: cladefs.cladefsd.v1.MigrateCellRequest
-	(*MigrateCellResponse)(nil),       // 3: cladefs.cladefsd.v1.MigrateCellResponse
-	(*HandOverCellRequest)(nil),       // 4: cladefs.cladefsd.v1.HandOverCellRequest
-	(*HandOverCellResponse)(nil),      // 5: cladefs.cladefsd.v1.HandOverCellResponse
-	(*DecommissionHostRequest)(nil),   // 6: cladefs.cladefsd.v1.DecommissionHostRequest
-	(*DecommissionHostResponse)(nil),  // 7: cladefs.cladefsd.v1.DecommissionHostResponse
-	(*CreateCellRequest)(nil),         // 8: cladefs.cladefsd.v1.CreateCellRequest
-	(*CreateCellResponse)(nil),        // 9: cladefs.cladefsd.v1.CreateCellResponse
-	(*ImportImageRequest)(nil),        // 10: cladefs.cladefsd.v1.ImportImageRequest
-	(*ImportImageResponse)(nil),       // 11: cladefs.cladefsd.v1.ImportImageResponse
-	(*ForkCellRequest)(nil),           // 12: cladefs.cladefsd.v1.ForkCellRequest
-	(*ForkCellResponse)(nil),          // 13: cladefs.cladefsd.v1.ForkCellResponse
-	(*DeleteCellRequest)(nil),         // 14: cladefs.cladefsd.v1.DeleteCellRequest
-	(*DeleteCellResponse)(nil),        // 15: cladefs.cladefsd.v1.DeleteCellResponse
-	(*DropCellRequest)(nil),           // 16: cladefs.cladefsd.v1.DropCellRequest
-	(*DropCellResponse)(nil),          // 17: cladefs.cladefsd.v1.DropCellResponse
-	(*ResizeCellRequest)(nil),         // 18: cladefs.cladefsd.v1.ResizeCellRequest
-	(*ResizeCellResponse)(nil),        // 19: cladefs.cladefsd.v1.ResizeCellResponse
-	(*PlaceCellRequest)(nil),          // 20: cladefs.cladefsd.v1.PlaceCellRequest
-	(*PlaceCellResponse)(nil),         // 21: cladefs.cladefsd.v1.PlaceCellResponse
-	(*MakeVersionRequest)(nil),        // 22: cladefs.cladefsd.v1.MakeVersionRequest
-	(*MakeVersionResponse)(nil),       // 23: cladefs.cladefsd.v1.MakeVersionResponse
-	(*ListVersionsRequest)(nil),       // 24: cladefs.cladefsd.v1.ListVersionsRequest
-	(*Version)(nil),                   // 25: cladefs.cladefsd.v1.Version
-	(*ListVersionsResponse)(nil),      // 26: cladefs.cladefsd.v1.ListVersionsResponse
-	(*DropVersionsRequest)(nil),       // 27: cladefs.cladefsd.v1.DropVersionsRequest
-	(*DropVersionsResponse)(nil),      // 28: cladefs.cladefsd.v1.DropVersionsResponse
-	(*ShareVersionRequest)(nil),       // 29: cladefs.cladefsd.v1.ShareVersionRequest
-	(*ShareVersionResponse)(nil),      // 30: cladefs.cladefsd.v1.ShareVersionResponse
-	(*MakePublicRequest)(nil),         // 31: cladefs.cladefsd.v1.MakePublicRequest
-	(*MakePublicResponse)(nil),        // 32: cladefs.cladefsd.v1.MakePublicResponse
-	(*AttachBaseRequest)(nil),         // 33: cladefs.cladefsd.v1.AttachBaseRequest
-	(*AttachBaseResponse)(nil),        // 34: cladefs.cladefsd.v1.AttachBaseResponse
-	(*SyncCellRequest)(nil),           // 35: cladefs.cladefsd.v1.SyncCellRequest
-	(*SyncCellResponse)(nil),          // 36: cladefs.cladefsd.v1.SyncCellResponse
-	(*StatCellRequest)(nil),           // 37: cladefs.cladefsd.v1.StatCellRequest
-	(*StatCellResponse)(nil),          // 38: cladefs.cladefsd.v1.StatCellResponse
-	(*ListCellsRequest)(nil),          // 39: cladefs.cladefsd.v1.ListCellsRequest
-	(*ListCellsResponse)(nil),         // 40: cladefs.cladefsd.v1.ListCellsResponse
-	(*ListedCell)(nil),                // 41: cladefs.cladefsd.v1.ListedCell
-	(*GetCountersRequest)(nil),        // 42: cladefs.cladefsd.v1.GetCountersRequest
-	(*GetCountersResponse)(nil),       // 43: cladefs.cladefsd.v1.GetCountersResponse
-	(*GetStatsRequest)(nil),           // 44: cladefs.cladefsd.v1.GetStatsRequest
-	(*GetStatsResponse)(nil),          // 45: cladefs.cladefsd.v1.GetStatsResponse
-	(*VmStats)(nil),                   // 46: cladefs.cladefsd.v1.VmStats
-	(*GuestStats)(nil),                // 47: cladefs.cladefsd.v1.GuestStats
-	(*Histogram)(nil),                 // 48: cladefs.cladefsd.v1.Histogram
-	(*ObjectStorageStats)(nil),        // 49: cladefs.cladefsd.v1.ObjectStorageStats
-	(*GrantRequest)(nil),              // 50: cladefs.cladefsd.v1.GrantRequest
-	(*GrantResponse)(nil),             // 51: cladefs.cladefsd.v1.GrantResponse
-	(*RevokeRequest)(nil),             // 52: cladefs.cladefsd.v1.RevokeRequest
-	(*RevokeResponse)(nil),            // 53: cladefs.cladefsd.v1.RevokeResponse
-	(*SetMemoryLimitRequest)(nil),     // 54: cladefs.cladefsd.v1.SetMemoryLimitRequest
-	(*SetMemoryLimitResponse)(nil),    // 55: cladefs.cladefsd.v1.SetMemoryLimitResponse
-	(*SetMemoryWeightRequest)(nil),    // 56: cladefs.cladefsd.v1.SetMemoryWeightRequest
-	(*SetMemoryWeightResponse)(nil),   // 57: cladefs.cladefsd.v1.SetMemoryWeightResponse
-	(*SetTenantInFlightRequest)(nil),  // 58: cladefs.cladefsd.v1.SetTenantInFlightRequest
-	(*SetTenantInFlightResponse)(nil), // 59: cladefs.cladefsd.v1.SetTenantInFlightResponse
-	(*ShrinkMemoryRequest)(nil),       // 60: cladefs.cladefsd.v1.ShrinkMemoryRequest
-	(*ShrinkMemoryResponse)(nil),      // 61: cladefs.cladefsd.v1.ShrinkMemoryResponse
-	(*SetDiskLimitRequest)(nil),       // 62: cladefs.cladefsd.v1.SetDiskLimitRequest
-	(*SetDiskLimitResponse)(nil),      // 63: cladefs.cladefsd.v1.SetDiskLimitResponse
-	(*SetDiskWeightRequest)(nil),      // 64: cladefs.cladefsd.v1.SetDiskWeightRequest
-	(*SetDiskWeightResponse)(nil),     // 65: cladefs.cladefsd.v1.SetDiskWeightResponse
-	(*SetPeersRequest)(nil),           // 66: cladefs.cladefsd.v1.SetPeersRequest
-	(*SetPeersResponse)(nil),          // 67: cladefs.cladefsd.v1.SetPeersResponse
-	(*GetTenantDiskRequest)(nil),      // 68: cladefs.cladefsd.v1.GetTenantDiskRequest
-	(*GetTenantDiskResponse)(nil),     // 69: cladefs.cladefsd.v1.GetTenantDiskResponse
-	(*ShredCellRequest)(nil),          // 70: cladefs.cladefsd.v1.ShredCellRequest
-	(*ShredCellResponse)(nil),         // 71: cladefs.cladefsd.v1.ShredCellResponse
-	(*ForgetTenantKeysRequest)(nil),   // 72: cladefs.cladefsd.v1.ForgetTenantKeysRequest
-	(*ForgetTenantKeysResponse)(nil),  // 73: cladefs.cladefsd.v1.ForgetTenantKeysResponse
-	(*ShredTenantRequest)(nil),        // 74: cladefs.cladefsd.v1.ShredTenantRequest
-	(*ShredTenantResponse)(nil),       // 75: cladefs.cladefsd.v1.ShredTenantResponse
-	(*Forgotten)(nil),                 // 76: cladefs.cladefsd.v1.Forgotten
-	nil,                               // 77: cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
-	nil,                               // 78: cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
-	nil,                               // 79: cladefs.cladefsd.v1.VmStats.CountersEntry
-	nil,                               // 80: cladefs.cladefsd.v1.VmStats.GaugesEntry
-	nil,                               // 81: cladefs.cladefsd.v1.VmStats.WindowEntry
-	nil,                               // 82: cladefs.cladefsd.v1.GuestStats.CountersEntry
-	nil,                               // 83: cladefs.cladefsd.v1.GuestStats.HistogramsEntry
-	nil,                               // 84: cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
-	nil,                               // 85: cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
-	nil,                               // 86: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
+	(FsyncLevel)(0),                    // 0: cladefs.cladefsd.v1.FsyncLevel
+	(CellKind)(0),                      // 1: cladefs.cladefsd.v1.CellKind
+	(*MigrateCellRequest)(nil),         // 2: cladefs.cladefsd.v1.MigrateCellRequest
+	(*MigrateCellResponse)(nil),        // 3: cladefs.cladefsd.v1.MigrateCellResponse
+	(*HandOverCellRequest)(nil),        // 4: cladefs.cladefsd.v1.HandOverCellRequest
+	(*HandOverCellResponse)(nil),       // 5: cladefs.cladefsd.v1.HandOverCellResponse
+	(*DecommissionHostRequest)(nil),    // 6: cladefs.cladefsd.v1.DecommissionHostRequest
+	(*DecommissionHostResponse)(nil),   // 7: cladefs.cladefsd.v1.DecommissionHostResponse
+	(*ListEphemeralHostsRequest)(nil),  // 8: cladefs.cladefsd.v1.ListEphemeralHostsRequest
+	(*ListEphemeralHostsResponse)(nil), // 9: cladefs.cladefsd.v1.ListEphemeralHostsResponse
+	(*EphemeralHost)(nil),              // 10: cladefs.cladefsd.v1.EphemeralHost
+	(*CreateCellRequest)(nil),          // 11: cladefs.cladefsd.v1.CreateCellRequest
+	(*CreateCellResponse)(nil),         // 12: cladefs.cladefsd.v1.CreateCellResponse
+	(*ImportImageRequest)(nil),         // 13: cladefs.cladefsd.v1.ImportImageRequest
+	(*ImportImageResponse)(nil),        // 14: cladefs.cladefsd.v1.ImportImageResponse
+	(*ForkCellRequest)(nil),            // 15: cladefs.cladefsd.v1.ForkCellRequest
+	(*ForkCellResponse)(nil),           // 16: cladefs.cladefsd.v1.ForkCellResponse
+	(*DeleteCellRequest)(nil),          // 17: cladefs.cladefsd.v1.DeleteCellRequest
+	(*DeleteCellResponse)(nil),         // 18: cladefs.cladefsd.v1.DeleteCellResponse
+	(*DropCellRequest)(nil),            // 19: cladefs.cladefsd.v1.DropCellRequest
+	(*DropCellResponse)(nil),           // 20: cladefs.cladefsd.v1.DropCellResponse
+	(*ResizeCellRequest)(nil),          // 21: cladefs.cladefsd.v1.ResizeCellRequest
+	(*ResizeCellResponse)(nil),         // 22: cladefs.cladefsd.v1.ResizeCellResponse
+	(*PlaceCellRequest)(nil),           // 23: cladefs.cladefsd.v1.PlaceCellRequest
+	(*PlaceCellResponse)(nil),          // 24: cladefs.cladefsd.v1.PlaceCellResponse
+	(*MakeVersionRequest)(nil),         // 25: cladefs.cladefsd.v1.MakeVersionRequest
+	(*MakeVersionResponse)(nil),        // 26: cladefs.cladefsd.v1.MakeVersionResponse
+	(*ListVersionsRequest)(nil),        // 27: cladefs.cladefsd.v1.ListVersionsRequest
+	(*Version)(nil),                    // 28: cladefs.cladefsd.v1.Version
+	(*ListVersionsResponse)(nil),       // 29: cladefs.cladefsd.v1.ListVersionsResponse
+	(*DropVersionsRequest)(nil),        // 30: cladefs.cladefsd.v1.DropVersionsRequest
+	(*DropVersionsResponse)(nil),       // 31: cladefs.cladefsd.v1.DropVersionsResponse
+	(*ShareVersionRequest)(nil),        // 32: cladefs.cladefsd.v1.ShareVersionRequest
+	(*ShareVersionResponse)(nil),       // 33: cladefs.cladefsd.v1.ShareVersionResponse
+	(*MakePublicRequest)(nil),          // 34: cladefs.cladefsd.v1.MakePublicRequest
+	(*MakePublicResponse)(nil),         // 35: cladefs.cladefsd.v1.MakePublicResponse
+	(*AttachBaseRequest)(nil),          // 36: cladefs.cladefsd.v1.AttachBaseRequest
+	(*AttachBaseResponse)(nil),         // 37: cladefs.cladefsd.v1.AttachBaseResponse
+	(*SyncCellRequest)(nil),            // 38: cladefs.cladefsd.v1.SyncCellRequest
+	(*SyncCellResponse)(nil),           // 39: cladefs.cladefsd.v1.SyncCellResponse
+	(*StatCellRequest)(nil),            // 40: cladefs.cladefsd.v1.StatCellRequest
+	(*StatCellResponse)(nil),           // 41: cladefs.cladefsd.v1.StatCellResponse
+	(*ListCellsRequest)(nil),           // 42: cladefs.cladefsd.v1.ListCellsRequest
+	(*ListCellsResponse)(nil),          // 43: cladefs.cladefsd.v1.ListCellsResponse
+	(*ListedCell)(nil),                 // 44: cladefs.cladefsd.v1.ListedCell
+	(*GetCountersRequest)(nil),         // 45: cladefs.cladefsd.v1.GetCountersRequest
+	(*GetCountersResponse)(nil),        // 46: cladefs.cladefsd.v1.GetCountersResponse
+	(*GetStatsRequest)(nil),            // 47: cladefs.cladefsd.v1.GetStatsRequest
+	(*GetStatsResponse)(nil),           // 48: cladefs.cladefsd.v1.GetStatsResponse
+	(*VmStats)(nil),                    // 49: cladefs.cladefsd.v1.VmStats
+	(*GuestStats)(nil),                 // 50: cladefs.cladefsd.v1.GuestStats
+	(*Histogram)(nil),                  // 51: cladefs.cladefsd.v1.Histogram
+	(*ObjectStorageStats)(nil),         // 52: cladefs.cladefsd.v1.ObjectStorageStats
+	(*GrantRequest)(nil),               // 53: cladefs.cladefsd.v1.GrantRequest
+	(*GrantResponse)(nil),              // 54: cladefs.cladefsd.v1.GrantResponse
+	(*RevokeRequest)(nil),              // 55: cladefs.cladefsd.v1.RevokeRequest
+	(*RevokeResponse)(nil),             // 56: cladefs.cladefsd.v1.RevokeResponse
+	(*SetMemoryLimitRequest)(nil),      // 57: cladefs.cladefsd.v1.SetMemoryLimitRequest
+	(*SetMemoryLimitResponse)(nil),     // 58: cladefs.cladefsd.v1.SetMemoryLimitResponse
+	(*SetMemoryWeightRequest)(nil),     // 59: cladefs.cladefsd.v1.SetMemoryWeightRequest
+	(*SetMemoryWeightResponse)(nil),    // 60: cladefs.cladefsd.v1.SetMemoryWeightResponse
+	(*SetTenantInFlightRequest)(nil),   // 61: cladefs.cladefsd.v1.SetTenantInFlightRequest
+	(*SetTenantInFlightResponse)(nil),  // 62: cladefs.cladefsd.v1.SetTenantInFlightResponse
+	(*ShrinkMemoryRequest)(nil),        // 63: cladefs.cladefsd.v1.ShrinkMemoryRequest
+	(*ShrinkMemoryResponse)(nil),       // 64: cladefs.cladefsd.v1.ShrinkMemoryResponse
+	(*SetDiskLimitRequest)(nil),        // 65: cladefs.cladefsd.v1.SetDiskLimitRequest
+	(*SetDiskLimitResponse)(nil),       // 66: cladefs.cladefsd.v1.SetDiskLimitResponse
+	(*SetDiskWeightRequest)(nil),       // 67: cladefs.cladefsd.v1.SetDiskWeightRequest
+	(*SetDiskWeightResponse)(nil),      // 68: cladefs.cladefsd.v1.SetDiskWeightResponse
+	(*SetPeersRequest)(nil),            // 69: cladefs.cladefsd.v1.SetPeersRequest
+	(*SetPeersResponse)(nil),           // 70: cladefs.cladefsd.v1.SetPeersResponse
+	(*GetTenantDiskRequest)(nil),       // 71: cladefs.cladefsd.v1.GetTenantDiskRequest
+	(*GetTenantDiskResponse)(nil),      // 72: cladefs.cladefsd.v1.GetTenantDiskResponse
+	(*ShredCellRequest)(nil),           // 73: cladefs.cladefsd.v1.ShredCellRequest
+	(*ShredCellResponse)(nil),          // 74: cladefs.cladefsd.v1.ShredCellResponse
+	(*ForgetTenantKeysRequest)(nil),    // 75: cladefs.cladefsd.v1.ForgetTenantKeysRequest
+	(*ForgetTenantKeysResponse)(nil),   // 76: cladefs.cladefsd.v1.ForgetTenantKeysResponse
+	(*ShredTenantRequest)(nil),         // 77: cladefs.cladefsd.v1.ShredTenantRequest
+	(*ShredTenantResponse)(nil),        // 78: cladefs.cladefsd.v1.ShredTenantResponse
+	(*Forgotten)(nil),                  // 79: cladefs.cladefsd.v1.Forgotten
+	nil,                                // 80: cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
+	nil,                                // 81: cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
+	nil,                                // 82: cladefs.cladefsd.v1.VmStats.CountersEntry
+	nil,                                // 83: cladefs.cladefsd.v1.VmStats.GaugesEntry
+	nil,                                // 84: cladefs.cladefsd.v1.VmStats.WindowEntry
+	nil,                                // 85: cladefs.cladefsd.v1.GuestStats.CountersEntry
+	nil,                                // 86: cladefs.cladefsd.v1.GuestStats.HistogramsEntry
+	nil,                                // 87: cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
+	nil,                                // 88: cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
+	nil,                                // 89: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
-	1,  // 0: cladefs.cladefsd.v1.CreateCellRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
-	0,  // 1: cladefs.cladefsd.v1.CreateCellRequest.fsync:type_name -> cladefs.cladefsd.v1.FsyncLevel
-	25, // 2: cladefs.cladefsd.v1.ListVersionsResponse.versions:type_name -> cladefs.cladefsd.v1.Version
-	0,  // 3: cladefs.cladefsd.v1.StatCellResponse.fsync:type_name -> cladefs.cladefsd.v1.FsyncLevel
-	41, // 4: cladefs.cladefsd.v1.ListCellsResponse.stores:type_name -> cladefs.cladefsd.v1.ListedCell
-	38, // 5: cladefs.cladefsd.v1.ListedCell.stat:type_name -> cladefs.cladefsd.v1.StatCellResponse
-	49, // 6: cladefs.cladefsd.v1.GetCountersResponse.object_storage:type_name -> cladefs.cladefsd.v1.ObjectStorageStats
-	77, // 7: cladefs.cladefsd.v1.GetStatsResponse.counters:type_name -> cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
-	78, // 8: cladefs.cladefsd.v1.GetStatsResponse.gauges:type_name -> cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
-	46, // 9: cladefs.cladefsd.v1.GetStatsResponse.vms:type_name -> cladefs.cladefsd.v1.VmStats
-	79, // 10: cladefs.cladefsd.v1.VmStats.counters:type_name -> cladefs.cladefsd.v1.VmStats.CountersEntry
-	80, // 11: cladefs.cladefsd.v1.VmStats.gauges:type_name -> cladefs.cladefsd.v1.VmStats.GaugesEntry
-	81, // 12: cladefs.cladefsd.v1.VmStats.window:type_name -> cladefs.cladefsd.v1.VmStats.WindowEntry
-	47, // 13: cladefs.cladefsd.v1.VmStats.guest:type_name -> cladefs.cladefsd.v1.GuestStats
-	82, // 14: cladefs.cladefsd.v1.GuestStats.counters:type_name -> cladefs.cladefsd.v1.GuestStats.CountersEntry
-	83, // 15: cladefs.cladefsd.v1.GuestStats.histograms:type_name -> cladefs.cladefsd.v1.GuestStats.HistogramsEntry
-	84, // 16: cladefs.cladefsd.v1.ObjectStorageStats.requests:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
-	85, // 17: cladefs.cladefsd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
-	86, // 18: cladefs.cladefsd.v1.ObjectStorageStats.failures:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
-	76, // 19: cladefs.cladefsd.v1.ShredCellResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
-	76, // 20: cladefs.cladefsd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
-	76, // 21: cladefs.cladefsd.v1.ShredTenantResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
-	48, // 22: cladefs.cladefsd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.cladefsd.v1.Histogram
-	8,  // 23: cladefs.cladefsd.v1.Cladefsd.CreateCell:input_type -> cladefs.cladefsd.v1.CreateCellRequest
-	10, // 24: cladefs.cladefsd.v1.Cladefsd.ImportImage:input_type -> cladefs.cladefsd.v1.ImportImageRequest
-	12, // 25: cladefs.cladefsd.v1.Cladefsd.ForkCell:input_type -> cladefs.cladefsd.v1.ForkCellRequest
-	14, // 26: cladefs.cladefsd.v1.Cladefsd.DeleteCell:input_type -> cladefs.cladefsd.v1.DeleteCellRequest
-	16, // 27: cladefs.cladefsd.v1.Cladefsd.DropCell:input_type -> cladefs.cladefsd.v1.DropCellRequest
-	18, // 28: cladefs.cladefsd.v1.Cladefsd.ResizeCell:input_type -> cladefs.cladefsd.v1.ResizeCellRequest
-	20, // 29: cladefs.cladefsd.v1.Cladefsd.PlaceCell:input_type -> cladefs.cladefsd.v1.PlaceCellRequest
-	31, // 30: cladefs.cladefsd.v1.Cladefsd.MakePublic:input_type -> cladefs.cladefsd.v1.MakePublicRequest
-	22, // 31: cladefs.cladefsd.v1.Cladefsd.MakeVersion:input_type -> cladefs.cladefsd.v1.MakeVersionRequest
-	24, // 32: cladefs.cladefsd.v1.Cladefsd.ListVersions:input_type -> cladefs.cladefsd.v1.ListVersionsRequest
-	27, // 33: cladefs.cladefsd.v1.Cladefsd.DropVersions:input_type -> cladefs.cladefsd.v1.DropVersionsRequest
-	29, // 34: cladefs.cladefsd.v1.Cladefsd.ShareVersion:input_type -> cladefs.cladefsd.v1.ShareVersionRequest
-	33, // 35: cladefs.cladefsd.v1.Cladefsd.AttachBase:input_type -> cladefs.cladefsd.v1.AttachBaseRequest
-	35, // 36: cladefs.cladefsd.v1.Cladefsd.SyncCell:input_type -> cladefs.cladefsd.v1.SyncCellRequest
-	37, // 37: cladefs.cladefsd.v1.Cladefsd.StatCell:input_type -> cladefs.cladefsd.v1.StatCellRequest
-	39, // 38: cladefs.cladefsd.v1.Cladefsd.ListCells:input_type -> cladefs.cladefsd.v1.ListCellsRequest
-	42, // 39: cladefs.cladefsd.v1.Cladefsd.GetCounters:input_type -> cladefs.cladefsd.v1.GetCountersRequest
-	44, // 40: cladefs.cladefsd.v1.Cladefsd.GetStats:input_type -> cladefs.cladefsd.v1.GetStatsRequest
-	50, // 41: cladefs.cladefsd.v1.Cladefsd.Grant:input_type -> cladefs.cladefsd.v1.GrantRequest
-	52, // 42: cladefs.cladefsd.v1.Cladefsd.Revoke:input_type -> cladefs.cladefsd.v1.RevokeRequest
-	54, // 43: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:input_type -> cladefs.cladefsd.v1.SetMemoryLimitRequest
-	56, // 44: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:input_type -> cladefs.cladefsd.v1.SetMemoryWeightRequest
-	58, // 45: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:input_type -> cladefs.cladefsd.v1.SetTenantInFlightRequest
-	60, // 46: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:input_type -> cladefs.cladefsd.v1.ShrinkMemoryRequest
-	62, // 47: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:input_type -> cladefs.cladefsd.v1.SetDiskLimitRequest
-	64, // 48: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:input_type -> cladefs.cladefsd.v1.SetDiskWeightRequest
-	68, // 49: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:input_type -> cladefs.cladefsd.v1.GetTenantDiskRequest
-	66, // 50: cladefs.cladefsd.v1.Cladefsd.SetPeers:input_type -> cladefs.cladefsd.v1.SetPeersRequest
-	70, // 51: cladefs.cladefsd.v1.Cladefsd.ShredCell:input_type -> cladefs.cladefsd.v1.ShredCellRequest
-	72, // 52: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:input_type -> cladefs.cladefsd.v1.ForgetTenantKeysRequest
-	74, // 53: cladefs.cladefsd.v1.Cladefsd.ShredTenant:input_type -> cladefs.cladefsd.v1.ShredTenantRequest
-	6,  // 54: cladefs.cladefsd.v1.Cladefsd.DecommissionHost:input_type -> cladefs.cladefsd.v1.DecommissionHostRequest
-	2,  // 55: cladefs.cladefsd.v1.Cladefsd.MigrateCell:input_type -> cladefs.cladefsd.v1.MigrateCellRequest
-	4,  // 56: cladefs.cladefsd.v1.Cladefsd.HandOverCell:input_type -> cladefs.cladefsd.v1.HandOverCellRequest
-	9,  // 57: cladefs.cladefsd.v1.Cladefsd.CreateCell:output_type -> cladefs.cladefsd.v1.CreateCellResponse
-	11, // 58: cladefs.cladefsd.v1.Cladefsd.ImportImage:output_type -> cladefs.cladefsd.v1.ImportImageResponse
-	13, // 59: cladefs.cladefsd.v1.Cladefsd.ForkCell:output_type -> cladefs.cladefsd.v1.ForkCellResponse
-	15, // 60: cladefs.cladefsd.v1.Cladefsd.DeleteCell:output_type -> cladefs.cladefsd.v1.DeleteCellResponse
-	17, // 61: cladefs.cladefsd.v1.Cladefsd.DropCell:output_type -> cladefs.cladefsd.v1.DropCellResponse
-	19, // 62: cladefs.cladefsd.v1.Cladefsd.ResizeCell:output_type -> cladefs.cladefsd.v1.ResizeCellResponse
-	21, // 63: cladefs.cladefsd.v1.Cladefsd.PlaceCell:output_type -> cladefs.cladefsd.v1.PlaceCellResponse
-	32, // 64: cladefs.cladefsd.v1.Cladefsd.MakePublic:output_type -> cladefs.cladefsd.v1.MakePublicResponse
-	23, // 65: cladefs.cladefsd.v1.Cladefsd.MakeVersion:output_type -> cladefs.cladefsd.v1.MakeVersionResponse
-	26, // 66: cladefs.cladefsd.v1.Cladefsd.ListVersions:output_type -> cladefs.cladefsd.v1.ListVersionsResponse
-	28, // 67: cladefs.cladefsd.v1.Cladefsd.DropVersions:output_type -> cladefs.cladefsd.v1.DropVersionsResponse
-	30, // 68: cladefs.cladefsd.v1.Cladefsd.ShareVersion:output_type -> cladefs.cladefsd.v1.ShareVersionResponse
-	34, // 69: cladefs.cladefsd.v1.Cladefsd.AttachBase:output_type -> cladefs.cladefsd.v1.AttachBaseResponse
-	36, // 70: cladefs.cladefsd.v1.Cladefsd.SyncCell:output_type -> cladefs.cladefsd.v1.SyncCellResponse
-	38, // 71: cladefs.cladefsd.v1.Cladefsd.StatCell:output_type -> cladefs.cladefsd.v1.StatCellResponse
-	40, // 72: cladefs.cladefsd.v1.Cladefsd.ListCells:output_type -> cladefs.cladefsd.v1.ListCellsResponse
-	43, // 73: cladefs.cladefsd.v1.Cladefsd.GetCounters:output_type -> cladefs.cladefsd.v1.GetCountersResponse
-	45, // 74: cladefs.cladefsd.v1.Cladefsd.GetStats:output_type -> cladefs.cladefsd.v1.GetStatsResponse
-	51, // 75: cladefs.cladefsd.v1.Cladefsd.Grant:output_type -> cladefs.cladefsd.v1.GrantResponse
-	53, // 76: cladefs.cladefsd.v1.Cladefsd.Revoke:output_type -> cladefs.cladefsd.v1.RevokeResponse
-	55, // 77: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:output_type -> cladefs.cladefsd.v1.SetMemoryLimitResponse
-	57, // 78: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:output_type -> cladefs.cladefsd.v1.SetMemoryWeightResponse
-	59, // 79: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:output_type -> cladefs.cladefsd.v1.SetTenantInFlightResponse
-	61, // 80: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:output_type -> cladefs.cladefsd.v1.ShrinkMemoryResponse
-	63, // 81: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:output_type -> cladefs.cladefsd.v1.SetDiskLimitResponse
-	65, // 82: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:output_type -> cladefs.cladefsd.v1.SetDiskWeightResponse
-	69, // 83: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:output_type -> cladefs.cladefsd.v1.GetTenantDiskResponse
-	67, // 84: cladefs.cladefsd.v1.Cladefsd.SetPeers:output_type -> cladefs.cladefsd.v1.SetPeersResponse
-	71, // 85: cladefs.cladefsd.v1.Cladefsd.ShredCell:output_type -> cladefs.cladefsd.v1.ShredCellResponse
-	73, // 86: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:output_type -> cladefs.cladefsd.v1.ForgetTenantKeysResponse
-	75, // 87: cladefs.cladefsd.v1.Cladefsd.ShredTenant:output_type -> cladefs.cladefsd.v1.ShredTenantResponse
-	7,  // 88: cladefs.cladefsd.v1.Cladefsd.DecommissionHost:output_type -> cladefs.cladefsd.v1.DecommissionHostResponse
-	3,  // 89: cladefs.cladefsd.v1.Cladefsd.MigrateCell:output_type -> cladefs.cladefsd.v1.MigrateCellResponse
-	5,  // 90: cladefs.cladefsd.v1.Cladefsd.HandOverCell:output_type -> cladefs.cladefsd.v1.HandOverCellResponse
-	57, // [57:91] is the sub-list for method output_type
-	23, // [23:57] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	10, // 0: cladefs.cladefsd.v1.ListEphemeralHostsResponse.hosts:type_name -> cladefs.cladefsd.v1.EphemeralHost
+	1,  // 1: cladefs.cladefsd.v1.CreateCellRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
+	0,  // 2: cladefs.cladefsd.v1.CreateCellRequest.fsync:type_name -> cladefs.cladefsd.v1.FsyncLevel
+	28, // 3: cladefs.cladefsd.v1.ListVersionsResponse.versions:type_name -> cladefs.cladefsd.v1.Version
+	0,  // 4: cladefs.cladefsd.v1.StatCellResponse.fsync:type_name -> cladefs.cladefsd.v1.FsyncLevel
+	44, // 5: cladefs.cladefsd.v1.ListCellsResponse.stores:type_name -> cladefs.cladefsd.v1.ListedCell
+	41, // 6: cladefs.cladefsd.v1.ListedCell.stat:type_name -> cladefs.cladefsd.v1.StatCellResponse
+	52, // 7: cladefs.cladefsd.v1.GetCountersResponse.object_storage:type_name -> cladefs.cladefsd.v1.ObjectStorageStats
+	80, // 8: cladefs.cladefsd.v1.GetStatsResponse.counters:type_name -> cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
+	81, // 9: cladefs.cladefsd.v1.GetStatsResponse.gauges:type_name -> cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
+	49, // 10: cladefs.cladefsd.v1.GetStatsResponse.vms:type_name -> cladefs.cladefsd.v1.VmStats
+	82, // 11: cladefs.cladefsd.v1.VmStats.counters:type_name -> cladefs.cladefsd.v1.VmStats.CountersEntry
+	83, // 12: cladefs.cladefsd.v1.VmStats.gauges:type_name -> cladefs.cladefsd.v1.VmStats.GaugesEntry
+	84, // 13: cladefs.cladefsd.v1.VmStats.window:type_name -> cladefs.cladefsd.v1.VmStats.WindowEntry
+	50, // 14: cladefs.cladefsd.v1.VmStats.guest:type_name -> cladefs.cladefsd.v1.GuestStats
+	85, // 15: cladefs.cladefsd.v1.GuestStats.counters:type_name -> cladefs.cladefsd.v1.GuestStats.CountersEntry
+	86, // 16: cladefs.cladefsd.v1.GuestStats.histograms:type_name -> cladefs.cladefsd.v1.GuestStats.HistogramsEntry
+	87, // 17: cladefs.cladefsd.v1.ObjectStorageStats.requests:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
+	88, // 18: cladefs.cladefsd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
+	89, // 19: cladefs.cladefsd.v1.ObjectStorageStats.failures:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
+	79, // 20: cladefs.cladefsd.v1.ShredCellResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
+	79, // 21: cladefs.cladefsd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
+	79, // 22: cladefs.cladefsd.v1.ShredTenantResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
+	51, // 23: cladefs.cladefsd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.cladefsd.v1.Histogram
+	11, // 24: cladefs.cladefsd.v1.Cladefsd.CreateCell:input_type -> cladefs.cladefsd.v1.CreateCellRequest
+	13, // 25: cladefs.cladefsd.v1.Cladefsd.ImportImage:input_type -> cladefs.cladefsd.v1.ImportImageRequest
+	15, // 26: cladefs.cladefsd.v1.Cladefsd.ForkCell:input_type -> cladefs.cladefsd.v1.ForkCellRequest
+	17, // 27: cladefs.cladefsd.v1.Cladefsd.DeleteCell:input_type -> cladefs.cladefsd.v1.DeleteCellRequest
+	19, // 28: cladefs.cladefsd.v1.Cladefsd.DropCell:input_type -> cladefs.cladefsd.v1.DropCellRequest
+	21, // 29: cladefs.cladefsd.v1.Cladefsd.ResizeCell:input_type -> cladefs.cladefsd.v1.ResizeCellRequest
+	23, // 30: cladefs.cladefsd.v1.Cladefsd.PlaceCell:input_type -> cladefs.cladefsd.v1.PlaceCellRequest
+	34, // 31: cladefs.cladefsd.v1.Cladefsd.MakePublic:input_type -> cladefs.cladefsd.v1.MakePublicRequest
+	25, // 32: cladefs.cladefsd.v1.Cladefsd.MakeVersion:input_type -> cladefs.cladefsd.v1.MakeVersionRequest
+	27, // 33: cladefs.cladefsd.v1.Cladefsd.ListVersions:input_type -> cladefs.cladefsd.v1.ListVersionsRequest
+	30, // 34: cladefs.cladefsd.v1.Cladefsd.DropVersions:input_type -> cladefs.cladefsd.v1.DropVersionsRequest
+	32, // 35: cladefs.cladefsd.v1.Cladefsd.ShareVersion:input_type -> cladefs.cladefsd.v1.ShareVersionRequest
+	36, // 36: cladefs.cladefsd.v1.Cladefsd.AttachBase:input_type -> cladefs.cladefsd.v1.AttachBaseRequest
+	38, // 37: cladefs.cladefsd.v1.Cladefsd.SyncCell:input_type -> cladefs.cladefsd.v1.SyncCellRequest
+	40, // 38: cladefs.cladefsd.v1.Cladefsd.StatCell:input_type -> cladefs.cladefsd.v1.StatCellRequest
+	42, // 39: cladefs.cladefsd.v1.Cladefsd.ListCells:input_type -> cladefs.cladefsd.v1.ListCellsRequest
+	45, // 40: cladefs.cladefsd.v1.Cladefsd.GetCounters:input_type -> cladefs.cladefsd.v1.GetCountersRequest
+	47, // 41: cladefs.cladefsd.v1.Cladefsd.GetStats:input_type -> cladefs.cladefsd.v1.GetStatsRequest
+	53, // 42: cladefs.cladefsd.v1.Cladefsd.Grant:input_type -> cladefs.cladefsd.v1.GrantRequest
+	55, // 43: cladefs.cladefsd.v1.Cladefsd.Revoke:input_type -> cladefs.cladefsd.v1.RevokeRequest
+	57, // 44: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:input_type -> cladefs.cladefsd.v1.SetMemoryLimitRequest
+	59, // 45: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:input_type -> cladefs.cladefsd.v1.SetMemoryWeightRequest
+	61, // 46: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:input_type -> cladefs.cladefsd.v1.SetTenantInFlightRequest
+	63, // 47: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:input_type -> cladefs.cladefsd.v1.ShrinkMemoryRequest
+	65, // 48: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:input_type -> cladefs.cladefsd.v1.SetDiskLimitRequest
+	67, // 49: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:input_type -> cladefs.cladefsd.v1.SetDiskWeightRequest
+	71, // 50: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:input_type -> cladefs.cladefsd.v1.GetTenantDiskRequest
+	69, // 51: cladefs.cladefsd.v1.Cladefsd.SetPeers:input_type -> cladefs.cladefsd.v1.SetPeersRequest
+	73, // 52: cladefs.cladefsd.v1.Cladefsd.ShredCell:input_type -> cladefs.cladefsd.v1.ShredCellRequest
+	75, // 53: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:input_type -> cladefs.cladefsd.v1.ForgetTenantKeysRequest
+	77, // 54: cladefs.cladefsd.v1.Cladefsd.ShredTenant:input_type -> cladefs.cladefsd.v1.ShredTenantRequest
+	6,  // 55: cladefs.cladefsd.v1.Cladefsd.DecommissionHost:input_type -> cladefs.cladefsd.v1.DecommissionHostRequest
+	8,  // 56: cladefs.cladefsd.v1.Cladefsd.ListEphemeralHosts:input_type -> cladefs.cladefsd.v1.ListEphemeralHostsRequest
+	2,  // 57: cladefs.cladefsd.v1.Cladefsd.MigrateCell:input_type -> cladefs.cladefsd.v1.MigrateCellRequest
+	4,  // 58: cladefs.cladefsd.v1.Cladefsd.HandOverCell:input_type -> cladefs.cladefsd.v1.HandOverCellRequest
+	12, // 59: cladefs.cladefsd.v1.Cladefsd.CreateCell:output_type -> cladefs.cladefsd.v1.CreateCellResponse
+	14, // 60: cladefs.cladefsd.v1.Cladefsd.ImportImage:output_type -> cladefs.cladefsd.v1.ImportImageResponse
+	16, // 61: cladefs.cladefsd.v1.Cladefsd.ForkCell:output_type -> cladefs.cladefsd.v1.ForkCellResponse
+	18, // 62: cladefs.cladefsd.v1.Cladefsd.DeleteCell:output_type -> cladefs.cladefsd.v1.DeleteCellResponse
+	20, // 63: cladefs.cladefsd.v1.Cladefsd.DropCell:output_type -> cladefs.cladefsd.v1.DropCellResponse
+	22, // 64: cladefs.cladefsd.v1.Cladefsd.ResizeCell:output_type -> cladefs.cladefsd.v1.ResizeCellResponse
+	24, // 65: cladefs.cladefsd.v1.Cladefsd.PlaceCell:output_type -> cladefs.cladefsd.v1.PlaceCellResponse
+	35, // 66: cladefs.cladefsd.v1.Cladefsd.MakePublic:output_type -> cladefs.cladefsd.v1.MakePublicResponse
+	26, // 67: cladefs.cladefsd.v1.Cladefsd.MakeVersion:output_type -> cladefs.cladefsd.v1.MakeVersionResponse
+	29, // 68: cladefs.cladefsd.v1.Cladefsd.ListVersions:output_type -> cladefs.cladefsd.v1.ListVersionsResponse
+	31, // 69: cladefs.cladefsd.v1.Cladefsd.DropVersions:output_type -> cladefs.cladefsd.v1.DropVersionsResponse
+	33, // 70: cladefs.cladefsd.v1.Cladefsd.ShareVersion:output_type -> cladefs.cladefsd.v1.ShareVersionResponse
+	37, // 71: cladefs.cladefsd.v1.Cladefsd.AttachBase:output_type -> cladefs.cladefsd.v1.AttachBaseResponse
+	39, // 72: cladefs.cladefsd.v1.Cladefsd.SyncCell:output_type -> cladefs.cladefsd.v1.SyncCellResponse
+	41, // 73: cladefs.cladefsd.v1.Cladefsd.StatCell:output_type -> cladefs.cladefsd.v1.StatCellResponse
+	43, // 74: cladefs.cladefsd.v1.Cladefsd.ListCells:output_type -> cladefs.cladefsd.v1.ListCellsResponse
+	46, // 75: cladefs.cladefsd.v1.Cladefsd.GetCounters:output_type -> cladefs.cladefsd.v1.GetCountersResponse
+	48, // 76: cladefs.cladefsd.v1.Cladefsd.GetStats:output_type -> cladefs.cladefsd.v1.GetStatsResponse
+	54, // 77: cladefs.cladefsd.v1.Cladefsd.Grant:output_type -> cladefs.cladefsd.v1.GrantResponse
+	56, // 78: cladefs.cladefsd.v1.Cladefsd.Revoke:output_type -> cladefs.cladefsd.v1.RevokeResponse
+	58, // 79: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:output_type -> cladefs.cladefsd.v1.SetMemoryLimitResponse
+	60, // 80: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:output_type -> cladefs.cladefsd.v1.SetMemoryWeightResponse
+	62, // 81: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:output_type -> cladefs.cladefsd.v1.SetTenantInFlightResponse
+	64, // 82: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:output_type -> cladefs.cladefsd.v1.ShrinkMemoryResponse
+	66, // 83: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:output_type -> cladefs.cladefsd.v1.SetDiskLimitResponse
+	68, // 84: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:output_type -> cladefs.cladefsd.v1.SetDiskWeightResponse
+	72, // 85: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:output_type -> cladefs.cladefsd.v1.GetTenantDiskResponse
+	70, // 86: cladefs.cladefsd.v1.Cladefsd.SetPeers:output_type -> cladefs.cladefsd.v1.SetPeersResponse
+	74, // 87: cladefs.cladefsd.v1.Cladefsd.ShredCell:output_type -> cladefs.cladefsd.v1.ShredCellResponse
+	76, // 88: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:output_type -> cladefs.cladefsd.v1.ForgetTenantKeysResponse
+	78, // 89: cladefs.cladefsd.v1.Cladefsd.ShredTenant:output_type -> cladefs.cladefsd.v1.ShredTenantResponse
+	7,  // 90: cladefs.cladefsd.v1.Cladefsd.DecommissionHost:output_type -> cladefs.cladefsd.v1.DecommissionHostResponse
+	9,  // 91: cladefs.cladefsd.v1.Cladefsd.ListEphemeralHosts:output_type -> cladefs.cladefsd.v1.ListEphemeralHostsResponse
+	3,  // 92: cladefs.cladefsd.v1.Cladefsd.MigrateCell:output_type -> cladefs.cladefsd.v1.MigrateCellResponse
+	5,  // 93: cladefs.cladefsd.v1.Cladefsd.HandOverCell:output_type -> cladefs.cladefsd.v1.HandOverCellResponse
+	59, // [59:94] is the sub-list for method output_type
+	24, // [24:59] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_cladefs_cladefsd_v1_cladefsd_proto_init() }
@@ -5161,24 +5355,24 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_init() {
 	if File_cladefs_cladefsd_v1_cladefsd_proto != nil {
 		return
 	}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[36].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[41].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[39].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[44].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[48].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[52].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[56].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[58].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[60].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[66].OneofWrappers = []any{}
-	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[67].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[47].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[51].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[55].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[59].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[61].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[63].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[69].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[70].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc), len(file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   85,
+			NumMessages:   88,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

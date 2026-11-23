@@ -225,10 +225,23 @@ service Cladefsd {
   // not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
   // the tenant's KEK in that KMS, then ForgetTenantKeys.
   rpc ShredTenant(ShredTenantRequest) returns (ShredTenantResponse);
-  // Decommissions a host gone for good, of the incarnation given (backlog doc-25): the references
-  // of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
-  // incarnation no host has: a host of it still holding its cells would read what is collected.
+  // Decommissions a host gone for good, of the incarnation given (backlog doc-25): its tombstone
+  // written in every bucket the registry records, so that no host of it refers to a version from
+  // then on (a host of it refuses to fork, or to start, once it reads it); then the references
+  // of its ephemeral cells, which no host holds any more, retired, `most` of them at most, in
+  // whichever bucket each is (boards 8517, 8519, 8523). Returns how many it retired, and how many
+  // it found and left: a call cut off by its deadline, or that left some, keeps what it retired,
+  // and a call again continues, retiring what is left; what it retires it retires in batches,
+  // references first, then their index entries. For an incarnation no host has: a host of it
+  // still holding its cells would read what is collected. The daemon's own incarnation, or one no
+  // host makes (an even number, 0 among them), is refused (INVALID_ARGUMENT, EINVAL); a bucket
+  // out of reach fails it (INTERNAL, EIO), never answering that it retired none. Incarnations
+  // are written in base 32 everywhere they are printed (cladefsctl, the daemon's log).
   rpc DecommissionHost(DecommissionHostRequest) returns (DecommissionHostResponse);
+  // Lists every incarnation of a host whose ephemeral cells have references in the buckets the
+  // registry records, or that was decommissioned there, with its count of references (board
+  // 8521): for an operator to find a lost host's incarnation without its disk or its log.
+  rpc ListEphemeralHosts(ListEphemeralHostsRequest) returns (ListEphemeralHostsResponse);
   // Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
   // address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
   // refers to the cell's origin first, then takes the cell's kept segments as they come, while its
@@ -272,12 +285,35 @@ message HandOverCellResponse {}
 message DecommissionHostRequest {
   // The incarnation of the host's ephemeral cells' directory (CLADEFSD_EPHEMERAL).
   uint64 incarnation = 1;
+  // The most references to retire in this call: 0 for the daemon's default, 10,000.
+  uint64 most = 2;
 }
 
 // What was retired.
 message DecommissionHostResponse {
   // How many references of its ephemeral cells.
   uint64 retired = 1;
+  // How many it found and left, past `most`: a call again retires them.
+  uint64 left = 2;
+}
+
+// Asks for the incarnations of hosts with ephemeral cells' references in the buckets.
+message ListEphemeralHostsRequest {}
+
+// The incarnations of hosts with ephemeral cells' references in the buckets, in order.
+message ListEphemeralHostsResponse {
+  // Each incarnation, by its number.
+  repeated EphemeralHost hosts = 1;
+}
+
+// A host's incarnation, as the buckets hold it.
+message EphemeralHost {
+  // Its incarnation (DecommissionHostRequest's).
+  uint64 incarnation = 1;
+  // How many references of its ephemeral cells the buckets' index names.
+  uint64 references = 2;
+  // Whether it was decommissioned (DecommissionHost).
+  bool decommissioned = 3;
 }
 
 // Makes an empty cell.
@@ -726,6 +762,9 @@ message GetStatsResponse {
   map<string, uint64> gauges = 4;
   // Its VM processes that opened a cell, in the order they connected.
   repeated VmStats vms = 5;
+  // The incarnation of its ephemeral cells' directory (CLADEFSD_EPHEMERAL), which their
+  // references name and DecommissionHost takes (board 8521): 0 if it keeps none.
+  uint64 incarnation = 6;
 }
 
 // A VM process, and its guest, as it answered, or as the daemon has it if it didn't.

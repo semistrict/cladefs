@@ -471,10 +471,12 @@ impl World {
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
                 // cladefs: nor a mirror's pin, hold or marker, in a test of one bucket
-                // (TASK-633.8); nor an ephemeral cell's reference or index entry, none forked here
-                // (doc-25).
+                // (TASK-633.8); nor an ephemeral cell's reference, index entry or host's
+                // tombstone, none forked here (doc-25).
                 Kind::Pin { .. } | Kind::Hold { .. } | Kind::Mirror { .. } => true,
-                Kind::Ephemeral { .. } | Kind::EphemeralIndex { .. } => true,
+                Kind::Ephemeral { .. }
+                | Kind::EphemeralIndex { .. }
+                | Kind::Decommissioned { .. } => true,
                 // cladefs: nor read evidence, which goes with its version (TASK-702.2).
                 Kind::Evidence { parent, .. } => !kept(parent),
                 // A deleted cell's head stays, final, fencing its writers (TASK-407), but with its

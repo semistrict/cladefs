@@ -11,7 +11,9 @@
 //!
 //! - `incarnation`: a random number made with the directory, new when its disk is lost: the host's
 //!   ephemeral cells, their references naming it, are lost with it, and decommissioning it
-//!   (`DecommissionHost`) retires those references;
+//!   (`DecommissionHost`, `cladefsctl decommission-host`) retires those references. Written in
+//!   base 32 wherever it is printed ([`said`]): the daemon's log, `GetStats`, cladefsctl (board
+//!   8521, hotbed question 480);
 //! - `cells/<TENANT>.<CELL>`, one for each ephemeral cell it may hold, written, durably, before
 //!   the cell's reference: its parent and origin, its cell's path, the bucket its parent is
 //!   kept in, and the cell's epoch; and the migration it is being taken by from another host, if
@@ -31,7 +33,11 @@
 //! As the daemon starts, before it serves, each journal entry whose cell is not there, an
 //! ephemeral cell's of its cell, has its reference retired and goes: a fork its host crashed in,
 //! or a deletion; and each a migration was taking here and never accepted, what it took dropped
-//! with it.
+//! with it. First, its incarnation's tombstone is looked for in the bucket of each entry's
+//! reference: found, the host was decommissioned, its cells' references retired, what they read
+//! perhaps collected, and the daemon refuses to start (board 8519) until its operator moves the
+//! directory aside, its cells with it, for a new incarnation; as each ephemeral fork of it is
+//! refused (`bucket_cell::lifecycle::refer_ephemeral`, `ESTALE`).
 
 use crate::CellId;
 use anyhow::{Context as _, Error, bail};
@@ -131,8 +137,21 @@ pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
     };
     let host = Arc::new(Host { dir: dir.to_owned(), incarnation });
     *HOST.get().lock().unwrap() = Some(host.clone());
-    log::info!("cladefsd: ephemeral cells at {}, incarnation {incarnation:x}", dir.display());
+    log::info!("{}", opened(dir, incarnation));
     Ok(host)
+}
+
+/// What the daemon logs as it opens the host's ephemeral cells' directory at `dir`, of
+/// incarnation `incarnation`: its last word the incarnation, as an operator gives it to
+/// `cladefsctl decommission-host` ([`said`]).
+pub(crate) fn opened(dir: &Path, incarnation: u64) -> String {
+    format!("cladefsd: ephemeral cells at {}, incarnation {}", dir.display(), said(incarnation))
+}
+
+/// An incarnation as everything prints it, and an operator types it (board 8521, hotbed question
+/// 480): in base 32, as cells' and tenants' IDs are ([`base32_id::Short`]).
+pub(crate) fn said(incarnation: u64) -> base32_id::Short {
+    base32_id::Short(incarnation)
 }
 
 /// The host's ephemeral cells' directory, if the daemon opened one: `ENOTSUP` else, as a host
@@ -251,9 +270,13 @@ impl Host {
     /// whose retiring fails, its disk failing, is said and left: to the next start, or to a
     /// migration's prepare here, which takes an entry of a cell this host holds not for none
     /// (board 5721); the daemon starts whatever one entry's disk does.
+    /// cladefs: fails first if the host's incarnation was decommissioned, as the bucket of any
+    /// entry's reference says ([`Host::refuse_decommissioned`], board 8519).
     pub async fn retire_stale(&self) -> Result<usize, Error> {
+        let entries = self.entries()?;
+        self.refuse_decommissioned(&entries).await?;
         let mut retired = 0;
-        for entry in self.entries()? {
+        for entry in entries {
             let child = entry.child;
             match self.retire_if_stale(entry).await {
                 Ok(gone) => retired += usize::from(gone),
@@ -261,6 +284,35 @@ impl Host {
             }
         }
         Ok(retired)
+    }
+
+    /// Fails if its incarnation was decommissioned, as the tombstone in the bucket of any of
+    /// `entries`' references says (board 8519): its cells' references retired, what they read
+    /// may be collected, and its reads of it fail or find it gone; going on, it would serve them
+    /// on as if whole. Its bucket failing to say fails it too: not knowing is no answer (AGENTS.md,
+    /// No silent fallbacks). One request a bucket.
+    async fn refuse_decommissioned(&self, entries: &[Entry]) -> Result<(), Error> {
+        let mut asked = std::collections::BTreeSet::new();
+        for entry in entries {
+            let parent = entry.origin.parent;
+            if !asked.insert(bucket_cell::layout::ephemeral_bucket(parent)) {
+                continue;
+            }
+            let bucket = crate::host_cell::bucket(&entry.bucket)?;
+            let found =
+                bucket_cell::lifecycle::decommissioned(&*bucket, self.incarnation, parent).await;
+            if found.map_err(bucket_cell::Error::from)? {
+                bail!(
+                    "incarnation {} of {} was decommissioned (DecommissionHost): its ephemeral \
+                     cells' references are retired, and what they read may be collected; move \
+                     the directory aside, its cells with it, for the daemon to start of a new \
+                     incarnation",
+                    said(self.incarnation),
+                    self.dir.display()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// [`Host::retire_stale`]'s of `entry`: whether it retired it.

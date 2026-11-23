@@ -165,6 +165,9 @@ fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
         counters: stats.counters.into_iter().collect(),
         gauges: named(&stats.gauges),
         vms: vms.collect(),
+        // cladefs: its ephemeral cells' directory's incarnation (board 8521); none opened
+        // (ENOTSUP), it keeps no ephemeral cells, which 0 says.
+        incarnation: crate::ephemeral_host::host().map_or(0, |host| host.incarnation()),
     }
 }
 
@@ -353,6 +356,18 @@ fn room_for_a_cell() -> Result<(), Status> {
         )),
         false => Ok(()),
     }
+}
+
+/// cladefs: the most references one `DecommissionHost` retires unless asked for another count
+/// (board 8523): its batches' requests, references then index entries, in one call.
+const DECOMMISSION_MOST: usize = 10_000;
+
+/// cladefs: the errno of a call that failed with `error`, a bucket's, `what` it was doing, which
+/// it logs.
+fn bucket_errno(what: &str, error: bucket_cell::Error) -> Errno {
+    let failure = local_cell::upload::Failure::Bucket(error);
+    log::error!("cladefsd: {what}: {failure}");
+    crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
 }
 
 /// The status of a call that failed with `errno`.
@@ -594,18 +609,63 @@ impl Cladefsd for Control {
         &self,
         request: Request<DecommissionHostRequest>,
     ) -> Result<Response<DecommissionHostResponse>, Status> {
-        let DecommissionHostRequest { incarnation } = request.into_inner();
-        let decommissioned = async {
-            let bucket = cells::daemon_bucket()?;
-            let decommissioned = bucket_cell::lifecycle::decommission(&*bucket, incarnation).await;
-            let retired = decommissioned.map_err(|refused| {
-                let failure = local_cell::upload::Failure::from(refused);
-                log::error!("cladefsd: decommissioning host {incarnation}: {failure}");
-                crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
-            })?;
-            Ok(retired as u64)
+        let DecommissionHostRequest { incarnation, most } = request.into_inner();
+        let most = match most {
+            0 => DECOMMISSION_MOST,
+            most => usize::try_from(most).unwrap_or(usize::MAX),
         };
-        reply(decommissioned.await.map(|retired| DecommissionHostResponse { retired }))
+        let said = base32_id::Short(incarnation);
+        let decommissioned = async {
+            // cladefs: an incarnation no host makes (each makes an odd one, `ephemeral_host`), or
+            // this daemon's own, whose live cells' references it would retire (board 8519): a
+            // mistyped ID, refused before anything is written. Its directory not opened (ENOTSUP),
+            // the daemon has no incarnation to be.
+            let own =
+                crate::ephemeral_host::host().is_ok_and(|host| host.incarnation() == incarnation);
+            if incarnation % 2 == 0 || own {
+                log::warn!(
+                    "cladefsd: decommissioning host {said}: refused, no host's to decommission"
+                );
+                return Err(Errno::EINVAL);
+            }
+            let bucket = cells::daemon_bucket()?;
+            let what = format!("decommissioning host {said}");
+            let buckets =
+                bucket.ephemeral_buckets().await.map_err(|err| bucket_errno(&what, err))?;
+            let decommissioning =
+                bucket_cell::lifecycle::decommission(&*bucket, &buckets, incarnation, most);
+            let done = decommissioning.await.map_err(|err| bucket_errno(&what, err))?;
+            let bucket_cell::lifecycle::Decommissioned { retired, left } = done;
+            match retired + left {
+                0 => log::warn!("cladefsd: decommissioning host {said}: no references of its"),
+                _ => log::info!(
+                    "cladefsd: decommissioning host {said}: retired {retired}, left {left}"
+                ),
+            }
+            Ok(DecommissionHostResponse { retired: retired as u64, left: left as u64 })
+        };
+        reply(decommissioned.await)
+    }
+
+    async fn list_ephemeral_hosts(
+        &self,
+        _: Request<ListEphemeralHostsRequest>,
+    ) -> Result<Response<ListEphemeralHostsResponse>, Status> {
+        let listed = async {
+            let bucket = cells::daemon_bucket()?;
+            let what = "listing the ephemeral cells' hosts";
+            let buckets =
+                bucket.ephemeral_buckets().await.map_err(|err| bucket_errno(what, err))?;
+            let hosts = bucket_cell::lifecycle::ephemeral_hosts(&*bucket, &buckets).await;
+            let hosts = hosts.map_err(|refused| bucket_errno(what, refused.into()))?;
+            let hosts = hosts.into_iter().map(|(incarnation, host)| EphemeralHost {
+                incarnation,
+                references: host.references as u64,
+                decommissioned: host.decommissioned,
+            });
+            Ok(ListEphemeralHostsResponse { hosts: hosts.collect() })
+        };
+        reply(listed.await)
     }
 
     async fn delete_cell(
@@ -1149,13 +1209,26 @@ impl Client {
     }
 
     /// cladefs: decommissions the host of incarnation `incarnation`, gone for good: its ephemeral
-    /// cells' references retired (doc-25, `DecommissionHost`). Returns how many.
-    pub fn decommission_host(&self, incarnation: u64) -> Result<u64, crate::Error> {
-        let request = DecommissionHostRequest { incarnation };
-        let what = format!("decommissioning incarnation {incarnation:x}");
+    /// cells' references retired, `most` of them at most, 0 for the daemon's default (doc-25,
+    /// `DecommissionHost`, board 8523). Returns how many it retired, and how many it left.
+    pub fn decommission_host(
+        &self,
+        incarnation: u64,
+        most: u64,
+    ) -> Result<DecommissionHostResponse, crate::Error> {
+        let request = DecommissionHostRequest { incarnation, most };
+        let what = format!("decommissioning incarnation {}", base32_id::Short(incarnation));
+        self.call(what, |mut c| async move { c.decommission_host(request).await })
+    }
+
+    /// cladefs: the incarnations of hosts with ephemeral cells' references in the buckets, or
+    /// decommissioned there, in order (`ListEphemeralHosts`, board 8521).
+    pub fn ephemeral_hosts(&self) -> Result<Vec<EphemeralHost>, crate::Error> {
+        let what = "listing the ephemeral cells' hosts".to_owned();
+        let request = ListEphemeralHostsRequest {};
         let response =
-            self.call(what, |mut c| async move { c.decommission_host(request).await })?;
-        Ok(response.retired)
+            self.call(what, |mut c| async move { c.list_ephemeral_hosts(request).await })?;
+        Ok(response.hosts)
     }
 
     /// Makes a version of the cell at `path`, keeping its newest `keep_last` if given,

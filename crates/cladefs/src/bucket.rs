@@ -184,6 +184,9 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
+        // cladefs: an ephemeral fork of a host decommissioned, its incarnation's references
+        // retired, which forks no more until started of a new one (board 8519).
+        Failure::Bucket(Error::Decommissioned(_)) => Some(Errno::ESTALE),
         // cladefs: a bucket refusing the host's credentials, for good, or a request of its own, or
         // answering what this build can't read: never retried (boards 5861, 5534).
         Failure::Bucket(Error::Refused(refused)) => Some(match refused.refusal {

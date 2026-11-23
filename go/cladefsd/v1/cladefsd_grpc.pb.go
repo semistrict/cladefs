@@ -85,40 +85,41 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Cladefsd_CreateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/CreateCell"
-	Cladefsd_ImportImage_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ImportImage"
-	Cladefsd_ForkCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ForkCell"
-	Cladefsd_DeleteCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/DeleteCell"
-	Cladefsd_DropCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/DropCell"
-	Cladefsd_ResizeCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ResizeCell"
-	Cladefsd_PlaceCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/PlaceCell"
-	Cladefsd_MakePublic_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MakePublic"
-	Cladefsd_MakeVersion_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/MakeVersion"
-	Cladefsd_ListVersions_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
-	Cladefsd_DropVersions_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
-	Cladefsd_ShareVersion_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
-	Cladefsd_AttachBase_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
-	Cladefsd_SyncCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/SyncCell"
-	Cladefsd_StatCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/StatCell"
-	Cladefsd_ListCells_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ListCells"
-	Cladefsd_GetCounters_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/GetCounters"
-	Cladefsd_GetStats_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/GetStats"
-	Cladefsd_Grant_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/Grant"
-	Cladefsd_Revoke_FullMethodName            = "/cladefs.cladefsd.v1.Cladefsd/Revoke"
-	Cladefsd_SetMemoryLimit_FullMethodName    = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryLimit"
-	Cladefsd_SetMemoryWeight_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryWeight"
-	Cladefsd_SetTenantInFlight_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/SetTenantInFlight"
-	Cladefsd_ShrinkMemory_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ShrinkMemory"
-	Cladefsd_SetDiskLimit_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/SetDiskLimit"
-	Cladefsd_SetDiskWeight_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/SetDiskWeight"
-	Cladefsd_GetTenantDisk_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/GetTenantDisk"
-	Cladefsd_SetPeers_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/SetPeers"
-	Cladefsd_ShredCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
-	Cladefsd_ForgetTenantKeys_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
-	Cladefsd_ShredTenant_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
-	Cladefsd_DecommissionHost_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
-	Cladefsd_MigrateCell_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
-	Cladefsd_HandOverCell_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/HandOverCell"
+	Cladefsd_CreateCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/CreateCell"
+	Cladefsd_ImportImage_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ImportImage"
+	Cladefsd_ForkCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/ForkCell"
+	Cladefsd_DeleteCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/DeleteCell"
+	Cladefsd_DropCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/DropCell"
+	Cladefsd_ResizeCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ResizeCell"
+	Cladefsd_PlaceCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/PlaceCell"
+	Cladefsd_MakePublic_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/MakePublic"
+	Cladefsd_MakeVersion_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MakeVersion"
+	Cladefsd_ListVersions_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
+	Cladefsd_DropVersions_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
+	Cladefsd_ShareVersion_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
+	Cladefsd_AttachBase_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
+	Cladefsd_SyncCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/SyncCell"
+	Cladefsd_StatCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/StatCell"
+	Cladefsd_ListCells_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ListCells"
+	Cladefsd_GetCounters_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/GetCounters"
+	Cladefsd_GetStats_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/GetStats"
+	Cladefsd_Grant_FullMethodName              = "/cladefs.cladefsd.v1.Cladefsd/Grant"
+	Cladefsd_Revoke_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/Revoke"
+	Cladefsd_SetMemoryLimit_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryLimit"
+	Cladefsd_SetMemoryWeight_FullMethodName    = "/cladefs.cladefsd.v1.Cladefsd/SetMemoryWeight"
+	Cladefsd_SetTenantInFlight_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/SetTenantInFlight"
+	Cladefsd_ShrinkMemory_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShrinkMemory"
+	Cladefsd_SetDiskLimit_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/SetDiskLimit"
+	Cladefsd_SetDiskWeight_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/SetDiskWeight"
+	Cladefsd_GetTenantDisk_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/GetTenantDisk"
+	Cladefsd_SetPeers_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/SetPeers"
+	Cladefsd_ShredCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
+	Cladefsd_ForgetTenantKeys_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
+	Cladefsd_ShredTenant_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
+	Cladefsd_DecommissionHost_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
+	Cladefsd_ListEphemeralHosts_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/ListEphemeralHosts"
+	Cladefsd_MigrateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
+	Cladefsd_HandOverCell_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/HandOverCell"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -279,10 +280,23 @@ type CladefsdClient interface {
 	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
 	// the tenant's KEK in that KMS, then ForgetTenantKeys.
 	ShredTenant(ctx context.Context, in *ShredTenantRequest, opts ...grpc.CallOption) (*ShredTenantResponse, error)
-	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): the references
-	// of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
-	// incarnation no host has: a host of it still holding its cells would read what is collected.
+	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): its tombstone
+	// written in every bucket the registry records, so that no host of it refers to a version from
+	// then on (a host of it refuses to fork, or to start, once it reads it); then the references
+	// of its ephemeral cells, which no host holds any more, retired, `most` of them at most, in
+	// whichever bucket each is (boards 8517, 8519, 8523). Returns how many it retired, and how many
+	// it found and left: a call cut off by its deadline, or that left some, keeps what it retired,
+	// and a call again continues, retiring what is left; what it retires it retires in batches,
+	// references first, then their index entries. For an incarnation no host has: a host of it
+	// still holding its cells would read what is collected. The daemon's own incarnation, or one no
+	// host makes (an even number, 0 among them), is refused (INVALID_ARGUMENT, EINVAL); a bucket
+	// out of reach fails it (INTERNAL, EIO), never answering that it retired none. Incarnations
+	// are written in base 32 everywhere they are printed (cladefsctl, the daemon's log).
 	DecommissionHost(ctx context.Context, in *DecommissionHostRequest, opts ...grpc.CallOption) (*DecommissionHostResponse, error)
+	// Lists every incarnation of a host whose ephemeral cells have references in the buckets the
+	// registry records, or that was decommissioned there, with its count of references (board
+	// 8521): for an operator to find a lost host's incarnation without its disk or its log.
+	ListEphemeralHosts(ctx context.Context, in *ListEphemeralHostsRequest, opts ...grpc.CallOption) (*ListEphemeralHostsResponse, error)
 	// Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
 	// address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
 	// refers to the cell's origin first, then takes the cell's kept segments as they come, while its
@@ -625,6 +639,16 @@ func (c *cladefsdClient) DecommissionHost(ctx context.Context, in *DecommissionH
 	return out, nil
 }
 
+func (c *cladefsdClient) ListEphemeralHosts(ctx context.Context, in *ListEphemeralHostsRequest, opts ...grpc.CallOption) (*ListEphemeralHostsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEphemeralHostsResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ListEphemeralHosts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cladefsdClient) MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MigrateCellResponse)
@@ -803,10 +827,23 @@ type CladefsdServer interface {
 	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
 	// the tenant's KEK in that KMS, then ForgetTenantKeys.
 	ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error)
-	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): the references
-	// of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
-	// incarnation no host has: a host of it still holding its cells would read what is collected.
+	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): its tombstone
+	// written in every bucket the registry records, so that no host of it refers to a version from
+	// then on (a host of it refuses to fork, or to start, once it reads it); then the references
+	// of its ephemeral cells, which no host holds any more, retired, `most` of them at most, in
+	// whichever bucket each is (boards 8517, 8519, 8523). Returns how many it retired, and how many
+	// it found and left: a call cut off by its deadline, or that left some, keeps what it retired,
+	// and a call again continues, retiring what is left; what it retires it retires in batches,
+	// references first, then their index entries. For an incarnation no host has: a host of it
+	// still holding its cells would read what is collected. The daemon's own incarnation, or one no
+	// host makes (an even number, 0 among them), is refused (INVALID_ARGUMENT, EINVAL); a bucket
+	// out of reach fails it (INTERNAL, EIO), never answering that it retired none. Incarnations
+	// are written in base 32 everywhere they are printed (cladefsctl, the daemon's log).
 	DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error)
+	// Lists every incarnation of a host whose ephemeral cells have references in the buckets the
+	// registry records, or that was decommissioned there, with its count of references (board
+	// 8521): for an operator to find a lost host's incarnation without its disk or its log.
+	ListEphemeralHosts(context.Context, *ListEphemeralHostsRequest) (*ListEphemeralHostsResponse, error)
 	// Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
 	// address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
 	// refers to the cell's origin first, then takes the cell's kept segments as they come, while its
@@ -924,6 +961,9 @@ func (UnimplementedCladefsdServer) ShredTenant(context.Context, *ShredTenantRequ
 }
 func (UnimplementedCladefsdServer) DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecommissionHost not implemented")
+}
+func (UnimplementedCladefsdServer) ListEphemeralHosts(context.Context, *ListEphemeralHostsRequest) (*ListEphemeralHostsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListEphemeralHosts not implemented")
 }
 func (UnimplementedCladefsdServer) MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MigrateCell not implemented")
@@ -1528,6 +1568,24 @@ func _Cladefsd_DecommissionHost_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_ListEphemeralHosts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEphemeralHostsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).ListEphemeralHosts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_ListEphemeralHosts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).ListEphemeralHosts(ctx, req.(*ListEphemeralHostsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Cladefsd_MigrateCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MigrateCellRequest)
 	if err := dec(in); err != nil {
@@ -1698,6 +1756,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DecommissionHost",
 			Handler:    _Cladefsd_DecommissionHost_Handler,
+		},
+		{
+			MethodName: "ListEphemeralHosts",
+			Handler:    _Cladefsd_ListEphemeralHosts_Handler,
 		},
 		{
 			MethodName: "MigrateCell",

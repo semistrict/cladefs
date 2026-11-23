@@ -1122,6 +1122,8 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             | Kind::Marks { .. }
             | Kind::Marking
             | Kind::Retired { .. } => true,
+            // cladefs: a host's tombstone, for good (board 8519).
+            Kind::Decommissioned { .. } => true,
             // cladefs: as its mirror's copy says ([`uncollected_copies`]).
             Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),

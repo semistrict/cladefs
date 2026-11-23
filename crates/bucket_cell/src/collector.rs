@@ -2279,9 +2279,10 @@ impl Pass {
                 | Kind::Pin { .. }
                 | Kind::Hold { .. }
                 // cladefs: an ephemeral cell's reference, and its index entry: its host's to delete
-                // (doc-25, TASK-698.3).
+                // (doc-25, TASK-698.3); and a host's tombstone, kept for good (board 8519).
                 | Kind::Ephemeral { .. }
                 | Kind::EphemeralIndex { .. }
+                | Kind::Decommissioned { .. }
                 | Kind::Mirror { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Identity
@@ -3762,10 +3763,15 @@ mod tests {
                 lifecycle::unrefer_ephemeral(&*bucket, origin, incarnation, child).await.unwrap()
             }
             Unreferred::Decommissioned => {
-                assert_eq!(lifecycle::decommission(&*bucket, incarnation).await.unwrap(), 1)
+                let buckets = lifecycle::ephemeral_buckets(&*bucket).await.unwrap();
+                let decommissioned = lifecycle::decommission(&*bucket, &buckets, incarnation, 10);
+                let decommissioned = decommissioned.await.unwrap();
+                assert_eq!(decommissioned, lifecycle::Decommissioned { retired: 1, left: 0 });
             }
         }
-        let indexes = lifecycle::ephemeral_references(&*bucket, incarnation).await.unwrap().len();
+        let buckets = lifecycle::ephemeral_buckets(&*bucket).await.unwrap();
+        let indexes = lifecycle::ephemeral_references(&*bucket, &buckets, incarnation);
+        let indexes = indexes.await.unwrap().len();
         if let Err(error) = sweep(&*bucket).await {
             return (Err(error), indexes);
         }

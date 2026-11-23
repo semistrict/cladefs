@@ -5831,9 +5831,13 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     parent.commit(Some(b"root")).unwrap();
     let version = parent.make_version().unwrap();
     let bucket = super::cells::daemon_bucket().unwrap();
+    let buckets = control(bucket.ephemeral_buckets()).unwrap();
     let references = || {
-        let listing =
-            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        let listing = bucket_cell::lifecycle::ephemeral_references(
+            &*bucket,
+            &buckets,
+            ephemeral.incarnation(),
+        );
         let mut children: Vec<_> =
             control(listing).unwrap().into_iter().map(|(_, child)| child).collect();
         children.sort();
@@ -5879,9 +5883,114 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(control(ephemeral.retire_stale()).unwrap(), 1);
     assert_eq!(references(), vec![kept]);
     assert!(ephemeral.entry(gone).unwrap().is_none());
-    let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
-    assert_eq!(retired, Ok(1));
+    let decommissioning =
+        bucket_cell::lifecycle::decommission(&*bucket, &buckets, ephemeral.incarnation(), 10);
+    let retired = control(decommissioning);
+    assert_eq!(retired, Ok(bucket_cell::lifecycle::Decommissioned { retired: 1, left: 0 }));
     assert_eq!(references(), vec![]);
+}
+
+/// Boards 8519, 8521, 8523: hosts decommissioned through the control API, as cladefsctl calls it.
+/// The serving daemon's own incarnation, or one no host makes (an even one), is refused, nothing
+/// retired. Another's, given as the daemon's log printed it, is listed with its references until
+/// then, and has them retired, `most` at a time, the rest left to a call again; listed after as
+/// decommissioned, with none. And a host decommissioned while alive, by mistake, finds out: its
+/// next ephemeral fork is refused (`ESTALE`), leaving no reference nor index entry, and it refuses
+/// to start again, rather than serve its cells over references retired. GetStats says the
+/// serving daemon's incarnation.
+#[test]
+fn hosts_are_decommissioned_through_the_control_api() {
+    use super::control::proto::EphemeralHost;
+    use bucket_cell::layout::{self, Kind};
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (lost_dir, serving_dir) = (dir.path().join("lost"), dir.path().join("serving"));
+    let lost = crate::ephemeral_host::open(&lost_dir).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let control_socket = dir.path().join("control.sock");
+    let listener = UnixListener::bind(&control_socket).unwrap();
+    let tenants = dir.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || super::control::serve_control(listener, tenants));
+    let api = super::control::Client::connect(&control_socket).unwrap();
+    let parent = CellClient::connect(&socket, dir.path().join("parent"), 1 << 24).unwrap();
+    write(&parent, ExtentId { cell: parent.cell(), sequence: 1 }, 0, &pattern(1, ps)).unwrap();
+    parent.commit(Some(b"root")).unwrap();
+    let version = parent.make_version().unwrap();
+    drop(parent);
+    let fork = |name: &str| {
+        let at = dir.path().join(name);
+        let cell = version_cell(version);
+        control(super::cells::fork_ephemeral_of_version(cell, version.version, at, None))
+    };
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let buckets = control(bucket.ephemeral_buckets()).unwrap();
+    let incarnation = lost.incarnation();
+    let references = || {
+        let listing = bucket_cell::lifecycle::ephemeral_references(&*bucket, &buckets, incarnation);
+        control(listing).unwrap().len()
+    };
+    let errno = |refused: crate::Error| refused.errno();
+    for name in ["one", "two", "three"] {
+        fork(name).unwrap();
+    }
+    assert_eq!(references(), 3);
+    assert_eq!(api.stats(None).unwrap().incarnation, incarnation);
+
+    // Its own, or an even one, which no host makes: refused, nothing retired.
+    assert_eq!(api.decommission_host(incarnation, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    let even = incarnation ^ 1;
+    assert_eq!(api.decommission_host(even, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    assert_eq!(api.decommission_host(0, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    assert_eq!(references(), 3);
+    let listed = EphemeralHost { incarnation, references: 3, decommissioned: false };
+    assert_eq!(api.ephemeral_hosts().unwrap(), vec![listed]);
+
+    // The daemon serving of another incarnation now, the lost host's, as its log printed it,
+    // decommissioned: two at a time, then the rest, then none.
+    let serving = crate::ephemeral_host::open(&serving_dir).unwrap();
+    assert_eq!(api.stats(None).unwrap().incarnation, serving.incarnation());
+    let printed = crate::ephemeral_host::opened(&lost_dir, incarnation);
+    let given = printed.rsplit(' ').next().unwrap();
+    let parsed = base32_id::parse(given).unwrap();
+    assert_eq!(parsed, incarnation, "{printed}");
+    let done = |response: super::control::proto::DecommissionHostResponse| {
+        (response.retired, response.left)
+    };
+    assert_eq!(api.decommission_host(parsed, 2).map(done).unwrap(), (2, 1));
+    assert_eq!(references(), 1);
+    assert_eq!(api.decommission_host(parsed, 0).map(done).unwrap(), (1, 0));
+    assert_eq!(references(), 0);
+    assert_eq!(api.decommission_host(parsed, 0).map(done).unwrap(), (0, 0));
+    let listed = EphemeralHost { incarnation, references: 0, decommissioned: true };
+    assert_eq!(api.ephemeral_hosts().unwrap(), vec![listed]);
+
+    // The lost host alive after all: its next fork refused, leaving nothing in the bucket; its
+    // start refused.
+    let lost = crate::ephemeral_host::open(&lost_dir).unwrap();
+    assert_eq!(lost.incarnation(), incarnation);
+    assert_eq!(fork("four"), Err(Errno::ESTALE));
+    assert_eq!(references(), 0);
+    let parent_cell = version_cell(version);
+    let listed = control(bucket_cell::Bucket::list(&*bucket, &layout::references(parent_cell)));
+    let theirs = listed.unwrap().into_iter().filter(|meta| {
+        matches!(layout::kind(&meta.key), Kind::Ephemeral { incarnation: of, .. } if of == incarnation)
+    });
+    assert_eq!(theirs.count(), 0, "no reference of the incarnation decommissioned");
+    let refused = control(lost.retire_stale()).map_err(|err| format!("{err:#}"));
+    assert_eq!(
+        refused,
+        Err(format!(
+            "incarnation {} of {} was decommissioned (DecommissionHost): its ephemeral cells' \
+             references are retired, and what they read may be collected; move the directory \
+             aside, its cells with it, for the daemon to start of a new incarnation",
+            base32_id::Short(incarnation),
+            lost_dir.display()
+        ))
+    );
 }
 
 /// Boards 5732 and 5734: a target takes a cell's migrations by the cell's epoch, one request at a
@@ -5918,9 +6027,13 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         formats: super::peers::formats(),
     };
     let bucket = super::cells::daemon_bucket().unwrap();
+    let buckets = control(bucket.ephemeral_buckets()).unwrap();
     let references = || {
-        let listing =
-            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        let listing = bucket_cell::lifecycle::ephemeral_references(
+            &*bucket,
+            &buckets,
+            ephemeral.incarnation(),
+        );
         control(listing).unwrap().into_iter().map(|(_, child)| child).collect::<Vec<_>>()
     };
 

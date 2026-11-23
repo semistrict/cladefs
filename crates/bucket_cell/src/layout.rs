@@ -106,8 +106,11 @@ const MIRRORS: &str = "mirrors/";
 const PIN: &str = "mirror";
 /// cladefs: where an ephemeral cell's reference names its host's incarnation, before its child
 /// ([`ephemeral_reference`], doc-25); and, at the bucket's root, the prefix of the index of those
-/// references by incarnation ([`ephemeral_index`]).
+/// references by bucket and incarnation ([`ephemeral_index`]) and of incarnations' tombstones
+/// ([`decommissioned`]).
 const EPHEMERAL: &str = "ephemeral";
+/// cladefs: the last word of an incarnation's tombstone ([`decommissioned`], board 8519).
+const DECOMMISSIONED: &str = "decommissioned";
 /// cladefs: under a cell's prefix, the read evidence of its versions ([`evidence`], TASK-702.2).
 const READS: &str = "reads/";
 /// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
@@ -218,11 +221,16 @@ pub fn cell_of(key: &str) -> Option<CellId> {
 }
 
 /// cladefs: the number of the bucket a request of `key`, a key or a prefix, goes to (TASK-633.4):
-/// that of the bucket its cell's ID carries ([`crate::objectid::bucket_of`]); none for a key of no
-/// cell, or of a cell tests name (number [`crate::identity::NAMED`]), whose requests stay in the
-/// bucket asked. What a routed bucket routes by, and the simulation's buckets of regions.
+/// that of the bucket its cell's ID carries ([`crate::objectid::bucket_of`]), or, for a key of the
+/// ephemeral cells' index, the bucket it names, its references' (board 8517, [`ephemeral_index`]);
+/// none for a key of no cell, or of a cell tests name (number [`crate::identity::NAMED`]), whose
+/// requests stay in the bucket asked. What a routed bucket routes by, and the simulation's buckets
+/// of regions.
 pub fn routed_to(key: &str) -> Option<u16> {
-    let number = crate::objectid::bucket_of(cell_of(key)?.id);
+    let number = match ephemeral_under(key) {
+        Some((bucket, _)) => bucket,
+        None => crate::objectid::bucket_of(cell_of(key)?.id),
+    };
     (number != crate::identity::NAMED).then_some(number)
 }
 
@@ -359,36 +367,82 @@ pub fn ephemeral_reference(parent: CellId, at: u64, incarnation: u64, child: Cel
     format!("{}{EPHEMERAL}.{}.{}", origin(parent, at), Padded(incarnation), child_name(child))
 }
 
-/// cladefs: the prefix of the index of the ephemeral cells' references whose host is of
-/// incarnation `incarnation` ([`ephemeral_index`]).
-pub fn ephemeral_indexes(incarnation: u64) -> String {
-    format!("{EPHEMERAL}/{}/", Padded(incarnation))
+/// cladefs: the number of the bucket an ephemeral cell forked from `parent` has its reference and
+/// its index entry in: `parent`'s, the bucket the parent's ID carries.
+pub fn ephemeral_bucket(parent: CellId) -> u16 {
+    crate::objectid::bucket_of(parent.id)
+}
+
+/// cladefs: the prefix of the index of the ephemeral cells' references in the bucket numbered
+/// `bucket`, every incarnation's, and of its incarnations' tombstones ([`decommissioned`]):
+/// listed, every host's with ephemeral cells forked from cells of that bucket.
+pub fn ephemeral_hosts(bucket: u16) -> String {
+    format!("{EPHEMERAL}/{bucket:04x}/")
+}
+
+/// cladefs: the prefix of the index of the ephemeral cells' references in the bucket numbered
+/// `bucket` whose host is of incarnation `incarnation` ([`ephemeral_index`]).
+pub fn ephemeral_indexes(bucket: u16, incarnation: u64) -> String {
+    format!("{}{}/", ephemeral_hosts(bucket), Padded(incarnation))
 }
 
 /// cladefs: the index entry of the reference of the ephemeral cell `child` of incarnation
 /// `incarnation`'s host, forked from `parent`'s version at the end of its segment `at`
-/// ([`ephemeral_reference`]): at the bucket's root, by the incarnation, so that decommissioning it
-/// lists them. Written before the reference, and deleted after it.
+/// ([`ephemeral_reference`]): at the bucket's root, by the bucket of its reference
+/// ([`ephemeral_bucket`]), then the incarnation, so that it is kept, and routed
+/// ([`routed_to`]), in the bucket its reference is in, whichever host wrote it and whichever's
+/// bucket it went through, and decommissioning the incarnation finds it listing that prefix in
+/// each bucket (board 8517, hotbed question 479; [`crate::lifecycle::decommission`]). Written
+/// before the reference, and deleted after it.
 pub fn ephemeral_index(incarnation: u64, parent: CellId, at: u64, child: CellId) -> String {
     format!(
         "{}{}.{}.{}",
-        ephemeral_indexes(incarnation),
+        ephemeral_indexes(ephemeral_bucket(parent), incarnation),
         child_name(parent),
         Padded(at),
         child_name(child)
     )
 }
 
-/// cladefs: the parent, origin and child an ephemeral cell's index entry names, by its key
-/// ([`ephemeral_index`]), if it is one.
-pub fn ephemeral_indexed(key: &str) -> Option<(u64, CellId, u64, CellId)> {
+/// cladefs: the tombstone of incarnation `incarnation` in the bucket numbered `bucket` (board
+/// 8519): there once its decommissioning began, for good, in every bucket. A host's reference of
+/// that incarnation written in that bucket is taken back and refused once it is seen there
+/// ([`crate::lifecycle::refer_ephemeral`]); beside its index entries' prefix, never under it, so
+/// that listing them lists not it.
+pub fn decommissioned(bucket: u16, incarnation: u64) -> String {
+    format!("{}{}.{DECOMMISSIONED}", ephemeral_hosts(bucket), Padded(incarnation))
+}
+
+/// cladefs: of a key or a prefix under the ephemeral cells' index, the bucket it names and the
+/// rest after it: none for any other. The bucket's number written as [`ephemeral_hosts`] writes
+/// it, four hexadecimal digits, alone.
+fn ephemeral_under(key: &str) -> Option<(u16, &str)> {
     let rest = key.strip_prefix(EPHEMERAL)?.strip_prefix('/')?;
+    let (bucket, rest) = rest.split_once('/')?;
+    // Not a bucket's number: no key of the index.
+    let number = u16::from_str_radix(bucket, 16).ok()?;
+    (format!("{number:04x}") == bucket).then_some((number, rest))
+}
+
+/// cladefs: the parent, origin and child an ephemeral cell's index entry names, and its
+/// incarnation, by its key ([`ephemeral_index`]), if it is one: in the bucket of its parent's.
+pub fn ephemeral_indexed(key: &str) -> Option<(u64, CellId, u64, CellId)> {
+    let (bucket, rest) = ephemeral_under(key)?;
     let (incarnation, rest) = rest.split_once('/')?;
     let words: Vec<&str> = rest.split('.').collect();
     let [parent_tenant, parent, at, tenant, child] = words[..] else { return None };
     let parent = CellId { tenant: number(parent_tenant)?, id: number(parent)? };
     let child = CellId { tenant: number(tenant)?, id: number(child)? };
-    Some((number(incarnation)?, parent, number(at)?, child))
+    let indexed = (number(incarnation)?, parent, number(at)?, child);
+    (ephemeral_bucket(parent) == bucket).then_some(indexed)
+}
+
+/// cladefs: the bucket and incarnation an incarnation's tombstone names, by its key
+/// ([`decommissioned`]), if it is one.
+pub fn decommissioned_of(key: &str) -> Option<(u16, u64)> {
+    let (bucket, rest) = ephemeral_under(key)?;
+    let incarnation = rest.strip_suffix(DECOMMISSIONED)?.strip_suffix('.')?;
+    Some((bucket, number(incarnation)?))
 }
 
 /// cladefs: the pin of the mirror of `parent`'s version at the end of its segment `at` in another
@@ -594,6 +648,11 @@ pub enum Kind<'a> {
     EphemeralIndex {
         incarnation: u64,
     },
+    /// cladefs: the tombstone of a host's incarnation decommissioned ([`decommissioned`], board
+    /// 8519): no cell's, never a candidate, kept for good.
+    Decommissioned {
+        incarnation: u64,
+    },
     /// cladefs: a recording of what a fork of `parent`'s version at `at`, of `tenant`'s, read of
     /// it ([`evidence`], TASK-702.2): no pass's candidate, nor in its listing's digest; the pass
     /// over `parent` trims it ([`crate::evidence::doomed`]).
@@ -628,6 +687,7 @@ impl Kind<'_> {
             Self::Mirror { .. } => "mirror",
             Self::Ephemeral { .. } => "ephemeral",
             Self::EphemeralIndex { .. } => "ephemeral-index",
+            Self::Decommissioned { .. } => "decommissioned",
             Self::Evidence { .. } => "evidence",
             Self::Unknown => "unknown",
         }
@@ -654,6 +714,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         Kind::Moves { cell, .. } => Some(cell),
         Kind::ObjectIds { .. }
         | Kind::EphemeralIndex { .. }
+        | Kind::Decommissioned { .. }
         | Kind::Identity
         | Kind::Buckets
         | Kind::Kek { .. }
@@ -683,6 +744,9 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         if let Some((incarnation, ..)) = ephemeral_indexed(key) {
             return Some(Kind::EphemeralIndex { incarnation });
+        }
+        if let Some((_, incarnation)) = decommissioned_of(key) {
+            return Some(Kind::Decommissioned { incarnation });
         }
         if let Some(tenant) =
             (key.strip_prefix(TENANTS)).and_then(|rest| rest.strip_suffix(KEK)?.strip_suffix('/'))
@@ -1370,11 +1434,38 @@ mod tests {
             Kind::Ephemeral { parent: cell, at: 7, incarnation: 0x2a, child }
         );
         assert_eq!((owner(&ephemeral), retired_of(&ephemeral)), (Some(cell), None));
+        // Its index entry, in its parent's bucket, and its incarnation's tombstone beside the
+        // entries' prefix, never under it (boards 8517, 8519).
         let index = ephemeral_index(0x2a, cell, 7, child);
-        assert!(index.starts_with(&ephemeral_indexes(0x2a)));
+        assert!(index.starts_with(&ephemeral_indexes(ephemeral_bucket(cell), 0x2a)));
         assert_eq!(ephemeral_indexed(&index), Some((0x2a, cell, 7, child)));
         assert_eq!(kind(&index), Kind::EphemeralIndex { incarnation: 0x2a });
         assert_eq!(owner(&index), None);
+        let theirs = CellId { tenant: 1, id: 3 << 48 | 5 };
+        let there = ephemeral_index(0x2a, theirs, 7, child);
+        assert_eq!(
+            there,
+            "ephemeral/0003/000000000001a/0000000000001.000r000000005.0000000000007.0000000000001.0000000000005"
+        );
+        assert_eq!((routed_to(&there), routed_to(&ephemeral_hosts(3))), (Some(3), Some(3)));
+        assert_eq!(routed_to(&index), None, "a named cell's stays in the bucket asked");
+        let forged = there.replacen("/0003/", "/0002/", 1);
+        assert_eq!((ephemeral_indexed(&forged), kind(&forged)), (None, Kind::Unknown));
+        let tombstone = decommissioned(3, 0x2a);
+        assert_eq!(tombstone, "ephemeral/0003/000000000001a.decommissioned");
+        assert!(!tombstone.starts_with(&ephemeral_indexes(3, 0x2a)));
+        assert!(tombstone.starts_with(&ephemeral_hosts(3)));
+        assert_eq!(decommissioned_of(&tombstone), Some((3, 0x2a)));
+        assert_eq!(kind(&tombstone), Kind::Decommissioned { incarnation: 0x2a });
+        assert_eq!((owner(&tombstone), routed_to(&tombstone)), (None, Some(3)));
+        for malformed in [
+            "ephemeral/3/000000000001a.decommissioned",
+            "ephemeral/+003/000000000001a.decommissioned",
+            "ephemeral/0003/1a.decommissioned",
+            "ephemeral/0003/000000000001a.decommissione",
+        ] {
+            assert_eq!(kind(malformed), Kind::Unknown, "{malformed}");
+        }
         assert!(mirror(cell, 7).starts_with(&mirrors(cell)));
         assert_eq!((owner(&pin(cell, 7)), owner(&mirror(cell, 7))), (Some(cell), Some(cell)));
         assert_eq!(kind(&format!("{}mirrors/x", cell.prefix())), Kind::Unknown);

@@ -91,6 +91,21 @@ impl<B: Bucket> RoutedBucket<B> {
         Ok(route.members.lock().unwrap().entry(number).or_insert(opened).clone())
     }
 
+    /// cladefs: the numbers of the buckets an ephemeral cell's reference may be in, which
+    /// decommissioning a host lists and retires in (board 8517): those its home's root records
+    /// ([`crate::lifecycle::ephemeral_buckets`]), and, routing, those the root bucket's registry
+    /// records, the authority, which a copy its spread missed lacks, as [`Registered`] reads it.
+    pub async fn ephemeral_buckets(&self) -> Result<BTreeSet<u16>, crate::Error> {
+        use crate::identity::ROOT;
+        let mut numbers = crate::lifecycle::ephemeral_buckets(&*self.home).await?;
+        let own = crate::identity::get(&*self.home).await?.map(|identity| identity.number);
+        if self.route.is_some() && own.is_some_and(|own| own != ROOT) {
+            let root = crate::identity::registry(&*self.numbered(ROOT).await?).await?;
+            numbers.extend(root.iter().flat_map(|root| &root.buckets).map(|entry| entry.number));
+        }
+        Ok(numbers)
+    }
+
     async fn own_number(&self, route: &Route<B>) -> Result<Option<u16>, Error> {
         if let Some(number) = *route.home.lock().unwrap() {
             return Ok(Some(number));
@@ -589,8 +604,10 @@ mod tests {
         }
 
         async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
-            self.requests.fetch_add(1, Ordering::Relaxed);
-            self.objects.list(prefix).await
+            match self.fails(prefix) {
+                Some(error) => Err(error),
+                None => self.objects.list(prefix).await,
+            }
         }
 
         async fn list_delimited(&self, prefix: &str, page: Page<'_>) -> Result<Listing, Error> {
@@ -709,5 +726,124 @@ mod tests {
         let routed = RoutedBucket::new(home.clone(), Arc::new(Opens(Arc::new(Scripted::new("")))));
         let refused = block_on(routed.retire(&[reference.as_str()]));
         assert_eq!(refused, Err(Refused::of(layout::IDENTITY, Refusal::Unreadable)));
+    }
+
+    /// Opens each bucket of the numbers it holds as the one it holds.
+    struct Members(BTreeMap<u16, Arc<Scripted>>);
+
+    impl Resolve<Scripted> for Members {
+        fn open<'a>(
+            &'a self,
+            _: &'a Scripted,
+            number: u16,
+        ) -> futures::future::BoxFuture<'a, Result<Arc<Scripted>, crate::Error>> {
+            let found = self.0.get(&number).cloned().ok_or(crate::Error::NoBucket(number));
+            Box::pin(std::future::ready(found))
+        }
+    }
+
+    /// Board 8517: ephemeral cells forked through daemons of two home buckets, 1 and 2, of
+    /// parents of a third, 3, have their references and index entries in bucket 3 alone,
+    /// whichever's daemon wrote them; a reference written through one is retired through another,
+    /// its entry with it (`Host::retire`, by the bucket its journal names). Decommissioning their
+    /// incarnation through a daemon of any of the three, the registry's buckets each, finds and
+    /// retires every one, counting them, and their entries, and leaves its tombstone in every
+    /// bucket, which refuses a reference of the incarnation after; a bucket refusing its listing
+    /// fails it, never answering that it retired none.
+    #[test]
+    fn ephemeral_references_are_decommissioned_from_any_bucket() {
+        use crate::layout::{CellId, Kind, Origin};
+        use crate::lifecycle::{self, Decommissioned};
+        let incarnation = 0x2b;
+        let indexed_there = layout::ephemeral_indexes(3, incarnation);
+        let parent = |n: u64| CellId { tenant: 1, id: 3 << 48 | n };
+        let origin = |n| Origin { parent: parent(n), at: 7, epoch: 1 };
+        let child = |n: u64| CellId { tenant: 1, id: 1 << 48 | 0x100 | n };
+        for decommissioner in [1, 2, 3] {
+            let buckets: BTreeMap<u16, Arc<Scripted>> = [(1, ""), (2, ""), (3, &*indexed_there)]
+                .into_iter()
+                .map(|(number, failing)| (number, Arc::new(Scripted::new(failing))))
+                .collect();
+            block_on(async {
+                let details = crate::identity::Details::default();
+                let root = &buckets[&1].objects;
+                crate::identity::format(root, &details, Default::default()).await.unwrap();
+                let mut registry = None;
+                for number in [2, 3] {
+                    let new = &buckets[&number].objects;
+                    let added = crate::identity::add(
+                        root,
+                        &details,
+                        new,
+                        details.clone(),
+                        Default::default(),
+                    );
+                    let (identity, added) = added.await.unwrap();
+                    assert_eq!(identity.number, number);
+                    registry = Some(added);
+                }
+                // Bucket 2 holds no copy of the registry, its spread cut short: the root's, the
+                // authority, records every bucket.
+                for number in [1, 3] {
+                    let registry = registry.as_ref().unwrap();
+                    crate::identity::spread(registry, &buckets[&number].objects).await.unwrap();
+                }
+            });
+            let routed = |home: u16| {
+                RoutedBucket::new(buckets[&home].clone(), Arc::new(Members(buckets.clone())))
+            };
+            let held = |number: u16| {
+                let listed = block_on(buckets[&number].objects.list("")).unwrap();
+                let count = |of: fn(&Kind) -> bool| {
+                    listed.iter().filter(|meta| of(&layout::kind(&meta.key))).count()
+                };
+                (
+                    count(|kind| matches!(kind, Kind::Ephemeral { .. })),
+                    count(|kind| matches!(kind, Kind::EphemeralIndex { .. })),
+                    count(|kind| matches!(kind, Kind::Decommissioned { .. })),
+                )
+            };
+            let (one, two) = (routed(1), routed(2));
+            block_on(async {
+                for n in 0..3 {
+                    lifecycle::refer_ephemeral(&one, origin(n), incarnation, child(n))
+                        .await
+                        .unwrap();
+                }
+                for n in 3..5 {
+                    lifecycle::refer_ephemeral(&two, origin(n), incarnation, child(n))
+                        .await
+                        .unwrap();
+                }
+            });
+            assert_eq!((held(1), held(2), held(3)), ((0, 0, 0), (0, 0, 0), (5, 5, 0)));
+            block_on(lifecycle::unrefer_ephemeral(&two, origin(0), incarnation, child(0))).unwrap();
+            assert_eq!(held(3), (4, 4, 0), "written through bucket 1's, retired through 2's");
+
+            let through = routed(decommissioner);
+            let numbers = block_on(through.ephemeral_buckets()).unwrap();
+            assert_eq!(numbers, BTreeSet::from([crate::identity::NAMED, 1, 2, 3]));
+            let listed = block_on(lifecycle::ephemeral_references(&through, &numbers, incarnation));
+            assert_eq!(listed.map(|listed| listed.len()), Ok(4));
+            if decommissioner == 3 {
+                buckets[&3].fails.lock().unwrap().push_back(Error::Refused(Refusal::Denied));
+                let refused =
+                    block_on(lifecycle::decommission(&through, &numbers, incarnation, 100));
+                let refusal = Refused::of(&indexed_there, Refusal::Denied);
+                assert_eq!(refused, Err(crate::Error::Refused(refusal)));
+                assert_eq!(held(3).0, 4, "nothing retired");
+            }
+            let decommissioned =
+                block_on(lifecycle::decommission(&through, &numbers, incarnation, 100));
+            assert_eq!(decommissioned, Ok(Decommissioned { retired: 4, left: 0 }));
+            // Its tombstone in each bucket; bucket 0's, of the cells tests name, in its home.
+            let home_named = |number| usize::from(number == decommissioner);
+            assert_eq!(held(1), (0, 0, 1 + home_named(1)));
+            assert_eq!(held(2), (0, 0, 1 + home_named(2)));
+            assert_eq!(held(3), (0, 0, 1 + home_named(3)));
+            let late = block_on(lifecycle::refer_ephemeral(&one, origin(9), incarnation, child(9)));
+            assert_eq!(late, Err(crate::Error::Decommissioned(incarnation)));
+            assert_eq!(held(3), (0, 0, 1 + home_named(3)), "taken back");
+        }
     }
 }
