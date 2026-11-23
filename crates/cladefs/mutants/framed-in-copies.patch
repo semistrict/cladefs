@@ -9,19 +9,9 @@
 # times their guests' bytes, past 1.5, and frame for up to 2.3 s, past a second (TASK-330.1).
 # Kind: writes
 # Killer: scripts/sandboxes.sh short
---- a/crates/local_cell/src/segments.rs
-+++ b/crates/local_cell/src/segments.rs
-@@ -1547,6 +1547,7 @@
-     // file's key (TASK-411.23).
-     let sectors = raw.sectors();
-     let in_place_maybe = quiet && len > 0 && len.is_multiple_of(SECTOR);
-+    let in_place_maybe = false && in_place_maybe;
-     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
-     // cladefs: in place at once if a look at its parts says compressing them saves too little,
-     // compressing no more of them: compressing every part to tell was most of what framings took
 --- a/crates/local_cell/src/cell.rs
 +++ b/crates/local_cell/src/cell.rs
-@@ -2758,10 +2758,6 @@ impl<D: Dir> LocalCell<D> {
+@@ -3047,10 +3047,6 @@ impl<D: Dir> LocalCell<D> {
              }
              let end = packer.end();
              let packed = packer.push(buf);
@@ -32,3 +22,13 @@
              let file = match &mut framed {
                  Some(file) => file,
                  // Its raw parts before are no parts of a cell at a version's, encrypted with
+--- a/crates/local_cell/src/segments.rs
++++ b/crates/local_cell/src/segments.rs
+@@ -1768,6 +1768,7 @@ fn frame_segment<D: Dir>(
+     // cladefs: in a copy, its parts encrypted with AES-GCM (TASK-411.2, TASK-411.3).
+     let mut packer = extent_frame::Packer::new(encrypting);
+     let in_place_maybe = quiet && len > 0 && len.is_multiple_of(SECTOR);
++    let in_place_maybe = false && in_place_maybe;
+     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
+     // cladefs: in place at once if a look at its parts says compressing them saves too little,
+     // compressing no more of them: compressing every part to tell was most of what framings took
