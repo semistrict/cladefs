@@ -133,6 +133,43 @@ impl Condition {
     }
 }
 
+/// cladefs: whether `objects` honours the condition `by` on a delete of `path`, its probe's object
+/// of `version` (board 9229, [`ObjectBucket::honours_deletes`]): a delete of another version must
+/// be refused, the object kept, and one of its version delete it. A failure, which answers nothing
+/// of the condition, fails it (hotbed review 53).
+async fn probe_deletes(
+    objects: &Arc<dyn ObjectStore>,
+    by: Condition,
+    path: &Path,
+    version: &Version,
+) -> object_store::Result<bool> {
+    // No backend makes this e-tag; no object's generation is 0.
+    let other =
+        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
+    let (Some(header), Some(own)) = (by.header(&other), by.header(version)) else {
+        // cladefs: none it names: the object deleted, the condition not to be sent.
+        delete_one(&**objects, path).await?;
+        return Ok(false);
+    };
+    let deleting = delete_one(&**objects, path);
+    let refused = match crate::client::conditioned(header, path.to_string(), deleting).await.0 {
+        Err(object_store::Error::Precondition { .. }) => true,
+        Ok(()) | Err(object_store::Error::NotFound { .. }) => false,
+        Err(failed) => return Err(failed),
+    };
+    let options = GetOptions { head: true, ..GetOptions::default() };
+    match objects.get_opts(path, options).await {
+        Ok(_) => {}
+        // Deleted: the condition ignored.
+        Err(object_store::Error::NotFound { .. }) => return Ok(false),
+        Err(other) => return Err(other),
+    }
+    let (deleted, _) =
+        crate::client::conditioned(own, path.to_string(), delete_one(&**objects, path)).await;
+    deleted?;
+    Ok(refused)
+}
+
 /// cladefs: deletes the object at `path` of `store`, through its `delete_stream`, as a delete of
 /// one object alone: of S3's with DeleteObjects off, a DeleteObject (board 9229).
 async fn delete_one(store: &dyn ObjectStore, path: &Path) -> object_store::Result<()> {
@@ -1626,41 +1663,13 @@ impl ObjectBucket {
             let create = PutOptions { mode: object_store::PutMode::Create, ..Default::default() };
             let made = objects.put_opts(&path, PutPayload::from_static(b"probe"), create).await?;
             let version = Version { e_tag: made.e_tag, version: made.version };
-            // No backend makes this e-tag; no object's generation is 0.
-            let other = Version {
-                e_tag: Some("\"cladefs-probe\"".to_owned()),
-                version: Some("0".to_owned()),
-            };
-            let (header, own) = (by.header(&other), by.header(&version));
-            let (Some(header), Some(own)) = (header, own) else { return Ok(false) };
-            let path_string = path.to_string();
-            let deleting = delete_one(&**objects, &path);
-            let other = crate::client::conditioned(header, path_string.clone(), deleting);
-            // Refused, or deleted, it answered; failed, it answered nothing of the condition, and
-            // the check fails, to be asked again (hotbed review 53).
-            let refused = match other.await.0 {
-                Err(object_store::Error::Precondition { .. }) => true,
-                Ok(()) | Err(object_store::Error::NotFound { .. }) => false,
-                Err(failed) => {
-                    // cladefs: best effort: what is left of a probe is its own object, which no
-                    // cell names; the failure is what the check gives.
-                    let _ = delete_one(&**objects, &path).await;
-                    return Err(failed);
-                }
-            };
-            let options = GetOptions { head: true, ..GetOptions::default() };
-            let kept = match objects.get_opts(&path, options).await {
-                Ok(_) => true,
-                Err(object_store::Error::NotFound { .. }) => false,
-                Err(other) => return Err(other),
-            };
-            if !kept {
-                return Ok(false);
+            let checked = probe_deletes(objects, by, &path, &version).await;
+            if checked.is_err() {
+                // cladefs: best effort (hotbed review 54): what is left of a probe is its own
+                // object, which no cell names; the failure is what the check gives.
+                let _ = delete_one(&**objects, &path).await;
             }
-            let (deleted, _) =
-                crate::client::conditioned(own, path_string, delete_one(&**objects, &path)).await;
-            deleted?;
-            Ok(refused)
+            checked
         };
         let honoured = *self.honours_deletes.get_or_try_init(probe).await?;
         if !honoured {
@@ -3935,14 +3944,14 @@ pub(crate) mod tests {
     /// delete, its delete of another version failing (the server refusing it once), answers
     /// nothing of the condition: the delete fails, and the next asks again, finds it honoured,
     /// and deletes, never taking the failure for "ignored" for good. Over S3, a conditional delete
-    /// is a DeleteObject, not DeleteObjects.
+    /// is a DeleteObject, not DeleteObjects. The check failing at any step deletes its object.
     #[test]
     fn conditional_deletes_check_their_backend_again_after_a_failure() {
         runtime().block_on(async {
             let server = S3Server::start(None);
             let bucket = s3(&server, "deletes", &Client::DEFAULT);
             let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
-            server.answering_next_conditional_delete(403);
+            server.answering_next(crate::s3_server::Next::ConditionalDelete, 403);
             let refused = bucket.delete_if("key", &version).await;
             assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
             assert_eq!(bucket.get("key").await.unwrap().bytes, [1]);
@@ -3954,6 +3963,16 @@ pub(crate) mod tests {
             // The check's two, then its own.
             assert_eq!(deletes(&server.requests()), deletes(&before).map(|n| n + 3));
             assert_eq!(server.requests().get("delete-objects"), before.get("delete-objects"));
+
+            // hotbed review 54: the check failing at any step leaves nothing of its probe.
+            let bucket = s3(&server, "leaks", &Client::DEFAULT);
+            let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
+            server.answering_next(crate::s3_server::Next::Head, 403);
+            let refused = bucket.delete_if("key", &version).await;
+            assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
+            let left: Vec<String> =
+                bucket.list("").await.unwrap().into_iter().map(|meta| meta.key).collect();
+            assert_eq!(left, ["key"]);
         });
     }
 

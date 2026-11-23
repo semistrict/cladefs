@@ -46,6 +46,28 @@ pub struct S3Server {
     clock: Arc<Clock>,
 }
 
+/// cladefs: a kind of request the server may be told to answer the next of alone
+/// ([`S3Server::answering_next`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// A DELETE conditional on `If-Match`.
+    ConditionalDelete,
+    Head,
+}
+
+impl Objects {
+    /// What it answers this request, of kind `kind`, if told to answer the next of its kind so.
+    fn next(&mut self, kind: Next) -> Option<Answer> {
+        match self.next {
+            Some((next, answer)) if next == kind => {
+                self.next = None;
+                Some(status(answer))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// cladefs: a server's clock (board 8467): so many milliseconds ahead of the host's, and whether
 /// its responses carry its date.
 #[derive(Debug)]
@@ -84,8 +106,9 @@ struct Objects {
     requests: BTreeMap<&'static str, u64>,
     /// What it answers every request, if it is told to answer them all so (board 5861).
     answer: Option<StatusCode>,
-    /// cladefs: what it answers the next conditional DELETE alone, if told to (board 9229).
-    next_conditional_delete: Option<StatusCode>,
+    /// cladefs: what it answers the next request of a kind alone, if told to (board 9229): a
+    /// conditional DELETE's, or a HEAD's.
+    next: Option<(Next, StatusCode)>,
 }
 
 impl Objects {
@@ -179,12 +202,11 @@ impl S3Server {
         objects.lock().unwrap().answer = answer;
     }
 
-    /// cladefs: has it answer the next DELETE conditional on `If-Match` alone with HTTP status
-    /// `answer`, then serve them again (board 9229).
-    pub fn answering_next_conditional_delete(&self, answer: u16) {
+    /// cladefs: has it answer the next request of kind `next` alone with HTTP status `answer`,
+    /// then serve them again (board 9229).
+    pub fn answering_next(&self, next: Next, answer: u16) {
         let objects = self.objects.as_ref().expect("a server of its own");
-        objects.lock().unwrap().next_conditional_delete =
-            Some(StatusCode::from_u16(answer).unwrap());
+        objects.lock().unwrap().next = Some((next, StatusCode::from_u16(answer).unwrap()));
     }
 
     /// Its bucket's objects, through cladefs's client, as a host reaches S3: for other crates'
@@ -426,6 +448,11 @@ async fn serve(
         }
         (&Method::GET | &Method::HEAD, key) => {
             objects.count(if parts.method == Method::HEAD { "head" } else { "get" });
+            if parts.method == Method::HEAD
+                && let Some(answer) = objects.next(Next::Head)
+            {
+                return answer;
+            }
             let Some(stored) = objects.objects.get(key) else {
                 return status(StatusCode::NOT_FOUND);
             };
@@ -483,9 +510,9 @@ async fn serve(
             // cladefs: conditional on `If-Match` (board 9229), as S3's DeleteObject is: of no
             // object, a failed precondition, as an update of none is.
             if header("if-match").is_some()
-                && let Some(answer) = objects.next_conditional_delete.take()
+                && let Some(answer) = objects.next(Next::ConditionalDelete)
             {
-                return status(answer);
+                return answer;
             }
             if let Some(e_tag) = header("if-match")
                 && objects.objects.get(key).is_none_or(|stored| stored.e_tag != e_tag)
