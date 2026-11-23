@@ -1203,3 +1203,47 @@ fn peer_calls_carry_their_trace_and_are_counted_on_both_sides() {
         assert_eq!(counted("calls_total", "unknown"), Some(0), "{side}");
     }
 }
+
+/// hotbed review 80, board 8569: what serving a peer's call hands to the bucket runtime goes on the
+/// call's trace: a part fetched cold for a peer, its bucket requests' spans on the trace of the
+/// asker's span, as the served call's span is. Before, the fetch was spawned with no context, its
+/// spans each a trace of its own.
+#[test]
+fn a_parts_bucket_requests_for_a_peer_are_on_its_trace() {
+    use opentelemetry::trace::{SpanKind, TraceContextExt as _};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SimpleSpanProcessor};
+    let (bucket, location) = holding(&noise(3 * layout::PART));
+    let dir = tempfile::tempdir().unwrap();
+    let address = serving(&bucket, dir.path());
+    let (asked, bytes) = asked(&bucket, &location, 1);
+    // Once the bucket is made, on futures' executor, where the in-memory exporter may not export.
+    let exporter = InMemorySpanExporter::default();
+    let processor = SimpleSpanProcessor::new(exporter.clone());
+    let export = super::super::zpages::tracez::Export::new(processor, Box::new(Sampler::AlwaysOn));
+    super::super::otel::install(Sampler::AlwaysOn, Some(export));
+    let asking = bucket_cell::trace::Span::start("a fetcher's read");
+    let trace = asking.context().unwrap().span().span_context().trace_id();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let link = link(&runtime, &address, (URL, None));
+    assert_eq!(runtime.block_on(asking.around(link.get(asked))), Ok(Some(bytes)));
+    drop(asking);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let served = loop {
+        let spans = exporter.get_finished_spans().unwrap();
+        let served = spans.iter().find(|span| {
+            span.name == "cladefs.peer.v1.Peer/GetPart" && span.span_kind == SpanKind::Server
+        });
+        if let Some(served) = served {
+            break (served.clone(), spans);
+        }
+        assert!(Instant::now() < deadline, "no span of the served call");
+        std::thread::yield_now();
+    };
+    let (served, spans) = served;
+    assert_eq!(served.span_context.trace_id(), trace);
+    let fetched: Vec<_> = spans.iter().filter(|span| span.name.starts_with("bucket.get")).collect();
+    assert_eq!(fetched.len(), 2, "its tail and the part: {spans:?}");
+    for span in fetched {
+        assert_eq!(span.span_context.trace_id(), trace, "{} on a trace of its own", span.name);
+    }
+}

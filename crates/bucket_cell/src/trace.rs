@@ -277,6 +277,14 @@ impl Parent {
             None => Either::Left(future),
         }
     }
+
+    /// cladefs: runs `work` with the span as the context current on this thread meanwhile: the
+    /// parent of the spans it starts, on a thread another task hands it to, as a blocking one
+    /// (board 8569).
+    pub fn run<T>(self, work: impl FnOnce() -> T) -> T {
+        let _attached = self.0.map(Context::attach);
+        work()
+    }
 }
 
 impl Drop for Span {

@@ -888,6 +888,8 @@ async fn seen(bucket: &Arc<RoutedBucket>, cell: crate::CellId) -> Result<Option<
     let reading = async move {
         tokio::time::timeout(HEAD_WITHIN, bucket_cell::head::get(&*bucket, cell)).await
     };
+    // cladefs: in the call's trace context, the parent of its bucket requests' spans (board 8569).
+    let reading = bucket_cell::trace::Parent::current().around(reading);
     let head = match runtime.spawn(reading).await {
         Ok(Ok(Ok(head))) => head,
         Ok(Ok(Err(err))) => {
@@ -1003,6 +1005,16 @@ async fn blocking<T: Send + 'static>(
 
 type Answers<T> = std::pin::Pin<Box<dyn futures::Stream<Item = Result<T, Status>> + Send>>;
 
+/// cladefs: spawns `work`, a streaming call's, on the runtime it is served on, in the call's trace
+/// context, the parent of its spans (board 8569).
+fn spawn_in_call<F>(work: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(bucket_cell::trace::Parent::current().around(work))
+}
+
 #[tonic::async_trait]
 impl proto::peer_server::Peer for Server {
     type AppendStream = Answers<AppendResponse>;
@@ -1029,7 +1041,7 @@ impl proto::peer_server::Peer for Server {
         let heads = self.heads.clone();
         let (answer, answers) = tokio::sync::mpsc::channel(16);
         let appending = Counted::new(&self.appending);
-        tokio::spawn(async move {
+        spawn_in_call(async move {
             let _appending = appending;
             let mut next = match appends.message().await {
                 Ok(next) => next,
@@ -1162,7 +1174,7 @@ impl proto::peer_server::Peer for Server {
         let ReadLogRequest { of, log, offset } = request.into_inner();
         let (replicas, of) = self.of(of)?;
         let (answer, answers) = tokio::sync::mpsc::channel(4);
-        tokio::spawn(async move {
+        spawn_in_call(async move {
             let mut at = offset;
             loop {
                 let replicas = replicas.clone();

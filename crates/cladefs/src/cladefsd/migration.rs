@@ -1033,7 +1033,8 @@ pub(super) mod target {
         work: impl std::future::Future<Output = Result<T, Status>> + Send + 'static,
     ) -> Result<T, Status> {
         let runtime = crate::bucket::bucket_runtime().map_err(|err| status("its runtime", err))?;
-        let done = runtime.spawn(work).await;
+        // cladefs: in the call's trace context, the parent of its spans (board 8569).
+        let done = runtime.spawn(bucket_cell::trace::Parent::current().around(work)).await;
         done.unwrap_or_else(|err| Err(status("serving it", err)))
     }
 

@@ -107,12 +107,17 @@ pub fn supervised(name: &'static str) -> local_cell::shared::Holding {
 
 /// Runs `work`, which blocks on the host's disk, off the runtime's workers: on one of its
 /// blocking threads, as it finishes whether or not what awaits it is dropped; under madsim, inline,
-/// the simulated disk being memory. Fails if `work` panicked.
+/// the simulated disk being memory. Fails if `work` panicked. cladefs: in the trace context current
+/// where it is asked, the parent of its spans there, as a control or peer call's (board 8569).
 pub(super) async fn off_the_runtime<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
     #[cfg(not(madsim))]
-    return tokio::task::spawn_blocking(work).await.map_err(|err| err.to_string());
+    {
+        let parent = bucket_cell::trace::Parent::current();
+        let done = tokio::task::spawn_blocking(move || parent.run(work)).await;
+        return done.map_err(|err| err.to_string());
+    }
     #[cfg(madsim)]
     return std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
         .map_err(|_| "it panicked".to_owned());

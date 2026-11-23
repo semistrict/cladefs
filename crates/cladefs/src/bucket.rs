@@ -883,10 +883,13 @@ impl Serving {
     /// fetched from the bucket once, however many ask, on the bucket runtime.
     pub async fn part(&self, asked: peers::Asked) -> Result<Option<Arc<[u8]>>, Failure> {
         let parts = self.parts.clone();
-        let serving = self.runtime.spawn(async move {
-            let peers::Asked { key, part } = asked;
-            Ok(parts.stored_part(&key, part).await?)
-        });
+        // cladefs: in the trace context current, the peer's call's, the parent of its bucket
+        // requests' spans (board 8569, hotbed review 80).
+        let serving =
+            self.runtime.spawn(bucket_cell::trace::Parent::current().around(async move {
+                let peers::Asked { key, part } = asked;
+                Ok(parts.stored_part(&key, part).await?)
+            }));
         serving.await.map_err(|err| Failure::local(err, "serving a peer"))?
     }
 }
