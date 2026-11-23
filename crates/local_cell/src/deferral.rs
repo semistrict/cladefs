@@ -223,10 +223,8 @@ impl Deferral {
             Err(io::Error::other("failpoint deferral::settle"))
         });
         let settled = self.make_durable();
-        self.ended(match settled {
-            Ok(()) => State::Settled,
-            Err(_) => State::Failed,
-        });
+        // Its error, if it failed, is the settling's answer, below.
+        self.ended(if settled.is_ok() { State::Settled } else { State::Failed });
         settled
     }
 

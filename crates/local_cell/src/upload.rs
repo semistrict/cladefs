@@ -1521,6 +1521,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.abort_round();
         let round = self.relocation.lock().unwrap().take();
         if let Some((_, gone)) = round {
+            // Sent or dropped as the round's task ends: either is what is waited for.
             let _ = gone.await;
         }
         let kept = self.kept.lock().unwrap().take();
@@ -1784,6 +1785,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         (self.spawn)(
             async move {
                 let stopped = |_| Err(anyhow::anyhow!("the uploader stopped"));
+                // Aborted is the uploader stopping, sent as the round's failure; the send fails
+                // only once no one waits for the round.
                 drop(ended.send(ending.await.unwrap_or_else(stopped)));
                 // Said once the round, and the cell it held, went.
                 drop(done);
