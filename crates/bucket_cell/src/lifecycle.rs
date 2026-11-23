@@ -470,7 +470,9 @@ pub struct Decommissioned {
 /// entries: stopped between, the entries left find the references a call again deletes, as
 /// deleting what is gone is no error. Returns how many it retired, and left. Its operator's to
 /// call, for an incarnation no host has: a host of it still holding its cells would read what it
-/// no longer keeps, and refuses to start, or fork, once it reads the tombstone.
+/// no longer keeps, and refuses to start, or fork, once it reads the tombstone. A bucket added
+/// after it holds no tombstone of it (board 9966); a reference whose write lands after its entry
+/// was deleted here stands unfound (board 9968).
 pub async fn decommission(
     bucket: &impl Bucket,
     buckets: &BTreeSet<u16>,

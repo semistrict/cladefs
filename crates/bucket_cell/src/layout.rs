@@ -79,8 +79,12 @@ pub struct Child {
 /// and a version name the epoch of their segment, whose checkpoint is read by its key, with no read
 /// of its cell's head (board 6017); nothing reads 24's. 26: a checkpoint keeps the length of the
 /// data of each of its cell's own segments its extents are in ([`crate::State::lengths`], doc-27),
-/// which its writer measures their density against; nothing reads 25's.
-pub const FORMAT: u32 = 26;
+/// which its writer measures their density against; nothing reads 25's. 27: an ephemeral cell's
+/// index entry is kept, and routed, in its reference's bucket, which its key names, beside its
+/// host's incarnation's tombstone ([`ephemeral_index`], [`decommissioned`], boards 8517, 8519);
+/// nothing reads 26's, whose entries were by incarnation alone, in the bucket of the daemon that
+/// wrote them, which no decommissioning would find.
+pub const FORMAT: u32 = 27;
 
 /// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
 /// TASK-691): keys past it are no head's.
