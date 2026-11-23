@@ -1356,13 +1356,20 @@ mod tests {
     }
 
     /// Writes segment `number`'s raw data, `blocks` blocks, and its log, of `records`, as an open
-    /// segment's flushes leave them. cladefs: encrypted (TASK-411.5).
+    /// segment's flushes leave them. cladefs: encrypted (TASK-411.5); and durable, the raw data and
+    /// the files' entries, as the cell makes them before its records' runs say so
+    /// (`Segments::opened`, `Runs::Synced`): not, a crash tore the raw data inside a run, or lost a
+    /// segment whose next kept its commits, which no cell's crash leaves (board 8264).
     fn left_open(dir: &MemDir, number: u64, blocks: u64, records: &[Contents]) {
         let encryption = encryption();
         let raw = dir.create(&open_segment_path(segment(number)), true).unwrap();
         let raw = crate::raw::RawFile::new(raw, encryption.clone());
         raw.write_at(&vec![number as u8; (blocks * 4096) as usize], 0).unwrap();
+        raw.sync().unwrap();
         logged_under(dir, number, number, records, encryption);
+        for kind in [OPEN_SEGMENTS, LOGS] {
+            dir.sync_dir(&cell_dir(kind, CELL.id)).unwrap();
+        }
     }
 
     /// Writes segment `number`'s log as segment `of`'s log, of `records`, its header and records
