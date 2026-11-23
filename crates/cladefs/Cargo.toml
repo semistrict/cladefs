@@ -102,9 +102,6 @@ madsim = "=0.2.34"
 [lints]
 workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-io-uring = "0.7.15"
-
 # The extent daemon's (cladefsd): Linux's, and under madsim everywhere, as its simulation runs on
 # macOS too (board 2912).
 [target.'cfg(any(target_os = "linux", madsim))'.dependencies]

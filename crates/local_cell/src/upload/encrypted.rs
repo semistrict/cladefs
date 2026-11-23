@@ -1201,12 +1201,11 @@ async fn segments_framed_in_place_encrypted_recover_from_crashes() {
     remote.cut_short()();
 }
 
-/// TASK-411.5, AC #5: a write's bytes, as a caller writing them by an I/O of its own takes them
-/// ([`crate::Write::stored`]), are encrypted for the file it names, at the offset it names, and
-/// read back as written; a write of a large extent that is not whole sectors is refused (TASK-411.8
-/// refuses such writes to segments).
+/// TASK-411.5, AC #5: a write's bytes are encrypted in the file they go to, and read back as
+/// written; a write of a large extent that is not whole sectors is refused (TASK-411.8 refuses
+/// such writes to segments).
 #[tokio::test(flavor = "multi_thread")]
-async fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors() {
+async fn writes_are_encrypted_and_large_extents_take_whole_sectors() {
     let world = World::new();
     let host = world.host(5);
     let cell = test_cell(7);
@@ -1217,13 +1216,7 @@ async fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sec
     let (open_cell, remote) = open_on(&world, &host, &dir).await.unwrap();
     let extent = ExtentId::new(cell.id, 1);
     let data = noise(3, 4 * 4096);
-    let write = open_cell.begin_write(extent, 0, data.len() as u64).await.unwrap();
-    let mut bytes = crate::Aligned::new(data.len());
-    bytes.as_mut_slice().copy_from_slice(&data);
-    let stored = write.stored(bytes).unwrap();
-    assert!(stored.bytes.as_slice() != &data[..], "encrypted");
-    stored.file.write_at(stored.bytes.as_slice(), stored.offset).unwrap();
-    write.finish();
+    open_cell.write(extent, 0, &data).await.unwrap();
     let mut buf = vec![0; data.len()];
     open_cell.read(extent, 0, &mut buf).unwrap();
     assert!(buf == data, "read back");

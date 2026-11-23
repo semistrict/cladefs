@@ -519,17 +519,6 @@ impl<D: Dir> Write<'_, D> {
         Ok(self.file.write_at(data, self.offset + at)?)
     }
 
-    /// cladefs: `data`, the whole write's bytes, as its file is to store them, for a caller writing
-    /// them by an I/O of its own, as an image's device does: encrypted in place if the cell
-    /// is (TASK-411.5). They go to the file it names, at the offset it names; written in whole
-    /// sectors if a write of them stops short, from the last whole sector written, they are what
-    /// they are whatever writes them again.
-    pub fn stored(&self, mut data: Aligned) -> Result<Stored<'_, D::File>, Error> {
-        ensure!(data.len() as u64 == self.len, "{} bytes of a write of {}", data.len(), self.len);
-        self.file.encrypt(self.offset, data.as_mut_slice())?;
-        Ok(Stored { file: self.file.file(), offset: self.offset, bytes: data })
-    }
-
     /// Records the write, whose data is in the file: reads see it, and the next commit includes
     /// it.
     pub fn finish(mut self) {
@@ -551,14 +540,6 @@ impl<D: Dir> Write<'_, D> {
             log::warn!("extent store: waiting for {len} bytes at {offset} of a segment: {err}");
         }
     }
-}
-
-/// cladefs: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
-/// in `file`, encrypted if the cell is.
-pub struct Stored<'a, F> {
-    pub file: &'a Arc<F>,
-    pub offset: u64,
-    pub bytes: Aligned,
 }
 
 impl<D: Dir> Drop for Write<'_, D> {

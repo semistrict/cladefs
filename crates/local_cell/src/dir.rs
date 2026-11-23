@@ -697,10 +697,8 @@ pub struct DiskFile {
 }
 
 impl HostFile {
-    /// cladefs: the host's file under the page cache and the counting, for I/O of a caller's own
-    /// beside them, as an image's device does, settled first (`settle`, `settle_for_write`): by its
-    /// descriptor on a real host, and in place on a simulated host's disk (host_fs, doc-24), which
-    /// has no descriptors (board 5687).
+    /// cladefs: the host's file under the page cache and the counting: for tests that refuse its
+    /// descriptor's system calls.
     pub fn host_file(&self) -> &host_fs::File {
         &self.under().under().file
     }

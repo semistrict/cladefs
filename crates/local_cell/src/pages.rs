@@ -636,22 +636,10 @@ impl<F: File> Cached<F> {
         &self.shared.file
     }
 
-    /// Writes back the dirty pages in `range`: what a read of the file's own, around the cache, is
-    /// to be preceded by, so that it reads what was written (an image's device,
-    /// `cladefs::storage::image`).
-    pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
-        self.shared.flush(range, None)
-    }
-
-    /// Writes back the dirty pages in `range`, drops every page there, and takes the file to be as
-    /// long as `range` goes at least: what a write of the file's own, around the cache, is to be
-    /// preceded by, so that no page hides what it writes, and reads see it all.
-    pub fn settle_for_write(&self, range: Range<u64>) -> io::Result<()> {
-        self.shared.flush(range.clone(), None)?;
-        self.shared.drop_pages(range.clone());
-        let mut pages = self.shared.lock();
-        pages.size = pages.size.max(range.end);
-        Ok(())
+    /// Writes back every dirty page: before the file is given to the host
+    /// ([`crate::CachedDir`]'s `give`), which reads it around the cache.
+    pub(crate) fn write_back_whole(&self) -> io::Result<()> {
+        self.shared.flush(0..u64::MAX, None)
     }
 
     /// Drops every page, the dirty ones unwritten: the file is the host's now

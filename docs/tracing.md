@@ -156,8 +156,8 @@ The profiler is pprof-rs (Apache-2.0), with inferno (CDDL-1.0) drawing flamegrap
 running threads 99 times per CPU second with SIGPROF, walking frame pointers. Every build here keeps
 frame pointers (`.cargo/config.toml`). Only one profile runs at a time. A second request gets
 `409 Conflict`. SIGPROF interrupts system calls. It is installed with `SA_RESTART`, and the calls
-the kernel does not restart fail with `EINTR`, which the daemon's own loops retry (`wire.rs`,
-`storage/io.rs`) as Rust's standard library and tokio do. Samples are not tagged with cells or
+the kernel does not restart fail with `EINTR`, which the daemon's own loops retry (`wire.rs`) as
+Rust's standard library and tokio do. Samples are not tagged with cells or
 requests: pprof-rs has no place for tags.
 
 ## Cost while off

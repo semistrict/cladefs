@@ -52,8 +52,8 @@ not (
         | test(=open_cell::tests::memory_run_out_evicts_the_least_used_extents)
         | test(=open_cell::tests::serves_whatever_a_guest_asks)
         | test(=open_cell::tests::writes_racing_a_commit_are_committed)
-        | test(=storage::kept::tests::images_dropped_as_their_pass_runs_leave_their_bucket_whole)
-        | test(=storage::kept::tests::passes_run_among_an_image_and_its_forks_commits)))
+        | test(=storage::tests::images_dropped_as_their_pass_runs_leave_their_bucket_whole)
+        | test(=storage::tests::passes_run_among_an_image_and_its_forks_commits)))
     | (binary_id(cladefs::cells) & test(=forks_and_takes_cells))
     | (binary_id(cladefs::cladefsctl) & (
         test(=cells_open_elsewhere_are_left_alone_locally)

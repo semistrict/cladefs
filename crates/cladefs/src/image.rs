@@ -388,9 +388,9 @@ impl ImageShared {
     }
 
     pub async fn fork_storage_to(&self, path: &Path) -> Result<Storage, Error> {
-        let Kind::Image { image, writes, .. } = &self.storage_kind else {
+        if matches!(self.storage_kind, Kind::Memory) {
             return Err(Error::msg("memory cannot be forked to an image"));
-        };
+        }
         let filesystem = self.with_open(|open| (*open.filesystem).clone())?;
         self.executor
             .run(async move {
@@ -398,7 +398,7 @@ impl ImageShared {
             })
             .await
             .map_err(Error::new)?;
-        fork_image(image.clone(), writes.clone(), path).await
+        fork_image(&self.storage_kind, path).await
     }
 
     /// Unmounts the volumes still mounted, closes the filesystem, and gives the storage back.

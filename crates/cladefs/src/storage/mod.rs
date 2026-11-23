@@ -3,30 +3,35 @@
 // found in the LICENSE file.
 
 //! The storage a filesystem lives on: an image, or memory.
+//!
+//! An image is a cell directory, its cell kept in the bucket its description names, an image's own
+//! file bucket where it was made on no host of cladefs's system (`host_cell::create`), opened as an
+//! [`OpenCell`] and mounted through it ([`OpenCellDevice`]): the extent daemon's own path, the
+//! cell's page cache and the extent cache, which guests' filesystems take too (board 8260). An
+//! image's own bucket's collector runs in the process, after commits ([`collect`]); a host's
+//! bucket's is the host's.
 
 mod collect;
-mod gate;
-mod image;
-mod io;
-mod kept;
+mod device;
 #[cfg(test)]
 mod model_tests;
+#[cfg(test)]
+mod tests;
 
 use crate::error::{Error, Result};
 use crate::executor::Executor;
 use crate::filesystem::DEFAULT_EXECUTOR_THREADS;
-use crate::host_cell;
+use crate::host_cell::{self, Opened};
+use crate::open_cell::{OpenCell, Opening, release};
 use anyhow::Context as _;
+use device::OpenCellDevice;
 use fxfs::filesystem::FxFilesystem;
 use fxfs::fsck::errors::FsckIssue;
 use fxfs::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
 use fxfs::object_store::volume::{list_volumes, root_volume};
-use gate::WriteGate;
-use image::ImageDevice;
-use kept::KeptImage;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use storage_device::DeviceHolder;
 use storage_device::fake_device::FakeDevice;
 
@@ -41,13 +46,16 @@ pub struct Storage {
 
 #[derive(Clone)]
 pub(crate) enum Kind {
-    /// An image: its directory, the device's writes and frees, which forking the image pauses,
-    /// and its cell, kept in its bucket, which forking the image forks. Its device's I/O bypasses
-    /// the host's page cache, or the image opens not at all (TASK-433.6).
+    /// An image: its directory, and its open cell, which forking the image forks. The open cell is
+    /// its device's, which holds it: whoever closes the storage closes the open cell, however many
+    /// copies of this name it, as a mounted image's does. Its files bypass the host's page cache,
+    /// or the image opens not at all (TASK-433.6).
     Image {
         dir: PathBuf,
-        writes: Arc<WriteGate>,
-        image: Arc<KeptImage>,
+        cell: Weak<OpenCell>,
+        /// The collector its device's commits start passes of, for tests to look at.
+        #[cfg(test)]
+        collecting: Option<Arc<collect::Collecting>>,
     },
     Memory,
 }
@@ -68,17 +76,19 @@ impl Storage {
     /// The image at `path`: a cell directory (see `image`), a fork's or not,
     /// its cell kept in the bucket its description names (see `kept`).
     ///
-    /// Its I/O bypasses the host's page cache where the host filesystem allows, as the in-process
-    /// kernel caches files' pages already, and runs on threads of its own (io_uring on Linux),
-    /// or, under madsim, in place on the simulated host's disk (board 5687).
-    /// It fails for an image made by older code, which kept its cell in no bucket, and which
-    /// nothing converts.
+    /// Its cell's files bypass the host's page cache where the host filesystem allows, as the
+    /// cell's page cache, and the in-process kernel's, cache their pages already (one memory
+    /// budget, TASK-433). Its uploader takes its cell's head as a copy never placed takes it where
+    /// this process is no host's daemon ([`host_cell::keeping`]). It fails for an image made by
+    /// older code, which kept its cell in no bucket, and which nothing converts.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let dir = path.as_ref().to_owned();
         on_bucket_runtime(async move {
-            let writes = Arc::new(WriteGate::default());
-            let device = ImageDevice::open(&dir, writes.clone()).await.map_err(Error::new)?;
-            Ok(Self::image(dir, writes, device))
+            let keeping = Self::keeping()?;
+            let opened = host_cell::open(&dir, keeping.clone()).await;
+            let context = || format!("opening {}", dir.display());
+            let opened = opened.map_err(|err| Error::from(err).context(context()))?;
+            Self::opened(dir, opened, keeping).await
         })
         .await
     }
@@ -203,20 +213,47 @@ impl Storage {
         }
         let path = path.to_owned();
         on_bucket_runtime(async move {
-            let writes = Arc::new(WriteGate::default());
-            let made = (size, host_cell::CellOf::New(tenant), whole);
-            let device = ImageDevice::create(&path, made, keeping, writes.clone()).await;
-            let device = device.map_err(Error::new)?;
-            Ok(Self::image(path, writes, device))
+            let of = host_cell::CellOf::New(tenant);
+            let kind = bucket_cell::cell::Kind::Fxfs;
+            let opened = host_cell::create_unmade(&path, size, of, kind, None, keeping.clone());
+            let opened = opened.await?;
+            if whole {
+                opened.made().map_err(Error::new)?;
+            }
+            Self::opened(path, opened, keeping).await
         })
         .await
     }
 
-    /// The storage of the image at `dir` whose device is `device`, its writes going through
-    /// `writes`.
-    fn image(dir: PathBuf, writes: Arc<WriteGate>, device: ImageDevice) -> Self {
-        let kind = Kind::Image { dir, writes, image: device.image() };
-        Self { device: DeviceHolder::new(device), kind }
+    /// The storage of the image `opened` at `dir`, its extents in its bucket read through
+    /// `keeping`'s cache, if it has one: an open cell of it, for work that boots no guest
+    /// ([`Opening::guest`]), as its device; and the collector of its own bucket, if it keeps its
+    /// cell in one.
+    async fn opened(
+        dir: PathBuf,
+        opened: Opened,
+        keeping: local_cell::upload::Options,
+    ) -> Result<Self, Error> {
+        let collecting = host_cell::keeps_own_bucket(&opened.local).then(|| {
+            let url = opened.local.bucket().unwrap_or_default().to_owned();
+            collect::of(&url, &opened.bucket)
+        });
+        let opening = Opening { arena: None, guest: false, keeping };
+        let cell = Arc::new(OpenCell::new(&dir, opened, opening).await?);
+        let kind = Kind::Image {
+            dir,
+            cell: Arc::downgrade(&cell),
+            #[cfg(test)]
+            collecting: collecting.clone(),
+        };
+        let device = match OpenCellDevice::new(cell.clone(), collecting) {
+            Ok(device) => device,
+            Err(err) => {
+                release(cell).await;
+                return Err(Error::new(err));
+            }
+        };
+        Ok(Self { device: DeviceHolder::new(device), kind })
     }
 
     /// `size` bytes of memory, which hold a filesystem until they are dropped, such as for a
@@ -247,10 +284,7 @@ impl Storage {
     /// The storage must not be mounted, which it is not while it is the caller's. To fork a mounted
     /// filesystem's, see [`Filesystem::fork_storage_to`](crate::Filesystem::fork_storage_to).
     pub async fn fork_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
-        let Kind::Image { image, writes, .. } = &self.kind else {
-            return Err(Error::msg("memory cannot be forked to an image"));
-        };
-        fork_image(image.clone(), writes.clone(), path.as_ref()).await
+        fork_image(&self.kind, path.as_ref()).await
     }
 
     /// Deletes the image at `path`, which nothing in this process has open, a fork or not: its
@@ -260,18 +294,42 @@ impl Storage {
     /// at `path`.
     pub async fn delete(path: impl AsRef<Path>) -> Result<(), Error> {
         let path = path.as_ref().to_owned();
-        on_bucket_runtime(async move { kept::delete(&path).await }).await
+        on_bucket_runtime(async move {
+            // As a copy never placed deletes its cell where this process is no host's daemon.
+            let bucket = host_cell::bucket_at(&path).map_err(Error::new)?;
+            host_cell::delete(&path, bucket.as_deref(), host_cell::token).await
+        })
+        .await
     }
 
-    /// cladefs: lets go of the storage, which nothing mounts: an image's uploader stopped first,
-    /// its cell's open segment closed and what it made durable uploaded, holding no thread
+    /// cladefs: lets go of the storage, which nothing mounts: an image's open cell closed
+    /// ([`OpenCell::close`]), its uploader's uploads done and stopped, holding no thread
     /// meanwhile, where dropping it waits on the dropping thread (board 5614).
     pub async fn close(self) {
-        if let Kind::Image { image, .. } = &self.kind {
-            let image = image.clone();
-            drop(self);
-            image.close().await;
+        let Self { device, kind } = self;
+        let cell = match kind {
+            Kind::Image { cell, .. } => cell.upgrade(),
+            Kind::Memory => None,
+        };
+        drop(device);
+        if let Some(cell) = cell {
+            release(cell).await;
         }
+    }
+
+    /// cladefs: an image's open cell, for tests of what it holds.
+    #[cfg(test)]
+    pub(crate) fn open_cell(&self) -> Arc<OpenCell> {
+        let Kind::Image { cell, .. } = &self.kind else { panic!("memory") };
+        cell.upgrade().expect("its device holds it")
+    }
+
+    /// cladefs: an image's own bucket's collector in this process, which its device's commits
+    /// start passes of, if it keeps its cell in one.
+    #[cfg(test)]
+    pub(crate) fn collecting(&self) -> Option<Arc<collect::Collecting>> {
+        let Kind::Image { collecting, .. } = &self.kind else { panic!("memory") };
+        collecting.clone()
     }
 
     /// The most bytes the storage holds.
@@ -341,21 +399,20 @@ impl fmt::Debug for Storage {
     }
 }
 
-/// Forks `image` to a new image at `path`, a fork of its cell directory, and of its cell in its
-/// bucket, with a cell of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits
-/// the cell directory durably and waits for the fork's upload. The fork pauses `writes`, the
-/// device's writes and frees, until the fork's commit is made, so that it is the image as it was at
-/// one time.
-pub(crate) async fn fork_image(
-    image: Arc<KeptImage>,
-    writes: Arc<WriteGate>,
-    path: &Path,
-) -> Result<Storage, Error> {
+/// Forks the image of storage of `kind` to a new image at `path`, a fork of its cell directory,
+/// and of its cell in its bucket, to a new cell of its tenant's ([`OpenCell::fork`]): through a
+/// version of its last commit, as of one time, its writes after the version's commit its own.
+/// Memory cannot be forked; nor an image closed (`ENOTCONN`).
+pub(crate) async fn fork_image(kind: &Kind, path: &Path) -> Result<Storage, Error> {
+    let Kind::Image { cell, .. } = kind else {
+        return Err(Error::msg("memory cannot be forked to an image"));
+    };
+    let cell = cell.upgrade().ok_or(crate::Errno::ENOTCONN)?;
     let path = path.to_owned();
     let forking = async move {
-        let forked = image.fork(&path, writes.pause()).await;
+        let forked = cell.fork(&path, cell.cell().tenant).await;
         let context = format!("forking to {}", path.display());
-        forked.map(|()| path).map_err(|error| error.context(context))
+        forked.map(|_| path).map_err(|error| error.context(context))
     };
     let path = on_bucket_runtime(forking).await?;
     Storage::open(path).await

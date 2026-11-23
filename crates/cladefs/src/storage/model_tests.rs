@@ -153,8 +153,7 @@ impl Images {
     fn new(dir: &Path) -> Self {
         let path = dir.join("image");
         let storage = local_cell::upload::wait_on(Storage::create(&path, SIZE)).unwrap();
-        let super::Kind::Image { image, .. } = &storage.kind else { panic!("memory") };
-        let collecting = image.collecting().expect("its own bucket's").clone();
+        let collecting = storage.collecting().expect("its own bucket's");
         let fs = block_on(Filesystem::format(storage)).unwrap();
         let mounted = vec![Mounted { path, fs, files: Files::new() }];
         Self { dir: dir.to_owned(), mounted, collecting }

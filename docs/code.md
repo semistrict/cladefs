@@ -140,18 +140,19 @@ of these stands in with the items the code copied from Fuchsia uses:
   reclaims what no other cell inherited, and the directory; forks live on.
   An image's own bucket's collector runs in the processes that have its images
   open (`collect.rs`), the only thing that deletes what they free (TASK-165.8).
-  - `image.rs` is the device on images, in place of Fuchsia's
-    `FileBackedDevice`: an extent store in a directory, `crates/local_cell`'s.
-    Extents' I/O bypasses the host's page cache (`O_DIRECT`, `F_NOCACHE`); on
-    a host filesystem that can't, the image, like the part cache, fails to open
-    rather than run in the host's page cache (TASK-433.6).
-  - `io.rs` runs extents' I/O off Fxfs's executor threads: on an io_uring on
-    Linux, and a small thread pool elsewhere.
-- `host_cell.rs` makes, opens, forks and deletes both host stacks' extent
-  stores in the host's directories, images (`Storage`) and guests' cells
-  (`OpenCell`), with one block size, one set of options and one way of
-  minting cells. Neither stack collects its cells: the collector alone
-  deletes (TASK-165.8).
+  - `device.rs` is the device on images, in place of Fuchsia's
+    `FileBackedDevice`: `OpenCellDevice`, an image's `OpenCell` as a device,
+    whose reads, writes, frees and commits are the open cell's, as a guest's
+    requests of the daemon are, through the cell's page cache
+    (`local_cell::pages`); its reads skip the extent cache, as the filesystem
+    caches what it reads itself (board 8260). The cell's files bypass the
+    host's page cache (`O_DIRECT`, `F_NOCACHE`); on a host filesystem that
+    can't, the image, like the part cache, fails to open rather than run in the
+    host's page cache (TASK-433.6).
+- `host_cell.rs` makes, opens, forks and deletes cell directories in the host's
+  directories, images (`Storage`) and guests' cells (`OpenCell`) alike, with
+  one block size, one set of options and one way of minting cells. Nothing
+  there collects its cells: the collector alone deletes (TASK-165.8).
 - `pages.rs` configures physical memory (`slabs.rs`): its size, which
   extents' parts come from, and tenants' arenas of it.
 - `executor.rs` holds the fuchsia-async executor Fxfs runs on.
