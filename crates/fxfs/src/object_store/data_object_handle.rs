@@ -631,9 +631,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.txn_grow_size(transaction, offset + buf.len() as u64, &[aligned]).await
     }
 
-    // Writes to multiple ranges with data provided in `buf`.  The buffer can be modified in place
-    // if encryption takes place.  The ranges must all be aligned and no change to content size is
-    // applied; the caller is responsible for updating size if required.
+    // Writes to multiple ranges with data provided in `buf`.  The ranges must all be aligned and no
+    // change to content size is applied; the caller is responsible for updating size if required.
     pub async fn multi_write<'a>(
         &'a self,
         transaction: &mut Transaction<'a>,
@@ -648,7 +647,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 
     // Note: in the event of power failure during an overwrite() call, it is possible that
     // old data (which hasn't been overwritten with new bytes yet) may be exposed to the user.
-    // Since the old data should be encrypted, it is probably safe to expose, although not ideal.
+    // The old data is the file's own, so it is probably safe to expose, although not ideal.
     pub async fn overwrite(
         &self,
         mut offset: u64,

@@ -17,7 +17,6 @@ use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle, Wr
 use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
 use crate::object_store::data_object_handle::OverwriteOptions;
 use crate::object_store::directory::{self, Directory, MutableAttributesInternal};
-use crate::object_store::extent::MIN_BLOCK_SIZE;
 use crate::object_store::transaction::{self, LockKey, Options, lock_keys};
 use crate::object_store::volume::root_volume;
 use crate::object_store::{
@@ -124,8 +123,8 @@ impl FsckTest {
     }
 }
 
-// Creates a new layer file containing |items|, sorted as a layer keeps them, and writes it into
-// |store|, skipping all normal validation.  This allows bad records to be inserted into the object store (although they
+// Creates a new layer file containing |items| and writes them in order into |store|, skipping all
+// normal validation.  This allows bad records to be inserted into the object store (although they
 // will still be subject to merging).
 // Doing this in the root store might cause a variety of unrelated failures.
 async fn install_items_in_store<K: Key, V: Value>(
@@ -154,9 +153,7 @@ async fn install_items_in_store<K: Key, V: Value>(
         )
         .await
         .expect("writer new");
-        let mut items: Vec<_> = items.as_ref().iter().collect();
-        items.sort_by(|a, b| a.key.cmp_upper_bound(&b.key));
-        for item in items {
+        for item in items.as_ref() {
             writer.write(item.as_item_ref()).await.expect("write failed");
         }
         writer.complete().await.expect("flush failed");
@@ -331,82 +328,6 @@ async fn test_malformed_allocation() {
         .await
         .expect_err("Fsck should fail");
     assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MalformedAllocation(..))]);
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
-async fn test_misaligned_extent_in_child_store() {
-    let mut test = FsckTest::new().await;
-
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
-            .await
-            .unwrap();
-
-        // In a layer file: replaying the journal, a mutation with such an extent is corrupt.
-        install_items_in_store(
-            &fs,
-            store.as_ref(),
-            vec![Item::new(
-                ObjectKey::extent(
-                    555,
-                    AttributeId::TEST_ID,
-                    MIN_BLOCK_SIZE.get()..fs.block_size().get(),
-                ),
-                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1)),
-            )],
-        )
-        .await;
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions {
-        halt_on_error: true,
-        volume_store_id: Some(store_id),
-        ..Default::default()
-    })
-    .await
-    .expect_err("Fsck should fail");
-    assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MisalignedExtent(..))]);
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
-async fn test_malformed_extent_in_child_store() {
-    let mut test = FsckTest::new().await;
-
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
-            .await
-            .unwrap();
-
-        // In a layer file: replaying the journal, a mutation with such an extent is corrupt.
-        install_items_in_store(
-            &fs,
-            store.as_ref(),
-            vec![Item::new(
-                ObjectKey::extent(555, AttributeId::TEST_ID, fs.block_size().get()..0),
-                ObjectValue::Extent(ExtentValue::new_raw(TEST_EXTENT, 1)),
-            )],
-        )
-        .await;
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions {
-        halt_on_error: true,
-        volume_store_id: Some(store_id),
-        ..Default::default()
-    })
-    .await
-    .expect_err("Fsck should fail");
-    assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::MalformedExtent(..))]);
 }
 
 #[fuchsia_async::run_singlethreaded(test)]
@@ -1433,10 +1354,20 @@ async fn test_invalid_value_graveyard_attribute_entry() {
             .await
             .unwrap();
 
+        // The graveyard's entry first, as its key sorts.
+        assert!(store.graveyard_directory_object_id() < 10);
         install_items_in_store(
             &fs,
             store.as_ref(),
             vec![
+                Item::new(
+                    ObjectKey::graveyard_attribute_entry(
+                        store.graveyard_directory_object_id(),
+                        10,
+                        AttributeId::TEST_ID,
+                    ),
+                    ObjectValue::Trim,
+                ),
                 Item::new(
                     ObjectKey::object(10),
                     ObjectValue::Object {
@@ -1447,14 +1378,6 @@ async fn test_invalid_value_graveyard_attribute_entry() {
                 Item::new(
                     ObjectKey::attribute(10, AttributeId::TEST_ID, AttributeKey::Attribute),
                     ObjectValue::attribute(100, false),
-                ),
-                Item::new(
-                    ObjectKey::graveyard_attribute_entry(
-                        store.graveyard_directory_object_id(),
-                        10,
-                        AttributeId::TEST_ID,
-                    ),
-                    ObjectValue::Trim,
                 ),
             ],
         )
@@ -1491,17 +1414,12 @@ async fn test_tombstoned_attribute_does_not_exist() {
             .await
             .unwrap();
 
+        // The graveyard's entry first, as its key sorts.
+        assert!(store.graveyard_directory_object_id() < 10);
         install_items_in_store(
             &fs,
             store.as_ref(),
             vec![
-                Item::new(
-                    ObjectKey::object(10),
-                    ObjectValue::Object {
-                        kind: ObjectKind::Directory { sub_dirs: 0, dir_type: DirType::Normal },
-                        attributes: ObjectAttributes { ..Default::default() },
-                    },
-                ),
                 Item::new(
                     ObjectKey::graveyard_attribute_entry(
                         store.graveyard_directory_object_id(),
@@ -1509,6 +1427,13 @@ async fn test_tombstoned_attribute_does_not_exist() {
                         AttributeId::TEST_ID,
                     ),
                     ObjectValue::Some,
+                ),
+                Item::new(
+                    ObjectKey::object(10),
+                    ObjectValue::Object {
+                        kind: ObjectKind::Directory { sub_dirs: 0, dir_type: DirType::Normal },
+                        attributes: ObjectAttributes { ..Default::default() },
+                    },
                 ),
             ],
         )

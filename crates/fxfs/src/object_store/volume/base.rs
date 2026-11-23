@@ -21,7 +21,7 @@ use anyhow::{Context, Error, anyhow, bail, ensure};
 use std::sync::Arc;
 
 impl RootVolume {
-    /// cladefs: flushes the volume `name`, which must be unencrypted and open, whole, to one layer,
+    /// cladefs: flushes the volume `name`, which must be open, whole, to one layer,
     /// and returns its manifest: what lets a filesystem on a device reading its extents make a
     /// volume over it (`new_volume_over_base`, backlog doc-10), with no replay of this journal.
     /// The device must keep what the manifest names, as of now: a compaction here frees the

@@ -20,7 +20,8 @@
 // Extent, and JournalRecordV64 adds JournalSpan. Version 65 drops Fxfs's own encryption, fscrypt,
 // fsverity and blobs (cladefs encrypts below Fxfs): no keys, encrypted children, encrypted symlinks,
 // verified attributes or encrypted mutations; an extent names no key (ExtentValueV65); a store's
-// information no mutations key (StoreInfoV65). The object, mutation, journal and super-block
+// information no mutations key, and its object IDs are sequential alone, its last a plain u64
+// (StoreInfoV65). The object, mutation, journal and super-block
 // records that hold them are V65.
 
 use crate::lsm_tree::{

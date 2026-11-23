@@ -192,7 +192,7 @@ impl RootVolume {
             };
         let root_store = self.filesystem.root_store();
 
-        // Delete all the layers and encrypted mutations stored in root_store for this volume.
+        // Delete all the layers stored in root_store for this volume.
         // This includes the StoreInfo itself. cladefs: layers are deleted only once no other volume
         // shares them (see `snapshot_volume`).
         let mut parent_objects = load_store_info(&root_store, object_id).await?.parent_objects();

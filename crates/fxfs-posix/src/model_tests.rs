@@ -494,7 +494,7 @@ enum Op {
     },
     /// Whole pages, a transaction each, as a compaction runs, which commits racing a super-block
     /// fall on either side of, and if `flushing`, with the volume's store flushed after each, as
-    /// an encrypted store flushes itself when it must: as can its end.
+    /// a store may flush itself at any time: as can its end.
     FillWhileCompacting {
         file: usize,
         page: u64,

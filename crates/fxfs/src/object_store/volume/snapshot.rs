@@ -16,7 +16,7 @@ use anyhow::{Context, Error, anyhow, bail, ensure};
 use std::sync::Arc;
 
 impl RootVolume {
-    /// cladefs: snapshots the volume `source_name`, which must be unencrypted, into the new volume
+    /// cladefs: snapshots the volume `source_name` into the new volume
     /// `snapshot_name`, which holds what the source held when it was flushed here, and is a volume
     /// of its own from then on.
     ///
@@ -97,7 +97,7 @@ impl RootVolume {
         handle.txn_write(&mut transaction, 0u64, buf.as_ref()).await?;
 
         // From here on, the source allocates under an owner of its own, never used before.
-        let new_owner_object_id = root_store.get_next_object_id().await?.release().get();
+        let new_owner_object_id = root_store.get_next_object_id()?;
         filesystem.allocator().snapshot(
             &mut transaction,
             source_object_id,

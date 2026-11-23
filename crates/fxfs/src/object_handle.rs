@@ -53,7 +53,7 @@ pub struct ObjectProperties {
     pub sub_dirs: u64,
     /// POSIX attributes: mode, uid, gid, rdev
     pub posix_attributes: Option<PosixAttributes>,
-    /// The type of directory (encryption, casefolding, etc.)
+    /// The type of directory: casefolded or not.
     pub dir_type: DirType,
 }
 

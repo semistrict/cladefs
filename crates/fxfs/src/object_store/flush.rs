@@ -21,8 +21,7 @@ use crate::object_store::object_manager::{ObjectManager, ReservationUpdate};
 use crate::object_store::object_record::{ObjectKey, ObjectValue};
 use crate::object_store::transaction::{AssociatedObject, LockKey, LockKeys, Mutation, lock_keys};
 use crate::object_store::{
-    AssocObj, DirectWriter, HandleOptions, LastObjectId, LastObjectIdInfo, ObjectStore, Options,
-    StoreInfo, tree,
+    AssocObj, DirectWriter, HandleOptions, ObjectStore, Options, StoreInfo, tree,
 };
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Context, Error};
@@ -252,11 +251,7 @@ impl ObjectStore {
         //
         // This might capture object IDs that might be in transactions not yet committed.  In
         // theory, we could do better than this but it's not worth the effort.
-        if let (LastObjectIdInfo::Sequential { id }, LastObjectId::Sequential { id: in_memory }) =
-            (&mut new_store_info.last_object_id, &*self.last_object_id.lock())
-        {
-            *id = *in_memory;
-        }
+        new_store_info.last_object_id = *self.last_object_id.lock();
 
         // cladefs: box `write_store_info` and `commit_with_callback` so `flush_unlocked` stays
         // small on 16 KiB guest kernel stacks (TASK-26.9).

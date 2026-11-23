@@ -194,11 +194,8 @@ impl<S: HandleOwner> Directory<S> {
         dir_type: DirType,
     ) -> Result<Directory<S>, Error> {
         let store = owner.as_ref().as_ref();
-        let object_id = store.get_next_object_id().await?;
+        let object_id = store.get_next_object_id()?;
         let now = Timestamp::now();
-
-        // The transaction takes ownership of the ID.
-        let object_id = object_id.release().get();
         transaction.add(
             store.store_object_id(),
             Mutation::insert_object(
@@ -700,8 +697,7 @@ impl<S: HandleOwner> Directory<S> {
         // cladefs: symlinks' targets may be longer, up to MAX_LONG_SYMLINK, which they keep
         // outside their records (see `LONG_SYMLINK_XATTR`).
         ensure!(link.len() <= MAX_LONG_SYMLINK, FxfsError::BadPath);
-        let reserved_symlink_id = self.store().get_next_object_id().await?;
-        let symlink_id = reserved_symlink_id.get();
+        let symlink_id = self.store().get_next_object_id()?;
 
         // cladefs: a target too long for the symlink's record is in records of its own, and the
         // record's target empty, as no target otherwise is.
@@ -710,7 +706,7 @@ impl<S: HandleOwner> Directory<S> {
         transaction.add(
             self.store().store_object_id(),
             Mutation::insert_object(
-                ObjectKey::object(reserved_symlink_id.release().get()),
+                ObjectKey::object(symlink_id),
                 ObjectValue::symlink(inline, Timestamp::now(), Timestamp::now(), None),
             ),
         );

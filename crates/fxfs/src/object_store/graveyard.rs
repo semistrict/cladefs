@@ -102,13 +102,12 @@ impl Graveyard {
         transaction: &mut Transaction<'_>,
         store: &ObjectStore,
     ) -> Result<u64, Error> {
-        let reserved_object_id = store.get_next_object_id().await?;
-        let object_id = reserved_object_id.get();
+        let object_id = store.get_next_object_id()?;
         let now = Timestamp::now();
         transaction.add(
             store.store_object_id,
             Mutation::insert_object(
-                ObjectKey::object(reserved_object_id.release().get()),
+                ObjectKey::object(object_id),
                 ObjectValue::Object {
                     kind: ObjectKind::Graveyard,
                     attributes: ObjectAttributes {

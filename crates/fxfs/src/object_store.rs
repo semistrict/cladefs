@@ -58,7 +58,7 @@ use crate::filesystem::{
 };
 use crate::log::*;
 use crate::lsm_tree::cache::ObjectCache;
-use crate::lsm_tree::types::{Existence, Item, ItemRef, LayerIterator};
+use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::lsm_tree::{LSMTree, Query, layers_from_handles};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties, ReadObjectHandle};
 use crate::object_store::allocator::Allocator;
@@ -74,8 +74,6 @@ use async_trait::async_trait;
 use fprint::TypeFingerprint;
 use fuchsia_sync::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use storage_device::{Device, ExtentRange};
@@ -109,7 +107,7 @@ pub struct StoreInfoV65 {
     /// last object ID used for the latest transaction that created an object because we use this at
     /// the point of creating the object but before we commit the transaction.  Transactions can
     /// then get committed in an arbitrary order (or not at all).
-    last_object_id: LastObjectIdInfo,
+    last_object_id: u64,
 
     /// Object ids for layers.  TODO(https://fxbug.dev/42178036): need a layer of indirection here
     /// so we can support snapshots.
@@ -136,18 +134,6 @@ pub struct StoreInfoV65 {
     /// cladefs: the cells of the extents the base layers, and the data they name, are in. The
     /// allocator holds none of them.
     pub base_cells: Vec<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint)]
-enum LastObjectIdInfo {
-    Sequential { id: u64 },
-    Low32Bit,
-}
-
-impl Default for LastObjectIdInfo {
-    fn default() -> Self {
-        LastObjectIdInfo::Sequential { id: 0 }
-    }
 }
 
 impl StoreInfo {
@@ -209,141 +195,8 @@ pub struct NewChildStoreOptions {
     /// INVALID_OBJECT_ID (the default and typical case), a suitable ID will be chosen.
     pub object_id: u64,
 
-    /// If true, reserve all 32 bit object_ids.  All new objects will start with IDs exceeding
-    /// 0x1_0000_0000.
-    pub reserve_32bit_object_ids: bool,
-
-    /// Object IDs will be restricted to 32 bits.  This involves a less performant algorithm and so
-    /// should not be used unless necessary.
-    pub low_32_bit_object_ids: bool,
-
     /// If set, use this GUID for the new store.
     pub guid: Option<[u8; 16]>,
-}
-
-enum LastObjectId {
-    Sequential { id: u64 },
-
-    Low32Bit { reserved: HashSet<u32>, unreserved: Vec<u32> },
-}
-
-impl LastObjectId {
-    /// Tries to get the next object ID.  Returns None if only using the lower 32 bits, which
-    /// requires an async algorithm, or if the IDs are exhausted.
-    fn try_get_next(&mut self) -> Option<NonZero<u64>> {
-        match self {
-            LastObjectId::Sequential { id } => {
-                NonZero::new(id.wrapping_add(1)).inspect(|next| *id = next.get())
-            }
-            LastObjectId::Low32Bit { .. } => None,
-        }
-    }
-
-    /// Returns INVALID_OBJECT_ID if it's not possible to peek at the next object ID.
-    fn peek_next(&self) -> u64 {
-        match self {
-            LastObjectId::Sequential { id } => id.wrapping_add(1),
-            LastObjectId::Low32Bit { .. } => INVALID_OBJECT_ID,
-        }
-    }
-
-    /// Returns INVALID_OBJECT_ID for algorithms that don't use the last ID.
-    fn id(&self) -> u64 {
-        match self {
-            LastObjectId::Sequential { id } => *id,
-            LastObjectId::Low32Bit { .. } => INVALID_OBJECT_ID,
-        }
-    }
-
-    /// Returns true if `id` is reserved (it must be 32 bits).
-    fn is_reserved(&self, id: u64) -> bool {
-        match self {
-            LastObjectId::Low32Bit { reserved, .. } => {
-                if let Ok(id) = id.try_into() {
-                    reserved.contains(&id)
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
-    /// Reserves `id`.
-    fn reserve(&mut self, id: u64) {
-        match self {
-            LastObjectId::Low32Bit { reserved, .. } => {
-                assert!(reserved.insert(id.try_into().unwrap()))
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    /// Unreserves `id`.
-    fn unreserve(&mut self, id: u64) {
-        match self {
-            LastObjectId::Low32Bit { unreserved, .. } => {
-                // To avoid races, where a reserved ID transitions from being reserved to being
-                // actually used in a committed transaction, we delay updating `reserved` until a
-                // suitable point.
-                //
-                // On thread A, we might have:
-                //
-                //   A1. Commit transaction (insert a record into the LSM tree that uses ID)
-                //   A2. `unreserve`
-                //
-                // And on another thread B, we might have:
-                //
-                //   B1. Drain `unreserved`.
-                //   B2. Check tree and `reserved` to see if ID is used.
-                //
-                // B2 will involve calling `LsmTree::layer_set` which should be thought of as a
-                // snapshot, so the change A1 might not be visible to thread B, but it won't matter
-                // because `reserved` will still include the ID.  So long as each thread does the
-                // operations in this order, it should be safe.
-                unreserved.push(id.try_into().unwrap())
-            }
-            _ => {}
-        }
-    }
-
-    /// Removes `unreserved` IDs from the `reserved` list.
-    fn drain_unreserved(&mut self) {
-        match self {
-            LastObjectId::Low32Bit { reserved, unreserved } => {
-                for u in unreserved.drain(..) {
-                    assert!(reserved.remove(&u));
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-pub struct ReservedId<'a>(&'a ObjectStore, NonZero<u64>);
-
-impl<'a> ReservedId<'a> {
-    pub fn new(store: &'a ObjectStore, id: NonZero<u64>) -> Self {
-        Self(store, id)
-    }
-
-    pub fn get(&self) -> u64 {
-        self.1.get()
-    }
-
-    /// The caller takes responsibility for this id.
-    #[must_use]
-    pub fn release(self) -> NonZero<u64> {
-        let id = self.1;
-        std::mem::forget(self);
-        id
-    }
-}
-
-impl Drop for ReservedId<'_> {
-    fn drop(&mut self) {
-        self.0.last_object_id.lock().unreserve(self.1.get());
-    }
 }
 
 /// An object store supports a file like interface for objects.  Objects are keyed by a 64 bit
@@ -374,8 +227,8 @@ pub struct ObjectStore {
     // The number of graveyard entries, updated as they are applied.
     graveyard_entries: AtomicU64,
 
-    // Contains the last object ID, or the IDs reserved of a store whose IDs are 32 bits.
-    last_object_id: Mutex<LastObjectId>,
+    // The last object ID handed out: IDs are sequential.
+    last_object_id: Mutex<u64>,
 
     // An optional callback to be invoked each time the ObjectStore flushes.  The callback is
     // invoked at the end of flush, while the write lock is still held.
@@ -389,7 +242,7 @@ impl ObjectStore {
         filesystem: Arc<FxFilesystem>,
         store_info: StoreInfo,
         object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
-        last_object_id: LastObjectId,
+        last_object_id: u64,
     ) -> Arc<ObjectStore> {
         let device = filesystem.device();
         let block_size = filesystem.block_size();
@@ -408,14 +261,7 @@ impl ObjectStore {
         filesystem: Arc<FxFilesystem>,
         object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
     ) -> Arc<Self> {
-        Self::new(
-            parent_store,
-            store_object_id,
-            filesystem,
-            StoreInfo::default(),
-            object_cache,
-            LastObjectId::Sequential { id: 0 },
-        )
+        Self::new(parent_store, store_object_id, filesystem, StoreInfo::default(), object_cache, 0)
     }
 
     /// Cycle breaker constructor that returns an ObjectStore without a filesystem.
@@ -439,7 +285,7 @@ impl ObjectStore {
             deleted: AtomicBool::new(false),
             trace: AtomicBool::new(false),
             graveyard_entries: AtomicU64::new(0),
-            last_object_id: Mutex::new(LastObjectId::Sequential { id: 0 }),
+            last_object_id: Mutex::new(0),
             flush_callback: Mutex::new(None),
         })
     }
@@ -482,42 +328,27 @@ impl ObjectStore {
         options: NewChildStoreOptions,
         object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
     ) -> Result<Arc<Self>, Error> {
-        ensure!(
-            !options.reserve_32bit_object_ids || !options.low_32_bit_object_ids,
-            FxfsError::InvalidArgs
-        );
-        let handle = if let Some(object_id) = NonZero::new(options.object_id) {
-            self.update_last_object_id(object_id.get());
-            let handle = ObjectStore::create_object_with_id(
+        let handle = if options.object_id != INVALID_OBJECT_ID {
+            self.update_last_object_id(options.object_id);
+            ObjectStore::create_object_with_id(
                 self,
                 transaction,
-                ReservedId::new(self, object_id),
+                options.object_id,
                 HandleOptions::default(),
-            )?;
-            handle
+            )?
         } else {
             ObjectStore::create_object(self, transaction, HandleOptions::default()).await?
-        };
-        let id = if options.reserve_32bit_object_ids { 0x1_0000_0000 } else { 0 };
-        let (last_object_id, last_object_id_in_memory) = if options.low_32_bit_object_ids {
-            (
-                LastObjectIdInfo::Low32Bit,
-                LastObjectId::Low32Bit { reserved: HashSet::new(), unreserved: Vec::new() },
-            )
-        } else {
-            (LastObjectIdInfo::Sequential { id }, LastObjectId::Sequential { id })
         };
         let store = Self::new(
             Some(self.clone()),
             handle.object_id(),
             self.filesystem(),
             StoreInfo {
-                last_object_id,
                 guid: options.guid.unwrap_or_else(|| *Uuid::new_v4().as_bytes()),
                 ..Default::default()
             },
             object_cache,
-            last_object_id_in_memory,
+            0,
         );
         assert!(store.store_info_handle.set(handle).is_ok());
         Ok(store)
@@ -625,9 +456,9 @@ impl ObjectStore {
         self.store_info.lock().object_count
     }
 
-    /// Returns INVALID_OBJECT_ID for algorithms that don't use the last ID.
+    /// The last object ID handed out.
     pub(crate) fn last_object_id(&self) -> u64 {
-        self.last_object_id.lock().id()
+        *self.last_object_id.lock()
     }
 
     /// Clears all in-memory caches (LSM tree object cache and persistent layer chunk caches) for
@@ -775,18 +606,17 @@ impl ObjectStore {
     pub fn create_object_with_id<S: HandleOwner>(
         owner: &Arc<S>,
         transaction: &mut Transaction<'_>,
-        reserved_object_id: ReservedId<'_>,
+        object_id: u64,
         options: HandleOptions,
     ) -> Result<DataObjectHandle<S>, Error> {
         let store = owner.as_ref().as_ref();
         let now = Timestamp::now();
-        let object_id = reserved_object_id.get();
         assert!(
             transaction
                 .add(
                     store.store_object_id(),
                     Mutation::insert_object(
-                        ObjectKey::object(reserved_object_id.release().get()),
+                        ObjectKey::object(object_id),
                         ObjectValue::file(
                             1,
                             0,
@@ -827,7 +657,7 @@ impl ObjectStore {
         options: HandleOptions,
     ) -> Result<DataObjectHandle<S>, Error> {
         let store = owner.as_ref().as_ref();
-        let object_id = store.get_next_object_id().await?;
+        let object_id = store.get_next_object_id()?;
         ObjectStore::create_object_with_id(owner, &mut transaction, object_id, options)
     }
 
@@ -1481,12 +1311,7 @@ impl ObjectStore {
 
         // TODO(https://fxbug.dev/42178043): the layer size here could be bad and cause overflow.
 
-        let last_object_id = match info.last_object_id {
-            LastObjectIdInfo::Sequential { id } => LastObjectId::Sequential { id },
-            LastObjectIdInfo::Low32Bit => {
-                LastObjectId::Low32Bit { reserved: HashSet::new(), unreserved: Vec::new() }
-            }
-        };
+        let last_object_id = info.last_object_id;
         let object_tree_layer_object_ids = info.layers.clone();
         let base_layers = info.base_layers.clone();
         let base_cells = info.base_cells.clone();
@@ -1602,59 +1427,24 @@ impl ObjectStore {
     /// used so far, and a new guid.
     pub(super) fn snapshot_store_info(&self) -> StoreInfo {
         let mut info = self.store_info.lock().clone();
-        info.last_object_id = match &*self.last_object_id.lock() {
-            LastObjectId::Sequential { id } => LastObjectIdInfo::Sequential { id: *id },
-            LastObjectId::Low32Bit { .. } => LastObjectIdInfo::Low32Bit,
-        };
+        info.last_object_id = *self.last_object_id.lock();
         info.guid = *Uuid::new_v4().as_bytes();
         info
     }
 
     /// Returns a new object ID that can be used.
-    pub(super) async fn get_next_object_id(&self) -> Result<ReservedId<'_>, Error> {
-        {
-            let mut last_object_id = self.last_object_id.lock();
-            if let Some(id) = last_object_id.try_get_next() {
-                return Ok(ReservedId::new(self, id));
-            }
-            // A sequential store's IDs wrapped, which within its lifetime means corruption.
-            ensure!(
-                matches!(&*last_object_id, LastObjectId::Low32Bit { .. }),
-                FxfsError::Inconsistent
-            );
-            // To avoid races, this must be before we capture the layer set.
-            last_object_id.drain_unreserved();
-        }
-
-        // Keep picking an object ID at random until we find one free.
-        let layer_set = self.tree.layer_set();
-        let mut key = ObjectKey::object(0);
-        loop {
-            // cladefs: use `getrandom` directly rather than `rand::rng()` so the guest kernel
-            // needs no thread-local RNG state (board 6929).
-            let next_id = getrandom::u32().expect("getrandom failed") as u64;
-            let Some(next_id) = NonZero::new(next_id) else { continue };
-            if self.last_object_id.lock().is_reserved(next_id.get()) {
-                continue;
-            }
-            key.object_id = next_id.get();
-            if layer_set.key_exists(&key).await? == Existence::Missing {
-                // Checked again under the lock, which another caller may have reserved it
-                // under since.
-                let mut last_object_id = self.last_object_id.lock();
-                if last_object_id.is_reserved(next_id.get()) {
-                    continue;
-                }
-                last_object_id.reserve(next_id.get());
-                return Ok(ReservedId::new(self, next_id));
-            }
-        }
+    pub(super) fn get_next_object_id(&self) -> Result<u64, Error> {
+        let mut last_object_id = self.last_object_id.lock();
+        // IDs that wrapped, which within a store's lifetime means corruption.
+        let id = last_object_id.checked_add(1).ok_or(FxfsError::Inconsistent)?;
+        *last_object_id = id;
+        Ok(id)
     }
 
     /// Query the next object ID that will be used. Intended for use when checking filesystem
     /// consistency. Prefer [`Self::get_next_object_id()`] for general use.
     pub(crate) fn query_next_object_id(&self) -> u64 {
-        self.last_object_id.lock().peek_next()
+        self.last_object_id.lock().wrapping_add(1)
     }
 
     fn allocator(&self) -> Arc<Allocator> {
@@ -1689,11 +1479,8 @@ impl ObjectStore {
     }
 
     fn update_last_object_id(&self, object_id: u64) {
-        if let LastObjectId::Sequential { id } = &mut *self.last_object_id.lock() {
-            if object_id > *id {
-                *id = object_id
-            }
-        }
+        let mut id = self.last_object_id.lock();
+        *id = (*id).max(object_id);
     }
 
     /// Adds the specified object to the graveyard.
@@ -1921,10 +1708,7 @@ impl ObjectStore {
 
     #[cfg(test)]
     pub(crate) fn test_set_last_object_id(&self, object_id: u64) {
-        match &mut *self.last_object_id.lock() {
-            LastObjectId::Sequential { id } => *id = object_id,
-            LastObjectId::Low32Bit { .. } => unreachable!(),
-        }
+        *self.last_object_id.lock() = object_id;
     }
 
     /// Looks up the size of the attribute. Returns an error if either the object or attribute
@@ -1961,7 +1745,6 @@ impl JournalingObject for ObjectStore {
             Mutation::ObjectStore(ObjectStoreMutation { item, op }) => {
                 match op {
                     Operation::Insert => {
-                        let mut unreserve_id = INVALID_OBJECT_ID;
                         // If we are inserting an object record for the first time, it signifies the
                         // birth of the object so we need to adjust the object count.
                         if matches!(item.value, ObjectValue::Object { .. }) {
@@ -1972,8 +1755,6 @@ impl JournalingObject for ObjectStore {
                             }
                             if context.mode.is_replay() {
                                 self.update_last_object_id(item.key.object_id);
-                            } else {
-                                unreserve_id = item.key.object_id;
                             }
                         } else if !context.mode.is_replay()
                             && matches!(
@@ -1989,10 +1770,6 @@ impl JournalingObject for ObjectStore {
                             }
                         }
                         self.tree.insert(item)?;
-                        if unreserve_id != INVALID_OBJECT_ID {
-                            // To avoid races, this *must* be after the `tree.insert(..)` above.
-                            self.last_object_id.lock().unreserve(unreserve_id);
-                        }
                     }
                     Operation::ReplaceOrInsert => {
                         if !context.mode.is_replay()
@@ -2048,15 +1825,7 @@ impl JournalingObject for ObjectStore {
         Ok(())
     }
 
-    fn drop_mutation(&self, mutation: Mutation, _transaction: &Transaction<'_>) {
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item: Item { key: ObjectKey { object_id, .. }, value: ObjectValue::Object { .. }, .. },
-            op: Operation::Insert,
-        }) = mutation
-        {
-            self.last_object_id.lock().unreserve(object_id);
-        }
-    }
+    fn drop_mutation(&self, _mutation: Mutation, _transaction: &Transaction<'_>) {}
 
     /// Push all in-memory structures to the device. This is not necessary for sync since the
     /// journal will take care of it.  This is supposed to be called when there is either memory or
@@ -2066,17 +1835,6 @@ impl JournalingObject for ObjectStore {
     /// Also returns the earliest version of a struct in the filesystem (when known).
     async fn flush(&self, reason: FlushReason) -> Result<Version, Error> {
         self.flush_with_reason(reason).await
-    }
-}
-
-impl Drop for ObjectStore {
-    fn drop(&mut self) {
-        let mut last_object_id = self.last_object_id.lock();
-        last_object_id.drain_unreserved();
-        match &*last_object_id {
-            LastObjectId::Low32Bit { reserved, .. } => debug_assert!(reserved.is_empty()),
-            _ => {}
-        }
     }
 }
 
@@ -2150,12 +1908,12 @@ async fn load_store_info_from_handle(
 #[cfg(test)]
 mod tests {
     use super::{
-        AttributeId, HandleOptions, LastObjectId, LastObjectIdInfo, LockKey,
-        MAX_STORE_INFO_SERIALIZED_SIZE, Mutation, NewChildStoreOptions, ObjectStore, StoreInfo,
+        AttributeId, HandleOptions, LockKey, MAX_STORE_INFO_SERIALIZED_SIZE, Mutation,
+        NewChildStoreOptions, ObjectStore, StoreInfo,
     };
     use crate::errors::FxfsError;
     use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem};
-    use crate::fsck::{fsck, fsck_volume};
+    use crate::fsck::fsck;
     use crate::hooks::HooksHandle;
     use crate::lsm_tree::Query;
     use crate::lsm_tree::types::{ItemRef, LayerIterator};
@@ -2608,13 +2366,8 @@ mod tests {
             // Hack the last object ID.
             {
                 let mut last_object_id = store.last_object_id.lock();
-                match &mut *last_object_id {
-                    LastObjectId::Sequential { id } => {
-                        assert_eq!(*id >> 32, 0);
-                        *id |= 0xffffffff;
-                    }
-                    _ => unreachable!(),
-                }
+                assert_eq!(*last_object_id >> 32, 0);
+                *last_object_id |= 0xffffffff;
             }
 
             let mut transaction = store
@@ -2638,9 +2391,7 @@ mod tests {
 
             assert_eq!(object.object_id(), 0x1_0000_0000);
 
-            assert_matches!(store.store_info().last_object_id, LastObjectIdInfo::Sequential { .. });
-
-            assert_eq!(store.last_object_id.lock().id(), 0x1_0000_0000);
+            assert_eq!(*store.last_object_id.lock(), 0x1_0000_0000);
         };
 
         fs.close().await.expect("Close failed");
@@ -2650,14 +2401,14 @@ mod tests {
         let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
         let store = root_volume.volume("test").await.expect("volume failed");
 
-        assert_eq!(store.last_object_id.lock().id(), 0x1_0000_0000);
+        assert_eq!(*store.last_object_id.lock(), 0x1_0000_0000);
     }
 
     #[test]
     fn test_store_info_max_serialized_size() {
         let info = StoreInfo {
             guid: [0xff; 16],
-            last_object_id: LastObjectIdInfo::Sequential { id: 0x1234567812345678 },
+            last_object_id: 0x1234567812345678,
             // Worst case, each layer should be 3/4 the size of the layer below it (because of the
             // compaction policy we're using).  If the smallest layer is 8,192 bytes, then 120
             // layers would take up a size that exceeds a 64 bit unsigned integer, so if this fits,
@@ -2706,88 +2457,6 @@ mod tests {
                 .expect("symlink");
         }
         assert_eq!(transaction.commit().await.expect("commit"), 0);
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_low_32_bit_object_ids() {
-        let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-
-        {
-            let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-
-            let store = root_vol
-                .new_volume(
-                    "test",
-                    NewChildStoreOptions { low_32_bit_object_ids: true, ..Default::default() },
-                )
-                .await
-                .expect("new_volume failed");
-
-            let root_dir = Directory::open(&store, store.root_directory_object_id())
-                .await
-                .expect("open failed");
-
-            let mut ids = std::collections::HashSet::new();
-
-            for i in 0..100 {
-                let mut transaction = fs
-                    .root_store()
-                    .new_transaction(
-                        lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
-                        Options::default(),
-                    )
-                    .await
-                    .expect("new_transaction failed");
-
-                for j in 0..100 {
-                    let object = root_dir
-                        .create_child_dir(&mut transaction, &format!("{i}.{j}"))
-                        .await
-                        .expect("create_child_file failed");
-
-                    assert!(object.object_id() < 1 << 32);
-                    assert_ne!(object.object_id(), INVALID_OBJECT_ID);
-                    assert!(ids.insert(object.object_id()));
-                }
-
-                transaction.commit().await.expect("commit failed");
-            }
-
-            assert_matches!(store.store_info().last_object_id, LastObjectIdInfo::Low32Bit);
-
-            fsck_volume(&fs, store.store_object_id()).await.expect("fsck_volume failed");
-        }
-
-        // Verify persistence
-        fs.close().await.expect("Close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
-        let store = root_vol.volume("test").await.expect("volume failed");
-
-        // Check that we can still create files and they have low 32-bit IDs.
-        let root_dir =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        let object = root_dir
-            .create_child_file(&mut transaction, "persistence_check")
-            .await
-            .expect("create_child_file failed");
-        assert!(object.object_id() < 1 << 32);
-
-        transaction.commit().await.expect("commit failed");
-
-        assert_matches!(store.store_info().last_object_id, LastObjectIdInfo::Low32Bit);
     }
 
     #[fuchsia_async::run_singlethreaded(test)]

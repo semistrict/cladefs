@@ -1199,7 +1199,7 @@ pub(super) async fn scan_store(
         fsck.error(FsckError::ObjectCountMismatch(store_id, num_objects, store.object_count()))?;
     }
     let last_object_id = store.last_object_id();
-    if last_object_id != INVALID_OBJECT_ID && last_object_id < highest_object_id {
+    if last_object_id < highest_object_id {
         fsck.error(FsckError::BadLastObjectId(highest_object_id, last_object_id))?;
     }
     fsck.verbose(format!(
