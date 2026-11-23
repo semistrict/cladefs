@@ -1127,30 +1127,49 @@ impl Writer for Connection {
 }
 
 /// The directories the daemon serves cells in to the default tenant's connections,
-/// `CLADEFSD_ROOTS` (separated by colons), if it names any (TASK-43.4). One that doesn't exist
-/// is no root, and with none, the daemon refuses every path.
+/// `CLADEFSD_ROOTS` (separated by colons), if it names any (TASK-43.4), as [`resolve_roots`]
+/// resolved them, once. cladefs: a daemon refuses to start with one it can't resolve (board 8595);
+/// served without one booted, as in a test, it refuses every path then, rather than serve beyond
+/// the roots named.
 fn roots() -> Option<&'static [PathBuf]> {
-    node_local::node_local! {
-        static ROOTS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
+    // Unresolved, said as it was resolved: no root, every path refused.
+    resolve_roots().unwrap_or(Some(&[]))
+}
+
+node_local::node_local! {
+    /// cladefs: the roots `CLADEFSD_ROOTS` names, resolved once ([`resolve_roots`]).
+    static ROOTS: OnceLock<Result<Option<Vec<PathBuf>>, String>> = OnceLock::new();
+}
+
+/// cladefs: the directories `CLADEFSD_ROOTS` names, each without symbolic links, if it names any;
+/// or why one is no directory, the daemon's boot's refusal to start, as a root mistyped, dropped,
+/// refused every VM's path while the daemon served (board 8595). Resolved once, the first time it
+/// is asked: at the boot, before the daemon serves.
+pub(super) fn resolve_roots() -> Result<Option<&'static [PathBuf]>, &'static str> {
+    let resolved = ROOTS.get().get_or_init(|| {
+        let Some(roots) =
+            node_local::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())
+        else {
+            return Ok(None);
+        };
+        let root = |root: PathBuf| {
+            let resolved = host_fs::canonicalize(&root)
+                .and_then(|resolved| Ok((host_fs::metadata(&resolved)?.is_dir(), resolved)));
+            match resolved {
+                Ok((true, resolved)) => Ok(resolved),
+                Ok((false, _)) => {
+                    Err(format!("CLADEFSD_ROOTS: {} is no directory", root.display()))
+                }
+                Err(err) => Err(format!("CLADEFSD_ROOTS: {}: {err}", root.display())),
+            }
+        };
+        let roots = std::env::split_paths(&roots).map(root).collect::<Result<_, _>>();
+        roots.map(Some).inspect_err(|err| log::error!("cladefsd: {err}"))
+    });
+    match resolved {
+        Ok(roots) => Ok(roots.as_deref()),
+        Err(err) => Err(err),
     }
-    ROOTS
-        .get()
-        .get_or_init(|| {
-            let roots =
-                node_local::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
-            Some(
-                std::env::split_paths(&roots)
-                    .filter_map(|root| match host_fs::canonicalize(&root) {
-                        Ok(root) => Some(root),
-                        Err(err) => {
-                            log::error!("cladefsd: CLADEFSD_ROOTS: {}: {err}", root.display());
-                            None
-                        }
-                    })
-                    .collect(),
-            )
-        })
-        .as_deref()
 }
 
 /// Whether `path` names a cell in `dir`, a canonical directory, whichever way it names it:
@@ -3000,12 +3019,12 @@ impl VmProcess {
 }
 
 /// cladefs: the process at the other end of `stream`, as a pidfd, unless it is this one: the
-/// socket's (`SO_PEERPIDFD`, Linux 6.5); or, on a kernel without it, the process that connected,
-/// opened by the pid the socket keeps of it (`SO_PEERCRED`, `pidfd_open`, 5.3). A process that
-/// exited before it was opened may have left its pid to another, which the daemon would kill in its
-/// place: so, the socket's other end hung up by then, the connection is refused. That leaves a
-/// race, on a kernel before 6.5, with a VM process that exits leaving the socket to another, as its
-/// child.
+/// socket's (`SO_PEERPIDFD`, Linux 6.5), which names the process that connected whatever became of
+/// its pid. A kernel without it the daemon refuses at its start ([`require_peer_pidfds`], board
+/// 8533): opening the pid `SO_PEERCRED` keeps (`pidfd_open`) raced a VM process that exits leaving
+/// its socket to another, as a child, its pid then another process's, which the daemon would kill
+/// in its place. Without it here, as in a test serving VM processes without booting a daemon, the
+/// connection is refused.
 #[cfg(madsim)]
 fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
     // cladefs: a simulated guest's, in this process, as a test's is (doc-24).
@@ -3014,7 +3033,7 @@ fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
 
 #[cfg(not(madsim))]
 fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
     let fd = stream.as_raw_fd();
     let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
     let mut len = size_of::<libc::ucred>() as libc::socklen_t;
@@ -3039,40 +3058,55 @@ fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProces
         }
         return Ok(None);
     }
+    Ok(Some(VmProcess::Pidfd(peer_pidfd(stream.as_fd())?)))
+}
+
+/// cladefs: the pidfd of the process at the other end of the Unix socket `socket`
+/// (`SO_PEERPIDFD`): `ENOPROTOOPT` said as needing Linux 6.5 (board 8533).
+#[cfg(not(madsim))]
+fn peer_pidfd(socket: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
     let mut pidfd: libc::c_int = -1;
     let mut len = size_of::<libc::c_int>() as libc::socklen_t;
     // SAFETY: Reads the peer's pidfd into `pidfd`, of `len` bytes.
     let read = unsafe {
         libc::getsockopt(
-            fd,
+            socket.as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_PEERPIDFD,
             (&raw mut pidfd).cast(),
             &mut len,
         )
     };
-    if read == 0 {
-        // SAFETY: A new descriptor, which the call gave this process.
-        return Ok(Some(VmProcess::Pidfd(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })));
+    if read != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(match err.raw_os_error() {
+            Some(libc::ENOPROTOOPT) => std::io::Error::new(
+                err.kind(),
+                format!(
+                    "the kernel has no SO_PEERPIDFD ({err}): the extent daemon needs Linux 6.5 or \
+                     later, to know which process to kill of a VM process's socket"
+                ),
+            ),
+            _ => err,
+        });
     }
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() != Some(libc::ENOPROTOOPT) {
-        return Err(err);
+    // SAFETY: A new descriptor, which the call gave this process.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })
+}
+
+/// cladefs: whether the kernel says which process is at the other end of a Unix socket
+/// (`SO_PEERPIDFD`, Linux 6.5), as the daemon needs to serve VM processes ([`peer_process`]): asked
+/// once, as it starts, of a pair of sockets of its own, so that a daemon on an older kernel refuses
+/// to start, naming the version, rather than refuse every VM process (board 8533). Under madsim,
+/// whose guests are in the simulation's process, nothing to ask.
+pub(super) fn require_peer_pidfds() -> std::io::Result<()> {
+    #[cfg(not(madsim))]
+    {
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair()?;
+        drop(peer_pidfd(ours.as_fd())?);
     }
-    // SAFETY: Opens a pidfd of the pid, taking the new descriptor.
-    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, credentials.pid, 0) };
-    if pidfd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: As above.
-    let process = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd as libc::c_int) };
-    if hung_up(stream.as_fd()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::ConnectionAborted,
-            "the VM process went as it connected",
-        ));
-    }
-    Ok(Some(VmProcess::Pidfd(process)))
+    Ok(())
 }
 
 /// cladefs: what of the guest's access a fault the window resolved as `faulted` refused, if it

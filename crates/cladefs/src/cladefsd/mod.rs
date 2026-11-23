@@ -273,6 +273,7 @@ fn remove_unfinished(private: &Path, bound: &Path) -> std::io::Result<()> {
 /// Raises the process's limit of open files to the most it may: each cell it serves keeps its
 /// own segments' and extents' files open, and its connection's (see the module's docs, TASK-34),
 /// for every VM on the host, which the usual default of 1024 runs out of after a hundred or so.
+/// cladefs: a daemon then refuses to start under [`open_files_floor`] (board 8595).
 pub fn raise_open_files_limit() -> std::io::Result<()> {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: Plain system calls on a limit the process owns.
@@ -285,6 +286,49 @@ pub fn raise_open_files_limit() -> std::io::Result<()> {
             return Err(std::io::Error::last_os_error());
         }
     }
+    Ok(())
+}
+
+/// cladefs: the cells a daemon has room to keep open at least, their files at their most (board
+/// 8595): a host of a few hundred VMs, each a cell or more.
+const FLOOR_CELLS: u64 = 256;
+
+/// cladefs: what a daemon keeps open of its own, beside its cells' files, at most: its sockets and
+/// listeners, its log, its part cache's and its bucket's files and connections, its arenas' memfds.
+const OWN_OPEN_FILES: u64 = 1024;
+
+/// cladefs: the open files a cell keeps at most beside its segments' and its extents' (each
+/// `local_cell::Options::open_files`): its open segment's, its commit log, its lock, and its VM
+/// process's connection, two sockets.
+const CELL_OPEN_FILES_BESIDE: u64 = 8;
+
+/// cladefs: the limit of open files (`RLIMIT_NOFILE`) under which a daemon refuses to start (board
+/// 8595): its own, and [`FLOOR_CELLS`] cells' at their most. A lower limit started a daemon that
+/// answered `EMFILE` once its host was busy, its VMs failing to open their cells or to connect
+/// (TASK-79.35).
+pub fn open_files_floor() -> u64 {
+    let segments_and_extents = 2 * local_cell::Options::default().open_files as u64;
+    OWN_OPEN_FILES + FLOOR_CELLS * (segments_and_extents + CELL_OPEN_FILES_BESIDE)
+}
+
+/// cladefs: refuses a limit of open files under [`open_files_floor`], naming it (board 8595): the
+/// soft limit, which `raise_open_files_limit` raises to the hard one before the daemon boots.
+#[cfg(all(target_os = "linux", not(madsim)))]
+fn require_open_files() -> anyhow::Result<()> {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: A plain system call writing the process's limit into `limit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::Error::new(err).context("reading the limit of open files"));
+    }
+    let floor = open_files_floor();
+    anyhow::ensure!(
+        limit.rlim_cur >= floor,
+        "RLIMIT_NOFILE: the limit of open files is {}, under the {floor} the extent daemon needs to \
+         start ({OWN_OPEN_FILES} of its own, and room for {FLOOR_CELLS} cells' files): raise its \
+         hard limit (LimitNOFILE= of its systemd unit, or ulimit -Hn)",
+        limit.rlim_cur
+    );
     Ok(())
 }
 

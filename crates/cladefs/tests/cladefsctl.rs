@@ -753,3 +753,98 @@ fn the_daemon_needs_a_bucket_and_a_token() {
     assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     assert!(!dir.path().join("vms.sock").exists(), "it listened");
 }
+
+/// The standard error of a daemon that refused to start in `dir`, a host as tests have it
+/// ([`HOST`]), with `env`, and `limit` open files at most if given: it exits, failing, having bound
+/// no socket.
+#[cfg(target_os = "linux")]
+fn refused_to_start(dir: &Path, env: &[(&str, &str)], limit: Option<u64>) -> String {
+    use std::os::unix::process::CommandExt as _;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
+    command.arg(dir.join("vms.sock")).env("CLADEFSD_GRPC", dir.join("control.sock"));
+    command.envs(HOST).envs(env.iter().copied());
+    if let Some(limit) = limit {
+        // SAFETY: Between fork and exec, a system call alone, async-signal-safe.
+        unsafe {
+            command.pre_exec(move || {
+                let limit = libc::rlimit { rlim_cur: limit, rlim_max: limit };
+                match libc::setrlimit(libc::RLIMIT_NOFILE, &limit) {
+                    0 => Ok(()),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            });
+        }
+    }
+    let output = command.output().unwrap();
+    assert!(!output.status.success(), "the daemon started");
+    assert!(!dir.join("vms.sock").exists(), "it listened");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// board 8595: a root of CLADEFSD_ROOTS that is no directory stops the daemon at its start, naming
+/// it: it was dropped, its paths refused to every VM while the daemon served.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_daemon_refuses_roots_it_cannot_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, missing, file) =
+        (dir.path().join("root"), dir.path().join("missing"), dir.path().join("file"));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(&file, b"").unwrap();
+    for (bad, said) in [(&missing, "No such file or directory"), (&file, "is no directory")] {
+        let roots = std::env::join_paths([&root, bad]).unwrap();
+        let error =
+            refused_to_start(dir.path(), &[("CLADEFSD_ROOTS", roots.to_str().unwrap())], None);
+        assert!(error.contains(&format!("CLADEFSD_ROOTS: {}", bad.display())), "{error}");
+        assert!(error.contains(said), "{error}");
+    }
+}
+
+/// board 8595: a part cache the daemon can't use stops it at its start, naming CLADEFSD_PART_CACHE
+/// and why, with no peers too: one on a filesystem that can't bypass the page cache (the
+/// `direct::bypass` failpoint), one another daemon holds locked, one under a file; each cell's
+/// opening failed EIO while it served.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_daemon_refuses_a_part_cache_it_cannot_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let cache = dir.path().join("cache");
+    let cache = cache.to_str().unwrap();
+
+    let bypass = [("CLADEFSD_PART_CACHE", cache), ("FAILPOINTS", "direct::bypass=return")];
+    let error = refused_to_start(&second, &bypass, None);
+    assert!(error.contains(&format!("CLADEFSD_PART_CACHE: {cache}: ")), "{error}");
+
+    let (_control, _running) =
+        daemon(&first, &[("CLADEFSD_PART_CACHE", cache)], std::process::Stdio::inherit());
+    let error = refused_to_start(&second, &[("CLADEFSD_PART_CACHE", cache)], None);
+    assert!(error.contains(&format!("CLADEFSD_PART_CACHE: {cache}: ")), "{error}");
+
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"").unwrap();
+    let under = file.join("cache");
+    let error =
+        refused_to_start(&second, &[("CLADEFSD_PART_CACHE", under.to_str().unwrap())], None);
+    assert!(error.contains(&format!("CLADEFSD_PART_CACHE: {}: ", under.display())), "{error}");
+    assert!(error.contains("Not a directory"), "{error}");
+}
+
+/// board 8595: a limit of open files under the daemon's floor stops it at its start, naming
+/// RLIMIT_NOFILE and the floor: it served, and answered EMFILE once its host was busy.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_daemon_refuses_too_few_open_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let floor = cladefs::cladefsd::open_files_floor();
+    let error = refused_to_start(dir.path(), &[], Some(floor - 1));
+    assert!(
+        error.contains(&format!(
+            "RLIMIT_NOFILE: the limit of open files is {}, under the {floor}",
+            floor - 1
+        )),
+        "{error}"
+    );
+}

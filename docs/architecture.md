@@ -87,7 +87,7 @@ tells the VMM of the pages it maps (`Prefault`), which the VMM has KVM map
 ahead of the guest (`KVM_PRE_FAULT_MEMORY`).
 
 Handling KVM's faults needs `/dev/userfaultfd` access (`operating-a-host.md`, Access to userfaultfd). The host's
-kernel must be Linux 6.1 or later: `/dev/userfaultfd` (6.1), userfaultfd's
+kernel must be Linux 6.5 or later: `SO_PEERPIDFD` (6.5, below), `/dev/userfaultfd` (6.1), userfaultfd's
 write protection of shared memory (`UFFD_FEATURE_WP_HUGETLBFS_SHMEM`, 5.19) and
 `MADV_POPULATE_WRITE` (5.14). In a jail, whose VMM has no privileges left,
 the device node must be in the jail, rather than `vm.unprivileged_userfaultfd=1`
@@ -153,8 +153,11 @@ the daemon has `CAP_KILL`), and refuses a connection whose process it could
 not kill: one that stops acknowledging the daemon's changes to its window,
 frozen, holds the pages it may still map until the daemon has killed it
 (TASK-79.9). It knows the process by the socket's pidfd (`SO_PEERPIDFD`, Linux
-6.5), or, on an older kernel, by the pid of the process that connected
-(`pidfd_open`).
+6.5), and refuses to start on a kernel without it (board 8533): the pid of the process that
+connected, opened after the fact (`pidfd_open`), may be another process's by then, which the
+daemon would kill. It refuses to start, too, under a limit of open files of 35,840
+(`RLIMIT_NOFILE`: its own 1,024, and 136 for each of 256 cells), with a `CLADEFSD_ROOTS`
+directory it can't resolve, or a part cache it can't open (board 8595).
 
 ## Ephemeral cells
 

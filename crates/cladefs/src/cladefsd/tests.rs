@@ -1163,14 +1163,18 @@ async fn frozen_vm_processes_hold_nothing_up() {
     frozen_vm_processes_are_killed().await;
 }
 
-/// TASK-79.9: as [`frozen_vm_processes_hold_nothing_up`], on a kernel without `SO_PEERPIDFD`
-/// (Linux 6.1 to 6.4), as the system call is refused here: the daemon kills the frozen VM process,
-/// which it knows by the process that connected, and keeps the page it maps until it has exited.
-#[tokio::test(flavor = "multi_thread")]
-async fn frozen_vm_processes_are_killed_without_peer_pidfds() {
+/// board 8533: on a kernel without `SO_PEERPIDFD` (before Linux 6.5), as the system call is refused
+/// here, the daemon's start refuses, naming the version: it opened a VM process by the pid that
+/// connected, which another process may have taken by then, the one it would kill (TASK-79.9).
+#[test]
+fn kernels_without_peer_pidfds_are_refused() {
+    super::server::require_peer_pidfds().unwrap();
     let (level, option) = (libc::SOL_SOCKET as u32, libc::SO_PEERPIDFD as u32);
     refuse_system_call(libc::SYS_getsockopt, &[(1, level), (2, option)], libc::ENOPROTOOPT as u16);
-    frozen_vm_processes_are_killed().await;
+    let refused = super::server::require_peer_pidfds().unwrap_err();
+    let said = refused.to_string();
+    assert!(said.contains("the extent daemon needs Linux 6.5 or later"), "{said}");
+    assert!(said.contains("Protocol not available"), "{said}");
 }
 
 /// A cell of a tenant's, whose extent's page a VM process, a child, and this one map, and what

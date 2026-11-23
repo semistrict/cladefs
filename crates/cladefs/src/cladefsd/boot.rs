@@ -31,8 +31,16 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     // cladefs: its KMS, which every cell is encrypted under: none chosen, it refuses to start,
     // naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
     crate::bucket::require_kms().map_err(anyhow::Error::msg)?;
-    // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
-    super::cache_config().map_err(anyhow::Error::msg)?;
+    // cladefs: what only failed once it served refused now (board 8595): too few open files for
+    // its cells, outside the simulation, whose hosts share its process's; a kernel that can't say
+    // which process to kill of a VM process's socket (board 8533); roots it can't resolve; a part
+    // cache it can't open, missing, locked, or unable to bypass the page cache, whether or not it
+    // has peers (TASK-406.1).
+    #[cfg(not(madsim))]
+    super::require_open_files()?;
+    super::server::require_peer_pidfds()?;
+    super::server::resolve_roots().map_err(anyhow::Error::msg)?;
+    super::cells::open_part_cache().map_err(anyhow::Error::msg)?;
     // cladefs: where traces of what VMs read go, if anywhere (TASK-702.1).
     super::reads::configure().map_err(anyhow::Error::msg)?;
     // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
