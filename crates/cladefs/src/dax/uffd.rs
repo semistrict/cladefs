@@ -110,6 +110,7 @@ use crate::error::{Errno, Error, Result};
 use crate::pages::page_size;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -507,6 +508,13 @@ struct PageChanges {
     mapped: Option<Mapped>,
 }
 
+impl PageChanges {
+    /// cladefs: when it was installed or faulted on last, if it is installed.
+    fn used_installed(&self) -> Option<u64> {
+        self.mapped.filter(Mapped::installed).map(|mapped| mapped.used.get())
+    }
+}
+
 /// A page the window maps here, read-only: its memory, whether it is installed in host memory or
 /// left out, and when it was installed or faulted on last. cladefs: `Option<Mapped>`'s `None` is
 /// zero bytes, `used`'s 0, which no tick of the clock is, so that a window's pages, zeroed memory
@@ -597,8 +605,11 @@ impl Drop for WindowPages {
 /// A second stage's pages, and the runs of them installed.
 struct Pages {
     pages: WindowPages,
-    /// The runs of pages installed: consecutive pages of one arena's memory, each a mapping.
-    runs: usize,
+    /// The runs of pages installed: consecutive pages of one arena's memory, each a mapping, by
+    /// their first pages. cladefs: kept as the pages change ([`Pages::update`]), so that a trim
+    /// looks at the runs alone, where it walked every page of the window, 16.7M of a 64 GiB
+    /// window's, holding the lock every fault takes (board 8495).
+    runs: BTreeMap<usize, Run>,
     /// Counts installations and faults, the ones longest ago left out first.
     clock: u64,
     /// cladefs: whether the memory was let go of ([`UffdSecondStage::release`]): nothing changes
@@ -614,6 +625,14 @@ struct Pages {
     private: u64,
 }
 
+/// cladefs: a run of pages installed ([`Pages::runs`]): the page past its last, and when it was
+/// installed or faulted on last, the latest of its pages', or later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Run {
+    end: usize,
+    used: u64,
+}
+
 impl Pages {
     /// Whether page `at` starts a run installed: it is installed, and its memory doesn't follow
     /// on from its predecessor's, installed.
@@ -627,17 +646,61 @@ impl Pages {
         !follows
     }
 
-    /// The runs starting in `range`, or at the page after it: what a change to it may change.
-    fn runs_around(&self, range: &std::ops::Range<usize>) -> usize {
-        let end = (range.end + 1).min(self.pages.len());
-        (range.start..end).filter(|&at| self.starts_run(at)).count()
+    /// cladefs: whether page `at` is installed, following on from the run its predecessor is in.
+    fn continues_run(&self, at: usize) -> bool {
+        self.pages[at].mapped.is_some_and(|mapped| mapped.installed()) && !self.starts_run(at)
     }
 
-    /// Changes the pages of `range` with `change`, counting the runs installed anew.
+    /// Changes the pages of `range` with `change`, keeping the runs installed as they are after
+    /// it. cladefs: a page starts a run, or follows on in one,
+    /// by itself and its predecessor alone, so only at the pages of `range` and the one after it
+    /// can a run start or end anew: the runs there, and the one before it reaching them, are
+    /// taken out, and made again from what those pages are now, as far as the run the page after
+    /// it was in reaches, if it follows on still. A run taken out keeps when it was used last, as
+    /// do runs it splits into, the latest of their pages' perhaps earlier: those left out first
+    /// are left out later, never sooner (board 8495).
     fn update(&mut self, range: std::ops::Range<usize>, change: impl FnOnce(&mut [PageChanges])) {
-        let before = self.runs_around(&range);
-        change(&mut self.pages[range.clone()]);
-        self.runs = self.runs + self.runs_around(&range) - before;
+        let (first, end) = (range.start, range.end);
+        if first == end {
+            return change(&mut self.pages[range]);
+        }
+        let mut old: Vec<(usize, Run)> = Vec::new();
+        if let Some((&start, &run)) = self.runs.range(..first).next_back()
+            && run.end >= first
+        {
+            old.push((start, run));
+        }
+        old.extend(self.runs.range(first..=end).map(|(&start, &run)| (start, run)));
+        for (start, _) in &old {
+            self.runs.remove(start);
+        }
+        change(&mut self.pages[range]);
+        // The run reaching the range from before it, if it still does.
+        let mut open =
+            old.first().filter(|(start, _)| *start < first).map(|&(start, run)| (start, run.used));
+        let last = end.min(self.pages.len() - 1);
+        for at in first..=last {
+            let used = self.pages[at].used_installed().unwrap_or(0);
+            if let Some((_, latest)) = open.as_mut()
+                && self.continues_run(at)
+            {
+                *latest = (*latest).max(used);
+                continue;
+            }
+            if let Some((start, used)) = open.take() {
+                self.runs.insert(start, Run { end: at, used });
+            }
+            if self.starts_run(at) {
+                open = Some((at, used));
+            }
+        }
+        let Some((start, latest)) = open else { return };
+        // On past the range's last page, as far as the run that page was in before, unchanged.
+        let run = match old.iter().find(|(start, run)| *start <= last && run.end > last) {
+            Some(&(_, run)) if last == end => Run { end: run.end, used: run.used.max(latest) },
+            _ => Run { end: last + 1, used: latest },
+        };
+        self.runs.insert(start, run);
     }
 
     /// The next tick of the clock, never 0.
@@ -1099,12 +1162,6 @@ impl UffdSecondStage {
         Ok(runs)
     }
 
-    /// cladefs: the runs of pages it has installed now, each a mapping of the process's, which
-    /// [`budget`](Self::budget) bounds (TASK-111.5).
-    pub(crate) fn installed(&self) -> u64 {
-        self.pages.lock().unwrap().runs as u64
-    }
-
     /// Serves the faults on the memory with `window`, on a thread of its own, until the returned
     /// thread is dropped.
     pub fn serve(self: &Arc<Self>, window: Arc<dyn Faults>) -> Result<FaultThread, Error> {
@@ -1218,7 +1275,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let for_workers = Vec::new();
         let pages = Mutex::new(Pages {
             pages,
-            runs: 0,
+            runs: BTreeMap::new(),
             clock: 0,
             released: false,
             for_workers,
@@ -1251,7 +1308,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// took the whole window's changes' memory, 768 MiB of a 64 GiB window's (TASK-227).
     fn leave_out_untouched(&self) {
         debug_assert!(
-            self.pages.lock().unwrap().runs == 0,
+            self.pages.lock().unwrap().runs.is_empty(),
             "a window left out untouched maps runs"
         );
         self.leave_out(self.base, self.size);
@@ -1273,6 +1330,12 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
         self.leave_out_untouched();
         Ok(())
+    }
+
+    /// cladefs: the runs of pages it has installed now, each a mapping of the process's, which
+    /// [`budget`](Self::budget) bounds (TASK-111.5).
+    pub(crate) fn installed(&self) -> u64 {
+        self.pages.lock().unwrap().runs.len() as u64
     }
 
     /// cladefs: how many of its pages are private (backlog doc-13): none unless it copies on write.
@@ -1441,7 +1504,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let len = pages.pages.len();
         match WindowPages::new(len) {
             Ok(fresh) => {
-                (pages.pages, pages.runs, pages.private) = (fresh, 0, 0);
+                (pages.pages, pages.private) = (fresh, 0);
+                pages.runs.clear();
                 pages.for_workers.clear();
             }
             Err(err) => {
@@ -2144,11 +2208,13 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                 let mapping = self.page_range(addr, len);
                 if pages.installed_at(mapping.clone(), phys) {
                     kept[mapping.start - range.start..mapping.end - range.start].fill(true);
-                    for page in &mut pages.pages[mapping] {
-                        if let Some(mapped) = &mut page.mapped {
-                            mapped.used = used;
+                    pages.update(mapping, |pages| {
+                        for page in pages {
+                            if let Some(mapped) = &mut page.mapped {
+                                mapped.used = used;
+                            }
                         }
-                    }
+                    });
                 }
             }
             // Each run of the rest taken away, and its pages mapping nothing, until named anew.
@@ -2304,43 +2370,28 @@ impl<H: HostMemory> UffdSecondStage<H> {
     }
 
     /// While more runs than the budget are installed, leaves out those installed or faulted on
-    /// longest ago, down to seven eighths of it, so that it is not done at each mapping.
+    /// longest ago, down to seven eighths of it, so that it is not done at each mapping. cladefs:
+    /// looking at the runs alone, where it walked every page of the window to find them, 16.7M of
+    /// a 64 GiB window's, holding the lock every fault takes (board 8495).
     fn trim(&self) {
         let mut pages = self.pages.lock().unwrap();
-        if pages.released || pages.runs <= self.budget {
+        if pages.released || pages.runs.len() <= self.budget {
             return;
         }
         let page_size = page_size() as usize;
-        // Each run, with when it was used last.
-        let mut runs = Vec::new();
-        let mut at = 0;
-        while at < pages.pages.len() {
-            if !pages.starts_run(at) {
-                at += 1;
-                continue;
-            }
-            let start = at;
-            let mut used = 0;
-            loop {
-                used = used.max(pages.pages[at].mapped.map_or(0, |mapped| mapped.used.get()));
-                at += 1;
-                let installed = at < pages.pages.len()
-                    && pages.pages[at].mapped.is_some_and(|mapped| mapped.installed());
-                if !installed || pages.starts_run(at) {
-                    break;
-                }
-            }
-            runs.push((used, start..at));
-        }
-        runs.sort_by_key(|(used, _)| *used);
+        let mut runs: Vec<(u64, usize)> =
+            pages.runs.iter().map(|(&start, run)| (run.used, start)).collect();
+        runs.sort_unstable();
         let low = self.budget - self.budget / 8;
         let now = self.now();
         let _busy = self.busy.doing(Doing::Trim, now);
-        for (_, run) in runs {
-            if pages.runs <= low {
+        for (_, start) in runs {
+            if pages.runs.len() <= low {
                 break;
             }
-            pages.update(run.clone(), |pages| {
+            // Leaving out another run leaves this one as it was.
+            let end = pages.runs[&start].end;
+            pages.update(start..end, |pages| {
                 for page in pages {
                     page.made = page.made.wrapping_add(1);
                     page.changed = now;
@@ -2351,7 +2402,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
                 }
             });
             Self::took(&self.taken.left_out, true);
-            self.leave_out(self.base + run.start * page_size, run.len() * page_size);
+            self.leave_out(self.base + start * page_size, (end - start) * page_size);
         }
     }
 
@@ -2370,9 +2421,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
             return true;
         }
         let used = pages.tick();
-        let Some(mapped) = &mut pages.pages[at].mapped else { return false };
+        let Some(mapped) = pages.pages[at].mapped else { return false };
         if mapped.installed() {
-            mapped.used = used;
+            pages.update(at..at + 1, |page| {
+                if let Some(mapped) = &mut page[0].mapped {
+                    mapped.used = used;
+                }
+            });
             return false;
         }
         let phys = mapped.phys;
@@ -2468,7 +2523,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         said.push_str(&format!(
             "; {} runs installed of a budget of {}, {} pages installed, {} left out, {} private, \
              {} withheld, {} restricted ({} for workers' writes)",
-            pages.runs,
+            pages.runs.len(),
             self.budget,
             count(installed),
             count(left_out),
@@ -3473,5 +3528,85 @@ mod tests {
             libc::close(pipe[1]);
             assert_eq!(libc::munmap(base as *mut libc::c_void, PAGES * ps), 0);
         }
+    }
+
+    /// A host memory that changes nothing: what a test of it measures is the stage's own work.
+    struct Unchanged;
+
+    impl HostMemory for Unchanged {
+        fn map(&self, _: usize, _: usize, _: libc::c_int, _: Memory) {}
+        fn protect(&self, _: usize, _: usize, _: libc::c_int) {}
+        fn register(&self, _: usize, _: usize, _: u64) {}
+        fn write_protect(&self, _: usize, _: usize) {}
+        fn wake(&self, _: usize, _: usize) {}
+        fn private_memory(&self, _: usize) -> std::io::Result<OwnedFd> {
+            Syscalls::private_memory_fd(page_size() as usize)
+        }
+        fn fill(&self, _: RawFd, _: u64, _: &[u8]) {}
+        fn punch(&self, _: RawFd, _: u64, _: usize) {}
+    }
+
+    /// cladefs board 8495: a trim of a full 64 GiB window, every page named, budget + 1 runs
+    /// installed across it, holds the pages' lock, which every fault takes, for a time that
+    /// follows its runs and the pages it leaves out, not the window's 16.7M pages (of 4 KiB): the
+    /// longest a fault waits behind it, measured by a thread taking the lock throughout, is a few
+    /// milliseconds, unoptimized, leaving out an eighth of the runs, 512 pages each. Red with
+    /// a trim walking every page of the window: on ubu1, unoptimized, each took up to 319 ms, and
+    /// the thread taking the lock waited up to 7.7 s.
+    #[test]
+    fn trims_of_a_large_window_follow_its_runs() {
+        const SIZE: u64 = 64 << 30;
+        const BUDGET: usize = 1024;
+        let ps = page_size() as usize;
+        let pages = SIZE as usize / ps;
+        // An arena of pages, which the window's are of: the stage changes no memory, so no page
+        // is mapped.
+        let arena = TestSource::filled(1, 0).location(0).arena;
+        // SAFETY: The host changes no memory.
+        let stage = unsafe {
+            UffdSecondStage::with_host(64 * ps, SIZE, Unchanged, Memories::InProcess, None, BUDGET)
+        }
+        .unwrap();
+        // Every page named, of memory following on: each fault installs a run of 512 pages.
+        stage.map(0, crate::pages::PhysLocation { arena, offset: 0 }, SIZE);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter = {
+            let (stage, stop) = (stage.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut longest = std::time::Duration::ZERO;
+                while !stop.load(Ordering::Relaxed) {
+                    let start = std::time::Instant::now();
+                    stage.installed();
+                    longest = longest.max(start.elapsed());
+                    std::thread::yield_now();
+                }
+                longest
+            })
+        };
+        // Runs spread over the window, each a fault's, the trims among them timed.
+        let (mut trims, mut longest) = (0, std::time::Duration::ZERO);
+        let stride = pages / (4 * BUDGET);
+        for round in 0..4 * BUDGET {
+            let before = stage.installed();
+            let start = std::time::Instant::now();
+            stage.reinstall(64 * ps + round * stride * ps);
+            let took = start.elapsed();
+            if stage.installed() < before {
+                trims += 1;
+                longest = longest.max(took);
+            }
+            // Faults come apart, as a guest's accesses do: back to back, the lock, which is not
+            // fair, went to this thread again and again, and the waiter waited through many.
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let waited = waiter.join().unwrap();
+        eprintln!(
+            "{trims} trims of a {SIZE}-byte window of {pages} pages, {BUDGET} runs: the longest \
+             took {longest:?}; the longest wait for the pages' lock {waited:?}"
+        );
+        assert!(trims >= 3, "{trims} trims");
+        assert!(longest < std::time::Duration::from_millis(50), "a trim took {longest:?}");
+        assert!(waited < std::time::Duration::from_millis(50), "a wait of {waited:?}");
     }
 }
