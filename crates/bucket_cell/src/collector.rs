@@ -220,6 +220,56 @@ impl std::ops::AddAssign for Report {
     }
 }
 
+/// cladefs: what a sweep's passes may delete together (board 8529): so many objects, and so many
+/// bytes of them as listed, each bounded or not. A pass takes from it what it is about to delete,
+/// all of it or none, before it deletes any of it ([`Collector::budget`]): the objects of its cell
+/// and their bytes, its dead cell's head if it removes it, and the references it retires, of no
+/// bytes; not its own lease. Once one take is refused, every take after it is, so that what a sweep
+/// deletes stays within its bounds whatever its passes find doomed: a bug, a bucket listing short.
+/// A pass refused deletes nothing, as one fenced deletes nothing, and records nothing new: late,
+/// never wrong, the next sweep's pass decides anew.
+#[derive(Debug)]
+pub struct Budget {
+    left: std::sync::Mutex<Spending>,
+}
+
+/// What a [`Budget`] has left, and the takes it refused.
+#[derive(Debug)]
+struct Spending {
+    objects: Option<u64>,
+    bytes: Option<u64>,
+    refused: usize,
+}
+
+impl Budget {
+    /// One of `objects` objects and `bytes` bytes at most, each unbounded if none.
+    pub fn new(objects: Option<u64>, bytes: Option<u64>) -> Self {
+        Self { left: std::sync::Mutex::new(Spending { objects, bytes, refused: 0 }) }
+    }
+
+    /// Takes `objects` objects of `bytes` bytes, if it has them left and refused no take before:
+    /// whether it did. Nothing it always gives.
+    fn take(&self, objects: u64, bytes: u64) -> bool {
+        if objects == 0 && bytes == 0 {
+            return true;
+        }
+        let mut left = self.left.lock().unwrap();
+        let fits = |left: Option<u64>, wanted: u64| left.is_none_or(|left| wanted <= left);
+        if left.refused == 0 && fits(left.objects, objects) && fits(left.bytes, bytes) {
+            left.objects = left.objects.map(|left| left - objects);
+            left.bytes = left.bytes.map(|left| left - bytes);
+            return true;
+        }
+        left.refused += 1;
+        false
+    }
+
+    /// The takes it refused: the passes that left what they would delete to a later sweep.
+    pub fn refused(&self) -> usize {
+        self.left.lock().unwrap().refused
+    }
+}
+
 /// cladefs: what a mark-only pass over a cell did ([`Collector::mark_cell`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Marking {
@@ -308,6 +358,9 @@ pub struct Collector {
     /// of its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
     /// [`Collector::collect`] (TASK-411.13).
     heard: Option<Arc<Heard>>,
+    /// cladefs: what its passes may delete, shared with the other passes of their sweep, if
+    /// bounded (board 8529).
+    budget: Option<Arc<Budget>>,
 }
 
 /// cladefs: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
@@ -360,7 +413,19 @@ struct Remembered {
 
 impl Collector {
     pub fn new(options: Options) -> Self {
-        Self { options, holding: Holding::default(), kms: None, heard: None }
+        Self { options, holding: Holding::default(), kms: None, heard: None, budget: None }
+    }
+
+    /// cladefs: one whose passes take what they delete from `budget`, if given, and delete
+    /// nothing past it (board 8529).
+    pub fn budget(self, budget: Option<Arc<Budget>>) -> Self {
+        Self { budget, ..self }
+    }
+
+    /// cladefs: whether a pass may delete `objects` objects of `bytes` bytes, as its budget says,
+    /// taking them from it if so (board 8529): always, without one.
+    fn may_delete(&self, objects: usize, bytes: u64) -> bool {
+        self.budget.as_ref().is_none_or(|budget| budget.take(objects as u64, bytes))
     }
 
     /// cladefs: one whose passes hold their cells as `holding` says (TASK-395.5).
@@ -512,6 +577,10 @@ impl Collector {
             }
         }
         if !gone.is_empty() {
+            // cladefs: past its sweep's budget, it deletes nothing (board 8529).
+            if !self.may_delete(gone.len(), 0) {
+                return Ok(report);
+            }
             lifecycle::retire(own, &gone).await?;
             report.retired += gone.len();
         }
@@ -531,7 +600,6 @@ impl Collector {
         // its mirrors'; then its markers here, then what they named, then the marks.
         let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
-        bucket::delete_all(bucket, &holds).await?;
         let of = |kind: fn(&Kind) -> bool| -> Vec<&Meta> {
             listed.iter().filter(|meta| kind(&layout::kind(&meta.key))).collect()
         };
@@ -548,13 +616,20 @@ impl Collector {
                     | Kind::Evidence { .. }
             )
         });
+        let written: Vec<String> = gone.iter().filter_map(|key| layout::retired_of(key)).collect();
+        let marks: BTreeSet<&str> =
+            marks.into_iter().chain(written.iter().map(String::as_str)).collect();
+        // cladefs: past its sweep's budget, it deletes nothing (board 8529).
+        let objects = holds.len() + markers.len() + copied.len() + marks.len();
+        let bytes = markers.iter().chain(&copied).map(|meta| meta.size).sum();
+        if !self.may_delete(objects, bytes) {
+            return Ok(report);
+        }
+        bucket::delete_all(bucket, &holds).await?;
         for metas in [&markers, &copied] {
             let keys: Vec<&str> = metas.iter().map(|meta| meta.key.as_str()).collect();
             bucket::delete_all(own, &keys).await?;
         }
-        let written: Vec<String> = gone.iter().filter_map(|key| layout::retired_of(key)).collect();
-        let marks: BTreeSet<&str> =
-            marks.into_iter().chain(written.iter().map(String::as_str)).collect();
         bucket::delete_all(own, &marks.into_iter().collect::<Vec<_>>()).await?;
         // What it deleted of the copy, not the marks, its own, which a pass over a child here may
         // have written as this one ran.
@@ -628,9 +703,9 @@ impl Collector {
     /// options, with nothing that pass deferred due, nor its tenant's KEK to be had now if it left
     /// objects encrypted uncompacted, the pass that skips it, which writes nothing and deletes
     /// nothing but the read evidence past each tenant's newest of each version, which nothing
-    /// relies on ([`trim_evidence`], TASK-702.2): no other pass need be fenced, and it costs the
-    /// lease's read and the listing. None: the pass goes on, taking the lease, with the look's
-    /// listing and the lease's epoch it read.
+    /// relies on ([`Collector::trim_evidence`], TASK-702.2): no other pass need be fenced, and it
+    /// costs the lease's read and the listing. None: the pass goes on, taking the lease, with the
+    /// look's listing and the lease's epoch it read.
     async fn look(
         &self,
         bucket: &impl Bucket,
@@ -660,7 +735,7 @@ impl Collector {
         }
         let locked = usize::from(uncompacted > 0);
         let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
-        Ok(Looked::Unchanged(trim_evidence(bucket, cell, &listed, skipped).await?))
+        Ok(Looked::Unchanged(self.trim_evidence(bucket, cell, &listed, skipped).await?))
     }
 
     /// cladefs: what a pass over `cell`, holding its lease as `taken` says, its listing `listed`,
@@ -722,6 +797,11 @@ impl Collector {
         }
         retiring.sort();
         retiring.dedup();
+        // cladefs: past its sweep's budget, it deletes nothing (board 8529).
+        let bytes = doomed.iter().map(|meta| meta.size).sum();
+        if !self.may_delete(doomed.len() + retiring.len(), bytes) {
+            return Ok(Some(Report::default()));
+        }
         let retired: Vec<&str> = retiring.iter().map(String::as_str).collect();
         lifecycle::retire(bucket, &retired).await?;
         let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
@@ -772,6 +852,17 @@ impl Collector {
         if !self.holds(bucket, cell, taken).await? {
             return Ok((report, None));
         }
+        let retired = pass.retired();
+        let removal = pass.removal(&doomed, &deferred);
+        // cladefs: past its sweep's budget, it deletes nothing, as one fenced, and records nothing
+        // new, so that the next pass decides anew (board 8529): what it would delete, the head of
+        // its cell if it goes whole, and the references it would retire.
+        let heads = removal.as_ref().map_or(&[][..], |removal| &removal.heads[..]);
+        let objects = doomed.len() + heads.len() + retired.len() + pass.recording.stale.len();
+        let bytes = doomed.iter().chain(heads).map(|meta| meta.size).sum();
+        if !self.may_delete(objects, bytes) {
+            return Ok((report, None));
+        }
         // Many at once, in batches where the backend deletes so, in any order: none of it is what a
         // live cell needs, whatever else goes (TASK-395.5).
         let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
@@ -782,7 +873,7 @@ impl Collector {
         // passes skip it (TASK-395.14); a clone's made unmarked, its one writer done with it
         // (TASK-455). The cell's own references listed marked, written again since their
         // retirements, deleted (TASK-395.13).
-        let (marked, unmarked): (Vec<_>, Vec<_>) = pass.retired().into_iter().partition(|r| r.1);
+        let (marked, unmarked): (Vec<_>, Vec<_>) = retired.into_iter().partition(|r| r.1);
         let keys = |retired: &[(String, bool)]| -> Vec<String> {
             retired.iter().map(|(key, _)| key.clone()).collect()
         };
@@ -804,7 +895,7 @@ impl Collector {
         // cladefs: a dead cell nothing will need again goes whole, its retirements made: its head,
         // then its lease (TASK-455), the collector's own, which the report counts not, as it counts
         // not its taking. It records nothing: nothing is left to record it in.
-        if let Some(removal) = pass.removal(&doomed, &deferred) {
+        if let Some(removal) = removal {
             report.removed += removal.remove(bucket).await?;
             report.deleted += removal.heads.len();
             report.deleted_bytes += removal.heads.iter().map(|meta| meta.size).sum::<u64>();
@@ -844,7 +935,7 @@ impl Collector {
         let uncompacted = passed.uncompacted as usize;
         let locked = usize::from(uncompacted > 0);
         let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
-        let skipped = trim_evidence(bucket, cell, listed, skipped).await?;
+        let skipped = self.trim_evidence(bucket, cell, listed, skipped).await?;
         let now = bucket.now();
         let (due, deferred): (Vec<Deferred>, Vec<Deferred>) =
             passed.deferred.iter().cloned().partition(|deferred| deferred.due <= now);
@@ -852,6 +943,12 @@ impl Collector {
             return Ok((skipped, None));
         }
         if !self.holds(bucket, cell, taken).await? {
+            return Ok((skipped, None));
+        }
+        // cladefs: past its sweep's budget, it deletes nothing, recording nothing new (board 8529).
+        let listed_size =
+            |due: &Deferred| listed.objects.get(due.key.as_str()).map(|meta| meta.size);
+        if !self.may_delete(due.len(), due.iter().filter_map(listed_size).sum()) {
             return Ok((skipped, None));
         }
         let keys: Vec<&str> = due.iter().map(|due| due.key.as_str()).collect();
@@ -1039,6 +1136,29 @@ impl Collector {
     }
 }
 
+/// cladefs: deletes the marks mark-only passes wrote of `cell` (`<C>gc/marks/`, board 8515), which
+/// keep a dead cell from being removed ([`Pass::removal`]) and its readers watching it, as an
+/// operator does once done with them (`cladefs-gc --clear-marks`): what it deleted, and their bytes,
+/// as listed. Beside a mark-only pass over the cell, it leaves the marks that pass writes after its
+/// listing, which a later clearing deletes.
+pub async fn clear_marks(bucket: &impl Bucket, cell: CellId) -> Result<(usize, u64), Error> {
+    let listed = bucket::list(bucket, &layout::marks_of(cell)).await?;
+    let marks: Vec<&Meta> = (listed.iter())
+        .filter(|meta| matches!(layout::kind(&meta.key), Kind::Marks { .. }))
+        .collect();
+    let keys: Vec<&str> = marks.iter().map(|meta| meta.key.as_str()).collect();
+    bucket::delete_all(bucket, &keys).await?;
+    Ok((keys.len(), marks.iter().map(|meta| meta.size).sum()))
+}
+
+/// cladefs: deletes the bucket's word that mark-only passes mark it ([`layout::MARKING`], board
+/// 8515), after every cell's marks ([`clear_marks`]), so that readers watch marks for as long as
+/// any are there: they watch none after it. A mark-only pass marking a cell after it writes it
+/// again.
+pub async fn clear_marking(bucket: &impl Bucket) -> Result<(), Error> {
+    Ok(bucket::delete(bucket, layout::MARKING).await?)
+}
+
 /// cladefs: what a look at a cell found, before its pass took the lease ([`Collector::look`]).
 enum Looked {
     /// The cell as the last pass in full recorded it, nothing due: the pass that skips it,
@@ -1211,28 +1331,35 @@ async fn first_listing(bucket: &impl Bucket, cell: CellId) -> Result<Option<List
     })
 }
 
-/// cladefs: `report`, of a pass over `cell` that skips it, its listing `listed`, with the read
-/// evidence it deletes counted: all but each tenant's newest of each version
-/// ([`crate::evidence::doomed`], TASK-702.2), which a cell's listing leaves out of its digest, so
-/// that forks' hosts writing it as they open the cell's versions leave it skipped. It needs no
-/// lease, nothing relying on evidence.
-async fn trim_evidence(
-    bucket: &impl Bucket,
-    cell: CellId,
-    listed: &Listed,
-    report: Report,
-) -> Result<Report, Error> {
-    let evidence = layout::evidence_of_cell(cell);
-    let listed = bucket::under(&listed.objects, &evidence);
-    let doomed = crate::evidence::doomed(cell, &listed, None, bucket.now());
-    let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
-    bucket::delete_all(bucket, &keys).await?;
-    let deleted_bytes = doomed.iter().map(|meta| meta.size).sum::<u64>();
-    Ok(Report {
-        deleted: report.deleted + keys.len(),
-        deleted_bytes: report.deleted_bytes + deleted_bytes,
-        ..report
-    })
+impl Collector {
+    /// cladefs: `report`, of a pass over `cell` that skips it, its listing `listed`, with the read
+    /// evidence it deletes counted: all but each tenant's newest of each version
+    /// ([`crate::evidence::doomed`], TASK-702.2), which a cell's listing leaves out of its digest,
+    /// so that forks' hosts writing it as they open the cell's versions leave it skipped. It needs
+    /// no lease, nothing relying on evidence. Past its sweep's budget, it deletes none (board
+    /// 8529): the next pass that skips the cell does.
+    async fn trim_evidence(
+        &self,
+        bucket: &impl Bucket,
+        cell: CellId,
+        listed: &Listed,
+        report: Report,
+    ) -> Result<Report, Error> {
+        let evidence = layout::evidence_of_cell(cell);
+        let listed = bucket::under(&listed.objects, &evidence);
+        let doomed = crate::evidence::doomed(cell, &listed, None, bucket.now());
+        let deleted_bytes = doomed.iter().map(|meta| meta.size).sum::<u64>();
+        if !self.may_delete(doomed.len(), deleted_bytes) {
+            return Ok(report);
+        }
+        let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
+        bucket::delete_all(bucket, &keys).await?;
+        Ok(Report {
+            deleted: report.deleted + keys.len(),
+            deleted_bytes: report.deleted_bytes + deleted_bytes,
+            ..report
+        })
+    }
 }
 
 /// cladefs: whether a pass writes to the bucket what giving up on forks needs: a dry run writes
@@ -2339,7 +2466,8 @@ impl Pass {
     /// listed references all stale, and every object it listed that `doomed` leaves one of a cell
     /// nothing will need again: its head, [`Head::removable`] (a root's or a clone's made,
     /// deleted, of an ID an allocator gave), and its lease. A mark under it (of a reference
-    /// retired, which a writer may write again; or a mark-only pass's, an operator's to remove),
+    /// retired, which a writer may write again; or a mark-only pass's, an operator's to remove,
+    /// [`clear_marks`]),
     /// what it defers, and anything else keep it. A cell of no head loses its lease alone, once
     /// nothing but its lease is left: one whose removal stopped before its end.
     fn removal<'a>(&'a self, doomed: &[&Meta], deferred: &[Deferred]) -> Option<Removal<'a>> {

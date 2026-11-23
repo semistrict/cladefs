@@ -27,6 +27,53 @@ fn test_cell(id: u64) -> bucket_cell::layout::CellId {
     bucket_cell::layout::CellId { tenant: 1, id }
 }
 
+/// Writes to `cell`, made, of the bucket at `url`, a segment holding an extent and one freeing
+/// it, then a checkpoint covering both: what a pass deletes, those two segments.
+fn write_and_free(url: &str, cell: bucket_cell::layout::CellId) {
+    use bucket_cell::Writer;
+    use bucket_cell::batch::{Commit, SegmentBuilder};
+    use bucket_cell::object_bucket::ObjectBucket;
+    use storage_device::ExtentId;
+    futures::executor::block_on(async {
+        let bucket = Arc::new(ObjectBucket::from_url(url).unwrap());
+        let kms = host_kms(&bucket);
+        let writer = Writer::open_under(bucket, cell, (10, 1), &kms).await.unwrap();
+        let extent = ExtentId::new(cell.id, writer.chain().next_sequence());
+        let written =
+            Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
+        let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
+        for commit in [written, freed] {
+            let framed = SegmentBuilder::from(commit)
+                .close(&mut writer.chain())
+                .frame(writer.keys().encrypting());
+            let segment = writer.add_segment(framed).unwrap();
+            writer.upload(segment).await.unwrap();
+            writer.acknowledge().await.unwrap();
+        }
+        writer.checkpoint().await.unwrap();
+    });
+}
+
+/// A bucket on the host's filesystem, in `dir`: its URL.
+fn file_bucket(dir: &tempfile::TempDir) -> String {
+    url::Url::from_directory_path(dir.path()).unwrap().to_string()
+}
+
+/// Every object of the bucket at `url`, by key, and its bytes.
+fn objects(url: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
+    use bucket_cell::Bucket as _;
+    use bucket_cell::object_bucket::ObjectBucket;
+    futures::executor::block_on(async {
+        let bucket = ObjectBucket::from_url(url).unwrap();
+        let mut objects = std::collections::BTreeMap::new();
+        for meta in bucket.list("").await.unwrap() {
+            let object = bucket.get(&meta.key).await.unwrap();
+            objects.insert(meta.key, object.bytes.to_vec());
+        }
+        objects
+    })
+}
+
 fn gc(args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
     command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY_FILE");
@@ -73,7 +120,8 @@ fn collects_a_bucket_once() {
 
 /// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect,
 /// before it touches the bucket, naming both variables: every cell is encrypted, and compacting
-/// needs its KEK. What reads no data, a dry run, `--cells`, `--usage`, and a deletion, needs none.
+/// needs its KEK. What reads no data, a dry run, `--cells`, `--usage`, a deletion, and clearing
+/// marks, needs none.
 #[test]
 fn refuses_to_collect_without_a_kms() {
     let keyless = |args: &[&str]| {
@@ -92,7 +140,8 @@ fn refuses_to_collect_without_a_kms() {
         &["memory:///", "--dry-run"][..],
         &["memory:///", "--cells"],
         &["memory:///", "--usage"],
-        &["memory:///", "--delete-cell", "1/1"],
+        &["memory:///", "--delete-cell", "1/1", "--force-missing"],
+        &["memory:///", "--clear-marks"],
     ] {
         assert!(keyless(args).status.success(), "{args:?}");
     }
@@ -113,6 +162,8 @@ fn sweeps_write_their_metrics() {
         "cladefs_gc_sweep_cells{outcome=\"skipped\"} 0",
         "cladefs_gc_sweep_requests{request=\"list-delimited\"} 1",
         "cladefs_gc_pass_seconds_count 0",
+        "cladefs_gc_sweep_stopped{reason=\"unlisted\"} 0",
+        "cladefs_gc_sweep_capped_passes 0",
     ] {
         assert!(metrics.lines().any(|had| had == line), "{line} in {metrics}");
     }
@@ -122,16 +173,40 @@ fn sweeps_write_their_metrics() {
     assert!((1 << 20..1 << 34).contains(&peak), "a process's memory, at most: {peak}");
 }
 
-/// TASK-79.85: a bucket (in memory: empty) has no live cells, and a cell is deleted, as an
-/// operator's commands do them.
+/// TASK-79.85: a bucket (in memory: empty) has no live cells, as an operator's command lists
+/// them; and a cell is deleted, as an operator's command does it. board 8511's AC #2 and #3: a
+/// cell of no head, an ID mistyped, it refuses to delete, saying so, writing nothing, not even its
+/// probe of the bucket's conditional writes; but with `--force-missing`, whose deleted head stays.
 #[test]
 fn lists_and_deletes_cells() {
     let out = gc(&["memory:///", "--cells"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     assert!(out.status.success());
-    let out = gc(&["memory:///", "--delete-cell", "1/ff"]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = file_bucket(&dir);
+    let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    futures::executor::block_on(bucket_cell::lifecycle::create(&bucket, test_cell(1), 0)).unwrap();
+    let files = || walk(dir.path());
+    let before = (files(), objects(&url));
+    let out = gc(&[&url, "--delete-cell", "1/ff"]);
+    let refused = "--delete-cell: cell 1/ff has no head, so no cell to delete: nothing written; \
+                   --force-missing writes it a deleted head, which no pass of the collector removes";
+    assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {refused:?}\n"));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!((files(), objects(&url)), before);
+
+    let out = gc(&[&url, "--delete-cell", "1/1"]);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert!(out.status.success());
+    let head = futures::executor::block_on(bucket_cell::head::get(&bucket, test_cell(1))).unwrap();
+    assert!(head.as_ref().is_some_and(|head| head.deleted()), "{head:?}");
+    let out = gc(&[&url, "--delete-cell", "1/ff", "--force-missing"]);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+    let missing: bucket_cell::layout::CellId = "1/ff".parse().unwrap();
+    let head = bucket_cell::layout::head(missing, 0);
+    assert!(objects(&url).contains_key(&head), "{head}: {:?}", objects(&url).keys());
 }
 
 /// cladefs: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
@@ -139,32 +214,14 @@ fn lists_and_deletes_cells() {
 /// holding what it freed, the one freeing it), and lists the cell.
 #[test]
 fn collects_a_file_bucket() {
-    use bucket_cell::batch::{Commit, SegmentBuilder};
+    use bucket_cell::lifecycle;
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Writer, lifecycle};
-    use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
-    let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
-    futures::executor::block_on(async {
-        let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-        let kms = host_kms(&bucket);
-        let writer = Writer::open_under(bucket, test_cell(1), (10, 1), &kms).await.unwrap();
-        let extent = ExtentId::new(1, writer.chain().next_sequence());
-        let written =
-            Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
-        let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
-        for commit in [written, freed] {
-            let framed = SegmentBuilder::from(commit)
-                .close(&mut writer.chain())
-                .frame(writer.keys().encrypting());
-            let segment = writer.add_segment(framed).unwrap();
-            writer.upload(segment).await.unwrap();
-            writer.acknowledge().await.unwrap();
-        }
-        writer.checkpoint().await.unwrap();
-    });
+    let url = file_bucket(&dir);
+    let bucket = ObjectBucket::from_url(&url).unwrap();
+    futures::executor::block_on(lifecycle::create(&bucket, test_cell(1), 0)).unwrap();
+    write_and_free(&url, test_cell(1));
     // The two segments a pass deletes, and their bytes.
     let at = "tenants/0000000000001/cells/0000000000001";
     let doomed = [0, 1].map(|segment| {
@@ -225,32 +282,14 @@ fn collects_a_file_bucket() {
 /// mark-only pass marks it, deleting nothing; a pass after deletes it, leaving the marks.
 #[test]
 fn dry_runs_and_mark_only_passes_delete_nothing() {
-    use bucket_cell::batch::{Commit, SegmentBuilder};
+    use bucket_cell::lifecycle;
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Writer, lifecycle};
-    use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
-    let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
-    futures::executor::block_on(async {
-        let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-        let kms = host_kms(&bucket);
-        let writer = Writer::open_under(bucket, test_cell(1), (10, 1), &kms).await.unwrap();
-        let extent = ExtentId::new(1, writer.chain().next_sequence());
-        let written =
-            Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
-        let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
-        for commit in [written, freed] {
-            let framed = SegmentBuilder::from(commit)
-                .close(&mut writer.chain())
-                .frame(writer.keys().encrypting());
-            let segment = writer.add_segment(framed).unwrap();
-            writer.upload(segment).await.unwrap();
-            writer.acknowledge().await.unwrap();
-        }
-        writer.checkpoint().await.unwrap();
-    });
+    let url = file_bucket(&dir);
+    let bucket = ObjectBucket::from_url(&url).unwrap();
+    futures::executor::block_on(lifecycle::create(&bucket, test_cell(1), 0)).unwrap();
+    write_and_free(&url, test_cell(1));
     let files = || -> Vec<(String, Vec<u8>)> {
         let mut files: Vec<_> = walk(dir.path())
             .into_iter()
@@ -366,13 +405,11 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[test]
 fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     use bucket_cell::Bucket as _;
-    use bucket_cell::batch::{Commit, SegmentBuilder};
     use bucket_cell::layout::{self, CellId};
+    use bucket_cell::lifecycle;
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Writer, lifecycle};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
-    use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
@@ -387,23 +424,9 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
         for cell in cells {
             lifecycle::create(&*bucket, cell, 0).await.unwrap();
         }
-        // In the first cell, a segment written and one freeing it: what the pass deletes.
-        let kms = host_kms(&bucket);
-        let writer = Writer::open_under(bucket.clone(), cells[0], (10, 1), &kms).await.unwrap();
-        let extent = ExtentId::new(1, writer.chain().next_sequence());
-        let written =
-            Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
-        let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
-        for commit in [written, freed] {
-            let framed = SegmentBuilder::from(commit)
-                .close(&mut writer.chain())
-                .frame(writer.keys().encrypting());
-            let segment = writer.add_segment(framed).unwrap();
-            writer.upload(segment).await.unwrap();
-            writer.acknowledge().await.unwrap();
-        }
-        writer.checkpoint().await.unwrap();
     });
+    // In the first cell, a segment written and one freeing it: what the pass deletes.
+    write_and_free(&url, cells[0]);
     let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let before = now().as_millis() as u64;
     let out = gc(&[&url, "--grace", "0"]);
@@ -617,13 +640,193 @@ fn without_a_bucket_prints_its_usage() {
     let out = gc(&[]);
     let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
                  [--grace SECONDS] [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] \
-                 [--metrics FILE] | cladefs-gc URL [--cell TENANT/CELL] \
-                 --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc URL --cells \
-                 [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell \
-                 TENANT/CELL | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc URL \
-                 --rotate-master-key (every cell, or the one --cell names; \
-                 --mark-only deletes nothing, writing each cell's gc/marks/EPOCH: the bucket \
-                 grows; --dry-run writes nothing, and finds less than a pass deletes)";
+                 [--metrics FILE] [--max-delete-objects N] [--max-delete-bytes N] \
+                 [--max-requests-per-second N] [--max-refused-passes N] | cladefs-gc URL [--cell \
+                 TENANT/CELL] --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc \
+                 URL --cells [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell \
+                 TENANT/CELL [--force-missing] | cladefs-gc URL --clear-marks [--cell \
+                 TENANT/CELL] | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc URL \
+                 --rotate-master-key (every cell, or the one --cell names; SECONDS from 0 to a \
+                 year, --every's and --lease's more than 0; --mark-only deletes nothing, writing \
+                 each cell's gc/marks/EPOCH: the bucket grows; --dry-run writes nothing, and finds \
+                 less than a pass deletes)";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {usage:?}\n"));
     assert_eq!(out.status.code(), Some(1));
+}
+
+/// The cells' objects of the bucket at `url`, the collector's leases aside, which a pass writes
+/// whatever it does.
+fn cells_objects(url: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut objects = objects(url);
+    objects.retain(|key, _| !key.ends_with("/gc/lease"));
+    objects
+}
+
+/// board 8509's AC #4: a sweep run once whose pass failed, its cell's head corrupt, says so, and
+/// writes its metrics, which say so too; then it fails the run.
+#[test]
+fn sweeps_run_once_that_fail_fail_the_run() {
+    use bucket_cell::Bucket as _;
+    use bucket_cell::bucket::PutMode;
+    use bucket_cell::object_bucket::ObjectBucket;
+    let dir = tempfile::tempdir().unwrap();
+    let url = file_bucket(&dir);
+    let bucket = ObjectBucket::from_url(&url).unwrap();
+    let head = bucket_cell::layout::head(test_cell(1), 0);
+    let corrupt = bucket.put(&head, vec![0xff; 7].into(), PutMode::Create);
+    futures::executor::block_on(corrupt).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let file = elsewhere.path().join("gc.prom");
+    let out = gc(&[&url, "--grace", "0", "--metrics", file.to_str().unwrap()]);
+    let said = said(&out);
+    let (failed, rest) = said.split_once('\n').unwrap();
+    assert!(failed.starts_with("cladefs-gc: collecting cell 1/1: "), "{said}");
+    assert_eq!(
+        rest,
+        "cladefs-gc: deleted 0 (0 bytes), compacted 0 (0 bytes), retired 0 references, over 1 \
+         cells (0 unchanged), 0 held by other passes, 0 swept by them since, 1 failed; requests: \
+         R\ncladefs-gc: took T s; slowest: 1/1 T s\nError: \"the sweep did not go through: 1 \
+         passes failed\"\n"
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let metrics = std::fs::read_to_string(&file).unwrap();
+    for line in [
+        "cladefs_gc_sweep_cells{outcome=\"passed\"} 0",
+        "cladefs_gc_sweep_cells{outcome=\"failed\"} 1",
+    ] {
+        assert!(metrics.lines().any(|had| had == line), "{line} in {metrics}");
+    }
+}
+
+/// board 8529's AC #1: a sweep bounded below what its pass would delete deletes nothing, says why
+/// it stopped, and fails the run; unbounded after it, it deletes it.
+#[test]
+fn sweeps_past_their_bounds_delete_nothing_and_fail_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = file_bucket(&dir);
+    let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    futures::executor::block_on(bucket_cell::lifecycle::create(&bucket, test_cell(1), 0)).unwrap();
+    write_and_free(&url, test_cell(1));
+    let before = cells_objects(&url);
+    for bound in ["--max-delete-objects", "--max-delete-bytes"] {
+        let out = gc(&[&url, "--grace", "0", bound, "1"]);
+        let stopped = "a pass would have deleted past the sweep's bounds";
+        assert_eq!(
+            said(&out),
+            format!(
+                "{}cladefs-gc: the sweep stopped: {stopped}\nError: \"the sweep did not go \
+                 through: 1 passes deleted nothing, past its bounds; it stopped: {stopped}\"\n",
+                swept(0, 0, 1, "1/1 T s")
+            ),
+            "{bound}"
+        );
+        assert_eq!(out.status.code(), Some(1), "{bound}");
+        assert_eq!(cells_objects(&url), before, "{bound}");
+    }
+    let out = gc(&[&url, "--grace", "0"]);
+    assert!(out.status.success());
+    assert_eq!(cells_objects(&url).len(), before.len() - 2);
+}
+
+/// board 8515's AC #1 and #2: a dead cell a mark-only pass marked, its marks keep from going whole;
+/// `--clear-marks --cell` deletes that cell's marks alone, leaving `gc/marking`; `--clear-marks`
+/// every cell's, then `gc/marking`; and the next pass removes the dead cell whole.
+#[test]
+fn cleared_marks_let_dead_cells_go_whole() {
+    use bucket_cell::layout::{self, CellId};
+    use bucket_cell::lifecycle;
+    use bucket_cell::object_bucket::ObjectBucket;
+    let dir = tempfile::tempdir().unwrap();
+    let url = file_bucket(&dir);
+    let bucket = ObjectBucket::from_url(&url).unwrap();
+    let ids = bucket_cell::objectid::Allocator::new();
+    let (dead, live) = futures::executor::block_on(async {
+        let mut cells = Vec::new();
+        for _ in 0..2 {
+            let cell = CellId { tenant: 1, id: ids.next(&bucket).await.unwrap() };
+            lifecycle::create(&bucket, cell, 0).await.unwrap();
+            cells.push(cell);
+        }
+        lifecycle::delete(&bucket, cells[0], 11, 1).await.unwrap();
+        (cells[0], cells[1])
+    });
+    let out = gc(&[&url, "--mark-only", "--grace", "0"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let marks = |cell: CellId| -> Vec<(String, usize)> {
+        let objects = objects(&url);
+        let of = objects.into_iter().filter(|(key, _)| key.starts_with(&layout::marks_of(cell)));
+        of.map(|(key, bytes)| (key, bytes.len())).collect()
+    };
+    let marking = || objects(&url).contains_key(layout::MARKING);
+    let (dead_marks, live_marks) = (marks(dead), marks(live));
+    let ([(_, dead_bytes)], [(_, live_bytes)]) = (&dead_marks[..], &live_marks[..]) else {
+        panic!("{dead_marks:?} {live_marks:?}")
+    };
+    let (dead_bytes, live_bytes) = (*dead_bytes, *live_bytes);
+    assert!(marking());
+    let of_dead =
+        || objects(&url).into_keys().filter(|key| key.starts_with(&dead.prefix())).count();
+    let out = gc(&[&url, "--grace", "0"]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(of_dead() > 0, "kept by its marks");
+
+    let out = gc(&[&url, "--clear-marks", "--cell", &live.to_string()]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "cladefs-gc: cell {live}: deleted 1 marks ({live_bytes} bytes)\ncladefs-gc: deleted 1 \
+             marks ({live_bytes} bytes) of 1 cells, leaving gc/marking, which other cells' marks \
+             may need\n"
+        )
+    );
+    assert!(out.status.success());
+    assert_eq!((marks(dead).len(), marks(live).len(), marking()), (1, 0, true));
+    let out = gc(&[&url, "--clear-marks"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "cladefs-gc: cell {dead}: deleted 1 marks ({dead_bytes} bytes)\ncladefs-gc: deleted 1 \
+             marks ({dead_bytes} bytes) of 1 cells, then gc/marking\n"
+        )
+    );
+    assert!(out.status.success());
+    assert_eq!((marks(dead).len(), marks(live).len(), marking()), (0, 0, false));
+
+    let out = gc(&[&url, "--grace", "0"]);
+    assert!(said(&out).contains(", removed 1 dead cells"), "{}", said(&out));
+    assert_eq!(of_dead(), 0);
+}
+
+/// board 8513's AC #1: SIGTERM has a process sweeping every so long end between its sweeps, at
+/// once, saying so, as its last sweep did, having written its metrics. A sweep stopped as it runs,
+/// starting no more passes, is `bucket_cell::sweep`'s test.
+#[test]
+fn sigterm_ends_sweeping() {
+    use std::io::{BufRead as _, Read as _};
+    let elsewhere = tempfile::tempdir().unwrap();
+    let file = elsewhere.path().join("gc.prom");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
+    command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY_FILE");
+    command.env("CLADEFS_MASTER_KEY", MASTER_KEY);
+    command.args(["memory:///", "--every", "3600", "--metrics", file.to_str().unwrap()]);
+    let mut child = command.stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("cladefs-gc: took ") {
+        assert_ne!(stderr.read_line(&mut said).unwrap(), 0, "{said}");
+    }
+    // SAFETY: A signal to the child this test started, which it has not waited for.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let status = child.wait().unwrap();
+    stderr.read_to_string(&mut said).unwrap();
+    assert!(
+        said.ends_with(
+            "cladefs-gc: SIGTERM: starting no more passes, letting those running end; again to \
+             exit at once\n"
+        ),
+        "{said}"
+    );
+    assert!(status.success(), "{status:?}");
+    let metrics = std::fs::read_to_string(&file).unwrap();
+    assert!(metrics.lines().any(|line| line == "cladefs_gc_sweeps_total 1"), "{metrics}");
 }

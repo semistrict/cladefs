@@ -3890,10 +3890,13 @@ pub(crate) mod tests {
             spawned: false,
             kms: Some(crate::keys::testing::kms()),
         };
+        // cladefs: the listing's refusal its own outcome, no pass's (board 8509).
         let swept = serving.block_on(sweep.run(&bucket, |_| {}));
-        assert_eq!((swept.visited, swept.failed), (0, 1));
+        assert_eq!((swept.visited, swept.failed), (0, 0));
+        let Some(crate::sweep::Stopped::Unlisted(_)) = swept.stopped else { panic!("{swept:?}") };
+        assert!(!swept.complete());
         let swept = serving.block_on(sweep.run_cell(&bucket, cell, |_| {}));
-        assert_eq!((swept.visited, swept.failed), (1, 1));
+        assert_eq!((swept.visited, swept.failed, swept.stopped), (1, 1, None));
     }
 
     /// cladefs: a bucket's connections are tasks of the runtime that opened them (`reqwest`, as

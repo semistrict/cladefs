@@ -24,17 +24,26 @@
 //! What each pass did, and the requests of each kind it made, it says as the pass ends
 //! ([`Ran`]); what they did together, with the requests listing the cells made and the slowest
 //! passes, once it ends ([`Swept`]).
+//!
+//! cladefs: a sweep may be bounded besides ([`Limits`], board 8529): in what its passes delete
+//! together, objects and bytes ([`Budget`]), a pass past it deleting nothing and the sweep starting
+//! no more; in the requests it makes a second, its passes' and its listing's together, each waiting
+//! its turn; and in the passes in a row the bucket refuses, after which it starts no more. And it
+//! may be asked to stop ([`Stop`], board 8513): it starts no more passes, and those running end,
+//! letting their cells go. A sweep that stopped early says why ([`Swept::stopped`]), as one whose
+//! listing of the cells the bucket refused does, or whose bucket's own identity it could not read
+//! (board 8509).
 
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
-use crate::bucket::{PutMode, Version};
-use crate::collector::{Collector, Heard, Holding, Marking, Options, Report};
+use crate::bucket::{PutMode, Refused, Version};
+use crate::collector::{Budget, Collector, Heard, Holding, Marking, Options, Report};
 use crate::layout::CellId;
 use crate::object_bucket::Request;
 use crate::{Error, Left};
 use futures::{FutureExt as _, StreamExt as _};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// What a sweep's passes do with what no live cell needs.
@@ -69,6 +78,167 @@ pub struct Sweep {
     /// if any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not
     /// to be had at a pass before is now ([`Heard`], TASK-411.13).
     pub kms: Option<extent_keys::kms::Shared>,
+}
+
+/// cladefs: what bounds a sweep besides its passes at once (boards 8529, 8513): nothing, by
+/// default.
+#[derive(Clone, Debug, Default)]
+pub struct Limits {
+    /// The most objects its passes delete together, and the most bytes of them, as listed
+    /// ([`Budget`]): once a pass would go past either, it deletes nothing, nor does any pass after
+    /// it, and the sweep starts no more ([`Stopped::Capped`]).
+    pub deleted_objects: Option<u64>,
+    pub deleted_bytes: Option<u64>,
+    /// The most requests a second its passes and its listing of the cells make together, each
+    /// waiting its turn: finite, and more than 0. A listing of many pages takes the turns of its
+    /// pages after the first from the requests after it.
+    pub requests_per_second: Option<f64>,
+    /// After so many passes in a row the bucket refused ([`Error::Refused`]), it starts no more
+    /// ([`Stopped::Refusing`]): at least 1. A bucket out of reach fails no pass: each request of
+    /// it waits and goes again ([`Bucket::pause`]), and the pass with it.
+    pub refused_in_a_row: Option<usize>,
+    /// What asks it to start no more passes ([`Stopped::Asked`]).
+    pub stop: Option<Arc<Stop>>,
+}
+
+/// cladefs: what asks a process's sweeps to stop (board 8513), as SIGTERM and SIGINT have
+/// `cladefs-gc`'s: a sweep asked starts no more passes, and those running end, letting their cells
+/// go ([`Stopped::Asked`]).
+#[derive(Debug, Default)]
+pub struct Stop {
+    asked: AtomicBool,
+    told: tokio::sync::Notify,
+}
+
+impl Stop {
+    /// Asks it, waking whoever waits.
+    pub fn ask(&self) {
+        self.asked.store(true, Ordering::SeqCst);
+        self.told.notify_waiters();
+    }
+
+    /// Whether it was asked.
+    pub fn asked(&self) -> bool {
+        self.asked.load(Ordering::SeqCst)
+    }
+
+    /// Waits until it is asked.
+    pub async fn wait(&self) {
+        // Made before the check, it is told of an asking after it, however late it is polled.
+        let told = self.told.notified();
+        if self.asked() {
+            return;
+        }
+        told.await;
+    }
+}
+
+/// cladefs: why a sweep stopped before it went over every cell (boards 8509, 8529, 8513).
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+pub enum Stopped {
+    /// The bucket refused its listing of the cells (board 5861).
+    #[error("the bucket refuses the listing of its cells: {0}")]
+    Unlisted(Refused),
+    /// It could not read its bucket's own identity, and so tell its cells from copies of other
+    /// buckets' (TASK-633.8): it went over none.
+    #[error("the bucket's own identity, unread: {0}")]
+    Unidentified(Error),
+    /// So many passes in a row the bucket refused ([`Limits::refused_in_a_row`]).
+    #[error("{0} passes in a row the bucket refused")]
+    Refusing(usize),
+    /// A pass would have deleted past its bounds ([`Limits::deleted_objects`],
+    /// [`Limits::deleted_bytes`]), and deleted nothing.
+    #[error("a pass would have deleted past the sweep's bounds")]
+    Capped,
+    /// It was asked to ([`Stop`]).
+    #[error("asked to stop")]
+    Asked,
+}
+
+impl Stopped {
+    /// What a stop of each reason is called, as `cladefs-gc --metrics` labels it, in order.
+    pub const NAMES: [&str; 5] = ["unlisted", "unidentified", "refusing", "capped", "asked"];
+
+    /// What it is called, one of [`Stopped::NAMES`].
+    pub fn name(&self) -> &'static str {
+        let index = match self {
+            Self::Unlisted(_) => 0,
+            Self::Unidentified(_) => 1,
+            Self::Refusing(_) => 2,
+            Self::Capped => 3,
+            Self::Asked => 4,
+        };
+        Self::NAMES[index]
+    }
+}
+
+/// cladefs: what spaces a sweep's requests (board 8529): one each `every` at most, whichever pass
+/// makes it, each waiting for its turn.
+#[derive(Debug)]
+struct Pacer {
+    every: Duration,
+    /// The next request's turn: none before the first.
+    next: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl Pacer {
+    /// One of `per_second` requests a second, if given.
+    fn of(per_second: Option<f64>) -> Option<Arc<Self>> {
+        let per_second = per_second?;
+        assert!(per_second.is_finite() && per_second > 0.0, "{per_second} requests a second");
+        let every = Duration::from_secs_f64(per_second.recip());
+        Some(Arc::new(Self { every, next: std::sync::Mutex::new(None) }))
+    }
+
+    /// Waits for a request's turn, and takes it.
+    async fn turn(&self) {
+        let at = self.take(1);
+        tokio::time::sleep_until(at).await;
+    }
+
+    /// Takes the turns of `requests` requests, waiting for none: the first's turn.
+    fn take(&self, requests: u32) -> tokio::time::Instant {
+        let mut next = self.next.lock().unwrap();
+        let now = tokio::time::Instant::now();
+        let at = next.map_or(now, |next| next.max(now));
+        *next = Some(at + self.every.saturating_mul(requests));
+        at
+    }
+}
+
+/// cladefs: what a sweep goes by of its [`Limits`], its own: what its passes may still delete, and
+/// the turns of its requests.
+struct Bounds<'a> {
+    limits: &'a Limits,
+    budget: Option<Arc<Budget>>,
+    pacer: Option<Arc<Pacer>>,
+}
+
+impl<'a> Bounds<'a> {
+    fn of(limits: &'a Limits) -> Self {
+        let bounded = limits.deleted_objects.is_some() || limits.deleted_bytes.is_some();
+        let budget =
+            bounded.then(|| Arc::new(Budget::new(limits.deleted_objects, limits.deleted_bytes)));
+        Self { limits, budget, pacer: Pacer::of(limits.requests_per_second) }
+    }
+
+    /// Why the sweep is to start no more passes, `refused` passes in a row the bucket refused, if
+    /// it is.
+    fn halted(&self, refused: usize) -> Option<Stopped> {
+        if self.limits.stop.as_ref().is_some_and(|stop| stop.asked()) {
+            return Some(Stopped::Asked);
+        }
+        if self.capped() > 0 {
+            return Some(Stopped::Capped);
+        }
+        let most = self.limits.refused_in_a_row.filter(|&most| refused >= most)?;
+        Some(Stopped::Refusing(most))
+    }
+
+    /// The passes its budget refused.
+    fn capped(&self) -> usize {
+        self.budget.as_ref().map_or(0, |budget| budget.refused())
+    }
 }
 
 /// The requests made, of each kind, as a [`crate::object_bucket::ObjectBucket`] counts them: a
@@ -125,12 +295,21 @@ pub struct Ran {
 pub struct Swept {
     /// The cells it ran a pass over, those that failed among them.
     pub visited: usize,
+    /// cladefs: those of them its passes went over in full, neither skipping them, unchanged since
+    /// their last passes, nor failing (board 8509): counted as they end, never derived.
+    pub passed: usize,
     /// The cells it left to passes holding them.
     pub held: usize,
     /// The cells it left to passes that went over them since it began.
     pub swept: usize,
     /// The passes that failed.
     pub failed: usize,
+    /// cladefs: the passes that left what they would delete to a later sweep, past its bounds
+    /// ([`Budget`], board 8529).
+    pub capped: usize,
+    /// cladefs: why it stopped before it went over every cell, if it did (boards 8509, 8529,
+    /// 8513).
+    pub stopped: Option<Stopped>,
     /// What the passes that went through did: what mark-only passes compacted, which deleted
     /// nothing.
     pub report: Report,
@@ -148,15 +327,23 @@ pub struct Swept {
 }
 
 impl Swept {
+    /// cladefs: whether it did all it was to: went over every cell, no pass failing, none left past
+    /// its bounds (board 8509).
+    pub fn complete(&self) -> bool {
+        self.failed == 0 && self.capped == 0 && self.stopped.is_none()
+    }
+
     /// Counts `passed` in, keeping the `slowest` slowest passes.
     fn add(&mut self, passed: Ran, slowest: usize) {
         self.requests += passed.requests;
         let ran = match passed.outcome {
             Outcome::Collected(report) => {
+                self.passed += usize::from(report.skipped == 0);
                 self.report += report;
                 true
             }
             Outcome::Marked(marking) => {
+                self.passed += 1;
                 self.report += marking.report;
                 if let Some(marks) = &marking.marks {
                     self.marked += marks.marked.len();
@@ -198,6 +385,44 @@ impl Sweep {
         self.run_with_own(bucket, None::<&Arc<B>>, observe).await
     }
 
+    /// cladefs: the sweep [`Sweep::run_with_own`] runs, or [`Sweep::run_cell`] runs of `named`,
+    /// bounded as `limits` say (boards 8529, 8513).
+    pub async fn run_limited<B: Bucket, O: Bucket>(
+        &self,
+        bucket: &Arc<B>,
+        own: Option<&Arc<O>>,
+        named: Option<CellId>,
+        limits: &Limits,
+        observe: impl FnMut(&Ran),
+    ) -> Swept {
+        let bounds = Bounds::of(limits);
+        if let Some(cell) = named {
+            let cells = futures::stream::iter([Ok(cell)]);
+            return self.over(bucket, None::<(Arc<B>, u16)>, cells, &bounds, observe).await;
+        }
+        let copies = match own {
+            None => None,
+            Some(own) => match crate::identity::get(&**own).await {
+                Ok(Some(identity)) => Some((own.clone(), identity.number)),
+                Ok(None) => None,
+                // cladefs: a sweep that did nothing, failed, saying why; never one of no cells
+                // (board 8509).
+                Err(error) => {
+                    log::error!("cladefs-gc: the bucket's own identity, unread: {error}");
+                    return Swept {
+                        stopped: Some(Stopped::Unidentified(error)),
+                        ..Swept::default()
+                    };
+                }
+            },
+        };
+        let listing = Counted::new(bucket.clone(), bounds.pacer.clone());
+        let cells = crate::cell::listed(&listing);
+        let mut swept = self.over(bucket, copies, cells, &bounds, observe).await;
+        swept.requests += listing.requests();
+        swept
+    }
+
     /// cladefs: as [`Sweep::run`], `bucket` routed, `own` its own bucket, unrouted, if given
     /// (TASK-633.8): a cell listed here of another bucket, by its ID, is a copy of that cell's
     /// mirrored versions, which a pass over the copy decides ([`Collector::collect_copy`]), not a
@@ -209,21 +434,7 @@ impl Sweep {
         own: Option<&Arc<O>>,
         observe: impl FnMut(&Ran),
     ) -> Swept {
-        let copies = match own {
-            None => None,
-            Some(own) => match crate::identity::get(&**own).await {
-                Ok(Some(identity)) => Some((own.clone(), identity.number)),
-                Ok(None) => None,
-                Err(error) => {
-                    log::warn!("cladefs-gc: the bucket's own identity, unread: {error}");
-                    return Swept::default();
-                }
-            },
-        };
-        let listing = Counted::new(bucket.clone());
-        let mut swept = self.over(bucket, copies, crate::cell::listed(&listing), observe).await;
-        swept.requests += listing.requests();
-        swept
+        self.run_limited(bucket, own, None, &Limits::default(), observe).await
     }
 
     /// A pass over `cell` of `bucket`, as a sweep of that cell alone runs it: what it did.
@@ -233,15 +444,17 @@ impl Sweep {
         cell: CellId,
         observe: impl FnMut(&Ran),
     ) -> Swept {
-        self.over(bucket, None::<(Arc<B>, u16)>, futures::stream::iter([Ok(cell)]), observe).await
+        self.run_limited(bucket, None::<&Arc<B>>, Some(cell), &Limits::default(), observe).await
     }
 
-    /// Passes over `cells` of `bucket`, [`Sweep::at_once`] at once, telling `observe` of each.
+    /// Passes over `cells` of `bucket`, [`Sweep::at_once`] at once, telling `observe` of each,
+    /// bounded as `bounds` say.
     async fn over<B: Bucket, O: Bucket>(
         &self,
         bucket: &Arc<B>,
         copies: Option<(Arc<O>, u16)>,
-        cells: impl futures::Stream<Item = Result<CellId, crate::bucket::Refused>>,
+        cells: impl futures::Stream<Item = Result<CellId, Refused>>,
+        bounds: &Bounds<'_>,
         mut observe: impl FnMut(&Ran),
     ) -> Swept {
         assert!(self.at_once >= 1, "a sweep of no passes at once");
@@ -255,6 +468,10 @@ impl Sweep {
         let mut swept = Swept::default();
         // cladefs: the listing refused, the sweep ends there, failed, saying why (board 5861).
         let refused = std::sync::Mutex::new(None);
+        // cladefs: halted, as its bounds say, it starts no more passes, saying why (boards 8529,
+        // 8513); and the passes in a row the bucket refused, which may halt it.
+        let halted = std::sync::Mutex::new(None);
+        let refused_in_a_row = AtomicUsize::new(0);
         let cells = cells
             .take_while(|cell| {
                 if let Err(error) = cell {
@@ -263,13 +480,26 @@ impl Sweep {
                 std::future::ready(cell.is_ok())
             })
             // Refused, kept above: the listing's last item.
-            .filter_map(|cell| std::future::ready(cell.ok()));
+            .filter_map(|cell| std::future::ready(cell.ok()))
+            // Asked as each pass would start, after the outcomes of those before it are counted.
+            .take_while(|_| {
+                let halt = bounds.halted(refused_in_a_row.load(Ordering::Relaxed));
+                let go = halt.is_none();
+                if let Some(halt) = halt {
+                    halted.lock().unwrap().get_or_insert(halt);
+                }
+                std::future::ready(go)
+            });
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
             let (sweep, bucket, heard) = (self.clone(), bucket.clone(), heard.clone());
             let copies = copies.clone();
-            let pass = async move { sweep.pass(&bucket, copies, cell, since, heard).await };
+            let (budget, pacer) = (bounds.budget.clone(), bounds.pacer.clone());
+            let pass = async move {
+                let bounded = (budget, pacer);
+                sweep.pass(&bucket, copies, cell, since, heard, bounded).await
+            };
             match self.spawned {
                 false => pass.boxed(),
                 true => {
@@ -289,20 +519,32 @@ impl Sweep {
         });
         let mut passes = std::pin::pin!(passes.buffer_unordered(self.at_once));
         while let Some(passed) = passes.next().await {
+            match passed.outcome {
+                Outcome::Failed(Error::Refused(_)) => {
+                    refused_in_a_row.fetch_add(1, Ordering::Relaxed)
+                }
+                _ => refused_in_a_row.swap(0, Ordering::Relaxed),
+            };
             observe(&passed);
             swept.add(passed, self.slowest);
         }
         let refused = refused.lock().unwrap().take();
-        if let Some(refused) = refused {
+        if let Some(refused) = &refused {
             log::error!("cladefs-gc: listing the cells: the bucket refuses {refused}");
-            swept.failed += 1;
         }
+        // cladefs: its own outcome, never a pass's: no count of passes goes past those it ran
+        // (board 8509). A pass its budget refused stops it, however late.
+        swept.capped = bounds.capped();
+        let capped = (swept.capped > 0).then_some(Stopped::Capped);
+        let halted = halted.lock().unwrap().take();
+        swept.stopped = halted.or(refused.map(Stopped::Unlisted)).or(capped);
         swept.took = started.elapsed();
         swept
     }
 
     /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own, hearing of
-    /// its tenant's KEK by `heard`, the sweep's.
+    /// its tenant's KEK by `heard`, the sweep's; deleting no more than its `budget` gives, and
+    /// making its requests in their turns, as its `pacer` gives them, if given (board 8529).
     async fn pass<B: Bucket, O: Bucket>(
         &self,
         bucket: &Arc<B>,
@@ -310,27 +552,32 @@ impl Sweep {
         cell: CellId,
         since: u64,
         heard: Arc<Heard>,
+        (budget, pacer): (Option<Arc<Budget>>, Option<Arc<Pacer>>),
     ) -> Ran {
-        let counted = Counted::new(bucket.clone());
+        let counted = Counted::new(bucket.clone(), pacer.clone());
         // cladefs: a cell of another bucket here is a copy of its versions (TASK-633.8).
         if let Some((own, number)) = copies
             && crate::layout::routed_to(&cell.prefix()).is_some_and(|of| of != number)
         {
             let started = Instant::now();
-            let collector = Collector::new(self.options);
+            let collector = Collector::new(self.options).budget(budget);
+            // Its requests of its own bucket, counted and paced as those of this one.
+            let own = Counted::new(own, pacer);
             let outcome = match self.mode {
-                Mode::Delete => match collector.collect_copy(&counted, &*own, number, cell).await {
+                Mode::Delete => match collector.collect_copy(&counted, &own, number, cell).await {
                     Ok(report) => Outcome::Collected(report),
                     Err(error) => Outcome::failed(error),
                 },
                 // A mark-only pass marks nothing of a copy, which nothing compacts.
                 Mode::MarkOnly => Outcome::Collected(Report::default()),
             };
-            return Ran { cell, outcome, requests: counted.requests(), took: started.elapsed() };
+            let mut requests = counted.requests();
+            requests += own.requests();
+            return Ran { cell, outcome, requests, took: started.elapsed() };
         }
         let holding = Holding { lease: self.lease, since: Some(since) };
         let collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
-        let mut collector = collector.heard(heard);
+        let mut collector = collector.heard(heard).budget(budget);
         let holder = rand::random();
         let started = Instant::now();
         let outcome = match self.mode {
@@ -359,15 +606,17 @@ impl Outcome {
 
 /// A bucket that counts the requests made of it, by kind, as a
 /// [`crate::object_bucket::ObjectBucket`] counts its own: each pass's, apart from the others' it
-/// runs beside.
+/// runs beside. cladefs: each in its turn, as its sweep's pacer gives them, if it has one (board
+/// 8529).
 struct Counted<B> {
     bucket: Arc<B>,
     counts: [AtomicU64; Request::ALL.len()],
+    pacer: Option<Arc<Pacer>>,
 }
 
 impl<B: Bucket> Counted<B> {
-    fn new(bucket: Arc<B>) -> Self {
-        Self { bucket, counts: Default::default() }
+    fn new(bucket: Arc<B>, pacer: Option<Arc<Pacer>>) -> Self {
+        Self { bucket, counts: Default::default(), pacer }
     }
 
     fn count(&self, request: Request) {
@@ -377,12 +626,22 @@ impl<B: Bucket> Counted<B> {
     fn requests(&self) -> Requests {
         Requests(self.counts.each_ref().map(|count| count.load(Ordering::Relaxed)))
     }
+
+    /// Waits for a request's turn, if paced.
+    async fn turn(&self) {
+        if let Some(pacer) = &self.pacer {
+            pacer.turn().await;
+        }
+    }
 }
 
 impl<B: Bucket> Bucket for Counted<B> {
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
         self.count(Request::Get);
-        self.bucket.get(key)
+        async move {
+            self.turn().await;
+            self.bucket.get(key).await
+        }
     }
 
     fn get_range(
@@ -391,25 +650,33 @@ impl<B: Bucket> Bucket for Counted<B> {
         range: ByteRange,
     ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
         self.count(Request::GetRange);
-        self.bucket.get_range(key, range)
+        async move {
+            self.turn().await;
+            self.bucket.get_range(key, range).await
+        }
     }
 
     fn head(&self, key: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
         self.count(Request::Head);
-        self.bucket.head(key)
+        async move {
+            self.turn().await;
+            self.bucket.head(key).await
+        }
     }
 
     /// A request a page of [`crate::bucket::LIST_PAGE`] objects, as S3 and GCS serve it, whatever
-    /// the bucket under it does (TASK-455).
-    fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
-        let listing = self.bucket.list(prefix);
-        async move {
-            let listed = listing.await;
-            let objects = listed.as_ref().map_or(0, Vec::len);
-            let pages = crate::bucket::list_pages(objects);
-            self.counts[Request::List as usize].fetch_add(pages, Ordering::Relaxed);
-            listed
+    /// the bucket under it does (TASK-455): paced so, its pages after the first taking the turns
+    /// of the requests after it.
+    async fn list(&self, prefix: &str) -> Result<Vec<Meta>, BucketError> {
+        self.turn().await;
+        let listed = self.bucket.list(prefix).await;
+        let objects = listed.as_ref().map_or(0, Vec::len);
+        let pages = crate::bucket::list_pages(objects);
+        self.counts[Request::List as usize].fetch_add(pages, Ordering::Relaxed);
+        if let Some(pacer) = &self.pacer {
+            pacer.take(pages.saturating_sub(1).min(u32::MAX.into()) as u32);
         }
+        listed
     }
 
     fn list_delimited(
@@ -418,7 +685,10 @@ impl<B: Bucket> Bucket for Counted<B> {
         page: Page<'_>,
     ) -> impl Future<Output = Result<Listing, BucketError>> + Send {
         self.count(Request::ListDelimited);
-        self.bucket.list_delimited(prefix, page)
+        async move {
+            self.turn().await;
+            self.bucket.list_delimited(prefix, page).await
+        }
     }
 
     fn put(
@@ -432,12 +702,18 @@ impl<B: Bucket> Bucket for Counted<B> {
             PutMode::Update(_) => Request::Update,
             PutMode::Overwrite => Request::Overwrite,
         });
-        self.bucket.put(key, bytes, mode)
+        async move {
+            self.turn().await;
+            self.bucket.put(key, bytes, mode).await
+        }
     }
 
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::Delete);
-        self.bucket.delete(key)
+        async move {
+            self.turn().await;
+            self.bucket.delete(key).await
+        }
     }
 
     fn delete_if(
@@ -446,13 +722,19 @@ impl<B: Bucket> Bucket for Counted<B> {
         version: &Version,
     ) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::Delete);
-        self.bucket.delete_if(key, version)
+        async move {
+            self.turn().await;
+            self.bucket.delete_if(key, version).await
+        }
     }
 
     /// One request, as a backend with batch deletes makes it, whatever the bucket under it does.
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::DeleteBatch);
-        self.bucket.delete_batch(keys)
+        async move {
+            self.turn().await;
+            self.bucket.delete_batch(keys).await
+        }
     }
 
     fn rewritable(&self, key: &str) -> impl Future<Output = ()> + Send {
@@ -739,23 +1021,15 @@ mod tests {
         }
     }
 
-    /// A bucket that notes, for each request of a cell's, the Tokio task that made it.
-    struct Tasks {
+    /// A bucket that tells `note` of each request's key as it is made.
+    struct Noting<F> {
         bucket: Arc<ObjectBucket>,
-        tasks: std::sync::Mutex<BTreeSet<(CellId, Option<tokio::task::Id>)>>,
+        note: F,
     }
 
-    impl Tasks {
-        fn note(&self, key: &str) {
-            if let Some(cell) = layout::cell_of(key) {
-                self.tasks.lock().unwrap().insert((cell, tokio::task::try_id()));
-            }
-        }
-    }
-
-    impl Bucket for Tasks {
+    impl<F: Fn(&str) + Send + Sync + 'static> Bucket for Noting<F> {
         fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
-            self.note(key);
+            (self.note)(key);
             self.bucket.get(key)
         }
 
@@ -764,12 +1038,12 @@ mod tests {
             key: &str,
             range: ByteRange,
         ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
-            self.note(key);
+            (self.note)(key);
             self.bucket.get_range(key, range)
         }
 
         fn head(&self, key: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
-            self.note(key);
+            (self.note)(key);
             self.bucket.head(key)
         }
 
@@ -777,7 +1051,7 @@ mod tests {
             &self,
             prefix: &str,
         ) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
-            self.note(prefix);
+            (self.note)(prefix);
             self.bucket.list(prefix)
         }
 
@@ -786,7 +1060,7 @@ mod tests {
             prefix: &str,
             page: Page<'_>,
         ) -> impl Future<Output = Result<Listing, BucketError>> + Send {
-            self.note(prefix);
+            (self.note)(prefix);
             self.bucket.list_delimited(prefix, page)
         }
 
@@ -796,12 +1070,12 @@ mod tests {
             bytes: bytes::Bytes,
             mode: PutMode,
         ) -> impl Future<Output = Result<Version, BucketError>> + Send {
-            self.note(key);
+            (self.note)(key);
             self.bucket.put(key, bytes, mode)
         }
 
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.note(key);
+            (self.note)(key);
             self.bucket.delete(key)
         }
 
@@ -810,15 +1084,16 @@ mod tests {
             key: &str,
             version: &Version,
         ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            self.note(key);
+            (self.note)(key);
             self.bucket.delete_if(key, version)
         }
 
+        /// One request, as [`Counted`] counts it.
         fn delete_batch(
             &self,
             keys: &[&str],
         ) -> impl Future<Output = Result<(), BucketError>> + Send {
-            keys.iter().for_each(|key| self.note(key));
+            (self.note)(keys.first().copied().unwrap_or_default());
             self.bucket.delete_batch(keys)
         }
 
@@ -838,15 +1113,21 @@ mod tests {
         let swept = |spawned: bool| {
             let memory =
                 Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
-            let bucket = Arc::new(Tasks { bucket: memory.clone(), tasks: Default::default() });
+            // For each request of a cell's, the Tokio task that made it.
+            let tasks = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+            let noted = tasks.clone();
+            let note = move |key: &str| {
+                if let Some(cell) = layout::cell_of(key) {
+                    noted.lock().unwrap().insert((cell, tokio::task::try_id()));
+                }
+            };
+            let bucket = Arc::new(Noting { bucket: memory.clone(), note });
             runtime.block_on(fill(&memory, &cells, false));
             let sweep = Sweep { spawned, ..sweep(4) };
-            let swept = {
-                let bucket = bucket.clone();
-                runtime.block_on(runtime.spawn(async move { sweep.run(&bucket, |_| {}).await }))
-            };
+            let swept =
+                runtime.block_on(runtime.spawn(async move { sweep.run(&bucket, |_| {}).await }));
             let swept = swept.unwrap();
-            let tasks = std::mem::take(&mut *bucket.tasks.lock().unwrap());
+            let tasks = std::mem::take(&mut *tasks.lock().unwrap());
             (swept.visited, swept.report.deleted, tasks)
         };
         let (visited, deleted, tasks) = swept(true);
@@ -1031,7 +1312,7 @@ mod tests {
                 crate::bucket::create(&*bucket, &format!("many/{n:05}"), vec![1]).await.unwrap();
             }
         });
-        let counted = Counted::new(bucket);
+        let counted = Counted::new(bucket, None);
         for (prefix, objects, pages) in [("none/", 0, 1), ("many/0000", 10, 1), ("many/", 2001, 3)]
         {
             let before = counted.requests().of(Request::List);
@@ -1147,5 +1428,196 @@ mod tests {
         let decided = |passed: Passed| (passed.listing, passed.decided);
         assert_eq!(recorded().map(decided), Some(decided(rewritten)));
         assert_eq!(run(&second).report, skipped);
+    }
+
+    /// A bucket that refuses every request but listings by delimiter, as one whose credentials
+    /// no longer reach its cells' objects: what a pass asks first, a GET of its cell's lease, it
+    /// refuses.
+    struct Refusing(Direct);
+
+    impl Refusing {
+        fn refused<T>() -> std::future::Ready<Result<T, BucketError>> {
+            std::future::ready(Err(BucketError::Refused(crate::bucket::Refusal::Denied)))
+        }
+    }
+
+    impl Bucket for Refusing {
+        fn get(&self, _: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn get_range(
+            &self,
+            _: &str,
+            _: ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn head(&self, _: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn list(&self, _: &str) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: Page<'_>,
+        ) -> impl Future<Output = Result<Listing, BucketError>> + Send {
+            self.0.list_delimited(prefix, page)
+        }
+
+        fn put(
+            &self,
+            _: &str,
+            _: bytes::Bytes,
+            _: PutMode,
+        ) -> impl Future<Output = Result<Version, BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn delete(&self, _: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn delete_if(
+            &self,
+            _: &str,
+            _: &Version,
+        ) -> impl Future<Output = Result<(), BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn delete_batch(&self, _: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
+            Self::refused()
+        }
+
+        fn now(&self) -> u64 {
+            self.0.now()
+        }
+    }
+
+    /// board 8529's AC #1: a sweep's passes delete no more together than its bounds, of objects
+    /// or of bytes, let them: a pass that would go past one deletes nothing, nor does any after
+    /// it, and the sweep starts no more, saying so; and records nothing new, so that the next
+    /// sweep, unbounded, deletes what it left, and the rest.
+    #[test]
+    fn sweeps_delete_no_more_than_their_bounds() {
+        let cells = cells(10);
+        // Bounds, and the passes run, the objects deleted.
+        let cases = [
+            (Limits { deleted_objects: Some(5), ..Limits::default() }, 3, 4),
+            (Limits { deleted_objects: Some(6), ..Limits::default() }, 4, 6),
+            (Limits { deleted_bytes: Some(1), ..Limits::default() }, 1, 0),
+        ];
+        for (limits, visited, deleted) in cases {
+            let bucket = Arc::new(Direct(SimBucket::new()));
+            block_on(fill(&bucket, &cells, false));
+            // The cells' objects, their leases, the collector's, aside.
+            let objects = || {
+                let lease = |key: &&String| {
+                    matches!(layout::kind(key), layout::Kind::CollectorLease { .. })
+                };
+                block_on(sizes(&*bucket)).keys().filter(|key| !lease(key)).count()
+            };
+            let before = objects();
+            let own = None::<&Arc<Direct>>;
+            let swept = block_on(sweep(1).run_limited(&bucket, own, None, &limits, |_| {}));
+            let said = (swept.visited, swept.report.deleted, swept.capped, swept.stopped.clone());
+            assert_eq!(said, (visited, deleted, 1, Some(Stopped::Capped)), "{limits:?}");
+            assert!(!swept.complete(), "{limits:?}");
+            assert_eq!(objects(), before - deleted, "{limits:?}");
+            let after = block_on(sweep(1).run(&bucket, |_| {}));
+            assert_eq!(after.report.deleted, 2 * cells.len() - deleted, "{limits:?}");
+            assert!(after.complete(), "{after:?}");
+        }
+    }
+
+    /// board 8529's AC #3: after so many passes in a row the bucket refused, a sweep starts no
+    /// more, saying so; unbounded, it runs a pass over every cell, each refused.
+    #[test]
+    fn sweeps_stop_after_passes_in_a_row_refused() {
+        let cells = cells(12);
+        let direct = Direct(SimBucket::new());
+        block_on(fill(&Arc::new(Direct(direct.0.clone())), &cells, false));
+        let bucket = Arc::new(Refusing(direct));
+        let limits = Limits { refused_in_a_row: Some(3), ..Limits::default() };
+        let own = None::<&Arc<Refusing>>;
+        let swept = block_on(sweep(1).run_limited(&bucket, own, None, &limits, |_| {}));
+        let said = (swept.visited, swept.failed, swept.passed, swept.stopped);
+        assert_eq!(said, (3, 3, 0, Some(Stopped::Refusing(3))));
+        let swept = block_on(sweep(1).run(&bucket, |_| {}));
+        let said = (swept.visited, swept.failed, swept.passed, swept.stopped);
+        assert_eq!(said, (12, 12, 0, None));
+    }
+
+    /// board 8509's AC #3: a sweep that could not read its bucket's own identity, and so tell its
+    /// cells from copies, goes over none and says why, failed: before, it was a sweep of no
+    /// cells, as if the bucket held none.
+    #[test]
+    fn sweeps_fail_on_their_buckets_identity_unread() {
+        let bucket = Arc::new(Direct(SimBucket::new()));
+        block_on(fill(&bucket, &cells(2), false));
+        let own = Arc::new(Refusing(Direct(SimBucket::new())));
+        let swept = block_on(sweep(1).run_with_own(&bucket, Some(&own), |_| {}));
+        assert_eq!((swept.visited, swept.failed), (0, 0));
+        let Some(Stopped::Unidentified(Error::Refused(refused))) = &swept.stopped else {
+            panic!("{swept:?}")
+        };
+        assert_eq!(refused.key, crate::layout::IDENTITY);
+        assert!(!swept.complete());
+    }
+
+    /// board 8513's AC #1: a sweep asked to stop starts no more passes, and says so: asked before
+    /// it began, none; asked as its first pass ended, that one alone.
+    #[test]
+    fn sweeps_asked_to_stop_start_no_more_passes() {
+        let bucket = Arc::new(Direct(SimBucket::new()));
+        block_on(fill(&bucket, &cells(6), false));
+        let stop = Arc::new(Stop::default());
+        let limits = Limits { stop: Some(stop.clone()), ..Limits::default() };
+        let run = |observe: &dyn Fn(&Ran)| {
+            block_on(sweep(1).run_limited(&bucket, None::<&Arc<Direct>>, None, &limits, observe))
+        };
+        let swept = run(&|_| stop.ask());
+        assert_eq!((swept.visited, swept.report.deleted), (1, 2));
+        assert_eq!(swept.stopped, Some(Stopped::Asked));
+        let swept = run(&|_| {});
+        assert_eq!((swept.visited, swept.stopped), (0, Some(Stopped::Asked)));
+    }
+
+    /// board 8529's AC #2: a sweep making so many requests a second at most makes them in their
+    /// turns, its passes' and its listing's together, each the pace's time after the one before,
+    /// as the bucket under it sees them: as many as it counts.
+    #[test]
+    fn paced_sweeps_make_their_requests_in_their_turns() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let memory =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        runtime.block_on(fill(&memory, &cells(4), false));
+        let made: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>> = Arc::default();
+        let noted = made.clone();
+        let note = move |_: &str| noted.lock().unwrap().push(tokio::time::Instant::now());
+        let bucket = Arc::new(Noting { bucket: memory, note });
+        let limits = Limits { requests_per_second: Some(20.0), ..Limits::default() };
+        let (began, swept) = runtime.block_on(async {
+            let began = tokio::time::Instant::now();
+            let own = None::<&Arc<Direct>>;
+            (began, sweep(2).run_limited(&bucket, own, None, &limits, |_| {}).await)
+        });
+        assert_eq!((swept.visited, swept.report.deleted, swept.stopped), (4, 8, None));
+        let made = made.lock().unwrap().clone();
+        assert_eq!(made.len() as u64, swept.requests.total());
+        let turns: Vec<Duration> = made.iter().map(|at| *at - began).collect();
+        let expected: Vec<Duration> =
+            (0..made.len() as u32).map(|turn| Duration::from_millis(50) * turn).collect();
+        assert_eq!(turns, expected);
     }
 }

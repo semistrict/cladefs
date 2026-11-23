@@ -183,7 +183,7 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `identity` | cladefs: the bucket's identity: its format, its **bucket number** and a random ID (`bucket_cell::identity`, TASK-633.9, doc-23) | create-only, by the bucket's formatting (`cladefsctl format-bucket`, or an allocator's before its first block) or its addition (`cladefsctl add-bucket`); kept for good |
 | `buckets` | cladefs: the record of every bucket: its version, and each bucket's number, identity ID, provider, cloud region, URL, endpoint, KMS and master key's ID; the root bucket's (number 1) is the authority, every other's a copy (doc-23) | the root's: created by its formatting, then updated with a condition by each addition, which serializes them; a copy: created, or updated with a condition, never by an older version; kept for good |
 | `tenants/<tenant>/kek` | cladefs: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`cladefs-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
-| `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
+| `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks, `cladefs-gc --clear-marks` (board 8515) |
 
 *Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease,
 `gc/marking` and a tenant's KEK object (TASK-411.27) is **written once**: created once, never written again, nor created again once
@@ -1466,7 +1466,10 @@ operator to see what the collector would do before trusting it with a bucket:
     of the cell, a cell not read for two minutes forgotten; all uncounted in its stats, never a
     round trip a read. Unmarked, a bucket costs a reader a HEAD a minute (TASK-395.4's review: a
     listing a minute for every cell each host reads was thousands a second at a million VMs). An
-    operator removes `gc/marking` with the marks. A GET, ranged GET or HEAD of a marked key logs a `warn`
+    operator removes `gc/marking` with the marks: `cladefs-gc URL --clear-marks` deletes every
+    cell's `<C>gc/marks/`, then `gc/marking`, so that readers watch marks for as long as any are
+    there; `--clear-marks --cell C` deletes C's alone, leaving `gc/marking` (board 8515). A dead
+    cell's marks keep it from being removed whole until they go. A GET, ranged GET or HEAD of a marked key logs a `warn`
     with the key, its kind (naming its branch), the request, the marks' epoch and the current span's
     trace and span IDs; in cladefsd the log names the guest request too (`request_id`). A read costs
     one load with no marks, one set lookup with some. Listings are logged at `debug` only: they name
