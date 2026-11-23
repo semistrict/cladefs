@@ -1,0 +1,2 @@
+cladefs ephemeral host 2
+{"child":{"tenant":47,"id":4294967297},"origin":{"parent":{"tenant":47,"id":7},"at":12,"epoch":3},"path":"/var/lib/cladefs/cells/c1","bucket":"gs://cladefs-golden/cells","epoch":5,"migrating":{"HandedOver":{"id":82,"peer":"10.0.0.7:7777"}}}

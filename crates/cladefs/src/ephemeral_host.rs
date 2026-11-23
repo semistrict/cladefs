@@ -14,21 +14,22 @@
 //!   (`DecommissionHost`, `cladefsctl decommission-host`) retires those references. Written in
 //!   base 32 wherever it is printed ([`said`]): the daemon's log, `GetStats`, cladefsctl (board
 //!   8521, hotbed question 480);
-//! - `cells/<TENANT>.<CELL>`, one for each ephemeral cell it may hold, written, durably, before
+//! - `cells/<TENANT>.<CELL>`, padded base 32 ([`base32_id::Padded`]), one for each ephemeral cell it may hold, written, durably, before
 //!   the cell's reference: its parent and origin, its cell's path, the bucket its parent is
 //!   kept in, and the cell's epoch; and the migration it is being taken by from another host, if
 //!   it is (TASK-698.4), or that took it from here, the cell let go of (board 5730). Removed once
 //!   the reference is;
-//! - `accepted/<MIGRATION>`, one for each migration it accepted, so that it answers yes to a
+//! - `accepted/<MIGRATION>`, padded base 32, one for each migration it accepted, so that it answers yes to a
 //!   hand-over it accepted however late it is asked again, the cell gone on since
 //!   (specs/ephemeral, `remembersAccepted`); kept until the migration's source, having let the
 //!   cell go, asks no more and releases it (board 5734).
 //!
-//! Each of these files begins with a line naming their format, [`FORMAT`], the rest JSON: one of
-//! another format, or not whole, which their durable writes never leave, is refused, failing the
-//! call reading it and the daemon's start, never deleted or taken for none (board 8461): it is of
-//! another build's, its schema changed, or corrupt, and taken for none it lost a migration under
-//! way, or a reference no start then retired. Nothing migrates (AGENTS.md, "No migrations").
+//! Each of these files begins with a line naming its version of the family [`FORMAT`], the rest
+//! JSON. The family is frozen (doc-28, board 10048): every later build reads every version of it
+//! from 2 on, its corpus under `formats/ephemeral-host/`. One of a version this build doesn't
+//! read, or not whole, which their durable writes never leave, is refused, failing the call
+//! reading it and the daemon's start, never deleted or taken for none (board 8461): taken for
+//! none it lost a migration under way, or a reference no start then retired.
 //!
 //! As the daemon starts, before it serves, each journal entry whose cell is not there, an
 //! ephemeral cell's of its cell, has its reference retired and goes: a fork its host crashed in,
@@ -54,14 +55,20 @@ pub(crate) struct Host {
     incarnation: u64,
 }
 
-/// The first line of each file of the host's ephemeral cells' directory: its format (board 8461).
-/// A change to what they hold, [`Entry`] and [`Migrating`] among it, is a new one.
-pub(crate) const FORMAT: &str = "cladefs ephemeral host 1";
+/// The family of the files of the host's ephemeral cells' directory (doc-28, board 10048), whose
+/// first line is [`HEADER`] and the version. A change to what they hold, [`Entry`] and
+/// [`Migrating`] among it, is a new version, whose reader still reads every one before.
+/// 1: board 8461, its names in hexadecimal. 2: its names in padded base 32
+/// ([`base32_id::Padded`]), as every other ID is written; frozen, nothing reads 1's.
+pub(crate) const FORMAT: formats::Format = formats::Format::new("ephemeral host", 2, 2);
 
-/// The error of a file of the host's ephemeral cells' directory of another format than
-/// [`FORMAT`], an older one included: refused, as nothing reads it.
+/// What each file's first line says before its version.
+const HEADER: &str = "cladefs ephemeral host ";
+
+/// The error of a file of the host's ephemeral cells' directory whose first line names no
+/// version of [`FORMAT`]: refused (a version named, but not read, is [`formats::Refused`]).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a file of format {found:?}, not {FORMAT:?}: refused")]
+#[error("a file of no ephemeral host format, its first line {found:?}: refused")]
 pub(crate) struct Format {
     /// Its first line, its first 64 characters.
     pub found: String,
@@ -171,7 +178,12 @@ impl Host {
     }
 
     fn entry_path(&self, child: CellId) -> PathBuf {
-        self.dir.join(CELLS).join(format!("{:x}.{:x}", child.tenant, child.id))
+        let (tenant, id) = (base32_id::Padded(child.tenant), base32_id::Padded(child.id));
+        self.dir.join(CELLS).join(format!("{tenant}.{id}"))
+    }
+
+    fn accepted_path(&self, migration: u64) -> PathBuf {
+        self.dir.join(ACCEPTED).join(base32_id::Padded(migration).to_string())
     }
 
     /// Notes, durably, that it may hold `entry`'s ephemeral cell: before its reference is written.
@@ -197,8 +209,7 @@ impl Host {
     /// Remembers, durably, that it accepted migration `migration`, of the cell `child`, until its
     /// source releases it.
     pub fn accept(&self, migration: u64, child: CellId) -> Result<(), Error> {
-        let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
-        write_durably(&path, &encode(&child)?)
+        write_durably(&self.accepted_path(migration), &encode(&child)?)
     }
 
     /// The cell migration `migration` took, if this host accepted it. Failing if its acceptance is
@@ -206,19 +217,18 @@ impl Host {
     /// another format: taken for none, the cell would go unnoted as taken, and a crash lose it
     /// (boards 6908, 8461).
     pub fn accepted_cell(&self, migration: u64) -> Result<Option<CellId>, Error> {
-        read(&self.dir.join(ACCEPTED).join(format!("{migration:x}")))
+        read(&self.accepted_path(migration))
     }
 
     /// Whether it accepted migration `migration`.
     pub fn accepted(&self, migration: u64) -> bool {
-        host_fs::exists(self.dir.join(ACCEPTED).join(format!("{migration:x}")))
+        host_fs::exists(self.accepted_path(migration))
     }
 
     /// Forgets, durably, that it accepted migration `migration`: its source let the cell go, and
     /// asks no more (board 5734).
     pub fn release(&self, migration: u64) -> Result<(), Error> {
-        let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
-        match host_fs::remove_file(&path) {
+        match host_fs::remove_file(self.accepted_path(migration)) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             removed => Ok(removed.and_then(|()| host_fs::sync_dir(self.dir.join(ACCEPTED)))?),
         }
@@ -436,31 +446,46 @@ fn held(entry: &Entry) -> Result<bool, Error> {
     Ok(local_cell::host_cell(&entry.path)? == entry.child)
 }
 
-/// `value` as a file of the host's ephemeral cells' directory holds it: its format's line, then
+/// `value` as a file of the host's ephemeral cells' directory holds it: its version's line, then
 /// its JSON.
 fn encode(value: &impl Serialize) -> Result<Vec<u8>, Error> {
-    let mut bytes = format!("{FORMAT}\n").into_bytes();
+    let mut bytes = format!("{HEADER}{}\n", FORMAT.current).into_bytes();
     serde_json::to_writer(&mut bytes, value)?;
     Ok(bytes)
 }
 
 /// What the file at `path` of the host's ephemeral cells' directory holds, as [`encode`] wrote it:
-/// none if it is not there. Failing if it is unread, of another format ([`Format`]), or not whole
-/// (board 8461). Its bytes are untrusted (AGENTS.md, Trust boundaries): read whole, split once.
-#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+/// none if it is not there. Failing if it is unread, or as [`decode`] fails.
 fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Error> {
     let bytes = match host_fs::read(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         read => read.with_context(|| format!("reading {}", path.display()))?,
     };
+    Ok(Some(decode(&bytes).with_context(|| format!("reading {}", path.display()))?))
+}
+
+/// What a file of the host's ephemeral cells' directory holds, `bytes`: failing if its first line
+/// names no version of [`FORMAT`] ([`Format`]), one this build doesn't read
+/// ([`formats::Refused`]), or if it is not whole (board 8461). Its bytes are untrusted (AGENTS.md,
+/// Trust boundaries): split once, the version's digits alone parsed.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     let mut lines = bytes.splitn(2, |&byte| byte == b'\n');
     let found = lines.next().unwrap_or_default();
-    if found != FORMAT.as_bytes() {
+    let version = std::str::from_utf8(found)
+        .ok()
+        .and_then(|line| line.strip_prefix(HEADER))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<u32>().ok());
+    let Some(version) = version else {
         let found = String::from_utf8_lossy(found).chars().take(64).collect();
-        return Err(Error::new(Format { found }).context(format!("reading {}", path.display())));
-    }
-    let value = serde_json::from_slice(lines.next().unwrap_or_default());
-    Ok(Some(value.with_context(|| format!("reading {}", path.display()))?))
+        return Err(Error::new(Format { found }));
+    };
+    let json = lines.next().unwrap_or_default();
+    FORMAT.check(version)?;
+    // Version 2's types are the current ones. A later version keeps them, as they are, decodes
+    // the files of 2 into them here, and converts them to its own.
+    Ok(serde_json::from_slice(json)?)
 }
 
 /// Writes `bytes` to a file at `path`, whole, durably, over any there.
@@ -502,8 +527,9 @@ mod tests {
         assert!(open(dir.path()).unwrap().accepted(0x3c));
         assert_eq!(host.accepted_cell(0x3c).unwrap(), Some(child));
         assert_eq!(host.accepted_cell(0x3d).unwrap(), None);
-        let file = dir.path().join(ACCEPTED).join("3e");
-        host_fs::write(&file, format!("{FORMAT}\n{{\"tenant").as_bytes()).unwrap();
+        let file = host.accepted_path(0x3e);
+        assert_eq!(file, dir.path().join(ACCEPTED).join("000000000001y"));
+        host_fs::write(&file, format!("{HEADER}2\n{{\"tenant").as_bytes()).unwrap();
         let unread = host.accepted_cell(0x3e).map_err(|err| format!("{err:#}"));
         assert_eq!(
             unread,
@@ -544,17 +570,33 @@ mod tests {
         let json = serde_json::to_string(&noted).unwrap();
         let schema = json.replacen('{', "{\"tier\":2,", 1);
         let note = host.entry_path(child);
+        assert_eq!(note, dir.path().join(CELLS).join("0000000000003.0000000000009"));
         let refusal = |found: &str| {
             format!(
-                "reading {}: a file of format {found:?}, not {FORMAT:?}: refused",
+                "reading {}: a file of no ephemeral host format, its first line {found:?}: refused",
+                note.display()
+            )
+        };
+        let unread = |version: u32| {
+            format!(
+                "reading {}: ephemeral host version {version}: this build reads version 2 alone",
                 note.display()
             )
         };
         let cases = [
             (json.clone(), refusal(&json[..64])),
-            (format!("cladefs ephemeral host 0\n{json}"), refusal("cladefs ephemeral host 0")),
+            (format!("cladefs ephemeral host\n{json}"), refusal("cladefs ephemeral host")),
+            (format!("cladefs ephemeral host +2\n{json}"), refusal("cladefs ephemeral host +2")),
             (
-                format!("{FORMAT}\n{schema}"),
+                format!("cladefs ephemeral host 4294967296\n{json}"),
+                refusal("cladefs ephemeral host 4294967296"),
+            ),
+            (format!("cladefs ephemeral host 0\n{json}"), unread(0)),
+            (format!("cladefs ephemeral host 1\n{json}"), unread(1)),
+            (format!("cladefs ephemeral host 3\n{json}"), unread(3)),
+            (format!("cladefs ephemeral host {}\n{json}", u32::MAX), unread(u32::MAX)),
+            (
+                format!("{HEADER}2\n{schema}"),
                 format!(
                     "reading {}: unknown field `tier`, expected one of `child`, `origin`, `path`, \
                      `bucket`, `epoch`, `migrating` at line 1 column 7",
@@ -562,7 +604,7 @@ mod tests {
                 ),
             ),
             (
-                format!("{FORMAT}\n{}", &json[..20]),
+                format!("{HEADER}2\n{}", &json[..20]),
                 format!(
                     "reading {}: EOF while parsing an object at line 1 column 20",
                     note.display()
@@ -583,14 +625,14 @@ mod tests {
         }
 
         // An acceptance, and an incarnation, of an older build's: refused alike.
-        let accepted = dir.path().join(ACCEPTED).join("3e");
+        let accepted = host.accepted_path(0x3e);
         host_fs::write(&accepted, serde_json::to_vec(&child).unwrap()).unwrap();
         let refused = host.accepted_cell(0x3e).map_err(|err| format!("{err:#}"));
         let found = serde_json::to_string(&child).unwrap();
         assert_eq!(
             refused,
             Err(format!(
-                "reading {}: a file of format {found:?}, not {FORMAT:?}: refused",
+                "reading {}: a file of no ephemeral host format, its first line {found:?}: refused",
                 accepted.display()
             ))
         );
@@ -600,10 +642,78 @@ mod tests {
         assert_eq!(
             refused,
             Err(format!(
-                "reading {}: a file of format \"12345\", not {FORMAT:?}: refused",
+                "reading {}: a file of no ephemeral host format, its first line \"12345\": \
+                 refused",
                 incarnation.display()
             ))
         );
         assert_eq!(host_fs::read(&incarnation).unwrap(), b"12345");
+    }
+
+    /// The family's golden corpus (doc-28): each kind of file, each kind of entry, as every
+    /// version from 2 wrote them, read by this build.
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<Files>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    struct Files;
+
+    /// An entry of the corpus's, migrating as `migrating` says.
+    fn golden_entry(migrating: Option<Migrating>) -> Entry {
+        Entry {
+            child: CellId { tenant: 0x2f, id: 0x1_0000_0001 },
+            origin: Origin { parent: CellId { tenant: 0x2f, id: 7 }, at: 12, epoch: 3 },
+            path: "/var/lib/cladefs/cells/c1".into(),
+            bucket: "gs://cladefs-golden/cells".into(),
+            epoch: 5,
+            migrating,
+        }
+    }
+
+    impl formats::golden::Family for Files {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let receiving = Migrating::Receiving { id: 0x51, token: u64::MAX };
+            let handed = Migrating::HandedOver { id: 0x52, peer: "10.0.0.7:7777".into() };
+            fn encoded(value: &impl Serialize) -> Vec<u8> {
+                encode(value).expect("encoding a corpus's file")
+            }
+            vec![
+                ("incarnation", encoded(&0xfedc_ba98_7654_3211_u64)),
+                ("cell", encoded(&golden_entry(None))),
+                ("cell-receiving", encoded(&golden_entry(Some(receiving)))),
+                ("cell-handed-over", encoded(&golden_entry(Some(handed)))),
+                ("accepted", encoded(&CellId { tenant: 0x2f, id: 9 })),
+            ]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            // Version 2's decoder, of files saying 2: its types are the current ones.
+            if version != 2 || !bytes.starts_with(format!("{HEADER}{version}\n").as_bytes()) {
+                return Err(format!("not a file of version {version}"));
+            }
+            Self::read_as(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::read_as(case, bytes).map(drop)
+        }
+    }
+
+    impl Files {
+        /// `bytes` decoded as the file `case` names, by this build's [`decode`].
+        fn read_as(case: &str, bytes: &[u8]) -> Result<String, String> {
+            fn said<T: std::fmt::Debug>(decoded: Result<T, Error>) -> Result<String, String> {
+                decoded.map(|value| format!("{value:#?}")).map_err(|err| format!("{err:#}"))
+            }
+            match case {
+                "incarnation" => said(decode::<u64>(bytes)),
+                "accepted" => said(decode::<CellId>(bytes)),
+                _ if case.starts_with("cell") => said(decode::<Entry>(bytes)),
+                _ => Err(format!("no file {case}")),
+            }
+        }
     }
 }
