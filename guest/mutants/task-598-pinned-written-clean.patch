@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2026 The cladefs Authors.
+#
+# Kernel: sim
+# Killer: scenarios cow_store_through_pin_after_writeback
+#
+# TASK-598 (board 2592): writeback leaves the pages a pin held clean once written: a store through a
+# short-term pin for writing (an O_DIRECT read's DMA into the mapping) after the copy faults
+# nowhere, in no dirty set, and the next fsync writes nothing of it
+# (cow_store_through_pin_after_writeback: Fxfs lacks the store).
+
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
+@@ -2508,8 +2508,6 @@
+ 		kept = cladefs_dax_keep(inode, batch, nr);
+ 	}
+ 	/* Written, and dirty again, those a pin held (cladefs_dax_protect), but by an eviction. */
+-	if (keep && cladefs_dax_take_pinned(batch, nr))
+-		cladefs_dax_keep(inode, batch, nr);
+ 	for (i = 0; i < nr; i++)
+ 		cladefs_dax_put_range(dax, batch[i].range);
+ 	atomic64_inc(&dax->writebacks);

@@ -70,11 +70,44 @@ static bool alloc_fails(gfp_t gfp, const char *file, int line)
 	return fail;
 }
 
+/*
+ * The locks reclaim from the filesystem takes: reclaim's inode shrinker evicts inodes no one holds,
+ * and an eviction writes its file back, taking the file's writeback lock, then its semaphore
+ * (cladefs_dax_evict), by the names their init gives them.
+ */
+static const char *const reclaim_takes[] = { "&file->wb_lock", "&file->sem" };
+
+/*
+ * An allocation, of `gfp`, at `file`:`line`: one that may reclaim from the filesystem (__GFP_FS,
+ * outside a NOFS scope) holding a lock that reclaim takes fails the run, as it could wait on that
+ * lock itself, the file's inode evicted under it (TASK-559, the budget's rebind allocating in the
+ * driver's sg_alloc_table). Lockdep's fs_reclaim finds it only once reclaim has evicted such a
+ * file, which a debug kernel's short runs never did; here every allocation counts.
+ */
+void sim_might_reclaim(gfp_t gfp, const char *file, int line)
+{
+	int i, j;
+
+	if (!current || !(current_gfp_context(gfp) & __GFP_FS))
+		return;
+	for (i = 0; i < current->nr_held; i++) {
+		for (j = 0; j < ARRAY_SIZE(reclaim_takes); j++) {
+			if (strcmp(current->held[i].name, reclaim_takes[j]))
+				continue;
+			sim_warn(file, line,
+				 "%s allocates as reclaim may from the filesystem, holding %s, "
+				 "which that reclaim takes: in no NOFS scope\n", current->comm,
+				 reclaim_takes[j]);
+		}
+	}
+}
+
 void *sim_kmalloc(size_t size, gfp_t gfp, const char *file, int line)
 {
 	void *p;
 
 	might_alloc(gfp);
+	sim_might_reclaim(gfp, file, line);
 	if (alloc_fails(gfp, file, line))
 		return NULL;
 	p = host_malloc(size);
@@ -86,6 +119,7 @@ void *sim_kmalloc(size_t size, gfp_t gfp, const char *file, int line)
 void *sim_krealloc(const void *p, size_t size, gfp_t gfp, const char *file, int line)
 {
 	might_alloc(gfp);
+	sim_might_reclaim(gfp, file, line);
 	if (alloc_fails(gfp, file, line))
 		return NULL;
 	return host_realloc((void *)p, size);

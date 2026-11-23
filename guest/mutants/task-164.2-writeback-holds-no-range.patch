@@ -10,7 +10,7 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2358,7 +2358,7 @@
+@@ -2431,7 +2431,7 @@
  	unsigned long kept = 0;
  	struct cladefs_dax_range *range;
  	unsigned long chunk;
@@ -19,7 +19,7 @@
  	long pages = 0, written = 0;
  	bool traced = false;
  	int err = 0;
-@@ -2414,8 +2414,6 @@
+@@ -2488,8 +2488,6 @@
  	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0) {
  		xa_clear_mark(&file->ranges, chunk, XA_MARK_0);
  		batch[nr].range = range;
@@ -27,11 +27,11 @@
 -		atomic_inc(&range->users);
  		pages += cladefs_dax_range_swap(range, batch[nr].pages);
  		bitmap_zero(batch[nr].kept, CLADEFS_DAX_PAGES);
- 		nr++;
-@@ -2432,8 +2430,6 @@
- 	} else if (kept) {
- 		kept = cladefs_dax_keep(inode, batch, nr);
- 	}
+ 		bitmap_zero(batch[nr].pinned, CLADEFS_DAX_PAGES);
+@@ -2510,8 +2508,6 @@
+ 	/* Written, and dirty again, those a pin held (cladefs_dax_protect), but by an eviction. */
+ 	if (keep && cladefs_dax_take_pinned(batch, nr))
+ 		cladefs_dax_keep(inode, batch, nr);
 -	for (i = 0; i < nr; i++)
 -		cladefs_dax_put_range(dax, batch[i].range);
  	atomic64_inc(&dax->writebacks);

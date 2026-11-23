@@ -91,6 +91,10 @@ static inline void bitmap_fill(unsigned long *dst, unsigned int nbits)
 {
 	memset(dst, 0xff, BITS_TO_LONGS(nbits) * sizeof(unsigned long));
 }
+static inline void bitmap_copy(unsigned long *dst, const unsigned long *src, unsigned int nbits)
+{
+	memcpy(dst, src, BITS_TO_LONGS(nbits) * sizeof(unsigned long));
+}
 static inline bool bitmap_empty(const unsigned long *src, unsigned int nbits)
 {
 	return find_first_bit(src, nbits) >= nbits;

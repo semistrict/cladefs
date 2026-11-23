@@ -374,6 +374,15 @@ u64 cladefs_sim_size(struct cladefs *fs, u64 ino)
 	return find_file(fs, ino)->size;
 }
 
+/*
+ * What Rust's allocator may do at any call into it: allocate GFP_KERNEL (fs/cladefs/rt.c), whose
+ * reclaim is checked as any other allocation's (sim_might_reclaim, TASK-559).
+ */
+static void rust_allocates(void)
+{
+	sim_might_reclaim(GFP_KERNEL, "guest/rust (rt.c's allocator)", 0);
+}
+
 ssize_t cladefs_dax_extents(struct cladefs *fs, u64 ino, u64 offset, u64 len, struct cladefs_dax_extent *out,
 			 size_t max)
 {
@@ -382,6 +391,7 @@ ssize_t cladefs_dax_extents(struct cladefs *fs, u64 ino, u64 offset, u64 len, st
 	ssize_t count = 0;
 	u32 access;
 
+	rust_allocates();
 	if (sim_sweep_fails("Fxfs's lookup of extents", __FILE__, __LINE__))
 		return -EIO;
 	mutex_lock(&fs->lock);
@@ -439,6 +449,7 @@ int cladefs_fsync(struct cladefs *fs)
 {
 	struct stub_extent *extent, *next;
 
+	rust_allocates();
 	if (sim_sweep_fails("a seal", __FILE__, __LINE__))
 		return -EIO;
 	mutex_lock(&fs->seal);
@@ -580,6 +591,7 @@ int cladefs_attr_of_open(struct cladefs *fs, u64 ino, struct cladefs_attr *attr)
 {
 	struct stub_file *file = lock_file(fs, ino);
 
+	rust_allocates();
 	mutex_lock(&fs->lock);
 	attr_of(file, attr);
 	mutex_unlock(&fs->lock);
@@ -596,6 +608,7 @@ int cladefs_write_inode(struct cladefs *fs, u64 ino, const struct cladefs_setatt
 	struct stub_file *file = lock_file(fs, ino);
 	u64 page, old;
 
+	rust_allocates();
 	if ((set->valid & CLADEFS_SET_SIZE) && set->size > file->size &&
 	    (sim_sweep_fails("a growth", __FILE__, __LINE__) ||
 	     (fail_odds && !(sim_random() % fail_odds)))) {
@@ -629,6 +642,7 @@ int cladefs_clone_range(struct cladefs *fs, u64 src, u64 offset, u64 len, u64 ds
 	struct block *block;
 	int err = 0;
 
+	rust_allocates();
 	/*
 	 * Failing, as a sweep has it, in its second half's transaction: what the first shared stands,
 	 * and the size that reached, as Fxfs's clone, a transaction at a time, leaves them.
@@ -676,6 +690,7 @@ int cladefs_punch(struct cladefs *fs, u64 ino, u64 offset, u64 len)
 	struct stub_file *file = lock_file(fs, ino);
 	u64 page;
 
+	rust_allocates();
 	mutex_lock(&fs->lock);
 	for (page = offset >> PAGE_SHIFT; page < (offset + len) >> PAGE_SHIFT &&
 	     page < file->nr_blocks; page++) {
@@ -698,6 +713,7 @@ int cladefs_reserve_dirty(struct cladefs *fs, u64 ino, u64 bytes)
 {
 	struct stub_file *file;
 
+	rust_allocates();
 	if (sim_sweep_fails("room for dirty pages", __FILE__, __LINE__) ||
 	    (fail_odds && !(sim_random() % fail_odds))) {
 		failures++;
@@ -712,6 +728,7 @@ int cladefs_reserve_dirty(struct cladefs *fs, u64 ino, u64 bytes)
 
 void cladefs_reserve_dirty_what_fits(struct cladefs *fs, u64 ino, u64 bytes)
 {
+	rust_allocates();
 	mutex_lock(&fs->lock);
 	find_file(fs, ino)->reserved += bytes;
 	mutex_unlock(&fs->lock);
@@ -728,6 +745,7 @@ static void unreserve(struct stub_file *file, u64 bytes, const char *what)
 
 void cladefs_release_dirty(struct cladefs *fs, u64 ino, u64 bytes)
 {
+	rust_allocates();
 	mutex_lock(&fs->lock);
 	unreserve(find_file(fs, ino), bytes, "release");
 	mutex_unlock(&fs->lock);
@@ -819,6 +837,7 @@ int cladefs_write_many(struct cladefs *fs, u64 ino, const struct cladefs_write_p
 	struct stub_file *file = lock_file(fs, ino);
 	struct stub_extent *extent;
 	struct written *pages;
+	rust_allocates();
 	char *copies;
 	size_t i, n = 0, total = 0;
 	u64 page, end = 0, device_at, first = 0;

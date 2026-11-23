@@ -34,6 +34,13 @@
 #define gfpflags_allow_blocking(gfp) (!!((gfp) & __GFP_DIRECT_RECLAIM))
 #define might_alloc(gfp) might_sleep_if(gfpflags_allow_blocking(gfp))
 
+/* `gfp` as the task's allocation scope has it: no __GFP_FS in a NOFS one (memalloc_nofs_save). */
+static inline gfp_t current_gfp_context(gfp_t gfp)
+{
+	return current->nofs ? gfp & ~__GFP_FS : gfp;
+}
+
+void sim_might_reclaim(gfp_t gfp, const char *file, int line);
 void *sim_kmalloc(size_t size, gfp_t gfp, const char *file, int line);
 void *sim_krealloc(const void *p, size_t size, gfp_t gfp, const char *file, int line);
 void kfree(const void *p);

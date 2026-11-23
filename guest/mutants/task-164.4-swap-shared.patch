@@ -10,26 +10,26 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2129,11 +2129,11 @@
+@@ -2476,11 +2476,11 @@
  		}
  		/* Between the count and the swap, where iomaps may dirty more (pause points). */
  		cladefs_dax_pause_file(CLADEFS_DAX_STEP_COUNTED, inode->i_ino);
--		down_write(&file->sem);
-+		down_read(&file->sem);
+-		cladefs_nofs_down_write(&file->sem);
++		cladefs_nofs_down_read(&file->sem);
  		now = cladefs_dax_dirty_ranges(file);
  		if (now && now <= most)
  			break;
--		up_write(&file->sem);
-+		up_read(&file->sem);
+-		cladefs_nofs_up_write(&file->sem);
++		cladefs_nofs_up_read(&file->sem);
  		kvfree(batch);
  		batch = NULL;
  		most = now;
-@@ -2148,7 +2148,7 @@
+@@ -2496,7 +2496,7 @@
  		nr++;
  	}
  	cladefs_dax_count(dax, file, 0, -pages);
--	up_write(&file->sem);
-+	up_read(&file->sem);
- 	cladefs_dax_protect(inode->i_mapping, batch, nr);
+-	cladefs_nofs_up_write(&file->sem);
++	cladefs_nofs_up_read(&file->sem);
+ 	cladefs_dax_protect(dax, inode->i_mapping, batch, nr);
  	/* Before it reads its ranges' window pages, which nothing may free (pause points). */
  	cladefs_dax_pause_file(CLADEFS_DAX_STEP_WRITEBACK, inode->i_ino);

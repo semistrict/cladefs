@@ -16,11 +16,11 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2226,7 +2226,7 @@
+@@ -2492,7 +2492,7 @@
  	}
  	cladefs_dax_count(dax, file, 0, -pages);
- 	up_write(&file->sem);
--	cladefs_dax_protect(inode->i_mapping, batch, nr);
+ 	cladefs_nofs_up_write(&file->sem);
+-	cladefs_dax_protect(dax, inode->i_mapping, batch, nr);
 +	cladefs_dax_clean_entries(inode, 0, LLONG_MAX);
  	/* Before it reads its ranges' window pages, which nothing may free (pause points). */
  	cladefs_dax_pause_file(CLADEFS_DAX_STEP_WRITEBACK, inode->i_ino);

@@ -26,12 +26,14 @@ static const struct cladefs_data_ops *cladefs_data_ops(struct inode *inode)
  * Makes `inode` `size` bytes long, with the attributes `iattr` sets, if any, and writes them back.
  * Its inode lock held. cladefs: every change of a file's size goes here: a DAX write stopped short
  * made its own, telling Fxfs nothing of the window's last block, which Fxfs moved from under it to
- * zero what it held past the end (TASK-150.9).
+ * zero what it held past the end (TASK-150.9). In a NOFS scope: DAX's resize holds the file's
+ * writeback lock from its begin to its end (dax.c, cladefs_nofs_held).
  */
 int cladefs_data_resize(struct inode *inode, loff_t size, struct mnt_idmap *idmap, struct iattr *iattr)
 {
 	const struct cladefs_data_ops *ops = cladefs_data_ops(inode);
 	loff_t old_size = i_size_read(inode);
+	cladefs_nofs_scope();
 	int err = ops->resize_begin(inode, size);
 
 	if (err)

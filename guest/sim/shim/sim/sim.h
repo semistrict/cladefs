@@ -174,6 +174,11 @@ int sim_clone(struct file *in, loff_t pos_in, struct file *out, loff_t pos_out, 
 unsigned long sim_mmap(struct file *file, loff_t offset, size_t len);
 unsigned long sim_mm_map(struct mm_struct *mm, struct file *file, pgoff_t pgoff, size_t len);
 void sim_munmap(unsigned long addr);
+/*
+ * mprotect of the mapping at `addr`, whole: read-only, or writable again, as change_protection
+ * makes a shared mapping's PTEs (kernel/mm.c).
+ */
+void sim_mprotect(unsigned long addr, bool writable);
 void sim_mm_init(void *window, u64 len);
 unsigned long sim_window_pfn(pgoff_t pgoff);
 /* How many faults tasks have taken. */
@@ -187,7 +192,19 @@ int sim_user_load(unsigned long addr, void *buf, size_t len);
 size_t sim_copy_user(unsigned long addr, void *buf, size_t len, bool write);
 /* A pin of a task's page, as vmsplice takes one (pin_user_pages): the page, or NULL. */
 struct page *sim_pin_user_page(unsigned long addr);
+/*
+ * A pin for writing (FOLL_WRITE), as an O_DIRECT read into the page takes one, faulting the page
+ * in for a store; the kernel then stores through the page, as DMA does, with no fault.
+ */
+struct page *sim_pin_user_page_write(unsigned long addr);
 void sim_unpin_page(struct page *page);
+/*
+ * The kernel's store of `len` bytes of `buf` through a pin of `file`'s page at `pos`, as DMA into
+ * it does: no fault, whatever the PTE; the file model told of it as of a mapped write.
+ */
+void sim_pin_store(struct page *page, struct file *file, loff_t pos, const void *buf, size_t len);
+/* unpin_user_pages_dirty_lock: the page marked dirty in its mapping (folio_mark_dirty_lock). */
+void sim_unpin_page_dirty(struct page *page, struct address_space *mapping);
 
 /* The sim's Fxfs: reads the file as it would, from its extents, for the tests to check. */
 void cladefs_sim_read(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len);

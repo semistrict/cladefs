@@ -47,6 +47,18 @@
  * barrier (vfs.h), which a batch takes holding no inode's lock; an inode's invalidate_lock
  * (faults, truncation and reclaim); its file's writeback lock (`wb_lock`); then its file's DAX
  * semaphore. Another inode's are only tried, when reclaiming its ranges.
+ *
+ * cladefs: a file's writeback lock and semaphore are held only in a NOFS allocation scope, taken
+ * and let go of through vfs.h's cladefs_nofs_* alone (scripts/cocci/nofs-locks.cocci), which check
+ * that it is one. Reclaim's inode shrinker evicts inodes no one holds, and an eviction writes its
+ * file back, taking both (cladefs_dax_evict): an allocation under them that could reclaim from the
+ * filesystem, in dax.c, in Rust or in the device's driver, could wait on them itself, as the
+ * budget's rebind's did in the driver's sg_alloc_table, holding a file whose inode it doesn't hold
+ * (TASK-559). A function that takes and lets go of them enters the scope at its top
+ * (cladefs_nofs_scope); one that returns holding them leaves it to its caller
+ * (cladefs_dax_map_missing; cladefs_dax_resize_begin, whose caller is data.c's resize); and the
+ * iomaps' callers enter it around them, a write's iomap holding the semaphore from its begin to its
+ * end (cladefs_dax_iomap_rw).
  */
 
 #include <linux/dax.h>
@@ -62,6 +74,7 @@
 #include <linux/pagemap.h>
 #include <linux/pagewalk.h>
 #include <linux/prandom.h>
+#include <linux/rmap.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/sort.h>
@@ -540,13 +553,16 @@ static loff_t cladefs_dax_chunk_start(const struct cladefs_dax_range *range)
 	return (loff_t)range->chunk << CLADEFS_DAX_SHIFT;
 }
 
-/* Room for the pieces of a chunk's data, at most one per page, from Rust. */
+/*
+ * Room for the pieces of a chunk's data, at most one per page, from Rust. Under the file's
+ * semaphore, in the NOFS scope it is held in (cladefs_nofs_held), as the extents' lookups are.
+ */
 static struct cladefs_dax_extent *cladefs_dax_alloc_extents(struct cladefs_dax *dax, size_t capacity)
 {
 	struct cladefs_dax_extent *extents;
 
 	/* DAX blocks are pages: at most one returned extent per covered logical page. */
-	extents = cladefs_nofs(kvmalloc_array(capacity, sizeof(*extents), GFP_KERNEL));
+	extents = kvmalloc_array(capacity, sizeof(*extents), GFP_KERNEL);
 	if (extents)
 		atomic64_add(capacity * sizeof(*extents), &dax->extent_alloc_bytes);
 	return extents;
@@ -858,7 +874,7 @@ static ssize_t cladefs_dax_sealed_extents(struct cladefs_dax *dax, struct cladef
 
 	for (;;) {
 		seals = cladefs_device_seals(dax->dev);
-		count = cladefs_nofs(cladefs_dax_extents(fs, ino, offset, len, found, capacity));
+		count = cladefs_dax_extents(fs, ino, offset, len, found, capacity);
 		if (count < 0 || (!(seals & 1) && cladefs_device_seals(dax->dev) == seals))
 			return count;
 		cladefs_device_wait_unsealed(dax->dev);
@@ -972,7 +988,7 @@ static long cladefs_dax_map_pages(struct cladefs_dax *dax, struct cladefs *fs, s
 			break;
 		}
 		atomic64_inc(&dax->seals_made);
-		ret = cladefs_nofs(cladefs_fsync(fs));
+		ret = cladefs_fsync(fs);
 		if (ret)
 			break;
 	}
@@ -1333,6 +1349,7 @@ static bool cladefs_dax_reclaim_range(struct cladefs_dax *dax, struct cladefs_da
 	struct cladefs_dax_range *range;
 	struct inode *inode = NULL;
 	bool reclaimed = false, forgotten = false;
+	cladefs_nofs_scope();
 
 	mutex_lock(&dax->files_lock);
 	if (file->inode)
@@ -1341,21 +1358,21 @@ static bool cladefs_dax_reclaim_range(struct cladefs_dax *dax, struct cladefs_da
 
 	if (inode) {
 		if (down_write_trylock(&inode->i_mapping->invalidate_lock)) {
-			if (down_write_trylock(&file->sem)) {
+			if (cladefs_nofs_down_write_trylock(&file->sem)) {
 				range = xa_load(&file->ranges, chunk);
 				if (range && !atomic_read(&range->users) &&
 				    cladefs_dax_release(inode, range)) {
 					cladefs_dax_unmap_range(dax, range);
 					reclaimed = true;
 				}
-				up_write(&file->sem);
+				cladefs_nofs_up_write(&file->sem);
 			}
 			filemap_invalidate_unlock(inode->i_mapping);
 		}
 		iput(inode);
 		return reclaimed;
 	}
-	if (!down_write_trylock(&file->sem))
+	if (!cladefs_nofs_down_write_trylock(&file->sem))
 		return false;
 	mutex_lock(&dax->files_lock);
 	/* An inode read in since may map the range: it is reclaimed with it next time. */
@@ -1369,7 +1386,7 @@ static bool cladefs_dax_reclaim_range(struct cladefs_dax *dax, struct cladefs_da
 		forgotten = cladefs_dax_forget_file(dax, file);
 	}
 	mutex_unlock(&dax->files_lock);
-	up_write(&file->sem);
+	cladefs_nofs_up_write(&file->sem);
 	if (forgotten)
 		cladefs_dax_put_file(dax, file);
 	return reclaimed;
@@ -1725,23 +1742,24 @@ static struct cladefs_dax_range *cladefs_dax_get_range(struct inode *inode, pgof
 	unsigned long pages;
 	long mapped;
 	int err;
+	cladefs_nofs_scope();
 
-	down_read(&file->sem);
+	cladefs_nofs_down_read(&file->sem);
 	range = xa_load(&file->ranges, chunk);
 	if (range)
 		atomic_inc(&range->users);
-	up_read(&file->sem);
+	cladefs_nofs_up_read(&file->sem);
 	if (range)
 		goto used;
 
-	down_write(&file->sem);
+	cladefs_nofs_down_write(&file->sem);
 	range = xa_load(&file->ranges, chunk);
 	if (range)
 		atomic_inc(&range->users);
 	else if (slice)
 		range = cladefs_dax_new_slice(dax, inode, chunk, max3(i_size_read(inode), size,
 								   READ_ONCE(file->growing)));
-	up_write(&file->sem);
+	cladefs_nofs_up_write(&file->sem);
 	if (IS_ERR(range))
 		return range;
 	if (range)
@@ -1752,12 +1770,12 @@ static struct cladefs_dax_range *cladefs_dax_get_range(struct inode *inode, pgof
 	new = cladefs_dax_alloc_range(dax, pages, fault);
 	if (IS_ERR(new))
 		return new;
-	down_write(&file->sem);
+	cladefs_nofs_down_write(&file->sem);
 	/* Another iomap may have mapped it meanwhile. */
 	range = xa_load(&file->ranges, chunk);
 	if (range) {
 		atomic_inc(&range->users);
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 		cladefs_dax_free_range(dax, new, 0);
 		goto used;
 	}
@@ -1781,7 +1799,7 @@ static struct cladefs_dax_range *cladefs_dax_get_range(struct inode *inode, pgof
 	} else {
 		cladefs_dax_free_range(dax, new, 0);
 	}
-	up_write(&file->sem);
+	cladefs_nofs_up_write(&file->sem);
 	if (err)
 		return ERR_PTR(err);
 	range = new;
@@ -1811,12 +1829,13 @@ static int cladefs_dax_drop_pinned(struct inode *inode, pgoff_t first, pgoff_t l
 	struct cladefs_dax_range *range;
 	unsigned long chunk;
 	int err;
+	cladefs_nofs_scope();
 
 	for (;;) {
 		long seen = atomic_long_read(&dax->released);
 		bool busy = false, dirty = false;
 
-		down_write(&file->sem);
+		cladefs_nofs_down_write(&file->sem);
 		xa_for_each_range(&file->ranges, chunk, range, first, last) {
 			if (size >= 0 && range->pages >= cladefs_dax_range_pages(chunk, size))
 				continue;
@@ -1827,7 +1846,7 @@ static int cladefs_dax_drop_pinned(struct inode *inode, pgoff_t first, pgoff_t l
 			}
 			cladefs_dax_unmap_range(dax, range);
 		}
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 		if (!busy)
 			return 0;
 		if (dirty) {
@@ -1934,12 +1953,12 @@ static int cladefs_dax_map_missing(struct inode *inode, struct cladefs_dax_range
 	int err;
 
 	for (;;) {
-		down_read(&file->sem);
+		cladefs_nofs_down_read(&file->sem);
 		if (dax->read_only ||
 		    cladefs_dax_pages_next_unmapped(range->state, first, last) == last)
 			return 0;
-		up_read(&file->sem);
-		down_write(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
+		cladefs_nofs_down_write(&file->sem);
 		err = 0;
 		while (!err &&
 		       (page = cladefs_dax_pages_next_unmapped(range->state, first, last)) < last) {
@@ -1948,7 +1967,7 @@ static int cladefs_dax_map_missing(struct inode *inode, struct cladefs_dax_range
 						    prefault);
 			err = mapped < 0 ? mapped : 0;
 		}
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 		if (err)
 			return err;
 	}
@@ -1969,41 +1988,42 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 	bool mapped;
 	u64 at = 0;
 	int err;
+	cladefs_nofs_scope();
 
 	if (pos >= i_size_read(inode)) {
 		cladefs_dax_hole(iomap, length);
 		return 0;
 	}
 	/* A cache hit keeps the lookup's read lock through its iomap, rather than taking it twice. */
-	down_read(&file->sem);
+	cladefs_nofs_down_read(&file->sem);
 	range = xa_load(&file->ranges, pos >> CLADEFS_DAX_SHIFT);
 	if (range) {
 		atomic_inc(&range->users);
 		cladefs_dax_use_range(dax, range);
 	} else {
-		up_read(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
 		range = cladefs_dax_get_range(inode, pos >> CLADEFS_DAX_SHIFT, 0, fault, true);
 		if (IS_ERR(range))
 			return PTR_ERR(range);
-		down_read(&file->sem);
+		cladefs_nofs_down_read(&file->sem);
 	}
 	/* cladefs: the window between a follower's extents read and its mapping, widened in tests. */
 	if (cladefs_vfs_follows(inode->i_sb) && cladefs_follow_iomap_delay_us) {
-		up_read(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
 		fsleep(cladefs_follow_iomap_delay_us);
-		down_read(&file->sem);
+		cladefs_nofs_down_read(&file->sem);
 	}
 	start = cladefs_dax_chunk_start(range);
 	page = (pos - start) >> PAGE_SHIFT;
 	/* A range covers the file's chunk as its size grows (cladefs_dax_fit). */
 	if (WARN_ON_ONCE(page >= range->pages)) {
-		up_read(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
 		cladefs_dax_put_range(dax, range);
 		return -EIO;
 	}
 	/* cladefs: a page of the file with no window page is no hole: mapped first. */
 	if (!dax->read_only && !cladefs_dax_pages_mapped(range->state, page)) {
-		up_read(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
 		err = cladefs_dax_map_missing(inode, range, page,
 					   min_t(u64, range->pages,
 						 page + DIV_ROUND_UP(offset_in_page(pos) + length,
@@ -2023,7 +2043,7 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 	}
 	length = min_t(loff_t, length, start + ((loff_t)end_page << PAGE_SHIFT) - pos);
 	if (!mapped) {
-		up_read(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
 		cladefs_dax_put_range(dax, range);
 		cladefs_dax_hole(iomap, length);
 		return 0;
@@ -2050,7 +2070,7 @@ static int cladefs_dax_iomap_read(struct inode *inode, loff_t pos, loff_t length
 		if (range->region)
 			iomap->flags |= IOMAP_F_SHARED;
 	}
-	up_read(&file->sem);
+	cladefs_nofs_up_read(&file->sem);
 	return 0;
 }
 
@@ -2124,6 +2144,11 @@ struct cladefs_dax_batch {
 	struct cladefs_dax_range *range;
 	unsigned long pages[BITS_TO_LONGS(CLADEFS_DAX_PAGES)];
 	unsigned long kept[BITS_TO_LONGS(CLADEFS_DAX_PAGES)];
+	/*
+	 * cladefs: of `pages`, those a pin held once they were write-protected
+	 * (cladefs_dax_protect).
+	 */
+	unsigned long pinned[BITS_TO_LONGS(CLADEFS_DAX_PAGES)];
 };
 
 /* cladefs: the pages one part of a writeback's run writes: `end - page` from `page` of a range's. */
@@ -2146,7 +2171,7 @@ static int cladefs_dax_write_run(struct cladefs *fs, u64 ino, const struct clade
 			      size_t nr, unsigned long pages)
 {
 	if (nr)
-		return cladefs_nofs(cladefs_write_many(fs, ino, parts, nr, (u64)pages << PAGE_SHIFT));
+		return cladefs_write_many(fs, ino, parts, nr, (u64)pages << PAGE_SHIFT);
 	if (pages)
 		cladefs_release_dirty(fs, ino, (u64)pages << PAGE_SHIFT);
 	return 0;
@@ -2244,50 +2269,92 @@ static int cladefs_dax_write_pages(struct cladefs_dax *dax, struct inode *inode,
 
 /*
  * cladefs: makes the user's mappings of the `nr` ranges' pages `batch`, a writeback's, read-only
- * (wp_shared_mapping_range): a store to one after this faults, and dirties its page again. By the
- * page tables, which see every PTE, not the DAX entries: a fault past its iomap, which made its
- * page dirty and its PTE writable, holds the page's entry until it returns, after its iomap_end
- * let the semaphore go and a writeback swapped the page out; and dax_writeback_mapping_range,
- * finding the entry locked, gives up on it rather than wait (dax_writeback_one's
- * get_next_unlocked_entry, mid-walk, says it gone). That PTE stayed writable: a rebind mapped the
- * page read-only under it, which the host refuses a store to, or a store through it after the
- * writeback's copy went in no writeback (guest/sim, seed 22).
+ * and clean (mapping_wrprotect_range, as pfn_mkclean_range cleans a DAX entry's): a store to one
+ * after this faults, and dirties its page again. Clean too: the kernel makes a shared mapping's PTE
+ * writable with no fault where it is dirty (can_change_shared_pte_writable), as mprotect and a
+ * userfaultfd's unprotect do, taking that the filesystem was told of it, which a writeback's page
+ * it wrote back no longer is: write-protected alone (wp_shared_mapping_range), a store after an
+ * mprotect toggle went into a page outside every dirty set, the host's copy, or the sealed extent a
+ * rebind mapped (TASK-558). By the page tables, which see every PTE, not the DAX entries: a fault
+ * past its iomap, which made its page dirty and its PTE writable, holds the page's entry until it
+ * returns, after its iomap_end let the semaphore go and a writeback swapped the page out; and
+ * dax_writeback_mapping_range, finding the entry locked, gives up on it rather than wait
+ * (dax_writeback_one's get_next_unlocked_entry, mid-walk, says it gone). That PTE stayed writable:
+ * a rebind mapped the page read-only under it, which the host refuses a store to, or a store
+ * through it after the writeback's copy went in no writeback (guest/sim, seed 22). A run of pages
+ * by its first page's frame: a range's pages are a run of the window's, which is one run of frames.
+ *
+ * And notes which pages a pin holds, then (`pinned`), which the writeback keeps dirty: a pin for
+ * writing, short-term (an O_DIRECT read into the mapping), faulted its page dirty as it was taken,
+ * and its stores come later, through the kernel's mapping or by DMA, with no fault, after the
+ * writeback's copy may be (TASK-598). A pin taken after this faults, its PTE read-only, and
+ * dirties its page again; one let go before this stored before the copy; one racing this,
+ * get_user_pages' fast walk, finds the PTE changed under it and takes no pin, or is seen here.
  */
-static void cladefs_dax_protect(struct address_space *mapping, const struct cladefs_dax_batch *batch,
-			     size_t nr)
+static void cladefs_dax_protect_run(struct cladefs_dax *dax, struct address_space *mapping,
+				 struct cladefs_dax_batch *batch, unsigned long page,
+				 unsigned long end)
 {
+	const struct cladefs_dax_range *range = batch->range;
+	pgoff_t index = (cladefs_dax_chunk_start(range) >> PAGE_SHIFT) + page;
+	pgoff_t window = cladefs_dax_page_offset(range, page) >> PAGE_SHIFT;
+	unsigned long pfn, at;
+	void *kaddr;
+
+	/*
+	 * A dirty page's frame: its part of the window has struct pages, a fault's. With none, the
+	 * run unmapped, its next access a fault, and kept dirty, its pins unknown.
+	 */
+	if (WARN_ON_ONCE(dax_direct_access(dax->dax_dev, window, 1, DAX_ACCESS, &kaddr,
+					   &pfn) < 1)) {
+		unmap_mapping_pages(mapping, index, end - page, false);
+		bitmap_set(batch->pinned, page, end - page);
+		return;
+	}
+	mapping_wrprotect_range(mapping, index, pfn, end - page);
+	for (at = page; at < end; at++) {
+		if (folio_maybe_dma_pinned(page_folio(pfn_to_page(pfn + at - page))))
+			__set_bit(at, batch->pinned);
+	}
+}
+
+static void cladefs_dax_protect(struct cladefs_dax *dax, struct address_space *mapping,
+			     struct cladefs_dax_batch *batch, size_t nr)
+{
+	int id = dax_read_lock();
 	unsigned long page, end;
 	size_t i;
 
 	for (i = 0; i < nr; i++) {
-		const struct cladefs_dax_range *range = batch[i].range;
-		pgoff_t first = cladefs_dax_chunk_start(range) >> PAGE_SHIFT;
+		unsigned long pages = batch[i].range->pages;
 
-		for (page = find_first_bit(batch[i].pages, range->pages); page < range->pages;
-		     page = find_next_bit(batch[i].pages, range->pages, end)) {
-			end = find_next_zero_bit(batch[i].pages, range->pages, page);
-			wp_shared_mapping_range(mapping, first + page, end - page);
+		for (page = find_first_bit(batch[i].pages, pages); page < pages;
+		     page = find_next_bit(batch[i].pages, pages, end)) {
+			end = find_next_zero_bit(batch[i].pages, pages, page);
+			cladefs_dax_protect_run(dax, mapping, &batch[i], page, end);
 		}
 	}
+	dax_read_unlock(id);
 }
 
 /*
- * cladefs: a writeback's pages Fxfs had no memory to write (`batch`'s `kept`), dirty again in their
- * file's dirty set, their room reserved again, which the writeback took (cladefs_write_many), what
- * there is of it, so that a writeback later writes them (TASK-207). Clean, as the page cache's
- * after an I/O error, they were lost: the private pages read as written, and a clone, which takes
- * the store's blocks, a rebind or an eviction brought back the blocks they replaced (GCE r699).
- * With the writeback lock held, which keeps their ranges from rebinding meanwhile. How many it
- * made dirty: not those a truncate or an UNMAP took meanwhile, nor those a store dirtied again.
+ * cladefs: a writeback's pages Fxfs had no memory to write, or a pin held (`batch`'s `kept`), dirty
+ * again in their file's dirty set, their room reserved again, which the writeback took
+ * (cladefs_write_many), what there is of it, so that a writeback later writes them (TASK-207,
+ * TASK-598). Clean, as the page cache's after an I/O error, they were lost: the private pages read
+ * as written, and a clone, which takes the store's blocks, a rebind or an eviction brought back the
+ * blocks they replaced (GCE r699). With the writeback lock held, which keeps their ranges from
+ * rebinding meanwhile. How many it made dirty: not those a truncate or an UNMAP took meanwhile, nor
+ * those a store dirtied again.
  */
 static unsigned long cladefs_dax_keep(struct inode *inode, struct cladefs_dax_batch *batch, size_t nr)
 {
 	struct cladefs_dax_file *file = cladefs_dax_file(inode);
 	unsigned long made = 0;
-	unsigned int nofs;
 	size_t i;
+	cladefs_nofs_scope();
 
-	down_write(&file->sem);
+	cladefs_nofs_down_write(&file->sem);
 	for (i = 0; i < nr; i++) {
 		struct cladefs_dax_range *range = batch[i].range;
 		unsigned long n = cladefs_dax_pages_redirty(range->state, batch[i].kept);
@@ -2297,16 +2364,30 @@ static unsigned long cladefs_dax_keep(struct inode *inode, struct cladefs_dax_ba
 		made += n;
 	}
 	cladefs_dax_count(cladefs_dax_of(inode), file, 0, made);
-	up_write(&file->sem);
+	cladefs_nofs_up_write(&file->sem);
 	if (!made)
 		return 0;
-	nofs = memalloc_nofs_save();
 	cladefs_reserve_dirty_what_fits(cladefs_vfs_fs(inode->i_sb), inode->i_ino,
 				     (u64)made << PAGE_SHIFT);
-	memalloc_nofs_restore(nofs);
 	/* For the flusher's writepages, as cladefs_dax_dirty marks it. */
 	__mark_inode_dirty(inode, I_DIRTY_PAGES);
 	return made;
+}
+
+/*
+ * cladefs: makes `batch`'s pages a pin held its `kept`, which cladefs_dax_keep makes dirty again,
+ * so that the writeback after the pin's stores writes them (TASK-598): whether there were any.
+ */
+static bool cladefs_dax_take_pinned(struct cladefs_dax_batch *batch, size_t nr)
+{
+	bool any = false;
+	size_t i;
+
+	for (i = 0; i < nr; i++) {
+		bitmap_copy(batch[i].kept, batch[i].pinned, CLADEFS_DAX_PAGES);
+		any |= !bitmap_empty(batch[i].pinned, CLADEFS_DAX_PAGES);
+	}
+	return any;
 }
 
 /*
@@ -2362,6 +2443,7 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 	long pages = 0, written = 0;
 	bool traced = false;
 	int err = 0;
+	cladefs_nofs_scope();
 
 	if (!IS_DAX(inode) || !file)
 		return 0;
@@ -2371,7 +2453,7 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 	 * them, and an fsync returns only once they are durable. Returning at once, as no page was
 	 * dirty, an fsync met by the worker's writeback sealed none of its pages (guest/sim, seed 962).
 	 */
-	mutex_lock(&file->wb_lock);
+	cladefs_nofs_mutex_lock(&file->wb_lock);
 	if (!atomic_long_read(&file->dirty_pages))
 		goto out;
 	traced = true;
@@ -2382,9 +2464,9 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 		err = -ENOMEM;
 		goto out;
 	}
-	down_read(&file->sem);
+	cladefs_nofs_down_read(&file->sem);
 	most = cladefs_dax_dirty_ranges(file);
-	up_read(&file->sem);
+	cladefs_nofs_up_read(&file->sem);
 	/*
 	 * The batch, before the swap, as many as the semaphore held shared counted: a writeback that
 	 * can't write leaves the set dirty. Counted again once it is held for writing, which keeps
@@ -2395,18 +2477,18 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 	for (;;) {
 		if (!most)
 			goto out;
-		batch = cladefs_nofs(kvmalloc_array(most, sizeof(*batch), GFP_KERNEL));
+		batch = kvmalloc_array(most, sizeof(*batch), GFP_KERNEL);
 		if (!batch) {
 			err = -ENOMEM;
 			goto out;
 		}
 		/* Between the count and the swap, where iomaps may dirty more (pause points). */
 		cladefs_dax_pause_file(CLADEFS_DAX_STEP_COUNTED, inode->i_ino);
-		down_write(&file->sem);
+		cladefs_nofs_down_write(&file->sem);
 		now = cladefs_dax_dirty_ranges(file);
 		if (now && now <= most)
 			break;
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 		kvfree(batch);
 		batch = NULL;
 		most = now;
@@ -2418,11 +2500,12 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 		atomic_inc(&range->users);
 		pages += cladefs_dax_range_swap(range, batch[nr].pages);
 		bitmap_zero(batch[nr].kept, CLADEFS_DAX_PAGES);
+		bitmap_zero(batch[nr].pinned, CLADEFS_DAX_PAGES);
 		nr++;
 	}
 	cladefs_dax_count(dax, file, 0, -pages);
-	up_write(&file->sem);
-	cladefs_dax_protect(inode->i_mapping, batch, nr);
+	cladefs_nofs_up_write(&file->sem);
+	cladefs_dax_protect(dax, inode->i_mapping, batch, nr);
 	/* Before it reads its ranges' window pages, which nothing may free (pause points). */
 	cladefs_dax_pause_file(CLADEFS_DAX_STEP_WRITEBACK, inode->i_ino);
 	err = cladefs_dax_write_pages(dax, inode, batch, nr, parts, run_parts, &kept);
@@ -2432,6 +2515,9 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 	} else if (kept) {
 		kept = cladefs_dax_keep(inode, batch, nr);
 	}
+	/* Written, and dirty again, those a pin held (cladefs_dax_protect), but by an eviction. */
+	if (keep && cladefs_dax_take_pinned(batch, nr))
+		cladefs_dax_keep(inode, batch, nr);
 	for (i = 0; i < nr; i++)
 		cladefs_dax_put_range(dax, batch[i].range);
 	atomic64_inc(&dax->writebacks);
@@ -2449,7 +2535,7 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 out:
 	if (traced)
 		trace_cladefs_dax_writeback_end(file->ino, err ?: written);
-	mutex_unlock(&file->wb_lock);
+	cladefs_nofs_mutex_unlock(&file->wb_lock);
 	kfree(run_parts);
 	kfree(parts);
 	kvfree(batch);
@@ -2482,10 +2568,11 @@ static long cladefs_dax_rebind_ranges(struct cladefs_dax *dax, struct cladefs_da
 	struct cladefs_dax_range *range;
 	unsigned long chunk = 0;
 	long rebound = 0, done;
+	cladefs_nofs_scope();
 
 	while (atomic_long_read(&file->private_pages) && atomic_long_read(&dax->private) > target) {
-		mutex_lock(&file->wb_lock);
-		down_write(&file->sem);
+		cladefs_nofs_mutex_lock(&file->wb_lock);
+		cladefs_nofs_down_write(&file->sem);
 		/* A volume going (cladefs_dax_remove_volume) stops the worker first. */
 		volume = READ_ONCE(file->volume);
 		range = volume ? xa_find(&file->ranges, &chunk, ULONG_MAX, XA_PRESENT) : NULL;
@@ -2497,8 +2584,8 @@ static long cladefs_dax_rebind_ranges(struct cladefs_dax *dax, struct cladefs_da
 			else
 				rebound += done;
 		}
-		up_write(&file->sem);
-		mutex_unlock(&file->wb_lock);
+		cladefs_nofs_up_write(&file->sem);
+		cladefs_nofs_mutex_unlock(&file->wb_lock);
 		if (!range || chunk == ULONG_MAX)
 			break;
 		chunk++;
@@ -2806,12 +2893,9 @@ static int cladefs_dax_dirty(struct inode *inode, struct cladefs_dax_range *rang
 	fresh = would.dirty;
 	newly = would.private;
 	if (fresh && zero) {
-		unsigned int nofs = memalloc_nofs_save();
-
 		cladefs_reserve_dirty_what_fits(fs, inode->i_ino, (u64)fresh << PAGE_SHIFT);
-		memalloc_nofs_restore(nofs);
 	} else if (fresh) {
-		err = cladefs_nofs(cladefs_reserve_dirty(fs, inode->i_ino, (u64)fresh << PAGE_SHIFT));
+		err = cladefs_reserve_dirty(fs, inode->i_ino, (u64)fresh << PAGE_SHIFT);
 		if (err)
 			return err;
 	}
@@ -2931,7 +3015,7 @@ static int cladefs_dax_iomap_write(struct inode *inode, loff_t pos, loff_t lengt
 		pages = page - first;
 		end = min_t(loff_t, end, start + ((loff_t)page << PAGE_SHIFT));
 		if (hole) {
-			up_read(&file->sem);
+			cladefs_nofs_up_read(&file->sem);
 			cladefs_dax_put_range(dax, range);
 			cladefs_dax_hole(iomap, end - pos);
 			return 0;
@@ -2957,7 +3041,7 @@ static int cladefs_dax_iomap_write(struct inode *inode, loff_t pos, loff_t lengt
 		cladefs_dax_pause_file(CLADEFS_DAX_STEP_WRITE_MAPPED, inode->i_ino);
 	return 0;
 unlock:
-	up_read(&file->sem);
+	cladefs_nofs_up_read(&file->sem);
 put:
 	cladefs_dax_put_range(dax, range);
 	return err;
@@ -3094,7 +3178,7 @@ static int cladefs_dax_iomap_end(struct inode *inode, loff_t pos, loff_t length,
 		__mark_inode_dirty(inode, I_DIRTY_SYNC | I_DIRTY_DATASYNC);
 	}
 	if (iomap->private) {
-		up_read(&file->sem);
+		cladefs_nofs_up_read(&file->sem);
 		cladefs_dax_put_range(dax, iomap->private);
 	}
 	/* A fault's PTE in, its page's DAX entry held still (pause points). */
@@ -3110,9 +3194,33 @@ static const struct iomap_ops cladefs_dax_iomap_ops = {
 	.iomap_end = cladefs_dax_iomap_end,
 };
 
+/*
+ * cladefs: dax_iomap_rw, dax_iomap_fault and dax_zero_range in a NOFS scope, which a file's
+ * semaphore is held in (cladefs_nofs_held): a write's iomap holds it from its begin to its end,
+ * across the kernel's copy or insert between.
+ */
+static ssize_t cladefs_dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter)
+{
+	cladefs_nofs_scope();
+	return dax_iomap_rw(iocb, iter, &cladefs_dax_iomap_ops);
+}
+
+static vm_fault_t cladefs_dax_iomap_fault(struct vm_fault *vmf, unsigned int order,
+					unsigned long *pfn, int *error)
+{
+	cladefs_nofs_scope();
+	return dax_iomap_fault(vmf, order, pfn, error, &cladefs_dax_iomap_ops);
+}
+
+static int cladefs_dax_iomap_zero(struct inode *inode, loff_t pos, loff_t len, bool *zeroed)
+{
+	cladefs_nofs_scope();
+	return dax_zero_range(inode, pos, len, zeroed, &cladefs_dax_iomap_ops);
+}
+
 static ssize_t cladefs_dax_read(struct kiocb *iocb, struct iov_iter *to)
 {
-	return dax_iomap_rw(iocb, to, &cladefs_dax_iomap_ops);
+	return cladefs_dax_iomap_rw(iocb, to);
 }
 
 /*
@@ -3297,9 +3405,10 @@ static int cladefs_dax_private_chunk_before(struct inode *inode, pgoff_t chunk, 
 	long newly, made;
 	loff_t start;
 	int err = 0;
+	cladefs_nofs_scope();
 
 	filemap_invalidate_lock_shared(inode->i_mapping);
-	down_read(&file->sem);
+	cladefs_nofs_down_read(&file->sem);
 	range = xa_load(&file->ranges, chunk);
 	/* A slice's chunk is mapped again as a range of its own by the write's iomap. */
 	if (!range || range->region)
@@ -3334,7 +3443,7 @@ static int cladefs_dax_private_chunk_before(struct inode *inode, pgoff_t chunk, 
 	atomic_long_add(made, &file->private_pages);
 	WRITE_ONCE(file->dirtied, jiffies);
 out:
-	up_read(&file->sem);
+	cladefs_nofs_up_read(&file->sem);
 	filemap_invalidate_unlock_shared(inode->i_mapping);
 	return err;
 }
@@ -3437,7 +3546,7 @@ static ssize_t cladefs_dax_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			break;
 		}
 		pagefault_disable();
-		ret = dax_iomap_rw(iocb, source, &cladefs_dax_iomap_ops);
+		ret = cladefs_dax_iomap_rw(iocb, source);
 		pagefault_enable();
 		cladefs_dax_lap(&dax->write_rw_ns, &lap);
 		if (ret > 0) {
@@ -3548,7 +3657,7 @@ static vm_fault_t cladefs_dax_do_fault(struct vm_fault *vmf, unsigned int order,
 		/* cladefs: a follower's extents read and mapped under its fill barrier, as of one state. */
 		cladefs_vfs_fill_begin(sb);
 		filemap_invalidate_lock_shared(inode->i_mapping);
-		ret = dax_iomap_fault(vmf, order, &pfn, &error, &cladefs_dax_iomap_ops);
+		ret = cladefs_dax_iomap_fault(vmf, order, &pfn, &error);
 		filemap_invalidate_unlock_shared(inode->i_mapping);
 		cladefs_vfs_fill_end(sb);
 		if (!(ret & VM_FAULT_ERROR))
@@ -3624,7 +3733,7 @@ static vm_fault_t cladefs_dax_fault(struct vm_fault *vmf)
  * the window holds them in a row, as it does a chunk of a large file mapped whole (the iomap says
  * so); otherwise the kernel faults them a page at a time (VM_FAULT_FALLBACK, TASK-26.18.8). A store
  * falls back to pages, so that dirty pages are 4 KiB, and writeback write-protects them page by
- * page (wp_shared_mapping_range), which would leave a writable PMD writable.
+ * page (cladefs_dax_protect).
  */
 static vm_fault_t cladefs_dax_huge_fault(struct vm_fault *vmf, unsigned int order)
 {
@@ -3941,6 +4050,7 @@ void cladefs_dax_remove_volume(struct cladefs_dax *dax, struct cladefs_dax_volum
 	struct cladefs_dax_file *file;
 	unsigned long ino, chunk;
 	void *entry;
+	cladefs_nofs_scope();
 
 	/* cladefs: the budget's worker, which uses the volume's files, waits. */
 	cladefs_dax_stop(dax);
@@ -3956,13 +4066,13 @@ void cladefs_dax_remove_volume(struct cladefs_dax *dax, struct cladefs_dax_volum
 	/* Its inodes evicted, nothing uses its ranges. */
 	xa_for_each(&volume->files, ino, file) {
 		xa_erase(&volume->files, ino);
-		down_write(&file->sem);
+		cladefs_nofs_down_write(&file->sem);
 		xa_for_each(&file->ranges, chunk, range) {
 			if (WARN_ON_ONCE(atomic_read(&range->users)))
 				continue;
 			cladefs_dax_unmap_range(dax, range);
 		}
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 		cladefs_dax_put_file(dax, file);
 	}
 	xa_destroy(&volume->files);
@@ -4216,6 +4326,7 @@ void cladefs_dax_evict(struct inode *inode)
 	unsigned int tries;
 	bool forgotten;
 	int err;
+	cladefs_nofs_scope();
 
 	if (!dax || !IS_DAX(inode) || !file)
 		return;
@@ -4235,10 +4346,10 @@ void cladefs_dax_evict(struct inode *inode)
 		if (err)
 			pr_warn("cladefs: writing back ino %lu as it is evicted: %d\n", inode->i_ino, err);
 	} else {
-		down_write(&file->sem);
+		cladefs_nofs_down_write(&file->sem);
 		xa_for_each(&file->ranges, chunk, range)
 			cladefs_dax_unmap_range(dax, range);
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 	}
 	mutex_lock(&dax->files_lock);
 	file->inode = NULL;
@@ -4263,6 +4374,7 @@ int cladefs_dax_changed(struct cladefs_dax *dax, struct cladefs_dax_volume *volu
 	unsigned long chunk;
 	bool forgotten;
 	int err;
+	cladefs_nofs_scope();
 
 	if (inode) {
 		if (!IS_DAX(inode) || !cladefs_dax_file(inode))
@@ -4278,14 +4390,14 @@ int cladefs_dax_changed(struct cladefs_dax *dax, struct cladefs_dax_volume *volu
 		if (!file)
 			return 0;
 		/* As reclaim locks them: the file's semaphore, then the files lock. */
-		down_write(&file->sem);
+		cladefs_nofs_down_write(&file->sem);
 		mutex_lock(&dax->files_lock);
 		if (!file->inode)
 			break;
 		/* An inode read in since: through it, once it is had, or gone. */
 		inode = igrab(file->inode);
 		mutex_unlock(&dax->files_lock);
-		up_write(&file->sem);
+		cladefs_nofs_up_write(&file->sem);
 		cladefs_dax_put_file(dax, file);
 		if (inode) {
 			filemap_invalidate_lock(inode->i_mapping);
@@ -4304,7 +4416,7 @@ int cladefs_dax_changed(struct cladefs_dax *dax, struct cladefs_dax_volume *volu
 	}
 	forgotten = cladefs_dax_forget_file(dax, file);
 	mutex_unlock(&dax->files_lock);
-	up_write(&file->sem);
+	cladefs_nofs_up_write(&file->sem);
 	if (forgotten)
 		cladefs_dax_put_file(dax, file);
 	cladefs_dax_put_file(dax, file);
@@ -4345,7 +4457,7 @@ static int cladefs_dax_zero_part(struct inode *inode, loff_t pos, loff_t len)
 	int err;
 
 	for (;;) {
-		err = dax_zero_range(inode, pos, len, &zeroed, &cladefs_dax_iomap_ops);
+		err = cladefs_dax_iomap_zero(inode, pos, len, &zeroed);
 		/* cladefs: no room among the private pages: the worker makes some. */
 		if (err == -ENOBUFS) {
 			err = cladefs_dax_throttle(cladefs_dax_of(inode), &throttles);
@@ -4480,7 +4592,7 @@ static int cladefs_dax_resize_begin(struct inode *inode, loff_t size)
 	 * wrote the pages past the new end after Fxfs cut them, and grew the file again. Taken last,
 	 * as zeroing above may wait for the budget's worker, which writes back.
 	 */
-	mutex_lock(&file->wb_lock);
+	cladefs_nofs_mutex_lock(&file->wb_lock);
 	return 0;
 }
 
@@ -4491,8 +4603,9 @@ static void cladefs_dax_resize_end(struct inode *inode, loff_t size)
 	unsigned long first = DIV_ROUND_UP(size, PAGE_SIZE), page, chunk;
 	struct cladefs_dax_range *range;
 	int err;
+	cladefs_nofs_scope();
 
-	down_write(&file->sem);
+	cladefs_nofs_down_write(&file->sem);
 	xa_for_each_start(&file->ranges, chunk, range, size >> CLADEFS_DAX_SHIFT) {
 		loff_t start = cladefs_dax_chunk_start(range);
 
@@ -4536,8 +4649,8 @@ static void cladefs_dax_resize_end(struct inode *inode, loff_t size)
 		cladefs_dax_dropped(dax, range,
 				 cladefs_dax_pages_unmap(range->state, page, range->pages - page), !err);
 	}
-	up_write(&file->sem);
-	mutex_unlock(&file->wb_lock);
+	cladefs_nofs_up_write(&file->sem);
+	cladefs_nofs_mutex_unlock(&file->wb_lock);
 	filemap_invalidate_unlock(inode->i_mapping);
 }
 

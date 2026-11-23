@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2026 The cladefs Authors.
+#
+# Kernel: sim
+# Killer: scenarios cow_rebind_during_writeback
+#
+# TASK-559 (board 2514): the budget's rebind takes the file's locks through cladefs_nofs_*, but
+# enters no NOFS scope first, so that allocations under them could reclaim from the filesystem,
+# whose eviction takes them. cow_rebind_during_writeback: cladefs_nofs_held's WARN at the first
+# cladefs_nofs_mutex_lock fails the run.
+
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
+@@ -2505,7 +2505,6 @@
+ 	struct cladefs_dax_range *range;
+ 	unsigned long chunk = 0;
+ 	long rebound = 0, done;
+-	cladefs_nofs_scope();
+ 
+ 	while (atomic_long_read(&file->private_pages) && atomic_long_read(&dax->private) > target) {
+ 		cladefs_nofs_mutex_lock(&file->wb_lock);

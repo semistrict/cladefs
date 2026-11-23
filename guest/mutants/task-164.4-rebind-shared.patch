@@ -11,21 +11,21 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2453,7 +2453,7 @@
+@@ -2556,7 +2556,7 @@
  
  	while (atomic_long_read(&file->private_pages) && atomic_long_read(&dax->private) > target) {
- 		mutex_lock(&file->wb_lock);
--		down_write(&file->sem);
-+		down_read(&file->sem);
+ 		cladefs_nofs_mutex_lock(&file->wb_lock);
+-		cladefs_nofs_down_write(&file->sem);
++		cladefs_nofs_down_read(&file->sem);
  		/* A volume going (cladefs_dax_remove_volume) stops the worker first. */
  		volume = READ_ONCE(file->volume);
  		range = volume ? xa_find(&file->ranges, &chunk, ULONG_MAX, XA_PRESENT) : NULL;
-@@ -2465,7 +2465,7 @@
+@@ -2568,7 +2568,7 @@
  			else
  				rebound += done;
  		}
--		up_write(&file->sem);
-+		up_read(&file->sem);
- 		mutex_unlock(&file->wb_lock);
+-		cladefs_nofs_up_write(&file->sem);
++		cladefs_nofs_up_read(&file->sem);
+ 		cladefs_nofs_mutex_unlock(&file->wb_lock);
  		if (!range || chunk == ULONG_MAX)
  			break;

@@ -11,8 +11,8 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2229,7 +2229,7 @@
- 	cladefs_dax_protect(inode->i_mapping, batch, nr);
+@@ -2500,7 +2500,7 @@
+ 	cladefs_dax_protect(dax, inode->i_mapping, batch, nr);
  	/* Before it reads its ranges' window pages, which nothing may free (pause points). */
  	cladefs_dax_pause_file(CLADEFS_DAX_STEP_WRITEBACK, inode->i_ino);
 -	err = cladefs_dax_write_pages(dax, inode, batch, nr, parts, run_parts, &kept);

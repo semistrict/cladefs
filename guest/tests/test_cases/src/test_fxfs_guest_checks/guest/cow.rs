@@ -213,6 +213,134 @@ pub(super) fn test_cow_mprotect_after_a_split_pmd() {
     chunk.finish();
 }
 
+/// cladefs: a file read in sealed, DAX, mapped shared, page 3 stored to, then written back, sealed
+/// and rebound by the budget (cladefs.dax_rebind_now), every page private no more; `toggle` makes
+/// the mapping read-only, then writable again; then page 3 is stored to again, which must fault and
+/// make the page private (TASK-558). The kernel makes a shared mapping's PTE writable with no fault
+/// where it is dirty (can_change_shared_pte_writable), from mprotect and from a userfaultfd's
+/// unprotect alike: with writeback's write-protect alone (wp_shared_mapping_range), which leaves it
+/// dirty, the store went to the window page the rebind mapped the sealed extent's at, which the
+/// host copied unknown to the guest or refused, the VM stopping, and the file, evicted, lacked it.
+fn cow_store_after_toggle(name: &str, toggle: impl FnOnce(&CowMapping)) {
+    const PAGE: usize = 4096;
+    const LEN: usize = 16 * PAGE;
+    let name = path(name);
+    let mut expected = cow_base_file(&name, LEN, 0x3c);
+    let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
+    let map = CowMapping::new(&file, LEN);
+    map.bytes()[3 * PAGE + 10] = 0x01;
+    expected[3 * PAGE + 10] = 0x01;
+    cow_rebind_now();
+    let private = stats()["dax_private_pages"];
+    toggle(&map);
+    map.bytes()[3 * PAGE + 20] = 0x02;
+    expected[3 * PAGE + 20] = 0x02;
+    assert_eq!(stats()["dax_private_pages"], private + 1, "private pages after the store");
+    assert!(map.bytes()[..] == expected[..], "the mapping after the store");
+    drop(map);
+    drop(file);
+    evict(&name);
+    assert!(fs::read(&name).unwrap() == expected, "{name} evicted");
+    fs::remove_file(&name).unwrap();
+}
+
+/// cladefs: [`cow_store_after_toggle`] with mprotect, read-only then writable again (TASK-558).
+pub(super) fn test_cow_mprotect_after_budget_rebind() {
+    cow_store_after_toggle("cow-mprotect-after-rebind", |map| {
+        map.protect(libc::PROT_READ);
+        map.protect(libc::PROT_READ | libc::PROT_WRITE);
+    });
+}
+
+/// cladefs: [`cow_store_after_toggle`] with a userfaultfd's write-protect and unprotect
+/// (UFFDIO_WRITEPROTECT), asynchronous (UFFD_FEATURE_WP_ASYNC), the one way a file's mapping takes
+/// one (vma_can_userfault): the unprotect makes a dirty PTE writable as mprotect does
+/// (uffd_wp_range's MM_CP_TRY_CHANGE_WRITABLE, TASK-558).
+pub(super) fn test_cow_uffd_after_budget_rebind() {
+    cow_store_after_toggle("cow-uffd-after-rebind", |map| {
+        let uffd = Uffd::write_protecting(map);
+        uffd.protect(map, true);
+        uffd.protect(map, false);
+    });
+}
+
+/// cladefs: a userfaultfd write-protecting a mapping, asynchronously: a write to a page it
+/// protects resolves itself, no reader of the descriptor needed. Its ioctls by hand, as `libc`
+/// has none (linux/userfaultfd.h).
+struct Uffd(std::os::fd::OwnedFd);
+
+#[repr(C)]
+struct UffdioApi {
+    api: u64,
+    features: u64,
+    ioctls: u64,
+}
+
+#[repr(C)]
+struct UffdioRange {
+    start: u64,
+    len: u64,
+}
+
+#[repr(C)]
+struct UffdioRegister {
+    range: UffdioRange,
+    mode: u64,
+    ioctls: u64,
+}
+
+#[repr(C)]
+struct UffdioWriteprotect {
+    range: UffdioRange,
+    mode: u64,
+}
+
+impl Uffd {
+    const API: u64 = 0xaa;
+    const FEATURE_WP_ASYNC: u64 = 1 << 15;
+    const REGISTER_MODE_WP: u64 = 1 << 1;
+    const WRITEPROTECT_MODE_WP: u64 = 1 << 0;
+    /// _IOWR(0xaa, NR, SIZE).
+    const fn iowr(nr: u64, size: usize) -> u64 {
+        (3 << 30) | ((size as u64) << 16) | (0xaa << 8) | nr
+    }
+    const IOCTL_API: u64 = Self::iowr(0x3f, std::mem::size_of::<UffdioApi>());
+    const IOCTL_REGISTER: u64 = Self::iowr(0x00, std::mem::size_of::<UffdioRegister>());
+    const IOCTL_WRITEPROTECT: u64 = Self::iowr(0x06, std::mem::size_of::<UffdioWriteprotect>());
+
+    fn ioctl<T>(&self, request: u64, arg: &mut T, what: &str) {
+        use std::os::fd::AsRawFd;
+        let arg = std::ptr::from_mut(arg);
+        let done = unsafe { libc::ioctl(self.0.as_raw_fd(), request as _, arg) };
+        assert_eq!(done, 0, "{what}: {}", std::io::Error::last_os_error());
+    }
+
+    fn range(map: &CowMapping) -> UffdioRange {
+        UffdioRange { start: map.addr as u64, len: map.len as u64 }
+    }
+
+    fn write_protecting(map: &CowMapping) -> Self {
+        use std::os::fd::FromRawFd;
+        let flags = libc::O_CLOEXEC | libc::O_NONBLOCK;
+        let fd = unsafe { libc::syscall(libc::SYS_userfaultfd, flags) };
+        assert!(fd >= 0, "userfaultfd: {}", std::io::Error::last_os_error());
+        let uffd = Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) });
+        let mut api = UffdioApi { api: Self::API, features: Self::FEATURE_WP_ASYNC, ioctls: 0 };
+        uffd.ioctl(Self::IOCTL_API, &mut api, "UFFDIO_API");
+        let mut register =
+            UffdioRegister { range: Self::range(map), mode: Self::REGISTER_MODE_WP, ioctls: 0 };
+        uffd.ioctl(Self::IOCTL_REGISTER, &mut register, "UFFDIO_REGISTER");
+        uffd
+    }
+
+    /// Write-protects all of `map`, or takes the write-protect away.
+    fn protect(&self, map: &CowMapping, protect: bool) {
+        let mode = if protect { Self::WRITEPROTECT_MODE_WP } else { 0 };
+        let mut writeprotect = UffdioWriteprotect { range: Self::range(map), mode };
+        self.ioctl(Self::IOCTL_WRITEPROTECT, &mut writeprotect, "UFFDIO_WRITEPROTECT");
+    }
+}
+
 /// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
 /// moved (mremap), its PTEs with it: a write to a page only read faults, which makes the page
 /// private (TASK-149.42). mremap moves a large folio's PTEs in batches whose write bits are alike

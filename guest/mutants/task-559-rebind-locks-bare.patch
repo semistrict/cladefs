@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2026 The cladefs Authors.
+#
+# Kernel: sim
+# Killer: scenarios cow_rebind_during_writeback
+#
+# TASK-559 (board 2514): the budget's rebind takes the file's writeback lock and semaphore bare,
+# in no NOFS scope, as it did: its MAP_MANY's request, whose data the driver describes in a
+# scatterlist it allocates GFP_KERNEL (vext_map_data), and the Rust calls under the locks, could
+# reclaim from the filesystem, whose eviction of the file's inode, which the worker doesn't hold,
+# takes the writeback lock it holds. cow_rebind_during_writeback: sim_might_reclaim fails the run at the first such
+# allocation; scripts/cocci/nofs-locks.cocci finds the bare locks.
+
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
+@@ -2505,11 +2505,10 @@
+ 	struct cladefs_dax_range *range;
+ 	unsigned long chunk = 0;
+ 	long rebound = 0, done;
+-	cladefs_nofs_scope();
+ 
+ 	while (atomic_long_read(&file->private_pages) && atomic_long_read(&dax->private) > target) {
+-		cladefs_nofs_mutex_lock(&file->wb_lock);
+-		cladefs_nofs_down_write(&file->sem);
++		mutex_lock(&file->wb_lock);
++		down_write(&file->sem);
+ 		/* A volume going (cladefs_dax_remove_volume) stops the worker first. */
+ 		volume = READ_ONCE(file->volume);
+ 		range = volume ? xa_find(&file->ranges, &chunk, ULONG_MAX, XA_PRESENT) : NULL;
+@@ -2521,8 +2520,8 @@
+ 			else
+ 				rebound += done;
+ 		}
+-		cladefs_nofs_up_write(&file->sem);
+-		cladefs_nofs_mutex_unlock(&file->wb_lock);
++		up_write(&file->sem);
++		mutex_unlock(&file->wb_lock);
+ 		if (!range || chunk == ULONG_MAX)
+ 			break;
+ 		chunk++;

@@ -21,6 +21,7 @@
 #define BIG_LEN (3UL << 20)
 #define PAUSE_READ_MAPPED BIT(4)
 #define PAUSE_WRITE_MAPPED BIT(5)
+#define PAUSE_REBIND BIT(7)
 #define PAUSE_WRITEBACK BIT(8)
 #define PAUSE_FAULTED BIT(9)
 #define PAUSE_COUNTED BIT(10)
@@ -1068,6 +1069,87 @@ static void cow_writeback_during_fault(void)
 }
 
 /*
+ * That a store after an mprotect toggle faults, its page written back (TASK-558): a store to page 3
+ * through the mapping makes its PTE writable and dirty; the budget writes the file back, seals and
+ * rebinds it (dax_rebind_now); mprotect makes the mapping read-only, then writable again. The
+ * kernel gives a dirty PTE its write bit back with no fault (can_change_shared_pte_writable):
+ * writeback's write-protect alone left it dirty, and the next store went to the window page the
+ * rebind had mapped the sealed extent's at, which the host refuses, or copies on write unknown to
+ * the guest, the store in no dirty set. Cleaned as they are write-protected, the store faults, and
+ * makes the page private once more.
+ */
+static void cow_mprotect_after_budget_rebind(void)
+{
+	u64 privates;
+
+	cow_mapped_file(8);
+	cow_put(3, 1, true);
+	wait_for(sim_spawn("rebinder", cow_rebind_now, NULL));
+	sim_mprotect(cow_addr, false);
+	sim_mprotect(cow_addr, true);
+	privates = sim_dax_stat(mount, "dax_privates");
+	cow_put(3, 2, true);
+	check(sim_dax_stat(mount, "dax_privates") == privates + 1,
+	      "the store after an mprotect toggle made %llu pages private, not 1",
+	      sim_dax_stat(mount, "dax_privates") - privates);
+	cow_check_file("after an mprotect toggle", 8 * PAGE_SIZE);
+}
+
+/*
+ * That a store between a writeback's copy and its rebind, after an mprotect toggle, is not lost
+ * (TASK-558): page 3 stored to through the mapping, the budget writes it back and seals it, and its
+ * rebind waits before its MAP (dax_pause, holding the file's semaphore); mprotect toggles the
+ * mapping, and another task stores to page 3. With its PTE left dirty, the store went into the
+ * private page with no fault, in no dirty set, after the copy, and the MAP replaced the page with
+ * the extent's: lost. Clean, it faults, waits for the rebind, and dirties the page again.
+ */
+static void cow_mprotect_during_rebind(void)
+{
+	struct task_struct *rebinder, *writer;
+
+	cow_mapped_file(8);
+	cow_put(3, 1, true);
+	rebinder = cow_pause(PAUSE_REBIND, cow_rebind_now, NULL);
+	sim_mprotect(cow_addr, false);
+	sim_mprotect(cow_addr, true);
+	writer = sim_spawn("writer", cow_mapped_write_page3, (void *)2UL);
+	sim_param_set("dax_pause", "0");
+	wait_for(writer);
+	wait_for(rebinder);
+	cow_check(3, true, "the store an mprotect toggle met a rebind with");
+	cow_check_file("after an mprotect toggle met a rebind", 8 * PAGE_SIZE);
+}
+
+/*
+ * That a store through a pin after a writeback is written back (TASK-598): page 3 pinned for
+ * writing (sim_pin_user_page_write), as an O_DIRECT read into the mapping pins it, which faults it
+ * dirty; an fsync writes it back; then the kernel stores through the pin with no fault, as the
+ * read's DMA does, and lets the pin go, marking the page dirty (folio_mark_dirty_lock, a no-op for
+ * DAX). The next fsync wrote nothing of it, in no dirty set, and the rebind after mapped the old
+ * extent over the private page: the store gone from the file, then from the mapping. Kept dirty
+ * while pinned, the next fsync writes it.
+ */
+static void cow_store_through_pin_after_writeback(void)
+{
+	const u64 round = 2;
+	struct page *pin;
+
+	cow_mapped_file(8);
+	pin = sim_pin_user_page_write(cow_addr + 3 * PAGE_SIZE);
+	check(pin, "a pin of page 3 for writing");
+	check(!sim_fsync(cow_target), "the fsync with page 3 pinned");
+	sim_pin_store(pin, cow_target, 3 * PAGE_SIZE, &round, sizeof(round));
+	memcpy(cow_expected + 3 * PAGE_SIZE, &round, sizeof(round));
+	cow_round[3] = round;
+	sim_unpin_page_dirty(pin, cow_target->f_mapping);
+	cow_check_file("after a store through a pin", 8 * PAGE_SIZE);
+	wait_for(sim_spawn("rebinder", cow_rebind_now, NULL));
+	cow_check(3, true, "a load after the rebind");
+	cow_check(3, false, "a read after the rebind");
+	cow_check_file("after the rebind", 8 * PAGE_SIZE);
+}
+
+/*
  * An fsync of cow_target, or, if `arg`, a sync of the filesystem, then a look at Fxfs: each page's
  * round from before it began is there.
  */
@@ -1815,6 +1897,9 @@ static const struct {
 	COW_SCENARIO(cow_writeback_found_no_memory),
 	COW_SCENARIO(cow_reclaim_during_writeback),
 	COW_SCENARIO(cow_writeback_during_fault),
+	COW_SCENARIO(cow_mprotect_after_budget_rebind),
+	COW_SCENARIO(cow_mprotect_during_rebind),
+	COW_SCENARIO(cow_store_through_pin_after_writeback),
 	COW_SCENARIO(cow_fsync_during_writeback),
 	COW_SCENARIO(cow_truncate_held),
 	COW_SCENARIO(cow_reclaim_after_writeback_met_a_fault),

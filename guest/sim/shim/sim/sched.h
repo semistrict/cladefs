@@ -110,14 +110,24 @@ static inline void pagefault_disable(void) { current->pagefault_disabled++; }
 static inline void pagefault_enable(void) { current->pagefault_disabled--; }
 static inline bool pagefault_disabled(void) { return current->pagefault_disabled; }
 
+/*
+ * As 6.18's memalloc_flags_save and memalloc_flags_restore: the save returns what it set, the scope
+ * if the task was in none, and the restore clears that, so that a restore of a scope entered within
+ * another leaves the outer one. Not the saved value restored: a model that restored it hid a scope
+ * a guest kernel left early (board 9143).
+ */
 static inline unsigned int memalloc_nofs_save(void)
 {
-	unsigned int was = current->nofs;
+	unsigned int set = !current->nofs;
 
 	current->nofs = 1;
-	return was;
+	return set;
 }
-static inline void memalloc_nofs_restore(unsigned int was) { current->nofs = was; }
+static inline void memalloc_nofs_restore(unsigned int set)
+{
+	if (set)
+		current->nofs = 0;
+}
 
 /* A spinlock is a lock like another here: a task that holds one may be switched out. */
 typedef struct spinlock {

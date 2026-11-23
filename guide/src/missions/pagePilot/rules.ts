@@ -12,4 +12,6 @@ export const ruleMutants: Record<string, string[]> = {
   swapExclusive: ["task-164.4-swap-shared.patch"],
   rebindExclusive: ["task-164.4-rebind-shared.patch"],
   countPrivate: ["task-164.4-private-uncounted.patch"],
+  protectCleans: ["task-558-protect-keeps-dirty.patch"],
+  keepPinned: ["task-598-pinned-written-clean.patch"],
 };

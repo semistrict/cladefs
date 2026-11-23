@@ -58,7 +58,7 @@ Written here (see each file's head for what it leaves out):
 | Simulated | Where | How far it goes |
 | --- | --- | --- |
 | Scheduler, locks, wait queues, RCU, workqueues | `kernel/sched.c`, `locks.c`, `workqueue.c` | One task at a time; wait queues as the kernel's; rwsem order as the kernel's, not its optimistic spinning |
-| Page tables and faults | `kernel/mm.c` | Two flat arrays per VMA, with `mm/memory.c`'s insert and fault rules rewritten, and `mmap_lock`. A pin, as `get_user_pages` takes one (`sim_pin_user_page`), is the page's reference alone, faulted in as the kernel faults. No TLB, no MMU, no private mappings |
+| Page tables and faults | `kernel/mm.c` | Two flat arrays per VMA, with `mm/memory.c`'s insert and fault rules rewritten, and `mmap_lock`. A pin, as `get_user_pages` takes one (`sim_pin_user_page`, `sim_pin_user_page_write`), is the page's pin references (`GUP_PIN_COUNTING_BIAS`), faulted in as the kernel faults, for a store if for writing, which the kernel may store through later with no fault, as an O_DIRECT read's DMA does. `mprotect` (`sim_mprotect`) makes a dirty PTE writable with no fault, as `change_protection` does. No TLB, no MMU, no private mappings |
 | VFS and page cache | `kernel/vfs.c`, `mount.c` | What dax.c and data.c call; the VFS's checks before a clone, and its writing both back, as `generic_remap_file_range_prep`. `super.c` is not built: its fsync, and its writing of an inode's attributes, its size alone here, are rewritten, so that a bug in them shows on a real kernel alone |
 | Host device | `kernel/device.c`, `host.c` | The window copies on write (doc-13): real memory, a memfd mapped page by page, read-only, so that a write the host refuses is a SIGSEGV. A MAP maps sealed extents alone (EPERM for an open one, which tests count) and zeros past what was written; `MAP_ZEROS` maps zeros; `PRIVATE` copies pages to private memory at the same addresses, ENOMEM past `private_max` (a quarter of the window, or what a test sets); a MAP or UNMAP frees private pages, as doc-13's host. A write to a sealed or zero page, which the host's userfaultfd write-protect would copy at, fails the run: the guest makes each page it dirties private first (TASK-164.9), so such a write is to a page no iomap made private. Requests complete at once, or fail with EIO as a test asks, or a MAP waits on its way as a test holds it: no virtqueue, no second stage, no async page faults, whose writes the host takes as reads |
 | Fxfs | `cladefs/cladefs.c` | A model of what the protocol assumes: blocks, open extents that go one way, shared blocks, the staging extent `zero_tail` moves a last block to, `FreeAfter::Flush`, one seal in four a flush, reservations that fail. Writeback (`cladefs_write_many`) allocating then: its copy of the pages, a page at a time, blocks of the staging extent for 256 KiB at most, as Fxfs packs small files, else a new extent, written, then the commit, which a test may hold to look at what a crash would leave, or fail; reservations of dirty pages, given back once. No seal comes between taking blocks and writing them, so the packed write a seal refuses, which Fxfs tries again in an extent of its own, has no counterpart. No journal, tree or crash consistency |
@@ -111,11 +111,14 @@ It can't find:
   sides isn't explored unless a delay point or a split falls there.
 - **Real page tables.** TLB shootdowns, PTE races with hardware, `get_user_pages`' own races
   (its fast walk, a pin taken as a mapping goes), KVM's stage 2, async page faults, userfaultfd:
-  all outside it. A pin is a reference a test takes and drops.
+  all outside it. A pin is the references a test takes and drops, and its later stores a test's.
 - **The host.** cladefsd, uffd and the VMM are fakes here.
 - **Fxfs.** Journal, compaction, crash recovery, and whatever the model gets wrong that
   `crates/fxfs-sim-diff`, which runs the model beside Fxfs, doesn't find ("The model against Fxfs").
-- **Lock order inversions that no seed plays out:** there is no lockdep graph.
+- **Lock order inversions that no seed plays out:** there is no lockdep graph. Reclaim's is the
+  exception: an allocation that may reclaim from the filesystem holding a lock that reclaim's
+  eviction takes fails the run, whether or not reclaim comes (`sim_might_reclaim`, TASK-559), the
+  driver's and Rust's allocations counted with dax.c's.
 - **The followers and private mappings**, which the sim doesn't reach yet.
 - **Copy on write's host side**: userfaultfd, KVM's async page faults resolved as reads, a source
   evicting its pages, a snapshot refused while pages are private. The model copies pages at a
@@ -306,6 +309,9 @@ a quarter of the window, the other tests' a quarter; and these scenarios, at 64 
 | `cow_commit_failed` | `dax_fail_commits`: the fsync fails EIO, Fxfs holds the file as it was, the next fsync succeeds |
 | `cow_reclaim_during_writeback` | a writeback paused after its swap (`dax_pause`), before it reads its pages from the window, as other files' chunks fill the ranges' half of it: reclaim takes their ranges, not the one the writeback reads (GCE r544's class: a range's space freed and given to another while something reads it there) |
 | `cow_writeback_during_fault` | a write's fault paused past its iomap_end (`dax_pause`), its PTE writable and its DAX entry held: the worker's writeback write-protects the PTE all the same, so that its rebind's read-only MAP finds none writable, and the write faults again and dirties its page |
+| `cow_mprotect_after_budget_rebind` | a store through a mapping, the budget's writeback, seal and rebind, `mprotect` read-only then writable again (`sim_mprotect`): the next store faults and makes the page private once more, its PTE clean, not made writable with no fault for being dirty (TASK-558) |
+| `cow_mprotect_during_rebind` | the same, the rebind paused before its MAP (`dax_pause`): a store from another task after the toggle waits for it, then dirties the page again; with no fault it went into the private page in no dirty set, which the MAP replaced (TASK-558) |
+| `cow_store_through_pin_after_writeback` | a pin for writing (`sim_pin_user_page_write`), as an O_DIRECT read's, an fsync, a store through the pin with no fault, the pin let go: the next fsync writes the store, and loads and read(2) after a rebind read it (TASK-598) |
 | `cow_fsync_during_writeback` | a writeback paused after its swap: a second fsync, and then a sync of the filesystem, nothing dirty, wait for it, and find every write before them in Fxfs as they return |
 | `cow_truncate_held` | a truncate's MAP of zeros over 48 dirty private pages held on its way: a second file's write waits for the budget until it ends, the host never holding more than `private_max` |
 | `cow_writeback_before_write` | a write's fault paused past its iomap_end, its page dirty, its write not come: an fsync writes it back, and the seals after free its old extent; the write, let go, keeps the rest of the page as it was, not the zeros the freed extent reads, as its iomap made it private (TASK-164.9) |
@@ -339,6 +345,10 @@ reserved, and no MAP of an open extent asked. The rules' mutants:
 | `task-164.9-private-failure-ignored` | `cow_private_failed`: the write whose `PRIVATE` failed writes to a page no `PRIVATE` made the VM's |
 | `task-164.2-writeback-holds-no-range` | `cow_reclaim_during_writeback`: the writeback hands Fxfs the zeros of the chunk reclaim gave its range's space to, reads the window where nothing is mapped, or the range reclaim freed (ASan) |
 | `task-283-rebind-leaves-open` | `cow_rebind_seals_open_extents`: the worker leaves the 7 pages private |
+| `task-558-protect-keeps-dirty` | `cow_mprotect_after_budget_rebind`: the store after the toggle goes to the window page the rebind mapped the sealed extent's at, which the host refuses |
+| `task-598-pinned-written-clean` | `cow_store_through_pin_after_writeback`: Fxfs lacks the store through the pin |
+| `task-559-rebind-locks-bare` | `cow_rebind_during_writeback`: an allocation that may reclaim from the filesystem holding the file's writeback lock (`sim_might_reclaim`) |
+| `task-559-rebind-unscoped` | `cow_rebind_during_writeback`: `cladefs_nofs_held`'s WARN |
 | `task-79.49-write-fails-on-pins` | `cow_write_to_pinned_slice`: the write fails (SIGBUS), its fault's drop of the slice refusing to wait for the pin (TASK-149.31) |
 | `unmapped-page-read-as-hole` | `hole_mapped_then_written`: a load of page 2, which a truncate's failed MAP of zeros left with no window page, reads the kernel's zero page where read(2) reads a write's bytes |
 

@@ -4,9 +4,12 @@
  * Memory management beneath fs/dax.c: the window's struct pages, and each VMA's page tables, with
  * what mm/memory.c does to them for a DAX file's shared mapping, rewritten for two flat arrays:
  * inserting PTEs and PMDs and the checks that refuse them (insert_page_into_pte_locked, whose
- * refusals were TASK-124's SIGBUS), unmapping, write-protecting, and the fault paths that call a
- * mapping's vm_ops. A user access is one step of a task: no TLB, no store buffer. A pin, as
- * get_user_pages takes one, is a reference to the page alone. Private mappings aren't simulated.
+ * refusals were TASK-124's SIGBUS), unmapping, write-protecting and cleaning, mprotect's changes of
+ * protection, which make a dirty PTE writable with no fault (TASK-558), and the fault paths that
+ * call a mapping's vm_ops. A user access is one step of a task: no TLB, no store buffer. A pin, as
+ * get_user_pages takes one, is the page's pin references (GUP_PIN_COUNTING_BIAS), faulted in for a
+ * store if it is for writing, which the kernel may store through later with no fault, as an
+ * O_DIRECT read's DMA does (TASK-598). Private mappings aren't simulated.
  */
 
 #include <sim/sim.h>
@@ -396,6 +399,23 @@ unsigned long wp_shared_mapping_range(struct address_space *mapping, pgoff_t fir
 	return total;
 }
 
+/*
+ * As mm/rmap.c's, page_vma_mkclean_one for each mapping of the range: those of its PTEs that map
+ * its frames, from `pfn`, read-only and clean.
+ */
+int mapping_wrprotect_range(struct address_space *mapping, pgoff_t pgoff, unsigned long pfn,
+			    unsigned long nr_pages)
+{
+	struct vm_area_struct *vma;
+	int cleaned = 0;
+
+	i_mmap_lock_read(mapping);
+	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff, pgoff + nr_pages - 1)
+		cleaned += pfn_mkclean_range(pfn, nr_pages, pgoff, vma);
+	i_mmap_unlock_read(mapping);
+	return cleaned;
+}
+
 int pfn_mkclean_range(unsigned long pfn, unsigned long nr_pages, pgoff_t pgoff,
 		      struct vm_area_struct *vma)
 {
@@ -470,6 +490,9 @@ static vm_fault_t handle_fault(struct vm_area_struct *vma, unsigned long addr, b
 	pte_t *pte = pte_of(vma, addr);
 	vm_fault_t ret;
 
+	/* access_error: a store to a mapping mprotect made read-only (sim_mprotect). */
+	if (write && !(vma->vm_flags & VM_WRITE))
+		return VM_FAULT_SIGSEGV;
 	current->fault_mapping = vma->vm_file->f_mapping;
 	current->fault_pgoff = vmf.pgoff;
 	current->fault_write = write;
@@ -599,7 +622,8 @@ bool sim_mm_is_huge(unsigned long addr)
  * need be, which isn't a user fault, and held by a reference, which keeps the page busy
  * (dax_layout_busy_page_range) until sim_unpin_page. The page, or NULL if the fault failed.
  */
-struct page *sim_pin_user_page(unsigned long addr)
+/* A pin, as __get_user_pages takes it: the page faulted in, for a store if `write`, and pinned. */
+static struct page *pin_user_page(unsigned long addr, bool write)
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
@@ -611,9 +635,9 @@ struct page *sim_pin_user_page(unsigned long addr)
 		vma = find_vma(mm, addr);
 		if (!vma || (ret & VM_FAULT_ERROR))
 			break;
-		page = translate_page(vma, addr, false);
+		page = translate_page(vma, addr, write);
 		if (page) {
-			folio_get(page_folio(page));
+			atomic_add(GUP_PIN_COUNTING_BIAS, &page_folio(page)->_refcount);
 			break;
 		}
 		sim_mm_faults++;
@@ -622,7 +646,7 @@ struct page *sim_pin_user_page(unsigned long addr)
 			sim_panic("a pin faults again: page %lu of a mapping at %lx, which held it, and "
 				  "nothing but a fault unmapped it", page_in(vma, addr), vma->vm_start);
 		current->fault_drops = 0;
-		ret = handle_fault(vma, addr, false, false);
+		ret = handle_fault(vma, addr, write, false);
 		current->fault_drops = -1;
 		if (translate_page(vma, addr, false))
 			hold(vma, addr);
@@ -631,10 +655,40 @@ struct page *sim_pin_user_page(unsigned long addr)
 	return page;
 }
 
+struct page *sim_pin_user_page(unsigned long addr)
+{
+	return pin_user_page(addr, false);
+}
+
+struct page *sim_pin_user_page_write(unsigned long addr)
+{
+	return pin_user_page(addr, true);
+}
+
 /* unpin_user_page: once the pin was the page's last use, the page is idle. */
 void sim_unpin_page(struct page *page)
 {
-	folio_put(page_folio(page));
+	struct folio *folio = page_folio(page);
+
+	if (WARN_ON(!folio_maybe_dma_pinned(folio)))
+		return;
+	if (!atomic_sub_return(GUP_PIN_COUNTING_BIAS, &folio->_refcount))
+		wake_up_var(&folio->page);
+}
+
+void sim_pin_store(struct page *page, struct file *file, loff_t pos, const void *buf, size_t len)
+{
+	struct sim_shadow_call call;
+
+	sim_shadow_mapped_write_begin(&call, file, pos, len);
+	memcpy(page_address(page) + offset_in_page(pos), buf, len);
+	sim_shadow_mapped_write_end(&call, buf, len);
+}
+
+void sim_unpin_page_dirty(struct page *page, struct address_space *mapping)
+{
+	mapping->a_ops->dirty_folio(mapping, page_folio(page));
+	sim_unpin_page(page);
 }
 
 /* Its pieces, a mapping's each, the file model's calls (kernel/shadow.c). */
@@ -734,6 +788,52 @@ unsigned long sim_mm_map(struct mm_struct *mm, struct file *file, pgoff_t pgoff,
 	up_write(&mapping->i_mmap_rwsem);
 	up_write(&mm->lock);
 	return vma->vm_start;
+}
+
+/*
+ * As mm/mprotect.c's change_protection for a shared mapping with writenotify, as a DAX file's is
+ * (page_mkwrite): read-only takes every PTE's write bit and keeps its dirty bit (pte_modify);
+ * writable again gives the write bit back with no fault to each PTE that is dirty
+ * (MM_CP_TRY_CHANGE_WRITABLE, can_change_shared_pte_writable), as the kernel takes a dirty PTE's
+ * filesystem to have been told of its store; the rest fault on their next store (TASK-558).
+ */
+void sim_mprotect(unsigned long addr, bool writable)
+{
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	unsigned long i, count;
+
+	down_write(&mm->lock);
+	vma = find_vma(mm, addr);
+	if (writable)
+		vma->vm_flags |= VM_WRITE;
+	else
+		vma->vm_flags &= ~VM_WRITE;
+	count = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	for (i = 0; i < count; i++) {
+		pte_t *pte = &vma->ptes[i];
+
+		if (!pte_present(*pte))
+			continue;
+		if (!writable)
+			pte->pte &= ~SIM_PT_WRITE;
+		else if (pte_dirty(*pte))
+			pte->pte |= SIM_PT_WRITE;
+		watch(vma->vm_start + (i << PAGE_SHIFT), writable ? "mprotected writable" :
+		      "mprotected read-only", pte->pte);
+	}
+	count = (vma->vm_end >> PMD_SHIFT) - (vma->vm_start >> PMD_SHIFT) + 1;
+	for (i = 0; i < count; i++) {
+		pmd_t *pmd = &vma->pmds[i];
+
+		if (!pmd_trans_huge(*pmd))
+			continue;
+		if (!writable)
+			pmd->pmd &= ~SIM_PT_WRITE;
+		else if (pmd->pmd & SIM_PT_DIRTY)
+			pmd->pmd |= SIM_PT_WRITE;
+	}
+	up_write(&mm->lock);
 }
 
 void sim_munmap(unsigned long addr)

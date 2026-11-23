@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2026 The cladefs Authors.
+#
+# Kernel: sim
+# Killer: scenarios cow_mprotect_after_budget_rebind
+#
+# TASK-558 (board 2512): writeback write-protects its pages and leaves their PTEs dirty
+# (wp_shared_mapping_range), which mprotect, making the mapping writable again, makes writable with
+# no fault (can_change_shared_pte_writable): the store after it goes to the window page the rebind
+# mapped the sealed extent's at, which the host refuses (cow_mprotect_after_budget_rebind), or
+# lands in no dirty set. scripts/cocci/wp-keeps-dirty.cocci finds the call.
+
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
+@@ -2316,7 +2316,7 @@
+ 		bitmap_set(batch->pinned, page, end - page);
+ 		return;
+ 	}
+-	mapping_wrprotect_range(mapping, index, pfn, end - page);
++	wp_shared_mapping_range(mapping, index, end - page);
+ 	for (at = page; at < end; at++) {
+ 		if (folio_maybe_dma_pinned(page_folio(pfn_to_page(pfn + at - page))))
+ 			__set_bit(at, batch->pinned);

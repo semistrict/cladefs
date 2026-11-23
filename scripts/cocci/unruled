@@ -39,6 +39,8 @@ task-212-no-memory-folios-lost: as task-207's, of the page cache's folios (super
 task-283-rebind-leaves-open: the seal before a rebind taken out whole: nothing left for a rule to see
 task-323-fsync-sleeps: a sleep added to fsync, a cost: a rule against sleeps would flag dax.c's three timed waits, there by design; append_writeback times fsync
 task-44.15-private-enomem-eio: an error mapped to another (-ENOMEM to -EIO): which errors pass through is the algorithm's
+task-559-rebind-unscoped: a NOFS scope left out before locks taken through cladefs_nofs_*: their check (cladefs_nofs_held) finds it in any run that takes them there
+task-598-pinned-written-clean: a writeback's pinned pages left clean, a call taken out: one bitmap's protocol, no shape another shares
 task-79.28-before-147: a value returned in one branch (-EXDEV or -EIO)
 task-79.28-range-too-small: a value returned in one branch (-EXDEV or -EIO): equivalent (Killer: none)
 task-79.29-inherited-acls-written-back: inherited ACLs written after the create, in a transaction of their own: what one call writes (super.c)

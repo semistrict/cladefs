@@ -579,10 +579,22 @@ void sim_device_check_unmounted(void)
 	sim_device_check_unmapped("the end, unmounted");
 }
 
+/*
+ * The driver's allocation for a request, as its virtio_extent_submit makes it: a request with data
+ * has it described by a scatterlist, allocated GFP_KERNEL (vext_map_data). Here nothing is, but the
+ * allocation's reclaim is checked as any other's (sim_might_reclaim, TASK-559).
+ */
+static void driver_allocates(const struct vext_request *req)
+{
+	if (req->data_len)
+		sim_might_reclaim(GFP_KERNEL, "drivers/virtio_extent/driver.c (vext_map_data)", 0);
+}
+
 int virtio_extent_call(struct virtio_extent *vext, struct vext_request *req)
 {
 	int err;
 
+	driver_allocates(req);
 	/* The request crosses to the host, and others run meanwhile; a seal may end on the way. */
 	sim_point("a device request");
 	if (req->type == VIRTIO_EXTENT_T_MAP || req->type == VIRTIO_EXTENT_T_UNMAP ||
@@ -621,6 +633,7 @@ int virtio_extent_submit(struct virtio_extent *vext, struct vext_request *req)
 {
 	struct extent *extent = find_extent(req->id.sequence);
 
+	driver_allocates(req);
 	sim_point("a device request");
 	if (req->type != VIRTIO_EXTENT_T_READ)
 		sim_panic("request %u", req->type);
