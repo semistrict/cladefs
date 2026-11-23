@@ -1636,7 +1636,18 @@ impl ObjectBucket {
             let path_string = path.to_string();
             let deleting = delete_one(&**objects, &path);
             let other = crate::client::conditioned(header, path_string.clone(), deleting);
-            let refused = matches!(other.await.0, Err(object_store::Error::Precondition { .. }));
+            // Refused, or deleted, it answered; failed, it answered nothing of the condition, and
+            // the check fails, to be asked again (hotbed review 53).
+            let refused = match other.await.0 {
+                Err(object_store::Error::Precondition { .. }) => true,
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => false,
+                Err(failed) => {
+                    // cladefs: best effort: what is left of a probe is its own object, which no
+                    // cell names; the failure is what the check gives.
+                    let _ = delete_one(&**objects, &path).await;
+                    return Err(failed);
+                }
+            };
             let options = GetOptions { head: true, ..GetOptions::default() };
             let kept = match objects.get_opts(&path, options).await {
                 Ok(_) => true,
@@ -3917,6 +3928,32 @@ pub(crate) mod tests {
             crate::bucket::conformance(&*bucket, "conformance").await;
             crate::bucket::conditional_deletes(&*bucket, "conformance", true).await;
             cell_lifecycle(s3(&server, "cells", &Client::DEFAULT), 1).await;
+        });
+    }
+
+    /// board 9229, hotbed review 53: a bucket's check that its backend honours a conditional
+    /// delete, its delete of another version failing (the server refusing it once), answers
+    /// nothing of the condition: the delete fails, and the next asks again, finds it honoured,
+    /// and deletes, never taking the failure for "ignored" for good. Over S3, a conditional delete
+    /// is a DeleteObject, not DeleteObjects.
+    #[test]
+    fn conditional_deletes_check_their_backend_again_after_a_failure() {
+        runtime().block_on(async {
+            let server = S3Server::start(None);
+            let bucket = s3(&server, "deletes", &Client::DEFAULT);
+            let version = bucket.put("key", vec![1].into(), PutMode::Create).await.unwrap();
+            server.answering_next_conditional_delete(403);
+            let refused = bucket.delete_if("key", &version).await;
+            assert_eq!(refused, Err(Error::Refused(Refusal::Denied)));
+            assert_eq!(bucket.get("key").await.unwrap().bytes, [1]);
+            let before = server.requests();
+            assert_eq!(bucket.delete_if("key", &version).await, Ok(()));
+            assert_eq!(bucket.head("key").await.map(drop), Err(Error::NotFound));
+            let deletes =
+                |requests: &std::collections::BTreeMap<&str, u64>| requests.get("delete").copied();
+            // The check's two, then its own.
+            assert_eq!(deletes(&server.requests()), deletes(&before).map(|n| n + 3));
+            assert_eq!(server.requests().get("delete-objects"), before.get("delete-objects"));
         });
     }
 

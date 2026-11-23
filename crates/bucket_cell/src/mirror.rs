@@ -219,16 +219,22 @@ impl Pin {
         bucket::delete_if(own, &self.key, &self.version).await
     }
 
-    /// [`Pin::release`], deleting `hold` in `bucket` first if it is still of this mirror's write,
-    /// its bytes its own (board 9229): read, and deleted only if of the version read. The next
-    /// mirror, its pin taken over, wrote it again, of its own bytes: it stands, the delete landing
-    /// however late.
+    /// [`Pin::release`], deleting `hold` in `bucket` first if the pin is still this mirror's,
+    /// written again first, conditionally, and the hold still of this mirror's write, its bytes
+    /// its own (board 9229): read, and deleted only if of the version read. A mirror whose pin
+    /// another took over since leaves both: that mirror's copy may be marked, its hold this one's
+    /// bytes, written over it as this one went on, paused past its lease (hotbed review 53). The
+    /// next mirror taking the pin over after the refresh writes the hold again, of its own bytes:
+    /// it stands, the delete landing however late.
     async fn release_holding(
-        self,
+        mut self,
         own: &impl Bucket,
         bucket: &impl Bucket,
         hold: &str,
     ) -> Result<(), Refused> {
+        if !self.refresh(own, true).await? {
+            return Ok(());
+        }
         if let Some(held) = bucket::get(bucket, hold).await?
             && held.bytes == self.hold()
         {
@@ -460,7 +466,8 @@ async fn write_hold(bucket: &impl Bucket, hold: &str, pin: &Pin) -> Result<(), R
 }
 
 /// Gives a mirror up: its hold deleted in the parent's bucket, then its pin, each only if still of
-/// its own write. A pin another mirror took over, the hold is that mirror's too, which it leaves.
+/// its own write, its pin its own still, written again first. A pin another mirror took over, the
+/// hold is that mirror's too, which it leaves.
 async fn let_go(
     bucket: &impl Bucket,
     own: &impl Bucket,
@@ -862,6 +869,31 @@ mod tests {
         assert_eq!(hold.bytes, next.hold(), "the hold");
         let pin = block_on(Direct(own.clone()).get(&pin_key)).expect("the next mirror's pin gone");
         assert_eq!(pin.bytes, next.bytes, "the pin");
+    }
+
+    /// hotbed review 53: a mirror paused past its lease after it found no marker, before its hold,
+    /// while the next mirror took its pin over, marked and let its pin go, its hold standing for
+    /// the marked copy; going on, it writes the hold over, of its own bytes, and gives up (its
+    /// version named no more): letting go, it finds its pin another's, gone, and leaves the hold,
+    /// the marked copy's still. Deleting a hold of its own bytes, its pin not its own, took the
+    /// marked copy's.
+    #[test]
+    fn mirrors_resumed_past_their_lease_leave_a_marked_copys_hold() {
+        let runtime = paused();
+        let _entered = runtime.enter();
+        let sim = SimBucket::new();
+        let (bucket, own) = (sim.at(1), sim.at(1).own());
+        let hold = layout::hold(PARENT, 3, 1);
+        let paused_one = pinned(&sim, &own);
+        sim.advance(PIN_STALE + 1);
+        advance(&runtime, Duration::from_millis(PIN_STALE + 1));
+        let next = pinned(&sim, &own);
+        sim.served(write_hold(&*bucket, &hold, &next)).0.unwrap();
+        assert_eq!(sim.served(next.release(&*own)).0, Ok(()));
+
+        sim.served(write_hold(&*bucket, &hold, &paused_one)).0.unwrap();
+        assert_eq!(sim.served(paused_one.release_holding(&*own, &*bucket, &hold)).0, Ok(()));
+        assert!(sim.stored().contains(&format!("@2/{hold}")), "the marked copy's hold deleted");
     }
 
     /// board 9229: a mirror letting go deletes its own hold and pin, with nothing else in the way:
