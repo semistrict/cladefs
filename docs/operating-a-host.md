@@ -238,7 +238,10 @@ mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs a
 errors name it only by its ID, a short hash. To rotate it, give every host
 `CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest first: it
 wraps, any unwraps), run `cladefs-gc URL --rotate-master-key`, which rewraps every
-tenant's KEK under NEW, then give the hosts NEW alone. To shred a tenant, run
+tenant's KEK under NEW and records NEW in the bucket's entry of the registry of
+buckets, every copy of it (run it again until it fails no copy: hosts of other
+buckets choose its KMS by that entry), then give the hosts NEW alone, those of
+other buckets too (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`). To shred a tenant, run
 `cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's daemon: it
 replaces the tenant's KEK object by a tombstone, so that nothing of the tenant's
 unwraps anywhere and no KEK is made for it again, and has each host forget its

@@ -726,8 +726,17 @@ refuses to start) and removed plaintext (One sealed mode).
   rewrapped under NEW by a conditional update (read again and done again if another changed it),
   the KEK and its ID unchanged, so every cell KEK it wrapped stays valid; it says how many it
   rewrapped, how many were under NEW already, how many tenants are shredded, and leaves, saying so
-  and failing, any under none of the keys given. Run again, it rewraps nothing. (3) Give hosts NEW
-  alone. With versioning on, OLD still opens the objects' non-current versions until they expire.
+  and failing, any under none of the keys given. Run again, it rewraps nothing. Refusing none, it
+  records NEW's ID in the bucket's entry of the registry of buckets (`master_key_id`, if the entry
+  records one), the root's registry first, then every bucket's copy, failing, and saying which,
+  for a copy out of reach: run it again until none fails (board 8483). Hosts for which the bucket
+  is not their own choose its bucket KMS by that entry, refusing it unless they hold the key it
+  names (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`), and read it from their own bucket's copy:
+  left naming OLD, step (3) would lock them out of the bucket's cells at their next restart. URL
+  names the bucket rotated, the root or any other, its other buckets reached as its hosts reach
+  them (`CLADEFSD_BUCKET_<N>_*`). (3) Give hosts NEW alone, the bucket's own
+  (`CLADEFS_MASTER_KEY`) and those of other buckets (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`).
+  With versioning on, OLD still opens the objects' non-current versions until they expire.
 - **Shredding a tenant** (`ShredTenant`, `cladefsctl shred-tenant TENANT`, through each host's
   daemon; `cladefs::bucket::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
   tenant's KEK object is replaced by a tombstone, by a conditional update (or created one, a tenant

@@ -108,8 +108,13 @@
 //! error how many it rewrapped, how many were under the newest already, and how many tenants are
 //! shredded (tombstones, left), naming the newest key by its ID. A KEK object under none of the
 //! keys given is left as it is, said, and fails the run, which, done again with its key among them,
-//! finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it rewraps
-//! nothing.
+//! finishes. Refusing none, it then records the newest key's ID in the bucket's entry of the
+//! registry of buckets, if that entry records a master key (`cladefsctl add-bucket` records it), in
+//! the root bucket's registry, then in every bucket's copy, each reached as the bucket's hosts
+//! reach it (`CLADEFSD_BUCKET_<N>_*`), saying so (board 8483): hosts of other buckets choose this
+//! bucket's KMS by it. A copy out of reach is said, and fails the run, which, done again, finishes
+//! it. URL may be any bucket, the root or another. Once it ran refusing none and failing no copy,
+//! hosts need the newest key alone. Done again, it rewraps nothing.
 
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
@@ -490,9 +495,12 @@ fn kms(bucket: &Arc<RoutedBucket>) -> Result<extent_keys::kms::Shared, String> {
 }
 
 /// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
-/// environment gives (TASK-411.27, `bucket_cell::bucket_kms::rotate`), saying what it did on
-/// standard error; failing, once it went over every tenant, if it left any under none of them.
-async fn rotate_master_key(bucket: &impl Bucket) -> Result<(), String> {
+/// environment gives (TASK-411.27), then records it in the bucket's entry of the registry of
+/// buckets, the root's and every copy (board 8483, `bucket_cell::bucket_kms::rotate_recorded`),
+/// saying what it did on standard error; failing, once it went over every tenant, if it left any
+/// under none of them, or a copy of the registry unwritten.
+async fn rotate_master_key(bucket: &RoutedBucket) -> Result<(), String> {
+    use bucket_cell::bucket_kms::{Recorded, Rotated};
     use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
     let keys = MasterKeys::from_env()?.ok_or_else(|| {
         format!(
@@ -500,9 +508,9 @@ async fn rotate_master_key(bucket: &impl Bucket) -> Result<(), String> {
              master key: the newest first, then those to rotate from"
         )
     })?;
-    let rotated = bucket_cell::bucket_kms::rotate(bucket, &keys).await;
-    let rotated = rotated.map_err(|err| format!("--rotate-master-key: {err}"))?;
-    let bucket_cell::bucket_kms::Rotated { rewrapped, newest, destroyed, refused } = rotated;
+    let rotated = bucket_cell::bucket_kms::rotate_recorded(bucket, &keys).await;
+    let (rotated, recorded) = rotated.map_err(|err| format!("--rotate-master-key: {err}"))?;
+    let Rotated { rewrapped, newest, destroyed, refused } = rotated;
     eprintln!(
         "cladefs-gc: master key {}: rewrapped {rewrapped} tenants' KEKs, {newest} under it already, \
          {destroyed} tenants shredded, {} refused",
@@ -512,12 +520,33 @@ async fn rotate_master_key(bucket: &impl Bucket) -> Result<(), String> {
     for refusal in &refused {
         eprintln!("cladefs-gc: left as it is: {refusal}");
     }
-    match refused.len() {
-        0 => Ok(()),
-        left => Err(format!(
-            "{left} tenants' KEK objects left under no master key given: run again with theirs \
-             among {MASTER_KEY_VAR}'s"
+    match recorded {
+        Recorded::Refused => Err(format!(
+            "{} tenants' KEK objects left under no master key given, the registry of buckets \
+             unchanged: run again with theirs among {MASTER_KEY_VAR}'s",
+            refused.len()
         )),
+        // No registry, or no master key recorded in it: none to record, nothing said.
+        Recorded::Unrecorded => Ok(()),
+        Recorded::Recorded { failed } if failed.is_empty() => {
+            eprintln!(
+                "cladefs-gc: the registry of buckets records master key {} for this bucket",
+                keys.newest().id()
+            );
+            Ok(())
+        }
+        Recorded::Recorded { failed } => {
+            for (number, why) in &failed {
+                eprintln!(
+                    "cladefs-gc: bucket {number}'s copy of the registry left as it was: {why}"
+                );
+            }
+            Err(format!(
+                "{} buckets' copies of the registry still name the old master key: run again, \
+                 those buckets in reach, before dropping it from any host",
+                failed.len()
+            ))
+        }
     }
 }
 
@@ -981,7 +1010,7 @@ fn main() -> Result<(), String> {
                 Ok(())
             }
             Command::DeleteCell(id) => delete_cell(&*bucket, id).await,
-            Command::RotateMasterKey => rotate_master_key(&*bucket).await,
+            Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
                 say_usage(&*bucket, tenant, &mut std::io::stdout().lock()).await
             }

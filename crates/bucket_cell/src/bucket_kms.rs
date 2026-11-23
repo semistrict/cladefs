@@ -296,7 +296,9 @@ pub struct Rotated {
 /// Rewraps every tenant's KEK object in `bucket` under the newest of `keys` (doc-16, The bucket
 /// KMS): each one under an older key, one of `keys`, by a conditional update, read again and done
 /// again if another changed it meanwhile. The KEKs stay as they are. Once done, refusing none,
-/// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`. Tenants
+/// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`, once the
+/// registry of buckets records it too ([`rotate_recorded`], which hosts of other buckets go by,
+/// board 8483). Tenants
 /// are listed a page at a time; done again, it rewraps nothing more. cladefs: refused by the bucket,
 /// [`bucket::Refused`] (board 5861), what it rewrapped before rewrapped.
 pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Result<Rotated, bucket::Refused> {
@@ -325,6 +327,70 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Result<Rotated,
         }
     }
     Ok(rotated)
+}
+
+/// cladefs: what [`rotate_recorded`] made of the registry of buckets (board 8483).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recorded {
+    /// The rotation refused a KEK object: nothing recorded, the older master keys still needed.
+    Refused,
+    /// The bucket is in no registry, never formatted, or its entry records no master key: none to
+    /// record.
+    Unrecorded,
+    /// Its entry records the newest master key, in the root's registry and in every bucket's copy
+    /// but those that failed, by number, and why: recording again, a rotation run again, finishes
+    /// them.
+    Recorded { failed: Vec<(u16, String)> },
+}
+
+/// cladefs: [`rotate`] of `home`'s own bucket under `keys`; then, refusing none, the newest of
+/// `keys` recorded as the master key of its tenants' KEKs in the registry of buckets (board 8483):
+/// its entry in the root's registry, by a conditional update ([`identity::record_master_key`]),
+/// then every bucket's copy ([`identity::spread`]), the root's first, each reached by `home`'s
+/// routes, as its own hosts reach it. Hosts for which the bucket is another than their own choose
+/// its bucket KMS by that entry, refusing it unless they hold the key it names ([`ByBucket`]),
+/// and read it from their own bucket's copy first: left naming a key dropped from their
+/// `CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY` since, they would refuse every cell of the bucket. An
+/// entry recording no master key records none still (hotbed question 460). Refused by the bucket, or
+/// the registry not to be read or written, says why.
+pub async fn rotate_recorded<B: Bucket>(
+    home: &RoutedBucket<B>,
+    keys: &MasterKeys,
+) -> Result<(Rotated, Recorded), String> {
+    let own = home.own();
+    let rotated = rotate(&*own, keys).await.map_err(|err| err.to_string())?;
+    if !rotated.refused.is_empty() {
+        return Ok((rotated, Recorded::Refused));
+    }
+    let registry = |err: crate::Error| format!("the registry of buckets: {err}");
+    let Some(ours) = identity::get(&*own).await.map_err(registry)? else {
+        return Ok((rotated, Recorded::Unrecorded));
+    };
+    let root = match ours.number {
+        identity::ROOT => own.clone(),
+        _ => home.numbered(identity::ROOT).await.map_err(registry)?,
+    };
+    let newest = keys.newest().id().to_string();
+    let recorded = identity::record_master_key(&*root, ours.number, &newest).await;
+    let Some(recorded) = recorded.map_err(registry)? else {
+        return Ok((rotated, Recorded::Unrecorded));
+    };
+    let mut failed = Vec::new();
+    for entry in &recorded.buckets {
+        let bucket = match entry.number {
+            number if number == ours.number => Ok(own.clone()),
+            identity::ROOT => Ok(root.clone()),
+            number => home.numbered(number).await,
+        };
+        let spread = match bucket {
+            Ok(bucket) => identity::spread(&recorded, &*bucket).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = spread {
+            failed.push((entry.number, err.to_string()));
+        }
+    }
+    Ok((rotated, Recorded::Recorded { failed }))
 }
 
 /// A host's KMS, as [`from_env`] chose it.
@@ -1105,6 +1171,100 @@ mod tests {
             }
         });
     }
+    /// board 8483: a rotation of a bucket's master key, run as `cladefs-gc --rotate-master-key` runs
+    /// it on that bucket, records the newest key in its entry of the registry, the root's and
+    /// every copy: a host of another bucket given the new key alone for it, restarted, opens its
+    /// cells, which it refused when the entry named the key dropped. A bucket recorded with no
+    /// master key records none; a rotation refusing a KEK object records nothing. No test combined
+    /// a rotation with a host of another bucket after the old key was gone.
+    #[test]
+    fn rotations_record_the_newest_master_key_for_hosts_of_other_buckets() {
+        use crate::identity::{Asked, Details};
+        use crate::keys::CachingKms;
+        use crate::layout::CellId;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let urls = [url("home"), url("other"), url("plain")];
+            let [home, other, plain] =
+                urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
+            let (ours, old, new) = ("11".repeat(32), "22".repeat(32), "33".repeat(32));
+            let parsed = |hex: &str| MasterKeys::parse(hex, "a test's").unwrap();
+            let id = |hex: &str| parsed(hex).newest().id().to_string();
+            let at = |url: &str, key: Option<String>| Details {
+                url: Some(url.to_owned()),
+                master_key_id: key,
+                ..Details::default()
+            };
+            identity::format(&home, &at(&urls[0], None), Asked::default()).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &other,
+                at(&urls[1], Some(id(&old))),
+                Asked::default(),
+            )
+            .await
+            .unwrap();
+            let (_, registry) = identity::add(
+                &home,
+                &Details::default(),
+                &plain,
+                at(&urls[2], None),
+                Asked::default(),
+            )
+            .await
+            .unwrap();
+            for bucket in [&home, &other, &plain] {
+                identity::spread(&registry, bucket).await.unwrap();
+            }
+            // A host of bucket 1, given bucket 2's master keys as `keys`, as it restarts.
+            let host = |keys: &str| {
+                let vars =
+                    vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), keys.to_owned())];
+                let home = ObjectBucket::from_url(&urls[0]).unwrap();
+                let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
+                let own = HostKms::Bucket(Arc::new(BucketKms::new(home.own(), parsed(&ours))));
+                Arc::new(ByBucket::new(home, own, vars))
+            };
+            let cell = CellId { tenant: 7, id: 2 << 48 | 1 };
+            let (secret, wrapped) = CachingKms::over(host(&old), None).new_kek(cell).await.unwrap();
+
+            // Rotated where bucket 2 is the home bucket, as cladefs-gc runs.
+            let gc = |url: &str| {
+                ObjectBucket::from_url(url).unwrap().routed(Arc::new(Registered::new(Vec::new())))
+            };
+            let both = parsed(&format!("{new},{old}"));
+            let (rotated, recorded) = rotate_recorded(&gc(&urls[1]), &both).await.unwrap();
+            assert_eq!((rotated.rewrapped, rotated.refused.len()), (1, 0));
+            assert_eq!(recorded, Recorded::Recorded { failed: vec![] });
+            for bucket in [&home, &other, &plain] {
+                let copy = identity::registry(bucket).await.unwrap().unwrap();
+                let entry = copy.bucket(2).unwrap();
+                assert_eq!(entry.details.master_key_id, Some(id(&new)));
+                assert_eq!(copy.version, registry.version + 1);
+            }
+            let (_, second) = host(&new).of(2).await.unwrap();
+            assert_eq!(second.unwrap_dyn(7, &wrapped).await.unwrap().expose(), secret.expose());
+
+            // A bucket recorded with no master key records none.
+            let (_, recorded) = rotate_recorded(&gc(&urls[2]), &both).await.unwrap();
+            assert_eq!(recorded, Recorded::Unrecorded);
+            let copy = identity::registry(&home).await.unwrap().unwrap();
+            assert_eq!(copy.bucket(3).unwrap().details.master_key_id, None);
+            // A rotation refusing a KEK object records nothing.
+            let wrong = parsed(&"44".repeat(32));
+            let (rotated, recorded) = rotate_recorded(&gc(&urls[1]), &wrong).await.unwrap();
+            assert_eq!((rotated.refused.len(), recorded), (1, Recorded::Refused));
+            let copy = identity::registry(&home).await.unwrap().unwrap();
+            assert_eq!(copy.bucket(2).unwrap().details.master_key_id, Some(id(&new)));
+        });
+    }
+
     /// board 6400: an unformatted home bucket serves bucket 1 (ROOT) with its own KMS while
     /// refusing other bucket numbers, and does not cache `None` so formatting it later (e.g. as
     /// bucket 2 via `identity::add`) takes effect on subsequent lookups.

@@ -591,7 +591,8 @@ fn rotates_master_keys_rewrapping_every_tenants_kek() {
     let expected = format!(
         "cladefs-gc: master key {other_id}: rewrapped 0 tenants' KEKs, 0 under it already, 1 \
          tenants shredded, 2 refused\n{}{}Error: \"2 tenants' KEK objects left under no master key \
-         given: run again with theirs among CLADEFS_MASTER_KEY's\"\n",
+         given, the registry of buckets unchanged: run again with theirs among \
+         CLADEFS_MASTER_KEY's\"\n",
         left(1),
         left(2)
     );
