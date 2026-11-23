@@ -440,6 +440,15 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.delete(key)
     }
 
+    fn delete_if(
+        &self,
+        key: &str,
+        version: &Version,
+    ) -> impl Future<Output = Result<(), BucketError>> + Send {
+        self.count(Request::Delete);
+        self.bucket.delete_if(key, version)
+    }
+
     /// One request, as a backend with batch deletes makes it, whatever the bucket under it does.
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::DeleteBatch);
@@ -712,6 +721,15 @@ mod tests {
             std::future::pending()
         }
 
+        fn delete_if(
+            &self,
+            key: &str,
+            version: &Version,
+        ) -> impl Future<Output = Result<(), BucketError>> + Send {
+            let _ = (key, version);
+            std::future::pending()
+        }
+
         fn delete_batch(&self, _: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
             std::future::pending()
         }
@@ -785,6 +803,15 @@ mod tests {
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
             self.note(key);
             self.bucket.delete(key)
+        }
+
+        fn delete_if(
+            &self,
+            key: &str,
+            version: &Version,
+        ) -> impl Future<Output = Result<(), BucketError>> + Send {
+            self.note(key);
+            self.bucket.delete_if(key, version)
         }
 
         fn delete_batch(

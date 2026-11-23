@@ -912,6 +912,7 @@ dependencies = [
  "node_local",
  "object_store",
  "opentelemetry",
+ "percent-encoding",
  "rand 0.10.3",
  "reqwest",
  "rustc-hash",

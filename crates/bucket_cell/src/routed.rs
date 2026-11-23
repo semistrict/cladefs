@@ -413,6 +413,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         }
     }
 
+    async fn delete_if(&self, key: &str, version: &Version) -> Result<(), Error> {
+        match self.member(key).await? {
+            Some(member) => member.delete_if(key, version).await,
+            None => self.home.delete_if(key, version).await,
+        }
+    }
+
     async fn delete_batch(&self, keys: &[&str]) -> Result<(), Error> {
         if self.route.is_none() {
             return self.home.delete_batch(keys).await;

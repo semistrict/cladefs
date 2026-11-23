@@ -8,7 +8,7 @@
 //!
 //! It serves what cells ask of S3 ([`crate::bucket::conformance`] checks it does), path-style
 //! and unsigned: objects' PUTs, conditional on `If-None-Match: *` or `If-Match`, their GETs, whole
-//! or of a range, HEADs, DELETEs and DeleteObjects, and ListObjectsV2 by prefix, by delimiter `/`
+//! or of a range, HEADs, DELETEs, conditional on `If-Match` or not, and DeleteObjects, and ListObjectsV2 by prefix, by delimiter `/`
 //! too (TASK-395.5), in pages of `max-keys` (1,000 by default) objects and prefixes together, each
 //! going on from its `continuation-token`: the last key or prefix of the page before, which it
 //! names as `NextContinuationToken`. An update of no object is a failed precondition, as RustFS and
@@ -470,6 +470,13 @@ async fn serve(
         }
         (&Method::DELETE, key) => {
             objects.count("delete");
+            // cladefs: conditional on `If-Match` (board 9229), as S3's DeleteObject is: of no
+            // object, a failed precondition, as an update of none is.
+            if let Some(e_tag) = header("if-match")
+                && objects.objects.get(key).is_none_or(|stored| stored.e_tag != e_tag)
+            {
+                return status(StatusCode::PRECONDITION_FAILED);
+            }
             objects.objects.remove(key);
             status(StatusCode::NO_CONTENT)
         }

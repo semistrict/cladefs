@@ -691,6 +691,14 @@ mod tests {
             self.bucket.delete(key).await
         }
 
+        async fn delete_if(
+            &self,
+            key: &str,
+            version: &bucket::Version,
+        ) -> Result<(), bucket::Error> {
+            self.bucket.delete_if(key, version).await
+        }
+
         fn now(&self) -> u64 {
             self.bucket.now()
         }

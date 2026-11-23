@@ -2993,6 +2993,14 @@ mod tests {
             self.answered(self.bucket.delete(key))
         }
 
+        fn delete_if(
+            &self,
+            key: &str,
+            version: &Version,
+        ) -> impl Future<Output = Result<(), BucketError>> + Send {
+            self.answered(self.bucket.delete_if(key, version))
+        }
+
         fn now(&self) -> u64 {
             self.bucket.now()
         }
@@ -3166,6 +3174,14 @@ mod tests {
             self.bucket.delete(key)
         }
 
+        fn delete_if(
+            &self,
+            key: &str,
+            version: &Version,
+        ) -> impl Future<Output = Result<(), BucketError>> + Send {
+            self.bucket.delete_if(key, version)
+        }
+
         fn now(&self) -> u64 {
             self.bucket.now()
         }
@@ -3229,6 +3245,14 @@ mod tests {
 
         fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
             self.bucket.delete(key)
+        }
+
+        fn delete_if(
+            &self,
+            key: &str,
+            version: &Version,
+        ) -> impl Future<Output = Result<(), BucketError>> + Send {
+            self.bucket.delete_if(key, version)
         }
 
         fn now(&self) -> u64 {
