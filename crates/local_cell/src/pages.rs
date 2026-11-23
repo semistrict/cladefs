@@ -29,8 +29,9 @@
 //! - **Writers are throttled**, not refused, past [`Options::hard`] dirty: they wait for
 //!   write-back, as `balance_dirty_pages` has them. cladefs: a file whose write-back is failing,
 //!   as a full or broken disk fails it, holds its dirty pages, which no wait writes back: they
-//!   are left out of what other files' writers wait on ([`PageCache::throttle`]), and its own
-//!   writers held at the bound get its failure, never another file's (board 8553).
+//!   are left out of what other files' writers wait on ([`PageCache::throttle`]), and the writers
+//!   held at the bound of it, or of any file of its disk, get its failure, never another disk's
+//!   (board 8553): so that what is stuck grows past the bound by a bound's worth a disk at most.
 //! - **A sync** ([`Cached::sync`]) writes back what was dirty as it began, waits for every write of
 //!   the file in flight, the flusher's too, then syncs the file: what it covers is a snapshot, so
 //!   that a writer going on never keeps it from ending (`PAGECACHE_TAG_TOWRITE`). cladefs: a
@@ -63,7 +64,7 @@ use crate::frames::{Frame, Frames};
 #[cfg(not(madsim))]
 use crate::shared::Holding;
 use crate::sync::{Condvar, Mutex, MutexGuard};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -162,6 +163,10 @@ pub struct PageCache {
     /// The bytes dirty of files whose write-back is failing ([`Pages::failing`]): what no wait
     /// of a writer's writes back until their disk takes them again (board 8553).
     stuck: AtomicU64,
+    /// The disks with files whose write-back is failing, by their address: how many, and the
+    /// last failure, which every writer of the disk held at the bound fails with. Taken after a
+    /// file's pages' lock.
+    failing_disks: Mutex<HashMap<usize, (usize, io::Error)>>,
     /// cladefs: what its pages are held in: frames of slabs of its own, those of pages gone
     /// holding the next (TASK-433.9).
     frames: Arc<Frames>,
@@ -238,6 +243,7 @@ impl PageCache {
             drained: Condvar::new(),
             holding: Mutex::new(()),
             stuck: AtomicU64::new(0),
+            failing_disks: Mutex::default(),
             frames: Frames::new(),
         })
     }
@@ -400,10 +406,10 @@ impl PageCache {
     /// as none would let it go.
     ///
     /// cladefs: what files whose write-back is failing hold dirty ([`PageCache::stuck`]) no wait
-    /// writes back: a writer waits for the rest alone, and one of a failing file, which `failing`
-    /// gives the failure of, held at the bound, fails with it. So a disk that fails its writes
-    /// fails its own files' writers, never another disk's, which before were given its error, or
-    /// any file's that failed last in the flusher's pass (board 8553).
+    /// writes back: a writer waits for the rest alone, and one of a failing file, or of a disk
+    /// with one, which `failing` gives the failure of, held at the bound, fails with it. So a disk
+    /// that fails its writes fails its own files' writers, never another disk's, which before were
+    /// given its error, or any file's that failed last in the flusher's pass (board 8553).
     fn throttle(&self, failing: impl Fn() -> Option<io::Error>) -> io::Result<()> {
         if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
             return Ok(());
@@ -719,22 +725,63 @@ impl<F: File> Shared<F> {
     }
 
     /// Notes whether its write-back is failing, as one just did or did not, under its pages'
-    /// lock: its dirty pages counted stuck from the first failure, and no more from a success.
+    /// lock: its dirty pages counted stuck from the first failure, and no more from a success;
+    /// its disk failing while it is.
     fn note_failing(&self, pages: &mut Pages, failed: Option<&io::Error>) {
         let bytes = pages.dirty_pages * PAGE;
         match (failed, pages.failing.is_some()) {
-            (Some(_), false) => self.cache.stuck.fetch_add(bytes, Ordering::Relaxed),
-            (None, true) => self.cache.stuck.fetch_sub(bytes, Ordering::Relaxed),
-            _ => 0,
-        };
-        pages.failing = failed.map(|err| io::Error::new(err.kind(), err.to_string()));
+            (Some(err), false) => {
+                self.cache.stuck.fetch_add(bytes, Ordering::Relaxed);
+                self.disk_failing(Some(err));
+            }
+            (Some(err), true) => self.disk_failing_again(err),
+            (None, true) => {
+                self.cache.stuck.fetch_sub(bytes, Ordering::Relaxed);
+                self.disk_failing(None);
+            }
+            (None, false) => {}
+        }
+        pages.failing = failed.map(copied);
     }
 
-    /// Its write-back's failure, if it is failing: what its writers held at the cache's bound
-    /// fail with ([`PageCache::throttle`]).
+    /// Its disk has one more file failing, `failed`'s, or, given none, one fewer.
+    fn disk_failing(&self, failed: Option<&io::Error>) {
+        let Some(disk) = &self.disk else { return };
+        let key = Arc::as_ptr(disk) as usize;
+        let mut disks = self.cache.failing_disks.lock().unwrap();
+        match failed {
+            Some(err) => {
+                let entry = disks.entry(key).or_insert_with(|| (0, copied(err)));
+                *entry = (entry.0 + 1, copied(err));
+            }
+            None => {
+                let entry = disks.get_mut(&key).expect("a disk with a file failing");
+                entry.0 -= 1;
+                if entry.0 == 0 {
+                    disks.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Its disk's failure is `failed` now, as its file failed again.
+    fn disk_failing_again(&self, failed: &io::Error) {
+        let Some(disk) = &self.disk else { return };
+        let mut disks = self.cache.failing_disks.lock().unwrap();
+        if let Some(entry) = disks.get_mut(&(Arc::as_ptr(disk) as usize)) {
+            entry.1 = copied(failed);
+        }
+    }
+
+    /// Its write-back's failure, if it is failing, or its disk's, if a file of it is: what its
+    /// writers held at the cache's bound fail with ([`PageCache::throttle`]).
     fn failing(&self) -> Option<io::Error> {
-        let pages = self.pages();
-        pages.failing.as_ref().map(|err| io::Error::new(err.kind(), err.to_string()))
+        if let Some(err) = self.pages().failing.as_ref() {
+            return Some(copied(err));
+        }
+        let disk = self.disk.as_ref()?;
+        let disks = self.cache.failing_disks.lock().unwrap();
+        disks.get(&(Arc::as_ptr(disk) as usize)).map(|(_, err)| copied(err))
     }
 
     /// Its write-back, taken: none other of it in flight.
@@ -880,6 +927,11 @@ impl<F: File> Shared<F> {
     }
 }
 
+/// `err`, again: an `io::Error` is no `Clone`.
+fn copied(err: &io::Error) -> io::Error {
+    io::Error::new(err.kind(), err.to_string())
+}
+
 /// A write-back in flight, of a run of a file's pages, by their indexes with the numbers of their
 /// last writes: ended ([`InFlight::end`]) as its write returns, or, if a panic unwinds it, by its
 /// drop, its pages left dirty, and in flight no more, and the failure kept for the next sync.
@@ -937,6 +989,10 @@ impl<F: File> Drop for Shared<F> {
         let failing = pages.failing.is_some();
         self.cache.held.fetch_sub(pages.pages.len() as u64 * PAGE, Ordering::Relaxed);
         self.dirty_sub(dirty * PAGE, failing);
+        // A file gone fails its disk no more.
+        if failing {
+            self.disk_failing(None);
+        }
         self.cache.drained();
     }
 }
