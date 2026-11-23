@@ -391,6 +391,59 @@ mod tests {
     use crate::bucket::Version;
     use crate::layout::TEST_CELL;
 
+    /// Board 8467's review: a lease of a cell of another bucket, taken through a host's routed
+    /// bucket, whose home bucket's backend is an hour ahead of that bucket's, ends by that bucket's
+    /// clock, as its own hosts read it: taken by them once its backend's clock passed the lease's
+    /// length, not an hour after. Its time is the least of the clocks of the buckets it reached.
+    #[test]
+    fn routed_leases_end_by_their_buckets_clock() {
+        use crate::client::Client;
+        use crate::object_bucket::ObjectBucket;
+        use crate::object_bucket::tests::{runtime, s3};
+        use crate::routed::{Resolve, RoutedBucket};
+        use crate::s3_server::S3Server;
+        use std::sync::Arc;
+        struct Other(Arc<ObjectBucket>);
+        impl Resolve for Other {
+            fn open<'a>(
+                &'a self,
+                _: &'a ObjectBucket,
+                _: u16,
+            ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, Error>> {
+                Box::pin(std::future::ready(Ok(self.0.clone())))
+            }
+        }
+        let serving = runtime();
+        let (ahead, behind) =
+            serving.block_on(async { (S3Server::start(None), S3Server::start(None)) });
+        ahead.clock_ahead(3_600_000);
+        let home = s3(&ahead, "home", &Client::DEFAULT);
+        let other = s3(&behind, "other", &Client::DEFAULT);
+        let details = crate::identity::Details::default();
+        let asked = crate::identity::Asked::default();
+        serving.block_on(crate::identity::format(&*home, &details, asked)).unwrap();
+        let routed = RoutedBucket::new(home, Arc::new(Other(other.clone())));
+        let cell = layout::test_cell(2 << 48 | 1);
+        serving.block_on(lifecycle::create(&*other, cell, 0)).unwrap();
+        let holding = Holding { lease: 60_000, since: None };
+        let through = |holder| {
+            serving.block_on(async {
+                let lease = super::found(&routed, cell).await.unwrap();
+                super::take(&routed, cell, lease, holder, holding).await.map(|taken| taken.epoch)
+            })
+        };
+        let direct = |holder| {
+            serving.block_on(async {
+                let lease = super::found(&*other, cell).await.unwrap();
+                super::take(&*other, cell, lease, holder, holding).await.map(|taken| taken.epoch)
+            })
+        };
+        assert_eq!(through(1).unwrap(), 1);
+        assert!(matches!(direct(2), Err(Error::Left(Left::Held))));
+        behind.clock_ahead(62_000);
+        assert_eq!(direct(2).unwrap(), 2);
+    }
+
     /// Board 8471's AC #2: a lease whose holder's host is gone, its own clock an hour ahead of its
     /// bucket's backend, another host takes once the backend's clock passed the lease's length since
     /// its taking, and not before: as every host reads the backend's clock, not its own. By the

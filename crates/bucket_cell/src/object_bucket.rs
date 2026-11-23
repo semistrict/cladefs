@@ -1030,6 +1030,20 @@ fn cloud(
     let (scheme, path) = Scheme::parse(url)?;
     let path = Path::parse(path)?;
     let served = Arc::new(crate::clock::Served::default());
+    // cladefs: what the bucket's own requests name, which its clock hears the dates of (board
+    // 8467's review): `s3://bucket`'s, `gs://bucket`'s, `az://container`'s host. A URL of another
+    // form (`https://...`) names it in ways of its backend's own, refused.
+    let bucket = || match url.scheme() {
+        "s3" | "s3a" | "gs" | "az" => url.host_str().map(str::to_owned),
+        _ => None,
+    };
+    let bucket = || {
+        bucket().ok_or_else(|| object_store::Error::Generic {
+            store: "cladefs",
+            source: "a bucket is named by its URL's host: s3://BUCKET, gs://BUCKET, az://CONTAINER"
+                .into(),
+        })
+    };
     // The client's options first, which the environment's add to.
     macro_rules! built {
         ($builder:ty) => {{
@@ -1038,6 +1052,7 @@ fn cloud(
                 .with_http_connector(crate::client::Connector {
                     client: *client,
                     clock: served.clone(),
+                    bucket: bucket()?,
                 });
             let builder = options.into_iter().fold(builder, |builder, (key, value)| {
                 match key.to_ascii_lowercase().parse() {
@@ -3343,6 +3358,61 @@ pub(crate) mod tests {
 
     pub(crate) fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// Board 8467's review: its clock hears the dates of the bucket's own requests' responses
+    /// alone, which name it, as its host's first label or one of its path's first two segments,
+    /// at no link-local address: not those of requests naming it nowhere, as its credentials' do
+    /// (an instance's metadata service's `/latest/...`, STS's, OAuth's `/token`), a service an hour
+    /// ahead of the bucket's backend dating them.
+    #[test]
+    fn only_the_buckets_own_requests_date_it() {
+        use object_store::client::{HttpConnector as _, HttpRequestBody};
+        let url = |url: &str| reqwest::Url::parse(url).unwrap();
+        let named = [
+            "https://s3.us-east-1.amazonaws.com/cladefs/cells/1",
+            "https://cladefs.s3.us-east-1.amazonaws.com/cells/1",
+            "https://storage.googleapis.com/cladefs?list-type=2",
+            "http://127.0.0.1:10000/devstoreaccount1/cladefs/cells/1",
+        ];
+        let unnamed = [
+            "http://169.254.169.254/cladefs/meta-data/iam/security-credentials/",
+            "http://[fd00:ec2::254]/cladefs/api/token",
+            "https://sts.us-east-1.amazonaws.com/",
+            "https://oauth2.googleapis.com/token",
+            "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+            "https://storage.googleapis.com/a/b/cladefs",
+        ];
+        for at in named {
+            assert!(crate::client::names("cladefs", &url(at)), "{at}");
+        }
+        for at in unnamed {
+            assert!(!crate::client::names("cladefs", &url(at)), "{at}");
+        }
+
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let served = Arc::new(crate::clock::Served::default());
+        let bucket = crate::s3_server::BUCKET.to_owned();
+        let connector =
+            crate::client::Connector { client: Client::DEFAULT, clock: served.clone(), bucket };
+        let client = connector.connect(&Client::DEFAULT.options().with_allow_http(true)).unwrap();
+        let options = server.options();
+        let endpoint = &options.iter().find(|(key, _)| key == "aws_endpoint").unwrap().1;
+        let get = |path: &str| {
+            let request = hyper::Request::get(format!("{endpoint}/{path}"));
+            serving
+                .block_on(client.execute(request.body(HttpRequestBody::empty()).unwrap()))
+                .unwrap();
+        };
+        server.clock_ahead(3_600_000);
+        get("latest/api/token");
+        get("token");
+        assert_eq!(served.now(), 0);
+        server.clock_ahead(0);
+        get("cladefs/absent");
+        let host = crate::clock::Clock::Host.now();
+        assert!(served.now() <= host && served.now() + 2_000 >= host, "{}", served.now());
     }
 
     /// Board 8467: a bucket over HTTP keeps its backend's clock, as its responses date it, whatever

@@ -58,21 +58,46 @@ impl Client {
     }
 }
 
-/// cladefs: what connects a bucket's backend: [`Client`]'s, each response's date heard by the
-/// bucket's clock (`Date`, [`crate::clock::Served`], board 8467). The credentials' requests a
-/// backend makes go through it too, to its cloud's endpoints, dated by that cloud's clocks.
+/// cladefs: what connects a bucket's backend: [`Client`]'s, the date of each response to a request
+/// of the bucket's own heard by its clock (`Date`, [`crate::clock::Served`], board 8467): one that
+/// names `bucket` ([`names`]). Its credentials' requests go through it too, to services of clocks
+/// of their own (an instance's metadata, STS, OAuth), whose dates it hears not.
 #[derive(Debug)]
 pub(crate) struct Connector {
     pub client: Client,
     pub clock: Arc<crate::clock::Served>,
+    /// The bucket's name, or its container's: what its own requests name.
+    pub bucket: String,
 }
 
 impl HttpConnector for Connector {
     fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
         let client = reqwest_client(options)?;
         let (stall, clock) = (self.client.stall, self.clock.clone());
-        Ok(HttpClient::new(Watched { client, stall, clock }))
+        let bucket = self.bucket.clone();
+        Ok(HttpClient::new(Watched { client, stall, clock, bucket }))
     }
+}
+
+/// Whether a request to `url` is of `bucket`'s own, as its backend's requests are: naming it as its
+/// host's first label (virtual-hosted, `bucket.s3.region.amazonaws.com`), or one of its path's first
+/// two segments (path-style S3's and GCS's first, Azure's container, the emulator's second, after
+/// its account), and at no link-local address, an instance's metadata service's (whose paths begin
+/// `/latest/`, a bucket's name as well as any). Its credentials' requests, to services of their
+/// own, name it nowhere.
+pub(crate) fn names(bucket: &str, url: &reqwest::Url) -> bool {
+    let local = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_link_local(),
+        // EC2's metadata service's, fd00:ec2::254, and link-local addresses.
+        Some(url::Host::Ipv6(ip)) => {
+            let segments = ip.segments();
+            segments[..2] == [0xfd00, 0xec2] || segments[0] & 0xffc0 == 0xfe80
+        }
+        _ => false,
+    };
+    let labelled = url.host_str().and_then(|host| host.split('.').next()) == Some(bucket);
+    let pathed = url.path_segments().is_some_and(|path| path.take(2).any(|at| at == bucket));
+    !local && (labelled || pathed)
 }
 
 /// The user agent of a client whose options name none.
@@ -196,13 +221,14 @@ fn stalled(stall: Duration) -> HttpError {
     HttpError::new(HttpErrorKind::Timeout, Stalled(stall))
 }
 
-/// reqwest's client, whose requests time out once they stall, and whose responses' dates `clock`
-/// hears.
+/// reqwest's client, whose requests time out once they stall, and the dates of whose responses to
+/// `bucket`'s own requests `clock` hears.
 #[derive(Debug)]
 struct Watched {
     client: reqwest::Client,
     stall: Duration,
     clock: Arc<crate::clock::Served>,
+    bucket: String,
 }
 
 #[async_trait::async_trait]
@@ -211,6 +237,7 @@ impl object_store::client::HttpService for Watched {
         let (parts, body) = request.into_parts();
         let url = reqwest::Url::parse(&parts.uri.to_string())
             .map_err(|error| HttpError::new(HttpErrorKind::Unknown, error))?;
+        let dated = names(&self.bucket, &url);
         let mut sent = reqwest::Request::new(parts.method, url);
         *sent.headers_mut() = parts.headers;
         let progress = Arc::new(Progress::new());
@@ -223,7 +250,7 @@ impl object_store::client::HttpService for Watched {
             Either::Right(((), _)) => return Err(stalled(self.stall)),
         };
         // As it arrived, headers read: a failure's response is dated as well as any.
-        if let Some(date) = response.headers().get(reqwest::header::DATE) {
+        if let Some(date) = response.headers().get(reqwest::header::DATE).filter(|_| dated) {
             self.clock.heard(date.as_bytes(), std::time::Instant::now());
         }
         let (parts, body) = hyper::Response::<reqwest::Body>::from(response).into_parts();

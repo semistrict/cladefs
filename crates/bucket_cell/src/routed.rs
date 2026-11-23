@@ -437,8 +437,16 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         Ok(())
     }
 
+    /// cladefs: the least of the clocks of the buckets it reached that read a time (board 8467's
+    /// review): a time it reads is compared with dates of, and written into, the bucket a request
+    /// routes to, which it can't name; each bucket's clock reads its backend's time at most, so the
+    /// least reads each's at most, a window in any closing late, never early. A clock that reads
+    /// no time (0) yet is a bucket it never had an answer of, whose dates it compares none of.
     fn now(&self) -> u64 {
-        self.home.now()
+        let members = self.route.as_ref().map(|route| route.members.lock().unwrap());
+        let members = members.iter().flat_map(|members| members.values());
+        let clocks = std::iter::once(self.home.now()).chain(members.map(|member| member.now()));
+        clocks.filter(|&now| now > 0).min().unwrap_or(0)
     }
 
     fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {

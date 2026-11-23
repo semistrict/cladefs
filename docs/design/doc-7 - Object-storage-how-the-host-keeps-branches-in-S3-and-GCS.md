@@ -1398,7 +1398,10 @@ never ahead of the backend's, and a second and a round trip behind at most of a 
 window closes late, never early, whatever a host's own clock reads or however it steps, and every
 host's sweeps and leases go by one clock, a host whose clock ran fast starving no other's sweep
 (`Left::Swept`) nor holding cells past their time. It assumes the backend's clock goes on, never
-back, as a cloud's does. A bucket of files or memory dates objects by the host's clock, its own. A
+back, as a cloud's does. Only responses to requests naming the bucket date it, never its
+credentials' services' (an instance's metadata, STS, OAuth); a host's routed bucket reads the least
+of the clocks of the buckets it reached, each a lower bound. A bucket of files or memory dates
+objects by the host's clock, its own. A
 bucket's probe, at a host's first attach and `cladefs-gc`'s start, refuses one whose clock is more
 than 10 s off the date the backend gives what the probe writes (`clock::SKEW`), or whose responses
 carry no date.
