@@ -36,7 +36,11 @@ pub struct MasterKeyId(pub [u8; MASTER_ID_LEN]);
 impl MasterKeyId {
     /// The ID of `key`.
     fn of(key: &Secret) -> Self {
-        let hash = digest::digest(&digest::SHA256, &[ID_LABEL, key.expose()].concat());
+        // The label and the key hashed one after the other, never copied together (board 8589).
+        let mut context = digest::Context::new(&digest::SHA256);
+        context.update(ID_LABEL);
+        context.update(key.expose());
+        let hash = context.finish();
         Self(hash.as_ref()[..MASTER_ID_LEN].try_into().expect("SHA-256 is 32 bytes"))
     }
 }
