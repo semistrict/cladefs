@@ -173,34 +173,53 @@ pub type Read = Arc<dyn Fn(ExtentId, &mut [u8]) -> std::io::Result<()> + Send + 
 /// The objects of the segment `footer` stamps, a plan's ([`Plan::close`]), and of the extents it
 /// says are stored on their own, by their keys: each read, its extents' data by `read`, and framed,
 /// only as it uploads. cladefs: encrypted under `encrypting`, the writer's DEK and which it is
-/// (TASK-411.3).
+/// (TASK-411.3). cladefs: refused as corrupt if an extent of it ends past a u64 (board 8545): a
+/// footer a WAL's replay may read off the host's disk; one whose extents a read reaches past the
+/// data fails that read.
 pub fn objects(
     footer: Footer,
     read: Read,
     (dek, id): (Arc<extent_frame::Secret>, extent_frame::KeyId),
-) -> Objects {
+) -> Result<Objects, crate::Error> {
     let own = (footer.own())
         .map(|(extent, location)| {
             let (len, read, dek) = (location.len, read.clone(), dek.clone());
             let body = Body::new(len, move || {
-                let mut data = vec![0; len as usize];
+                let mut data = vec![0; usize::try_from(len).map_err(std::io::Error::other)?];
                 read(extent, &mut data)?;
                 Ok(layout::own_extent(extent, &data, (&dek, id)))
             });
             (location.key.clone(), body)
         })
         .collect();
-    let len =
-        footer.contents.extents.iter().map(|&(_, offset, len)| offset + len).max().unwrap_or(0);
+    let len = data_len(&footer).ok_or_else(|| {
+        crate::Error::Corrupt(format!("segment {}: an extent past a u64", footer.segment))
+    })?;
     let framed = footer.clone();
     let segment = Body::new(len, move || {
-        let mut data = vec![0; len as usize];
+        let size = usize::try_from(len).map_err(std::io::Error::other)?;
+        let mut data = vec![0; size];
         for &(extent, offset, len) in &framed.contents.extents {
-            read(extent, &mut data[offset as usize..(offset + len) as usize])?;
+            // Past what this host addresses: no range, refused below.
+            let range = usize::try_from(offset).ok().zip(usize::try_from(len).ok());
+            let range = range.and_then(|(offset, len)| Some(offset..offset.checked_add(len)?));
+            let Some(into) = range.and_then(|range| data.get_mut(range)) else {
+                let past = format!("{extent:?} at {offset} of {len} bytes, past {size}");
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, past));
+            };
+            read(extent, into)?;
         }
         Ok(Segment { data, footer: framed.clone() }.encode((&dek, id)))
     });
-    Objects { footer, segment, own, data_len: len }
+    Ok(Objects { footer, segment, own, data_len: len })
+}
+
+/// cladefs: the length of the data of the segment `footer` stamps: where its last extent ends;
+/// none if one ends past a u64 (board 8545).
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn data_len(footer: &Footer) -> Option<u64> {
+    (footer.contents.extents.iter())
+        .try_fold(0u64, |most, &(_, offset, len)| Some(most.max(offset.checked_add(len)?)))
 }
 
 /// Commits for one segment, in order: what they make ([`Plan`]), its data, and that of the
@@ -469,7 +488,7 @@ mod tests {
         };
         let (dek, id) = crate::testing::encrypting(test_cell(1));
         let encrypting = (Arc::new(extent_frame::Secret::from_bytes(dek.expose())), id);
-        let planned = objects(plan.close(&mut chain.clone()), read, encrypting);
+        let planned = objects(plan.close(&mut chain.clone()), read, encrypting).unwrap();
         assert_eq!(planned.footer, batch.footer);
         let read = || reads.lock().unwrap().clone();
         assert_eq!(read(), []);

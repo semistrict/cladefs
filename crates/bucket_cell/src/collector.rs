@@ -1872,9 +1872,10 @@ async fn compact_object(
     let mut data = Vec::new();
     let mut entries = Vec::new();
     for (&extent, location) in extents {
-        let range = location.offset as usize..(location.offset + location.len) as usize;
-        let bytes = object_data
-            .get(range)
+        // cladefs: checked (board 8545): a location from a checkpoint or a footer the keyless
+        // collector decoded, whose MAC it checked not.
+        let bytes = location_range(location)
+            .and_then(|range| object_data.get(range))
             .ok_or_else(|| Error::Corrupt(format!("{extent:?} past the end of {key}")))?;
         let to = Location { key: moves.clone(), offset: data.len() as u64, len: location.len };
         entries.push((extent, to));
@@ -1888,6 +1889,17 @@ async fn compact_object(
         Created::Exists(stood) => stood.meta.size,
     };
     Ok(Some((moves, size)))
+}
+
+/// cladefs: the bytes of its object `location` names, if this host addresses them: none for one
+/// whose end is past a u64 or a usize (board 8545).
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn location_range(location: &Location) -> Option<std::ops::Range<usize>> {
+    // Past what this host addresses: none, the answer.
+    let start = usize::try_from(location.offset).ok()?;
+    // Past what this host addresses: none, the answer.
+    let end = usize::try_from(location.offset.checked_add(location.len)?).ok()?;
+    Some(start..end)
 }
 
 /// cladefs: compacts the object `compactable` is, under `ring`, by the pass of epoch `pass`, as

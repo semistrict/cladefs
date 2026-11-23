@@ -971,13 +971,29 @@ impl Head {
     }
 
     /// The head of `cell` that `bytes` encode, unless it is of another format than this one, newer
-    /// or older, which its first bytes say ([`crate::Error::Format`]).
+    /// or older, which its first bytes say ([`crate::Error::Format`]). cladefs: refused as corrupt
+    /// unless its runs name every segment of `0..end` (board 8545): a bucket's object, untrusted
+    /// until a MAC is checked, which the keyless collector checks none of; past here, the epoch of
+    /// each segment it names is there ([`Head::segments`]).
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, crate::Error> {
         let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
         if format != FORMAT {
             return Err(crate::Error::Format { cell, format });
         }
-        decode(bytes)
+        let head: Self = decode(bytes)?;
+        // Runs name every segment: the first from 0, each after the one before, within 0..end.
+        let from_zero = head.runs.first().is_none_or(|&(from, _)| from == 0);
+        let ascending = head.runs.windows(2).all(|pair| matches!(pair, [(a, _), (b, _)] if a < b));
+        let within = head.runs.iter().all(|&(from, _)| from < head.end);
+        let named = head.end == 0 || !head.runs.is_empty();
+        if !(from_zero && ascending && within && named) {
+            return Err(crate::Error::Corrupt(format!(
+                "{cell}'s head: runs {:?} not naming every segment to {}, in order",
+                head.runs, head.end
+            )));
+        }
+        Ok(head)
     }
 
     /// Whether the cell was deleted: no writer takes it again.
@@ -994,10 +1010,15 @@ impl Head {
         run.checked_sub(1).map(|run| self.runs[run].1)
     }
 
-    /// The segments the head names from `segment` on, each by its number and its writer's epoch.
+    /// The segments the head names from `segment` on, each by its number and its writer's epoch:
+    /// those of its runs, each to the next's first or its end. A decoded head's runs name every
+    /// segment to its end ([`Head::decode`], board 8545).
     pub fn segments(&self, segment: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
-        (segment..self.end)
-            .map(|segment| (segment, self.epoch_of(segment).expect("runs name every segment")))
+        let end = self.end;
+        let next = self.runs.iter().skip(1).map(|&(from, _)| from).chain(std::iter::once(end));
+        self.runs.iter().zip(next).flat_map(move |(&(from, epoch), to)| {
+            (from.max(segment)..to.min(end)).map(move |segment| (segment, epoch))
+        })
     }
 
     /// The key of segment `segment` of `cell`, if the head names it.
@@ -1425,6 +1446,55 @@ mod tests {
         ];
         for key in keys {
             assert_eq!(owner(&key), None, "{key}");
+        }
+    }
+
+    /// board 8545: a head's runs, forged, its end too, of every edge (0, 1, the end and its
+    /// neighbours, u64::MAX) in every order of up to three: decoded only if they name every segment
+    /// of 0..end, in order, else refused as corrupt; and each decoded names, of its segments, those
+    /// its runs give, its last few read as `epoch_of` reads them, never a panic.
+    #[test]
+    fn heads_whose_runs_name_not_every_segment_are_refused() {
+        let cell = test_cell(3);
+        for end in [0, 1, 2, 3, u64::MAX - 1, u64::MAX] {
+            let edges = [0, 1, end.saturating_sub(1), end, end.saturating_add(1), u64::MAX];
+            let mut cases: Vec<Vec<u64>> = vec![vec![]];
+            for _ in 0..3 {
+                let longer: Vec<Vec<u64>> = (cases.iter())
+                    .flat_map(|case| {
+                        edges.iter().map(move |&edge| [case.clone(), vec![edge]].concat())
+                    })
+                    .collect();
+                cases.extend(longer);
+            }
+            cases.sort();
+            cases.dedup();
+            for froms in cases {
+                let runs: Vec<(u64, u64)> =
+                    (froms.iter()).zip(10..).map(|(&f, e)| (f, e)).collect();
+                let head =
+                    Head { end, runs: runs.clone(), ..Head::of(crate::record::Made::Own, 7) };
+                let valid = froms.first().is_none_or(|&first| first == 0)
+                    && froms.windows(2).all(|pair| pair[0] < pair[1])
+                    && froms.iter().all(|&from| from < end)
+                    && (end == 0 || !froms.is_empty());
+                let decoded = Head::decode(cell, &encode(&head));
+                if !valid {
+                    assert!(matches!(decoded, Err(crate::Error::Corrupt(_))), "{end} {runs:?}");
+                    continue;
+                }
+                let decoded = decoded.unwrap_or_else(|err| panic!("{end} {runs:?}: {err}"));
+                let from = end.saturating_sub(3);
+                let named: Vec<(u64, u64)> = decoded.segments(from).take(3).collect();
+                let read: Vec<(u64, u64)> = (from..end)
+                    .map(|segment| (segment, decoded.epoch_of(segment).unwrap()))
+                    .collect();
+                assert_eq!(named, read, "{end} {runs:?}");
+                assert_eq!(
+                    decoded.segments(0).next().map(|(segment, _)| segment),
+                    (end > 0).then_some(0)
+                );
+            }
         }
     }
 }
