@@ -17,7 +17,9 @@
 # A, ...), so that what drifts on the host moves both alike. Their cells are in RESULTS/disk, on
 # the workspace's filesystem (board 6058). Each case's output goes to RESULTS/SIDE/CASE-rN.txt, and
 # RESULTS/summary.txt says, for each case's figures, each side's median over the rounds but the
-# first, which runs cold.
+# first, which runs cold. CLADEFS_CELL_BENCH_CASES names the cases, of `durable`, `burst`, and the
+# cells in memory whose time is the cell's own CPU, `writes` and `segments` (default: `durable
+# burst`): what a change of the build's profile costs, such as overflow checks (board 8597).
 set -euo pipefail
 
 if [[ $# -lt 4 || ( $1 != build && $1 != measure ) ]]; then
@@ -30,6 +32,11 @@ b=$(cd "$3" && pwd)
 mkdir -p "$4"
 results=$(cd "$4" && pwd)
 rounds=${5:-6}
+cases=${CLADEFS_CELL_BENCH_CASES:-durable burst}
+for case in $cases; do
+    [[ $case =~ ^(durable|burst|writes|segments)$ ]] ||
+        { echo "CLADEFS_CELL_BENCH_CASES: $case is not durable, burst, writes or segments" >&2; exit 2; }
+done
 here=$(cd "$(dirname "$0")" && pwd)
 source "$here/lib/measurement.sh"
 
@@ -54,7 +61,7 @@ mkdir -p "$mount"
 
 run() {
     local side=$1 round=$2
-    for case in durable burst; do
+    for case in $cases; do
         TMPDIR=$mount "$results/$side/cell-bench" "$case" > "$results/$side/$case-r$round.txt"
     done
 }
@@ -69,11 +76,11 @@ for round in $(seq 1 "$rounds"); do
 done
 
 # Each side's medians, round 1 left out.
-python3 - "$results" "$rounds" > "$results/summary.txt" <<'EOF'
+python3 - "$results" "$rounds" $cases > "$results/summary.txt" <<'EOF'
 import re, statistics, sys
 from pathlib import Path
 
-results, rounds = Path(sys.argv[1]), int(sys.argv[2])
+results, rounds, cases = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
 figures = {
     "durable": [("flush µs each", r"of them,\s+([\d.]+) µs each")],
     "burst": [
@@ -82,8 +89,17 @@ figures = {
         ("durable ms", r"durable in ([\d.]+) ms"),
         ("framed ms", r"framed in ([\d.]+) ms"),
     ],
+    "writes": [
+        ("writes MiB/s", r"writes (\d+) MiB/s"),
+        ("reads MiB/s", r"reads while open (\d+) MiB/s"),
+        ("commit ms", r"the commit ([\d.]+) ms"),
+    ],
+    "segments": [
+        ("commit µs each", r"commits after them:\s+([\d.]+) µs each"),
+        ("opening ms", r"opening:\s+([\d.]+) ms"),
+    ],
 }
-for case, named in figures.items():
+for case, named in ((case, figures[case]) for case in cases):
     for name, pattern in named:
         medians = []
         for side in "ab":

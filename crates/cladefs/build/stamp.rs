@@ -61,3 +61,47 @@ fn git_paths(root: &Path) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .collect()
 }
+
+/// Refuses a release build (the release profile, or one inheriting it) whose rustflags lose frame
+/// pointers, which perf and `/z/pprof` unwind by (TASK-92.39): `.cargo/config.toml` keeps them,
+/// but a `RUSTFLAGS` in the environment replaces its flags, and the daemon's stacks then go wrong
+/// with no error (board 8597). A debug build, as the madsim part's (`--cfg madsim`), may lose them.
+pub fn require_frame_pointers() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("PROFILE")? != "release" {
+        return Ok(());
+    }
+    // Cargo's flags for rustc, separated by 0x1f, empty for none.
+    let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS")?;
+    if frame_pointers_kept(flags.split('\x1f')) {
+        return Ok(());
+    }
+    Err("a release build without frame pointers, which perf and /z/pprof unwind by: a RUSTFLAGS \
+         in the environment replaces .cargo/config.toml's -Cforce-frame-pointers=yes. Add it to \
+         RUSTFLAGS, or unset RUSTFLAGS (docs/operating-a-host.md, Building a release daemon)"
+        .into())
+}
+
+/// Whether rustc, given `flags`, keeps frame pointers: the last `force-frame-pointers` codegen
+/// option says, spelled `-Cforce-frame-pointers=V`, `-C force-frame-pointers=V` or with
+/// `--codegen`; none, it doesn't.
+fn frame_pointers_kept<'a>(flags: impl Iterator<Item = &'a str>) -> bool {
+    let mut kept = false;
+    let mut option_next = false;
+    for flag in flags {
+        let option = if option_next {
+            option_next = false;
+            Some(flag)
+        } else if flag == "-C" || flag == "--codegen" {
+            option_next = true;
+            None
+        } else {
+            flag.strip_prefix("-C").or_else(|| flag.strip_prefix("--codegen="))
+        };
+        if let Some(("force-frame-pointers", value)) =
+            option.map(|option| option.split_once('=').unwrap_or((option, "yes")))
+        {
+            kept = matches!(value, "yes" | "y" | "on" | "true");
+        }
+    }
+    kept
+}

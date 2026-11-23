@@ -136,6 +136,23 @@ fxfs = { path = "crates/fxfs" }
 fxfs_macros = { path = "crates/fxfs_macros" }
 fxfs-posix = { path = "crates/fxfs-posix" }
 
+# cladefs: what a release cladefsd is built with, each choice made, not Cargo's default (board
+# 8597). docs/operating-a-host.md says how a host's daemon is built.
+[profile.release]
+# Line tables, not full debug info: enough for /z/pprof's and /z/tracez's stacks, which walk frame
+# pointers (.cargo/config.toml) and resolve them in the process (pprof, the backtrace crate), to
+# name each frame's file and line, not its function alone.
+debug = "line-tables-only"
+# Never abort: a panic halts its cell, and one under a lock shared beyond a cell aborts by the panic
+# hook (local_cell::shared), the halt being the design's.
+panic = "unwind"
+# Arithmetic that overflows panics, halting its cell, as the debug and sim builds every test runs
+# have it, rather than wrapping into a wrong offset or length: measured free (cell-bench's
+# segments, writes, durable and burst, 23 rounds of each side interleaved on ubu1, every figure
+# within the other's quartiles, medians -4% to +7% either way; 0.9 MB more code; board 8597,
+# hotbed question 512). The parsers of untrusted input deny unchecked arithmetic anyway (AGENTS.md).
+overflow-checks = true
+
 # bucket_cell's simulation (scripts/test.sh's part sim): optimized, as its seed searches, seconds
 # to minutes each so, took past 20 minutes each unoptimized and ran CI's workspace job out of time;
 # with a debug build's checks kept, its debug_asserts and overflows, among which are the protocol's

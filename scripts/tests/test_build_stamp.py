@@ -9,7 +9,10 @@ depends on a crate `dep`, as cladefs does on local_cell and bucket_cell.
 
 - The stamp follows the tree whichever crate an edit is in (board 8599): an edit to `dep`'s source
   alone left a build saying the clean commit, as its script re-ran only for cladefs's own sources;
-  and a revert, `git checkout -- FILE`, makes it clean again."""
+  and a revert, `git checkout -- FILE`, makes it clean again.
+- A release build without frame pointers is refused (board 8597): a RUSTFLAGS in the environment
+  replaces .cargo/config.toml's -Cforce-frame-pointers=yes, and /z/pprof's stacks went wrong with
+  no error."""
 
 import os
 import shutil
@@ -30,6 +33,7 @@ FILES = {
                                  '[dependencies]\ndep = { path = "../dep" }\n',
     "crates/stamped/build.rs": f'#[path = "{STAMP}"]\nmod stamp;\n\n'
                                "fn main() -> Result<(), Box<dyn std::error::Error>> {\n"
+                               "    stamp::require_frame_pointers()?;\n"
                                "    stamp::stamp_commit()\n}\n",
     "crates/stamped/src/main.rs": 'fn main() {\n    assert_eq!(dep::answer(), 42);\n'
                                   '    println!("{}", env!("CLADEFS_BUILD_COMMIT"));\n}\n',
@@ -89,6 +93,23 @@ class Stamp(unittest.TestCase):
         self.assertEqual(self.stamp(), f"{self.commit}-dirty")
         self.git("checkout", "--", "crates/dep/src/lib.rs")
         self.assertEqual(self.stamp(), self.commit)
+
+    def test_a_release_build_without_frame_pointers_is_refused(self):
+        # The workspace has no .cargo/config.toml: rustflags are RUSTFLAGS's alone.
+        refused = self.cargo("build", "--offline", "-q", "--release", env={"RUSTFLAGS": "--cfg x"})
+        self.assertEqual(refused.returncode, 101, refused.stderr)
+        self.assertIn("a release build without frame pointers, which perf and /z/pprof unwind by",
+                      refused.stderr)
+        for flags in ["-Cforce-frame-pointers=yes", "--cfg x -C force-frame-pointers=on",
+                      "-Cforce-frame-pointers=no -Cforce-frame-pointers"]:
+            with self.subTest(flags):
+                built = self.cargo("build", "--offline", "-q", "--release",
+                                   env={"RUSTFLAGS": flags})
+                self.assertEqual(built.returncode, 0, built.stderr)
+        # The last option says: frame pointers turned off after on are off.
+        off = self.cargo("build", "--offline", "-q", "--release",
+                         env={"RUSTFLAGS": "-Cforce-frame-pointers=yes -Cforce-frame-pointers=no"})
+        self.assertEqual(off.returncode, 101, off.stderr)
 
 
 if __name__ == "__main__":

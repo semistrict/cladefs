@@ -7,15 +7,17 @@
 //! the API of FUSE mounts of many cells (`proto/cladefs/mount/v1/mount.proto`), with protox, which
 //! compiles protobuf in Rust: no protoc needed; for tonic, and for madsim's tonic. cladefs: and
 //! stamps the build with the commit it is of (`CLADEFS_BUILD_COMMIT`, [`crate::BUILD_COMMIT`]), as
-//! scripts/build-commit.sh says, which every build of the tree reports (TASK-111.7).
+//! scripts/build-commit.sh says, which every build of the tree reports (TASK-111.7), and refuses a
+//! release build without frame pointers (`build/stamp.rs`).
 
 use std::path::PathBuf;
 
-// What the build stamps, and checks of it (board 8599).
+// What the build stamps, and checks of it (board 8597, board 8599).
 #[path = "build/stamp.rs"]
 mod stamp;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    stamp::require_frame_pointers()?;
     let protos = [
         "proto/cladefs/cladefsd/v1/cladefsd.proto",
         "proto/cladefs/peer/v1/peer.proto",
