@@ -303,6 +303,18 @@ impl Vm {
         self.config["vsock"] = serde_json::json!({ "guest_cid": 3, "uds_path": uds });
     }
 
+    /// cladefs: gives the VM a balloon of nothing, deflated as the guest needs, and its free page
+    /// reporting on if `free_page_reporting`, whatever CLADEFS_GUEST_BALLOON says ([`balloon`]):
+    /// a test that inflates it, measuring what the host gets back of its guest's memory then.
+    pub fn balloon(&mut self, free_page_reporting: bool) {
+        self.config["balloon"] = serde_json::json!({
+            "amount_mib": 0,
+            "deflate_on_oom": true,
+            "stats_polling_interval_s": 0,
+            "free_page_reporting": free_page_reporting,
+        });
+    }
+
     /// Has the root filesystem's disk read-only: as VMs restored from one snapshot share it.
     pub fn read_only_root(&mut self) {
         self.read_only_root = true;
