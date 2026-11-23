@@ -92,7 +92,11 @@ if ((use_hotbed)); then
         esac
         review_id=$(hotbed "${request[@]}" --json | json_field data id)
     fi
-    hotbed review start -s "$session" "$review_id" > /dev/null
+    # The exact model the reviewer runs, which hotbed records with it: $CODEX_MODEL, else Codex's
+    # configured one.
+    model=${CODEX_MODEL:-$(sed -n 's/^model = "\(.*\)"$/\1/p' "${CODEX_HOME:-$HOME/.codex}/config.toml")}
+    [[ -n $model ]] || { echo "review-change.sh: no Codex model: set CODEX_MODEL" >&2; exit 2; }
+    hotbed review start -s "$session" "$review_id" --model "$model" > /dev/null
     instructions+=$'\n\n'"This is hotbed review $review_id. Your sandbox can't reach hotbed: end your report with the \`\`\`json hotbed-findings block (\`{\"findings\": []}\` if none survive)."
 fi
 
@@ -105,7 +109,7 @@ fail() {
     exit 1
 }
 
-printf '%s\n' "$instructions" | codex exec --sandbox read-only --ephemeral --output-last-message "$out" - \
+printf '%s\n' "$instructions" | codex exec ${model:+-m "$model"} --sandbox read-only --ephemeral --output-last-message "$out" - \
     > "$out.log" 2>&1 || { cat "$out.log" >&2; fail "codex exec failed (its run in $out.log)"; }
 cat "$out"
 echo "review-change.sh: kept in $out (Codex's run in $out.log)" >&2
