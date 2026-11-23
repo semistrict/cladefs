@@ -184,6 +184,9 @@ fn ephemeral_cells_migrate_live_between_hosts() {
     source.control.hand_over_cell(&here).unwrap();
     assert!(!here.exists(), "the source's cell directory goes once handed over");
     let incarnation = std::fs::read_to_string(target.ephemeral.join("incarnation")).unwrap();
+    // Its format's line (`cladefs ephemeral host 1`, board 8461), then the number.
+    let (format, incarnation) = incarnation.split_once('\n').unwrap();
+    assert_eq!(format, "cladefs ephemeral host 1");
     let incarnation: u64 = incarnation.trim().parse().unwrap();
     let named = referring(&bucket);
     assert_eq!(named.len(), 1, "one reference: {named:?}");

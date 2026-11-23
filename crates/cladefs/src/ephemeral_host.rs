@@ -22,6 +22,12 @@
 //!   (specs/ephemeral, `remembersAccepted`); kept until the migration's source, having let the
 //!   cell go, asks no more and releases it (board 5734).
 //!
+//! Each of these files begins with a line naming their format, [`FORMAT`], the rest JSON: one of
+//! another format, or not whole, which their durable writes never leave, is refused, failing the
+//! call reading it and the daemon's start, never deleted or taken for none (board 8461): it is of
+//! another build's, its schema changed, or corrupt, and taken for none it lost a migration under
+//! way, or a reference no start then retired. Nothing migrates (AGENTS.md, "No migrations").
+//!
 //! As the daemon starts, before it serves, each journal entry whose cell is not there, an
 //! ephemeral cell's of its cell, has its reference retired and goes: a fork its host crashed in,
 //! or a deletion; and each a migration was taking here and never accepted, what it took dropped
@@ -30,6 +36,7 @@
 use crate::CellId;
 use anyhow::{Context as _, Error, bail};
 use bucket_cell::layout::Origin;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -41,8 +48,22 @@ pub(crate) struct Host {
     incarnation: u64,
 }
 
+/// The first line of each file of the host's ephemeral cells' directory: its format (board 8461).
+/// A change to what they hold, [`Entry`] and [`Migrating`] among it, is a new one.
+pub(crate) const FORMAT: &str = "cladefs ephemeral host 1";
+
+/// The error of a file of the host's ephemeral cells' directory of another format than
+/// [`FORMAT`], an older one included: refused, as nothing reads it.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a file of format {found:?}, not {FORMAT:?}: refused")]
+pub(crate) struct Format {
+    /// Its first line, its first 64 characters.
+    pub found: String,
+}
+
 /// A journal entry: an ephemeral cell the host may hold.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Entry {
     pub child: CellId,
     pub origin: Origin,
@@ -58,6 +79,7 @@ pub(crate) struct Entry {
 
 /// A migration of a journal entry's cell.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum Migrating {
     /// Being taken here by migration `id`, its files staged beside its path ([`staging`]), until
     /// this host accepts it; `token` made as this host took its prepare, new to that take, which
@@ -99,14 +121,13 @@ pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
             .with_context(|| format!("making {}", made.display()))?;
     }
     let path = dir.join(INCARNATION);
-    let incarnation = match host_fs::read_to_string(&path) {
-        Ok(text) => text.trim().parse().with_context(|| format!("{}", path.display()))?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+    let incarnation = match read(&path)? {
+        Some(incarnation) => incarnation,
+        None => {
             let incarnation = rand::random::<u64>() | 1;
-            write_durably(&path, incarnation.to_string().as_bytes())?;
+            write_durably(&path, &encode(&incarnation)?)?;
             incarnation
         }
-        Err(err) => return Err(Error::new(err).context(format!("reading {}", path.display()))),
     };
     let host = Arc::new(Host { dir: dir.to_owned(), incarnation });
     *HOST.get().lock().unwrap() = Some(host.clone());
@@ -136,7 +157,7 @@ impl Host {
 
     /// Notes, durably, that it may hold `entry`'s ephemeral cell: before its reference is written.
     pub fn note(&self, entry: &Entry) -> Result<(), Error> {
-        write_durably(&self.entry_path(entry.child), &serde_json::to_vec(entry)?)
+        write_durably(&self.entry_path(entry.child), &encode(entry)?)
     }
 
     /// Forgets `child`, its reference gone: durably, so that no crash brings its entry back
@@ -158,20 +179,15 @@ impl Host {
     /// source releases it.
     pub fn accept(&self, migration: u64, child: CellId) -> Result<(), Error> {
         let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
-        write_durably(&path, &serde_json::to_vec(&child)?)
+        write_durably(&path, &encode(&child)?)
     }
 
     /// The cell migration `migration` took, if this host accepted it. Failing if its acceptance is
-    /// there but unread, its disk failing, or not whole, which its durable write never leaves:
-    /// taken for none, the cell would go unnoted as taken, and a crash lose it (board 6908).
+    /// there but unread, its disk failing, not whole, which its durable write never leaves, or of
+    /// another format: taken for none, the cell would go unnoted as taken, and a crash lose it
+    /// (boards 6908, 8461).
     pub fn accepted_cell(&self, migration: u64) -> Result<Option<CellId>, Error> {
-        let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
-        let bytes = match host_fs::read(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            read => read.with_context(|| format!("reading {}", path.display()))?,
-        };
-        let child = serde_json::from_slice(&bytes);
-        Ok(Some(child.with_context(|| format!("reading {}", path.display()))?))
+        read(&self.dir.join(ACCEPTED).join(format!("{migration:x}")))
     }
 
     /// Whether it accepted migration `migration`.
@@ -204,20 +220,16 @@ impl Host {
     }
 
     /// The ephemeral cell `child`'s entry, if it has one.
-    /// cladefs: failing if it is unread, its disk failing (board 5748), rather than as none, which
-    /// a migration's prepare would write over; one torn by a crash is none.
+    /// cladefs: failing if it is unread, its disk failing (board 5748), not whole or of another
+    /// format (board 8461), rather than as none, which a migration's prepare would write over.
     pub fn entry(&self, child: CellId) -> Result<Option<Entry>, Error> {
-        let path = self.entry_path(child);
-        let bytes = match host_fs::read(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            read => read.with_context(|| format!("reading {}", path.display()))?,
-        };
-        // Torn by a crash before it was durable: none, as the doc says.
-        Ok(serde_json::from_slice(&bytes).ok())
+        read(&self.entry_path(child))
     }
 
-    /// Its journal's entries, those that read whole: one torn by a crash, after which no reference
-    /// was written, goes.
+    /// Its journal's entries. A note staged (`.new`), which a crash in [`write_durably`] may
+    /// leave, goes; one there but unread, not whole or of another format fails it, removed never
+    /// (boards 5748, 8461): removed, its cell's entry went, the cell noted on no host, its
+    /// reference never retired.
     pub fn entries(&self) -> Result<Vec<Entry>, Error> {
         let mut entries = Vec::new();
         for found in host_fs::read_dir(self.dir.join(CELLS))? {
@@ -226,17 +238,8 @@ impl Host {
                 host_fs::remove_file(&path)?;
                 continue;
             }
-            // cladefs: a note unread, its disk failing, is no torn one: said, not removed (board
-            // 5748: removed, its cell's entry went, the cell noted on no host).
-            let bytes =
-                host_fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            match serde_json::from_slice::<Entry>(&bytes) {
-                Ok(entry) => entries.push(entry),
-                Err(err) => {
-                    log::warn!("cladefsd: {} is no whole note, removed: {err:#}", path.display());
-                    host_fs::remove_file(&path)?;
-                }
-            }
+            // Listed, then gone: forgotten meanwhile, no entry.
+            entries.extend(read(&path)?);
         }
         Ok(entries)
     }
@@ -344,6 +347,33 @@ fn held(entry: &Entry) -> Result<bool, Error> {
     Ok(local_cell::host_cell(&entry.path)? == entry.child)
 }
 
+/// `value` as a file of the host's ephemeral cells' directory holds it: its format's line, then
+/// its JSON.
+fn encode(value: &impl Serialize) -> Result<Vec<u8>, Error> {
+    let mut bytes = format!("{FORMAT}\n").into_bytes();
+    serde_json::to_writer(&mut bytes, value)?;
+    Ok(bytes)
+}
+
+/// What the file at `path` of the host's ephemeral cells' directory holds, as [`encode`] wrote it:
+/// none if it is not there. Failing if it is unread, of another format ([`Format`]), or not whole
+/// (board 8461). Its bytes are untrusted (AGENTS.md, Trust boundaries): read whole, split once.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Error> {
+    let bytes = match host_fs::read(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        read => read.with_context(|| format!("reading {}", path.display()))?,
+    };
+    let mut lines = bytes.splitn(2, |&byte| byte == b'\n');
+    let found = lines.next().unwrap_or_default();
+    if found != FORMAT.as_bytes() {
+        let found = String::from_utf8_lossy(found).chars().take(64).collect();
+        return Err(Error::new(Format { found }).context(format!("reading {}", path.display())));
+    }
+    let value = serde_json::from_slice(lines.next().unwrap_or_default());
+    Ok(Some(value.with_context(|| format!("reading {}", path.display()))?))
+}
+
 /// Writes `bytes` to a file at `path`, whole, durably, over any there.
 fn write_durably(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let staged = path.with_extension("new");
@@ -361,8 +391,8 @@ mod tests {
     use super::*;
 
     /// A host's directory keeps its incarnation across openings, and its journal its notes, until
-    /// forgotten; a torn note, or one staged, goes as it is listed. Board 6908: an acceptance there
-    /// but not whole fails, never read as none.
+    /// forgotten; a note staged goes as it is listed. Board 6908: an acceptance there but not whole
+    /// fails, never read as none.
     #[test]
     fn hosts_keep_their_incarnation_and_their_notes() {
         let dir = tempfile::tempdir().unwrap();
@@ -370,17 +400,8 @@ mod tests {
         let host = open(dir.path()).unwrap();
         assert_eq!(host.incarnation(), incarnation);
         let child = CellId { tenant: 3, id: 9 };
-        let origin = Origin { parent: CellId { tenant: 3, id: 1 }, at: 4, epoch: 1 };
-        let entry = Entry {
-            child,
-            origin,
-            path: dir.path().join("store"),
-            bucket: "memory:///e".into(),
-            epoch: 0,
-            migrating: None,
-        };
+        let entry = entry(dir.path(), child);
         host.note(&entry).unwrap();
-        host_fs::write(dir.path().join(CELLS).join("torn"), b"{\"child\"").unwrap();
         host_fs::write(dir.path().join(CELLS).join("staged.new"), b"{}").unwrap();
         assert_eq!(host.entries().unwrap(), vec![entry.clone()]);
         assert_eq!(host_fs::read_dir(dir.path().join(CELLS)).unwrap().count(), 1);
@@ -392,9 +413,9 @@ mod tests {
         assert!(open(dir.path()).unwrap().accepted(0x3c));
         assert_eq!(host.accepted_cell(0x3c).unwrap(), Some(child));
         assert_eq!(host.accepted_cell(0x3d).unwrap(), None);
-        host_fs::write(dir.path().join(ACCEPTED).join("3e"), b"{\"tenant").unwrap();
-        let unread = host.accepted_cell(0x3e).map_err(|err| format!("{err:#}"));
         let file = dir.path().join(ACCEPTED).join("3e");
+        host_fs::write(&file, format!("{FORMAT}\n{{\"tenant").as_bytes()).unwrap();
+        let unread = host.accepted_cell(0x3e).map_err(|err| format!("{err:#}"));
         assert_eq!(
             unread,
             Err(format!(
@@ -402,5 +423,98 @@ mod tests {
                 file.display()
             ))
         );
+    }
+
+    /// An entry of `child`'s, its cell at `CELL` in `dir`.
+    fn entry(dir: &Path, child: CellId) -> Entry {
+        Entry {
+            child,
+            origin: Origin { parent: CellId { tenant: 3, id: 1 }, at: 4, epoch: 1 },
+            path: dir.join("cell"),
+            bucket: "memory:///e".into(),
+            epoch: 0,
+            migrating: None,
+        }
+    }
+
+    /// Board 8461: a file of the host's directory of another format, an older build's, or not
+    /// whole, which a durable write never leaves, fails what reads it, the daemon's start among
+    /// them (its retiring of references, and its letting go of cells handed over, which list the
+    /// entries as `entries` does, failing the boot): never deleted, never
+    /// none, the cell directory it names untouched. The cases: each file without the format's line
+    /// (as every build before it wrote them), of another format, of a schema this build's does
+    /// not know (a field added) and torn after the format's line.
+    #[test]
+    fn files_of_another_format_are_refused_never_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path()).unwrap();
+        let child = CellId { tenant: 3, id: 9 };
+        let noted = entry(dir.path(), child);
+        host_fs::create_dir(&noted.path).unwrap();
+        host_fs::write(noted.path.join("store"), b"kept").unwrap();
+        let json = serde_json::to_string(&noted).unwrap();
+        let schema = json.replacen('{', "{\"tier\":2,", 1);
+        let note = host.entry_path(child);
+        let refusal = |found: &str| {
+            format!(
+                "reading {}: a file of format {found:?}, not {FORMAT:?}: refused",
+                note.display()
+            )
+        };
+        let cases = [
+            (json.clone(), refusal(&json[..64])),
+            (format!("cladefs ephemeral host 0\n{json}"), refusal("cladefs ephemeral host 0")),
+            (
+                format!("{FORMAT}\n{schema}"),
+                format!(
+                    "reading {}: unknown field `tier`, expected one of `child`, `origin`, `path`, \
+                     `bucket`, `epoch`, `migrating` at line 1 column 7",
+                    note.display()
+                ),
+            ),
+            (
+                format!("{FORMAT}\n{}", &json[..20]),
+                format!(
+                    "reading {}: EOF while parsing an object at line 1 column 20",
+                    note.display()
+                ),
+            ),
+        ];
+        for (bytes, refused) in cases {
+            host_fs::write(&note, &bytes).unwrap();
+            fn said<T>(result: Result<T, Error>) -> Result<(), String> {
+                result.map(drop).map_err(|err| format!("{err:#}"))
+            }
+            assert_eq!(said(host.entry(child)), Err(refused.clone()), "{bytes}");
+            assert_eq!(said(host.entries()), Err(refused.clone()), "{bytes}");
+            let starting = futures::executor::block_on(host.retire_stale());
+            assert_eq!(said(starting), Err(refused), "{bytes}");
+            assert_eq!(host_fs::read(&note).unwrap(), bytes.as_bytes(), "the note kept");
+            assert_eq!(host_fs::read(noted.path.join("store")).unwrap(), b"kept");
+        }
+
+        // An acceptance, and an incarnation, of an older build's: refused alike.
+        let accepted = dir.path().join(ACCEPTED).join("3e");
+        host_fs::write(&accepted, serde_json::to_vec(&child).unwrap()).unwrap();
+        let refused = host.accepted_cell(0x3e).map_err(|err| format!("{err:#}"));
+        let found = serde_json::to_string(&child).unwrap();
+        assert_eq!(
+            refused,
+            Err(format!(
+                "reading {}: a file of format {found:?}, not {FORMAT:?}: refused",
+                accepted.display()
+            ))
+        );
+        let incarnation = dir.path().join(INCARNATION);
+        host_fs::write(&incarnation, b"12345").unwrap();
+        let refused = open(dir.path()).map(drop).map_err(|err| format!("{err:#}"));
+        assert_eq!(
+            refused,
+            Err(format!(
+                "reading {}: a file of format \"12345\", not {FORMAT:?}: refused",
+                incarnation.display()
+            ))
+        );
+        assert_eq!(host_fs::read(&incarnation).unwrap(), b"12345");
     }
 }
