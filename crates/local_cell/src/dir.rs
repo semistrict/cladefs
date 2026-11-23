@@ -384,6 +384,7 @@ impl Dir for DiskDir {
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let _renaming = self.renaming();
+        fail::fail_point!("dir::renaming");
         host_fs::rename(self.path.join(from), self.path.join(to))
     }
 

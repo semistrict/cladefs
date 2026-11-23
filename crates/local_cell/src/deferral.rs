@@ -323,11 +323,12 @@ mod tests {
     use super::*;
     use crate::dir::{Dir as _, DiskDir, File as _};
 
-    /// A file renamed while a settling begins is synced by its new name: the settling waits for
-    /// the rename in flight before it lists what is there, as a framer's rename of a segment
-    /// framed, its sync skipped, once lost its data (board 7420's review).
+    /// A file renamed through its directory while a settling begins is synced by its new name: the
+    /// settling waits for the rename in flight before it lists what is there, as a framer's rename
+    /// of a segment framed, its sync skipped, once lost its data (board 7420's reviews).
     #[test]
     fn settlings_list_what_renames_in_flight_left() {
+        use std::sync::{Arc as StdArc, Barrier};
         let parent = tempfile::tempdir().unwrap();
         let path = parent.path().join("cell");
         let deferring = defer_durability(&path);
@@ -339,8 +340,17 @@ mod tests {
         crate::made_host(&path).unwrap();
         deferring.opened();
         let deferral = of(&path).unwrap();
-        let renaming = deferral.renaming();
+        // The rename stops past its start, as it renames, until let go.
+        let (arrived, released) = (StdArc::new(Barrier::new(2)), StdArc::new(Barrier::new(2)));
+        let (at, go) = (arrived.clone(), released.clone());
+        fail::cfg_callback("dir::renaming", move || {
+            at.wait();
+            go.wait();
+        })
+        .unwrap();
         std::thread::scope(|scope| {
+            let renamed = scope.spawn(|| dir.rename("framing", "segment"));
+            arrived.wait();
             let settling = scope.spawn(|| deferral.settle());
             // Once the settling waits for the rename, or, were it not to, has listed what is
             // there: renamed then, its listing missed the file.
@@ -348,10 +358,11 @@ mod tests {
             while !awaits() && deferral.listed.lock().unwrap().is_empty() {
                 std::thread::yield_now();
             }
-            host_fs::rename(path.join("framing"), path.join("segment")).unwrap();
-            drop(renaming);
+            released.wait();
+            renamed.join().unwrap().unwrap();
             settling.join().unwrap().unwrap();
         });
+        fail::remove("dir::renaming");
         let listed = deferral.listed.lock().unwrap();
         assert!(listed.contains(&key(&path).join("segment")), "{listed:?}");
         assert!(!path.join(crate::cell::UNMADE).exists());

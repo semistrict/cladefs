@@ -1927,9 +1927,19 @@ impl<D: Dir> LocalCell<D> {
         // closes, whether or not its flush failed, as a fork's making would have: whole on the
         // disk for its next opening (board 7420).
         let settled = crate::upload::blocking(|| self.dir.settle());
-        let flushed = flushed.and_then(|()| {
-            settled.context("making the cell durable as it closes, its durability deferred")
-        });
+        let flushed = match (flushed, settled) {
+            (Ok(()), settled) => {
+                settled.context("making the cell durable as it closes, its durability deferred")
+            }
+            (Err(error), Err(settled)) => {
+                log::error!(
+                    "extent store: making cell {} durable as it closes, its flush failed: {settled}",
+                    self.cell
+                );
+                Err(error)
+            }
+            (flushed, Ok(())) => flushed,
+        };
         // cladefs: an ephemeral cell's closed segments covered, all of them, its local checkpoint
         // what its next opening starts from (TASK-698.2).
         let flushed = match flushed {
