@@ -370,10 +370,11 @@ pub struct Options {
     /// 10 s and more each, the interval closing the segments they filled at 10 s, their commits
     /// copying out a segment's worth each.
     pub filling_wait: Duration,
-    /// cladefs: the budget of the GETs its relocation rounds read through, the host's fetchers', if
-    /// it has them (Codex's review of fa1912379): else each round's own, of a few at once
-    /// ([`relocations`]).
-    pub fetches: Option<bucket_cell::fetch::Budgets>,
+    /// cladefs: what its relocation rounds read through, the host's fetchers' budget and memory, if
+    /// it has them, with its [`Options::cache`]: so that their GETs, the tails they keep and the
+    /// parts they fetch are the host's, governed and shared (Codex's reviews of fa1912379 and
+    /// 10149e8e3). Else each round's own ([`relocations`]).
+    pub fetching: Option<Fetching>,
     /// cladefs: whether its checkpoint rounds relocate out of the cell's sparse segments
     /// ([`relocations`], doc-27): not where a collector compacts them, its moves and relocations
     /// a combination no spec checks (doc-27 step 1).
@@ -456,6 +457,20 @@ pub trait Members: Send + Sync + 'static {
     }
 }
 
+/// cladefs: the budget of a host's fetchers' GETs and the memory they keep tails and parts in
+/// ([`Options::fetching`]).
+#[derive(Clone)]
+pub struct Fetching {
+    pub budgets: bucket_cell::fetch::Budgets,
+    pub memory: Arc<bucket_cell::fetch::Memory>,
+}
+
+impl std::fmt::Debug for Fetching {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fetching").field("budgets", &self.budgets).finish_non_exhaustive()
+    }
+}
+
 /// cladefs: a host's [`Members`], as [`Options`] holds it.
 #[derive(Clone)]
 pub struct MembersOf(pub Arc<dyn Members>);
@@ -478,7 +493,7 @@ impl Default for Options {
             checkpoint_every: CHECKPOINT_EVERY,
             filling_wait: Duration::from_secs(30),
             relocate: true,
-            fetches: None,
+            fetching: None,
             replication: None,
             members: None,
             replace_after: Duration::from_secs(30),
@@ -1755,14 +1770,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         allowance: u64,
     ) -> Round {
         let (cell, uploads) = (self.cell().clone(), self.uploads.clone());
-        let fetches = self.options.fetches.clone();
+        let (fetching, cache) = (self.options.fetching.clone(), self.options.cache.clone());
         let (ended, round) = futures::channel::oneshot::channel();
         let (abort, registration) = futures::future::AbortHandle::new_pair();
         let (done, gone) = futures::channel::oneshot::channel::<()>();
         *self.relocation.lock().unwrap() = Some((abort, gone));
         let ending = async move {
             fail::fail_point!("upload::relocating", |_| Err(anyhow::anyhow!("failpoint")));
-            let budgets = relocations::Budgets { uploads: &uploads, fetches };
+            let budgets = relocations::Budgets { uploads: &uploads, fetching, cache };
             relocations::round(&cell, &writer, (&bucket, budgets), &pins, allowance).await
         };
         let ending = futures::future::Abortable::new(ending, registration);
@@ -3184,7 +3199,13 @@ mod tests {
         let writer = cell.uploader.shared.writer().unwrap();
         let pins = relocations::Pins::default();
         let round = async |allowance| {
-            let budgets = relocations::Budgets { uploads: &cell.host.uploads, fetches: None };
+            // As a host's: its fetchers' budget and memory (`Options::fetching`).
+            let fetching = Some(Fetching {
+                budgets: Budget::new(Limits::UNBOUNDED).into(),
+                memory: bucket_cell::fetch::Memory::new(),
+            });
+            let budgets =
+                relocations::Budgets { uploads: &cell.host.uploads, fetching, cache: None };
             let places = (&cell.bucket, budgets);
             relocations::round(&cell.cell, &writer, places, &pins, allowance).await.unwrap().bytes
         };

@@ -266,8 +266,8 @@ pub(crate) fn token() -> Result<u64, Failure> {
 /// How a cell this process opens where no host's daemon serves it keeps its cell in its bucket:
 /// its uploader's options, as a copy never placed takes its cell's head here ([`token`]).
 pub(crate) fn keeping() -> Result<upload::Options, Failure> {
-    let fetches = Some(crate::bucket::fetches());
-    Ok(upload::Options { token: token()?, fetches, ..Default::default() })
+    let fetching = Some(crate::bucket::fetching());
+    Ok(upload::Options { token: token()?, fetching, ..Default::default() })
 }
 
 /// A cell directory opened ([`open`]), with the bucket its description names, which its cell is

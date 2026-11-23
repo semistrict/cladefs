@@ -29,11 +29,14 @@ pub(crate) const MOST: u64 = crate::upload::UPLOAD_BYTES / 4;
 const AT_ONCE: usize = 8;
 
 /// What a round's reads go within: a place in the budget of the host's uploads for what it holds
-/// read until relocated, behind the uploads; and its GETs, in the budget of the host's fetchers if
-/// it has them (doc-27; Codex's review of fa1912379), else one of its own, [`AT_ONCE`] parts.
+/// read until relocated, behind the uploads; and its fetcher's, the host's fetchers' budget,
+/// memory and cache, if it has them (doc-27; Codex's reviews of fa1912379 and 10149e8e3), so that
+/// what it fetches is governed and shared; else its own, of [`AT_ONCE`] parts, keeping none: the
+/// tests' and tools', which read each extent's parts anew.
 pub(crate) struct Budgets<'a> {
     pub uploads: &'a Arc<Budget>,
-    pub fetches: Option<bucket_cell::fetch::Budgets>,
+    pub fetching: Option<crate::upload::Fetching>,
+    pub cache: Option<Arc<bucket_cell::cache::Cache>>,
 }
 
 /// What a cell's rounds may copy: the bytes it uploaded of its own since, less those its rounds
@@ -138,7 +141,7 @@ fn own_segments(cell: CellId, state: &bucket_cell::State) -> HashSet<String> {
 pub(crate) async fn round<D: Dir, B: Bucket>(
     cell: &LocalCell<D>,
     writer: &Writer<B>,
-    (bucket, Budgets { uploads, fetches }): (&Arc<B>, Budgets<'_>),
+    (bucket, Budgets { uploads, fetching, cache }): (&Arc<B>, Budgets<'_>),
     pins: &Pins,
     allowance: u64,
 ) -> anyhow::Result<Relocated> {
@@ -173,13 +176,16 @@ pub(crate) async fn round<D: Dir, B: Bucket>(
     // What it reads it holds until relocated: in the budget of the host's uploads, behind them.
     let bytes = chosen.iter().map(|(_, at)| at.len).sum();
     let _held = uploads.hold(Priority::Ahead, bytes).await;
-    let memory = Memory::new();
-    let _keys = memory.keys().hold(writer.keys().clone());
-    let own = || {
-        let parts = Limits { requests: AT_ONCE, bytes: AT_ONCE as u64 * extent_frame::PART };
-        Budget::new(parts).into()
+    let (budgets, memory, cache) = match fetching {
+        Some(crate::upload::Fetching { budgets, memory }) => (budgets, memory, cache),
+        None => {
+            let parts = Limits { requests: AT_ONCE, bytes: AT_ONCE as u64 * extent_frame::PART };
+            (Budget::new(parts).into(), Memory::new(), None)
+        }
     };
-    let fetcher = Fetcher::new(bucket.clone(), fetches.unwrap_or_else(own), memory, None);
+    // Its cell's keys, held among its memory's while it reads.
+    let _keys = memory.keys().hold(writer.keys().clone());
+    let fetcher = Fetcher::new(bucket.clone(), budgets, memory, cache);
     let read = futures::stream::iter(chosen)
         .map(|(extent, from)| {
             let fetcher = &fetcher;

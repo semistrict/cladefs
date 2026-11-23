@@ -1564,7 +1564,7 @@ impl World {
             // cladefs: the world's own op runs relocation rounds ([`World::relocate`]), which its
             // model follows: its uploaders run none, whose commits it would not know of.
             relocate: false,
-            fetches: None,
+            fetching: None,
         };
         let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
         let kept = Arc::<Mutex<Vec<BoxFuture<'static, ()>>>>::default();
@@ -2113,7 +2113,8 @@ impl World {
         let round = self.spawn(async move {
             let pins = crate::relocations::Pins::default();
             // A round failing fails nothing (doc-27): it says so in the trace alone.
-            let budgets = crate::relocations::Budgets { uploads: &uploads, fetches: None };
+            let budgets =
+                crate::relocations::Budgets { uploads: &uploads, fetching: None, cache: None };
             let places = (&bucket, budgets);
             let ended =
                 crate::relocations::round(&open_cell, &writer, places, &pins, allowance).await;

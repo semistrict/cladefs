@@ -664,7 +664,7 @@ fn keeping() -> Result<local_cell::upload::Options, Errno> {
     Ok(local_cell::upload::Options {
         cache,
         held,
-        fetches: Some(crate::bucket::fetches()),
+        fetching: Some(crate::bucket::fetching()),
         token,
         interval,
         members,
