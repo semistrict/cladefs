@@ -30,11 +30,13 @@
 //! [`real`]'s: a header naming the backend and the key's resource name, then the KMS's ciphertext.
 
 use super::background::Background;
+use super::http::{self, Unread};
 use super::retry::{self, Failed};
-use super::{Error, KeyNames, Kms, real};
+use super::{Error, KeyNames, Kms, Origin, Vars, real};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use bytes::Bytes;
 use object_store::StaticCredentialProvider;
 use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
 use serde::Deserialize;
@@ -58,22 +60,48 @@ pub const TOKEN_VAR: &str = "CLADEFS_KMS_GCP_TOKEN";
 /// variable.
 const QUOTA_PROJECT_VAR: &str = "GOOGLE_CLOUD_QUOTA_PROJECT";
 
+/// The variables Application Default Credentials are read from, as `object_store`'s
+/// `GoogleCloudStorageBuilder::from_env` reads them: each `GOOGLE_*` it takes as its own
+/// configuration's key, and its own `SERVICE_ACCOUNT`.
+const ADC_VARS: [&str; 6] = [
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_SERVICE_ACCOUNT",
+    "GOOGLE_SERVICE_ACCOUNT_PATH",
+    "GOOGLE_SERVICE_ACCOUNT_KEY",
+    "GOOGLE_BEARER_TOKEN",
+    "SERVICE_ACCOUNT",
+];
+
+/// The variables its credentials are read from ([`credentials`]): a bucket's own replace the
+/// host's as one (board 8485, `super::vars`).
+pub(super) const CREDENTIAL_VARS: &[&str] = &[
+    TOKEN_VAR,
+    QUOTA_PROJECT_VAR,
+    ADC_VARS[0],
+    ADC_VARS[1],
+    ADC_VARS[2],
+    ADC_VARS[3],
+    ADC_VARS[4],
+    ADC_VARS[5],
+];
+
 /// What a call waits for an answer at most, and for a connection.
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The KMS `url` names ([`super::from_url`]).
-pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
-    let (ring, names) = parse(url)?;
-    let credentials = credentials().map_err(|why| format!("{url}: {why}"))?;
-    // Unset, or not UTF-8, which no project is: none.
-    let quota_project = std::env::var(QUOTA_PROJECT_VAR).ok().filter(|project| !project.is_empty());
+/// The KMS `url` names ([`super::from_url_with`]), of `origin`, its credentials as `vars` give
+/// them.
+pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
+    let (ring, names) = parse(url, origin)?;
+    let credentials = credentials(vars).map_err(|why| format!("{url}: {why}"))?;
+    let quota_project = vars.get(QUOTA_PROJECT_VAR).map(str::to_owned);
     let kms = GcpKms::new(ENDPOINT, ring, names, credentials, quota_project);
     Ok(Arc::new(kms.map_err(|why| format!("{url}: {why}"))?))
 }
 
-/// The key ring `url` names and its tenants' keys' names, each checked.
-fn parse(url: &str) -> Result<(String, KeyNames), String> {
+/// The key ring `url` names and its tenants' keys' names, each checked: of `origin` the registry of
+/// buckets, no file of the host's named (board 8525).
+fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
     let usage = "gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]";
     let rest = url.strip_prefix("gcp-kms://").expect("a gcp-kms:// URL");
     let (ring, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -87,8 +115,8 @@ fn parse(url: &str) -> Result<(String, KeyNames), String> {
     if let Some((name, _)) = query.iter().find(|(name, _)| !matches!(&name[..], "key" | "keys")) {
         return Err(format!("{url:?}: no parameter {name:?}: {usage}"));
     }
-    let names = KeyNames::of_query(query.iter().map(|(name, value)| (&name[..], &value[..])))
-        .map_err(|why| format!("{url:?}: {why}"))?;
+    let query_pairs = query.iter().map(|(name, value)| (&name[..], &value[..]));
+    let names = KeyNames::of_query(query_pairs, origin).map_err(|why| format!("{url:?}: {why}"))?;
     // The template, as the longest tenant names it: its other tenants' names are as valid.
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
     for (tenant, name) in names.overridden() {
@@ -146,15 +174,29 @@ fn qualified(ring: &str, name: &str) -> String {
     }
 }
 
-/// The credentials its calls carry: [`TOKEN_VAR`]'s token, if it has one, else Application
-/// Default Credentials, found as `object_store` finds them for a `gs://` bucket.
-fn credentials() -> Result<GcpCredentialProvider, String> {
-    // Unset, or not UTF-8, which no token is: Application Default Credentials.
-    if let Some(bearer) = std::env::var(TOKEN_VAR).ok().filter(|token| !token.is_empty()) {
+/// The credentials its calls carry, as `vars` give them: [`TOKEN_VAR`]'s token, if it has one,
+/// else Application Default Credentials, found as `object_store` finds them for a `gs://` bucket
+/// but in `vars` alone ([`ADC_VARS`]), never the process's environment (board 8485). The token's
+/// copies in `object_store`'s `GcpCredential`, and its provider's, are theirs, which nothing here
+/// zeroes (board 8589).
+fn credentials(vars: &Vars) -> Result<GcpCredentialProvider, String> {
+    if let Some(bearer) = vars.get(TOKEN_VAR) {
+        let bearer = bearer.to_owned();
         return Ok(Arc::new(StaticCredentialProvider::new(GcpCredential { bearer })));
     }
     // A client of a bucket it never calls: its credentials are what it is built for.
-    let gcs = GoogleCloudStorageBuilder::from_env().with_bucket_name("cladefs-kms-credentials");
+    let mut gcs = GoogleCloudStorageBuilder::new().with_bucket_name("cladefs-kms-credentials");
+    for name in ADC_VARS {
+        let Some(value) = vars.get(name) else { continue };
+        gcs = match name {
+            "SERVICE_ACCOUNT" => gcs.with_service_account_path(value),
+            name => {
+                let key =
+                    name.to_ascii_lowercase().parse().map_err(|err| format!("{name}: {err}"))?;
+                gcs.with_config(key, value)
+            }
+        };
+    }
     let gcs = gcs.build().map_err(|err| format!("Application Default Credentials: {err}"))?;
     Ok(gcs.credentials().clone())
 }
@@ -198,9 +240,12 @@ impl GcpKms {
         credentials: GcpCredentialProvider,
         quota_project: Option<String>,
     ) -> Result<Self, String> {
+        // No redirect followed (board 8527): one would take a request's body, a key in the clear
+        // among them, elsewhere.
         let http = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|err| format!("an HTTP client: {err}"))?;
         let runtime =
@@ -299,8 +344,7 @@ impl Inner {
             additional_authenticated_data: &aad_base64,
             additional_authenticated_data_crc32c: crc32c(&aad).to_string(),
         };
-        let body = Zeroizing::new(serde_json::to_vec(&request).expect("a request serializes"));
-        let answer = self.call(tenant, &name, Op::Encrypt, &body).await?;
+        let answer = self.call(tenant, &name, Op::Encrypt, http::json(&request)).await?;
         let corrupt = |why: &str| io_error(tenant, &name, Op::Encrypt, format!("its answer {why}"));
         let response: EncryptResponse = serde_json::from_slice(&answer)
             .map_err(|err| corrupt(&format!("is not an EncryptResponse: {err}")))?;
@@ -337,11 +381,10 @@ impl Inner {
             additional_authenticated_data: &aad_base64,
             additional_authenticated_data_crc32c: crc32c(&aad).to_string(),
         };
-        let body = serde_json::to_vec(&request).expect("a request serializes");
-        let mut answer = self.call(tenant, &name, Op::Decrypt, &body).await?;
+        let answer = self.call(tenant, &name, Op::Decrypt, http::json(&request)).await?;
         let corrupt = |why: &str| io_error(tenant, &name, Op::Decrypt, format!("its answer {why}"));
         let parsed = serde_json::from_slice::<DecryptResponse>(&answer);
-        answer.zeroize();
+        drop(answer);
         let mut response =
             parsed.map_err(|err| corrupt(&format!("is not a DecryptResponse: {err}")))?;
         let decoded = BASE64.decode(&response.plaintext);
@@ -360,8 +403,14 @@ impl Inner {
     /// The body of the KMS's answer to `op` with key `name` for `tenant`, of request `body`:
     /// tried again while it fails as it may not next time, the service throttling it among them
     /// ([`retry`], board 8473), as Google's client libraries retry `Encrypt` and `Decrypt`.
-    async fn call(&self, tenant: u64, name: &str, op: Op, body: &[u8]) -> Result<Vec<u8>, Error> {
-        retry::retried(|| self.attempt(tenant, name, op, body)).await
+    async fn call(
+        &self,
+        tenant: u64,
+        name: &str,
+        op: Op,
+        body: Bytes,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        retry::retried(|| self.attempt(tenant, name, op, body.clone())).await
     }
 
     async fn attempt(
@@ -369,8 +418,8 @@ impl Inner {
         tenant: u64,
         name: &str,
         op: Op,
-        body: &[u8],
-    ) -> Result<Vec<u8>, Failed<Error>> {
+        body: Bytes,
+    ) -> Result<Zeroizing<Vec<u8>>, Failed<Error>> {
         let failed = |why: String| io_error(tenant, name, op, why);
         // The provider's own errors name no token: it retries its own requests.
         let credential = self
@@ -383,24 +432,22 @@ impl Inner {
             .post(format!("{}{name}:{}", self.endpoint, op.method()))
             .bearer_auth(&credential.bearer)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec());
+            .body(body);
         if let Some(project) = &self.quota_project {
             request = request.header("x-goog-user-project", project);
         }
-        let transport = |err: reqwest::Error| Failed::transient(failed(chain(&err)), None);
-        let response = request.send().await.map_err(transport)?;
+        let unread = |unread: Unread| match unread.transient() {
+            true => Failed::transient(failed(unread.why()), None),
+            false => Failed::refused(failed(unread.why())),
+        };
+        let response = request.send().await.map_err(|err| unread(Unread::Transport(err)))?;
         let status = response.status();
         let after = retry::retry_after(response.headers());
-        let answer = response.bytes().await.map_err(transport)?;
-        let mut owned = answer.to_vec();
-        if let Ok(mut unique) = answer.try_into_mut() {
-            unique[..].zeroize();
-        }
+        let answer = http::body(response, http::MAX).await.map_err(unread)?;
         if status.is_success() {
-            return Ok(owned);
+            return Ok(answer);
         }
-        let refused = refusal(tenant, name, op, status.as_u16(), &owned);
-        owned.zeroize();
+        let refused = refusal(tenant, name, op, status.as_u16(), &answer);
         Err(Failed { after, ..refused })
     }
 }
@@ -569,19 +616,6 @@ fn io_error(tenant: u64, name: &str, op: Op, why: String) -> Error {
     Error::Io { tenant, source }
 }
 
-/// `error` and its sources, each after the one before: a request's failure says why only so. A
-/// request's URL, which reqwest names, is the key's, no secret.
-fn chain(error: &dyn std::error::Error) -> String {
-    let mut why = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        why.push_str(": ");
-        why.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    why
-}
-
 /// Against real Cloud KMS, given an access token.
 #[cfg(test)]
 mod service;
@@ -589,7 +623,7 @@ mod service;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kms::fake_http::{Request, Response, Server};
+    use crate::kms::fake_http::{Endless, Request, Response, Server};
     use futures::executor::block_on;
     use std::sync::Mutex;
 
@@ -850,6 +884,53 @@ mod tests {
         block_on(kms.wrap(9, &Secret::random())).unwrap();
         assert!(started.elapsed() >= Duration::from_secs(1), "{:?}", started.elapsed());
         assert_eq!(fake.lock().unwrap().calls, 2);
+    }
+
+    /// board 8527: a reply without end is refused, read no further than [`http::MAX`] bytes, at
+    /// once and never asked again, whether it says its length (past any reply's) or none; a
+    /// redirect is followed not, the call failing as the KMS's, its target never asked, which
+    /// would have had the key's plaintext again. Before, the first was read for its 30 s at each
+    /// of its five tries, and the redirect followed.
+    #[test]
+    fn endless_replies_and_redirects_are_refused() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let served = asked.clone();
+        let server = Server::start(move |_, request| {
+            served.lock().unwrap().push(request.route().to_owned());
+            match request.route() {
+                route if route.ends_with("k-1:encrypt") => Response::endless(200, Endless::Said),
+                route if route.ends_with("k-2:encrypt") => Response::endless(200, Endless::Unsaid),
+                route if route.ends_with("k-3:encrypt") => {
+                    Response::of(307, "").with("location", "/elsewhere")
+                }
+                _ => Response::of(200, "{}"),
+            }
+        });
+        let credentials: GcpCredentialProvider =
+            Arc::new(StaticCredentialProvider::new(GcpCredential { bearer: "t".into() }));
+        let names = KeyNames::new("k-{tenant}", None).unwrap();
+        let endpoint = format!("{}/v1/", server.base());
+        let kms = GcpKms::new(&endpoint, RING.into(), names, credentials, None).unwrap();
+        for tenant in [1, 2] {
+            let refused = block_on(kms.wrap(tenant, &Secret::random())).unwrap_err().to_string();
+            assert_eq!(
+                refused,
+                format!(
+                    "tenant {tenant}: the KMS failed: Google Cloud KMS, encrypt with \
+                     {RING}/cryptoKeys/k-{tenant}: a reply of over 16384 bytes, refused"
+                )
+            );
+        }
+        let refused = block_on(kms.wrap(3, &Secret::random())).unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            format!(
+                "tenant 3: the KMS failed: Google Cloud KMS, encrypt with {RING}/cryptoKeys/k-3: \
+                 HTTP 307, no status: "
+            )
+        );
+        let route = |tenant| format!("/v1/{RING}/cryptoKeys/k-{tenant}:encrypt");
+        assert_eq!(*asked.lock().unwrap(), [route(1), route(2), route(3)]);
     }
 
     /// board 8477: its calls run on a runtime of its own: made on a runtime then dropped, then

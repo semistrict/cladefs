@@ -15,4 +15,4 @@ source "$root/scripts/lib/openbao.sh"
 CLADEFS_BAO="$(openbao_binary)"
 export CLADEFS_BAO CLADEFS_REQUIRE_OPENBAO=1
 "$CLADEFS_BAO" version
-cargo nextest run --manifest-path "$root/Cargo.toml" -p extent_keys -p local_cell -E 'test(/openbao/)' "$@"
+cargo nextest run --manifest-path "$root/Cargo.toml" -p extent_keys -p local_cell -p bucket_cell -E 'test(/openbao/)' "$@"

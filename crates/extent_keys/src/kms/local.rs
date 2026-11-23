@@ -14,8 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroize as _;
 
-/// The [`LocalKms`] `url`, `local:///DIR`, names ([`super::from_url`]).
-pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
+/// The [`LocalKms`] `url`, `local:///DIR`, names ([`super::from_url`]): refused, its directory
+/// never made, if the registry of buckets records it and the host allows no fake (board 8525).
+pub(super) fn from_url(url: &str, origin: super::Origin) -> Result<super::Shared, String> {
+    origin.local().map_err(|why| format!("{url:?}: {why}"))?;
     let dir = url.strip_prefix("local://").expect("a local:// URL");
     if !dir.starts_with('/') {
         return Err(format!("{url:?} names no KMS: local:///DIR names an absolute directory"));

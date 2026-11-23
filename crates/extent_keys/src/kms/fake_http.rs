@@ -33,18 +33,35 @@ impl Request {
     }
 }
 
-/// What the fake answers a request with: its status, extra headers and JSON body, after `delay`.
+/// What the fake answers a request with: its status, extra headers and JSON body, after `delay`;
+/// or, `endless`, a body without end.
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: String,
     pub delay: Duration,
+    pub endless: Option<Endless>,
+}
+
+/// How a body without end is sent, until the client hangs up (board 8527).
+#[derive(Clone, Copy, Debug)]
+pub enum Endless {
+    /// Saying a length past any reply's: a terabyte.
+    Said,
+    /// Saying none, ended by the connection's close: one never closed.
+    Unsaid,
 }
 
 impl Response {
     /// `body`, with `status`, at once.
     pub fn of(status: u16, body: impl Into<String>) -> Self {
-        Self { status, headers: Vec::new(), body: body.into(), delay: Duration::ZERO }
+        let body = body.into();
+        Self { status, headers: Vec::new(), body, delay: Duration::ZERO, endless: None }
+    }
+
+    /// A body without end, with `status`, sent as `how` says.
+    pub fn endless(status: u16, how: Endless) -> Self {
+        Self { endless: Some(how), ..Self::of(status, "") }
     }
 
     /// The same, with the header `name: value`.
@@ -148,6 +165,20 @@ async fn connection(mut stream: tokio::net::TcpStream, handler: Arc<Handler>, ba
         tokio::time::sleep(response.delay).await;
         let extra: String =
             response.headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
+        if let Some(how) = response.endless {
+            let length = match how {
+                Endless::Said => "content-length: 1099511627776\r\n",
+                Endless::Unsaid => "connection: close\r\n",
+            };
+            let head = format!("HTTP/1.1 {} X\r\n{length}{extra}\r\n", response.status);
+            if stream.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            // Until the client hangs up.
+            let chunk = vec![b'x'; 64 * 1024];
+            while stream.write_all(&chunk).await.is_ok() {}
+            return;
+        }
         let written = format!(
             "HTTP/1.1 {} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}\r\n{}",
             response.status,

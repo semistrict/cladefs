@@ -7,7 +7,7 @@
 //! at all: they run on the backend's own (board 8477).
 
 use super::*;
-use crate::kms::fake_http::{Request, Response, Server};
+use crate::kms::fake_http::{Endless, Request, Response, Server};
 use futures::executor::block_on;
 
 /// A tenant's key named whole names a vault: never another host, which its tokens would go to.
@@ -17,7 +17,7 @@ fn overrides_naming_no_vault_are_refused() {
     let keys = dir.path().join("keys");
     std::fs::write(&keys, "7 https://evil.example/keys/x\n").unwrap();
     let url = format!("azure-kv://v.vault.azure.net?key=t-{{tenant}}&keys={}", keys.display());
-    let refused = parse(&url).unwrap_err();
+    let refused = parse(&url, Origin::Host).unwrap_err();
     assert!(
         refused.starts_with(&format!(
             "{url:?}: tenant 7's key, \"https://evil.example/keys/x\", names no key: \"evil.example\" is no vault's host"
@@ -281,7 +281,8 @@ fn tokens_are_for_the_audience_of_each_vault() {
         Some("https://managedhsm.usgovcloudapi.net")
     );
     assert_eq!(audience_of("evil.example"), None);
-    let parsed = parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW").unwrap();
+    let parsed =
+        parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW", Origin::Host).unwrap();
     assert_eq!(parsed.audience, "https://managedhsm.azure.net");
     let fake = Arc::new(Mutex::new(Fake::default()));
     let server = serve(&fake);
@@ -422,4 +423,76 @@ fn a_fetch_given_up_on_keeps_no_kms_alive() {
     drop(wrap);
     drop(kms);
     eventually("the KMS kept alive", &|| inner.upgrade().is_none());
+}
+
+/// board 8527: a vault's reply without end is refused, read no further than [`http::MAX`] bytes,
+/// at once and never asked again, whether it says its length (past any reply's) or none; and a
+/// token's, past [`http::TOKEN_MAX`]. A redirect, of the vault or of the authority, is followed
+/// not, the call failing, its target never asked: it would have had the wrapped key again, or the
+/// client's secret.
+#[test]
+fn endless_replies_and_redirects_are_refused() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let served = asked.clone();
+    let server = Server::start(move |_, request| {
+        let route = request.route().to_owned();
+        served.lock().unwrap().push(route.clone());
+        let token = r#"{"token_type":"Bearer","expires_in":3600,"access_token":"token-1"}"#;
+        match &route[..] {
+            "/t/oauth2/v2.0/token" => Response::of(200, token),
+            "/endless/oauth2/v2.0/token" => Response::endless(200, Endless::Unsaid),
+            "/moved/oauth2/v2.0/token" => Response::of(308, "").with("location", "/elsewhere"),
+            "/keys/said-9/wrapkey" => Response::endless(200, Endless::Said),
+            "/keys/unsaid-9/wrapkey" => Response::endless(200, Endless::Unsaid),
+            "/keys/moved-9/wrapkey" => Response::of(307, "").with("location", "/elsewhere"),
+            _ => Response::of(200, "{}"),
+        }
+    });
+    let base = server.base();
+    for name in ["said", "unsaid"] {
+        let kms = over(base, &format!("{name}-{{tenant}}"), None);
+        let refused = block_on(kms.wrap(9, &Secret::random())).unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            format!(
+                "tenant 9: the KMS failed: Azure Key Vault, wrapkey with {base}/keys/{name}-9: a \
+                 reply of over 16384 bytes, refused"
+            )
+        );
+    }
+    let kms = over(base, "moved-{tenant}", None);
+    let refused = block_on(kms.wrap(9, &Secret::random())).unwrap_err().to_string();
+    assert_eq!(
+        refused,
+        format!(
+            "tenant 9: the KMS failed: Azure Key Vault, wrapkey with {base}/keys/moved-9: HTTP \
+             307, no code: "
+        )
+    );
+    for (authority, why) in [
+        ("endless", "a reply of over 65536 bytes, refused".to_owned()),
+        ("moved", "the authority answered HTTP 308: ".to_owned()),
+    ] {
+        let source = Source::Secret {
+            url: format!("{base}/{authority}/oauth2/v2.0/token"),
+            client_id: "c".into(),
+            secret: Zeroizing::new("s".into()),
+        };
+        let kms = over_from(base, "t-{tenant}", None, "https://vault.azure.net", source);
+        let refused = block_on(kms.wrap(9, &Secret::random())).unwrap_err().to_string();
+        assert!(refused.ends_with(&format!("credentials: {why}")), "{refused}");
+    }
+    let wrapped = ["said", "unsaid", "moved"].map(|name| format!("/keys/{name}-9/wrapkey"));
+    let tokens = ["/t", "/endless", "/moved"].map(|at| format!("{at}/oauth2/v2.0/token"));
+    let expected = [
+        tokens[0].clone(),
+        wrapped[0].clone(),
+        tokens[0].clone(),
+        wrapped[1].clone(),
+        tokens[0].clone(),
+        wrapped[2].clone(),
+        tokens[1].clone(),
+        tokens[2].clone(),
+    ];
+    assert_eq!(*asked.lock().unwrap(), expected);
 }

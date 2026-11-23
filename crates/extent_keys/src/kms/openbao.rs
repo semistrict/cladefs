@@ -7,7 +7,8 @@
 //! ([`crate::testing::openbao::DevServer`]).
 
 use super::background::Background;
-use super::{Error, KeyNames, Kms};
+use super::http::{self, Unread};
+use super::{Error, KeyNames, Kms, Origin, Vars};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -63,24 +64,18 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The token [`OpenBao`] calls with, or where it is.
 pub enum Token {
-    /// The token itself.
+    /// The token itself, zeroed when dropped (board 8589).
     Value(String),
     /// A file holding it, white space around it ignored, read again as [`TOKEN_FILE_ENV`] says.
     File(PathBuf),
 }
 
 impl Token {
-    /// The token the environment gives: [`TOKEN_ENV`]'s, or [`TOKEN_FILE_ENV`]'s file, exactly one
-    /// of them set.
-    pub fn from_env() -> Result<Self, String> {
-        // Unset, or not UTF-8, which no token is: none.
-        Self::of_env(|name| std::env::var(name).ok())
-    }
-
-    fn of_env(var: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let set = |name| var(name).filter(|value| !value.is_empty());
-        match (set(TOKEN_ENV), set(TOKEN_FILE_ENV)) {
-            (Some(token), None) => Ok(Self::Value(token)),
+    /// The token `vars` give: [`TOKEN_ENV`]'s, or [`TOKEN_FILE_ENV`]'s file, exactly one of them
+    /// set (board 8485: a bucket's own, or the host's).
+    pub fn of_vars(vars: &Vars) -> Result<Self, String> {
+        match (vars.get(TOKEN_ENV), vars.get(TOKEN_FILE_ENV)) {
+            (Some(token), None) => Ok(Self::Value(token.to_owned())),
             (None, Some(path)) => Ok(Self::File(path.into())),
             (Some(_), Some(_)) => {
                 Err(format!("both {TOKEN_ENV} and {TOKEN_FILE_ENV} are set: one"))
@@ -88,6 +83,14 @@ impl Token {
             (None, None) => {
                 Err(format!("OpenBao's token is in neither {TOKEN_ENV} nor {TOKEN_FILE_ENV}"))
             }
+        }
+    }
+}
+
+impl Drop for Token {
+    fn drop(&mut self) {
+        if let Token::Value(token) = self {
+            token.zeroize();
         }
     }
 }
@@ -166,15 +169,22 @@ struct Inner {
     shown: String,
 }
 
-/// The KMS `url` names ([`super::from_url`]), its token as the environment gives it.
-pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
-    let token = Token::from_env().map_err(|why| format!("{url:?}: {why}"))?;
-    Ok(Arc::new(OpenBao::new(url, token)?))
+/// The KMS `url` names ([`super::from_url_with`]), of `origin`, its token as `vars` give it.
+pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::Shared, String> {
+    let token = Token::of_vars(vars).map_err(|why| format!("{url:?}: {why}"))?;
+    Ok(Arc::new(OpenBao::of(url, token, origin)?))
 }
 
 impl OpenBao {
-    /// The KMS `url` names (see [`OpenBao`]), calling with `token`.
+    /// The KMS `url` names (see [`OpenBao`]), calling with `token`: the host's own.
     pub fn new(url: &str, token: Token) -> Result<Self, String> {
+        Self::of(url, token, Origin::Host)
+    }
+
+    /// The same, `url` of `origin`: one the registry of buckets records reaches a host the host
+    /// allows alone, over TLS but on this host, and names none of its files (board 8525), refused
+    /// before any is opened.
+    fn of(url: &str, token: Token, origin: Origin) -> Result<Self, String> {
         let at = |why: &dyn std::fmt::Display| format!("{url:?}: {why}");
         let parsed = url::Url::parse(url).map_err(|err| at(&err))?;
         let tls = match parsed.scheme() {
@@ -188,6 +198,10 @@ impl OpenBao {
         let host = parsed.host_str().filter(|host| !host.is_empty());
         let host = host.ok_or_else(|| at(&"names no host: openbao://HOST[:PORT]/MOUNT"))?;
         let port = parsed.port().unwrap_or(DEFAULT_PORT);
+        origin.host(host, Some(port)).map_err(|why| at(&why))?;
+        if !tls {
+            origin.cleartext(host).map_err(|why| at(&why))?;
+        }
         let mount: Vec<String> = (parsed.path_segments().into_iter().flatten())
             .filter(|segment| !segment.is_empty())
             .map(str::to_owned)
@@ -206,7 +220,10 @@ impl OpenBao {
                 _ => return Err(at(&format!("{name:?} is none of key, keys, namespace or ca"))),
             }
         }
-        let names = KeyNames::of_query(query.iter().map(|(n, v)| (n.as_str(), v.as_str())))
+        if ca.is_some() {
+            origin.file("ca=FILE").map_err(|why| at(&why))?;
+        }
+        let names = KeyNames::of_query(query.iter().map(|(n, v)| (n.as_str(), v.as_str())), origin)
             .map_err(|why| at(&why))?;
         key_name(&names.of(0)).map_err(|why| at(&why))?;
         let namespace = (namespace.map(HeaderValue::from_str).transpose())
@@ -315,7 +332,7 @@ impl Inner {
         let header = header(tenant, &name);
         let plaintext = Zeroizing::new(BASE64.encode(key.expose()));
         let header_text = BASE64.encode(&header);
-        let body = json_body(&EncryptRequest {
+        let body = http::json(&EncryptRequest {
             plaintext: &plaintext,
             associated_data: &header_text,
             context: &header_text,
@@ -334,7 +351,7 @@ impl Inner {
             return Err(unauthentic("a wrapped key, wrapped under another key"));
         }
         let header_text = BASE64.encode(parsed.header);
-        let body = json_body(&DecryptRequest {
+        let body = http::json(&DecryptRequest {
             ciphertext: parsed.ciphertext,
             associated_data: &header_text,
             context: &header_text,
@@ -484,7 +501,8 @@ impl Inner {
         }
     }
 
-    /// One request, and its reply, read whole; or why neither was had.
+    /// One request, and its reply, read whole, of [`http::TOKEN_MAX`] bytes at most (board
+    /// 8527); or why neither was had.
     async fn send(
         &self,
         method: &Method,
@@ -504,10 +522,10 @@ impl Inner {
         if let Some(body) = body {
             request = request.header("Content-Type", "application/json").body(body);
         }
-        let response = request.send().await.map_err(Failure::transport)?;
+        let response = request.send().await.map_err(|err| Failure::Transport(http::chain(&err)))?;
         let status = response.status();
-        let body = response.bytes().await.map_err(Failure::transport)?;
-        let reply = Received { status, body: Received::keep(body) };
+        let body = http::body(response, http::TOKEN_MAX).await.map_err(Failure::unread)?;
+        let reply = Received { status, body };
         match status {
             StatusCode::PRECONDITION_FAILED | StatusCode::TOO_MANY_REQUESTS => {
                 Err(Failure::Server(reply))
@@ -538,18 +556,16 @@ enum Failure {
     Transport(String),
     /// The server failed, or asked for the request again later.
     Server(Received),
+    /// Its reply was refused, as no try again changes: longer than any OpenBao sends.
+    Refused(String),
 }
 
 impl Failure {
-    fn transport(err: reqwest::Error) -> Self {
-        let mut why = err.to_string();
-        let mut source = std::error::Error::source(&err);
-        while let Some(cause) = source {
-            why.push_str(": ");
-            why.push_str(&cause.to_string());
-            source = cause.source();
+    fn unread(unread: Unread) -> Self {
+        match unread.transient() {
+            true => Self::Transport(unread.why()),
+            false => Self::Refused(unread.why()),
         }
-        Self::Transport(why)
     }
 }
 
@@ -563,6 +579,7 @@ async fn retried<F: Future<Output = Result<Received, Failure>>>(
     loop {
         let why = match send().await {
             Ok(reply) => return Ok(reply),
+            Err(Failure::Refused(why)) => return Err(why),
             Err(Failure::Transport(why)) => why,
             Err(Failure::Server(reply)) => format!("{}: {}", reply.status, reply.errors()),
         };
@@ -575,25 +592,13 @@ async fn retried<F: Future<Output = Result<Received, Failure>>>(
     }
 }
 
-/// A reply, read whole, its body zeroed when dropped if no one else holds it.
+/// A reply, read whole, its body zeroed when dropped ([`http::body`]).
 struct Received {
     status: StatusCode,
-    body: Bytes,
+    body: Zeroizing<Vec<u8>>,
 }
 
 impl Received {
-    /// `body`, copied out of the client's buffer if it shares one, that one zeroed if it can be.
-    fn keep(body: Bytes) -> Bytes {
-        match body.try_into_mut() {
-            Ok(body) => body.freeze(),
-            Err(shared) => {
-                let copy = Bytes::from_owner(Zeroizing::new(shared.to_vec()));
-                drop(shared);
-                copy
-            }
-        }
-    }
-
     /// The reply's JSON, as a `T`.
     fn json<T: for<'de> Deserialize<'de>>(&self, tenant: u64, what: &str) -> Result<T, Error> {
         serde_json::from_slice(&self.body).map_err(|err| {
@@ -611,14 +616,6 @@ impl Received {
             Ok(errors) => errors.errors.join("; ").split_whitespace().collect::<Vec<_>>().join(" "),
             // Not OpenBao's errors: the body itself, its first bytes.
             Err(_) => String::from_utf8_lossy(&self.body[..self.body.len().min(200)]).into_owned(),
-        }
-    }
-}
-
-impl Drop for Received {
-    fn drop(&mut self) {
-        if let Ok(mut body) = std::mem::take(&mut self.body).try_into_mut() {
-            body[..].zeroize();
         }
     }
 }
@@ -659,14 +656,6 @@ struct DecryptRequest<'a> {
     ciphertext: &'a str,
     associated_data: &'a str,
     context: &'a str,
-}
-
-/// `request`, as a body whose bytes are zeroed once the client drops it: written into room enough
-/// for it, so that no copy is left behind growing it.
-fn json_body(request: &impl serde::Serialize) -> Bytes {
-    let mut body = Zeroizing::new(Vec::with_capacity(1024));
-    serde_json::to_writer(&mut *body, request).expect("a request serializes");
-    Bytes::from_owner(body)
 }
 
 /// The error of `tenant`'s key missing in OpenBao when `op` was asked: no KEK, for a wrap; for an
@@ -785,6 +774,8 @@ impl Credentials {
         if token.is_empty() {
             return Err("OpenBao's token is empty".to_owned());
         }
+        // board 8589: the header's copy of the token, and those reqwest and hyper make of it to
+        // send it, are theirs: nothing here zeroes them.
         let mut header = HeaderValue::from_str(token)
             .map_err(|_| "OpenBao's token is no HTTP header's value".to_owned())?;
         header.set_sensitive(true);
@@ -976,6 +967,31 @@ mod tests {
         assert!(failed.starts_with(&start), "{failed}");
         assert!(failed.ends_with("(3 tries)"), "{failed}");
         assert!(!failed.contains("s.token"), "{failed}");
+    }
+
+    /// board 8527: a reply without end is refused, read no further than [`http::TOKEN_MAX`] bytes,
+    /// at once and never asked again: before, it was read for its 15 s at each of its 3 tries.
+    /// Against a fake of OpenBao, in this process, which no `bao` needs.
+    #[test]
+    fn endless_replies_are_refused() {
+        use crate::kms::fake_http::{Endless, Response, Server};
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = asked.clone();
+        let server = Server::start(move |_, _| {
+            served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Response::endless(200, Endless::Unsaid)
+        });
+        let port = url::Url::parse(server.base()).unwrap().port().unwrap();
+        let url = format!("openbao://127.0.0.1:{port}/{MOUNT}?{QUERY}");
+        let kms = OpenBao::new(&url, token("s.token")).unwrap();
+        assert_eq!(
+            refusal(wrap(&kms, 7, &Secret::random())),
+            format!(
+                "tenant 7: the KMS failed: openbao://127.0.0.1:{port}/{MOUNT}: \
+                 {MOUNT}/encrypt/cladefs-tenant-7: a reply of over 65536 bytes, refused"
+            )
+        );
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A `derived` key derives a key of its own for each header, its `context`: wraps and unwraps

@@ -25,17 +25,22 @@ pub mod bucket;
 #[cfg(test)]
 mod fake_http;
 mod gcp;
+mod http;
 mod local;
 pub mod master;
 mod names;
 pub mod openbao;
 mod real;
 mod retry;
+pub mod trust;
+pub mod vars;
 
 pub use azure::TOKEN_VAR as AZURE_TOKEN_VAR;
 pub use gcp::TOKEN_VAR as GCP_TOKEN_VAR;
 pub use local::{KekVersion, LOCAL_WRAPPED_LEN, LocalKms};
 pub use names::KeyNames;
+pub use trust::{Origin, Trust};
+pub use vars::{KMS_VAR, Vars};
 
 /// A KMS, holding tenants' KEKs, each named by its tenant's ID.
 pub trait Kms: Send + Sync + 'static {
@@ -106,15 +111,28 @@ pub type Shared = std::sync::Arc<dyn Dyn>;
 /// - `azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]`: Azure Key Vault
 ///   (TASK-633.6).
 ///
+/// cladefs: each over HTTP reads a reply of 16 KiB at most, a token's or OpenBao's of 64 KiB
+/// (`reply`), refusing a longer one, and follows no redirect (board 8527): a hostile
+/// endpoint sends a host no more than that, and takes no request elsewhere.
+///
 /// A real KMS names each tenant's KEK as [`KeyNames`] says, from `key` and `keys`. Any other URL is
-/// refused, naming it.
+/// refused, naming it. Its credentials are the process's environment's ([`Vars::from_env`]), the
+/// URL the host's own ([`Origin::Host`]).
 pub fn from_url(url: &str) -> Result<Shared, String> {
+    from_url_with(url, &Vars::from_env()?, Origin::Host)
+}
+
+/// cladefs: the same, its credentials those `vars` give, never the process's environment behind
+/// them (board 8485): a bucket's own over the host's ([`Vars::numbered`]); and the URL of
+/// `origin`, which, one the registry of buckets records, reaches what the host allows alone
+/// (board 8525, [`trust`]), refused before any file or connection is opened.
+pub fn from_url_with(url: &str, vars: &Vars, origin: Origin) -> Result<Shared, String> {
     match url.split_once("://").map(|(scheme, _)| scheme) {
-        Some("local") => local::from_url(url),
-        Some("openbao" | "openbaos") => openbao::from_url(url),
-        Some("aws-kms") => aws::from_url(url),
-        Some("gcp-kms") => gcp::from_url(url),
-        Some("azure-kv") => azure::from_url(url),
+        Some("local") => local::from_url(url, origin),
+        Some("openbao" | "openbaos") => openbao::from_url(url, vars, origin),
+        Some("aws-kms") => aws::from_url(url, vars, origin),
+        Some("gcp-kms") => gcp::from_url(url, vars, origin),
+        Some("azure-kv") => azure::from_url(url, vars, origin),
         _ => Err(format!(
             "{url:?} names no KMS: local:///DIR, openbao://, aws-kms://, gcp-kms:// or azure-kv:// \
              (doc-16)"
