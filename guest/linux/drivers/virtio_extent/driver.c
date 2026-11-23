@@ -1171,7 +1171,7 @@ static int vext_probe(struct virtio_device *vdev)
 	mutex_lock(&devices_lock);
 	list_add(&vext->node, &devices);
 	mutex_unlock(&devices_lock);
-	dev_info(&vdev->dev, "extent store \"%s\", cell %llx, %u request queue%s%s%s\n",
+	dev_info(&vdev->dev, "extent store \"%s\", cell %llx, %u request queue%s%s\n",
 		 vext->config.tag, vext->config.cell, vext->nr_queues,
 		 vext->nr_queues == 1 ? "" : "s",
 		 vext->window.dax ? ", with a DAX window copying on write" : "");
