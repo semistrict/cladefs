@@ -39,17 +39,39 @@ pub fn fill(dest: &mut [u8]) {
         let registered = unsafe { libc::atexit(stop_drawing) };
         assert_eq!(registered, 0, "registering random draws' exit handler");
     });
-    // SeqCst, as the exit's handler: either it sees this draw under way and waits, or this sees
-    // the process exiting and draws nothing.
-    DRAWING.fetch_add(1, Ordering::SeqCst);
+    let drawing = Drawing::start();
     if EXITING.load(Ordering::SeqCst) {
-        DRAWING.fetch_sub(1, Ordering::SeqCst);
+        drop(drawing);
         loop {
             std::thread::park();
         }
     }
+    #[cfg(test)]
+    if tests::FAIL.swap(false, Ordering::SeqCst) {
+        panic!("the system's random generator fails, as a test has it");
+    }
     aws_lc_rs::rand::fill(dest).expect("the system's random generator fills its bytes");
-    DRAWING.fetch_sub(1, Ordering::SeqCst);
+    drop(drawing);
+}
+
+/// A draw under way, counted in [`DRAWING`] until dropped: however it ends, a panic's unwinding
+/// too, which a caught panic (a task's, a worker thread's) would otherwise leave counted, the exit
+/// waiting for it for ever (board 8591).
+struct Drawing;
+
+impl Drawing {
+    fn start() -> Self {
+        // SeqCst, as the exit's handler: either it sees this draw under way and waits, or this
+        // sees the process exiting and draws nothing.
+        DRAWING.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Drawing {
+    fn drop(&mut self) {
+        DRAWING.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The process exits: draws stop, and those under way end, before aws-lc clears its generators.
@@ -67,6 +89,47 @@ mod tests {
 
     /// What makes this test's process a child exiting as it draws.
     const CHILD: &str = "EXTENT_KEYS_DRAWING_AT_EXIT";
+
+    /// A failpoint: set, the next draw fails, panicking, as aws-lc's generator failing would.
+    // The process's: each child process sets it once, before its one draw.
+    pub(super) static FAIL: AtomicBool = AtomicBool::new(false);
+
+    /// What makes this test's process a child whose draw failed before it exits.
+    const FAILED_CHILD: &str = "EXTENT_KEYS_DRAW_FAILED";
+
+    /// board 8591: a draw that panics, the panic caught (a task's, a worker thread's), leaves no
+    /// draw counted: the process exits, within a minute, where the exit's handler waited for it
+    /// for ever, the child never ending.
+    #[test]
+    fn processes_exit_after_a_draw_failed() {
+        if std::env::var_os(FAILED_CHILD).is_some() {
+            fill(&mut [0; 8]);
+            FAIL.store(true, Ordering::SeqCst);
+            let failed = std::thread::spawn(|| fill(&mut [0; 32])).join();
+            assert!(failed.is_err(), "the draw failed not");
+            std::process::exit(0);
+        }
+        let name = "random::tests::processes_exit_after_a_draw_failed";
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads", "1"])
+            .env(FAILED_CHILD, "1")
+            .spawn()
+            .unwrap();
+        // How long a child that exits may take: one that waits for a draw for ever takes longer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("the child exits not: its exit waits for a draw that failed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "the child {status}");
+    }
 
     /// TASK-650: a process exiting as its threads draw random bytes exits as it says, aborting
     /// never: run 20 times, each a child whose 8 threads draw salts without end as it exits, and
