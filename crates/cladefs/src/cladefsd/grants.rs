@@ -70,9 +70,7 @@ impl Grants {
         let served = listener.try_clone().map_err(errno).and_then(|accepting| {
             let serving = tenant.clone();
             // cladefs: outside the simulation: a tenant's VM socket (doc-24).
-            std::thread::Builder::new()
-                .name("cladefsd tenant".into())
-                .spawn(move || serve_tenant(accepting, serving))
+            super::run::thread("cladefsd tenant", move || serve_tenant(accepting, serving))
                 .map_err(errno)
         });
         if let Err(errno) = served {

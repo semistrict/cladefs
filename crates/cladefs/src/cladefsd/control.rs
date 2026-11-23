@@ -81,6 +81,9 @@ pub fn serve_control(
         let mut now = *serving.borrow_and_update();
         report_health(&reporter, now).await;
         tokio::spawn(async move {
+            // cladefs: its panic aborts the daemon, as a service thread's does (board 8501): the
+            // health service would say what it last said for ever, the drain waiting for it.
+            let _supervised = local_cell::shared::Awaited::new(HEALTH_REPORTER);
             loop {
                 // cladefs: a test's reporter gone once it reported SERVING, as no panic but its
                 // runtime's going leaves it, which a drain bounds (board 8503).
@@ -240,6 +243,11 @@ where
         })
     }
 }
+
+/// cladefs: the task that has the health service report whether the daemon serves, as the log
+/// names it if it panics (board 8501).
+#[cfg(not(madsim))]
+const HEALTH_REPORTER: &str = "health reporter";
 
 node_local::node_local! {
     /// Whether this process serves the control API ([`serve_control`]).

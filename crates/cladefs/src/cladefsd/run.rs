@@ -13,10 +13,10 @@
 use std::future::Future;
 use std::time::Duration;
 
-/// Runs `service`, which runs as long as the daemon does, named `name`: on a thread of its own,
-/// driving a runtime of its own of `threads` workers; under madsim, a task of the node's. A
-/// runtime that can't be made, as with no threads to be had, stops the daemon: it would serve
-/// without the service.
+/// Runs `service`, which runs as long as the daemon does, named `name`: on a thread of its own
+/// ([`thread`]), driving a runtime of its own of `threads` workers; under madsim, a task of the
+/// node's. A runtime that can't be made, as with no threads to be had, stops the daemon: it would
+/// serve without the service.
 pub(super) fn service<F>(
     name: &'static str,
     threads: usize,
@@ -26,7 +26,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     #[cfg(not(madsim))]
-    std::thread::Builder::new().name(name.into()).spawn(move || {
+    thread(name, move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(threads)
             .thread_name(name)
@@ -49,7 +49,7 @@ where
 }
 
 /// Runs `turn` now and every `period` after, until it says to stop (false), named `name`: on a
-/// thread of its own, which `wait` has wait `period` between turns (a sleep, or a wait something
+/// thread of its own ([`thread`]), which `wait` has wait `period` between turns (a sleep, or a wait something
 /// may end early); under madsim, a task that sleeps `period` on the simulation's clock.
 pub(super) fn every(
     name: &'static str,
@@ -58,7 +58,7 @@ pub(super) fn every(
     mut turn: impl FnMut() -> bool + Send + 'static,
 ) -> std::io::Result<()> {
     #[cfg(not(madsim))]
-    std::thread::Builder::new().name(name.into()).spawn(move || {
+    thread(name, move || {
         while turn() {
             wait(period);
         }
@@ -73,6 +73,36 @@ pub(super) fn every(
         }));
     }
     Ok(())
+}
+
+/// cladefs: runs `work`, a service of the daemon's that runs as long as it does, on a thread of its
+/// own named `name`, [`supervised`]: every service's thread is made here, or, made elsewhere, as
+/// the signal thread is, says so first (board 8501).
+pub(super) fn thread(
+    name: &'static str,
+    work: impl FnOnce() + Send + 'static,
+) -> std::io::Result<()> {
+    std::thread::Builder::new().name(name.into()).spawn(move || {
+        let _supervised = supervised(name);
+        work()
+    })?;
+    Ok(())
+}
+
+/// cladefs: the calling thread doing the daemon's service `name`, a duty of the whole process's,
+/// until what this returns drops (board 8501, hotbed question 446): a panic on it aborts the
+/// process, its log naming the service, once the process asks for that, as `cladefsd` does
+/// (`local_cell::shared::abort_on_panics`), as a panic on the page cache's flusher does (hotbed
+/// question 112). Unwound instead, the thread gone, the daemon would serve on half-dead: its
+/// memory or disk ungoverned, its VM sockets bound but accepting no more, its health SERVING, its
+/// drain never to come. A test has a service panic as it starts with the failpoint
+/// `cladefsd::service::NAME` (`FAILPOINTS`, in a daemon built with them). Not under madsim, whose
+/// one thread every task of every simulated host shares: there a service is a task, whose panic
+/// the simulation reports.
+pub fn supervised(name: &'static str) -> local_cell::shared::Holding {
+    let supervised = local_cell::shared::Holding::work(name);
+    fail::fail_point!(&format!("cladefsd::service::{name}"));
+    supervised
 }
 
 /// Runs `work`, which blocks on the host's disk, off the runtime's workers: on one of its

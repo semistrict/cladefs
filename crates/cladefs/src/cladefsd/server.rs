@@ -75,9 +75,8 @@ const COMMITS_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// the default tenant's ([`default_tenant`]). Their requests run on threads every connection shares
 /// (TASK-34).
 pub fn serve(listener: UnixListener) {
-    super::SERVING.get().send_replace(true);
+    let _serving = super::Serving::begin();
     serve_as(listener, default_tenant);
-    super::SERVING.get().send_replace(false);
 }
 
 /// Serves the VM processes of `tenant` that connect to `listener`, as [`serve`] does (TASK-43):

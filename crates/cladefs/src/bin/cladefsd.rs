@@ -188,6 +188,9 @@ fn main() -> anyhow::Result<()> {
 fn drain_on_sigterm(bound: std::time::Duration) -> std::io::Result<()> {
     let sigterm = cladefs::signals::Signals::block(&[libc::SIGTERM])?;
     cladefs::signals::spawn_taking_no_signals("cladefsd signal", move || {
+        // cladefs: its panic, as its drain's, aborts the daemon, which could drain no more
+        // (board 8501).
+        let _supervised = cladefs::cladefsd::supervised("cladefsd signal");
         if let Err(error) = sigterm.wait() {
             log::error!("cladefsd: waiting for SIGTERM: {error}");
             return;

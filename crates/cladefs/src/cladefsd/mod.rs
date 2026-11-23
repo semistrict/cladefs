@@ -146,6 +146,7 @@ pub use control::serve_control;
 #[cfg(target_os = "linux")]
 pub use device::DaemonDevice;
 pub use http::serve_http;
+pub use run::supervised;
 pub use server::{Tenant, serve, serve_tenant};
 
 node_local::node_local! {
@@ -165,6 +166,24 @@ node_local::node_local! {
 /// connects once its host's does (doc-24).
 pub fn serving() -> bool {
     *SERVING.get().borrow()
+}
+
+/// cladefs: the daemon serving VM processes at its own socket ([`serve`]), as [`SERVING`] says,
+/// until this drops, however serving ends: its listener shut down, or a panic unwinding (board
+/// 8501), which left the health service saying SERVING, no VM process served.
+pub(crate) struct Serving(());
+
+impl Serving {
+    pub(crate) fn begin() -> Self {
+        SERVING.get().send_replace(true);
+        Self(())
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        SERVING.get().send_replace(false);
+    }
 }
 
 /// Says the daemon stops serving, as it is about to exit: once the control API's health service, if
