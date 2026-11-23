@@ -99,7 +99,7 @@ fn keys_wrap_unwrap_and_bind_their_tenant() {
 
 /// A key rotated, a new version its primary: what the old one wrapped unwraps still, what is
 /// wrapped after is under the new one, which unwraps once the old one is destroyed, and what the
-/// old one wrapped no more.
+/// old one wrapped no more, refused naming the version alone (board 8479).
 #[test]
 fn rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed() {
     let test = "rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed";
@@ -121,7 +121,10 @@ fn rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed() {
         let (kms, under_old) = (&kms, &under_old);
         eventually(&format!("version {old} of {name} destroyed"), move || async move {
             match kms.unwrap_dyn(2, under_old).await {
-                Err(Error::Destroyed { tenant: 2 }) => Ok(()),
+                // board 8479: the version's loss, not the tenant's KEK's.
+                Err(Error::VersionGone { tenant: 2, version }) if version == old.to_string() => {
+                    Ok(())
+                }
                 other => Err(format!("{:?}", other.map(drop))),
             }
         })

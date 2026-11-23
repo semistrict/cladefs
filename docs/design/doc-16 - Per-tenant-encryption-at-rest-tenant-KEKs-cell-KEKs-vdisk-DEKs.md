@@ -914,8 +914,9 @@ start `bao server -dev` themselves.
   | 400 `encryption key not found` (a deleted key's decrypt) | | `Destroyed` |
   | 403, the key readable; or 403 everywhere, `lookup-self` 200 | `Revoked` | `Revoked` |
   | 400 `refusing to use soft-deleted key` (soft-delete, restorable) | `Revoked` | `Revoked` |
-  | 400 `disallowed by policy (too old)`, version ≥ `min_available_version` (`min_decryption_version` raised, reversible) | | `Revoked` |
-  | the same, version < `min_available_version` (trimmed, gone) | | `Destroyed` |
+  | 400 `disallowed by policy (too old)`, version < `min_decryption_version` but ≥ `min_available_version` (raised, reversible) | | `VersionDisabled`, that version's alone (board 8479) |
+  | the same, version < `min_available_version` (trimmed, gone) | | `VersionGone`, that version's alone (board 8479) |
+  | 400 `disallowed by policy`, the version decryptable | | `Revoked` |
   | 400 `message authentication failed`, `invalid ciphertext` | | `Unauthentic` |
   | 400 `version is too new` | | `Unauthentic` |
   | 403 and `lookup-self` 403 (cladefs's token invalid, expired, revoked) | `Io` | `Io` |
@@ -995,8 +996,8 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   protection). An unwrap refuses bytes of another backend (`LocalKms`'s `fxkw` among them), or
   naming another key than the tenant's, as `Unauthentic`, asking the KMS nothing. A tenant whose
   key's name changes (a moved override) has its old wraps refused so: rewrapping is not built.
-- **Refusals, as Cloud KMS answered them** (2026-11-15, the unit test
-  `kms::gcp::tests::refusals_are_mapped_as_cloud_kms_answers_them` holds the bodies):
+- **Refusals, as Cloud KMS answered them** (2026-11-15; the unit tests `kms::gcp::tests` hold the
+  bodies, and every pair of a 429 or 5xx and a status):
   - `NOT_FOUND` "CryptoKey NAME not found." (the key missing; a missing key ring answers the same)
     → `NoSuchTenant`: the tenant's new cells are refused as destroyed (TASK-411.28; made in the
     clear before). Any other `NOT_FOUND` ("Project
@@ -1004,21 +1005,30 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
     override fails closed. A misnamed key ring in the URL reads as every template tenant keyless,
     their new cells refused (in the clear before TASK-411.28; TASK-411.22, moot): check the URL.
   - `PERMISSION_DENIED` (the role taken away, or a project cladefs may not see: Cloud KMS says "or it
-    may not exist") → `Revoked`.
+    may not exist"), its `ErrorInfo` reason `IAM_PERMISSION_DENIED` or none → `Revoked`. Of any
+    other reason (`SERVICE_DISABLED`, `BILLING_DISABLED`, `SECURITY_POLICY_VIOLATED` of VPC Service
+    Controls, `USER_PROJECT_DENIED` of the quota project, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`): the
+    host's or its project's configuration, not the tenant's key → `Io`, not retried, naming the
+    reason, so that a configuration change never reads as every tenant revoking at once (board
+    8481; those reasons' bodies are Google's documented shapes, not yet recorded from the service).
   - `FAILED_PRECONDITION` "NAME/cryptoKeyVersions/N is not enabled, current state is: S.", its
     `PreconditionFailure` violation `KEY_S` (seen: `KEY_DISABLED`, `KEY_DESTROY_SCHEDULED`; the
-    message read if no violation says): `DISABLED` → `Revoked`; `DESTROY_SCHEDULED`, `DESTROYED`
-    → `Destroyed`. (A version reaches `DESTROYED` a day after scheduling at the soonest: not seen
-    yet, mapped by the same rule.) Both for a wrap (its primary) and an unwrap (the version that
-    wrapped it).
+    message read if no violation says). For a wrap, its primary, so the tenant's KEK: `DISABLED` →
+    `Revoked`; `DESTROY_SCHEDULED`, `DESTROYED` → `Destroyed`. For an unwrap, the version that
+    wrapped the key alone, named, never the tenant's KEK, whose other versions and cells live
+    (board 8479): `DISABLED` → `VersionDisabled`; `DESTROY_SCHEDULED`, `DESTROYED` →
+    `VersionGone`. (A version reaches `DESTROYED` a day after scheduling at the soonest: not seen
+    yet, mapped by the same rule.)
   - `INVALID_ARGUMENT` of a decrypt ("Decryption failed.", wrong associated data; "the ciphertext
     is invalid"; `INDECIPHERABLE_CIPHERTEXT_FOR_CRYPTOKEY`) → `Unauthentic`; but `INVALID_CHECKSUM`
     (a CRC32C failed in transit) → `Io`, retried.
   - `UNAUTHENTICATED` (cladefs's own credentials), `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`,
-    other 5xx and 429, network failures and timeouts (30 s a call, 10 s to connect) → `Io`, naming
-    the call and the key; `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`, untyped 5xx and 429,
-    checksums and network failures retried twice (after 200 ms and 1 s), as Google's client
-    libraries retry `Encrypt` and `Decrypt`.
+    `RESOURCE_EXHAUSTED`, every 5xx and 429 whatever its body, network failures and timeouts (30 s a
+    call, 10 s to connect) → `Io`, naming the call and the key; all but `UNAUTHENTICATED` retried,
+    with checksums failed in transit, four times, after waits of up to 200 ms, 1 s, 4 s and 10 s,
+    each drawn within its upper half, or the `Retry-After` the service sends (up to 30 s), plus
+    jitter (`kms::retry`, board 8473): the quota's refusal (429 `RESOURCE_EXHAUSTED`) was not
+    retried at all before, a burst of opens failing at its first.
 - **Changes of state take effect eventually**: a version disabled, enabled, destroyed or made
   primary took from a few seconds to about two minutes to show in `:encrypt` and `:decrypt`
   (2026-11-15). A tenant revoking is not instant either.

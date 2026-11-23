@@ -20,13 +20,17 @@ use std::io;
 
 mod aws;
 mod azure;
+mod background;
 pub mod bucket;
+#[cfg(test)]
+mod fake_http;
 mod gcp;
 mod local;
 pub mod master;
 mod names;
 pub mod openbao;
 mod real;
+mod retry;
 
 pub use azure::TOKEN_VAR as AZURE_TOKEN_VAR;
 pub use gcp::TOKEN_VAR as GCP_TOKEN_VAR;
@@ -134,6 +138,20 @@ pub enum Error {
     /// shredded (doc-16, Shredding).
     #[error("tenant {tenant}: its KEK is destroyed")]
     Destroyed { tenant: u64 },
+    /// cladefs: the version of the tenant's KEK that wrapped this key is destroyed (Cloud KMS's
+    /// `DESTROYED`, `DESTROY_SCHEDULED`) or trimmed (OpenBao's `min_available_version`): this key is
+    /// gone for good, and the cell it is of with it; the tenant's KEK and its other versions live, its
+    /// other cells unharmed (board 8479). Never a refusal of the tenant: the KMS said nothing of its
+    /// KEK. Only an unwrap's: a wrap is under the KEK's newest version, whose loss is
+    /// [`Error::Destroyed`].
+    #[error("tenant {tenant}: version {version} of its KEK, which wrapped this key, is destroyed")]
+    VersionGone { tenant: u64, version: String },
+    /// cladefs: the version of the tenant's KEK that wrapped this key is disabled (Cloud KMS's
+    /// `DISABLED`) or below what the key decrypts (OpenBao's `min_decryption_version`), for now: as
+    /// [`Error::VersionGone`], that version's alone, never the tenant's (board 8479, hotbed question
+    /// 457).
+    #[error("tenant {tenant}: version {version} of its KEK, which wrapped this key, is disabled")]
+    VersionDisabled { tenant: u64, version: String },
     /// A wrapped key not wrapped by this tenant's KEK: another tenant's, a version it never had,
     /// tampered with or corrupt.
     #[error("tenant {tenant}: {source}")]

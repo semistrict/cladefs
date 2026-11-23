@@ -6,6 +6,7 @@
 //! (MPL-2.0) is self-hosted, so the one real KMS cladefs's tests run anywhere, `bao server -dev`
 //! ([`crate::testing::openbao::DevServer`]).
 
+use super::background::Background;
 use super::{Error, KeyNames, Kms};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
@@ -121,9 +122,10 @@ impl std::fmt::Debug for Token {
 /// What it is told maps to [`Error`] as follows, each as OpenBao 2.7 says it (its tests check
 /// each): a key not found (a 404 reading it, after a 403) is [`Error::NoSuchTenant`] when wrapping,
 /// [`Error::Destroyed`] when unwrapping, as the header says it wrapped; a key soft-deleted, or a
-/// version below its `min_decryption_version`, or a refused call (403) of a token OpenBao knows
-/// (`auth/token/lookup-self`), is [`Error::Revoked`]; a version trimmed (below
-/// `min_available_version`) is [`Error::Destroyed`]; a ciphertext failing its check, or of a
+/// refused call (403) of a token OpenBao knows (`auth/token/lookup-self`), is [`Error::Revoked`];
+/// the version that wrapped a key unwrapped below the key's `min_decryption_version` is
+/// [`Error::VersionDisabled`], trimmed (below `min_available_version`) [`Error::VersionGone`], that
+/// version's alone, never the tenant's (board 8479); a ciphertext failing its check, or of a
 /// version the key never had, [`Error::Unauthentic`]; anything else, a token OpenBao refuses
 /// altogether, a missing mount, the network or the server failing, [`Error::Io`], saying what
 /// failed. A 403 is read on as it is because OpenBao answers one both for a token lacking rights
@@ -229,27 +231,20 @@ impl OpenBao {
         let origin = format!("{}://{host}:{port}/", if tls { "https" } else { "http" });
         let origin = url::Url::parse(&origin).map_err(|err| at(&err))?;
         let token = Credentials::new(token).map_err(|why| at(&why))?;
-        let runtime = Background::new().map_err(|err| at(&format!("its runtime: {err}")))?;
+        let runtime =
+            Background::new("cladefs-openbao").map_err(|err| at(&format!("its runtime: {err}")))?;
         let shown = format!("{}://{host}:{port}/{}", parsed.scheme(), mount.join("/"));
         let inner = Inner { client, origin, mount, namespace, names, token, shown };
         Ok(Self { inner: Arc::new(inner), runtime })
     }
 
-    /// Runs `call` on its runtime: dropped, its future drops the call.
+    /// Runs `call` on its runtime ([`Background::run`]).
     fn run<T: Send + 'static>(
         &self,
         tenant: u64,
         call: impl Future<Output = Result<T, Error>> + Send + 'static,
     ) -> impl Future<Output = Result<T, Error>> + Send + 'static {
-        let handle = self.runtime.handle();
-        async move {
-            let mut task = Aborting(handle.spawn(call));
-            match (&mut task.0).await {
-                Ok(done) => done,
-                Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-                Err(_) => Err(io(tenant, "the call was cancelled: its runtime is shut down")),
-            }
-        }
+        self.runtime.run(tenant, call)
     }
 }
 
@@ -427,9 +422,14 @@ impl Inner {
                     Ok(key) => key,
                     Err(err) => return err,
                 };
+                // A version of the key gone, or disallowed, is that version's: the key, its newer
+                // versions, the tenant's other cells, live (board 8479).
                 match op {
                     Op::Decrypt(version) if version < key.data.min_available_version => {
-                        Error::Destroyed { tenant }
+                        Error::VersionGone { tenant, version: version.to_string() }
+                    }
+                    Op::Decrypt(version) if version < key.data.min_decryption_version => {
+                        Error::VersionDisabled { tenant, version: version.to_string() }
                     }
                     _ => Error::Revoked { tenant },
                 }
@@ -643,6 +643,8 @@ struct Decrypted {
 struct KeyConfig {
     #[serde(default)]
     min_available_version: u32,
+    #[serde(default)]
+    min_decryption_version: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -806,41 +808,6 @@ impl Credentials {
             }
             _ => false,
         }
-    }
-}
-
-/// [`OpenBao`]'s runtime, one thread of its own, shut down without waiting when dropped.
-struct Background(Option<tokio::runtime::Runtime>);
-
-impl Background {
-    fn new() -> io::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("cladefs-openbao")
-            .enable_all()
-            .build()?;
-        Ok(Self(Some(runtime)))
-    }
-
-    fn handle(&self) -> tokio::runtime::Handle {
-        self.0.as_ref().expect("a runtime until dropped").handle().clone()
-    }
-}
-
-impl Drop for Background {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
-            runtime.shutdown_background();
-        }
-    }
-}
-
-/// A task, aborted when dropped: a call whose caller gave up on it.
-struct Aborting<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for Aborting<T> {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
@@ -1048,7 +1015,9 @@ mod tests {
 
     /// AC #2: a tenant's key whose versions that wrapped are trimmed, or that is deleted, is
     /// destroyed for what they wrapped. Deleted, OpenBao has no more of it than of a key never
-    /// made: a wrap says the tenant has none.
+    /// made: a wrap says the tenant has none. board 8479: a version disallowed, then trimmed, is
+    /// that version's alone, refused naming it, never the tenant's KEK: the key's newer version
+    /// wraps and unwraps on.
     #[test]
     fn destroyed_keys_unwrap_nothing_again() {
         let Some(bao) = bao(&[7, 8]) else { return };
@@ -1058,9 +1027,19 @@ mod tests {
         bao.bao(&["write", "-f", &format!("{}/rotate", key_path(7))]);
         let config = format!("{}/config", key_path(7));
         bao.bao(&["write", &config, "min_decryption_version=2", "min_encryption_version=2"]);
+        assert_eq!(
+            refusal(unwrap(&kms, 7, &old)),
+            "tenant 7: version 1 of its KEK, which wrapped this key, is disabled"
+        );
         bao.bao(&["write", &format!("{}/trim", key_path(7)), "min_available_version=2"]);
-        assert_matches!(unwrap(&kms, 7, &old), Err(Error::Destroyed { tenant: 7 }));
-        assert_eq!(refusal(unwrap(&kms, 7, &old)), "tenant 7: its KEK is destroyed");
+        assert_matches!(
+            unwrap(&kms, 7, &old),
+            Err(Error::VersionGone { tenant: 7, version }) if version == "1"
+        );
+        assert_eq!(
+            refusal(unwrap(&kms, 7, &old)),
+            "tenant 7: version 1 of its KEK, which wrapped this key, is destroyed"
+        );
         let new = wrap(&kms, 7, &key).unwrap();
         assert_eq!(unwrap(&kms, 7, &new).unwrap().expose(), key.expose());
 

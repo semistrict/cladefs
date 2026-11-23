@@ -5,6 +5,7 @@
 //! cladefs's own: AWS KMS as a [`super::Kms`] (TASK-411.17, backlog doc-16, Real KMSes: AWS KMS):
 //! [`AwsKms`], `aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`.
 
+use super::background::Background;
 use super::{Error, KeyNames, Kms};
 use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use aws_sdk_kms::error::{ProvideErrorMetadata, SdkError};
@@ -79,13 +80,13 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// `NotFoundException` for it as for a key never made: the tenant reads as one with no KEK
 /// ([`Error::NoSuchTenant`]), not as destroyed (doc-16, Real KMSes: AWS KMS).
 ///
-/// Its calls run on a runtime of its own, one thread, its HTTPS client made there as first
+/// Its calls run on a runtime of its own ([`Background`]), its HTTPS client made there as first
 /// needed: so its futures run on any executor, and the client's connections are never another
 /// runtime's, gone when it is.
 pub struct AwsKms {
     names: KeyNames,
     client: Arc<Client>,
-    runtime: Option<tokio::runtime::Runtime>,
+    runtime: Background,
 }
 
 /// The client of an [`AwsKms`], made as first needed, on its runtime.
@@ -155,38 +156,19 @@ impl AwsKms {
     /// The KMS in `region`, at `endpoint` if given, else AWS's own, naming tenants' keys by
     /// `names`.
     pub fn new(region: &str, endpoint: Option<String>, names: KeyNames) -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("cladefs-aws-kms")
-            .enable_all()
-            .build()
-            .expect("a runtime for AWS KMS's calls");
+        let runtime = Background::new("cladefs-aws-kms").expect("a runtime for AWS KMS's calls");
         let made = tokio::sync::OnceCell::new();
         let client = Arc::new(Client { region: region.to_owned(), endpoint, made });
-        Self { names, client, runtime: Some(runtime) }
+        Self { names, client, runtime }
     }
 
-    /// Runs `call` on its runtime, given its client.
+    /// Runs `call` on its runtime, given its client ([`Background::run`]).
     async fn run<T, F>(&self, tenant: u64, call: impl FnOnce(Arc<Client>) -> F) -> Result<T, Error>
     where
         T: Send + 'static,
         F: Future<Output = Result<T, Error>> + Send + 'static,
     {
-        let runtime = self.runtime.as_ref().expect("a runtime until dropped");
-        let task = runtime.spawn(call(self.client.clone()));
-        task.await.unwrap_or_else(|err| {
-            Err(Error::Io { tenant, source: io::Error::other(format!("AWS KMS's call: {err}")) })
-        })
-    }
-}
-
-impl Drop for AwsKms {
-    /// Its runtime, stopped without waiting for what it runs: whatever calls drop it, an async
-    /// task's included, where a runtime may not be waited for.
-    fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
+        self.runtime.run(tenant, call(self.client.clone())).await
     }
 }
 

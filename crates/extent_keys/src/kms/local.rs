@@ -51,6 +51,10 @@ const WRAP_INFO: &[u8] = b"cladefs local kms wrap";
 /// The suffix of a KEK version's file, after its version in decimal.
 const KEK_SUFFIX: &str = ".kek";
 
+/// The suffix of the file, after a version in decimal, whose presence says that version of the
+/// tenant's KEK is destroyed, its own file gone ([`LocalKms::destroy_version`]).
+const VERSION_DESTROYED_SUFFIX: &str = ".destroyed";
+
 /// The file whose presence says a tenant's KEK is revoked.
 const REVOKED: &str = "revoked";
 
@@ -167,6 +171,31 @@ impl LocalKms {
         sync_dir(&dir).map_err(io_of(tenant))
     }
 
+    /// cladefs: destroys version `version` of `tenant`'s KEK, as a tenant destroys an old version
+    /// of its key in a real KMS (Cloud KMS's version destroy, OpenBao's trim, board 8479): what it
+    /// wrapped unwraps no more ([`Error::VersionGone`]), the KEK's other versions as they were. The
+    /// newest, which wraps, is refused, as a real KMS refuses destroying a key's primary version:
+    /// rotate first. Destroying it again is no error.
+    pub fn destroy_version(&self, tenant: u64, version: u32) -> Result<(), Error> {
+        let dir = self.usable_dir(tenant, true)?;
+        if versions(&dir).map_err(io_of(tenant))?.last() == Some(&version) {
+            let why = format!("version {version} is the newest, which wraps: rotate first");
+            return Err(io_of(tenant)(io::Error::new(io::ErrorKind::InvalidInput, why)));
+        }
+        match create_file(&version_destroyed_path(&dir, version)) {
+            Ok(file) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_of(tenant)(error)),
+        }
+        sync_dir(&dir).map_err(io_of(tenant))?;
+        match fs::remove_file(kek_path(&dir, version)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_of(tenant)(error)),
+        }
+        sync_dir(&dir).map_err(io_of(tenant))
+    }
+
     /// The versions of `tenant`'s KEK it keeps, in order.
     pub fn versions(&self, tenant: u64) -> Result<Vec<u32>, Error> {
         let dir = self.usable_dir(tenant, true)?;
@@ -226,8 +255,12 @@ impl LocalKms {
         match read_kek(&kek_path(&dir, kek.version)) {
             Ok(secret) => Ok(secret),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                // Destroyed meanwhile, or a version it never had.
+                // Destroyed meanwhile, the KEK or this version of it, or a version it never had.
                 self.usable_dir(tenant, false)?;
+                let version = kek.version;
+                if exists(&version_destroyed_path(&dir, version)).map_err(io_of(tenant))? {
+                    return Err(Error::VersionGone { tenant, version: version.to_string() });
+                }
                 Err(Error::Unauthentic {
                     tenant,
                     source: Unauthentic("a wrapped key, of a KEK version the tenant has not"),
@@ -322,6 +355,10 @@ fn wrapping_key(kek: &Secret, header: &[u8]) -> Secret {
 
 fn kek_path(dir: &Path, version: u32) -> PathBuf {
     dir.join(format!("{version}{KEK_SUFFIX}"))
+}
+
+fn version_destroyed_path(dir: &Path, version: u32) -> PathBuf {
+    dir.join(format!("{version}{VERSION_DESTROYED_SUFFIX}"))
 }
 
 /// The versions of the KEK whose files are in `dir`, in order.

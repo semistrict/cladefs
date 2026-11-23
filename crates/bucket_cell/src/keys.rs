@@ -691,7 +691,10 @@ fn refused(error: kms::Error) -> Error {
 
 /// Whether `error` says its tenant's KEK is revoked or destroyed; or that the KMS has none of it,
 /// as destroyed (TASK-411.28): a real KMS forgets a deleted key, answering as for one never made,
-/// and no cell is made in the clear for want of one.
+/// and no cell is made in the clear for want of one. A version of the KEK destroyed or disabled
+/// ([`kms::Error::VersionGone`], [`kms::Error::VersionDisabled`]) is the cells' it wrapped, never
+/// the tenant's (board 8479); nor is a failure of the KMS, the host's own configuration among them
+/// (board 8481).
 fn revokes(error: &kms::Error) -> bool {
     matches!(
         error,
@@ -2196,6 +2199,48 @@ mod tests {
         assert_eq!(other.refuses(TEST_CELL), Some(Error::Kms("tenant 1: revoked".into())));
         assert_eq!(opened(&their_keys, theirs).map(drop), Ok(()));
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 3));
+    }
+
+    /// board 8479: a cell whose KEK the tenant's KEK wrapped under a version destroyed since, as a
+    /// tenant destroys an old version of its key after rotating it, is refused naming the version,
+    /// and that cell alone: the tenant is refused by none of the host's KMSes, its pool stays, and
+    /// a cell wrapped under the version that lives opens, forks inheriting its keys going on. Read
+    /// as the tenant's KEK destroyed, as it was, it refused those forks and dropped the pool.
+    #[test]
+    fn a_destroyed_version_of_a_tenants_kek_refuses_its_cells_alone() {
+        let (_dir, counted, kms) = kms();
+        counted.inner().create(2).unwrap();
+        let bucket = Direct(SimBucket::new());
+        let tenant = TEST_CELL.tenant;
+        let (old, new) = (TEST_CELL, CellId { tenant, id: 2 });
+        block_on(lifecycle::create(&bucket, old, 1)).unwrap();
+        taken(&bucket, &kms, old, 5, None);
+        assert_eq!(counted.inner().rotate(tenant).unwrap(), 2);
+        block_on(lifecycle::create(&bucket, new, 1)).unwrap();
+        taken(&bucket, &kms, new, 5, None);
+        counted.inner().destroy_version(tenant, 1).unwrap();
+        let head = |cell| block_on(head::get(&bucket, cell)).unwrap().unwrap();
+
+        // Another host, its pool of the tenant's KEKs filled.
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let shared: kms::Shared = counted.clone();
+        let pooling = Pooling { low: 2, batch: 3, handle: runtime.handle().clone() };
+        let other = CachingKms::pooled(shared, pooling);
+        runtime.block_on(other.new_kek(CellId { tenant, id: 3 })).unwrap();
+        runtime.block_on(other.filled(tenant));
+        assert_eq!(other.in_pool(tenant), 3);
+
+        let keys = CellKeys::of(old, &head(old), other.clone());
+        let refused = runtime.block_on(ring(&bucket, &keys, old, &head(old), true)).map(drop);
+        let gone = "tenant 1: version 1 of its KEK, which wrapped this key, is destroyed";
+        assert_eq!(refused, Err(Error::Kms(gone.into())));
+        assert_eq!((other.refuses(old), other.refuses(new)), (None, None));
+        assert_eq!(other.in_pool(tenant), 3);
+        let keys = CellKeys::of(new, &head(new), other.clone());
+        let source = runtime.block_on(ring(&bucket, &keys, new, &head(new), true)).unwrap();
+        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 8 }, owner: 1 };
+        let forking = runtime.block_on(inheriting(&other, &source, child));
+        assert_eq!(forking.map(drop), Ok(()));
     }
 
     /// Takes `cell` as `holder`, of token 0, by `kms`, the host's, giving it `kind`: its head as
