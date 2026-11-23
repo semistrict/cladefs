@@ -224,7 +224,9 @@ impl std::ops::AddAssign for Report {
 /// bytes of them as listed, each bounded or not. A pass takes from it what it is about to delete,
 /// all of it or none, before it deletes any of it ([`Collector::budget`]): the objects of its cell
 /// and their bytes, its dead cell's head if it removes it, and the references it retires, of no
-/// bytes; not its own lease. Once one take is refused, every take after it is, so that what a sweep
+/// bytes; not its own lease, nor what moves rather than goes: the references a mirror it resumes
+/// copies to another bucket before it retires them, and the copies elsewhere of those it retires
+/// (`mirror::Here::retire`), counted once as the references they are. Once one take is refused, every take after it is, so that what a sweep
 /// deletes stays within its bounds whatever its passes find doomed: a bug, a bucket listing short.
 /// A pass refused deletes nothing, as one fenced deletes nothing, and records nothing new: late,
 /// never wrong, the next sweep's pass decides anew.
@@ -576,28 +578,11 @@ impl Collector {
                 false => gone.push(key),
             }
         }
-        if !gone.is_empty() {
-            // cladefs: past its sweep's budget, it deletes nothing (board 8529).
-            if !self.may_delete(gone.len(), 0) {
-                return Ok(report);
-            }
-            lifecycle::retire(own, &gone).await?;
-            report.retired += gone.len();
-        }
-        for at in &stale {
-            let resumed = crate::mirror::mirror(bucket, own, number, cell, *at).await?;
-            log::info!("collector: {cell}'s mirror at {at:x}, its pin stale, again: {resumed:?}");
-            // The references it moved here and retired there, whether there or not.
-            if let crate::mirror::Mirrored::Done { retired, .. } = resumed {
-                report.retired += retired;
-            }
-        }
-        if alive || pinned || !stale.is_empty() || standing {
-            return Ok(report);
-        }
-        // Nothing of it needed: its mirrors' holds there first, which keep there what it inherits,
-        // of every version of it here, a mirror's that marked none too, unreported, as they are
-        // its mirrors'; then its markers here, then what they named, then the marks.
+        // Nothing of it needed, it goes whole: its mirrors' holds there first, which keep there
+        // what it inherits, of every version of it here, a mirror's that marked none too,
+        // unreported, as they are its mirrors'; then its markers here, then what they named, then
+        // the marks.
+        let whole = !(alive || pinned || !stale.is_empty() || standing);
         let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
         let of = |kind: fn(&Kind) -> bool| -> Vec<&Meta> {
@@ -619,10 +604,32 @@ impl Collector {
         let written: Vec<String> = gone.iter().filter_map(|key| layout::retired_of(key)).collect();
         let marks: BTreeSet<&str> =
             marks.into_iter().chain(written.iter().map(String::as_str)).collect();
-        // cladefs: past its sweep's budget, it deletes nothing (board 8529).
-        let objects = holds.len() + markers.len() + copied.len() + marks.len();
-        let bytes = markers.iter().chain(&copied).map(|meta| meta.size).sum();
+        // cladefs: all it deletes taken from its sweep's budget at once, or nothing deleted (board
+        // 8529): the references gone, and, if it goes whole, the rest. Not what a mirror it
+        // resumes moves here, which copies each reference here before it retires it there.
+        let (objects, bytes) = match whole {
+            true => (
+                gone.len() + holds.len() + markers.len() + copied.len() + marks.len(),
+                markers.iter().chain(&copied).map(|meta| meta.size).sum(),
+            ),
+            false => (gone.len(), 0),
+        };
         if !self.may_delete(objects, bytes) {
+            return Ok(report);
+        }
+        if !gone.is_empty() {
+            lifecycle::retire(own, &gone).await?;
+            report.retired += gone.len();
+        }
+        for at in &stale {
+            let resumed = crate::mirror::mirror(bucket, own, number, cell, *at).await?;
+            log::info!("collector: {cell}'s mirror at {at:x}, its pin stale, again: {resumed:?}");
+            // The references it moved here and retired there, whether there or not.
+            if let crate::mirror::Mirrored::Done { retired, .. } = resumed {
+                report.retired += retired;
+            }
+        }
+        if !whole {
             return Ok(report);
         }
         bucket::delete_all(bucket, &holds).await?;
@@ -1104,9 +1111,13 @@ impl Collector {
         let marked = doomed.into_iter().map(Marked::of).collect();
         let marks = Marks { epoch, grace: self.options.grace, marked };
         // Readers watch the cells' marks only while the bucket says it is marked: first.
-        bucket::create(bucket, layout::MARKING, b"marking".to_vec()).await?;
+        mark_bucket(bucket).await?;
         // The epoch is this pass's taking of the lease alone: nothing else is at its key.
         bucket::create(bucket, &layout::marks(cell, epoch), layout::encode(&marks)).await?;
+        // cladefs: and after, should an operator's clearing of the marks have deleted it
+        // meanwhile, which looks for marks again once it did (board 8515): marks are never left
+        // unwatched, whichever of the two goes first.
+        mark_bucket(bucket).await?;
         Ok(Marking { report, marks: Some(marks), resurrected })
     }
 
@@ -1151,10 +1162,27 @@ pub async fn clear_marks(bucket: &impl Bucket, cell: CellId) -> Result<(usize, u
     Ok((keys.len(), marks.iter().map(|meta| meta.size).sum()))
 }
 
+/// cladefs: whether `cell` has marks of mark-only passes (board 8515): what a clearing of every
+/// cell's looks for again once it deleted [`layout::MARKING`].
+pub async fn has_marks(bucket: &impl Bucket, cell: CellId) -> Result<bool, Error> {
+    let listed = bucket::list(bucket, &layout::marks_of(cell)).await?;
+    Ok(listed.iter().any(|meta| matches!(layout::kind(&meta.key), Kind::Marks { .. })))
+}
+
+/// cladefs: writes the bucket's word that mark-only passes mark it ([`layout::MARKING`]), if it is
+/// not there: before readers are to watch marks, and again by a clearing that found marks written
+/// as it ran (board 8515).
+pub async fn mark_bucket(bucket: &impl Bucket) -> Result<(), Error> {
+    bucket::create(bucket, layout::MARKING, b"marking".to_vec()).await?;
+    Ok(())
+}
+
 /// cladefs: deletes the bucket's word that mark-only passes mark it ([`layout::MARKING`], board
 /// 8515), after every cell's marks ([`clear_marks`]), so that readers watch marks for as long as
-/// any are there: they watch none after it. A mark-only pass marking a cell after it writes it
-/// again.
+/// any are there: they watch none after it. A mark-only pass marking a cell writes it again, after
+/// its marks too ([`Collector::mark_cell`]); and the clearing looks for marks again after it
+/// ([`has_marks`]), writing it again if it finds any, so that whichever comes first, a pass's
+/// marks or the clearing's delete, no marks are left unwatched.
 pub async fn clear_marking(bucket: &impl Bucket) -> Result<(), Error> {
     Ok(bucket::delete(bucket, layout::MARKING).await?)
 }

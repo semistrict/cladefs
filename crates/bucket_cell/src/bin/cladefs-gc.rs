@@ -779,34 +779,53 @@ async fn refuse_missing(bucket: &impl Bucket, cell: CellId) -> Result<(), String
     }
 }
 
-/// cladefs: deletes the marks of mark-only passes (`--clear-marks`, board 8515): every cell's, then
-/// the bucket's word that they mark it, which readers watch the marks only while it stands, so
-/// that they watch every mark for as long as it is there; or `named`'s alone, leaving that word,
-/// which other cells' marks may need still. It says on standard error what it deleted of each cell
-/// that had marks, then of all. A mark-only sweep running meanwhile writes again what it marks
-/// after: done again once it ended, it deletes that too.
-async fn clear_marks(bucket: &impl Bucket, named: Option<CellId>) -> Result<(), String> {
+/// cladefs: deletes the marks of mark-only passes (`--clear-marks`, board 8515) of `bucket`, unrouted,
+/// so that a copy here of another bucket's cell clears nothing there: every cell's, then the
+/// bucket's word that they mark it, which readers watch the marks only while it stands, so that
+/// they watch every mark for as long as it is there; or `named`'s alone, leaving that word, which
+/// other cells' marks may need still. It says on standard error what it deleted of each cell that
+/// had marks, then of all. Clearing every cell's, it then looks for marks again, which a mark-only
+/// sweep running meanwhile wrote: finding any, it writes the word again, and fails, saying to clear
+/// again once that sweep ended (`collector::clear_marking` has why no marks are left unwatched).
+async fn clear_marks(bucket: &ObjectBucket, named: Option<CellId>) -> Result<(), String> {
+    use bucket_cell::collector;
     let (mut cleared, mut marks, mut bytes) = (0u64, 0usize, 0u64);
-    let mut cells = std::pin::pin!(cells(bucket, named));
-    while let Some(cell) = cells.next().await {
+    let mut listed = std::pin::pin!(cells(bucket, named));
+    while let Some(cell) = listed.next().await {
         let cell = cell?;
-        let deleted = bucket_cell::collector::clear_marks(bucket, cell).await;
+        let deleted = collector::clear_marks(bucket, cell).await;
         let (deleted, size) = deleted.map_err(|err| format!("cell {cell}: {err}"))?;
         if deleted > 0 {
             eprintln!("cladefs-gc: cell {cell}: deleted {deleted} marks ({size} bytes)");
             (cleared, marks, bytes) = (cleared + 1, marks + deleted, bytes + size);
         }
     }
-    let marking = match named {
-        None => {
-            let deleted = bucket_cell::collector::clear_marking(bucket).await;
-            deleted.map_err(|err| format!("{}: {err}", layout::MARKING))?;
-            format!(", then {}", layout::MARKING)
-        }
-        Some(_) => format!(", leaving {}, which other cells' marks may need", layout::MARKING),
-    };
-    eprintln!("cladefs-gc: deleted {marks} marks ({bytes} bytes) of {cleared} cells{marking}");
-    Ok(())
+    let said = format!("cladefs-gc: deleted {marks} marks ({bytes} bytes) of {cleared} cells");
+    if named.is_some() {
+        let marking = layout::MARKING;
+        eprintln!("{said}, leaving {marking}, which other cells' marks may need");
+        return Ok(());
+    }
+    let deleted = collector::clear_marking(bucket).await;
+    deleted.map_err(|err| format!("{}: {err}", layout::MARKING))?;
+    eprintln!("{said}, then {}", layout::MARKING);
+    let mut marked = 0u64;
+    let mut listed = std::pin::pin!(cells(bucket, None));
+    while let Some(cell) = listed.next().await {
+        let cell = cell?;
+        let found = collector::has_marks(bucket, cell).await;
+        marked += u64::from(found.map_err(|err| format!("cell {cell}: {err}"))?);
+    }
+    if marked == 0 {
+        return Ok(());
+    }
+    let written = collector::mark_bucket(bucket).await;
+    written.map_err(|err| format!("{}: {err}", layout::MARKING))?;
+    Err(format!(
+        "--clear-marks: {marked} cells marked by a mark-only pass as their marks were cleared: {} \
+         written again; clear again once no mark-only sweep runs",
+        layout::MARKING
+    ))
 }
 
 /// What a dry run over every cell of `bucket`, or the one `named`, finds, written to `out` a cell
@@ -1310,7 +1329,8 @@ fn main() -> Result<(), String> {
                 say_cells(&*bucket, cell, &held, &mut std::io::stdout().lock()).await
             }
             Command::DeleteCell { cell, .. } => delete_cell(&*bucket, cell).await,
-            Command::ClearMarks { cell } => clear_marks(&*bucket, cell).await,
+            // cladefs: unrouted, its copies of other buckets' cells' marks none of theirs.
+            Command::ClearMarks { cell } => clear_marks(&bucket.own(), cell).await,
             Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
                 say_usage(&*bucket, tenant, &mut std::io::stdout().lock()).await

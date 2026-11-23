@@ -2794,6 +2794,16 @@ pub(crate) mod tests {
             for key in heads_of(child) {
                 home.object_delete(&key).await.unwrap();
             }
+            // cladefs: a pass past its sweep's budget, which would retire the reference and delete
+            // the copy whole, deletes none of it, the reference neither: all it would delete taken
+            // at once, or none (board 8529).
+            let before = (listed(home, parent).await, listed(other, parent).await);
+            let budget = Some(Arc::new(crate::collector::Budget::new(Some(1), None)));
+            let capped = pass().budget(budget.clone());
+            let report = capped.collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+            let after = (listed(home, parent).await, listed(other, parent).await);
+            assert_eq!((report, after), (crate::collector::Report::default(), before), "capped");
+            assert_eq!(budget.unwrap().refused(), 1);
             put(home, &layout::pin(parent, 3), b"pin".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 1), "pinned");
