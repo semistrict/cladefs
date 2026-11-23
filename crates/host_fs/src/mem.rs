@@ -77,6 +77,9 @@ struct FileData {
     changes: Vec<FileChange>,
     /// Its blocks of [`HOLE`] bytes given back, written since none.
     holes: BTreeSet<u64>,
+    /// Its holes as of its last sync, which a crash keeps where its bytes there are zeros still
+    /// (board 5452).
+    durable_holes: BTreeSet<u64>,
     modified: SystemTime,
 }
 
@@ -124,6 +127,7 @@ impl FileData {
             data,
             changes: Vec::new(),
             holes: BTreeSet::new(),
+            durable_holes: BTreeSet::new(),
             modified: SystemTime::now(),
         }
     }
@@ -143,6 +147,20 @@ impl FileData {
         let blocks = (self.data.len() as u64).div_ceil(HOLE);
         let holes = self.holes.range(..blocks).count() as u64;
         (blocks - holes) * HOLE
+    }
+
+    /// As a crash leaves it, of `data`: its holes as of its last sync, those still within `data`
+    /// and zeros there, what a write since the sync, kept, filled no more (board 5452).
+    fn crashed(&self, data: Vec<u8>) -> Self {
+        let zeros = |block: u64| {
+            let start = (block * HOLE) as usize;
+            data.get(start..start + HOLE as usize)
+                .is_some_and(|bytes| bytes.iter().all(|&b| b == 0))
+        };
+        let holes: BTreeSet<u64> =
+            self.durable_holes.iter().copied().filter(|&b| zeros(b)).collect();
+        let durable_holes = holes.clone();
+        Self { holes, durable_holes, modified: self.modified, ..Self::new(data) }
     }
 }
 
@@ -268,8 +286,8 @@ impl Fs {
         found
     }
 
-    /// What it holds, as a disk counts it: `file` of each file's length, each file once however
-    /// many names it has, and `dir` for each directory but the root.
+    /// What it holds, as a disk counts it: `file` of the bytes each file takes, but for its holes,
+    /// each file once however many names it has, and `dir` for each directory but the root.
     pub fn used(&self, file: impl Fn(u64) -> u64, dir: u64) -> u64 {
         let (mut seen, mut reached, mut used) = (BTreeSet::new(), vec![ROOT], 0);
         while let Some(number) = reached.pop() {
@@ -277,7 +295,7 @@ impl Fs {
                 continue;
             }
             match &self.inodes[&number] {
-                Inode::File(of) => used += file(of.data.len() as u64),
+                Inode::File(of) => used += file(of.allocated()),
                 Inode::Dir(of) => {
                     used += if number == ROOT { 0 } else { dir };
                     reached.extend(of.entries.values());
@@ -485,6 +503,7 @@ impl Fs {
         match self.inodes.get_mut(&inode) {
             Some(Inode::File(file)) => {
                 file.durable = file.data.clone();
+                file.durable_holes = file.holes.clone();
                 file.changes.clear();
             }
             Some(Inode::Dir(dir)) => {
@@ -562,8 +581,7 @@ impl Fs {
                             }
                         }
                     }
-                    let crashed = FileData { modified: file.modified, ..FileData::new(data) };
-                    inodes.insert(number, Inode::File(crashed));
+                    inodes.insert(number, Inode::File(file.crashed(data)));
                 }
                 None => {}
             }
@@ -618,6 +636,27 @@ mod tests {
     fn names(fs: &Fs, path: &str) -> Vec<String> {
         let listed = fs.list(Path::new(path)).unwrap().into_iter();
         listed.map(|(name, _)| name.into_string().unwrap()).collect()
+    }
+
+    /// Board 5452: what a file's holes give back its disk counts free, and a crash keeps the holes
+    /// a sync made durable, while those punched since are lost with the punch, as on a real disk.
+    #[test]
+    fn holes_are_counted_free_and_kept_once_synced() {
+        let mut fs = Fs::new();
+        let file = fs.create(Path::new("/f")).unwrap();
+        fs.sync(ROOT).unwrap();
+        fs.write(file, 0, &[1; 4 * HOLE as usize]).unwrap();
+        fs.sync(file).unwrap();
+        fs.punch(file, 0, 2 * HOLE).unwrap();
+        fs.sync(file).unwrap();
+        fs.punch(file, 2 * HOLE, HOLE).unwrap();
+        assert_eq!(fs.used(|bytes| bytes, 0), HOLE);
+        for seed in 0..8 {
+            let crashed = fs.crashed(seed, true);
+            let stat = crashed.stat(crashed.lookup(Path::new("/f")).unwrap()).unwrap();
+            assert_eq!((stat.len, stat.allocated), (4 * HOLE, 2 * HOLE), "seed {seed}");
+            assert_eq!(crashed.used(|bytes| bytes, 0), 2 * HOLE, "seed {seed}");
+        }
     }
 
     #[test]
