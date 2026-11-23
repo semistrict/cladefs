@@ -138,8 +138,20 @@ impl Local {
     }
 
     /// Writes `payload` at `location` as `opts` say, the lock held: an update only if the object
-    /// there is of `version`, then as an overwrite.
+    /// there is of `version`, then as an overwrite. Run to its end ([`to_its_end`]).
     async fn update(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+        version: UpdateVersion,
+    ) -> Result<PutResult> {
+        let (this, location) = (self.clone(), location.clone());
+        to_its_end(async move { this.update_locked(&location, payload, opts, version).await }).await
+    }
+
+    /// [`Local::update`], on whatever runs it.
+    async fn update_locked(
         &self,
         location: &Path,
         payload: PutPayload,
@@ -160,6 +172,30 @@ impl Local {
         }
         let opts = PutOptions { mode: PutMode::Overwrite, ..opts };
         self.files.put_opts(location, payload, opts).await
+    }
+}
+
+/// Runs `locked`, a write under a lock, to its end, whatever its caller does: on a task of the
+/// runtime, if there is one, which a caller dropping its wait leaves running. Dropped half-way,
+/// the write would let its lock go while `LocalFileSystem`'s blocking write it started went on,
+/// publishing after another process's update under the lock, which it would undo: a registry of
+/// buckets rolled back by a copy's spread that timed out (hotbed review 49). A write whose caller
+/// gave up may so take effect, as a request of any bucket whose answer was lost may.
+async fn to_its_end<T: Send + 'static>(
+    locked: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => match runtime.spawn(locked).await {
+            Ok(done) => done,
+            // madsim's `JoinError` gives no panic back to resume: said, as a panic here.
+            Err(err) if err.is_panic() => panic!("a write under its lock panicked: {err}"),
+            Err(err) => Err(object_store::Error::Generic {
+                store: "Local",
+                source: format!("a write under its lock, cancelled: {err}").into(),
+            }),
+        },
+        // No runtime: the caller's thread runs it, as it waits for its lock.
+        Err(_) => locked.await,
     }
 }
 
@@ -187,8 +223,12 @@ impl ObjectStore for Local {
         match opts.mode.clone() {
             PutMode::Create => self.files.put_opts(location, payload, opts).await,
             PutMode::Overwrite => {
-                let _locked = self.lock_for(location).await?;
-                self.files.put_opts(location, payload, opts).await
+                let (this, location) = (self.clone(), location.clone());
+                to_its_end(async move {
+                    let _locked = this.lock_for(&location).await?;
+                    this.files.put_opts(&location, payload, opts).await
+                })
+                .await
             }
             PutMode::Update(version) => self.update(location, payload, opts, version).await,
         }
@@ -411,6 +451,46 @@ mod tests {
             lock.unlock().unwrap();
             waiting.await.unwrap().unwrap();
             assert_eq!(bucket.get(held).await.unwrap().bytes, [2]);
+        });
+    }
+
+    /// hotbed review 49: an update whose caller gave up on it, waiting for its lock, runs to its
+    /// end once the lock is let go: never dropped half-way, which let the lock go while the write
+    /// it started went on, undoing an update made after it under the lock.
+    #[test]
+    fn updates_given_up_on_run_to_their_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let key = "held/object";
+        runtime.block_on(async {
+            let bucket = file(dir.path());
+            let version = bucket.put(key, vec![1].into(), PutMode::Create).await.unwrap();
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.path().join(lock_of(key)))
+                .unwrap();
+            lock.lock().unwrap();
+            let giving_up = tokio::spawn({
+                let bucket = bucket.clone();
+                async move { bucket.put(key, vec![2].into(), PutMode::Update(version)).await }
+            });
+            // Long enough for it to begin and wait for the lock, which nothing else shows: an update
+            // aborted before it began does nothing, rightly, and fails this test.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            giving_up.abort();
+            assert!(giving_up.await.unwrap_err().is_cancelled());
+            lock.unlock().unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while bucket.get(key).await.unwrap().bytes != [2] {
+                assert!(tokio::time::Instant::now() < deadline, "the update was dropped");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         });
     }
 }
