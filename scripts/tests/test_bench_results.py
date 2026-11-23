@@ -48,8 +48,6 @@ class Registry(unittest.TestCase):
                 "fxfs-guest-fork-warm",
                 "ext4-dax-pmem-fork",
                 "ext4-pmem-fork",
-                "fxfs-guest-dax-followed",
-                "fxfs-guest-dax-followed-idle",
             ],
         )
         self.assertEqual([name for name in names if name not in bench.ORDER], [])
