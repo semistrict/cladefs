@@ -343,7 +343,7 @@ impl<D: Dir> Replicas<D> {
             // Made: the promise, from here on, whatever of the rest fails. The files before it
             // going fail no fence: they are left as a crash leaves them, the next fence's to remove.
             held.promise = epoch;
-            if let Err(err) = self.remove_promises_before(cell, &mut held, epoch) {
+            if let Err(err) = self.remove_promises(cell, &mut held, ..epoch) {
                 log::warn!("replicas: {cell}'s promises before {epoch}: {err:#}");
             }
         }
@@ -428,22 +428,26 @@ impl<D: Dir> Replicas<D> {
             Swept::Gone => held.logs.keys().copied().collect(),
         };
         self.remove(cell, &mut held, &gone)?;
-        if swept == Swept::Gone && held.promise > 0 {
-            self.remove_promises_before(cell, &mut held, u64::MAX)?;
+        if swept == Swept::Gone {
+            // Every promise, of `u64::MAX` too (board 8449: removing those before `u64::MAX` kept
+            // its file, while the promise held went to 0, accepting appends it promised to refuse):
+            // the promise held 0 only once all are gone, durably.
+            self.remove_promises(cell, &mut held, ..)?;
             held.promise = 0;
         }
         Ok(())
     }
 
-    /// Removes the files of `held`'s promises before `epoch`, durably: those a removal failed
-    /// before (board 5420) too, each gone from `promises` once it went, and found gone as gone.
-    fn remove_promises_before(
+    /// Removes the files of `held`'s promises of epochs in `epochs`, durably: those a removal
+    /// failed before (board 5420) too, each gone from `promises` once it went, and found gone as
+    /// gone.
+    fn remove_promises(
         &self,
         cell: CellId,
         held: &mut Held,
-        epoch: u64,
+        epochs: impl std::ops::RangeBounds<u64>,
     ) -> Result<(), Error> {
-        let before: Vec<u64> = held.promises.range(..epoch).copied().collect();
+        let before: Vec<u64> = held.promises.range(epochs).copied().collect();
         if before.is_empty() {
             return Ok(());
         }

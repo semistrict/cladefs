@@ -310,3 +310,43 @@ fn open_file_descriptors_stay_bounded_across_many_logs() {
     assert!(open.load(Ordering::Relaxed) <= OPEN_FILES);
     assert!(peak.load(Ordering::Relaxed) <= OPEN_FILES + 1);
 }
+
+/// Board 8449: a cell gone for good loses every promise, of `u64::MAX` too, durably, and holds 0
+/// only once they are gone: the edges of epochs, log and configuration numbers drawn, 0, 1 and
+/// `u64::MAX` and their neighbours, as a hostile peer may send them.
+#[test]
+fn cells_swept_gone_lose_promises_of_every_epoch() {
+    const EDGES: [u64; 6] = [0, 1, 2, u64::MAX / 2, u64::MAX - 1, u64::MAX];
+    for epoch in EDGES {
+        for number in EDGES {
+            let dir = MemDir::new();
+            let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+            let me = (CELL, key(number, epoch), replicas.incarnation());
+            let at = format!("epoch {epoch}, configuration {number}");
+            for log in [1, u64::MAX] {
+                let frame = own_frame(log, b"x");
+                assert_eq!(
+                    replicas.append(me, log, 0, &frame).unwrap(),
+                    frame.len() as u64,
+                    "{at}"
+                );
+            }
+            replicas.fence(me, epoch.saturating_sub(1)).unwrap();
+            replicas.fence(me, epoch).unwrap();
+            replicas.sweep(CELL, Swept::Gone).unwrap();
+            assert_eq!(dir.list("").unwrap(), [INCARNATION], "{at}");
+            // Nothing promised: an append of the earliest epoch is taken, here and once the
+            // directory is opened again.
+            let earliest = (CELL, key(0, 0), replicas.incarnation());
+            let frame = own_frame(0, b"y");
+            assert_eq!(
+                replicas.append(earliest, 1, 0, &frame).unwrap(),
+                frame.len() as u64,
+                "{at}"
+            );
+            let reopened = Replicas::open(dir, MOST).unwrap();
+            let end = reopened.append(earliest, 1, frame.len() as u64, &frame);
+            assert_eq!(end.unwrap(), 2 * frame.len() as u64, "{at}");
+        }
+    }
+}
