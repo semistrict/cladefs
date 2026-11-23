@@ -38,11 +38,16 @@ async fn read(fs: &Filesystem, file: &[u8]) -> Vec<u8> {
 
 /// The bytes of the host's storage the files under `path` take.
 fn allocated(path: &Path) -> u64 {
+    files(path).iter().map(|(_, bytes)| bytes).sum()
+}
+
+/// The files under `path`, each with the bytes of the host's storage it takes.
+fn files(path: &Path) -> Vec<(PathBuf, u64)> {
     let metadata = std::fs::symlink_metadata(path).unwrap();
     if !metadata.is_dir() {
-        return metadata.blocks() * 512;
+        return vec![(path.to_owned(), metadata.blocks() * 512)];
     }
-    std::fs::read_dir(path).unwrap().map(|entry| allocated(&entry.unwrap().path())).sum()
+    std::fs::read_dir(path).unwrap().flat_map(|entry| files(&entry.unwrap().path())).collect()
 }
 
 /// Image I/O bypasses the host's page cache.
@@ -66,7 +71,7 @@ fn fork_closed_storage() {
         let before = allocated(&path);
         let fork = storage.fork_to(&fork_path).await.expect("fork failed");
         // A handle naming the image, and a record of the fork in it.
-        assert!(allocated(&fork_path) <= 16 << 10, "{} bytes", allocated(&fork_path));
+        assert!(allocated(&fork_path) <= 16 << 10, "{:?}", files(&fork_path));
         assert!(allocated(&path) <= before + (64 << 10), "{} > {before}", allocated(&path));
         assert!(storage.fork_to(&fork_path).await.is_err(), "forked over an image");
 
