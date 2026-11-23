@@ -1676,6 +1676,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "crc-fast",
+ "futures",
  "libc",
  "object_store",
  "reqwest",
