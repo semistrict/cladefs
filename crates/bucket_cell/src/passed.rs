@@ -43,8 +43,12 @@ use std::collections::BTreeMap;
 /// head does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go
 /// through ended; and what the last pass over the cell that ran to its end recorded, carried from
 /// each taking to the next ([`Passed`]). Time is the backend's clock as each pass read it
-/// ([`Bucket::now`]), in milliseconds: a pass's clock ahead takes a cell early, fencing the pass
-/// holding it, which then deletes nothing; never wrong, only late.
+/// ([`Bucket::now`]), in milliseconds, never a host's own (board 8471): every host's reading of it
+/// is at most behind the backend's, never ahead, so that a lease ends, and a pass's end orders
+/// against a sweep's start, by one clock for all of them, a host whose own clock runs fast
+/// starving no other's sweeps nor holding its cells past their time. A pass taking a cell early,
+/// as one whose clock is ahead would, fences the pass holding it, which then deletes nothing:
+/// never wrong, only late.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectorLease {
     pub format: u32,
@@ -386,6 +390,39 @@ mod tests {
     use super::*;
     use crate::bucket::Version;
     use crate::layout::TEST_CELL;
+
+    /// Board 8471's AC #2: a lease whose holder's host is gone, its own clock an hour ahead of its
+    /// bucket's backend, another host takes once the backend's clock passed the lease's length since
+    /// its taking, and not before: as every host reads the backend's clock, not its own. By the
+    /// hosts' clocks, which the backend's going on moves not, it stood held.
+    #[test]
+    fn leases_end_by_the_backends_clock() {
+        use crate::client::Client;
+        use crate::object_bucket::tests::{runtime, s3};
+        use crate::s3_server::S3Server;
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let behind = -3_600_000;
+        server.clock_ahead(behind);
+        let (gone, other) =
+            (s3(&server, "leases", &Client::DEFAULT), s3(&server, "leases", &Client::DEFAULT));
+        let cell = layout::test_cell(1);
+        serving.block_on(lifecycle::create(&*gone, cell, 0)).unwrap();
+        let holding = Holding { lease: 60_000, since: None };
+        // The epoch a taking by `holder` through `bucket` takes.
+        let taking = |bucket: &crate::object_bucket::ObjectBucket, holder| {
+            serving.block_on(async {
+                let lease = super::found(bucket, cell).await.unwrap();
+                super::take(bucket, cell, lease, holder, holding).await.map(|taken| taken.epoch)
+            })
+        };
+        assert_eq!(taking(&gone, 1).unwrap(), 1);
+        assert!(matches!(taking(&other, 2), Err(Error::Left(Left::Held))));
+        server.clock_ahead(behind + 58_000);
+        assert!(matches!(taking(&other, 2), Err(Error::Left(Left::Held))));
+        server.clock_ahead(behind + 62_000);
+        assert_eq!(taking(&other, 2).unwrap(), 2);
+    }
 
     fn meta(key: &str, size: u64, modified: u64, e_tag: &str) -> Meta {
         let version = Version { e_tag: Some(e_tag.to_owned()), version: None };

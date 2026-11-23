@@ -246,7 +246,8 @@ impl Sweep {
     ) -> Swept {
         assert!(self.at_once >= 1, "a sweep of no passes at once");
         let started = Instant::now();
-        // What another pass did after this, it leaves be.
+        // What another pass did after this, it leaves be: by the backend's clock, as every pass
+        // ends by it (board 8471).
         let since = bucket.now();
         // cladefs: what its passes hear of their tenants' KEKs, the KMS asked once a tenant
         // (TASK-411.13).
