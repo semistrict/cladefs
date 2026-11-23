@@ -527,14 +527,22 @@ impl Fs {
                 entries.insert(number, kept);
             }
         }
-        let mut reached = vec![ROOT];
+        // The directories given a place in the tree. Each change kept apart from the others, a
+        // directory moved between parents may be left under two, or under itself, which no
+        // journaling file system leaves, as it commits a rename's entries together: it keeps its
+        // place first reached from the root alone (hotbed review 25, board 8330).
+        let (mut placed, mut reached) = (BTreeSet::from([ROOT]), vec![ROOT]);
         while let Some(number) = reached.pop() {
             if inodes.contains_key(&number) {
                 continue;
             }
             match self.inodes.get(&number) {
                 Some(Inode::Dir(_)) => {
-                    let kept = entries.remove(&number).unwrap_or_default();
+                    let mut kept = entries.remove(&number).unwrap_or_default();
+                    kept.retain(|_, child| match self.inodes.get(child) {
+                        Some(Inode::Dir(_)) => placed.insert(*child),
+                        _ => true,
+                    });
                     reached.extend(kept.values());
                     let dir = DirData { durable: kept.clone(), entries: kept, changes: Vec::new() };
                     inodes.insert(number, Inode::Dir(dir));
@@ -660,6 +668,36 @@ mod tests {
             assert!(names(&fs.crashed(seed, false), "").contains(&"e".to_owned()), "seed {seed}");
         }
         assert!(lens.len() > 2, "{lens:?}");
+    }
+
+    /// cladefs: a crash leaves each directory in one place, never under two parents or under
+    /// itself, however its moves since the last sync are kept: changes kept apart, `a`'s entry of
+    /// `b` kept and its removal not, `b`'s of `a` kept too, made a cycle, which walking it never
+    /// left (hotbed review 25, board 8330).
+    #[test]
+    fn crashes_leave_each_directory_in_one_place() {
+        let p = Path::new;
+        let mut fs = Fs::new();
+        fs.create_dir(p("a")).unwrap();
+        fs.create_dir(p("b")).unwrap();
+        fs.sync(ROOT).unwrap();
+        fs.rename(p("b"), p("a/b")).unwrap();
+        fs.rename(p("a/b"), p("b")).unwrap();
+        fs.rename(p("a"), p("b/a")).unwrap();
+        for seed in 0..128 {
+            let crashed = fs.crashed(seed, false);
+            let (mut seen, mut dirs) = (BTreeSet::from([ROOT]), vec![PathBuf::new()]);
+            while let Some(dir) = dirs.pop() {
+                for (name, stat) in crashed.list(&dir).unwrap() {
+                    if stat.dir {
+                        let path = dir.join(name);
+                        assert!(seen.insert(stat.inode), "seed {seed}: {path:?} reached again");
+                        dirs.push(path);
+                    }
+                }
+            }
+            assert_eq!(crashed.walk().len(), seen.len() - 1, "seed {seed}");
+        }
     }
 
     /// cladefs: a corrupting crash keeps what was synced, and leaves each sector written since
