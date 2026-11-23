@@ -574,6 +574,12 @@ node_local::node_local! {
     static MEMORY: Arc<fetch::Memory> = fetch::Memory::with_parts(fetch::shared_parts().clone());
 }
 
+/// cladefs: the budget of the GETs of the host's fetchers, which its writers' relocation rounds
+/// read within too (doc-27, board 6214).
+pub(crate) fn fetches() -> fetch::Budgets {
+    BUDGET.get().clone()
+}
+
 /// cladefs: the host's fetcher memory, whose tails and unified recent/unpacked parts the memory
 /// governor counts and evicts (board 6026).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

@@ -24,8 +24,17 @@ use std::sync::{Arc, Mutex};
 /// The most bytes a round relocates: what it holds read meanwhile (doc-27: `UPLOAD_BYTES / 4`).
 pub(crate) const MOST: u64 = crate::upload::UPLOAD_BYTES / 4;
 
-/// How many extents a round reads at once.
+/// How many extents a round reads at once, and, with no budget of the host's fetchers, how many
+/// GETs it has in flight, of a part each ([`Budgets`]).
 const AT_ONCE: usize = 8;
+
+/// What a round's reads go within: a place in the budget of the host's uploads for what it holds
+/// read until relocated, behind the uploads; and its GETs, in the budget of the host's fetchers if
+/// it has them (doc-27; Codex's review of fa1912379), else one of its own, [`AT_ONCE`] parts.
+pub(crate) struct Budgets<'a> {
+    pub uploads: &'a Arc<Budget>,
+    pub fetches: Option<bucket_cell::fetch::Budgets>,
+}
 
 /// What a cell's rounds may copy: the bytes it uploaded of its own since, less those its rounds
 /// copied. What a round relocated, uploaded in the segments after, counts as none of its own.
@@ -129,12 +138,14 @@ fn own_segments(cell: CellId, state: &bucket_cell::State) -> HashSet<String> {
 pub(crate) async fn round<D: Dir, B: Bucket>(
     cell: &LocalCell<D>,
     writer: &Writer<B>,
-    (bucket, uploads): (&Arc<B>, &Arc<Budget>),
+    (bucket, Budgets { uploads, fetches }): (&Arc<B>, Budgets<'_>),
     pins: &Pins,
     allowance: u64,
 ) -> anyhow::Result<Relocated> {
-    // No more than a relocation would take now: none while it would take nothing.
-    let allowance = allowance.min(cell.relocation_room()?);
+    // No more than a relocation would take now, none while it would take nothing; and no more than
+    // a quarter of the uploads' budget, so that a round's hold of it keeps no upload waiting long
+    // (the verifying review of fa1912379).
+    let allowance = allowance.min(uploads.limits().bytes / 4).min(cell.relocation_room()?);
     if allowance == 0 {
         return Ok(Relocated::default());
     }
@@ -164,7 +175,11 @@ pub(crate) async fn round<D: Dir, B: Bucket>(
     let _held = uploads.hold(Priority::Ahead, bytes).await;
     let memory = Memory::new();
     let _keys = memory.keys().hold(writer.keys().clone());
-    let fetcher = Fetcher::new(bucket.clone(), Budget::new(Limits::UNBOUNDED), memory, None);
+    let own = || {
+        let parts = Limits { requests: AT_ONCE, bytes: AT_ONCE as u64 * extent_frame::PART };
+        Budget::new(parts).into()
+    };
+    let fetcher = Fetcher::new(bucket.clone(), fetches.unwrap_or_else(own), memory, None);
     let read = futures::stream::iter(chosen)
         .map(|(extent, from)| {
             let fetcher = &fetcher;

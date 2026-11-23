@@ -845,6 +845,15 @@ struct Parts {
 /// returning an unpacked-only memory entry).
 type Flown = (String, u64, bool, bool);
 
+impl std::fmt::Debug for Budgets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::One(budget) => f.debug_tuple("One").field(&budget.limits()).finish(),
+            Self::PerBucket(per) => f.debug_tuple("PerBucket").field(&per.0).finish(),
+        }
+    }
+}
+
 struct Waited {
     /// The budget it has its place in, the fetcher's that sent it, and its place there.
     budget: Arc<Budget>,

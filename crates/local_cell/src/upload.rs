@@ -370,6 +370,10 @@ pub struct Options {
     /// 10 s and more each, the interval closing the segments they filled at 10 s, their commits
     /// copying out a segment's worth each.
     pub filling_wait: Duration,
+    /// cladefs: the budget of the GETs its relocation rounds read through, the host's fetchers', if
+    /// it has them (Codex's review of fa1912379): else each round's own, of a few at once
+    /// ([`relocations`]).
+    pub fetches: Option<bucket_cell::fetch::Budgets>,
     /// cladefs: whether its checkpoint rounds relocate out of the cell's sparse segments
     /// ([`relocations`], doc-27): not where a collector compacts them, its moves and relocations
     /// a combination no spec checks (doc-27 step 1).
@@ -474,6 +478,7 @@ impl Default for Options {
             checkpoint_every: CHECKPOINT_EVERY,
             filling_wait: Duration::from_secs(30),
             relocate: true,
+            fetches: None,
             replication: None,
             members: None,
             replace_after: Duration::from_secs(30),
@@ -1750,14 +1755,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         allowance: u64,
     ) -> Round {
         let (cell, uploads) = (self.cell().clone(), self.uploads.clone());
+        let fetches = self.options.fetches.clone();
         let (ended, round) = futures::channel::oneshot::channel();
         let (abort, registration) = futures::future::AbortHandle::new_pair();
         let (done, gone) = futures::channel::oneshot::channel::<()>();
         *self.relocation.lock().unwrap() = Some((abort, gone));
         let ending = async move {
             fail::fail_point!("upload::relocating", |_| Err(anyhow::anyhow!("failpoint")));
-            let places = (&bucket, &uploads);
-            relocations::round(&cell, &writer, places, &pins, allowance).await
+            let budgets = relocations::Budgets { uploads: &uploads, fetches };
+            relocations::round(&cell, &writer, (&bucket, budgets), &pins, allowance).await
         };
         let ending = futures::future::Abortable::new(ending, registration);
         (self.spawn)(
@@ -3178,7 +3184,8 @@ mod tests {
         let writer = cell.uploader.shared.writer().unwrap();
         let pins = relocations::Pins::default();
         let round = async |allowance| {
-            let places = (&cell.bucket, &cell.host.uploads);
+            let budgets = relocations::Budgets { uploads: &cell.host.uploads, fetches: None };
+            let places = (&cell.bucket, budgets);
             relocations::round(&cell.cell, &writer, places, &pins, allowance).await.unwrap().bytes
         };
         assert_eq!(round(u64::MAX).await, 0, "its version keeps the first segment whole");

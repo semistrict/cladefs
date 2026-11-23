@@ -794,9 +794,8 @@ enum Event {
     /// cladefs: a writer's relocation round committed, at `epoch` of its session's cell
     /// (doc-27): a commit of the cell's state as of its commit before, its extents elsewhere.
     Relocated {
-        host: usize,
+        lineage: u64,
         cell: u64,
-        session: u64,
         epoch: u64,
     },
     Deleted {
@@ -1196,12 +1195,10 @@ impl World {
                 }
                 self.end(host, cell, session);
             }
-            Event::Relocated { host, cell, session, epoch } => {
-                let Some(found) = self.hosts[host].sessions.get(&cell) else { return };
-                if found.id != session {
-                    return;
-                }
-                let history = self.lineages.get_mut(&found.lineage).unwrap();
+            // Into the history its session's cell held then, its session over or not: what it
+            // committed, its log keeps (the verifying review of fa1912379).
+            Event::Relocated { lineage, cell, epoch } => {
+                let history = self.lineages.get_mut(&lineage).unwrap();
                 match history.range(..epoch).next_back() {
                     Some((_, &before)) => drop(history.insert(epoch, before)),
                     None => self.violation(format!(
@@ -1564,9 +1561,10 @@ impl World {
             // commits, its commits uploading, is what the world's clock can't wait for
             // (TASK-92.41).
             filling_wait: Duration::ZERO,
-            // cladefs: writers relocate where the world's collector compacts nothing: the two
-            // together are what no spec checks (doc-27 step 1).
-            relocate: self.profile.options.compact_below == 0.0,
+            // cladefs: the world's own op runs relocation rounds ([`World::relocate`]), which its
+            // model follows: its uploaders run none, whose commits it would not know of.
+            relocate: false,
+            fetches: None,
         };
         let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
         let kept = Arc::<Mutex<Vec<BoxFuture<'static, ()>>>>::default();
@@ -2111,16 +2109,17 @@ impl World {
             (session.cell.clone().unwrap(), session.uploader.writer().unwrap());
         let (bucket, uploads) = (self.host_bucket(host), self.hosts[host].uploads.clone());
         let allowance = self.rng.random_range(1..=64) << 14;
-        let (id, events) = (session.id, self.events.clone());
+        let (lineage, events) = (session.lineage, self.events.clone());
         let round = self.spawn(async move {
             let pins = crate::relocations::Pins::default();
             // A round failing fails nothing (doc-27): it says so in the trace alone.
-            let places = (&bucket, &uploads);
+            let budgets = crate::relocations::Budgets { uploads: &uploads, fetches: None };
+            let places = (&bucket, budgets);
             let ended =
                 crate::relocations::round(&open_cell, &writer, places, &pins, allowance).await;
             trace!("cell {cell} relocated {ended:?}", cell = Short(cell));
             if let Some(epoch) = crate::relocations::relocated(&ended).commit {
-                events.borrow_mut().push(Event::Relocated { host, cell, session: id, epoch });
+                events.borrow_mut().push(Event::Relocated { lineage, cell, epoch });
             }
         });
         // Its uploader's, as its own rounds are, which its stopping waits for: ended with the

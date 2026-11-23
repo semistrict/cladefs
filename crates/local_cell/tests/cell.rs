@@ -332,6 +332,30 @@ async fn segments_freed_past_half_are_sparse() {
     assert_eq!(sparse(false), [], "freed whole");
 }
 
+/// cladefs: doc-27 (board 6214; Codex's review of fa1912379): a relocation is admitted to its
+/// cell's disk as a guest's write is: on a disk as full as its allowance lets it be, it is refused
+/// for room, the cell unchanged, its extent still in the bucket.
+#[tokio::test(flavor = "multi_thread")]
+async fn relocations_are_admitted_to_the_disk_as_writes_are() {
+    let dir = MemDir::with_capacity(64 << 20);
+    let cell = create(dir.clone(), 1 << 20);
+    for sequence in 0..4 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let first = closed_one(&cell).await;
+    cell.acknowledged(first.number).await.unwrap();
+    let Some(Place::Bucket(from)) = cell.place(extent(0)).unwrap() else { panic!("not uploaded") };
+    let full = dir.footprint().bytes();
+    dir.disk().disk().govern(full, 64 << 20, false);
+    let relocating =
+        Relocating { extent: extent(0), from: from.clone(), data: pattern(0, 0, BLOCK) };
+    let refused = cell.relocate(vec![relocating]).await.unwrap_err();
+    assert!(refused.downcast_ref::<local_cell::footprint::DiskFull>().is_some(), "{refused:#}");
+    assert_eq!(cell.place(extent(0)).unwrap(), Some(Place::Bucket(from)));
+}
+
 /// cladefs: doc-27 (board 6214): a relocation copies the extents its writer read from the cell's
 /// segments in the bucket into the open segment, in a commit of its own, which names them there.
 /// The guest's extent open stays open, and takes its next write; its free not yet committed is

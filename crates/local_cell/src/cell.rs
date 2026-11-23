@@ -2639,6 +2639,12 @@ impl<D: Dir> LocalCell<D> {
             let read = data.len() as u64;
             ensure!(read == from.len, "{extent:?} relocated with {read} bytes of {}", from.len);
         }
+        // cladefs: within its disk's allowance and its tenant's limits, as a guest's write is,
+        // room left for what the cell's own work adds for it (doc-22; Codex's review of
+        // fa1912379): refused, it relocates nothing, held until its copies land.
+        let bytes = relocating.iter().map(|relocating| relocating.from.len).sum();
+        let _pledge =
+            self.dir.footprint().map(|footprint| footprint.admit(bytes, 0)).transpose()?;
         let (relocated, failed) = {
             let committing = self.committing.lock().await;
             let mut state = self.between_writes(&committing).await?;
