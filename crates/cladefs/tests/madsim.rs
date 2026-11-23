@@ -95,6 +95,12 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
         vars.extend([
             ("CLADEFSD_PEER_ADDRESS", peer(host).to_string()),
             ("CLADEFSD_PEERS", peers.join(",")),
+            // The tests' peer credentials (board 8437), read as a host's are: the simulated
+            // network has no TLS.
+            (
+                "CLADEFSD_PEER_TLS",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/peer-tls").to_owned(),
+            ),
             ("CLADEFSD_PART_CACHE", root.join("cache").display().to_string()),
         ]);
     }

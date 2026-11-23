@@ -5,8 +5,12 @@
 // What the extent daemons of hosts sharing a bucket serve each other (TASK-406.2): parts of the
 // bucket's objects, each owned by one of them, which a host asks its owner for before the bucket,
 // so that a part many hosts read comes from the bucket about once for them all. Served over TCP at
-// each daemon's CLADEFSD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
-// every host can read the whole bucket already. A part is asked for by its object's key and its
+// each daemon's CLADEFSD_PEER_ADDRESS, the service and its clients authenticating each other by
+// mutual TLS, each certificate the hosts' CA's, for cladefs-peer (CLADEFSD_PEER_TLS, board 8437):
+// no call of an unauthenticated peer's is served, GetPart's neither, each a fetch from the bucket
+// this host makes for it. A host holds so many connections of a peer, so many streams on each, and
+// each call's messages to what it needs (OUT_OF_RANGE past it). A refusal names nothing of this
+// host's bucket. A part is asked for by its object's key and its
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
 // the bucket on any failure.

@@ -12,3 +12,8 @@ rustflags = ["-Cforce-frame-pointers=yes"]
 # keeps its value, as cells-per-host's driver's.
 [env]
 CLADEFSD_HEADROOM = { value = "0", force = false }
+# cladefs: the tests' peer credentials, known to all, never a host's (crates/cladefs/tests/peer-tls,
+# board 8437): every daemon a test starts that serves peers authenticates them by mutual TLS with
+# the credentials CLADEFSD_PEER_TLS names, and refuses to start without. A variable set outright
+# keeps its value.
+CLADEFSD_PEER_TLS = { value = "crates/cladefs/tests/peer-tls", relative = true, force = false }

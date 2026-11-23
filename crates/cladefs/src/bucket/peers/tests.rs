@@ -233,7 +233,9 @@ fn peers_serve_their_region_alone() {
     assert!(admits((Some(east), "s3://e"), (Some(west), "s3://e")).is_err());
     assert!(admits((Some(east), "s3://e"), (Some(other_system), "s3://e")).is_err());
     assert_eq!(admits((None, "file:///b"), (None, "file:///b")), Ok(()));
-    assert!(admits((None, "file:///b"), (None, "file:///c")).is_err());
+    // Its bucket never said (board 8437).
+    let refused = admits((None, "file:///b"), (None, "file:///c"));
+    assert_eq!(refused, Err("asked of a bucket not this host's".to_owned()));
     assert_eq!(admits((Some(east), "s3://e"), (None, "s3://e")), Ok(()));
 }
 

@@ -98,8 +98,12 @@
 //! owns a part, by rendezvous hashing over them, before the bucket (TASK-406.2): a part many hosts
 //! read comes from the bucket about once for them all. `CLADEFSD_PEERS` names them at start,
 //! comma-separated, each spelled as it names itself; the control API's `SetPeers` replaces them.
-//! The network is trusted: peers are unauthenticated, as every host reads the whole bucket anyway,
-//! and what a peer gives is checked against the CRCs of the asker's own tail of the object; on any
+//! cladefs: peers authenticate each other by mutual TLS (board 8437): `CLADEFSD_PEER_TLS` names a
+//! directory of the hosts' credentials, `ca.crt` (the hosts' CA), `peer.crt` and `peer.key` (this
+//! host's certificate, for `cladefs-peer`, and its key, PEM), without which a daemon serving peers
+//! refuses to start; every call, served or made, is of a peer whose certificate the CA signed. A
+//! replication call is admitted only if its cell's head in the bucket could have asked it (board
+//! 8445). What a peer gives is checked against the CRCs of the asker's own tail of the object; on any
 //! failure a part comes from the bucket, and the peer is asked nothing for 30 seconds. cladefs:
 //! peers are of one cloud region (TASK-633.4, backlog doc-23): a host's region is its home
 //! bucket, and a peer refuses one of another region, or another system of buckets, which then

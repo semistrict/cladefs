@@ -90,13 +90,14 @@ pub fn admits(
 ) -> Result<(), String> {
     match (ours, theirs) {
         (Some(ours), Some(theirs)) if ours == theirs => Ok(()),
-        (Some(ours), Some(theirs)) => Err(format!(
-            "asked from bucket {} of root {:x}, another region than this host's, bucket {} of root \
-             {:x}: peers never serve across regions",
-            theirs.home, theirs.root, ours.home, ours.root
+        // This host's region and bucket never said: no peer's to learn (board 8437).
+        (Some(_), Some(theirs)) => Err(format!(
+            "asked from bucket {} of root {:x}, another region than this host's: peers never \
+             serve across regions",
+            theirs.home, theirs.root
         )),
         _ if their_url == our_url => Ok(()),
-        _ => Err(format!("asked of {their_url}, this host's bucket being {our_url}")),
+        _ => Err("asked of a bucket not this host's".to_owned()),
     }
 }
 

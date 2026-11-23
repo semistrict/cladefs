@@ -52,7 +52,9 @@ kernel. The VM snapshots and cell directories are unchanged.
 ### Daemons of two builds side by side
 
 In steps 1 to 6 the hosts of a clade run two builds, and their daemons call each other over the
-peer service (`peer.proto`, `CLADEFSD_PEER_ADDRESS`), unauthenticated (board 8437):
+peer service (`peer.proto`, `CLADEFSD_PEER_ADDRESS`), authenticated by mutual TLS with the hosts'
+credentials (`CLADEFSD_PEER_TLS`, board 8437): give every host of both builds the same CA's. A
+daemon of a build before it calls in the clear, which the new refuses, and is refused by:
 
 - `GetPart` names no format, and needs none: a part is the bucket's bytes, the same to every
   build, and the asker checks it against its own tail of the object, fetching it from the bucket

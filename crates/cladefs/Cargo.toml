@@ -111,7 +111,9 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 pprof = { version = "0.15.0", default-features = false, features = ["prost-codec", "flamegraph", "frame-pointer"] }
 prost = "0.14.4"
 tokio-stream = { version = "0.1.19", features = ["net"] }
-tonic = { package = "madsim-tonic", version = "=0.6.0" }
+# cladefs: TLS (rustls over aws-lc-rs, which rustls here uses already) for the peer service's
+# mutual authentication (board 8437).
+tonic = { package = "madsim-tonic", version = "=0.6.0", features = ["tls-aws-lc"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tower = "0.5.3"
