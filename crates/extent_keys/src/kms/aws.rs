@@ -319,8 +319,10 @@ impl AwsKms {
         if let Some(endpoint) = &endpoint {
             origin.aws_endpoint(endpoint, region).map_err(|why| refused(&why))?;
         }
-        let names = KeyNames::of_query(query.iter().map(|(n, v)| (n.as_str(), v.as_str())), origin)
-            .map_err(|why| refused(&why))?;
+        // Any name: AWS KMS takes a key's ID, alias or ARN, in this account or another.
+        let query_pairs = query.iter().map(|(n, v)| (n.as_str(), v.as_str()));
+        let names =
+            KeyNames::of_query(query_pairs, origin, |_| Ok(())).map_err(|why| refused(&why))?;
         Ok(Self::with(region, endpoint, names, credentials))
     }
 
@@ -415,6 +417,10 @@ impl Kms for AwsKms {
             })
             .await
         }
+    }
+
+    fn names(&self) -> Option<&KeyNames> {
+        Some(&self.names)
     }
 }
 

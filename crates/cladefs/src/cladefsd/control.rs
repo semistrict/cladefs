@@ -1118,6 +1118,35 @@ impl Cladefsd for Control {
             forgotten: Some(forgotten_of(forgotten)),
         }))
     }
+
+    async fn reload_kms(
+        &self,
+        request: Request<ReloadKmsRequest>,
+    ) -> Result<Response<ReloadKmsResponse>, Status> {
+        use bucket_cell::bucket_kms::Unreloaded;
+        let ReloadKmsRequest {} = request.into_inner();
+        let reloaded = crate::bucket::reload_kms().await.map_err(|refused| {
+            let errno = match &refused {
+                Unreloaded::Malformed(_) => Errno::EINVAL,
+                Unreloaded::InUse(_) => Errno::EBUSY,
+                Unreloaded::Unreached(_) => Errno::EIO,
+                Unreloaded::Unsupported(_) => Errno::ENOTSUP,
+            };
+            log::error!("cladefsd: reloading the KMS: {refused}");
+            saying(errno, format!("reloading the KMS: {refused}"))
+        })?;
+        let ids = |ids: Vec<extent_keys::kms::master::MasterKeyId>| {
+            ids.iter().map(ToString::to_string).collect()
+        };
+        let master_keys = (reloaded.master_keys.into_iter())
+            .map(|changed| MasterKeysReloaded {
+                bucket: changed.bucket.into(),
+                added: ids(changed.added),
+                removed: ids(changed.removed),
+            })
+            .collect();
+        Ok(Response::new(ReloadKmsResponse { renamed: reloaded.renamed, master_keys }))
+    }
 }
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, as the API has it (TASK-411.7).
@@ -1542,6 +1571,13 @@ impl Client {
         let what = format!("shredding tenant {tenant}");
         let response = self.call(what, |mut c| async move { c.shred_tenant(request).await })?;
         Ok((response.shredded_now, response.forgotten.unwrap_or_default()))
+    }
+
+    /// cladefs: reloads what of the daemon's KMS configuration reloads live (`ReloadKms`, board
+    /// 8487): the tenants renamed, and the bucket KMSes whose master keys changed.
+    pub fn reload_kms(&self) -> Result<ReloadKmsResponse, crate::Error> {
+        let what = "reloading the daemon's KMS".to_owned();
+        self.call(what, |mut c| async move { c.reload_kms(ReloadKmsRequest {}).await })
     }
 
     /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,

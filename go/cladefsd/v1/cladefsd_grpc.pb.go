@@ -122,6 +122,7 @@ const (
 	Cladefsd_ShredCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
 	Cladefsd_ForgetTenantKeys_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
 	Cladefsd_ShredTenant_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
+	Cladefsd_ReloadKms_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ReloadKms"
 	Cladefsd_DecommissionHost_FullMethodName   = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
 	Cladefsd_ListEphemeralHosts_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/ListEphemeralHosts"
 	Cladefsd_MigrateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
@@ -291,6 +292,20 @@ type CladefsdClient interface {
 	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
 	// the tenant's KEK in that KMS, then ForgetTenantKeys.
 	ShredTenant(ctx context.Context, in *ShredTenantRequest, opts ...grpc.CallOption) (*ShredTenantResponse, error)
+	// Reloads what of the daemon's KMS configuration reloads live (board 8487, doc-16 What
+	// reloads): the key overrides file of each KMS named by a URL (its keys=FILE), and the master
+	// keys of each bucket KMS (CLADEFS_MASTER_KEY_FILE's, or CLADEFSD_BUCKET_<N>_'s for bucket N's),
+	// each read again as at the start, so that a tenant onboarded with a key of its own (BYOK), or a
+	// master key added, takes effect without a restart. Applied whole or not at all, a refusal
+	// changing nothing: a file not to be read, or holding a line that is not one, INVALID_ARGUMENT
+	// (EINVAL), naming the file and the line by its number; a change that would lose what is in use,
+	// FAILED_PRECONDITION (EBUSY): a tenant's key renamed (an override added, changed or removed)
+	// while it has cells in a bucket under that KMS, which would open no more, or a master key
+	// removed while the registry of buckets records it as its bucket's or a tenant's KEK object is
+	// under it; a bucket to check out of reach, INTERNAL (EIO); a daemon with no bucket of its own
+	// (CLADEFSD_BUCKET) to check against, FAILED_PRECONDITION (ENOTSUP). Each KMS's URL, credentials,
+	// and which KMS each bucket is under, stay the daemon's start's. Call it on every host.
+	ReloadKms(ctx context.Context, in *ReloadKmsRequest, opts ...grpc.CallOption) (*ReloadKmsResponse, error)
 	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): its tombstone
 	// written in every bucket the registry records, so that no host of it refers to a version from
 	// then on (a host of it refuses to fork, or to start, once it reads it); then the references
@@ -640,6 +655,16 @@ func (c *cladefsdClient) ShredTenant(ctx context.Context, in *ShredTenantRequest
 	return out, nil
 }
 
+func (c *cladefsdClient) ReloadKms(ctx context.Context, in *ReloadKmsRequest, opts ...grpc.CallOption) (*ReloadKmsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReloadKmsResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ReloadKms_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cladefsdClient) DecommissionHost(ctx context.Context, in *DecommissionHostRequest, opts ...grpc.CallOption) (*DecommissionHostResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DecommissionHostResponse)
@@ -843,6 +868,20 @@ type CladefsdServer interface {
 	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
 	// the tenant's KEK in that KMS, then ForgetTenantKeys.
 	ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error)
+	// Reloads what of the daemon's KMS configuration reloads live (board 8487, doc-16 What
+	// reloads): the key overrides file of each KMS named by a URL (its keys=FILE), and the master
+	// keys of each bucket KMS (CLADEFS_MASTER_KEY_FILE's, or CLADEFSD_BUCKET_<N>_'s for bucket N's),
+	// each read again as at the start, so that a tenant onboarded with a key of its own (BYOK), or a
+	// master key added, takes effect without a restart. Applied whole or not at all, a refusal
+	// changing nothing: a file not to be read, or holding a line that is not one, INVALID_ARGUMENT
+	// (EINVAL), naming the file and the line by its number; a change that would lose what is in use,
+	// FAILED_PRECONDITION (EBUSY): a tenant's key renamed (an override added, changed or removed)
+	// while it has cells in a bucket under that KMS, which would open no more, or a master key
+	// removed while the registry of buckets records it as its bucket's or a tenant's KEK object is
+	// under it; a bucket to check out of reach, INTERNAL (EIO); a daemon with no bucket of its own
+	// (CLADEFSD_BUCKET) to check against, FAILED_PRECONDITION (ENOTSUP). Each KMS's URL, credentials,
+	// and which KMS each bucket is under, stay the daemon's start's. Call it on every host.
+	ReloadKms(context.Context, *ReloadKmsRequest) (*ReloadKmsResponse, error)
 	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): its tombstone
 	// written in every bucket the registry records, so that no host of it refers to a version from
 	// then on (a host of it refuses to fork, or to start, once it reads it); then the references
@@ -974,6 +1013,9 @@ func (UnimplementedCladefsdServer) ForgetTenantKeys(context.Context, *ForgetTena
 }
 func (UnimplementedCladefsdServer) ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ShredTenant not implemented")
+}
+func (UnimplementedCladefsdServer) ReloadKms(context.Context, *ReloadKmsRequest) (*ReloadKmsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReloadKms not implemented")
 }
 func (UnimplementedCladefsdServer) DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecommissionHost not implemented")
@@ -1566,6 +1608,24 @@ func _Cladefsd_ShredTenant_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_ReloadKms_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReloadKmsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).ReloadKms(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_ReloadKms_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).ReloadKms(ctx, req.(*ReloadKmsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Cladefsd_DecommissionHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DecommissionHostRequest)
 	if err := dec(in); err != nil {
@@ -1768,6 +1828,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ShredTenant",
 			Handler:    _Cladefsd_ShredTenant_Handler,
+		},
+		{
+			MethodName: "ReloadKms",
+			Handler:    _Cladefsd_ReloadKms_Handler,
 		},
 		{
 			MethodName: "DecommissionHost",

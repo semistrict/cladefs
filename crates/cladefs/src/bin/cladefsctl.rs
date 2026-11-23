@@ -42,6 +42,7 @@
 //! cladefsctl shred-cell TENANT/CELL
 //! cladefsctl forget-tenant-keys TENANT
 //! cladefsctl shred-tenant TENANT
+//! cladefsctl kms reload
 //! cladefsctl decommission-host [--none-ok] INCARNATION
 //! cladefsctl ephemeral-hosts
 //! cladefsctl mount attach TENANT CELL [TOKEN]
@@ -186,6 +187,14 @@
 //! versions until a lifecycle rule expires them. A daemon of another KMS refuses it: destroy the
 //! tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
 //! value` a line.
+//!
+//! `kms reload`, through the daemon alone, is the control API's `ReloadKms` (board 8487, doc-16
+//! What reloads): the daemon reads its KMS's key overrides file (`keys=FILE`) and its master keys
+//! (`CLADEFS_MASTER_KEY_FILE`) again, applying them whole or refusing, changing nothing, naming
+//! the file and line of what is not one, or the tenant or master key in use a change would lose.
+//! Run it against every host's daemon. It prints `renamed TENANT` for each tenant whose KEK's name
+//! changed, then `master_key_added BUCKET ID` and `master_key_removed BUCKET ID` for each master key
+//! of a bucket KMS, one a line.
 //!
 //! `decommission-host` and `ephemeral-hosts`, through the daemon alone, are the control API's
 //! `DecommissionHost` and `ListEphemeralHosts` (doc-25, boards 8517, 8519, 8521).
@@ -357,6 +366,7 @@ fn usage() -> anyhow::Error {
          cladefsctl grant TENANT DIR [UID [GID]] | \
          cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
          cladefsctl forget-tenant-keys TENANT | cladefsctl shred-tenant TENANT | \
+         cladefsctl kms reload | \
          cladefsctl decommission-host [--none-ok] INCARNATION | cladefsctl ephemeral-hosts | \
          cladefsctl mount attach TENANT CELL [TOKEN] | \
          cladefsctl mount create TENANT CAPACITY [TOKEN] | \
@@ -377,6 +387,21 @@ fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> 
         "stores_halted {stores}\nrings_forgotten {rings}\nkept_dropped {kept}\n\
          extents_evicted {extents}\nbytes_evicted {bytes}\n"
     )
+}
+
+/// cladefs: what a reload of the daemon's KMS changed, one `name values` a line, tenants in base 32
+/// (board 8487).
+#[cfg(target_os = "linux")]
+fn reloaded_lines(reloaded: &cladefs::cladefsd::control::proto::ReloadKmsResponse) -> String {
+    let renamed =
+        (reloaded.renamed.iter()).map(|&tenant| format!("renamed {}\n", base32_id::Short(tenant)));
+    let keys = reloaded.master_keys.iter().flat_map(|keys| {
+        let added = keys.added.iter().map(|id| format!("master_key_added {} {id}\n", keys.bucket));
+        let removed =
+            keys.removed.iter().map(|id| format!("master_key_removed {} {id}\n", keys.bucket));
+        added.chain(removed)
+    });
+    renamed.chain(keys).collect()
 }
 
 /// What cladefsctl was asked to do. cladefs: what only the daemon does is read by `through`
@@ -553,6 +578,8 @@ enum Command {
     ShredTenant {
         tenant: u64,
     },
+    /// cladefs: the daemon's KMS configuration reloaded (board 8487).
+    KmsReload,
     /// cladefs: a host of incarnation `incarnation` decommissioned, retiring none refused unless
     /// `none_ok` (boards 8519, 8521).
     DecommissionHost {
@@ -778,6 +805,7 @@ impl Command {
             }
             ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
             ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
+            ["kms", "reload"] => Self::KmsReload,
             ["decommission-host", given] => {
                 Self::DecommissionHost { incarnation: incarnation(given)?, none_ok: false }
             }
@@ -922,6 +950,7 @@ impl Command {
                 let (now, forgotten) = daemon.shred_tenant(tenant)?;
                 print!("shredded_now {}\n{}", u8::from(now), forgotten_lines(&forgotten));
             }
+            Self::KmsReload => print!("{}", reloaded_lines(&daemon.reload_kms()?)),
             Self::DecommissionHost { incarnation, none_ok } => {
                 // Called again while the daemon left some, each call retiring its most (board
                 // 8523); one that retired none, of a listing it says is not empty, would never end.
@@ -1009,6 +1038,7 @@ impl Command {
             Self::ShredCell { .. } | Self::ForgetTenantKeys { .. } | Self::ShredTenant { .. } => {
                 Some("shredding and forgetting keys are")
             }
+            Self::KmsReload => Some("reloading the KMS is"),
             Self::DecommissionHost { .. } | Self::EphemeralHosts => {
                 Some("decommissioning hosts, and listing them, are")
             }
@@ -1180,6 +1210,7 @@ impl Command {
             | Self::ShredCell { .. }
             | Self::ForgetTenantKeys { .. }
             | Self::ShredTenant { .. }
+            | Self::KmsReload
             | Self::DecommissionHost { .. }
             | Self::EphemeralHosts
             | Self::Mount(_)

@@ -236,6 +236,20 @@ service Cladefsd {
   // not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
   // the tenant's KEK in that KMS, then ForgetTenantKeys.
   rpc ShredTenant(ShredTenantRequest) returns (ShredTenantResponse);
+  // Reloads what of the daemon's KMS configuration reloads live (board 8487, doc-16 What
+  // reloads): the key overrides file of each KMS named by a URL (its keys=FILE), and the master
+  // keys of each bucket KMS (CLADEFS_MASTER_KEY_FILE's, or CLADEFSD_BUCKET_<N>_'s for bucket N's),
+  // each read again as at the start, so that a tenant onboarded with a key of its own (BYOK), or a
+  // master key added, takes effect without a restart. Applied whole or not at all, a refusal
+  // changing nothing: a file not to be read, or holding a line that is not one, INVALID_ARGUMENT
+  // (EINVAL), naming the file and the line by its number; a change that would lose what is in use,
+  // FAILED_PRECONDITION (EBUSY): a tenant's key renamed (an override added, changed or removed)
+  // while it has cells in a bucket under that KMS, which would open no more, or a master key
+  // removed while the registry of buckets records it as its bucket's or a tenant's KEK object is
+  // under it; a bucket to check out of reach, INTERNAL (EIO); a daemon with no bucket of its own
+  // (CLADEFSD_BUCKET) to check against, FAILED_PRECONDITION (ENOTSUP). Each KMS's URL, credentials,
+  // and which KMS each bucket is under, stay the daemon's start's. Call it on every host.
+  rpc ReloadKms(ReloadKmsRequest) returns (ReloadKmsResponse);
   // Decommissions a host gone for good, of the incarnation given (backlog doc-25): its tombstone
   // written in every bucket the registry records, so that no host of it refers to a version from
   // then on (a host of it refuses to fork, or to start, once it reads it); then the references
@@ -1031,6 +1045,29 @@ message ShredTenantResponse {
   bool shredded_now = 1;
   // What this host forgot.
   Forgotten forgotten = 2;
+}
+
+// Reloads the daemon's KMS configuration.
+message ReloadKmsRequest {}
+
+// What a reload of the daemon's KMS configuration changed.
+message ReloadKmsResponse {
+  // The tenants, by their IDs in the bucket, whose KEKs' names changed, in order: an override
+  // added, changed or removed.
+  repeated uint64 renamed = 1;
+  // The bucket KMSes whose master keys changed.
+  repeated MasterKeysReloaded master_keys = 2;
+}
+
+// A bucket KMS's master keys reloaded.
+message MasterKeysReloaded {
+  // Its bucket's number in the registry of buckets: 0 for the daemon's own bucket, numbered none
+  // yet.
+  uint32 bucket = 1;
+  // The IDs of the master keys added, the newest first, each 16 hexadecimal digits.
+  repeated string added = 2;
+  // The IDs of the master keys removed.
+  repeated string removed = 3;
 }
 
 // What a host forgot of a tenant's or a cell's keys.

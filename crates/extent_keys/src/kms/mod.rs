@@ -38,7 +38,7 @@ pub mod vars;
 pub use azure::TOKEN_VAR as AZURE_TOKEN_VAR;
 pub use gcp::TOKEN_VAR as GCP_TOKEN_VAR;
 pub use local::{KekVersion, LOCAL_WRAPPED_LEN, LocalKms};
-pub use names::KeyNames;
+pub use names::{KeyNames, Staged};
 pub use trust::{Origin, Trust};
 pub use vars::{KMS_VAR, Vars};
 
@@ -64,6 +64,12 @@ pub trait Kms: Send + Sync + 'static {
     fn forget(&self, tenant: u64) {
         let _ = tenant;
     }
+
+    /// cladefs: how it names tenants' KEKs, if by [`KeyNames`]: what a reload of its `keys` file
+    /// changes (board 8487). A KMS naming them otherwise has none, as here.
+    fn names(&self) -> Option<&KeyNames> {
+        None
+    }
 }
 
 /// cladefs: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
@@ -77,6 +83,9 @@ pub trait Dyn: Send + Sync + 'static {
 
     /// [`Kms::forget`].
     fn forget_dyn(&self, tenant: u64);
+
+    /// [`Kms::names`].
+    fn names_dyn(&self) -> Option<&KeyNames>;
 }
 
 /// What a [`Dyn`] KMS's calls return.
@@ -93,6 +102,10 @@ impl<K: Kms> Dyn for K {
 
     fn forget_dyn(&self, tenant: u64) {
         self.forget(tenant)
+    }
+
+    fn names_dyn(&self) -> Option<&KeyNames> {
+        self.names()
     }
 }
 

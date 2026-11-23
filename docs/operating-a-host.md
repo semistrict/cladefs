@@ -252,6 +252,16 @@ asked. As for a cell, a bucket with
 versioning on needs non-current versions of `tenants/<tenant>/kek` expired, by
 the rule above. It is not BYOK: a tenant holding its own key uses a real KMS.
 
+**Reloading the KMS** (doc-16, What reloads). `cladefsctl kms reload` (`ReloadKms`),
+against every host's daemon, reads its `&keys=FILE` overrides and its
+`CLADEFS_MASTER_KEY_FILE` again, no restart: a tenant onboarded with its own key,
+or a master key added for a rotation (or dropped after it), takes effect at once.
+It applies all or nothing: a line that is no override fails it naming the line
+(`EINVAL`); renaming the key of a tenant with cells, or dropping a master key a
+KEK object or the registry still holds, fails it (`EBUSY`). The KMS's URL, its
+credentials, `CLADEFS_MASTER_KEY` itself and which KMS each bucket is under change
+only by a restart.
+
 **AWS KMS** (doc-16, Real KMSes: AWS KMS). `CLADEFS_KMS=aws-kms://REGION?key=TEMPLATE`,
 say `aws-kms://us-east-1?key=alias/cladefs-tenant-{tenant}`: each tenant's KEK is a
 symmetric KMS key, named by the template with `{tenant}` in base 32 (a key

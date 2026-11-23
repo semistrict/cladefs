@@ -594,6 +594,176 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     assert_eq!(failure(daemon.stat(&ours)), (Code::PermissionDenied, Errno::EACCES));
 }
 
+/// board 8487: a tenant added to the KMS's key overrides file (`keys=FILE`) while the daemon runs
+/// wraps under its own key (BYOK) from the next call on, `ReloadKms` reading the file again, no
+/// restart: before it, tenant 7's cells are refused, as the template names a key OpenBao lacks.
+/// A file with a line that is no override is refused (INVALID_ARGUMENT, EINVAL), naming the line,
+/// the overrides in use kept; so is renaming the key of a tenant with cells, or dropping its
+/// override (FAILED_PRECONDITION, EBUSY), as its cells would open no more (board 2062).
+#[test]
+fn key_overrides_reload_without_a_restart_openbao() {
+    use extent_keys::testing::openbao::DevServer;
+    let Some(bao) = DevServer::start() else { return };
+    bao.transit("transit");
+    for key in ["cladefs-tenant-1", "byok-7"] {
+        bao.bao(&["write", "-f", &format!("transit/keys/{key}")]);
+    }
+    bao.policy("cladefs", &DevServer::cladefs_policy("transit", "*"));
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
+    std::fs::write(&keys, "# tenants with keys of their own\n").unwrap();
+    let url = bao.url("transit", &format!("key=cladefs-tenant-{{tenant}}&keys={}", keys.display()));
+    let bucket = dir.path().join("bucket");
+    std::fs::create_dir(&bucket).unwrap();
+    // SAFETY: as in tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api.
+    unsafe {
+        std::env::remove_var("CLADEFS_MASTER_KEY");
+        std::env::set_var("CLADEFS_KMS", &url);
+        std::env::set_var(extent_keys::kms::openbao::TOKEN_ENV, bao.token("cladefs"));
+        std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display()));
+    }
+    let mut daemon = Daemon::new(dir.path());
+    let of = |tenant| cladefs::CellId { tenant, id: 0 };
+    let reload = |daemon: &mut Daemon| {
+        let reloaded = daemon.runtime.block_on(daemon.client.reload_kms(ReloadKmsRequest {}));
+        reloaded.map(tonic::Response::into_inner)
+    };
+    let seven = base32_id::Short(7).to_string();
+    daemon.create(&dir.path().join("one"), of(1), None).unwrap();
+    let early = daemon.create(&dir.path().join("early"), of(7), None);
+    assert_eq!(failure(early).0, Code::PermissionDenied);
+
+    std::fs::write(&keys, format!("# tenants with keys of their own\n{seven} byok-7\n")).unwrap();
+    let reloaded = reload(&mut daemon).unwrap();
+    assert_eq!(reloaded, ReloadKmsResponse { renamed: vec![7], master_keys: vec![] });
+    let byok = dir.path().join("byok");
+    daemon.create(&byok, of(7), None).unwrap();
+    let vm = daemon.open(&byok, CAPACITY);
+    write(&vm, &pattern(7), b"byok");
+    drop(vm);
+    daemon.sync(&byok).unwrap();
+    assert_eq!(reload(&mut daemon).unwrap(), ReloadKmsResponse::default());
+
+    let refusal = |daemon: &mut Daemon| {
+        let refused = reload(daemon).unwrap_err();
+        let errno = cladefs::cladefsd::control::errno(&refused).unwrap();
+        (refused.code(), errno, refused.message().to_owned())
+    };
+    std::fs::write(&keys, format!("{seven} byok-7\nnot-base-32! byok-8\n")).unwrap();
+    let malformed =
+        format!("reloading the KMS: {url}: the key overrides' line 2: no tenant in base 32");
+    assert_eq!(refusal(&mut daemon), (Code::InvalidArgument, Errno::EINVAL, malformed));
+    for overrides in [format!("{seven} byok-7b\n"), String::new()] {
+        std::fs::write(&keys, overrides).unwrap();
+        let (code, errno, message) = refusal(&mut daemon);
+        assert_eq!((code, errno), (Code::FailedPrecondition, Errno::EBUSY));
+        let renamed = format!(
+            "reloading the KMS: {url}: tenant 7's KEK would be renamed, and it has cells in the \
+             host's bucket ({seven}/"
+        );
+        assert!(message.starts_with(&renamed), "{message}");
+    }
+    // Every refusal kept the overrides in use: tenant 7's next cell is under byok-7 still, which
+    // OpenBao has, byok-7b not.
+    daemon.create(&dir.path().join("still"), of(7), None).unwrap();
+}
+
+/// board 8487: master keys added to `CLADEFS_MASTER_KEY_FILE` while the daemon runs are its from
+/// the next KEK object on, `ReloadKms` reading the file again; removing one is refused while a
+/// tenant's KEK object is under it, or the registry of buckets records it as the bucket's (board
+/// 8483), FAILED_PRECONDITION (EBUSY), and done once a rotation moved both to another; a file
+/// holding no key is refused (INVALID_ARGUMENT, EINVAL), the keys in use kept.
+#[test]
+fn master_keys_reload_without_a_restart_keeping_those_in_use() {
+    use bucket_cell::identity::{self, Asked, Details};
+    use extent_keys::kms::master::MasterKeys;
+    let hex = |byte: u8| format!("{byte:02x}").repeat(32);
+    let (a, b, c) = (hex(0xa1), hex(0xb2), hex(0xc3));
+    let id = |key: &str| MasterKeys::parse(key, "a test's").unwrap().newest().id().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("master-keys");
+    std::fs::write(&file, &a).unwrap();
+    std::fs::create_dir(dir.path().join("bucket")).unwrap();
+    let url = format!("file://{}", dir.path().join("bucket").display());
+    let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let details = Details { master_key_id: Some(id(&a)), ..Details::default() };
+    runtime.block_on(identity::format(&bucket, &details, Asked::default())).unwrap();
+    // SAFETY: as in tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api.
+    unsafe {
+        std::env::remove_var("CLADEFS_KMS");
+        std::env::remove_var("CLADEFS_MASTER_KEY");
+        std::env::set_var("CLADEFS_MASTER_KEY_FILE", &file);
+        std::env::set_var("CLADEFSD_BUCKET", &url);
+    }
+    let mut daemon = Daemon::new(dir.path());
+    let of = |tenant| cladefs::CellId { tenant, id: 0 };
+    let reload = |daemon: &mut Daemon| {
+        let reloaded = daemon.runtime.block_on(daemon.client.reload_kms(ReloadKmsRequest {}));
+        reloaded.map(tonic::Response::into_inner)
+    };
+    let refusal = |daemon: &mut Daemon| {
+        let refused = reload(daemon).unwrap_err();
+        let errno = cladefs::cladefsd::control::errno(&refused).unwrap();
+        (refused.code(), errno, refused.message().to_owned())
+    };
+    let changed = |added: &[&str], removed: &[&str]| ReloadKmsResponse {
+        renamed: vec![],
+        master_keys: vec![MasterKeysReloaded {
+            bucket: 1,
+            added: added.iter().map(|key| id(key)).collect(),
+            removed: removed.iter().map(|key| id(key)).collect(),
+        }],
+    };
+    daemon.create(&dir.path().join("one"), of(1), None).unwrap();
+
+    std::fs::write(&file, format!("{b}\n{a}\n")).unwrap();
+    assert_eq!(reload(&mut daemon).unwrap(), changed(&[&b], &[]));
+    daemon.create(&dir.path().join("two"), of(2), None).unwrap();
+
+    let busy = |why: String| (Code::FailedPrecondition, Errno::EBUSY, why);
+    std::fs::write(&file, &a).unwrap();
+    let sealed = format!(
+        "reloading the KMS: bucket 1: tenant 2's KEK object is under master key {}: rotate them \
+         under another first (cladefs-gc --rotate-master-key), then remove it",
+        id(&b)
+    );
+    assert_eq!(refusal(&mut daemon), busy(sealed));
+    std::fs::write(&file, &b).unwrap();
+    let recorded = format!(
+        "reloading the KMS: bucket 1: the registry of buckets records master key {} as its \
+         tenants' KEKs': rotate them under another first (cladefs-gc --rotate-master-key), then \
+         remove it",
+        id(&a)
+    );
+    assert_eq!(refusal(&mut daemon), busy(recorded));
+
+    let both = MasterKeys::parse(&format!("{b},{a}"), "a test's").unwrap();
+    let rotated = runtime.block_on(bucket_cell::bucket_kms::rotate(&bucket, &both)).unwrap();
+    assert_eq!((rotated.rewrapped, rotated.newest, rotated.refused.len()), (1, 1, 0));
+    let recorded = runtime.block_on(identity::record_master_key(&bucket, 1, &id(&b)));
+    assert!(recorded.unwrap().is_some());
+    assert_eq!(reload(&mut daemon).unwrap(), changed(&[], &[&a]));
+    daemon.create(&dir.path().join("three"), of(3), None).unwrap();
+
+    std::fs::write(&file, &c).unwrap();
+    let recorded = format!(
+        "reloading the KMS: bucket 1: the registry of buckets records master key {} as its \
+         tenants' KEKs': rotate them under another first (cladefs-gc --rotate-master-key), then \
+         remove it",
+        id(&b)
+    );
+    assert_eq!(refusal(&mut daemon), busy(recorded));
+    std::fs::write(&file, "not a key").unwrap();
+    let malformed = format!(
+        "reloading the KMS: bucket 1's bucket KMS: CLADEFS_MASTER_KEY_FILE {}: key 1 of 3: not 64 \
+         hexadecimal digits",
+        file.display()
+    );
+    assert_eq!(refusal(&mut daemon), (Code::InvalidArgument, Errno::EINVAL, malformed));
+    daemon.create(&dir.path().join("four"), of(4), None).unwrap();
+}
+
 /// TASK-537.3.1 (doc-21): CreateCell gives a cell its replication, its f and what its fsync waits
 /// for, in its head, which StatCell reports of the open cell; a taking that asks for nothing, on
 /// any host, keeps them, and one that asks for another changes them. Asks no f can satisfy are

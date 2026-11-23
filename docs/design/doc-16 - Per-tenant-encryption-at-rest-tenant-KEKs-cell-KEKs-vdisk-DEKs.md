@@ -720,7 +720,8 @@ refuses to start) and removed plaintext (One sealed mode).
   deleted outright, no tombstone, is made anew at the next wrap, as the marker no longer tells;
   what the old KEK wrapped is lost, as shredding loses it.)*
 - **Rotating the master key.** (1) Give every host `CLADEFS_MASTER_KEY=NEW,OLD` and restart its
-  processes: from then on they unwrap under either and make new KEK objects under NEW (a host
+  processes, or, keys given in `CLADEFS_MASTER_KEY_FILE`, write `NEW OLD` there and reload each
+  daemon (`cladefsctl kms reload`, What reloads, below; board 8487): from then on they unwrap under either and make new KEK objects under NEW (a host
   still given OLD alone refuses those tenants, naming NEW's ID: update every host first). (2) Run
   `cladefs-gc URL --rotate-master-key` with the same variable: every tenant's KEK object under OLD is
   rewrapped under NEW by a conditional update (read again and done again if another changed it),
@@ -735,8 +736,9 @@ refuses to start) and removed plaintext (One sealed mode).
   left naming OLD, step (3) would lock them out of the bucket's cells at their next restart. URL
   names the bucket rotated, the root or any other, its other buckets reached as its hosts reach
   them (`CLADEFSD_BUCKET_<N>_*`). (3) Give hosts NEW alone, the bucket's own
-  (`CLADEFS_MASTER_KEY`) and those of other buckets (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`).
-  With versioning on, OLD still opens the objects' non-current versions until they expire.
+  (`CLADEFS_MASTER_KEY`) and those of other buckets (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`),
+  by a restart, or by their files and a reload, which refuses dropping OLD while a KEK object is
+  under it or the registry records it. With versioning on, OLD still opens the objects' non-current versions until they expire.
 - **Shredding a tenant** (`ShredTenant`, `cladefsctl shred-tenant TENANT`, through each host's
   daemon; `cladefs::bucket::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
   tenant's KEK object is replaced by a tombstone, by a conditional update (or created one, a tenant
@@ -773,6 +775,72 @@ refuses to start) and removed plaintext (One sealed mode).
   `tests/control.rs` `tenants_sealed_under_the_bucket_kms_and_shredded_through_the_control_api`.
   Hand mutants (no marker read, a racing create keeping its own KEK, no tombstone written) each
   failed two or three of them.
+
+## What reloads (board 8487)
+
+A host's KMS configuration was the start's alone: onboarding a tenant with a key of its own
+(BYOK), or adding a master key, restarted every host's `cladefsd`, a drain of the host and its VMs
+(board 1578). `ReloadKms` (`cladefsctl kms reload`, through each host's daemon;
+`cladefs::bucket::reload_kms`, `bucket_kms::ByBucket::reload`) reads again, as at the start:
+
+- **The key overrides** (`keys=FILE`) of every KMS the daemon holds that a URL names, the host's
+  (`CLADEFS_KMS`) and each bucket's (`CLADEFSD_BUCKET_<N>_CLADEFS_KMS`): parsed and checked as at
+  the start (`kms::KeyNames::reread`, each name by its backend's check), then swapped in whole, the
+  backend's calls naming tenants' KEKs by them from the next on (`Staged::apply`). The daemon's
+  pools of new cell KEKs of each tenant renamed, wrapped under the old name, are dropped
+  (`keys::CachingKms::renamed`), so that its next cell's KEK is wrapped under the new one.
+- **The master keys** of every bucket KMS the daemon holds, `CLADEFS_MASTER_KEY_FILE`'s (or
+  `CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY_FILE`'s): a key added wraps the next KEK objects made,
+  if newest, and unwraps those under it at once.
+
+All or nothing, a refusal changing nothing, with an errno for the caller:
+
+- `EINVAL`: a file not to be read, or holding what is not one: the overrides' line named by its
+  number alone (`the key overrides' line N: ...`, as at the start: never what it holds, board
+  8525), a master key by its place (`key N of M`), or no key at all.
+- `EBUSY`: a change that would lose what is in use. A tenant's KEK renamed (an override added,
+  changed or removed) while the tenant has cells in a bucket under that KMS, the host's own or one
+  it reached under it so far: their KEKs are wrapped under the old name, which a real backend's
+  unwrap checks, and they would open no more (TASK-411.20, board 2062, has no rewrap yet): the
+  reload names the tenant and one of its cells. A cell deleted counts until the collector
+  has removed its objects: refused rather than guessed. A master key removed while the registry of
+  buckets records it as its bucket's (`master_key_id`, board 8483), or while a tenant's KEK object
+  in its bucket is under it (a listing of every tenant's, as `rotate` lists them): rotate first.
+- `EIO`: a bucket to check that answers a request not within 30 s (`RELOAD_WITHIN`), each
+  request bounded alone, so that a bucket of many tenants is listed however long it takes.
+- `ENOTSUP`: a daemon with no bucket of its own (`CLADEFSD_BUCKET`), which has none to check
+  renames against.
+
+Reloads are one at a time (`ByBucket::reloading`), so that what one checked is what it applies.
+A reload removing master keys of a bucket KMS fences the making of its KEK objects
+(`BucketKms::fenced`): it waits for those being made, and new tenants' first KEKs there wait for
+it, from before its check of the KEK objects until its keys are in use, so that none is sealed
+under a key removed unseen by the check (hotbed reviews 78, 79). Other hosts are another matter:
+one still given the key as its newest seals under it after this host's check, which is why a
+rotation gives every host the new key first.
+A cell made by another call while the reload runs, of a tenant it renames, may take a new cell KEK
+wrapped under the old name in the instant between the swap and the pools' drop: such a tenant had
+no cells as the reload checked, so this is a tenant onboarded while its first cells are made, which
+an operator orders the other way. Each host checks the buckets it reaches; every host reloads.
+
+**Boot-only, still:** which KMS each bucket is under and its URL (`CLADEFS_KMS`'s scheme, host,
+key template and other parameters, the registry's `kms`, `CLADEFSD_BUCKET_<N>_CLADEFS_KMS`), and
+the files' paths (`keys=FILE`'s, `CLADEFS_MASTER_KEY_FILE`'s), as the environment is read once
+(board 8593); every credential (the host's and buckets' `CLADEFS_KMS_OPENBAO_TOKEN`, `AWS_*`,
+`GOOGLE_*`, `AZURE_*`; OpenBao's token in a file is read again when OpenBao refuses the one
+held, as before);
+`CLADEFS_MASTER_KEY` itself, a variable no running process sees change; the bucket KMS chosen
+over a named one, or the reverse. A bucket the daemon first reaches after its file changed reads
+the file as it is then, as before: its KMS is made then, unchecked (board 10466). Changing those is a restart (a drain).
+
+Tests: `cladefs` `control` `key_overrides_reload_without_a_restart_openbao` (a tenant added while
+the daemon runs wraps under its own key at the next call, refused before; a malformed line named,
+the overrides kept; a renamed or dropped override of a tenant with cells refused), and
+`master_keys_reload_without_a_restart_keeping_those_in_use` (a key added; removals refused while
+a KEK object is under the key, or the registry records it, done after a rotation; a file holding
+no key refused, the keys kept); `extent_keys` `names::tests::
+reloads_name_the_tenants_they_rename_and_apply_whole` (the renamed tenants, malformed lines, and
+a reload read before another applied refused).
 
 ## Real KMSes: AWS KMS
 

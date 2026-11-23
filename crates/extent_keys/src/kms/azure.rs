@@ -146,17 +146,14 @@ fn parse(url: &str, origin: Origin) -> Result<Parsed, String> {
         None => format!("https://{host}"),
     };
     let query_pairs = query.iter().map(|(name, value)| (&name[..], &value[..]));
-    let names = KeyNames::of_query(query_pairs, origin).map_err(|why| format!("{url:?}: {why}"))?;
+    let names = KeyNames::of_query(query_pairs, origin, check_key)
+        .map_err(|why| format!("{url:?}: {why}"))?;
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
     // A template naming keys whole names their vault: one the host allows, as the template has it,
     // so that a vault a tenant's ID makes (`https://t{tenant}.vault.azure.net/...`) is none.
     if let Some(rest) = names.template().strip_prefix("https://") {
         let vault = rest.split('/').next().unwrap_or_default();
         origin.host(vault, None).map_err(|why| format!("{url:?}: the key template, {why}"))?;
-    }
-    for (tenant, name) in names.overridden() {
-        check_key(name)
-            .map_err(|why| format!("{url:?}: tenant {}'s key, {why}", base32_id::Short(tenant)))?;
     }
     let audience = audience_of(host).expect("a vault's host, checked");
     Ok(Parsed { vault, audience, names, alg })
@@ -750,6 +747,10 @@ impl Kms for AzureKms {
     ) -> impl Future<Output = Result<Secret, Error>> + Send {
         let (inner, wrapped) = (self.inner.clone(), wrapped.clone());
         self.runtime.run(tenant, async move { inner.unwrap_now(tenant, &wrapped).await })
+    }
+
+    fn names(&self) -> Option<&KeyNames> {
+        Some(&self.inner.names)
     }
 }
 

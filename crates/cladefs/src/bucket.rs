@@ -16,7 +16,7 @@
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
-use bucket_cell::bucket_kms::{BucketKms, ByBucket};
+use bucket_cell::bucket_kms::{BucketKms, ByBucket, Unreloaded};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
 use bucket_cell::identity::{Asked, Details, Identity, Registry};
@@ -528,6 +528,27 @@ pub async fn shred_tenant(
         ));
     }
     Ok((destroyed, forgotten))
+}
+
+/// cladefs: reloads what of the host's KMS configuration reloads live (board 8487; doc-16, What
+/// reloads), as [`ByBucket::reload`] does, whole or not at all; then has its pools of new cell KEKs
+/// of each tenant renamed dropped, wrapped under the old name as they are
+/// ([`keys::CachingKms::renamed`]). Refused, changing nothing, by a host with no KMSes by bucket
+/// (no `CLADEFSD_BUCKET`, or no KMS at all), which has no bucket to check renames against.
+pub async fn reload_kms() -> Result<bucket_cell::bucket_kms::Reloaded, Unreloaded> {
+    let unsupported = |why: String| Unreloaded::Unsupported(format!("the host's KMS: {why}"));
+    let keys = host_keys().as_ref().map_err(|why| unsupported(why.clone()))?;
+    let by_bucket = keys.by_bucket.as_ref().ok_or_else(|| {
+        unsupported("reloads with a bucket of the host's own alone (CLADEFSD_BUCKET)".to_owned())
+    })?;
+    let reloaded = by_bucket.reload().await?;
+    // Its KMS, if it made it: one not made yet pooled nothing.
+    if let Some(kms) = POOLED.get().get() {
+        for &tenant in &reloaded.renamed {
+            kms.renamed(tenant);
+        }
+    }
+    Ok(reloaded)
 }
 
 /// cladefs: a KMS the environment chose that can't be had (a bad `CLADEFS_KMS`, master keys

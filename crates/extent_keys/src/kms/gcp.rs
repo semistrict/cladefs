@@ -116,13 +116,10 @@ fn parse(url: &str, origin: Origin) -> Result<(String, KeyNames), String> {
         return Err(format!("{url:?}: no parameter {name:?}: {usage}"));
     }
     let query_pairs = query.iter().map(|(name, value)| (&name[..], &value[..]));
-    let names = KeyNames::of_query(query_pairs, origin).map_err(|why| format!("{url:?}: {why}"))?;
+    let names = KeyNames::of_query(query_pairs, origin, check_key)
+        .map_err(|why| format!("{url:?}: {why}"))?;
     // The template, as the longest tenant names it: its other tenants' names are as valid.
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
-    for (tenant, name) in names.overridden() {
-        check_key(name)
-            .map_err(|why| format!("{url:?}: tenant {}'s key, {why}", base32_id::Short(tenant)))?;
-    }
     Ok((ring.to_owned(), names))
 }
 
@@ -469,6 +466,10 @@ impl Kms for GcpKms {
     ) -> impl Future<Output = Result<Secret, Error>> + Send {
         let (inner, wrapped) = (self.inner.clone(), wrapped.clone());
         self.runtime.run(tenant, async move { inner.unwrap_now(tenant, &wrapped).await })
+    }
+
+    fn names(&self) -> Option<&KeyNames> {
+        Some(&self.inner.names)
     }
 }
 

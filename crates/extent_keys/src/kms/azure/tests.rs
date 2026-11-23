@@ -20,7 +20,7 @@ fn overrides_naming_no_vault_are_refused() {
     let refused = parse(&url, Origin::Host).unwrap_err();
     assert!(
         refused.starts_with(&format!(
-            "{url:?}: tenant 7's key, \"https://evil.example/keys/x\", names no key: \"evil.example\" is no vault's host"
+            "{url:?}: the key overrides' line 1: tenant 7's key, \"https://evil.example/keys/x\", names no key: \"evil.example\" is no vault's host"
         )),
         "{refused}"
     );

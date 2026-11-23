@@ -223,8 +223,8 @@ impl OpenBao {
         if ca.is_some() {
             origin.file("ca=FILE").map_err(|why| at(&why))?;
         }
-        let names = KeyNames::of_query(query.iter().map(|(n, v)| (n.as_str(), v.as_str())), origin)
-            .map_err(|why| at(&why))?;
+        let query_pairs = query.iter().map(|(n, v)| (n.as_str(), v.as_str()));
+        let names = KeyNames::of_query(query_pairs, origin, key_name).map_err(|why| at(&why))?;
         key_name(&names.of(0)).map_err(|why| at(&why))?;
         let namespace = (namespace.map(HeaderValue::from_str).transpose())
             .map_err(|_| at(&"the namespace is no HTTP header's value"))?;
@@ -284,6 +284,10 @@ impl Kms for OpenBao {
         let inner = self.inner.clone();
         let request = inner.decryption(tenant, wrapped);
         self.run(tenant, async move { inner.unwrap(tenant, request?).await })
+    }
+
+    fn names(&self) -> Option<&KeyNames> {
+        Some(&self.inner.names)
     }
 }
 
