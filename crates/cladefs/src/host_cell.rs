@@ -516,12 +516,14 @@ pub(crate) fn unmade(path: &Path) -> bool {
 
 /// Removes what a making that failed left at `path`, if anything, as a cell directory goes
 /// (`local_cell::remove_cell_dir`): logged if it can't, as the failure the caller returns is
-/// the making's.
+/// the making's, and no cell from then on in this process, which a making there again removes
+/// first ([`unmade`], `local_cell::left_unmade`, board 10506).
 pub(crate) fn discard(path: &Path) {
     if host_fs::exists(&path)
         && let Err(err) = local_cell::remove_cell_dir(path)
     {
         log::warn!("cladefs: removing {}, which a making left: {err:#}", path.display());
+        local_cell::left_unmade(path);
     }
 }
 
