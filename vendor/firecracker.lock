@@ -1108,6 +1108,7 @@ dependencies = [
  "fxfs",
  "fxfs-posix",
  "host_fs",
+ "http-body",
  "humantime",
  "hyper-util",
  "libc",

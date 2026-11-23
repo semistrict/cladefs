@@ -13,6 +13,7 @@
 use super::cells;
 use super::disk;
 use super::grants::Grants;
+use super::grpc::Served;
 use super::memory;
 use crate::Errno;
 use bucket_cell::cell::Kind;
@@ -109,12 +110,14 @@ pub fn serve_control(
         tonic::transport::Server::builder()
             .add_service(health)
             // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
-            // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's.
-            .add_service(Drained(
+            // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's. Its
+            // calls counted and traced, refusals as the daemon drains among them (board 8565,
+            // board 8569).
+            .add_service(Served::new(Drained(
                 CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
-            ))
+            )))
             // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
-            .add_optional_service(super::mount::service().map(Drained))
+            .add_optional_service(super::mount::service().map(|mount| Served::new(Drained(mount))))
             .serve_with_incoming(incoming)
             .await
             .map_err(std::io::Error::other)
@@ -141,9 +144,9 @@ pub async fn serve_control(
     });
     CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
     tonic::transport::Server::builder()
-        .add_service(Drained(
+        .add_service(Served::new(Drained(
             CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
-        ))
+        )))
         .serve(address)
         .await
         .map_err(std::io::Error::other)
@@ -285,8 +288,10 @@ where
         };
         // cladefs: in a task of its own, which runs to its end, counted until then, whether or not
         // its caller waits for the answer (board 5599): a caller's deadline, or its stream reset,
-        // drops what awaits it, which stops at whatever await it was in otherwise.
-        let answered = self.0.call(request);
+        // drops what awaits it, which stops at whatever await it was in otherwise. Its span, the
+        // one current as it is called (`grpc::Served`), current as the task runs, the parent of
+        // what the call does (board 8569).
+        let answered = bucket_cell::trace::Parent::current().around(self.0.call(request));
         let detached = crate::caller::detached(async move {
             let answered = answered.await;
             drop(call);

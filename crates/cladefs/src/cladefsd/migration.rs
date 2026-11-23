@@ -45,7 +45,6 @@
 //! The target serves one request of a cell's migrations at a time, each run to its end however
 //! its asker goes, its bucket calls bounded (board 5732).
 
-use super::peers::proto::peer_client::PeerClient;
 use super::peers::proto::{
     FileDigest, MigrateAbortRequest, MigrateFileRequest, MigrateHandOverRequest,
     MigratePrepareRequest, MigratePrepareResponse, MigrateReleaseRequest, MigrateRenewRequest,
@@ -58,6 +57,7 @@ use host_fs::FileExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::Status;
@@ -110,7 +110,7 @@ struct Outgoing {
     peer: String,
     incarnation: u64,
     token: u64,
-    client: PeerClient<tonic::transport::Channel>,
+    client: super::peers::Client,
     sent: tokio::sync::Mutex<HashMap<String, (u64, u64)>>,
     stopped: std::sync::atomic::AtomicBool,
 }
@@ -118,7 +118,7 @@ struct Outgoing {
 impl Outgoing {
     fn new(
         Marker { migration, peer, incarnation, token }: Marker,
-        client: PeerClient<tonic::transport::Channel>,
+        client: super::peers::Client,
     ) -> Self {
         let sent = tokio::sync::Mutex::default();
         let stopped = std::sync::atomic::AtomicBool::new(false);
@@ -149,6 +149,50 @@ enum Underway {
 node_local::node_local! {
     /// The migrations from this host, by their cells' paths.
     static OUTGOING: Mutex<BTreeMap<PathBuf, Underway>> = Mutex::new(BTreeMap::new());
+}
+
+/// cladefs: what migrations did since the daemon started, for its metrics (board 8565): as a source,
+/// those prepared at their targets, those whose prepare failed, aborted, their rounds, the bytes they
+/// sent, their hand-overs accepted and refused, and those their targets gave up; as a target, the
+/// bytes taken, and the migrations given up, aborted by their sources or idle.
+#[derive(Default)]
+pub(super) struct Counts {
+    pub prepared: AtomicU64,
+    pub aborted: AtomicU64,
+    pub rounds: AtomicU64,
+    pub sent_bytes: AtomicU64,
+    pub accepted: AtomicU64,
+    pub refused: AtomicU64,
+    pub given_up: AtomicU64,
+    pub taken_bytes: AtomicU64,
+    pub taken_given_up: AtomicU64,
+}
+
+/// cladefs: [`Counts`]' of the daemon.
+// The process's counts, every simulated host's together, as a process's metrics are.
+pub(super) static COUNTS: Counts = Counts {
+    prepared: AtomicU64::new(0),
+    aborted: AtomicU64::new(0),
+    rounds: AtomicU64::new(0),
+    sent_bytes: AtomicU64::new(0),
+    accepted: AtomicU64::new(0),
+    refused: AtomicU64::new(0),
+    given_up: AtomicU64::new(0),
+    taken_bytes: AtomicU64::new(0),
+    taken_given_up: AtomicU64::new(0),
+};
+
+/// cladefs: counts `n` more in `count` ([`COUNTS`]).
+fn count(count: &AtomicU64, n: u64) {
+    count.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// cladefs: the migrations under way here, for the daemon's metrics (board 8565): from this host,
+/// being prepared and moving (rounds, then their hand-overs); and to it, being taken.
+pub(super) fn under_way() -> (usize, usize, usize) {
+    let outgoing = OUTGOING.get().lock().unwrap();
+    let preparing = outgoing.values().filter(|under| matches!(under, Underway::Preparing)).count();
+    (preparing, outgoing.len() - preparing, target::being_taken())
 }
 
 /// The path of a cell whose migration is being prepared, held in [`OUTGOING`] from before the
@@ -188,7 +232,7 @@ fn status(what: impl std::fmt::Display, err: impl std::fmt::Display) -> Status {
 }
 
 /// A client of the peer at `address`.
-fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno> {
+fn client(address: &str) -> Result<super::peers::Client, Errno> {
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
     super::peers::member(&runtime, address).map_err(|err| {
         log::warn!("cladefsd: migrating to {address}: {err}");
@@ -271,9 +315,11 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
                 if let Err(err) = client.migrate_abort(abort).await {
                     log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
                 }
+                count(&COUNTS.aborted, 1);
                 return Err(refusal(&refused));
             }
         };
+    count(&COUNTS.prepared, 1);
     let marker = Marker { migration, peer, incarnation, token };
     let outgoing = Arc::new(Outgoing::new(marker, client));
     reserved.begin(outgoing.clone());
@@ -284,6 +330,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
             if let Err(err) = round(&outgoing, &path).await {
                 log::warn!("cladefsd: migration {:x}'s round: {err}", outgoing.migration);
             }
+            count(&COUNTS.rounds, 1);
             if renewed.elapsed() >= RENEW {
                 renew(&outgoing).await;
                 renewed = tokio::time::Instant::now();
@@ -298,7 +345,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
 /// is lost, [`PREPARE_TRIES`] times at most (board 5734): the target's answer, or the last
 /// failure.
 async fn prepare_retrying(
-    client: &mut PeerClient<tonic::transport::Channel>,
+    client: &mut super::peers::Client,
     prepare: MigratePrepareRequest,
 ) -> Result<MigratePrepareResponse, Status> {
     let mut tries = 0;
@@ -374,6 +421,7 @@ async fn renew(outgoing: &Outgoing) {
         Err(gone) if gone.code() == tonic::Code::NotFound => {
             log::warn!("cladefsd: migration {:x} given up by its target", outgoing.migration);
             outgoing.stopped.store(true, std::sync::atomic::Ordering::Release);
+            count(&COUNTS.given_up, 1);
         }
         Err(err) => log::info!("cladefsd: renewing migration {:x}: {err}", outgoing.migration),
     }
@@ -468,6 +516,7 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
             .map_err(|err| status(relative, err))?
             .map_err(|err| status(relative, err))?
         };
+        let sent = bytes.len() as u64;
         let request = MigrateFileRequest {
             migration: outgoing.migration,
             path: relative.to_owned(),
@@ -477,6 +526,7 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
             holes: if piece == last { holes.clone() } else { Vec::new() },
         };
         client.migrate_file(request).await?;
+        count(&COUNTS.sent_bytes, sent);
     }
     Ok(allocated)
 }
@@ -630,9 +680,11 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
             Errno::EIO
         })?;
         OUTGOING.get().lock().unwrap().remove(&path);
+        count(&COUNTS.refused, 1);
         return Err(Errno::EAGAIN);
     }
     OUTGOING.get().lock().unwrap().remove(&path);
+    count(&COUNTS.accepted, 1);
     // Accepted: noted so in the cell's entry, durably, then let go of, as asking again, or the
     // daemon starting again, finds it noted (board 5730).
     let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
@@ -866,6 +918,11 @@ pub(super) mod target {
         /// what a peer stages (board 8451). Like [`PREPARED`] and [`HEARD`], of migrations the
         /// journal names being taken alone: each goes as its migration does.
         static STAGING: Mutex<HashMap<u64, local_cell::HostDir>> = Mutex::new(HashMap::new());
+    }
+
+    /// cladefs: how many migrations this daemon takes, prepared and not yet gone (board 8565).
+    pub(super) fn being_taken() -> usize {
+        PREPARED.get().lock().unwrap().len()
     }
 
     /// cladefs: forgets migration `migration`, being taken here no more (board 8451): what
@@ -1337,6 +1394,7 @@ pub(super) mod target {
         };
         if !bytes.is_empty() {
             file.write_at(&bytes, offset).map_err(failed)?;
+            count(&COUNTS.taken_bytes, bytes.len() as u64);
         }
         // Its length, past its last data a hole, which its holes' punching gives back.
         if len > file.size().map_err(failed)? {
@@ -1493,7 +1551,9 @@ pub(super) mod target {
             return Ok(());
         }
         let Some((_taking, entry)) = held(&host, migration).await? else { return Ok(()) };
-        refuse(&host, &entry).await
+        refuse(&host, &entry).await?;
+        count(&COUNTS.taken_given_up, 1);
+        Ok(())
     }
 
     /// Gives up the migration taking `entry`'s cell: its cell, if taken into place, then its
@@ -1584,6 +1644,7 @@ pub(super) mod target {
                 entry.child
             );
             refuse(&host, &entry).await?;
+            count(&COUNTS.taken_given_up, 1);
         }
         Ok(())
     }

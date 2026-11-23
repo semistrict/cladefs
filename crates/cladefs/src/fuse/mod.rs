@@ -43,4 +43,4 @@ mod server;
 
 #[cfg(target_os = "linux")]
 pub use mount::{CellsMount, Mount, MountOptions, Unmounter};
-pub use server::{Attached, Notifier, Server};
+pub use server::{Attached, Counts, Notifier, Server};

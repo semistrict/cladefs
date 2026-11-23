@@ -17,6 +17,7 @@
 //! asked it (board 8445, `local_cell::replica::admit`), read for the call; and a refusal says
 //! nothing of this host's bucket.
 
+use super::grpc::Served;
 use crate::bucket::peers::{Asked, Link, Peers, Refusal, Region, admits};
 use bucket_cell::object_bucket::RoutedBucket;
 use futures::FutureExt as _;
@@ -328,7 +329,8 @@ fn router(server: Server) -> std::io::Result<tonic::transport::server::Router> {
         .max_concurrent_streams(Some(STREAMS_MOST))
         .tls_config(credentials.server)
         .map_err(std::io::Error::other)?;
-    Ok(builder.add_service(Limited::new(server)))
+    // cladefs: its calls counted and traced (board 8565, board 8569).
+    Ok(builder.add_service(Served::new(Limited::new(server))))
 }
 
 /// cladefs: the peer service of `server` under madsim, whose network has no TLS, nor limits of
@@ -342,7 +344,7 @@ fn router(server: Server) -> std::io::Result<tonic::transport::server::Router> {
     Ok(tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(KEEPALIVE))
         .http2_keepalive_timeout(Some(CONNECT))
-        .add_service(service))
+        .add_service(Served::new(service)))
 }
 
 /// cladefs: the peer service, each call's messages decoded to what it needs at most (board 8437):
@@ -1237,16 +1239,13 @@ fn link(
     // Its address checked, and the credentials as the daemon started.
     let endpoint = endpoint(address).expect("a peer's address checked, the credentials read");
     let endpoint = endpoint.connect_timeout(CONNECT).timeout(DEADLINE).tcp_nodelay(true);
-    let client = PeerClient::new(endpoint.connect_lazy());
+    let client = made(endpoint.connect_lazy());
     Arc::new(Grpc { client, bucket: bucket.to_owned(), region })
 }
 
 /// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime, on a
 /// channel of its own ([`channel`]).
-pub(crate) fn member(
-    runtime: &tokio::runtime::Handle,
-    address: &str,
-) -> Result<PeerClient<Channel>, String> {
+pub(crate) fn member(runtime: &tokio::runtime::Handle, address: &str) -> Result<Client, String> {
     Ok(client(&channel(runtime, address)?))
 }
 
@@ -1267,9 +1266,25 @@ fn channel(runtime: &tokio::runtime::Handle, address: &str) -> Result<Channel, S
 }
 
 /// cladefs: a client of a member on `channel`, its messages [`MESSAGE_MOST`] at most.
-fn client(channel: &Channel) -> PeerClient<Channel> {
-    let client = PeerClient::new(channel.clone());
+fn client(channel: &Channel) -> Client {
+    let client = made(channel.clone());
     client.max_decoding_message_size(MESSAGE_MOST).max_encoding_message_size(MESSAGE_MOST)
+}
+
+/// cladefs: a client of a peer, its calls counted and traced, each sending its trace's context to
+/// the peer (`super::grpc::Made`, board 8565, board 8569); under madsim, whose tonic's clients take
+/// its channel alone, a plain one.
+#[cfg(not(madsim))]
+pub(crate) type Client = PeerClient<super::grpc::Made<Channel>>;
+#[cfg(madsim)]
+pub(crate) type Client = PeerClient<Channel>;
+
+/// cladefs: a [`Client`] on `channel`.
+fn made(channel: Channel) -> Client {
+    #[cfg(not(madsim))]
+    return PeerClient::new(super::grpc::Made::new(channel, super::grpc::PEER));
+    #[cfg(madsim)]
+    PeerClient::new(channel)
 }
 
 /// cladefs: the channels to the members, one per address (board 8575): every replicated cell's
@@ -1642,7 +1657,7 @@ impl GrpcMember {
 
 /// A peer reached over gRPC.
 struct Grpc {
-    client: PeerClient<tonic::transport::Channel>,
+    client: Client,
     bucket: String,
     region: Option<Region>,
 }

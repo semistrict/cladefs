@@ -1124,3 +1124,82 @@ fn streams_admitted_by_noted_heads_trim_nothing() {
     }));
     assert_eq!(replicas.cells().unwrap(), [(cell, vec![key(1), key(2), key(3)])]);
 }
+
+/// cladefs: the value of the series `series`, as the daemon's metrics render it now.
+fn metric(series: &str) -> Option<u64> {
+    let metrics = super::super::metrics::render();
+    let line = metrics.lines().find_map(|line| line.strip_prefix(series)?.strip_prefix(' '));
+    line.map(|value| value.parse().unwrap())
+}
+
+/// board 8569, board 8565: a call a host makes of a peer within a span sends its trace's context
+/// (W3C's `traceparent`), and the peer's span of the call is a child of the caller's, on its
+/// trace: a span of each side, the client's a child of the span it was made in. Each side counts
+/// it in its gRPC metrics, by method, a failure as failed. Before, no call carried context, every
+/// span the peer made beginning a trace of its own, and no call was counted.
+#[test]
+fn peer_calls_carry_their_trace_and_are_counted_on_both_sides() {
+    use opentelemetry::trace::{SpanKind, TraceContextExt as _};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SimpleSpanProcessor};
+    let dir = tempfile::tempdir().unwrap();
+    let (address, _replicas) = member(dir.path(), true);
+    // Once the member serves, its bucket made: the in-memory exporter exports as each span ends,
+    // which the bucket's making, on futures' executor, may not.
+    let exporter = InMemorySpanExporter::default();
+    let processor = SimpleSpanProcessor::new(exporter.clone());
+    let export = super::super::zpages::tracez::Export::new(processor, Box::new(Sampler::AlwaysOn));
+    super::super::otel::install(Sampler::AlwaysOn, Some(export));
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let mut client = super::member(&runtime, &address).unwrap();
+    let asking_within = bucket_cell::trace::Span::start("a writer's work");
+    let caller = asking_within.context().unwrap().span().span_context().clone();
+    runtime.block_on(asking_within.around(client.incarnation(asking()))).unwrap();
+    let fence = FenceRequest { of: None, epoch: 5 };
+    runtime.block_on(asking_within.around(client.fence(fence))).unwrap_err();
+    drop(asking_within);
+
+    let name = "cladefs.peer.v1.Peer/Incarnation";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let spans = loop {
+        let spans = exporter.get_finished_spans().unwrap();
+        if spans.iter().filter(|span| span.name == name).count() == 2 {
+            break spans;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{:?}",
+            spans.iter().map(|span| &span.name).collect::<Vec<_>>()
+        );
+        std::thread::yield_now();
+    };
+    let of = |kind: SpanKind| {
+        spans.iter().find(|span| span.name == name && span.span_kind == kind).unwrap()
+    };
+    let (made, served) = (of(SpanKind::Client), of(SpanKind::Server));
+    assert_eq!(made.span_context.trace_id(), caller.trace_id());
+    assert_eq!(made.parent_span_id, caller.span_id());
+    assert_eq!(
+        served.span_context.trace_id(),
+        caller.trace_id(),
+        "the peer's span on the caller's trace"
+    );
+    assert_eq!(served.parent_span_id, made.span_context.span_id());
+    assert!(served.parent_span_is_remote);
+
+    let labels = |method: &str| format!("{{service=\"cladefs.peer.v1.Peer\",method=\"{method}\"}}");
+    for side in ["server", "client"] {
+        let counted = |family: &str, method: &str| {
+            metric(&format!("cladefsd_grpc_{side}_{family}{}", labels(method)))
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while counted("calls_total", "Fence") != Some(1) {
+            assert!(Instant::now() < deadline, "{side}: {:?}", counted("calls_total", "Fence"));
+            std::thread::yield_now();
+        }
+        assert_eq!(counted("calls_total", "Incarnation"), Some(1), "{side}");
+        assert_eq!(counted("errors_total", "Incarnation"), Some(0), "{side}");
+        assert_eq!(counted("errors_total", "Fence"), Some(1), "{side}");
+        assert_eq!(counted("calls_total", "GetPart"), Some(0), "{side}: there from the start");
+        assert_eq!(counted("calls_total", "unknown"), Some(0), "{side}");
+    }
+}

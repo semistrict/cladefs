@@ -343,6 +343,25 @@ rather than keep each cell's. `cladefsd_vm_*` tells a cell's writer from its fol
 `cladefsd_process_*` gauges are sampled at each scrape, right from the daemon's start; the
 object storage and part cache families read 0 until a cell opens them (board 8561).
 
+These families are there from the start too, each 0 until it has any (board 8565; every family
+is listed in `crates/cladefs/src/cladefsd/metrics.rs`'s module doc):
+
+| Family | What |
+|---|---|
+| `cladefsd_grpc_server_calls_total`, `cladefsd_grpc_server_errors_total`, `cladefsd_grpc_server_duration_seconds` (histogram) | gRPC calls served, by `service` (`cladefs.cladefsd.v1.Cladefsd`, the control API; `cladefs.mount.v1.Mount`; `cladefs.peer.v1.Peer`) and `method`, each of the .protos' and `unknown`: their count, those failed (a status other than OK, or their stream cut), and how long each took to its answer's end, a stream's whole life. Refusals while the daemon drains count, `UNAVAILABLE`. |
+| `cladefsd_grpc_client_calls_total`, `cladefsd_grpc_client_errors_total`, `cladefsd_grpc_client_duration_seconds` | The calls the daemon made of its peers (parts, replication, migrations), alike. |
+| `cladefsd_migrations{state}` | Live migrations under way: from this host `preparing` and `moving`, to it `taking`. |
+| `cladefsd_migrations_total{outcome}` | Migrations from this host `prepared`, `aborted` (their prepare failed), `accepted`, `refused`, and `given_up` by their targets. |
+| `cladefsd_migration_rounds_total`, `cladefsd_migration_sent_bytes_total`, `cladefsd_migration_taken_bytes_total`, `cladefsd_migrations_taken_given_up_total` | Their rounds, bytes sent from this host and taken by it, and migrations to it given up (aborted, or idle `CLADEFSD_MIGRATION_IDLE`). |
+| `cladefsd_mount_cells{state}` | The FUSE mount's cells, `attached` and `detaching`. |
+| `cladefsd_mount_requests_total`, `cladefsd_mount_request_errors_total`, `cladefsd_mount_attaches_total`, `cladefsd_mount_detaches_total` | Its requests, those answered with an error (but `ENOENT` and `ENOSYS`, a name not there and an operation it has not, which the kernel asks every filesystem), its attaches and detaches. |
+| `cladefsd_page_cache_bytes`, `_dirty_bytes`, `_writeback_bytes`, `_stuck_bytes`, `_limit_bytes`, `_dirty_limit_bytes` | The cells' page cache: held, dirty, being written back, dirty of files whose write-back fails, its size, and the dirty bytes past which writers wait. |
+| `cladefsd_page_cache_flush_stalls_total`, `cladefsd_page_cache_flush_stalled_seconds_total`, `cladefsd_page_cache_flusher_died` | Writers held back at that bound and how long, together: the disk not keeping up; 1 once its flusher died. |
+| `cladefsd_memory_full`, `cladefsd_memory_pressure`, `cladefsd_memory_full_entered_total`, `cladefsd_memory_floor_bytes` | 1 while the host's memory is full (the daemon makes no cell, `CreateCell` failing `ENOMEM`), 1 while the daemon holds past the governor's allowance and evicts; how often it became full; the floor it keeps. |
+| `cladefsd_otel_spans_exported_total`, `cladefsd_otel_spans_dropped_total`, `cladefsd_otel_spans_failed_total` | Spans exported over OTLP, dropped (the exporter's queue, `OTEL_BSP_MAX_QUEUE_SIZE`, full), and whose export failed (`docs/tracing.md`). |
+
+No label holds what a caller names: a method none of the .protos has is `unknown`.
+
 The log is on standard error (`CLADEFS_LOG_FORMAT`, `CLADEFS_LOG_LEVEL`): text records begin with
 their RFC 3339 time and escape control characters; a record logged within a span carries its
 `trace_id` and `span_id`. What it logs changes while the daemon runs, which a restart would crash

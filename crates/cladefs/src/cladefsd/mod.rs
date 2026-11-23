@@ -106,6 +106,7 @@ pub mod disk;
 pub mod drain;
 pub mod governor;
 mod grants;
+mod grpc;
 /// cladefs: a simulated guest's connection, under madsim (doc-24, TASK-685.6).
 #[cfg(madsim)]
 pub mod guest;

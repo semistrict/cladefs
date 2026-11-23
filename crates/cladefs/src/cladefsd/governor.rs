@@ -111,6 +111,48 @@ node_local::node_local! {
     static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 }
 
+/// cladefs: what the governor last found and did, for the daemon's metrics (board 8565): whether
+/// the host is full ([`full`]); whether the daemon held past what it may, evicting
+/// ([`Governed::pressured`]); how often the host became full; and the floor it keeps, 0 for a
+/// daemon not governed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Governed {
+    /// Whether the host is full.
+    pub full: bool,
+    /// Whether the daemon held past what it may at the governor's last look, evicting.
+    pub pressured: bool,
+    /// How often the host became full.
+    pub fulls: u64,
+    /// The floor the governor keeps the daemon's memory at, 0 for a daemon not governed.
+    pub floor: u64,
+}
+
+node_local::node_local! {
+    /// cladefs: [`Governed::pressured`].
+    static PRESSURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+}
+
+node_local::node_local! {
+    /// cladefs: [`Governed::fulls`].
+    static FULLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+}
+
+node_local::node_local! {
+    /// cladefs: [`Governed::floor`].
+    static FLOOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+}
+
+/// cladefs: what the governor last found and did ([`Governed`]).
+pub fn governed() -> Governed {
+    use std::sync::atomic::Ordering::Relaxed;
+    Governed {
+        full: full(),
+        pressured: PRESSURED.get().load(Relaxed),
+        fulls: FULLS.get().load(Relaxed),
+        floor: FLOOR.get().load(Relaxed),
+    }
+}
+
 /// cladefs: says the host is full, or not, as the governor would: for tests of what refuses then.
 #[cfg(test)]
 pub(crate) fn set_full(full: bool) {
@@ -274,6 +316,7 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
 pub fn start() -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
     let (headroom, floor) = (headroom(host.total)?, floor(limit(host.total))?);
+    FLOOR.get().store(floor, std::sync::atomic::Ordering::Relaxed);
     super::run::service("memory governor", 1, move || govern_every(headroom, floor))
         .map_err(|err| format!("starting the memory governor: {err}"))
 }
@@ -286,7 +329,12 @@ async fn govern_every(headroom: u64, floor: u64) {
         match host_memory() {
             Ok(host) => {
                 let was = FULL.get().load(Ordering::Relaxed);
-                let allowed = allowance(memory::governed_bytes(), host, headroom, floor, was);
+                let held = memory::governed_bytes();
+                let allowed = allowance(held, host, headroom, floor, was);
+                PRESSURED.get().store(held > allowed.bytes, Ordering::Relaxed);
+                if allowed.full && !was {
+                    FULLS.get().fetch_add(1, Ordering::Relaxed);
+                }
                 if allowed.full != was {
                     log::warn!(
                         "cladefsd: the host's memory is {}: {} bytes available, the floor {floor}",

@@ -195,7 +195,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Drains the daemon on SIGTERM, as an orchestrator stops it, within `bound`, and exits
-/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound. cladefs: on
+/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound; cladefs: its last
+/// spans exported within the bound too, as much as it leaves (board 8569). cladefs: on
 /// SIGINT and SIGHUP too, whose default action ended it at once, a crash for every cell (board
 /// 8567). They are blocked in every thread but one, made here first, which waits for them
 /// (`cladefs::signals`), and, once draining, for none again.
@@ -221,7 +222,9 @@ fn drain_on_signals(bound: std::time::Duration) -> std::io::Result<()> {
         log::info!("cladefsd: draining, on {name}, within {}s", bound.as_secs());
         let began = std::time::Instant::now();
         let drained = local_cell::upload::wait_on(cladefs::cladefsd::drain::drain(bound));
-        cladefs::cladefsd::otel::shutdown();
+        // cladefs: the last spans exported within what is left of the bound, never past it,
+        // whatever the collector (board 8569).
+        cladefs::cladefsd::otel::shutdown(bound.saturating_sub(began.elapsed()));
         match drained {
             Ok(()) => {
                 log::info!("cladefsd: drained in {:.1?}: every cell closed", began.elapsed());

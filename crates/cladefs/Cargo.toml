@@ -76,7 +76,10 @@ shuttle = { workspace = true, optional = true }
 fail = "0.5.1"
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+# cladefs: its TLS named (`reqwest-rustls`: rustls over aws-lc-rs, the host's roots or SSL_CERT_FILE's),
+# so that an `https://` collector is reached by what this crate asks for, never by another crate's
+# turning reqwest's TLS on (board 8569; tests/tracing.rs exports to one).
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
 # cladefs: the frames of spans that waited for the bucket, resolved as /z/tracez shows them (TASK-672.2).
 backtrace = "0.3.77"
 humantime = "2.4.0"
@@ -99,6 +102,9 @@ proptest.workspace = true
 tempfile.workspace = true
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "testing"] }
 madsim = "=0.2.34"
+# cladefs: the tests' OTLP collector over HTTPS (tests/tracing.rs, board 8569): rustls (Apache-2.0
+# OR ISC OR MIT), over aws-lc-rs, as tonic's TLS here.
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
 
 [lints]
 workspace = true
@@ -107,6 +113,9 @@ workspace = true
 # macOS too (board 2912).
 [target.'cfg(any(target_os = "linux", madsim))'.dependencies]
 async-task = "4.7.1"
+# cladefs: the bodies of gRPC answers, watched to their trailers' status (`cladefsd::grpc`, board
+# 8565): http-body (MIT), tonic's.
+http-body = "1.1.0"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 pprof = { version = "0.15.0", default-features = false, features = ["prost-codec", "flamegraph", "frame-pointer"] }
 prost = "0.14.4"

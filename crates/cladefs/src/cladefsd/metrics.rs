@@ -101,6 +101,42 @@
 //!   `cladefsd_object_storage_bucket_downloaded_bytes_total{bucket}`, by bucket number, its own and
 //!   those of other buckets' cells (TASK-633.4): 0 until a cell opens the bucket (board 8561),
 //!   and each bucket's series once a cell asked it for something.
+//!
+//! cladefs: and, each from the daemon's start, 0 until it has any (board 8565):
+//!
+//! - `cladefsd_grpc_server_calls_total{service,method}`,
+//!   `cladefsd_grpc_server_errors_total{service,method}` and
+//!   `cladefsd_grpc_server_duration_seconds{service,method}`, a histogram: the gRPC calls the
+//!   daemon served, of the control API (`cladefs.cladefsd.v1.Cladefsd`), its Mount service
+//!   (`cladefs.mount.v1.Mount`) and the peer service (`cladefs.peer.v1.Peer`), by method, each of
+//!   the .protos' and `unknown`, never one a caller names; those that failed, a status other than
+//!   OK, or none, their stream cut; and how long they took, to their answer's end (a stream's
+//!   whole life). `cladefsd_grpc_client_*`, alike, the calls it made of its peers
+//!   (`super::grpc`).
+//! - `cladefsd_migrations{state}`: live migrations under way, from this host `preparing` or
+//!   `moving`, to it `taking`; `cladefsd_migrations_total{outcome}`, those from it `prepared`,
+//!   `aborted` (their prepare failed), `accepted`, `refused` and `given_up` by their targets;
+//!   `cladefsd_migration_rounds_total`, `cladefsd_migration_sent_bytes_total`,
+//!   `cladefsd_migration_taken_bytes_total` and `cladefsd_migrations_taken_given_up_total`, their
+//!   rounds, the bytes sent and taken, and those to it given up (`super::migration`).
+//! - `cladefsd_mount_cells{state}`, the FUSE mount's cells `attached` and `detaching`;
+//!   `cladefsd_mount_requests_total`, `cladefsd_mount_request_errors_total` (errors but ENOENT
+//!   and ENOSYS), `cladefsd_mount_attaches_total` and `cladefsd_mount_detaches_total`
+//!   (`super::mount`).
+//! - `cladefsd_page_cache_bytes`, `cladefsd_page_cache_dirty_bytes`,
+//!   `cladefsd_page_cache_writeback_bytes`, `cladefsd_page_cache_stuck_bytes`,
+//!   `cladefsd_page_cache_limit_bytes` and `cladefsd_page_cache_dirty_limit_bytes`: the cells'
+//!   page cache (`local_cell::pages`), its pages held, dirty, being written back and dirty of
+//!   files failing, its size and the dirty bytes past which writers wait;
+//!   `cladefsd_page_cache_flush_stalls_total` and `cladefsd_page_cache_flush_stalled_seconds_total`,
+//!   the writers held so and how long; `cladefsd_page_cache_flusher_died`, 1 once its flusher died.
+//! - `cladefsd_memory_full` and `cladefsd_memory_pressure`, 1 while the host's memory is full
+//!   (the daemon making no cell) and while the daemon holds past the governor's allowance,
+//!   evicting; `cladefsd_memory_full_entered_total` and `cladefsd_memory_floor_bytes`
+//!   (`super::governor`).
+//! - `cladefsd_otel_spans_exported_total`, `cladefsd_otel_spans_dropped_total` and
+//!   `cladefsd_otel_spans_failed_total`: the spans exported over OTLP, dropped (the exporter's
+//!   queue full) and whose export failed (`super::otel::batch`).
 
 use super::wire::*;
 use std::fmt::Write as _;
@@ -143,32 +179,82 @@ const BUCKETS: [f64; 14] = [
     1.0,
 ];
 
-/// The requests of a kind served: how many took at most each bucket's bound, and longer than the
-/// last, their nanoseconds, and how many failed. cladefs: no count of them all apart, which a
-/// scrape would read at another moment than the buckets, a bucket's cumulative count then past it
-/// (board 8561): the count is the buckets' sum, as one read of them has them ([`Requests::counts`]).
-#[derive(Default)]
-struct Requests {
-    /// Each of [`BUCKETS`]' (those over the bound before it), then those past them all.
-    buckets: [AtomicU64; BUCKETS.len() + 1],
+/// cladefs: what took some time, as a histogram's buckets count it, of the upper bounds `bounds`, in
+/// seconds: how many took at most each bound, and longer than the last, their nanoseconds, and how
+/// many failed: the VM processes' requests of a kind ([`REQUESTS`]), a gRPC method's calls
+/// (`super::grpc`). No count of them all apart, which a scrape would read at another moment than
+/// the buckets, a bucket's cumulative count then past it (board 8561): the count is the buckets'
+/// sum, as one read of them has them ([`Timed::counts`]).
+pub(super) struct Timed {
+    bounds: &'static [f64],
+    /// Each of `bounds`' (those over the bound before it), then those past them all.
+    buckets: Box<[AtomicU64]>,
     nanos: AtomicU64,
     errors: AtomicU64,
 }
 
-impl Requests {
-    /// How many took at most each bucket's bound, of those over the bound before it, and how many
-    /// in all, as of one read of each bucket.
-    fn counts(&self) -> ([u64; BUCKETS.len()], u64) {
-        let read = self.buckets.each_ref().map(|bucket| bucket.load(Ordering::Relaxed));
-        let mut within = [0; BUCKETS.len()];
-        within.copy_from_slice(&read[..BUCKETS.len()]);
-        (within, read.iter().sum())
+impl Timed {
+    /// None yet, in buckets of `bounds`, ascending.
+    pub(super) fn new(bounds: &'static [f64]) -> Self {
+        let buckets = (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect();
+        Self { bounds, buckets, nanos: AtomicU64::new(0), errors: AtomicU64::new(0) }
+    }
+
+    /// Counts one that took `took`, and whether it `failed`.
+    pub(super) fn record(&self, took: Duration, failed: bool) {
+        let seconds = took.as_secs_f64();
+        let bucket = self.bounds.iter().position(|bound| seconds <= *bound);
+        self.buckets[bucket.unwrap_or(self.bounds.len())].fetch_add(1, Ordering::Relaxed);
+        self.nanos.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+        if failed {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// How many took at most each bound, of those over the bound before it, and how many in all,
+    /// as of one read of each bucket.
+    fn counts(&self) -> (Vec<u64>, u64) {
+        let read: Vec<u64> =
+            self.buckets.iter().map(|bucket| bucket.load(Ordering::Relaxed)).collect();
+        let count = read.iter().sum();
+        (read[..self.bounds.len()].to_vec(), count)
+    }
+
+    /// How many failed.
+    fn errors(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed)
+    }
+
+    /// Their nanoseconds.
+    fn nanos(&self) -> u64 {
+        self.nanos.load(Ordering::Relaxed)
+    }
+
+    /// Its series of the histogram `name`, labelled `labels` (`KEY="VALUE",...`), appended to
+    /// `out`, as of `counts`, one read of it ([`Timed::counts`]): `+Inf` and `_count` its count.
+    fn render(
+        &self,
+        out: &mut String,
+        name: &str,
+        labels: &str,
+        (within, count): &(Vec<u64>, u64),
+    ) {
+        let mut cumulative = 0;
+        for (bound, bucket) in self.bounds.iter().zip(within) {
+            cumulative += bucket;
+            let _ = writeln!(out, "{name}_bucket{{{labels},le=\"{bound}\"}} {cumulative}");
+        }
+        let _ = writeln!(out, "{name}_bucket{{{labels},le=\"+Inf\"}} {count}");
+        let sum = self.nanos() as f64 / 1e9;
+        let _ = writeln!(out, "{name}_sum{{{labels}}} {sum}");
+        let _ = writeln!(out, "{name}_count{{{labels}}} {count}");
     }
 }
 
 /// Each kind's requests, in [`KINDS`]' order.
 // The process's count, every simulated host's together, as a process's metrics are.
-static REQUESTS: LazyLock<[Requests; KINDS.len()]> = LazyLock::new(Default::default);
+static REQUESTS: LazyLock<[Timed; KINDS.len()]> =
+    LazyLock::new(|| std::array::from_fn(|_| Timed::new(&BUCKETS)));
 
 /// The name of the kind of request `kind` ([`KINDS`]), if it is one.
 pub(super) fn kind_name(kind: u32) -> Option<&'static str> {
@@ -190,14 +276,7 @@ pub(super) fn span_name(kind: u32) -> &'static str {
 /// Counts a request of `kind` served, which took `took`, and whether it `failed`.
 pub(super) fn served(kind: u32, took: Duration, failed: bool) {
     let Some(at) = KINDS.iter().position(|(known, _)| *known == kind) else { return };
-    let requests = &REQUESTS[at];
-    let seconds = took.as_secs_f64();
-    let bucket = BUCKETS.iter().position(|bound| seconds <= *bound).unwrap_or(BUCKETS.len());
-    requests.buckets[bucket].fetch_add(1, Ordering::Relaxed);
-    requests.nanos.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
-    if failed {
-        requests.errors.fetch_add(1, Ordering::Relaxed);
-    }
+    REQUESTS[at].record(took, failed);
 }
 
 /// The requests served, as a line of `NAME=COUNT` after `requests:`: of each kind served, how
@@ -208,7 +287,7 @@ pub(super) fn requests_line() -> String {
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
         let (_, count) = requests.counts();
         if count > 0 {
-            let nanos = requests.nanos.load(Ordering::Relaxed);
+            let nanos = requests.nanos();
             let _ = write!(line, " {kind}={count} {kind}-ns={nanos}");
         }
     }
@@ -265,37 +344,29 @@ pub fn render() -> String {
 /// The VM processes' requests' metrics, appended to `out`: each kind's, its histogram's buckets,
 /// `+Inf` and count as of one read of its buckets.
 fn render_requests(out: &mut String) {
-    let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
-    let counts: Vec<_> = REQUESTS.iter().map(Requests::counts).collect();
-    *out += "# HELP cladefsd_requests_total VM processes' requests served, by kind.\n";
-    *out += "# TYPE cladefsd_requests_total counter\n";
+    let counts: Vec<_> = REQUESTS.iter().map(Timed::counts).collect();
+    family(out, "cladefsd_requests_total", "counter", "VM processes' requests served, by kind.");
     for ((_, kind), (_, count)) in KINDS.iter().zip(&counts) {
         let _ = writeln!(out, "cladefsd_requests_total{{kind=\"{kind}\"}} {count}");
     }
-    *out += "# HELP cladefsd_request_errors_total VM processes' requests that failed, by kind.\n";
-    *out += "# TYPE cladefsd_request_errors_total counter\n";
+    let name = "cladefsd_request_errors_total";
+    family(out, name, "counter", "VM processes' requests that failed, by kind.");
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
-        let _ = writeln!(
-            out,
-            "cladefsd_request_errors_total{{kind=\"{kind}\"}} {}",
-            load(&requests.errors)
-        );
+        let _ = writeln!(out, "{name}{{kind=\"{kind}\"}} {}", requests.errors());
     }
-    *out += "# HELP cladefsd_request_duration_seconds How long VM processes' requests took to \
-             serve, from their dispatch to their reply, by kind.\n";
-    *out += "# TYPE cladefsd_request_duration_seconds histogram\n";
-    for (((_, kind), requests), (within, count)) in KINDS.iter().zip(REQUESTS.iter()).zip(&counts) {
-        let name = "cladefsd_request_duration_seconds";
-        let mut cumulative = 0;
-        for (bound, bucket) in BUCKETS.iter().zip(within) {
-            cumulative += bucket;
-            let _ = writeln!(out, "{name}_bucket{{kind=\"{kind}\",le=\"{bound}\"}} {cumulative}");
-        }
-        let _ = writeln!(out, "{name}_bucket{{kind=\"{kind}\",le=\"+Inf\"}} {count}");
-        let sum = load(&requests.nanos) as f64 / 1e9;
-        let _ = writeln!(out, "{name}_sum{{kind=\"{kind}\"}} {sum}");
-        let _ = writeln!(out, "{name}_count{{kind=\"{kind}\"}} {count}");
+    let name = "cladefsd_request_duration_seconds";
+    let help = "How long VM processes' requests took to serve, from their dispatch to their reply, \
+                by kind.";
+    family(out, name, "histogram", help);
+    for (((_, kind), requests), counts) in KINDS.iter().zip(REQUESTS.iter()).zip(&counts) {
+        requests.render(out, name, &format!("kind=\"{kind}\""), counts);
     }
+}
+
+/// cladefs: the `# HELP` and `# TYPE` lines of the family `name`, of `kind`, appended to `out`.
+fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} {kind}");
 }
 
 /// The metrics but the requests', appended to `out`, each part lapped: `out`.
@@ -683,8 +754,239 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
             let _ = writeln!(out, "{name}{{bucket=\"{number}\"}} {}", stats.downloaded);
         }
     }
-    laps.said("replication");
+    laps.lap("replication");
+    render_grpc(&mut out);
+    laps.lap("gRPC calls");
+    render_subsystems(&mut out);
+    laps.said("migrations, the mount, the page cache, the governor and spans");
     out
+}
+
+/// cladefs: the gRPC calls' metrics, appended to `out` (board 8565): each method's of each service,
+/// served, and made of the service the daemon calls, its peers', from the daemon's start; each's
+/// count and histogram as of one read of its buckets.
+fn render_grpc(out: &mut String) {
+    for (side, what) in [("server", "served"), ("client", "made")] {
+        let series: Vec<_> = super::grpc::calls()
+            .flat_map(|calls| {
+                calls.methods().filter_map(move |(method, served, made)| {
+                    let timed = if side == "server" { served } else { made? };
+                    let labels = format!("service=\"{}\",method=\"{method}\"", calls.service());
+                    Some((labels, timed, timed.counts()))
+                })
+            })
+            .collect();
+        let name = format!("cladefsd_grpc_{side}_calls_total");
+        family(out, &name, "counter", &format!("gRPC calls {what}, by service and method."));
+        for (labels, _, (_, count)) in &series {
+            let _ = writeln!(out, "{name}{{{labels}}} {count}");
+        }
+        let name = format!("cladefsd_grpc_{side}_errors_total");
+        let help = format!(
+            "gRPC calls {what} that failed, a status other than OK or none, by service and method."
+        );
+        family(out, &name, "counter", &help);
+        for (labels, timed, _) in &series {
+            let _ = writeln!(out, "{name}{{{labels}}} {}", timed.errors());
+        }
+        let name = format!("cladefsd_grpc_{side}_duration_seconds");
+        let help = format!(
+            "How long gRPC calls {what} took, to their answer's end, by service and method."
+        );
+        family(out, &name, "histogram", &help);
+        for (labels, timed, counts) in &series {
+            timed.render(out, &name, labels, counts);
+        }
+    }
+}
+
+/// cladefs: one series of no labels, `name`, of `kind`, with its family's lines, appended to `out`.
+fn single(out: &mut String, name: &str, kind: &str, help: &str, value: impl std::fmt::Display) {
+    family(out, name, kind, help);
+    let _ = writeln!(out, "{name} {value}");
+}
+
+/// cladefs: the metrics of the daemon's live migrations, its FUSE mount of cells, its page cache,
+/// its memory governor's state and its spans exported, appended to `out` (board 8565): each there
+/// from the daemon's start, 0 until it has any.
+fn render_subsystems(out: &mut String) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (preparing, moving, taking) = super::migration::under_way();
+    let name = "cladefsd_migrations";
+    let help = "Migrations under way: from this host, being prepared, or moving (its rounds, then \
+                its hand-over); to it, being taken.";
+    family(out, name, "gauge", help);
+    for (state, count) in [("preparing", preparing), ("moving", moving), ("taking", taking)] {
+        let _ = writeln!(out, "{name}{{state=\"{state}\"}} {count}");
+    }
+    let counts = &super::migration::COUNTS;
+    let name = "cladefsd_migrations_total";
+    let help = "Migrations from this host, by what came of them: prepared at their targets, \
+                aborted as their prepare failed, accepted and refused at their hand-overs, and \
+                given up by their targets.";
+    family(out, name, "counter", help);
+    for (outcome, count) in [
+        ("prepared", &counts.prepared),
+        ("aborted", &counts.aborted),
+        ("accepted", &counts.accepted),
+        ("refused", &counts.refused),
+        ("given_up", &counts.given_up),
+    ] {
+        let _ = writeln!(out, "{name}{{outcome=\"{outcome}\"}} {}", count.load(Relaxed));
+    }
+    let migration: [(&str, &str, u64); 4] = [
+        (
+            "cladefsd_migration_rounds_total",
+            "Rounds of migrations from this host, each sending the kept segments not sent yet.",
+            counts.rounds.load(Relaxed),
+        ),
+        (
+            "cladefsd_migration_sent_bytes_total",
+            "Bytes of cells' files migrations from this host sent.",
+            counts.sent_bytes.load(Relaxed),
+        ),
+        (
+            "cladefsd_migration_taken_bytes_total",
+            "Bytes of cells' files migrations to this host wrote.",
+            counts.taken_bytes.load(Relaxed),
+        ),
+        (
+            "cladefsd_migrations_taken_given_up_total",
+            "Migrations to this host given up: aborted by their sources, or idle too long.",
+            counts.taken_given_up.load(Relaxed),
+        ),
+    ];
+    for (name, help, value) in migration {
+        single(out, name, "counter", help, value);
+    }
+
+    let (attached, detaching, mount) = super::mount::counts();
+    let name = "cladefsd_mount_cells";
+    family(out, name, "gauge", "Cells the FUSE mount of cells holds, attached or detaching.");
+    for (state, count) in [("attached", attached), ("detaching", detaching)] {
+        let _ = writeln!(out, "{name}{{state=\"{state}\"}} {count}");
+    }
+    let mounted: [(&str, &str, u64); 4] = [
+        (
+            "cladefsd_mount_requests_total",
+            "The kernel's requests the FUSE mount served.",
+            mount.requests,
+        ),
+        (
+            "cladefsd_mount_request_errors_total",
+            "The FUSE mount's requests answered with an error but ENOENT and ENOSYS.",
+            mount.errors,
+        ),
+        ("cladefsd_mount_attaches_total", "Cells the FUSE mount attached.", mount.attaches),
+        ("cladefsd_mount_detaches_total", "Cells the FUSE mount detached.", mount.detaches),
+    ];
+    for (name, help, value) in mounted {
+        single(out, name, "counter", help, value);
+    }
+
+    let pages = local_cell::pages::shared();
+    let (usage, options) = (pages.usage(), pages.options());
+    let gauges: [(&str, &str, u64); 6] = [
+        ("cladefsd_page_cache_bytes", "Bytes of pages the cells' page cache holds.", usage.held),
+        (
+            "cladefsd_page_cache_dirty_bytes",
+            "Bytes of the page cache's pages dirty: written, not yet on the disk.",
+            usage.dirty,
+        ),
+        (
+            "cladefsd_page_cache_writeback_bytes",
+            "Bytes of the page cache's pages being written back.",
+            usage.writing,
+        ),
+        (
+            "cladefsd_page_cache_stuck_bytes",
+            "Bytes dirty of files whose write-back is failing, which no writer waits for.",
+            usage.stuck,
+        ),
+        (
+            "cladefsd_page_cache_limit_bytes",
+            "The most bytes the page cache holds, as the governor sizes it.",
+            options.most,
+        ),
+        (
+            "cladefsd_page_cache_dirty_limit_bytes",
+            "Bytes dirty past which writers wait for write-back: flush stalls.",
+            options.hard,
+        ),
+    ];
+    for (name, help, value) in gauges {
+        single(out, name, "gauge", help, value);
+    }
+    single(
+        out,
+        "cladefsd_page_cache_flusher_died",
+        "gauge",
+        "1 once the page cache's flusher died: nothing writes back for it since.",
+        u8::from(pages.flusher_died()),
+    );
+    single(
+        out,
+        "cladefsd_page_cache_flush_stalls_total",
+        "counter",
+        "Writers held back past the dirty limit, waiting for write-back.",
+        usage.stalls,
+    );
+    single(
+        out,
+        "cladefsd_page_cache_flush_stalled_seconds_total",
+        "counter",
+        "How long writers were held back past the dirty limit, together, in seconds.",
+        usage.stalled_ns as f64 / 1e9,
+    );
+
+    let governed = super::governor::governed();
+    single(
+        out,
+        "cladefsd_memory_full",
+        "gauge",
+        "1 while the host's memory is full: the room for the daemon's under its floor, the \
+         daemon making no cell more.",
+        u8::from(governed.full),
+    );
+    single(
+        out,
+        "cladefsd_memory_pressure",
+        "gauge",
+        "1 while the daemon held past what the governor allows it at its last look, evicting.",
+        u8::from(governed.pressured),
+    );
+    single(
+        out,
+        "cladefsd_memory_full_entered_total",
+        "counter",
+        "Times the host's memory became full.",
+        governed.fulls,
+    );
+    single(
+        out,
+        "cladefsd_memory_floor_bytes",
+        "gauge",
+        "The least memory the governor leaves the daemon, 0 for a daemon not governed.",
+        governed.floor,
+    );
+
+    let (exported, dropped, failed) = super::otel::spans();
+    let spans: [(&str, &str, u64); 3] = [
+        ("cladefsd_otel_spans_exported_total", "Spans exported over OTLP.", exported),
+        (
+            "cladefsd_otel_spans_dropped_total",
+            "Spans dropped unexported: the exporter's queue full, or shut down.",
+            dropped,
+        ),
+        (
+            "cladefsd_otel_spans_failed_total",
+            "Spans whose export over OTLP failed: refused, or unanswered.",
+            failed,
+        ),
+    ];
+    for (name, help, value) in spans {
+        single(out, name, "counter", help, value);
+    }
 }
 
 /// cladefs: a gauge of each VM process, if it has it.

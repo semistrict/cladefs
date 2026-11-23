@@ -2516,6 +2516,49 @@ fn metrics_are_there_before_any_cell_opens() {
     assert_eq!(value("cladefsd_object_storage_downloaded_bytes_total"), 0.0);
     let get = bucket_cell::object_bucket::Request::Get.name();
     assert_eq!(value(&format!("cladefsd_object_storage_requests_total{{request=\"{get}\"}}")), 0.0);
+    // cladefs: board 8565: the control API's and the peers' calls, each method's, the migrations,
+    // the FUSE mount, the page cache, the governor and the spans exported, 0, from the start.
+    let call = "service=\"cladefs.cladefsd.v1.Cladefsd\",method=\"CreateCell\"";
+    let peer = "service=\"cladefs.peer.v1.Peer\",method=\"GetPart\"";
+    for series in [
+        format!("cladefsd_grpc_server_calls_total{{{call}}}"),
+        format!("cladefsd_grpc_server_errors_total{{{call}}}"),
+        format!("cladefsd_grpc_server_duration_seconds_count{{{call}}}"),
+        format!("cladefsd_grpc_server_calls_total{{{peer}}}"),
+        format!("cladefsd_grpc_client_calls_total{{{peer}}}"),
+        format!("cladefsd_grpc_client_duration_seconds_bucket{{{peer},le=\"+Inf\"}}"),
+        "cladefsd_grpc_server_calls_total{service=\"cladefs.mount.v1.Mount\",method=\"unknown\"}"
+            .to_owned(),
+        "cladefsd_migrations{state=\"moving\"}".to_owned(),
+        "cladefsd_migrations{state=\"taking\"}".to_owned(),
+        "cladefsd_migrations_total{outcome=\"aborted\"}".to_owned(),
+        "cladefsd_migration_rounds_total".to_owned(),
+        "cladefsd_migration_sent_bytes_total".to_owned(),
+        "cladefsd_mount_cells{state=\"attached\"}".to_owned(),
+        "cladefsd_mount_requests_total".to_owned(),
+        "cladefsd_mount_request_errors_total".to_owned(),
+        "cladefsd_mount_attaches_total".to_owned(),
+        "cladefsd_page_cache_flush_stalls_total".to_owned(),
+        "cladefsd_memory_full".to_owned(),
+        "cladefsd_memory_pressure".to_owned(),
+        "cladefsd_memory_full_entered_total".to_owned(),
+        "cladefsd_otel_spans_exported_total".to_owned(),
+        "cladefsd_otel_spans_dropped_total".to_owned(),
+        "cladefsd_otel_spans_failed_total".to_owned(),
+    ] {
+        assert_eq!(value(&series), 0.0, "{series}");
+    }
+    assert!(value("cladefsd_page_cache_limit_bytes") > 0.0, "{metrics}");
+    assert!(value("cladefsd_page_cache_dirty_limit_bytes") > 0.0, "{metrics}");
+    // No family is named twice: each its own HELP and TYPE, once.
+    let mut families: Vec<&str> = metrics
+        .lines()
+        .filter_map(|line| line.strip_prefix("# TYPE ")?.split(' ').next())
+        .collect();
+    let count = families.len();
+    families.sort_unstable();
+    families.dedup();
+    assert_eq!(families.len(), count, "a family named twice");
 }
 
 /// board 8563: a cell is labelled alike in every family, `TENANT/CELL`, as cells name it: its
