@@ -1187,29 +1187,38 @@ pub(super) mod target {
         let staged = staging(&entry.path, migration);
         // Taken into place before, what followed failing: what is left of taking it, as asking
         // again finishes it (board 5721). A failure reading it says neither: answered so, asked
-        // again later.
-        let moved_before = !host_fs::exists(&staged)
-            && host.holds(&entry).map_err(|err| status("reading the cell taken", err))?;
-        let lacking = match entry.receiving() {
-            Some((_, taken)) if taken != token => {
-                Some(format!("it names token {token:x}, of another take of it"))
-            }
-            _ if moved_before => None,
-            _ => lacking(&staged, &files),
+        // again later. Its files read whole for their CRCs off the runtime's workers, as all of
+        // the hand-over's disk work is (board 5378).
+        let checked = {
+            let (host, entry, staged) = (host.clone(), entry.clone(), staged.clone());
+            off(move || {
+                let moved_before = !host_fs::exists(&staged)
+                    && host.holds(&entry).map_err(|err| status("reading the cell taken", err))?;
+                let lacking = match entry.receiving() {
+                    Some((_, taken)) if taken != token => {
+                        Some(format!("it names token {token:x}, of another take of it"))
+                    }
+                    _ if moved_before => None,
+                    _ => lacking(&staged, &files),
+                };
+                Ok((moved_before, lacking))
+            })
         };
+        let (moved_before, lacking) = checked.await?;
         if let Some(lacking) = lacking {
             log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
             refuse(&host, &entry).await?;
             return Ok(false);
         }
-        let moved = || -> std::io::Result<()> {
+        let into = entry.path.clone();
+        let moved = move || -> std::io::Result<()> {
             if !moved_before {
                 sync_tree(&staged)?;
-                host_fs::rename(&staged, &entry.path)?;
+                host_fs::rename(&staged, &into)?;
             }
-            host_fs::File::open(entry.path.parent().unwrap_or(Path::new(".")))?.sync_all()
+            host_fs::File::open(into.parent().unwrap_or(Path::new(".")))?.sync_all()
         };
-        moved().map_err(|err| status("taking the cell", err))?;
+        off(move || moved().map_err(|err| status("taking the cell", err))).await?;
         crate::faults::crashpoint!("migration::renamed");
         // Its reference written again before it is accepted (`targetRefersFirst`): a restart since
         // its prepare may have retired it, its entry's removal failing after (board 5721).
@@ -1225,11 +1234,27 @@ pub(super) mod target {
                 return Err(Status::unavailable(format!("referring to {origin:?} timed out")));
             }
         }
-        host.accept(migration, taken.child)
-            .map_err(|err| status("remembering it accepted", err))?;
-        host.note(&taken).map_err(|err| status("noting the cell", err))?;
+        off(move || {
+            host.accept(migration, taken.child)
+                .map_err(|err| status("remembering it accepted", err))?;
+            host.note(&taken).map_err(|err| status("noting the cell", err))
+        })
+        .await?;
         HEARD.get().lock().unwrap().remove(&migration);
         Ok(true)
+    }
+
+    /// Runs `work`, of the host's disk, off the runtime's workers ([`run::off_the_runtime`]): a
+    /// hand-over's reads and syncs held a bucket runtime's worker for as long as a cell's files
+    /// took to read whole and sync (board 5378).
+    ///
+    /// [`run::off_the_runtime`]: super::super::run::off_the_runtime
+    async fn off<T: Send + 'static>(
+        work: impl FnOnce() -> Result<T, Status> + Send + 'static,
+    ) -> Result<T, Status> {
+        super::super::run::off_the_runtime(work)
+            .await
+            .map_err(|err| status("its disk work", err))?
     }
 
     /// Gives the migration `request` names up, if this host holds it not yet.

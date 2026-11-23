@@ -472,16 +472,35 @@ impl Dir for DiskDir {
     /// this process another opening of it here shares, as a cell's uploader stopping, which holds
     /// it ([`LocalCell::hold_dir`](crate::LocalCell::hold_dir)), and its cell's next opening do;
     /// which cell is open here, its claim says ([`Dir::claim`], TASK-165.7).
+    ///
+    /// cladefs: waiting for another process, it holds no lock of this process's, whose takings
+    /// and lettings go of other directories go on meanwhile (board 5440): it tries the directory's
+    /// lock under the process's takings, and waits between tries with them let go, a taking of the
+    /// same directory by another thread here, meanwhile, shared as it is found.
     fn take(&self) -> io::Result<()> {
         let id = self.id()?;
-        let mut taken = TAKEN.get().lock().unwrap();
-        if let Some((count, _)) = taken.get_mut(&id) {
-            *count += 1;
-            return Ok(());
+        let deadline = std::time::Instant::now() + TAKE_WAIT;
+        loop {
+            {
+                let mut taken = TAKEN.get().lock().unwrap();
+                if let Some((count, _)) = taken.get_mut(&id) {
+                    *count += 1;
+                    return Ok(());
+                }
+                // Its lock, held while any taking in the process holds it.
+                if let Some(locked) = try_take_from_others(&self.handle)? {
+                    taken.insert(id, (1, locked));
+                    return Ok(());
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another process has the store's cells open",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        // Its lock, held while any taking in the process holds it.
-        taken.insert(id, (1, take_from_others(&self.handle)?));
-        Ok(())
     }
 
     fn let_go(&self) {
@@ -663,25 +682,15 @@ impl DiskDir {
     }
 }
 
-/// Takes the directory through `handle`, a descriptor of it, against other processes' takings of
-/// it, waiting a while for them to let it go ([`Dir::take`]): its lock, through a `dup` of the
-/// descriptor, of its open file description.
-fn take_from_others(handle: &host_fs::File) -> io::Result<host_fs::Flock> {
-    let deadline = std::time::Instant::now() + TAKE_WAIT;
-    loop {
-        match host_fs::Flock::try_lock(handle.try_clone()?) {
-            Ok(locked) => return Ok(locked),
-            Err(err) if err.kind() != io::ErrorKind::WouldBlock => return Err(err),
-            // Another's: waited for a while.
-            Err(_) => {}
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "another process has the store's cells open",
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+/// Tries to take the directory through `handle`, a descriptor of it, against other processes'
+/// takings of it ([`Dir::take`]): its lock, through a `dup` of the descriptor, of its open file
+/// description; none while another holds it.
+fn try_take_from_others(handle: &host_fs::File) -> io::Result<Option<host_fs::Flock>> {
+    match host_fs::Flock::try_lock(handle.try_clone()?) {
+        Ok(locked) => Ok(Some(locked)),
+        // Another's: the caller waits a while.
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(err) => Err(err),
     }
 }
 
