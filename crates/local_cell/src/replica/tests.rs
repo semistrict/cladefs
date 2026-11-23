@@ -311,6 +311,60 @@ fn open_file_descriptors_stay_bounded_across_many_logs() {
     assert!(peak.load(Ordering::Relaxed) <= OPEN_FILES + 1);
 }
 
+/// Board 8457: a segment's log of another format than this build's is refused, never taken for one
+/// holding nothing. As its writer sends it, at its first bytes, however they are split, before any
+/// ack (a writer of another build gathers no quorum on this member); as the directory holds it,
+/// which a member of an older build left, when the member starts again (it acked what it holds);
+/// and a directory naming other log formats is refused as it opens. A header torn by a crash, its
+/// hash failing, still holds nothing, as nothing of it was acked; an own extents' log names no
+/// format and is held as sent.
+#[test]
+fn logs_of_other_formats_are_refused_as_sent_and_as_held() {
+    let (header, _) = replica_chunks(1);
+    let mut foreign = header.clone();
+    foreign[7] = 3;
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    let path = log_path(CELL, key(1, 4), log_of(1));
+    let format = |at: &str, found: &str| Refused::Format { log: at.into(), found: found.into() };
+    let at = |log: u64, offset: u64| format!("log {log} of {CELL} at {offset}");
+    // Its first bytes another format's: refused, nothing written.
+    let refusal = refused(replicas.append(me, log_of(1), 0, &foreign));
+    assert_eq!(refusal, format(&at(2, 0), "FXLOG\\x00\\x00\\x03"));
+    assert_eq!(dir.list("").unwrap(), [INCARNATION]);
+    // Split: its first byte taken, the rest refused as it is sent.
+    assert_eq!(replicas.append(me, log_of(1), 0, &foreign[..1]).unwrap(), 1);
+    let refusal = refused(replicas.append(me, log_of(1), 1, &foreign[1..]));
+    assert_eq!(refusal, format(&at(2, 1), "XLOG\\x00\\x00\\x03"));
+    let refusal = refused(replicas.append(me, log_of(2), 0, b"no magic"));
+    assert_eq!(refusal, format(&at(4, 0), "no magic"));
+    assert_eq!(replicas.fence(me, 4).unwrap(), [(log_of(1), 1)]);
+    let own = own_frame(1, b"any");
+    assert_eq!(replicas.append(me, own_of(1), 0, &own).unwrap(), own.len() as u64);
+
+    // Held: a log of another format, as a member of the build before left it, refused as the
+    // member reads it back; a torn header holding nothing.
+    let file = dir.open(&path, false).unwrap();
+    file.write_at(&foreign, 0).unwrap();
+    file.sync().unwrap();
+    let reopened = Replicas::open(dir.clone(), MOST).unwrap();
+    assert_eq!(refused(reopened.fence(me, 5)), format(&path, "FXLOG\\x00\\x00\\x03"));
+    let mut torn = header.clone();
+    torn[crate::wal::LOG_HASHED] ^= 1;
+    file.write_at(&torn, 0).unwrap();
+    file.sync().unwrap();
+    let reopened = Replicas::open(dir.clone(), MOST).unwrap();
+    assert_eq!(reopened.fence(me, 5).unwrap(), [(log_of(1), 0), (own_of(1), own.len() as u64)]);
+
+    // A directory naming other log formats: refused as it opens.
+    let older = MemDir::new();
+    older.replace(INCARNATION, b"cladefs replicas 2\nincarnation 5\n").unwrap();
+    let opened =
+        Replicas::open(older, MOST).err().expect("a directory of other log formats opened");
+    assert_eq!(opened.to_string(), format!("{INCARNATION}: not {:?}", magic()));
+}
+
 /// Board 8449: a cell gone for good loses every promise, of `u64::MAX` too, durably, and holds 0
 /// only once they are gone: the edges of epochs, log and configuration numbers drawn, 0, 1 and
 /// `u64::MAX` and their neighbours, as a hostile peer may send them.
@@ -349,4 +403,24 @@ fn cells_swept_gone_lose_promises_of_every_epoch() {
             assert_eq!(end.unwrap(), 2 * frame.len() as u64, "{at}");
         }
     }
+}
+
+/// Board 8453: a member holds at most so many logs of a configuration ([`LOGS_MOST`]), as a take
+/// refuses a fence answer naming more: the next new log is refused, those it holds appended to
+/// still, another configuration's its own.
+#[test]
+fn members_hold_at_most_so_many_logs_of_a_configuration() {
+    const LOGS: usize = 5;
+    let replicas = Replicas::open(MemDir::new(), MOST).unwrap().holding_at_most(LOGS);
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    let frame = own_frame(0, b"x");
+    for segment in 0..LOGS as u64 {
+        replicas.append(me, own_of(segment), 0, &frame).unwrap();
+    }
+    let refusal = refused(replicas.append(me, own_of(LOGS as u64), 0, &frame));
+    assert_eq!(refusal, Refused::Logs { most: LOGS });
+    let end = replicas.append(me, own_of(0), frame.len() as u64, &frame).unwrap();
+    assert_eq!(end, 2 * frame.len() as u64);
+    let next = (CELL, key(2, 5), replicas.incarnation());
+    assert_eq!(replicas.append(next, own_of(0), 0, &frame).unwrap(), frame.len() as u64);
 }

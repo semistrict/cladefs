@@ -53,6 +53,16 @@ const KEEPALIVE: Duration = Duration::from_secs(5);
 /// cladefs: how much of a log a member sends a take at once (`ReadLog`).
 const READ_PIECE: u64 = 1 << 20;
 
+/// cladefs: the largest piece of a log a take takes from a member (`ReadLog`, board 8453): a
+/// member sends [`READ_PIECE`] at most, with its message's few bytes more.
+const READ_PIECE_MOST: usize = READ_PIECE as usize + 64;
+
+/// cladefs: the largest fence answer a take takes (board 8453): [`replica::LOGS_MOST`] logs, each
+/// 24 bytes at most as protobuf encodes it (a tag and a length, then two tagged varints), and a
+/// few bytes more. A member answering past it, by the million, is refused by the decoder before
+/// anything of it is held.
+const FENCE_ANSWER_MOST: usize = replica::LOGS_MOST * 24 + 64;
+
 /// cladefs: the largest message a member takes or sends (doc-21): a writer's append carries its
 /// flush's records, their data inline, and a writer sends 4 MiB at most at once, well within it;
 /// tonic's default, 4 MiB, refused one a little larger as OUT_OF_RANGE (TASK-537.3.2's review).
@@ -64,13 +74,14 @@ const SWEEP_EVERY: Duration = Duration::from_secs(600);
 
 /// cladefs: the version of the peer service's protocol, `peer.proto`'s (board 8455): a change to
 /// what a call means, or to a message's fields, is a new one, which [`formats`] names.
-pub(crate) const PROTOCOL: u32 = 1;
+pub(crate) const PROTOCOL: u32 = 2;
 
 /// cladefs: the formats of what this daemon hands its peers, in a line: its cell directories'
 /// (`local_cell::FORMAT`), its extent frames' (`extent_frame::FORMAT`), its bucket's layout's
 /// (`bucket_cell::layout::FORMAT`) and the protocol's ([`PROTOCOL`]). Two daemons hand each other
-/// a cell (a migration's prepare names them) only if theirs are the same (board 8455): nothing of
-/// another build's format is taken, as nothing migrates (AGENTS.md, "No migrations").
+/// a cell (a migration's prepare names them), or a writer's logs (every replication call names
+/// them, [`same_formats`]), only if theirs are the same (boards 8455, 8457): nothing of another
+/// build's format is taken, as nothing migrates (AGENTS.md, "No migrations").
 pub(crate) fn formats() -> String {
     let named = |cell: &str| {
         let (frames, layout) = (extent_frame::FORMAT, bucket_cell::layout::FORMAT);
@@ -81,6 +92,28 @@ pub(crate) fn formats() -> String {
     // A test's daemon of another build's cell directories: `peers::formats=return(FORMAT)`.
     fail::fail_point!("peers::formats", |cell: Option<String>| named(&cell.unwrap_or_default()));
     named(local_cell::FORMAT)
+}
+
+/// cladefs: whether `theirs`, the formats a replication call names, are this host's ([`formats`],
+/// board 8457): FAILED_PRECONDITION if not, an asker of a build before them naming none (""), so
+/// that no writer of another format is acked, nor a take of another given logs it would misread.
+fn same_formats(theirs: &str) -> Result<(), Status> {
+    let ours = formats();
+    if theirs == ours {
+        return Ok(());
+    }
+    // Its first 256 characters: a peer's string, said in a log line and an answer.
+    let theirs: String = theirs.chars().take(256).collect();
+    Err(Status::failed_precondition(format!(
+        "the asker's formats ({theirs:?}) are not this host's ({ours:?}): refused"
+    )))
+}
+
+/// cladefs: the most a member holds of a configuration's logs, in bytes: the lag bound a writer's
+/// bytes are kept within, which its replica directory holds each configuration to, and a take
+/// holds each member's fence answer to ([`fence_answer`], board 8453).
+fn members_most() -> u64 {
+    local_cell::upload::Options::default().max_lag_bytes
 }
 
 /// The parts the daemon served its peers, and those it had not as they asked.
@@ -321,9 +354,8 @@ fn replicas(dir: &std::path::Path) -> Result<Arc<Replicas<HostDir>>, String> {
     // cladefs: made durable, its promises with it (TASK-708).
     let made = host_fs::create_dir_all_durably(dir).and_then(|()| HostDir::new(dir));
     let dir = made.map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
-    let most = local_cell::upload::Options::default().max_lag_bytes;
-    let replicas =
-        Replicas::open(dir, most).map_err(|err| format!("the replica directory: {err}"))?;
+    let replicas = Replicas::open(dir, members_most())
+        .map_err(|err| format!("the replica directory: {err}"))?;
     log::info!("cladefsd: replica directory, incarnation {}", replicas.incarnation());
     Ok(Arc::new(replicas))
 }
@@ -446,14 +478,16 @@ fn replicas_of(
     replicas.ok_or_else(|| Status::failed_precondition("no replica directory (CLADEFSD_REPLICAS)"))
 }
 
-/// The replica directory of a host of the bucket `ours`, and what a call of `of` is of.
+/// The replica directory of a host of the bucket `ours`, and what a call of `of` is of: refused
+/// unless it names this host's formats (board 8457).
 fn of_in(
     ours: &str,
     replicas: &Option<Arc<Replicas<HostDir>>>,
     of: Option<ReplicaOf>,
 ) -> Result<(Arc<Replicas<HostDir>>, Of), Status> {
     let of = of.ok_or_else(|| Status::invalid_argument("of what: none said"))?;
-    let ReplicaOf { bucket, tenant, cell, configuration, incarnation } = of;
+    let ReplicaOf { bucket, tenant, cell, configuration, incarnation, formats } = of;
+    same_formats(&formats)?;
     let configuration =
         configuration.ok_or_else(|| Status::invalid_argument("no configuration"))?;
     let key = Key { number: configuration.number, epoch: configuration.epoch };
@@ -472,8 +506,14 @@ fn refused(err: replica::Error) -> Status {
         replica::Error::Refused(refused @ Refused::Fenced { .. }) => {
             Status::failed_precondition(refused.to_string())
         }
-        replica::Error::Refused(refused @ Refused::Full { .. }) => {
+        replica::Error::Refused(refused @ (Refused::Full { .. } | Refused::Logs { .. })) => {
             Status::resource_exhausted(refused.to_string())
+        }
+        // A writer's log, or one held, of another format: this member holds none of it for the
+        // writer (board 8457).
+        replica::Error::Refused(refused @ Refused::Format { .. }) => {
+            log::warn!("cladefsd: the replica directory: {refused}");
+            Status::failed_precondition(refused.to_string())
         }
         replica::Error::Io(err) => {
             log::error!("cladefsd: the replica directory: {err:#}");
@@ -503,7 +543,9 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<IncarnationRequest>,
     ) -> Result<Response<IncarnationResponse>, Status> {
-        let replicas = self.replicas(&request.into_inner().bucket)?;
+        let IncarnationRequest { bucket, formats } = request.into_inner();
+        same_formats(&formats)?;
+        let replicas = self.replicas(&bucket)?;
         Ok(Response::new(IncarnationResponse { incarnation: replicas.incarnation() }))
     }
 
@@ -816,11 +858,9 @@ impl local_cell::upload::Members for ReplicaMembers {
         Box::pin(async move {
             let request = FenceRequest { of: Some(self.of(cell, configuration, whom)), epoch };
             let channel = self.channels.of(&whom.address)?;
-            let mut client = client(&channel);
+            let mut client = client(&channel).max_decoding_message_size(FENCE_ANSWER_MOST);
             match tokio::time::timeout(DEADLINE, client.fence(request)).await {
-                Ok(Ok(answer)) => {
-                    Ok(answer.into_inner().logs.into_iter().map(|log| (log.log, log.end)).collect())
-                }
+                Ok(Ok(answer)) => fence_answer(answer.into_inner(), members_most()),
                 Ok(Err(status)) => Err(said(&status)),
                 Err(_) => Err(format!("no answer within {DEADLINE:?}")),
             }
@@ -839,7 +879,7 @@ impl local_cell::upload::Members for ReplicaMembers {
             let request =
                 ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
             let channel = self.channels.of(&whom.address)?;
-            let mut client = client(&channel);
+            let mut client = client(&channel).max_decoding_message_size(READ_PIECE_MOST);
             let answered = tokio::time::timeout(DEADLINE, client.read_log(request)).await;
             let answered = answered.map_err(|_| format!("no answer within {DEADLINE:?}"))?;
             read_to(answered.map_err(|status| said(&status))?.into_inner(), end, DEADLINE).await
@@ -872,10 +912,41 @@ fn said(status: &Status) -> String {
     format!("{:?}: {}", status.code(), status.message())
 }
 
+/// cladefs: a member's fence answer, `answer`, as a take relies on it (board 8453): the logs it
+/// holds of the configuration, in order, none twice, each with its end; refused, as no member's
+/// answer, if it names more than [`replica::LOGS_MOST`] logs, or ends summing past `most`, what a
+/// member holds of a configuration ([`members_most`]). What a take then reads of a member, to the
+/// ends it answered, is within what a member may hold.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+fn fence_answer(answer: FenceResponse, most: u64) -> Result<Vec<(u64, u64)>, String> {
+    let FenceResponse { logs } = answer;
+    if logs.len() > replica::LOGS_MOST {
+        return Err(format!(
+            "{} logs answered, past the {} a member holds of a configuration",
+            logs.len(),
+            replica::LOGS_MOST
+        ));
+    }
+    let (mut ends, mut total) = (Vec::with_capacity(logs.len()), 0u64);
+    for LogEnd { log, end } in logs {
+        if let Some(&(last, _)) = ends.last()
+            && log <= last
+        {
+            return Err(format!("log {log} answered after log {last}: out of order, or twice"));
+        }
+        total = total.checked_add(end).filter(|&total| total <= most).ok_or_else(|| {
+            format!("log {log}'s end, {end}, takes the logs' past the {most} bytes a member holds")
+        })?;
+        ends.push((log, end));
+    }
+    Ok(ends)
+}
+
 /// cladefs: the bytes of a log a member streams, `pieces`, to `end`, where its fence said the log
-/// ends, and no further, the stream dropped there; each piece within `deadline` of the one before,
-/// as a member's keepalives are answered however long its disk takes (board 5416). Fewer if the
-/// stream ends before, which its caller refuses.
+/// ends; each piece within `deadline` of the one before, as a member's keepalives are answered
+/// however long its disk takes (board 5416). A piece past `end` fails it (board 8453): a member
+/// that fenced the log at its end holds no more of it, and what a read holds is no more than its
+/// end, which its caller counts. Fewer if the stream ends before, which its caller refuses.
 async fn read_to(
     mut pieces: impl futures::Stream<Item = Result<ReadLogResponse, Status>> + Unpin,
     end: u64,
@@ -885,12 +956,16 @@ async fn read_to(
     let mut bytes = Vec::new();
     while (bytes.len() as u64) < end {
         let piece = tokio::time::timeout(deadline, pieces.next()).await;
-        match piece.map_err(|_| format!("no answer within {deadline:?}"))? {
-            Some(piece) => bytes.extend(piece.map_err(|status| said(&status))?.bytes),
-            None => break,
+        let Some(piece) = piece.map_err(|_| format!("no answer within {deadline:?}"))? else {
+            break;
+        };
+        let piece = piece.map_err(|status| said(&status))?.bytes;
+        let read = (bytes.len() as u64).saturating_add(piece.len() as u64);
+        if read > end {
+            return Err(format!("sent {read} bytes of a log it fenced at {end}"));
         }
+        bytes.extend(piece);
     }
-    bytes.truncate(usize::try_from(end).unwrap_or(usize::MAX));
     Ok(bytes)
 }
 
@@ -949,6 +1024,7 @@ impl ReplicaMembers {
                 epoch: configuration.epoch,
             }),
             incarnation: member.incarnation,
+            formats: formats(),
         }
     }
 }
@@ -958,7 +1034,7 @@ impl ReplicaMembers {
     /// [`DEADLINE`].
     async fn incarnation_of(&self, address: &str) -> Result<u64, String> {
         let mut client = client(&*self.channels.of(address)?);
-        let asked = IncarnationRequest { bucket: self.bucket.clone() };
+        let asked = IncarnationRequest { bucket: self.bucket.clone(), formats: formats() };
         match tokio::time::timeout(DEADLINE, client.incarnation(asked)).await {
             Ok(Ok(answer)) => Ok(answer.into_inner().incarnation),
             Ok(Err(status)) => Err(said(&status)),

@@ -213,12 +213,13 @@ fn of(incarnation: u64, number: u64, epoch: u64) -> Option<ReplicaOf> {
         cell: 9,
         configuration: Some(proto::Configuration { number, epoch }),
         incarnation,
+        formats: formats(),
     })
 }
 
-/// cladefs: what asks a member for its incarnation names: [`URL`].
+/// cladefs: what asks a member for its incarnation names: [`URL`], and this host's formats.
 fn asking() -> IncarnationRequest {
-    IncarnationRequest { bucket: URL.to_owned() }
+    IncarnationRequest { bucket: URL.to_owned(), formats: formats() }
 }
 
 /// cladefs: a writer streams appends to a member, each answered once synced; a take fences the
@@ -233,10 +234,7 @@ fn members_take_appends_and_fences_over_grpc() {
     // Bounded: a member and a writer waiting on each other fail here, not the run (a member
     // answering appends only once the first came deadlocked so, TASK-537.3.2).
     runtime.block_on(within(async move {
-        let incarnation = (client.incarnation(IncarnationRequest { bucket: URL.to_owned() }).await)
-            .unwrap()
-            .into_inner()
-            .incarnation;
+        let incarnation = (client.incarnation(asking()).await).unwrap().into_inner().incarnation;
         let append = |log, offset, bytes: &[u8]| AppendRequest {
             of: of(incarnation, 1, 4),
             log,
@@ -254,15 +252,15 @@ fn members_take_appends_and_fences_over_grpc() {
         // An append past the end writes nothing and answers the end (not OUT_OF_RANGE, which a
         // message past tonic's size limit is answered with); one of 5 MiB, past tonic's default
         // limit, is taken (TASK-537.3.2's review).
-        sending.send(append(2, 4, b"past")).await.unwrap();
-        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 2, end: 0 }));
-        sending.send(append(2, 0, &vec![5; 5 << 20])).await.unwrap();
-        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 2, end: 5 << 20 }));
+        sending.send(append(3, 4, b"past")).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 3, end: 0 }));
+        sending.send(append(3, 0, &vec![5; 5 << 20])).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 3, end: 5 << 20 }));
 
         // A take of epoch 5 fences the cell, and reads what the old writer's configuration holds.
         let fence = FenceRequest { of: of(incarnation, 1, 4), epoch: 5 };
         let fenced = client.fence(fence).await.unwrap().into_inner();
-        assert_eq!(fenced.logs, [LogEnd { log: 1, end: 12 }, LogEnd { log: 2, end: 5 << 20 }]);
+        assert_eq!(fenced.logs, [LogEnd { log: 1, end: 12 }, LogEnd { log: 3, end: 5 << 20 }]);
         let read = ReadLogRequest { of: of(incarnation, 1, 4), log: 1, offset: 0 };
         let mut pieces = client.read_log(read).await.unwrap().into_inner();
         let mut bytes = Vec::new();
@@ -285,7 +283,10 @@ fn members_take_appends_and_fences_over_grpc() {
 }
 
 /// cladefs: a member refuses calls naming another incarnation (ABORTED), asked of another bucket,
-/// or of a host with no replica directory (FAILED_PRECONDITION).
+/// or of a host with no replica directory (FAILED_PRECONDITION); and, board 8457, every call
+/// naming other formats than its own, or none (an asker of a build before them), and a writer's
+/// segment log of another format, before it acks any of it (FAILED_PRECONDITION, which a writer
+/// takes for a refusal of the member, not a fencing).
 #[test]
 fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
     let dir = tempfile::tempdir().unwrap();
@@ -306,10 +307,55 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
         elsewhere.as_mut().unwrap().bucket = "memory:///other".to_owned();
         let elsewhere = client.fence(fence(elsewhere)).await.unwrap_err();
         assert_eq!(elsewhere.code(), Code::FailedPrecondition, "{elsewhere:?}");
-        let asked = IncarnationRequest { bucket: URL.to_owned() };
-        let no = other.incarnation(asked).await.unwrap_err();
+        let no = other.incarnation(asking()).await.unwrap_err();
         assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
         assert!(no.message().contains("CLADEFSD_REPLICAS"), "{no:?}");
+
+        let ours = formats();
+        for asked_as in ["", "cell directories \"cladefs extent store 15\"", &ours[1..]] {
+            let refusal = format!(
+                "the asker's formats ({asked_as:?}) are not this host's ({ours:?}): refused"
+            );
+            let asked = IncarnationRequest { bucket: URL.to_owned(), formats: asked_as.to_owned() };
+            let no = client.incarnation(asked).await.unwrap_err();
+            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            let mut named = of(theirs, 1, 4);
+            named.as_mut().unwrap().formats = asked_as.to_owned();
+            let no = client.fence(fence(named.clone())).await.unwrap_err();
+            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            let read = ReadLogRequest { of: named.clone(), log: 1, offset: 0 };
+            let no = client.read_log(read).await.unwrap_err();
+            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            let dropped = DropLogsRequest { of: named.clone(), through: None };
+            let no = client.drop_logs(dropped).await.unwrap_err();
+            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            let (sending, sent) = tokio::sync::mpsc::channel(1);
+            let mut answers = (client.append(tokio_stream::wrappers::ReceiverStream::new(sent)))
+                .await
+                .unwrap()
+                .into_inner();
+            let first = AppendRequest { of: named, log: 1, offset: 0, bytes: b"x".to_vec() };
+            sending.send(first).await.unwrap();
+            let no = answers.message().await.unwrap_err();
+            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            assert!(matches!(link_error(&no), local_cell::replicate::LinkError::Refused(_)));
+        }
+
+        // A segment's log of another format, its first bytes the build before's.
+        let (sending, sent) = tokio::sync::mpsc::channel(1);
+        let mut answers = (client.append(tokio_stream::wrappers::ReceiverStream::new(sent)))
+            .await
+            .unwrap()
+            .into_inner();
+        let older = b"FXLOG\0\0\x03 and the rest of a header".to_vec();
+        let first = AppendRequest { of: of(theirs, 1, 4), log: 2, offset: 0, bytes: older };
+        sending.send(first).await.unwrap();
+        let no = answers.message().await.unwrap_err();
+        assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+        assert!(no.message().ends_with("begins a log of this build's format: refused"), "{no:?}");
+        assert!(matches!(link_error(&no), local_cell::replicate::LinkError::Refused(_)));
+        let fenced = client.fence(fence(of(theirs, 1, 4))).await.unwrap().into_inner();
+        assert_eq!(fenced.logs, []);
     }));
 }
 
@@ -377,7 +423,7 @@ fn sweeps_drop_what_heads_name_no_more() {
 /// refused for good.
 #[test]
 fn writers_append_to_members_through_their_links() {
-    use local_cell::replicate::{LinkError, log_of};
+    use local_cell::replicate::{LinkError, own_of as log_of};
     use local_cell::upload::Members as _;
     let dir = tempfile::tempdir().unwrap();
     let (address, replicas) = member(dir.path(), true);
@@ -418,11 +464,12 @@ fn writers_append_to_members_through_their_links() {
     assert!(matches!(refused, Err(LinkError::Refused(_))), "{refused:?}");
 }
 
-/// board 5416: a takeover's read of a member's log goes to the end its fence said and no further,
-/// the stream dropped there, whatever more the member sends; a member that stops answering, its
-/// keepalives answered as its disk stalls, fails it within the deadline, a piece's wait (50 ms
-/// here, `DEADLINE` for members); a log
-/// ending short of the end reads short, as its caller refuses.
+/// board 5416: a takeover's read of a member's log goes to the end its fence said; a member that
+/// stops answering, its keepalives answered as its disk stalls, fails it within the deadline, a
+/// piece's wait (50 ms here, `DEADLINE` for members); a log ending short of the end reads short,
+/// as its caller refuses. Board 8453: a member sending past the end it fenced the log at, streaming
+/// for ever, fails the read at the first piece past it, so that what a read holds is never more
+/// than its end, which its caller counts.
 #[tokio::test]
 async fn logs_read_from_members_end_at_their_fences_or_a_stall() {
     use futures::StreamExt as _;
@@ -430,10 +477,15 @@ async fn logs_read_from_members_end_at_their_fences_or_a_stall() {
     let pieces = |n: u8| futures::stream::iter((1..=n).map(piece));
     const WAIT: Duration = Duration::from_millis(50);
 
-    // Past its end, a member streaming for ever: none of what comes after asked for.
-    let endless = pieces(2).chain(futures::stream::repeat_with(|| piece(9)));
-    let read = read_to(Box::pin(endless), 15, WAIT).await;
-    assert_eq!(read, Ok([vec![1; 10], vec![2; 5]].concat()));
+    // To its end, the stream dropped there, whatever more it would send.
+    let endless = || pieces(2).chain(futures::stream::repeat_with(|| piece(9)));
+    let read = read_to(Box::pin(endless()), 20, WAIT).await;
+    assert_eq!(read, Ok([vec![1; 10], vec![2; 10]].concat()));
+    // Past its end: refused, holding no more than the end.
+    let read = read_to(Box::pin(endless()), 15, WAIT).await;
+    assert_eq!(read, Err("sent 20 bytes of a log it fenced at 15".to_owned()));
+    let read = read_to(Box::pin(endless()), 0, WAIT).await;
+    assert_eq!(read, Ok(Vec::new()));
 
     // Stalled after a piece.
     let start = tokio::time::Instant::now();
@@ -447,6 +499,83 @@ async fn logs_read_from_members_end_at_their_fences_or_a_stall() {
     let refused = futures::stream::iter([Err(Status::not_found("no log"))]);
     let read = read_to(Box::pin(refused), 15, WAIT).await;
     assert_eq!(read, Err("NotFound: no log".to_owned()));
+}
+
+/// board 8453: a fence answer is a take's only if it names at most `replica::LOGS_MOST` logs, in
+/// order, none twice, their ends within the bytes a member holds of a configuration; the edges of
+/// counts, log numbers and ends drawn (0, 1, the bounds and past them, `u64::MAX`).
+#[test]
+fn fence_answers_past_what_a_member_holds_are_refused() {
+    use replica::LOGS_MOST;
+    const MOST: u64 = 1 << 30;
+    let answer = |logs: &[(u64, u64)]| FenceResponse {
+        logs: logs.iter().map(|&(log, end)| LogEnd { log, end }).collect(),
+    };
+    let many = |n: usize| (0..n as u64).map(|log| (log, 0)).collect::<Vec<_>>();
+    for taken in
+        [vec![], vec![(0, 0)], vec![(0, MOST)], vec![(1, MOST - 1), (u64::MAX, 1)], many(LOGS_MOST)]
+    {
+        assert_eq!(fence_answer(answer(&taken), MOST), Ok(taken.clone()));
+    }
+    let refused = |logs: &[(u64, u64)]| fence_answer(answer(logs), MOST).unwrap_err();
+    let past = |log, end| {
+        format!("log {log}'s end, {end}, takes the logs' past the {MOST} bytes a member holds")
+    };
+    assert_eq!(refused(&[(0, MOST + 1)]), past(0, MOST + 1));
+    assert_eq!(refused(&[(4, u64::MAX)]), past(4, u64::MAX));
+    assert_eq!(refused(&[(2, MOST), (3, 1)]), past(3, 1));
+    assert_eq!(refused(&[(2, 1), (3, u64::MAX)]), past(3, u64::MAX));
+    assert_eq!(refused(&[(3, 1), (2, 1)]), "log 2 answered after log 3: out of order, or twice");
+    assert_eq!(refused(&[(3, 1), (3, 1)]), "log 3 answered after log 3: out of order, or twice");
+    let too_many = format!(
+        "{} logs answered, past the {LOGS_MOST} a member holds of a configuration",
+        LOGS_MOST + 1
+    );
+    assert_eq!(refused(&many(LOGS_MOST + 1)), too_many);
+    let a_million =
+        format!("1000000 logs answered, past the {LOGS_MOST} a member holds of a configuration");
+    assert_eq!(refused(&many(1_000_000)), a_million);
+}
+
+/// board 8453: a take's fence of a member holding more logs of the configuration than a member
+/// may (as one of another build, or a hostile one, answers) fails that member's answer, through
+/// the daemon's client; and a fence answer past [`FENCE_ANSWER_MOST`] bytes, a million logs, is
+/// refused by its decoder before it is held.
+#[test]
+fn takes_refuse_members_answering_more_logs_than_a_member_holds() {
+    use local_cell::upload::Members as _;
+    let dir = tempfile::tempdir().unwrap();
+    // Logs a member of this build never holds so many of, its files left as one would, before it
+    // opens its directory again.
+    drop(super::replicas(&dir.path().join("replicas")).unwrap());
+    for log in 0..=replica::LOGS_MOST as u64 {
+        let path = dir.path().join(format!("replicas/3.9.1.4.{}", log * 2 + 1));
+        std::fs::File::create(path).unwrap();
+    }
+    let (address, replicas) = member(dir.path(), true);
+    let replicas = replicas.unwrap();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let members = ReplicaMembers {
+        bucket: URL.to_owned(),
+        me: "127.0.0.1:1".to_owned(),
+        incarnation: 1,
+        channels: Channels::new(runtime.clone()),
+    };
+    let cell = crate::CellId { tenant: 3, id: 9 };
+    let configuration =
+        bucket_cell::layout::Configuration { number: 1, epoch: 4, f: 1, members: Vec::new() };
+    let whom = bucket_cell::layout::Member { address, incarnation: replicas.incarnation() };
+    let fenced = runtime.block_on(members.fence(cell, &configuration, &whom, 5));
+    let refusal = format!(
+        "{} logs answered, past the {} a member holds of a configuration",
+        replica::LOGS_MOST + 1,
+        replica::LOGS_MOST
+    );
+    assert_eq!(fenced, Err(refusal));
+    // Answered by the million: past what the decoder takes.
+    let logs = (0..1_000_000u64).map(|log| LogEnd { log: u64::MAX - log, end: u64::MAX });
+    let answer = prost::Message::encoded_len(&FenceResponse { logs: logs.collect() });
+    assert!(answer > FENCE_ANSWER_MOST, "{answer}");
 }
 
 /// board 8573: an accept that fails as the host may get over (EMFILE, as with every descriptor

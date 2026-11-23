@@ -79,6 +79,43 @@ pub fn hot_bytes() -> u64 {
     HOT.get().total.load(Ordering::Relaxed)
 }
 
+/// cladefs: what a take holds of its fenced members' logs as it reads them (board 8453), counted
+/// with the hot replication buffers ([`hot_bytes`]), which the daemon's memory governor counts and
+/// makes room for, from when a read is asked for to when the take is done with it: a member's
+/// copy is the take's to hold whole, as it checks it whole, so nothing of it is evicted, but the
+/// governor shrinks what else it governs for it (one memory budget).
+#[derive(Default)]
+pub(crate) struct Holding(u64);
+
+impl Holding {
+    /// Holds `bytes` more.
+    pub(crate) fn hold(&mut self, bytes: u64) {
+        HOT.get().total.fetch_add(bytes, Ordering::Relaxed);
+        self.0 += bytes;
+    }
+
+    /// Holds `bytes` fewer, of those it holds.
+    pub(crate) fn release(&mut self, bytes: u64) {
+        let bytes = bytes.min(self.0);
+        HOT.get().total.fetch_sub(bytes, Ordering::Relaxed);
+        self.0 -= bytes;
+    }
+
+    /// Holds `bytes`, more or fewer than it held.
+    pub(crate) fn hold_only(&mut self, bytes: u64) {
+        match bytes.checked_sub(self.0) {
+            Some(more) => self.hold(more),
+            None => self.release(self.0 - bytes),
+        }
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        HOT.get().total.fetch_sub(self.0, Ordering::Relaxed);
+    }
+}
+
 /// Sets the node-wide soft cap on hot replication buffers (called by the daemon's memory
 /// governor): new flushes past this cap evict persisted chunks as soon as they hit local disk.
 pub fn size_hot_to(limit: u64) {
@@ -119,8 +156,9 @@ pub fn evict_hot_to(target: u64) -> u64 {
     }
 }
 
-/// Seed for `own_frame` rapidhash integrity checks.
-const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0002;
+/// Seed for `own_frame` rapidhash integrity checks: its last digits the frames' format, which the
+/// replica directory's format names (`replica::magic`, board 8457).
+pub(crate) const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0002;
 
 /// Header bytes of an `own_frame`: sequence (u64), len (u64), hash (u64).
 pub(crate) const OWN_FRAME_HEADER: u64 = 24;

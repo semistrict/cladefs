@@ -1977,9 +1977,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: what the fenced members hold, the longest copy of each log, after the head's
         // last commit: the cell's write-ahead log, if it holds none, and what the new
         // configuration's members are given before it is active (TASK-537.3.4).
-        let (seed, recovering, short, restored) = match (&old, fenced) {
+        let (seed, seeding, recovering, short, restored) = match (&old, fenced) {
             (Some(old), Some(Fenced { members: fenced, short })) => {
-                let logs = self.read_longest(cell, old, &fenced, &keys).await?;
+                let (logs, mut seeding) = self.read_longest(cell, old, &fenced, &keys).await?;
                 let last = writer.taken().last_commit;
                 let seed = match crate::replicate::trimmed(cell, &logs, last, Some(&keys)) {
                     Ok(seed) => seed,
@@ -1991,6 +1991,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     }
                     Err(err) => return Err(err.into()),
                 };
+                // What it holds of the members' logs from here: the seed alone, counted until its
+                // replicator holds it (board 8453, Codex's review 56).
+                drop(logs);
+                seeding.hold_only(seed.iter().map(|(_, bytes)| bytes.len() as u64).sum());
                 // Its own write-ahead log, if it holds one, recovered unless the members' go past
                 // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's
                 // review).
@@ -2029,9 +2033,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         Ok(recovering.restored(&seed, last)?)
                     })?,
                 };
-                (seed, recovering, short, ahead)
+                (seed, seeding, recovering, short, ahead)
             }
-            _ => (Vec::new(), recovering, None, false),
+            _ => (Vec::new(), crate::replicate::Holding::default(), recovering, None, false),
         };
         // cladefs: taken by force from too few members: what may be lost noted in the cell's
         // description, which its status says from now on, while this placement holds it; or, of an
@@ -2091,7 +2095,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             replication.wish.f = replication.wish.f.max(before);
             if replication.wish.f >= 1 {
                 let (configuration, stale) =
-                    self.replicate(&writer, replication, old, seed).await?;
+                    self.replicate(&writer, replication, old, (seed, seeding)).await?;
                 *self.keeping.lock().unwrap() = Some((wish, configuration, stale));
             }
         }
@@ -2112,13 +2116,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// it is activated only by the acknowledgement that names them all, in the same swap
     /// (`Writer::configure_past`), the head naming `old`, fenced, until then (TASK-678; the spec's
     /// installOwn, its mutation InstallMembersOnly). Returns the configuration, and whether the
-    /// head names one before it still ([`Shared::keep`]'s `stale`).
+    /// head names one before it still ([`Shared::keep`]'s `stale`). The seed's bytes are counted
+    /// by `seeding` until the replicator holds them, which counts them then (board 8453).
     async fn replicate(
         &self,
         writer: &Arc<Writer<B>>,
         replication: bucket_cell::layout::Replication,
         old: Option<bucket_cell::layout::Configuration>,
-        seed: Vec<(u64, Vec<u8>)>,
+        (seed, seeding): (Vec<(u64, Vec<u8>)>, crate::replicate::Holding),
     ) -> Result<(bucket_cell::layout::Configuration, bool), Failure> {
         use bucket_cell::layout::Configuration;
         let bucket_cell::layout::Replication { wish, configuration } = replication;
@@ -2196,6 +2201,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         if !seed.is_empty() {
             replicator.seed(base, seed);
+            drop(seeding);
             let started = std::time::Instant::now();
             while replicator.replicated() < base {
                 if replicator.fenced().is_some() || started.elapsed() > SEEDING {
@@ -2577,14 +2583,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// member's fence says ends at nothing holds nothing, as one it never made: a member makes a
     /// log's file at its first append, which may fail after (board 5914: its write failing,
     /// ENOSPC, it held the file empty, which, no header of its own, was no authentic copy, and
-    /// every take failed).
+    /// every take failed). What it holds of the copies, the longest of each log and the one being
+    /// read, from its asking, is counted with the hot replication buffers, which the daemon's
+    /// memory governor governs (`replicate::Holding`, board 8453), and returned with the logs, still
+    /// counted for as long as the caller holds it; each member's ends are bounded where its answer
+    /// entered (`cladefsd::peers`), and a read stops at its end.
     async fn read_longest(
         &self,
         cell: CellId,
         old: &bucket_cell::layout::Configuration,
         fenced: &[(bucket_cell::layout::Member, Vec<(u64, u64)>)],
         keys: &Arc<Ring>,
-    ) -> Result<Vec<(u64, Vec<u8>)>, Failure> {
+    ) -> Result<(Vec<(u64, Vec<u8>)>, crate::replicate::Holding), Failure> {
         // Each log's copies, by their members' fences' ends, the longest first.
         let mut copies: BTreeMap<u64, Vec<(u64, bucket_cell::layout::Member)>> = BTreeMap::new();
         for (member, ends) in fenced {
@@ -2597,6 +2607,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let members = self.members()?;
         let mut logs = Vec::with_capacity(copies.len());
+        let mut holding = crate::replicate::Holding::default();
         {
             for (log, held) in copies {
                 let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
@@ -2607,9 +2618,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     if best.as_ref().is_some_and(|best| best.len() as u64 >= end) {
                         break;
                     }
+                    // Held from its asking, to its end, where the read stops; let go of below as
+                    // far as it is not the best copy.
+                    holding.hold(end);
                     let mut bytes = match members.read(cell, old, &member, log, end).await {
                         Ok(bytes) => bytes,
                         Err(err) => {
+                            holding.release(end);
                             let err =
                                 format!("{} reading log {log} of {cell:?}: {err}", member.address);
                             log::warn!("cladefs: {err}: passed over if another copy as long reads");
@@ -2630,8 +2645,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     // extents' files, whose records name them, as they are.
                     if log & 1 == 0 {
                         match crate::wal::replica_whole(&bytes, segment, keys) {
-                            Ok(whole) => bytes.truncate(whole),
+                            // Cut to what is whole, its allocation with it: what it holds is
+                            // what is counted (Codex's review 56).
+                            Ok(whole) if whole < bytes.len() => {
+                                bytes.truncate(whole);
+                                bytes.shrink_to_fit();
+                            }
+                            Ok(_) => {}
                             Err(err) => {
+                                holding.release(end);
                                 log::warn!(
                                     "cladefs: {}'s log {log} of {cell:?}: {err:#}: passed over",
                                     member.address
@@ -2642,7 +2664,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         }
                     }
                     if best.as_ref().is_none_or(|best| bytes.len() > best.len()) {
-                        best = Some(bytes);
+                        holding.release(end - bytes.len() as u64);
+                        if let Some(was) = best.replace(bytes) {
+                            holding.release(was.len() as u64);
+                        }
+                    } else {
+                        holding.release(end);
                     }
                 }
                 // A copy that could not be read, longer than every copy read: the commits it alone
@@ -2663,7 +2690,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
             }
         }
-        Ok(logs)
+        Ok((logs, holding))
     }
 
     /// `writer` took the cell, with the fencing token `token`: the cell names what it reads in
