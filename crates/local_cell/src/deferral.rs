@@ -16,8 +16,8 @@
 //! at once: every file and directory under it, and its parent's entry for it; then its `UNMADE`
 //! file goes, durably, and its syncs are its own again. No commit is acknowledged before its cell
 //! is durable: the guest sees no difference. What renames, links or replaces a file in it waits
-//! for a settling in flight, which lists what is there once: a name it listed is the name it
-//! syncs. A settling that fails fails the cell, as any flush's failure does: nothing of it is
+//! for a settling in flight, and a settling for those in flight before it lists what is there:
+//! a name it listed is the name it syncs. A settling that fails fails the cell, as any flush's failure does: nothing of it is
 //! taken as durable after, its syncs its own again.
 //!
 //! A deferral is the directory's, by its canonical path, however its users spell it, as the cell
@@ -33,8 +33,22 @@ use std::sync::Arc;
 pub(crate) struct Deferral {
     /// Its directory's canonical path ([`key`]).
     path: PathBuf,
-    state: Mutex<State>,
+    /// What its settling listed, a test's to see.
+    #[cfg(test)]
+    listed: Mutex<Vec<PathBuf>>,
+    /// Whether its settling waits for renames in flight, a test's to see.
+    #[cfg(test)]
+    awaits_renames: std::sync::atomic::AtomicBool,
+    state: Mutex<Stage>,
+    /// What its settling's waits and renames' wait for: a settling's end, or a rename's.
     settled: Condvar,
+}
+
+/// A [`Deferral`]'s state, and how many renames of files in its directory are in flight
+/// ([`Deferral::renaming`]), which a settling waits for before it lists what is there.
+struct Stage {
+    state: State,
+    renaming: usize,
 }
 
 /// Where a [`Deferral`] is.
@@ -78,7 +92,11 @@ pub fn defer_durability(path: &Path) -> Deferring {
     let path = key(path);
     let deferral = Arc::new(Deferral {
         path: path.clone(),
-        state: Mutex::new(State::Making),
+        #[cfg(test)]
+        listed: Mutex::new(Vec::new()),
+        #[cfg(test)]
+        awaits_renames: std::sync::atomic::AtomicBool::new(false),
+        state: Mutex::new(Stage { state: State::Making, renaming: 0 }),
         settled: Condvar::new(),
     });
     DEFERRED.get().lock().unwrap().insert(path, deferral.clone());
@@ -101,15 +119,15 @@ impl Deferring {
 
 impl Drop for Deferring {
     fn drop(&mut self) {
-        let mut state = self.deferral.state.lock().unwrap();
-        match *state {
+        let mut stage = self.deferral.state.lock().unwrap();
+        match stage.state {
             State::Making => {
-                *state = State::Settled;
-                drop(state);
+                stage.state = State::Settled;
+                drop(stage);
                 self.deferral.forget();
             }
             State::Made if !self.opened => {
-                drop(state);
+                drop(stage);
                 if let Err(err) = crate::upload::blocking(|| self.deferral.settle()) {
                     log::error!(
                         "extent store: making {} durable, its opening failed: {err}",
@@ -139,39 +157,41 @@ pub(crate) fn made_here(path: &Path) -> bool {
 }
 
 impl Deferral {
-    /// Its state, once no settling is in flight.
-    fn settled_state(&self) -> crate::sync::MutexGuard<'_, State> {
-        let mut state = self.state.lock().unwrap();
-        while *state == State::Settling {
-            state = self.settled.wait(state).unwrap();
+    /// Its stage, once no settling is in flight.
+    fn settled_state(&self) -> crate::sync::MutexGuard<'_, Stage> {
+        let mut stage = self.state.lock().unwrap();
+        while stage.state == State::Settling {
+            stage = self.settled.wait(stage).unwrap();
         }
-        state
+        stage
     }
 
     /// Whether a sync of its directory's is to be skipped now: while it is made, or being made;
     /// a sync while it settles waits for its settling.
     pub fn skips(&self) -> bool {
-        matches!(*self.settled_state(), State::Making | State::Made)
+        matches!(self.settled_state().state, State::Making | State::Made)
     }
 
-    /// Waits for a settling in flight: what renames, links or replaces a file in its directory
-    /// waits so, the settling listing what is there once (the module's docs).
-    pub fn wait_settling(&self) {
-        drop(self.settled_state());
+    /// A rename, link or replacement of a file in its directory, in flight until what is returned
+    /// goes: begun once no settling is in flight, and waited for by the next before it lists what
+    /// is there (the module's docs).
+    pub fn renaming(&self) -> Renaming<'_> {
+        self.settled_state().renaming += 1;
+        Renaming(self)
     }
 
     /// Whether it is whole here: made, as its maker said.
     pub fn made(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), State::Made | State::Settling)
+        matches!(self.state.lock().unwrap().state, State::Made | State::Settling)
     }
 
     /// Its maker says it is whole: returns whether that is deferred too, its `UNMADE` file to go
     /// as it settles.
     pub fn mark_made(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
-        match *state {
+        let mut stage = self.state.lock().unwrap();
+        match stage.state {
             State::Making => {
-                *state = State::Made;
+                stage.state = State::Made;
                 true
             }
             _ => false,
@@ -184,12 +204,18 @@ impl Deferral {
     /// fails for good, its syncs its own again, its cell failed by the flush that asked.
     pub fn settle(&self) -> io::Result<()> {
         {
-            let mut state = self.settled_state();
-            match *state {
+            let mut stage = self.settled_state();
+            match stage.state {
                 State::Making | State::Settled => return Ok(()),
                 State::Failed => return Err(io::Error::other("its deferred durability failed")),
                 State::Settling => unreachable!("waited for"),
-                State::Made => *state = State::Settling,
+                State::Made => stage.state = State::Settling,
+            }
+            // The renames in flight done first: what it lists is there under the names it syncs.
+            while stage.renaming > 0 {
+                #[cfg(test)]
+                self.awaits_renames.store(true, std::sync::atomic::Ordering::Relaxed);
+                stage = self.settled.wait(stage).unwrap();
             }
         }
         fail::fail_point!("deferral::settle", |_| {
@@ -206,7 +232,7 @@ impl Deferral {
 
     /// Its settling ended in `state`: what waited for it goes on, and it is forgotten.
     fn ended(&self, state: State) {
-        *self.state.lock().unwrap() = state;
+        self.state.lock().unwrap().state = state;
         self.settled.notify_all();
         self.forget();
     }
@@ -222,6 +248,8 @@ impl Deferral {
     fn make_durable(&self) -> io::Result<()> {
         let mut found = Vec::new();
         under(&self.path, &mut found)?;
+        #[cfg(test)]
+        self.listed.lock().unwrap().extend(found.iter().map(|(path, _)| path.clone()));
         let parent = self.path.parent().filter(|parent| !parent.as_os_str().is_empty());
         found.push((parent.unwrap_or(Path::new(".")).to_owned(), true));
         let synced =
@@ -235,6 +263,16 @@ impl Deferral {
             _ => {}
         }
         sync(&self.path, true)
+    }
+}
+
+/// A rename of a file in a deferred directory, in flight ([`Deferral::renaming`]).
+pub(crate) struct Renaming<'a>(&'a Deferral);
+
+impl Drop for Renaming<'_> {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().renaming -= 1;
+        self.0.settled.notify_all();
     }
 }
 
@@ -277,5 +315,45 @@ fn sync(path: &Path, dir: bool) -> io::Result<()> {
     match dir {
         true => file.sync_all(),
         false => file.sync_data(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dir::{Dir as _, DiskDir, File as _};
+
+    /// A file renamed while a settling begins is synced by its new name: the settling waits for
+    /// the rename in flight before it lists what is there, as a framer's rename of a segment
+    /// framed, its sync skipped, once lost its data (board 7420's review).
+    #[test]
+    fn settlings_list_what_renames_in_flight_left() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("cell");
+        let deferring = defer_durability(&path);
+        host_fs::create_dir(&path).unwrap();
+        let dir = DiskDir::new(&path).unwrap();
+        let file = dir.create("framing", false).unwrap();
+        file.write_at(&[7; 4096], 0).unwrap();
+        file.sync().unwrap();
+        crate::made_host(&path).unwrap();
+        deferring.opened();
+        let deferral = of(&path).unwrap();
+        let renaming = deferral.renaming();
+        std::thread::scope(|scope| {
+            let settling = scope.spawn(|| deferral.settle());
+            // Once the settling waits for the rename, or, were it not to, has listed what is
+            // there: renamed then, its listing missed the file.
+            let awaits = || deferral.awaits_renames.load(std::sync::atomic::Ordering::Relaxed);
+            while !awaits() && deferral.listed.lock().unwrap().is_empty() {
+                std::thread::yield_now();
+            }
+            host_fs::rename(path.join("framing"), path.join("segment")).unwrap();
+            drop(renaming);
+            settling.join().unwrap().unwrap();
+        });
+        let listed = deferral.listed.lock().unwrap();
+        assert!(listed.contains(&key(&path).join("segment")), "{listed:?}");
+        assert!(!path.join(crate::cell::UNMADE).exists());
     }
 }

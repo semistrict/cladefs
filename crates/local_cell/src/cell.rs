@@ -1924,9 +1924,10 @@ impl<D: Dir> LocalCell<D> {
         };
         drop(flushing);
         // cladefs: its durability deferred, and no flush to make it durable, made durable as it
-        // closes: whole on the disk for its next opening (board 7420).
+        // closes, whether or not its flush failed, as a fork's making would have: whole on the
+        // disk for its next opening (board 7420).
+        let settled = crate::upload::blocking(|| self.dir.settle());
         let flushed = flushed.and_then(|()| {
-            let settled = crate::upload::blocking(|| self.dir.settle());
             settled.context("making the cell durable as it closes, its durability deferred")
         });
         // cladefs: an ephemeral cell's closed segments covered, all of them, its local checkpoint
