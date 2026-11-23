@@ -826,7 +826,12 @@ impl Replicator {
         tasks.retain(|task| !task.is_finished());
         for (m, link) in (first..).zip(links) {
             let shared = self.shared.clone();
-            tasks.push(runtime.spawn(async move { serve(&shared, m, &*link).await }));
+            tasks.push(runtime.spawn(async move {
+                let served = std::panic::AssertUnwindSafe(serve(&shared, m, &*link));
+                if let Err(panic) = served.catch_unwind().await {
+                    shared.panicked(m, &*panic);
+                }
+            }));
         }
     }
 
@@ -1139,6 +1144,33 @@ impl Drop for Replicator {
         state.clear_hot();
         drop(state);
         self.shared.changed.notify(usize::MAX);
+    }
+}
+
+impl Shared {
+    /// cladefs: member `m`'s task panicked, with `panic` (board 8505): the member is down for good,
+    /// as one out of reach is, which its writer's keeper replaces once it has been for long
+    /// (`lost`), and counts in what is degraded; before, it counted as up for ever, its ends
+    /// never moving, and was never replaced. Panicking holding the state, which may be half
+    /// changed, it breaks the replicator, its commits waiting for the bucket, and clears the
+    /// poison, which every lock of it after would panic on.
+    fn panicked(&self, m: usize, panic: &(dyn std::any::Any + Send)) {
+        let message = (panic.downcast_ref::<&str>().copied())
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("of no message");
+        let why = format!("its task panicked: {message}");
+        log::error!("cladefs: replicating: member {m} down for good: {why}");
+        let poisoned = self.state.is_poisoned();
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if poisoned {
+            log::error!("cladefs: replicating: broken, its state left as a panic left it");
+            state.broken.get_or_insert_with(|| format!("member {m}'s task panicked holding it"));
+            self.state.clear_poison();
+        }
+        state.members[m].down = Some((why, std::time::Instant::now()));
+        drop(state);
+        self.changed.notify(usize::MAX);
+        (self.notify)();
     }
 }
 

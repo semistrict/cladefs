@@ -290,6 +290,10 @@ fn link_error(err: local_cell::replica::Error) -> LinkError {
     }
 }
 
+/// The address of the member whose link panics at its next append, once, if any: a bug's panic
+/// in its writer's task serving it (board 8505).
+static PANICKING: Mutex<Option<String>> = Mutex::new(None);
+
 impl MemberLink for Link {
     fn append<'a>(
         &'a self,
@@ -299,6 +303,9 @@ impl MemberLink for Link {
     ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
         Box::pin(async move {
             let bytes = &bytes[..];
+            if PANICKING.lock().unwrap().take_if(|panicking| *panicking == self.address).is_some() {
+                panic!("a panic appending to {}, as a test asks", self.address);
+            }
             self.reach()?;
             self.replicas.append(self.of, log, offset, bytes).map_err(link_error)
         })
@@ -755,6 +762,47 @@ async fn lost_members_are_replaced_and_commits_stay_replicated() {
     taken.made().unwrap();
     assert!(taken.last_commit().unwrap() >= last);
     assert_eq!(host.contents(&taken).await, expected);
+    drop(uploader);
+}
+
+/// board 8505: a member whose writer's task serving it panics, as a link's call may, is down, lost
+/// once it has been for long, and replaced. Before, its task's panic went unobserved: the member
+/// counted as up for ever, its ends never moving, and was never replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_whose_tasks_panic_are_replaced() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
+    let last = commit(&cell, 0, 2).await;
+    uploader.replicated(last).await.unwrap();
+
+    // b's task panics at its next append: c alone holds what comes next, until b is replaced.
+    let replicator = cell.replicator().unwrap();
+    *PANICKING.lock().unwrap() = Some("b".into());
+    let last = commit(&cell, 2, 2).await;
+    uploader.replicated(last).await.unwrap();
+    until("b down", async || replicator.members_up() == 1).await;
+    assert!(replicator.lost(Duration::ZERO), "{:?}", replicator.down());
+    assert!(!replicator.degraded(), "c holds what f = 1 asks for");
+    until("b replaced", async || configuration_named(&host).await.number == 2).await;
+    until("swapped", async || {
+        let status = uploader.status().unwrap().replication.unwrap();
+        !status.degraded && !status.replacing && status.members_up == 2
+    })
+    .await;
+    let last = commit(&cell, 4, 2).await;
+    uploader.replicated(last).await.unwrap();
     drop(uploader);
 }
 
