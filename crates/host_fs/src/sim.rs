@@ -4,422 +4,40 @@
 
 //! cladefs: each simulated host's disk, in memory, of `std::fs`'s calls (the crate's docs).
 //!
-//! A disk is a tree of inodes from its root, `/`: files, holding bytes, and directories, holding
-//! entries, each a name and an inode. What is durable is a file's bytes as of its last sync, a
-//! directory's entries of files as of its last sync, and directories once made, as
-//! `local_cell::MemDir` has them, the model the cells' own crash tests are written to; what
-//! changed since, files' writes, and directories' entries made, removed or renamed, each in order,
-//! are kept beside. A crash ([`Disk::crashed`]) keeps what was
-//! durable and any of what changed since, as the seed says, each change kept or not in order, each
-//! sector of each write whole, not at all, garbage, or torn, its garbage in the bytes it changes
-//! alone ([`crate::crash`]); what no directory's entry names after goes. A directory made is an
-//! entry of its parent's like a file's, durable at the next sync of anything, which commits a
-//! journaling file system's journal, as ext4 and XFS have it (board 5748). No symbolic links;
-//! paths are absolute, a relative one taken from the root.
+//! A disk is a file system in memory ([`crate::mem`], the crash model the cells' own crash tests'
+//! directories are too), from its root, `/`, a relative path taken from it: a host started again,
+//! killed before, finds it as a crash left it ([`mem::Fs::crashed`]), corrupting what was written
+//! since its files' last syncs, its locks of files gone. Its calls fail as the simulation's faults
+//! say, besides ([`faults`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use crate::mem::{self, components, errno};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
-
-/// The blocks a file gives back ([`punch_hole`](crate::punch_hole)), and counts allocated.
-const HOLE: u64 = 4096;
-
-/// The inode of a disk's root.
-const ROOT: u64 = 1;
 
 /// The device every simulated disk is, as `stat` says.
 const DEVICE: u64 = 0x5155;
 
-fn errno(code: i32) -> io::Error {
-    io::Error::from_raw_os_error(code)
-}
-
-/// A simulated host's disk (see the module's docs).
+/// A simulated host's disk (see the module's docs): its file system, and its locks of files.
 struct Disk {
-    fs: Mutex<Fs>,
+    fs: Mutex<mem::Fs>,
+    locks: Mutex<Locks>,
 }
 
-#[derive(Clone, Default)]
-struct Fs {
-    inodes: BTreeMap<u64, Inode>,
-    next: u64,
+struct Locks {
     /// The inodes locked ([`File::lock_exclusive`]), by the openings that hold them.
-    locks: BTreeMap<u64, u64>,
+    held: BTreeMap<u64, u64>,
     /// The openings made, numbered.
     opened: u64,
-    /// cladefs: the directories made since the last sync of anything: their parents, names and
-    /// inodes (board 5748).
-    making: Vec<(u64, OsString, u64)>,
 }
 
-#[derive(Clone)]
-enum Inode {
-    File(FileData),
-    Dir(DirData),
-}
-
-#[derive(Clone)]
-struct FileData {
-    data: Vec<u8>,
-    durable: Vec<u8>,
-    /// What changed since its last sync, in order.
-    changes: Vec<FileChange>,
-    /// Its blocks of [`HOLE`] bytes given back, written since none.
-    holes: BTreeSet<u64>,
-    modified: SystemTime,
-    /// The entries naming it.
-    links: u32,
-}
-
-#[derive(Clone)]
-enum FileChange {
-    Write(usize, Vec<u8>),
-    SetLen(usize),
-}
-
-#[derive(Clone, Default)]
-struct DirData {
-    entries: BTreeMap<OsString, u64>,
-    durable: BTreeMap<OsString, u64>,
-    /// What changed since its last sync, in order.
-    changes: Vec<DirChange>,
-}
-
-#[derive(Clone)]
-enum DirChange {
-    /// An entry made, or put over the one there.
-    Set(OsString, u64),
-    Remove(OsString),
-    /// An entry renamed within the directory, at once.
-    Rename(OsString, OsString, u64),
-}
-
-impl DirChange {
-    fn apply(&self, entries: &mut BTreeMap<OsString, u64>) {
-        match self {
-            DirChange::Set(name, inode) => drop(entries.insert(name.clone(), *inode)),
-            DirChange::Remove(name) => drop(entries.remove(name)),
-            DirChange::Rename(from, to, inode) => {
-                if entries.remove(from).is_some() {
-                    entries.insert(to.clone(), *inode);
-                }
-            }
-        }
-    }
-}
-
-impl FileData {
-    fn new() -> Self {
-        Self {
-            data: Vec::new(),
-            durable: Vec::new(),
-            changes: Vec::new(),
-            holes: BTreeSet::new(),
-            modified: SystemTime::now(),
-            links: 0,
-        }
-    }
-
-    fn write(&mut self, at: usize, bytes: &[u8]) {
-        if self.data.len() < at + bytes.len() {
-            self.data.resize(at + bytes.len(), 0);
-        }
-        self.data[at..at + bytes.len()].copy_from_slice(bytes);
-        let (first, last) = (at as u64 / HOLE, (at + bytes.len()).div_ceil(HOLE as usize) as u64);
-        for block in first..last {
-            self.holes.remove(&block);
-        }
-        self.changes.push(FileChange::Write(at, bytes.to_vec()));
-        self.modified = SystemTime::now();
-    }
-
-    fn set_len(&mut self, len: usize) {
-        self.data.resize(len, 0);
-        self.changes.push(FileChange::SetLen(len));
-        self.modified = SystemTime::now();
-    }
-
-    fn sync(&mut self) {
-        self.durable = self.data.clone();
-        self.changes.clear();
-    }
-
-    fn allocated(&self) -> u64 {
-        let blocks = (self.data.len() as u64).div_ceil(HOLE);
-        let holes = self.holes.range(..blocks).count() as u64;
-        (blocks - holes) * HOLE
-    }
-}
-
-impl Fs {
-    fn new() -> Self {
-        let mut inodes = BTreeMap::new();
-        inodes.insert(ROOT, Inode::Dir(DirData::default()));
-        Self { inodes, next: ROOT + 1, locks: BTreeMap::new(), opened: 0, making: Vec::new() }
-    }
-
-    fn file(&mut self, inode: u64) -> io::Result<&mut FileData> {
-        match self.inodes.get_mut(&inode) {
-            Some(Inode::File(file)) => Ok(file),
-            Some(Inode::Dir(_)) => Err(errno(libc::EISDIR)),
-            None => Err(errno(libc::EBADF)),
-        }
-    }
-
-    fn dir(&mut self, inode: u64) -> io::Result<&mut DirData> {
-        match self.inodes.get_mut(&inode) {
-            Some(Inode::Dir(dir)) => Ok(dir),
-            Some(Inode::File(_)) => Err(errno(libc::ENOTDIR)),
-            None => Err(errno(libc::ENOENT)),
-        }
-    }
-
-    /// The inode at `path`.
-    fn lookup(&self, path: &Path) -> io::Result<u64> {
-        let mut at = ROOT;
-        for name in components(path)? {
-            at = match self.inodes.get(&at) {
-                Some(Inode::Dir(dir)) => {
-                    *dir.entries.get(&name).ok_or_else(|| errno(libc::ENOENT))?
-                }
-                _ => return Err(errno(libc::ENOTDIR)),
-            };
-        }
-        Ok(at)
-    }
-
-    /// The directory holding `path`'s entry, and its name: the root has none.
-    fn parent(&self, path: &Path) -> io::Result<(u64, OsString)> {
-        let mut names = components(path)?;
-        let name = names.pop().ok_or_else(|| errno(libc::EEXIST))?;
-        let parent: PathBuf = std::iter::once(OsString::from("/")).chain(names).collect();
-        let dir = self.lookup(&parent)?;
-        match self.inodes.get(&dir) {
-            Some(Inode::Dir(_)) => Ok((dir, name)),
-            _ => Err(errno(libc::ENOTDIR)),
-        }
-    }
-
-    fn change(&mut self, dir: u64, change: DirChange) -> io::Result<()> {
-        let dir = self.dir(dir)?;
-        change.apply(&mut dir.entries);
-        dir.changes.push(change);
-        Ok(())
-    }
-
-    fn make(&mut self, inode: Inode) -> u64 {
-        let number = self.next;
-        self.next += 1;
-        self.inodes.insert(number, inode);
-        number
-    }
-
-    /// Lets the file `inode` go, once no entry names it and no opening holds it.
-    fn unlinked(&mut self, inode: u64) {
-        if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
-            file.links = file.links.saturating_sub(1);
-        }
-    }
-
-    fn create_dir(&mut self, path: &Path) -> io::Result<()> {
-        let (parent, name) = self.parent(path)?;
-        if self.dir(parent)?.entries.contains_key(&name) {
-            return Err(errno(libc::EEXIST));
-        }
-        let made = self.make(Inode::Dir(DirData::default()));
-        // cladefs: an entry of its parent's like a file's, durable at the next sync of anything
-        // (board 5748): a crash before loses the directory, or keeps it, with all under it.
-        self.making.push((parent, name.clone(), made));
-        self.change(parent, DirChange::Set(name, made))
-    }
-
-    fn remove(&mut self, path: &Path, dir: bool) -> io::Result<()> {
-        let (parent, name) = self.parent(path)?;
-        let inode = *self.dir(parent)?.entries.get(&name).ok_or_else(|| errno(libc::ENOENT))?;
-        match (self.inodes.get(&inode), dir) {
-            (Some(Inode::Dir(_)), false) => return Err(errno(libc::EISDIR)),
-            (Some(Inode::File(_)), true) => return Err(errno(libc::ENOTDIR)),
-            (Some(Inode::Dir(of)), true) if !of.entries.is_empty() => {
-                return Err(errno(libc::ENOTEMPTY));
-            }
-            _ => {}
-        }
-        self.change(parent, DirChange::Remove(name))?;
-        self.unlinked(inode);
-        Ok(())
-    }
-
-    fn remove_all(&mut self, path: &Path) -> io::Result<()> {
-        let inode = self.lookup(path)?;
-        if let Some(Inode::Dir(dir)) = self.inodes.get(&inode) {
-            let names: Vec<OsString> = dir.entries.keys().cloned().collect();
-            for name in names {
-                self.remove_all(&path.join(name))?;
-            }
-            return self.remove(path, true);
-        }
-        self.remove(path, false)
-    }
-
-    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
-        let (source, name) = self.parent(from)?;
-        let inode = *self.dir(source)?.entries.get(&name).ok_or_else(|| errno(libc::ENOENT))?;
-        let (target, to_name) = self.parent(to)?;
-        let moving_dir = matches!(self.inodes.get(&inode), Some(Inode::Dir(_)));
-        if let Some(&there) = self.dir(target)?.entries.get(&to_name) {
-            if there == inode {
-                return Ok(());
-            }
-            match (self.inodes.get(&there), moving_dir) {
-                (Some(Inode::Dir(_)), false) => return Err(errno(libc::EISDIR)),
-                (Some(Inode::File(_)), true) => return Err(errno(libc::ENOTDIR)),
-                (Some(Inode::Dir(of)), true) if !of.entries.is_empty() => {
-                    return Err(errno(libc::ENOTEMPTY));
-                }
-                _ => {}
-            }
-            self.unlinked(there);
-        }
-        if moving_dir && self.within(to, inode)? {
-            return Err(errno(libc::EINVAL));
-        }
-        if source == target {
-            return self.change(source, DirChange::Rename(name, to_name, inode));
-        }
-        self.change(target, DirChange::Set(to_name, inode))?;
-        self.change(source, DirChange::Remove(name))
-    }
-
-    /// Whether `path`, or a directory above it, is the directory `inode`.
-    fn within(&self, path: &Path, inode: u64) -> io::Result<bool> {
-        let mut at = ROOT;
-        for name in components(path)? {
-            if at == inode {
-                return Ok(true);
-            }
-            match self.inodes.get(&at) {
-                Some(Inode::Dir(dir)) => match dir.entries.get(&name) {
-                    Some(next) => at = *next,
-                    None => return Ok(false),
-                },
-                _ => return Ok(false),
-            }
-        }
-        Ok(at == inode)
-    }
-
-    /// cladefs: a sync's commit of the file system's journal: every directory made since durable
-    /// in its parent, if its parent holds it still (board 5748).
-    fn journaled(&mut self) {
-        for (parent, name, made) in std::mem::take(&mut self.making) {
-            if let Some(Inode::Dir(dir)) = self.inodes.get_mut(&parent)
-                && dir.entries.get(&name) == Some(&made)
-            {
-                dir.durable.insert(name, made);
-            }
-        }
-    }
-
-    /// The disk as a crash leaves it, as `rng` draws it (the module's docs).
-    fn crashed(&self, rng: &mut Rng) -> Fs {
-        let mut inodes = BTreeMap::new();
-        // Each directory's entries as a crash leaves them, then what they reach from the root.
-        let mut entries: BTreeMap<u64, BTreeMap<OsString, u64>> = BTreeMap::new();
-        for (&number, inode) in &self.inodes {
-            if let Inode::Dir(dir) = inode {
-                let mut kept = dir.durable.clone();
-                for change in &dir.changes {
-                    if rng.flip() {
-                        change.apply(&mut kept);
-                    }
-                }
-                entries.insert(number, kept);
-            }
-        }
-        let mut reached = vec![ROOT];
-        let mut links: BTreeMap<u64, u32> = BTreeMap::new();
-        while let Some(number) = reached.pop() {
-            if inodes.contains_key(&number) {
-                continue;
-            }
-            match self.inodes.get(&number) {
-                Some(Inode::Dir(_)) => {
-                    let kept = entries.remove(&number).unwrap_or_default();
-                    for &child in kept.values() {
-                        *links.entry(child).or_default() += 1;
-                        reached.push(child);
-                    }
-                    let dir = DirData { durable: kept.clone(), entries: kept, changes: Vec::new() };
-                    inodes.insert(number, Inode::Dir(dir));
-                }
-                Some(Inode::File(file)) => {
-                    let mut data = file.durable.clone();
-                    for change in &file.changes {
-                        match change {
-                            FileChange::SetLen(len) => {
-                                if rng.flip() {
-                                    data.resize(*len, 0);
-                                }
-                            }
-                            FileChange::Write(at, bytes) => {
-                                let draw = &mut |n| rng.below(n);
-                                crate::crash::write(&mut data, *at, bytes, true, draw);
-                            }
-                        }
-                    }
-                    let mut crashed = FileData::new();
-                    crashed.durable = data.clone();
-                    crashed.data = data;
-                    crashed.modified = file.modified;
-                    inodes.insert(number, Inode::File(crashed));
-                }
-                None => {}
-            }
-        }
-        for (number, count) in links {
-            if let Some(Inode::File(file)) = inodes.get_mut(&number) {
-                file.links = count;
-            }
-        }
-        let (locks, making) = (BTreeMap::new(), Vec::new());
-        Fs { inodes, next: self.next, locks, opened: self.opened, making }
-    }
-}
-
-/// The names of `path`'s components, from the root, `.` and `..` resolved.
-fn components(path: &Path) -> io::Result<Vec<OsString>> {
-    let mut names = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-            Component::ParentDir => drop(names.pop()),
-            Component::Normal(name) => names.push(name.to_owned()),
-        }
-    }
-    Ok(names)
-}
-
-/// The draws of a crash: SplitMix64, seeded.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-
-    fn flip(&mut self) -> bool {
-        self.next() & 1 == 1
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
+impl Disk {
+    fn new(fs: mem::Fs, opened: u64) -> Arc<Self> {
+        let locks = Mutex::new(Locks { held: BTreeMap::new(), opened });
+        Arc::new(Self { fs: Mutex::new(fs), locks })
     }
 }
 
@@ -449,13 +67,14 @@ fn disk() -> Arc<Disk> {
                 Some(_) => madsim::rand::random::<u64>(),
                 None => 0,
             };
-            let crashed = disks[at].1.fs.lock().unwrap().crashed(&mut Rng(seed));
-            disks[at].1 = Arc::new(Disk { fs: Mutex::new(crashed) });
+            let crashed = disks[at].1.fs.lock().unwrap().crashed(seed, true);
+            let opened = disks[at].1.locks.lock().unwrap().opened;
+            disks[at].1 = Disk::new(crashed, opened);
             disks[at].1.clone()
         }
         Some(at) => disks[at].1.clone(),
         None => {
-            let disk = Arc::new(Disk { fs: Mutex::new(Fs::new()) });
+            let disk = Disk::new(mem::Fs::new(), 0);
             disks.push((host, disk.clone()));
             disk
         }
@@ -463,7 +82,7 @@ fn disk() -> Arc<Disk> {
 }
 
 /// `work` on the current host's file system.
-fn with<T>(work: impl FnOnce(&mut Fs) -> io::Result<T>) -> io::Result<T> {
+fn with<T>(work: impl FnOnce(&mut mem::Fs) -> io::Result<T>) -> io::Result<T> {
     let disk = disk();
     let mut fs = disk.fs.lock().unwrap();
     work(&mut fs)
@@ -577,23 +196,9 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    fn of(number: u64, inode: &Inode) -> Self {
-        match inode {
-            Inode::File(file) => Self {
-                kind: FileType { dir: false },
-                len: file.data.len() as u64,
-                inode: number,
-                allocated: file.allocated(),
-                modified: file.modified,
-            },
-            Inode::Dir(dir) => Self {
-                kind: FileType { dir: true },
-                len: dir.entries.len() as u64,
-                inode: number,
-                allocated: HOLE,
-                modified: SystemTime::UNIX_EPOCH,
-            },
-        }
+    fn of(stat: mem::Stat) -> Self {
+        let mem::Stat { inode, dir, len, allocated, modified } = stat;
+        Self { kind: FileType { dir }, len, inode, allocated, modified }
     }
 
     pub fn file_type(&self) -> FileType {
@@ -712,34 +317,31 @@ impl OpenOptions {
         let inode = match fs.lookup(path) {
             Ok(_) if self.create_new => return Err(errno(libc::EEXIST)),
             Ok(inode) => {
-                if self.write && matches!(fs.inodes.get(&inode), Some(Inode::Dir(_))) {
+                let stat = fs.stat(inode)?;
+                if self.write && stat.dir {
                     return Err(errno(libc::EISDIR));
                 }
-                if self.truncate
-                    && let Ok(file) = fs.file(inode)
-                    && !file.data.is_empty()
-                {
+                if self.truncate && !stat.dir && stat.len > 0 {
                     faulted(format_args!("truncating {}", path.display()), false)?;
-                    file.set_len(0);
+                    fs.set_len(inode, 0)?;
                 }
                 inode
             }
             Err(err)
                 if err.raw_os_error() == Some(libc::ENOENT) && (self.create || self.create_new) =>
             {
-                let (parent, name) = fs.parent(path)?;
+                fs.parent(path)?;
                 faulted(format_args!("creating {}", path.display()), true)?;
-                let mut file = FileData::new();
-                file.links = 1;
-                let made = fs.make(Inode::File(file));
-                fs.change(parent, DirChange::Set(name, made))?;
-                made
+                fs.create(path)?
             }
             Err(err) => return Err(err),
         };
-        fs.opened += 1;
-        let opening = fs.opened;
         drop(fs);
+        let opening = {
+            let mut locks = disk.locks.lock().unwrap();
+            locks.opened += 1;
+            locks.opened
+        };
         let position = Arc::new(Mutex::new(0));
         Ok(File { disk, inode, opening, append: self.append, position })
     }
@@ -780,18 +382,16 @@ impl File {
         OpenOptions::new()
     }
 
-    fn with<T>(&self, work: impl FnOnce(&mut Fs) -> io::Result<T>) -> io::Result<T> {
+    fn with<T>(&self, work: impl FnOnce(&mut mem::Fs) -> io::Result<T>) -> io::Result<T> {
         let mut fs = self.disk.fs.lock().unwrap();
         work(&mut fs)
     }
 
     pub fn set_len(&self, len: u64) -> io::Result<()> {
         self.with(|fs| {
-            let file = fs.file(self.inode)?;
-            let adds = len as usize > file.data.len();
+            let adds = len > fs.data(self.inode)?.len() as u64;
             faulted(format_args!("setting inode {}'s length to {len}", self.inode), adds)?;
-            file.set_len(len as usize);
-            Ok(())
+            fs.set_len(self.inode, len)
         })
     }
 
@@ -799,16 +399,7 @@ impl File {
     pub fn sync_all(&self) -> io::Result<()> {
         self.with(|fs| {
             faulted(format_args!("syncing inode {}", self.inode), false)?;
-            match fs.inodes.get_mut(&self.inode) {
-                Some(Inode::File(file)) => file.sync(),
-                Some(Inode::Dir(dir)) => {
-                    dir.durable = dir.entries.clone();
-                    dir.changes.clear();
-                }
-                None => return Err(errno(libc::EBADF)),
-            }
-            fs.journaled();
-            Ok(())
+            fs.sync(self.inode)
         })
     }
 
@@ -817,10 +408,7 @@ impl File {
     }
 
     pub fn metadata(&self) -> io::Result<Metadata> {
-        self.with(|fs| {
-            let inode = fs.inodes.get(&self.inode).ok_or_else(|| errno(libc::EBADF))?;
-            Ok(Metadata::of(self.inode, inode))
-        })
+        self.with(|fs| Ok(Metadata::of(fs.stat(self.inode)?)))
     }
 
     pub fn try_clone(&self) -> io::Result<File> {
@@ -836,57 +424,38 @@ impl File {
     /// Gives the `len` bytes at `offset` back to its disk, keeping its size: zeros after.
     pub(crate) fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
         self.with(|fs| {
-            let file = fs.file(self.inode)?;
-            let end = (offset + len).min(file.data.len() as u64);
-            if offset >= end {
+            // Nothing to give back past its end: no call to fail.
+            if offset >= fs.data(self.inode)?.len() as u64 {
                 return Ok(());
             }
             faulted(format_args!("punching inode {} at {offset}", self.inode), false)?;
-            let zeros = vec![0; (end - offset) as usize];
-            file.write(offset as usize, &zeros);
-            for block in offset.div_ceil(HOLE)..end / HOLE {
-                file.holes.insert(block);
-            }
-            Ok(())
+            fs.punch(self.inode, offset, len)
         })
     }
 
     /// The ranges below `size` that hold data: but for its holes, all of it.
-    pub(crate) fn data_ranges(&self, size: u64) -> Vec<std::ops::Range<u64>> {
-        let holes = self.with(|fs| Ok(fs.file(self.inode)?.holes.clone())).unwrap_or_default();
-        let mut ranges: Vec<std::ops::Range<u64>> = Vec::new();
-        for block in 0..size.div_ceil(HOLE) {
-            if holes.contains(&block) {
-                continue;
-            }
-            let (start, end) = (block * HOLE, ((block + 1) * HOLE).min(size));
-            match ranges.last_mut() {
-                Some(last) if last.end == start => last.end = end,
-                _ => ranges.push(start..end),
-            }
-        }
-        ranges
+    pub(crate) fn data_ranges(&self, size: u64) -> io::Result<Vec<std::ops::Range<u64>>> {
+        self.with(|fs| fs.data_ranges(self.inode, size))
     }
 
     /// Locks it for its opening, its clones', as `flock` does: `WouldBlock` if another opening
     /// holds it.
     pub(crate) fn lock_exclusive(&self) -> io::Result<()> {
-        self.with(|fs| match fs.locks.get(&self.inode) {
+        let mut locks = self.disk.locks.lock().unwrap();
+        match locks.held.get(&self.inode) {
             Some(holder) if *holder != self.opening => Err(errno(libc::EWOULDBLOCK)),
             _ => {
-                fs.locks.insert(self.inode, self.opening);
+                locks.held.insert(self.inode, self.opening);
                 Ok(())
             }
-        })
+        }
     }
 
     pub(crate) fn unlock(&self) {
-        let _ = self.with(|fs| {
-            if fs.locks.get(&self.inode) == Some(&self.opening) {
-                fs.locks.remove(&self.inode);
-            }
-            Ok(())
-        });
+        let mut locks = self.disk.locks.lock().unwrap();
+        if locks.held.get(&self.inode) == Some(&self.opening) {
+            locks.held.remove(&self.inode);
+        }
     }
 }
 
@@ -952,10 +521,7 @@ impl Seek for File {
 }
 
 pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
-    with(|fs| {
-        let number = fs.lookup(path.as_ref())?;
-        Ok(Metadata::of(number, &fs.inodes[&number]))
-    })
+    with(|fs| Ok(Metadata::of(fs.stat(fs.lookup(path.as_ref())?)?)))
 }
 
 /// As [`metadata`]: a disk in memory has no symbolic links.
@@ -974,10 +540,10 @@ pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     with(|fs| {
         let mut at = PathBuf::from("/");
-        for name in components(path.as_ref())? {
+        for name in components(path.as_ref()) {
             at.push(name);
             match fs.lookup(&at) {
-                Ok(inode) if matches!(fs.inodes.get(&inode), Some(Inode::Dir(_))) => {}
+                Ok(inode) if fs.stat(inode)?.dir => {}
                 Ok(_) => return Err(errno(libc::EEXIST)),
                 Err(_) => {
                     faulted(format_args!("making the directory {}", at.display()), true)?;
@@ -1027,22 +593,14 @@ pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()>
             format_args!("linking {} at {}", from.as_ref().display(), to.as_ref().display()),
             true,
         )?;
-        let inode = fs.lookup(from.as_ref())?;
-        fs.file(inode)?;
-        let (parent, name) = fs.parent(to.as_ref())?;
-        if fs.dir(parent)?.entries.contains_key(&name) {
-            return Err(errno(libc::EEXIST));
-        }
-        fs.file(inode)?.links += 1;
-        fs.change(parent, DirChange::Set(name, inode))
+        fs.link(from.as_ref(), to.as_ref())
     })
 }
 
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     with(|fs| {
         read_faulted(format_args!("reading {}", path.as_ref().display()))?;
-        let inode = fs.lookup(path.as_ref())?;
-        Ok(fs.file(inode)?.data.clone())
+        Ok(fs.data(fs.lookup(path.as_ref())?)?.to_vec())
     })
 }
 
@@ -1066,13 +624,10 @@ pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     let path = path.as_ref();
     with(|fs| {
-        let inode = fs.lookup(path)?;
-        let entries = fs.dir(inode)?.entries.clone();
-        let read = entries
-            .into_iter()
-            .map(|(name, number)| DirEntry {
+        let read = (fs.list(path)?.into_iter())
+            .map(|(name, stat)| DirEntry {
                 path: path.join(&name),
-                metadata: Metadata::of(number, &fs.inodes[&number]),
+                metadata: Metadata::of(stat),
                 name,
             })
             .collect::<Vec<_>>();
@@ -1084,7 +639,7 @@ pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
 pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     let path = path.as_ref();
     with(|fs| fs.lookup(path).map(drop))?;
-    Ok(std::iter::once(OsStr::new("/").to_owned()).chain(components(path)?).collect())
+    Ok(std::iter::once(OsStr::new("/").to_owned()).chain(components(path)).collect())
 }
 
 /// `std::os::unix::fs::FileExt`'s calls, of a disk's files.
@@ -1100,10 +655,10 @@ impl FileExt for File {
         self.with(|fs| {
             let len = buf.len();
             read_faulted(format_args!("reading {len} bytes of inode {} at {offset}", self.inode))?;
-            let file = fs.file(self.inode)?;
-            let at = (offset as usize).min(file.data.len());
-            let read = buf.len().min(file.data.len() - at);
-            buf[..read].copy_from_slice(&file.data[at..at + read]);
+            let data = fs.data(self.inode)?;
+            let at = (offset as usize).min(data.len());
+            let read = buf.len().min(data.len() - at);
+            buf[..read].copy_from_slice(&data[at..at + read]);
             Ok(read)
         })
     }
@@ -1119,7 +674,7 @@ impl FileExt for File {
         self.with(|fs| {
             let len = buf.len();
             faulted(format_args!("writing {len} bytes of inode {} at {offset}", self.inode), true)?;
-            fs.file(self.inode)?.write(offset as usize, buf);
+            fs.write(self.inode, offset, buf)?;
             Ok(buf.len())
         })
     }
