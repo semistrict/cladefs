@@ -4,42 +4,42 @@
 
 //! A cell directory in memory, which simulates crashes, for tests.
 //!
-//! It keeps what a host's file system would have made durable: a file's contents as of its last
-//! sync, and a directory's entries as of its last sync. A crash ([`MemDir::crash`]) keeps that, and
-//! any of what happened since, at random: each sector of each write since the file's last sync,
-//! and each file created or removed since the directory's last sync, in order. cladefs: a
-//! directory made is durable at the next sync of anything, which commits a journaling file
-//! system's journal, as ext4 and XFS have it (board 5748); a crash before loses it, or keeps it, at
-//! random, with all under it. A crash may also corrupt what it kept of the writes since
-//! ([`MemDir::crash_corrupting`], TASK-680, as FoundationDB's simulation's power losses do): each
-//! sector written since its file's last sync there whole, not at all, garbage, or torn, at a
-//! random offset ([`host_fs::crash`]). [`MemDir::fail_after`] makes the file system fail every
-//! operation that would change it after a number of them, as a crash would interrupt them. cladefs:
-//! which of them fails, and so what a crash keeps, is a function of the cell's calls, and of the
-//! crash's seed, only if the cell does no I/O on threads of its own, in a directory made
-//! [`MemDir::serial`], or if a seeded schedule orders that I/O, as Shuttle's do; it says whether
-//! the first that failed was a thread's of the cell's ([`MemDir::failed_elsewhere`], TASK-79.79).
+//! Its files and directories are a file system in memory, [`host_fs::mem`], which each simulated
+//! host's disk is too, so that the cells' crash tests and the simulation crash alike (board 8264):
+//! it keeps what a host's file system would have made durable, a file's contents as of its last
+//! sync and a directory's entries as of its last sync, and a crash ([`MemDisk::crash`]) keeps that,
+//! and any of what happened since, at random: each sector of each write since the file's last sync,
+//! and each entry made, removed or renamed since its directory's last sync, in order. A directory
+//! made is durable at the next sync of anything, which commits a journaling file system's journal,
+//! as ext4 and XFS have it (board 5748); a crash before loses it, or keeps it, at random, with all
+//! under it. A crash may also corrupt what it kept of the writes since
+//! ([`MemDisk::crash_corrupting`], TASK-680, as FoundationDB's simulation's power losses do): each
+//! sector written since its file's last sync there whole, not at all, garbage, or torn, at a random
+//! offset ([`host_fs::crash`]).
+//!
+//! What it checks besides is a cell's: a rename or link refuses to go over a file there
+//! ([`Dir::rename`]); its disk may be of a capacity ([`MemDisk::with_capacity`]); and
+//! [`MemDir::fail_after`] makes the file system fail every operation that would change it after a
+//! number of them, as a crash would interrupt them. cladefs: which of them fails, and so what a
+//! crash keeps, is a function of the cell's calls, and of the crash's seed, only if the cell does
+//! no I/O on threads of its own, in a directory made [`MemDir::serial`], or if a seeded schedule
+//! orders that I/O, as Shuttle's do; it says whether the first that failed was a thread's of the
+//! cell's ([`MemDir::failed_elsewhere`], TASK-79.79).
 
 use crate::cached::{CachedDir, CachedFile};
 use crate::dir::{Dir, DirFile, File};
 use crate::pages::{Options, PageCache};
 use crate::sync::{Mutex, thread};
 use bucket_cell::host_disk::{self, HostDisk, Sample};
-use rand::rngs::StdRng;
-use rand::{RngExt as _, SeedableRng as _};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-/// The granularity of a crash: a write survives it in sectors of this size at the file's offsets,
-/// each whole or not at all ([`host_fs::crash`]).
-#[cfg(test)]
-const BLOCK: usize = host_fs::crash::SECTOR;
 
 /// A cell directory in memory, under its page cache ([`MemDir`]). See the module docs.
 #[derive(Clone)]
 pub struct MemDisk {
-    fs: Arc<Mutex<Fs>>,
+    state: Arc<Mutex<State>>,
     /// cladefs: its disk, of its capacity ([`MemDisk::with_capacity`], doc-22).
     disk: Arc<HostDisk>,
     /// cladefs: the footprint its cell's files are counted in ([`crate::footprint`]).
@@ -52,24 +52,17 @@ pub struct MemDisk {
 
 /// A file of a [`MemDisk`].
 pub struct MemDiskFile {
-    fs: Arc<Mutex<Fs>>,
+    state: Arc<Mutex<State>>,
     inode: u64,
 }
 
 #[derive(Clone, Default)]
-struct Fs {
-    inodes: HashMap<u64, Inode>,
-    next_inode: u64,
-    /// Each directory's entries, by its path: the files' names, with their inodes.
-    dirs: BTreeMap<String, BTreeMap<String, u64>>,
-    /// The same, as durable.
-    durable_dirs: BTreeMap<String, BTreeMap<String, u64>>,
-    /// The entries created and removed in each directory since its last sync, in order.
-    dir_changes: BTreeMap<String, Vec<DirChange>>,
-    /// cladefs: the directories whose making is durable, something synced since (board 5748).
-    made_dirs: std::collections::BTreeSet<String>,
-    /// cladefs: the directories made since the last sync of anything, by their paths.
-    making_dirs: Vec<String>,
+struct State {
+    /// Its files and directories, and what a crash would leave of them.
+    fs: host_fs::mem::Fs,
+    /// cladefs: the bytes written to each file since the last write-back of any of its range, or
+    /// sync, by its inode.
+    unwritten: HashMap<u64, u64>,
     /// How many more operations that change the file system succeed, if limited.
     budget: Option<u64>,
     /// cladefs: the thread that last set the budget ([`MemDir::fail_after`]), if any.
@@ -101,59 +94,23 @@ pub struct Io {
     pub synced_files: u64,
 }
 
-#[derive(Clone, Default)]
-struct Inode {
-    data: Vec<u8>,
-    /// The data as of the last sync.
-    durable: Vec<u8>,
-    /// The writes since the last sync, in order: their offsets and data.
-    writes: Vec<(usize, Vec<u8>)>,
-    /// cladefs: the bytes written since the last write-back of any of its range, or sync.
-    unwritten: u64,
-    /// cladefs: its blocks of [`HOLE`] bytes given back ([`File::punch`]), written since none
-    /// (doc-25, TASK-698.2).
-    holes: std::collections::BTreeSet<u64>,
-}
-
-/// cladefs: the blocks a file in memory gives back ([`File::punch`]).
-const HOLE: u64 = 4096;
-
-impl Inode {
-    /// cladefs: the bytes of its data, but for its holes.
-    fn allocated(&self) -> u64 {
-        let len = self.data.len() as u64;
-        let holes = self.holes.range(..len.div_ceil(HOLE)).count() as u64;
-        len.div_ceil(HOLE).saturating_sub(holes) * HOLE
+/// `err`, of a call on `path`: one saying nothing is there names it, as a cell's errors then say
+/// which of its files is missing.
+fn at(path: &str) -> impl FnOnce(io::Error) -> io::Error + '_ {
+    move |err| match err.kind() {
+        io::ErrorKind::NotFound => {
+            io::Error::new(io::ErrorKind::NotFound, format!("{path} doesn't exist"))
+        }
+        _ => err,
     }
 }
 
-#[derive(Clone)]
-enum DirChange {
-    Add(String, u64),
-    Remove(String),
-    /// cladefs: a file renamed, at once ([`Dir::rename`]).
-    Rename(String, String, u64),
-    /// cladefs: a file written whole, synced, put at a name over any there ([`Dir::replace`]).
-    Replace(String, u64),
+/// `path`, of names made of `&str`s, as one.
+fn utf8(path: PathBuf) -> String {
+    path.to_string_lossy().into_owned()
 }
 
-fn not_found(path: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::NotFound, format!("{path} doesn't exist"))
-}
-
-/// Splits `path` into its directory's path and its name.
-fn split(path: &str) -> (&str, &str) {
-    path.rsplit_once('/').unwrap_or(("", path))
-}
-
-impl Fs {
-    /// cladefs: a sync's commit of the file system's journal: every directory made since durable
-    /// (board 5748).
-    fn journaled(&mut self) {
-        let made = std::mem::take(&mut self.making_dirs);
-        self.made_dirs.extend(made);
-    }
-
+impl State {
     /// Spends one of the operations the budget allows, failing if none are left.
     fn spend(&mut self) -> io::Result<()> {
         match &mut self.budget {
@@ -170,23 +127,13 @@ impl Fs {
     }
 
     fn lookup(&self, path: &str) -> io::Result<u64> {
-        let (dir, name) = split(path);
-        self.dirs
-            .get(dir)
-            .and_then(|entries| entries.get(name))
-            .copied()
-            .ok_or_else(|| not_found(path))
+        self.fs.lookup(Path::new(path)).map_err(at(path))
     }
 
     /// cladefs: what it holds, as a disk counts it ([`host_disk::counted`]): each file reachable
     /// once, however many names it has, and each directory but its root a granule.
     fn used(&self) -> u64 {
-        let mut seen = std::collections::HashSet::new();
-        let files: u64 = (self.dirs.values().flat_map(|entries| entries.values()))
-            .filter(|inode| seen.insert(**inode))
-            .map(|inode| host_disk::counted(self.inodes[inode].data.len() as u64))
-            .sum();
-        files + (self.dirs.len() as u64 - 1) * host_disk::GRANULE
+        self.fs.used(host_disk::counted, host_disk::GRANULE)
     }
 
     /// cladefs: `ENOSPC` unless `more` bytes, counted, fit in its capacity, as a full disk refuses
@@ -200,67 +147,42 @@ impl Fs {
         }
     }
 
-    fn change_dir(&mut self, path: &str, change: DirChange) -> io::Result<()> {
-        let (dir, _) = split(path);
-        let entries = self.dirs.get_mut(dir).ok_or_else(|| not_found(dir))?;
-        match &change {
-            // Not over an entry there, which stays as it was.
-            DirChange::Add(name, _) if entries.contains_key(name) => {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{path} exists")));
-            }
-            DirChange::Add(name, inode) => {
-                entries.insert(name.clone(), *inode);
-            }
-            DirChange::Remove(name) => {
-                entries.remove(name).ok_or_else(|| not_found(path))?;
-            }
-            DirChange::Rename(_, to, _) if entries.contains_key(to) => {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} exists")));
-            }
-            DirChange::Rename(from, to, inode) => {
-                entries.remove(from).ok_or_else(|| not_found(path))?;
-                entries.insert(to.clone(), *inode);
-            }
-            DirChange::Replace(name, inode) => {
-                entries.insert(name.clone(), *inode);
-            }
+    /// `AlreadyExists` unless nothing is at `path`, as a cell's rename asks ([`Dir::rename`]): one
+    /// going over a file there is the cell's mistake, which a host's rename would hide.
+    fn vacant(&self, path: &str) -> io::Result<()> {
+        match self.fs.lookup(Path::new(path)) {
+            Ok(_) => Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{path} exists"))),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
         }
-        self.dir_changes.entry(dir.to_owned()).or_default().push(change);
-        Ok(())
     }
 }
 
 impl MemDisk {
     /// An empty directory.
     pub fn new() -> Self {
-        let mut fs = Fs::default();
-        fs.dirs.insert(String::new(), BTreeMap::new());
-        fs.durable_dirs.insert(String::new(), BTreeMap::new());
-        fs.made_dirs.insert(String::new());
-        Self::over(fs, false)
+        Self::over(State::default(), false)
     }
 
     /// cladefs: an empty directory on a disk of its own of `capacity` bytes, which refuses with
     /// `ENOSPC` what would pass it, as a full filesystem does: its writes, and its makings of
     /// files and directories (doc-22).
     pub fn with_capacity(capacity: u64) -> Self {
-        let dir = Self::new();
-        dir.fs.lock().unwrap().capacity = Some(capacity);
-        dir
+        Self::over(State { capacity: Some(capacity), ..State::default() }, false)
     }
 
-    /// The directory holding `fs`, on a disk of its own that says what it holds.
-    fn over(fs: Fs, serial: bool) -> Self {
-        let fs = Arc::new(Mutex::new(fs));
-        let held = Arc::downgrade(&fs);
+    /// The directory holding `state`, on a disk of its own that says what it holds.
+    fn over(state: State, serial: bool) -> Self {
+        let state = Arc::new(Mutex::new(state));
+        let held = Arc::downgrade(&state);
         let disk = HostDisk::in_memory(move || {
-            let Some(fs) = held.upgrade() else { return Sample::default() };
-            let fs = fs.lock().unwrap();
-            let (size, used) = (fs.capacity.unwrap_or(u64::MAX), fs.used());
+            let Some(state) = held.upgrade() else { return Sample::default() };
+            let state = state.lock().unwrap();
+            let (size, used) = (state.capacity.unwrap_or(u64::MAX), state.used());
             Sample { size, free: size.saturating_sub(used), used }
         });
         let footprint = crate::footprint::Footprint::new(None, Some(disk.clone()));
-        Self { fs, disk, footprint, serial }
+        Self { state, disk, footprint, serial }
     }
 
     /// cladefs: an empty directory in which the cell does all of its I/O on its callers' threads,
@@ -279,20 +201,20 @@ impl MemDisk {
     /// Makes every operation that changes the file system fail after `operations` more of them,
     /// or none if `None`.
     pub fn fail_after(&self, operations: Option<u64>) {
-        let mut fs = self.fs.lock().unwrap();
-        fs.budget = operations;
-        (fs.limited_on, fs.failed_on) = (Some(thread::current().id()), None);
+        let mut state = self.state.lock().unwrap();
+        state.budget = operations;
+        (state.limited_on, state.failed_on) = (Some(thread::current().id()), None);
     }
 
     /// The bytes its files were read and written so far.
     pub fn io(&self) -> Io {
-        self.fs.lock().unwrap().io
+        self.state.lock().unwrap().io
     }
 
     /// Whether the file system failed an operation, or would fail the next, having spent its
     /// budget (see `fail_after`).
     pub fn has_failed(&self) -> bool {
-        self.fs.lock().unwrap().budget == Some(0)
+        self.state.lock().unwrap().budget == Some(0)
     }
 
     /// cladefs: whether the first operation the file system failed, since its budget was last set
@@ -300,31 +222,30 @@ impl MemDisk {
     /// thread runs the cell, and sets the budget, one of the cell's own, framing a segment or
     /// syncing a flush's files, which a crash then interrupted (TASK-79.79).
     pub fn failed_elsewhere(&self) -> bool {
-        let fs = self.fs.lock().unwrap();
-        fs.failed_on.is_some() && fs.failed_on != fs.limited_on
+        let state = self.state.lock().unwrap();
+        state.failed_on.is_some() && state.failed_on != state.limited_on
     }
 
     /// cladefs: every file in it, by its path, with what it holds now, durable or not: what tests
     /// search for bytes that must be in no file of a host's (TASK-411.9).
     pub fn files(&self) -> Vec<(String, Vec<u8>)> {
-        let fs = self.fs.lock().unwrap();
-        let mut files = Vec::new();
-        for (dir, entries) in &fs.dirs {
-            for (name, inode) in entries {
-                let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-                files.push((path, fs.inodes[inode].data.clone()));
-            }
-        }
+        let state = self.state.lock().unwrap();
+        let files = state.fs.walk().into_iter().filter(|(_, stat)| !stat.dir);
         files
+            .map(|(path, stat)| {
+                let data = state.fs.data(stat.inode).expect("a file walked to holds bytes");
+                (utf8(path), data.to_vec())
+            })
+            .collect()
     }
 
     /// cladefs: the directory as a process killed with its host up leaves it (board 5744): all it
     /// wrote, durable or not, its writes since their syncs at a later power loss's mercy still,
     /// which [`MemDisk::crash`] of what this returns models.
     pub fn killed(&self) -> MemDisk {
-        let mut fs = self.fs.lock().unwrap().clone();
-        (fs.budget, fs.limited_on, fs.failed_on) = (None, None, None);
-        Self::over(fs, self.serial)
+        let mut state = self.state.lock().unwrap().clone();
+        (state.budget, state.limited_on, state.failed_on) = (None, None, None);
+        Self::over(state, self.serial)
     }
 
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
@@ -341,82 +262,9 @@ impl MemDisk {
     }
 
     fn crash_with(&self, seed: u64, corrupting: bool) -> MemDisk {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let fs = self.fs.lock().unwrap();
-        // cladefs: the directories kept, their making durable or, at random, kept anyway, each
-        // only if its parent is (board 5748).
-        let mut made = fs.made_dirs.clone();
-        for path in &fs.making_dirs {
-            if rng.random::<bool>() {
-                made.insert(path.clone());
-            }
-        }
-        let kept = |path: &str| {
-            let mut at = path;
-            loop {
-                if !made.contains(at) {
-                    return false;
-                }
-                match at.rsplit_once('/') {
-                    Some((parent, _)) => at = parent,
-                    None if at.is_empty() => return true,
-                    None => at = "",
-                }
-            }
-        };
-        let mut dirs = BTreeMap::new();
-        for path in fs.dirs.keys().filter(|path| kept(path)) {
-            let mut entries = fs.durable_dirs.get(path).cloned().unwrap_or_default();
-            for change in fs.dir_changes.get(path).into_iter().flatten() {
-                if rng.random::<bool>() {
-                    match change {
-                        DirChange::Add(name, inode) => {
-                            entries.insert(name.clone(), *inode);
-                        }
-                        DirChange::Remove(name) => {
-                            entries.remove(name);
-                        }
-                        DirChange::Rename(from, to, inode) => {
-                            if entries.remove(from).is_some() {
-                                entries.insert(to.clone(), *inode);
-                            }
-                        }
-                        DirChange::Replace(name, inode) => {
-                            entries.insert(name.clone(), *inode);
-                        }
-                    }
-                }
-            }
-            dirs.insert(path.clone(), entries);
-        }
-        let mut inodes = HashMap::new();
-        for inode in dirs.values().flat_map(|entries| entries.values()) {
-            if inodes.contains_key(inode) {
-                continue;
-            }
-            let file = &fs.inodes[inode];
-            let mut data = file.durable.clone();
-            for (offset, written) in &file.writes {
-                let draw = &mut |n| rng.random_range(0..n);
-                host_fs::crash::write(&mut data, *offset, written, corrupting, draw);
-            }
-            inodes.insert(*inode, Inode { durable: data.clone(), data, ..Inode::default() });
-        }
-        let crashed = Fs {
-            inodes,
-            next_inode: fs.next_inode,
-            durable_dirs: dirs.clone(),
-            made_dirs: dirs.keys().cloned().collect(),
-            making_dirs: Vec::new(),
-            dirs,
-            dir_changes: BTreeMap::new(),
-            budget: None,
-            limited_on: None,
-            failed_on: None,
-            io: Io::default(),
-            capacity: fs.capacity,
-        };
-        MemDisk::over(crashed, self.serial)
+        let state = self.state.lock().unwrap();
+        let fs = state.fs.crashed(seed, corrupting);
+        MemDisk::over(State { fs, capacity: state.capacity, ..State::default() }, self.serial)
     }
 }
 
@@ -531,141 +379,104 @@ impl Dir for MemDisk {
     type File = MemDiskFile;
 
     fn create(&self, path: &str, _data: bool) -> io::Result<MemDiskFile> {
-        let mut fs = self.fs.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         // A full disk makes no file.
-        fs.fits(1)?;
-        fs.spend()?;
-        let inode = fs.next_inode;
-        let (_, name) = split(path);
-        fs.change_dir(path, DirChange::Add(name.to_owned(), inode))?;
-        fs.next_inode += 1;
-        fs.inodes.insert(inode, Inode::default());
-        Ok(MemDiskFile { fs: self.fs.clone(), inode })
+        state.fits(1)?;
+        state.spend()?;
+        let inode = state.fs.create(Path::new(path)).map_err(at(path))?;
+        Ok(MemDiskFile { state: self.state.clone(), inode })
     }
 
     fn open(&self, path: &str, _data: bool) -> io::Result<MemDiskFile> {
-        let mut fs = self.fs.lock().unwrap();
-        let inode = fs.lookup(path)?;
-        fs.io.opened += 1;
-        Ok(MemDiskFile { fs: self.fs.clone(), inode })
+        let mut state = self.state.lock().unwrap();
+        let inode = state.lookup(path)?;
+        if state.fs.stat(inode)?.dir {
+            return Err(io::Error::from_raw_os_error(libc::EISDIR));
+        }
+        state.io.opened += 1;
+        Ok(MemDiskFile { state: self.state.clone(), inode })
     }
 
     fn remove(&self, path: &str) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let (_, name) = split(path);
-        fs.change_dir(path, DirChange::Remove(name.to_owned()))
+        let mut state = self.state.lock().unwrap();
+        state.spend()?;
+        state.fs.remove(Path::new(path), false).map_err(at(path))
     }
 
     /// cladefs: within a directory, at once; from one to another, its removal from the one and its
-    /// entry in the other each durable as its directory is synced (TASK-310).
+    /// entry in the other each durable as its directory is synced (TASK-310). Never over a file
+    /// there.
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        let ((dir, from_name), (to_dir, to_name)) = (split(from), split(to));
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let inode = fs.lookup(from)?;
-        if dir == to_dir {
-            let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode);
-            return fs.change_dir(from, rename);
-        }
-        // Nothing changes if `to` is there.
-        if fs.lookup(to).is_ok() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} exists")));
-        }
-        fs.change_dir(to, DirChange::Add(to_name.to_owned(), inode))?;
-        fs.change_dir(from, DirChange::Remove(from_name.to_owned()))
+        let mut state = self.state.lock().unwrap();
+        state.spend()?;
+        state.lookup(from)?;
+        state.vacant(to)?;
+        state.fs.rename(Path::new(from), Path::new(to)).map_err(at(to))
     }
 
     /// cladefs: `to`'s entry, of `from`'s file, durable as its directory is synced (TASK-310).
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
-        let (_, to_name) = split(to);
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let inode = fs.lookup(from)?;
-        fs.change_dir(to, DirChange::Add(to_name.to_owned(), inode))
+        let mut state = self.state.lock().unwrap();
+        state.spend()?;
+        state.lookup(from)?;
+        state.fs.link(Path::new(from), Path::new(to)).map_err(at(to))
     }
 
     /// cladefs: its file written and synced, then put at `path`, which a crash keeps or not until
     /// its directory is synced.
     fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.fits(host_disk::counted(bytes.len() as u64))?;
-        fs.spend()?;
-        let inode = fs.next_inode;
-        let (_, name) = split(path);
-        fs.change_dir(path, DirChange::Replace(name.to_owned(), inode))?;
-        fs.next_inode += 1;
-        let data = bytes.to_vec();
-        fs.inodes.insert(inode, Inode { durable: data.clone(), data, ..Inode::default() });
-        fs.io.written += bytes.len() as u64;
-        fs.io.synced_files += 1;
+        let mut state = self.state.lock().unwrap();
+        state.fits(host_disk::counted(bytes.len() as u64))?;
+        state.spend()?;
+        state.fs.replace(Path::new(path), bytes).map_err(at(path))?;
+        state.io.written += bytes.len() as u64;
+        state.io.synced_files += 1;
         Ok(())
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.fits(host_disk::GRANULE)?;
-        fs.spend()?;
-        if fs.dirs.contains_key(path) {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{path} exists")));
-        }
-        fs.dirs.insert(path.to_owned(), BTreeMap::new());
-        // cladefs: durable at the next sync of anything (board 5748).
-        fs.making_dirs.push(path.to_owned());
-        Ok(())
+        let mut state = self.state.lock().unwrap();
+        state.fits(host_disk::GRANULE)?;
+        state.spend()?;
+        state.fs.create_dir(Path::new(path)).map_err(at(path))
     }
 
+    /// Its files' and directories' names, in order.
     fn list(&self, path: &str) -> io::Result<Vec<String>> {
-        let fs = self.fs.lock().unwrap();
-        let mut names: Vec<String> =
-            fs.dirs.get(path).ok_or_else(|| not_found(path))?.keys().cloned().collect();
-        // And its directories, as a host's file system lists them.
-        names.extend(
-            (fs.dirs.keys())
-                .filter_map(|dir| dir.rsplit_once('/').or(Some(("", dir.as_str()))))
-                .filter(|(parent, name)| *parent == path && !name.is_empty())
-                .map(|(_, name)| name.to_owned()),
-        );
-        names.sort();
-        Ok(names)
+        let state = self.state.lock().unwrap();
+        let listed = state.fs.list(Path::new(path)).map_err(at(path))?;
+        Ok(listed.into_iter().map(|(name, _)| utf8(name.into())).collect())
     }
 
     fn entries(&self) -> io::Result<Vec<DirFile>> {
-        let fs = self.fs.lock().unwrap();
-        let mut found = Vec::new();
-        for (dir, entries) in &fs.dirs {
-            if !dir.is_empty() {
-                found.push(DirFile {
-                    path: dir.clone(),
-                    len: 0,
-                    allocated: 0,
-                    inode: 0,
-                    dir: true,
-                });
-            }
-            for (name, inode) in entries {
-                let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-                let (len, allocated) =
-                    (fs.inodes[inode].data.len() as u64, fs.inodes[inode].allocated());
-                found.push(DirFile { path, len, allocated, inode: *inode, dir: false });
-            }
-        }
-        Ok(found)
+        let state = self.state.lock().unwrap();
+        let found = state.fs.walk().into_iter().map(|(path, stat)| match stat.dir {
+            true => DirFile { path: utf8(path), len: 0, allocated: 0, inode: 0, dir: true },
+            false => DirFile {
+                path: utf8(path),
+                len: stat.len,
+                allocated: stat.allocated,
+                inode: stat.inode,
+                dir: false,
+            },
+        });
+        Ok(found.collect())
     }
 
     fn sync_dir(&self, path: &str) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let entries = fs.dirs.get(path).ok_or_else(|| not_found(path))?.clone();
-        fs.durable_dirs.insert(path.to_owned(), entries);
-        fs.dir_changes.remove(path);
-        fs.journaled();
-        fs.io.synced_dirs += 1;
+        let mut state = self.state.lock().unwrap();
+        state.spend()?;
+        let inode = state.lookup(path)?;
+        if !state.fs.stat(inode)?.dir {
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
+        state.fs.sync(inode)?;
+        state.io.synced_dirs += 1;
         Ok(())
     }
 
     fn barrier(&self) -> io::Result<()> {
-        self.fs.lock().unwrap().spend()
+        self.state.lock().unwrap().spend()
     }
 
     fn concurrent(&self) -> bool {
@@ -679,9 +490,9 @@ impl Dir for MemDisk {
 
 impl File for MemDiskFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.io.read += buf.len() as u64;
-        let data = &fs.inodes[&self.inode].data;
+        let mut state = self.state.lock().unwrap();
+        state.io.read += buf.len() as u64;
+        let data = state.fs.data(self.inode)?;
         let offset = (offset as usize).min(data.len());
         let held = (data.len() - offset).min(buf.len());
         buf[..held].copy_from_slice(&data[offset..offset + held]);
@@ -690,47 +501,36 @@ impl File for MemDiskFile {
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        let len = fs.inodes[&self.inode].data.len() as u64;
+        let mut state = self.state.lock().unwrap();
+        let len = state.fs.data(self.inode)?.len() as u64;
         let end = (offset + buf.len() as u64).max(len);
-        fs.fits(host_disk::counted(end) - host_disk::counted(len))?;
-        fs.spend()?;
-        fs.io.written += buf.len() as u64;
-        let inode = fs.inodes.get_mut(&self.inode).unwrap();
-        let offset = offset as usize;
-        if inode.data.len() < offset + buf.len() {
-            inode.data.resize(offset + buf.len(), 0);
-        }
-        inode.data[offset..offset + buf.len()].copy_from_slice(buf);
-        let blocks = offset as u64 / HOLE..(offset + buf.len()).div_ceil(HOLE as usize) as u64;
-        inode.holes.retain(|block| !blocks.contains(block));
-        inode.writes.push((offset, buf.to_vec()));
-        inode.unwritten += buf.len() as u64;
-        let unwritten = inode.unwritten;
-        fs.io.most_unwritten = fs.io.most_unwritten.max(unwritten);
+        state.fits(host_disk::counted(end) - host_disk::counted(len))?;
+        state.spend()?;
+        state.fs.write(self.inode, offset, buf)?;
+        state.io.written += buf.len() as u64;
+        let unwritten = state.unwritten.entry(self.inode).or_default();
+        *unwritten += buf.len() as u64;
+        let unwritten = *unwritten;
+        state.io.most_unwritten = state.io.most_unwritten.max(unwritten);
         Ok(())
     }
 
     fn write_back(&self, _offset: u64, _len: u64) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.inodes.get_mut(&self.inode).unwrap().unwritten = 0;
+        self.state.lock().unwrap().unwritten.remove(&self.inode);
         Ok(())
     }
 
     fn size(&self) -> io::Result<u64> {
-        Ok(self.fs.lock().unwrap().inodes[&self.inode].data.len() as u64)
+        Ok(self.state.lock().unwrap().fs.data(self.inode)?.len() as u64)
     }
 
     fn sync(&self) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let inode = fs.inodes.get_mut(&self.inode).unwrap();
-        inode.durable = inode.data.clone();
-        inode.writes.clear();
-        let unwritten = std::mem::take(&mut inode.unwritten);
-        fs.journaled();
-        fs.io.synced_files += 1;
-        fs.io.most_synced_unwritten = fs.io.most_synced_unwritten.max(unwritten);
+        let mut state = self.state.lock().unwrap();
+        state.spend()?;
+        state.fs.sync(self.inode)?;
+        let unwritten = state.unwritten.remove(&self.inode).unwrap_or(0);
+        state.io.synced_files += 1;
+        state.io.most_synced_unwritten = state.io.most_synced_unwritten.max(unwritten);
         Ok(())
     }
 
@@ -741,22 +541,13 @@ impl File for MemDiskFile {
 
     /// Written as zeros, as a crash keeps or loses a write, and its whole blocks given back.
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let inode = fs.inodes.get_mut(&self.inode).unwrap();
-        let end = (offset + len).min(inode.data.len() as u64);
-        if offset >= end {
-            return Ok(());
-        }
-        let (from, to) = (offset as usize, end as usize);
-        inode.data[from..to].fill(0);
-        inode.writes.push((from, vec![0; to - from]));
-        inode.holes.extend(offset.div_ceil(HOLE)..end / HOLE);
-        Ok(())
+        let mut state = self.state.lock().unwrap();
+        state.spend()?;
+        state.fs.punch(self.inode, offset, len)
     }
 
     fn allocated(&self) -> io::Result<u64> {
-        Ok(self.fs.lock().unwrap().inodes[&self.inode].allocated())
+        Ok(self.state.lock().unwrap().fs.stat(self.inode)?.allocated)
     }
 }
 
@@ -768,117 +559,6 @@ mod tests {
         let mut data = vec![0; file.size().unwrap() as usize];
         file.read_at(&mut data, 0).unwrap();
         data
-    }
-
-    #[test]
-    fn crashes_keep_what_was_synced() {
-        let dir = MemDisk::new();
-        dir.create_dir("d").unwrap();
-        dir.sync_dir("").unwrap();
-        let synced = dir.create("d/synced", true).unwrap();
-        synced.write_at(&[1; BLOCK], 0).unwrap();
-        synced.sync().unwrap();
-        dir.sync_dir("d").unwrap();
-        // Neither the file nor its entry is synced.
-        let unsynced = dir.create("d/unsynced", true).unwrap();
-        unsynced.write_at(&[2; BLOCK], 0).unwrap();
-        synced.write_at(&[3; 4 * BLOCK], BLOCK as u64).unwrap();
-        // cladefs: a directory made, nothing synced since: kept or lost, with all under it (board
-        // 5748).
-        dir.create_dir("e").unwrap();
-        dir.create("e/f", true).unwrap();
-
-        let mut seen_unsynced = [false; 2];
-        let mut seen_e = [false; 2];
-        let mut lens = std::collections::BTreeSet::new();
-        for seed in 0..64 {
-            let crashed = dir.crash(seed);
-            let synced = crashed.open("d/synced", true).unwrap();
-            let data = read(&synced);
-            assert_eq!(data[..BLOCK], [1; BLOCK]);
-            // Each block written since the sync is there whole, or not at all.
-            for block in data[BLOCK..].chunks(BLOCK) {
-                assert!(block == [3; BLOCK] || block == [0; BLOCK], "{block:?}");
-            }
-            lens.insert(data.len());
-            seen_unsynced[crashed.list("d").unwrap().len() - 1] = true;
-            let listed = crashed.list("").unwrap();
-            match listed.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-                ["d"] => seen_e[0] = true,
-                ["d", "e"] => seen_e[1] = true,
-                _ => panic!("{listed:?}"),
-            }
-        }
-        assert_eq!(seen_unsynced, [true, true]);
-        assert_eq!(seen_e, [true, true]);
-        // Anything synced after, as a journaling file system's commit makes it, it is kept.
-        dir.create("d/later", true).unwrap().sync().unwrap();
-        for seed in 0..16 {
-            assert!(dir.crash(seed).list("").unwrap().contains(&"e".to_owned()), "seed {seed}");
-        }
-        assert!(lens.len() > 2, "{lens:?}");
-    }
-
-    /// cladefs: a corrupting crash keeps what was synced, and leaves each sector written since
-    /// whole, as it was, garbage, or torn at a random offset, its left part or its right part
-    /// written, the rest as it was or garbage (TASK-680, board 5748).
-    #[test]
-    fn corrupting_crashes_keep_what_was_synced_and_mangle_the_rest() {
-        let dir = MemDisk::new();
-        let file = dir.create("f", true).unwrap();
-        file.write_at(&[1; 2 * BLOCK], 0).unwrap();
-        file.sync().unwrap();
-        dir.sync_dir("").unwrap();
-        file.write_at(&[3; 2 * BLOCK], 0).unwrap();
-        // A sector of `first` bytes, then of `then` from where they stop, if it is one.
-        let cut = |block: &[u8], first: u8, then: u8| {
-            let at = block.iter().position(|&byte| byte != first)?;
-            (at > 0 && block[at..].iter().all(|&byte| byte == then)).then_some(at)
-        };
-        let (mut torn, mut cuts, mut garbage) =
-            ([false; 2], std::collections::BTreeSet::new(), false);
-        let mut whole = [false; 2];
-        for seed in 0..64 {
-            let data = read(&dir.crash_corrupting(seed).open("f", true).unwrap());
-            assert_eq!(data.len(), 2 * BLOCK);
-            for block in data.chunks(BLOCK) {
-                match block {
-                    _ if block == [1; BLOCK] => whole[0] = true,
-                    _ if block == [3; BLOCK] => whole[1] = true,
-                    _ => match (cut(block, 3, 1), cut(block, 1, 3)) {
-                        (Some(at), _) => (torn[0], _) = (true, cuts.insert(at)),
-                        (_, Some(at)) => (torn[1], _) = (true, cuts.insert(at)),
-                        _ => garbage = true,
-                    },
-                }
-            }
-        }
-        assert_eq!((whole, torn, garbage), ([true, true], [true, true], true));
-        assert!(cuts.len() > 2, "torn at {cuts:?} alone");
-    }
-
-    /// cladefs: a corrupting crash damages no byte a write leaves as it was, the block's others
-    /// included (powersafe overwrite, board 5890, decision-3): a log's append, written back a page
-    /// at a time, writes again the end of the record synced before it, which every crash keeps,
-    /// whatever it makes of the bytes after.
-    #[test]
-    fn corrupting_crashes_damage_no_byte_written_as_it_was() {
-        const SYNCED: usize = BLOCK + 188;
-        let dir = MemDisk::new();
-        let file = dir.create("f", true).unwrap();
-        file.write_at(&[1; SYNCED], 0).unwrap();
-        file.sync().unwrap();
-        dir.sync_dir("").unwrap();
-        let mut page = vec![1; SYNCED];
-        page.resize(2 * BLOCK, 3);
-        file.write_at(&page, 0).unwrap();
-        let mut garbage = false;
-        for seed in 0..64 {
-            let data = read(&dir.crash_corrupting(seed).open("f", true).unwrap());
-            assert_eq!(data[..SYNCED], [1; SYNCED], "seed {seed} damaged what was synced");
-            garbage |= data.len() == 2 * BLOCK && data[SYNCED..].iter().any(|&byte| byte != 3);
-        }
-        assert!(garbage, "no crash made garbage of the new bytes");
     }
 
     /// Creating a file where one is fails, as a host's `create_new` does, leaving the one there as

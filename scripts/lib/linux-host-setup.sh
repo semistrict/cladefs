@@ -34,6 +34,8 @@ host_needed=()
 # This tree, whose scripts build what the host scripts measure.
 host_tools=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$host_tools/scripts/lib/measurement.sh"
+# The host's packages (host_packages_install) and apt-get's runs (host_apt).
+source "$host_tools/scripts/lib/host-packages.sh"
 
 # host_setup provisions the host, once per host for what lasts: the packages,
 # the Rust toolchain and its musl target; and exports the environment the
@@ -57,25 +59,8 @@ host_setup() {
         return 0
     fi
     export DEBIAN_FRONTEND=noninteractive
-    # clang's libraries build Firecracker's bindings, libseccomp its seccompiler,
-    # podman the root filesystems of guests that need one, and busybox-static the
-    # image of fxfs-guest-docker-dax's containers; flex, bison, bc, cpio and
-    # libelf's and OpenSSL's headers build the guest kernel (test-linux-host.sh's
-    # CLADEFS_GUEST_KERNEL_BUILD); elfutils' eu-stack saves a hung test's stacks
-    # (the guest tests' runner, TASK-44.13); coccinelle's spatch checks the guest's C
-    # (scripts/cocci-guest.py, TASK-44.17); fuse3's fusermount3 mounts FUSE
-    # filesystems for users other than root, as cladefs-mount does (TASK-222). The
-    # marker names the list, so a host that installed a different one installs again.
-    local packages packages_ready
-    packages=(build-essential clang libclang-dev llvm pkg-config musl-tools python3
-        curl ca-certificates e2fsprogs podman rsync libseccomp-dev busybox-static
-        git flex bison bc cpio libelf-dev libssl-dev sqlite3 elfutils coccinelle fuse3)
-    packages_ready="$work/tools/packages-$(printf '%s\n' "${packages[@]}" | sha256sum | cut -c1-16)"
-    if [[ ! -f "$packages_ready" ]]; then
-        host_apt update -qq
-        host_apt install -y -qq "${packages[@]}"
-        touch "$packages_ready"
-    fi
+    # scripts/host-packages.txt's, once per list.
+    host_packages_install "$work/tools"
 
     RUSTUP_TOOLCHAIN=$(pinned_version rust)
     export CARGO_HOME="$work/tools/cargo" RUSTUP_HOME="$work/tools/rustup" RUSTUP_TOOLCHAIN
@@ -146,15 +131,6 @@ host_network() {
     export CARGO_HTTP_LOW_SPEED_LIMIT=${CARGO_HTTP_LOW_SPEED_LIMIT:-1024}
     export CARGO_NET_RETRY=${CARGO_NET_RETRY:-5}
     export CARGO_HTTP_MULTIPLEXING=${CARGO_HTTP_MULTIPLEXING:-false}
-}
-
-# host_apt ARG... runs apt-get with ARGs, waiting for its lock, restarting no
-# service: needrestart, which a host installs, restarted sshd and re-executed
-# systemd after a run's packages went in, and the run's job, which they ran
-# under, died with no status 11 s later (GCE r990, 2026-11-08).
-host_apt() {
-    NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive \
-        apt-get -o DPkg::Lock::Timeout=600 "$@"
 }
 
 # host_need TOOL... installs each TOOL, unless it is there: perf, which follows

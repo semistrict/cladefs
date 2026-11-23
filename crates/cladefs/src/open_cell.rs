@@ -836,7 +836,11 @@ impl OpenCell {
 
     /// The open cell `opened` at `path`, opened as `opening` says, of whose cell and those it was
     /// forked from the cells `public` are public ([`cell_dir::public_cells`]).
-    async fn new(path: &Path, opened: host_cell::Opened, opening: Opening) -> Result<Self, Error> {
+    pub(crate) async fn new(
+        path: &Path,
+        opened: host_cell::Opened,
+        opening: Opening,
+    ) -> Result<Self, Error> {
         let host_cell::Opened { local, bucket, uploader } = opened;
         let forked = uploader.forked_from();
         Self::assemble(path, (local, bucket, Some(uploader)), forked, opening).await
@@ -1230,6 +1234,12 @@ impl OpenCell {
         &self.bucket
     }
 
+    /// cladefs: its open cell, for tests of what it holds.
+    #[cfg(test)]
+    pub(crate) fn local(&self) -> &Arc<LocalCell<HostDir>> {
+        &self.local
+    }
+
     /// cladefs: the open cell's uploader, if it has one.
     #[cfg(test)]
     pub(crate) fn uploader(&self) -> Option<&local_cell::upload::Uploader<HostDir>> {
@@ -1384,6 +1394,26 @@ impl OpenCell {
             if done == len {
                 return Ok(());
             }
+        }
+    }
+
+    /// cladefs: reads as [`OpenCell::read`] does, into `data`, a buffer of this process's own, from
+    /// the cell itself, or object storage, never through the extent cache: for a device this
+    /// process mounts a filesystem on (`storage::device`), whose kernel caches the pages it reads
+    /// itself, which the extent cache would hold a second time, at 2.4 times the cost of a read
+    /// (board 8260). The extent cache is for what windows map, and their guests read.
+    pub(crate) async fn read_uncached(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        data: &mut [u8],
+    ) -> Result<()> {
+        stats::add(Counter::Reads, 1);
+        stats::add(Counter::ReadBytes, data.len() as u64);
+        self.halt.check()?;
+        match self.base_holding(extent).await? {
+            Some((base, _)) => base.read_stored(extent, offset, data).await,
+            None => self.read_stored(extent, offset, data).await,
         }
     }
 
@@ -1565,8 +1595,7 @@ impl OpenCell {
 
     /// cladefs: `Ok` unless the open cell's uploader stopped, failed: the open cell's commits are
     /// its cell's no more, as once a later placement took its cell (`EROFS`, TASK-364), so nothing
-    /// changes it from then on ([`OpenCell::admit`]), as a kept image's commits fail
-    /// (`storage::kept`).
+    /// changes it from then on ([`OpenCell::admit`]).
     fn uploading(&self) -> Result<()> {
         match self.uploader.as_ref().and_then(|uploader| uploader.failed()) {
             Some(failure) => Err(upload_errno(failure)),
@@ -2934,7 +2963,7 @@ mod tests {
         let from = in_bucket();
         let relocating =
             local_cell::Relocating { extent, from: from.clone(), data: pattern(6, BLOCK) };
-        assert_eq!(cell.local.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+        assert_eq!(cell.local.relocate(vec![relocating]).await.unwrap().bytes, BLOCK as u64);
         cell.commit(None).await.unwrap();
         let to = in_bucket();
         assert_ne!(to.key, from.key);

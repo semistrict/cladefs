@@ -6,12 +6,12 @@
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -1778,7 +1778,7 @@
-             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
-                 cells::removed_if_unmade(path)?;
-                 let forked = (crate::CellId { tenant, id: cell }, version);
+@@ -1938,7 +1938,7 @@
+                 // call). A host crash before leaves it unmade, as if the restore never was.
+                 // cladefs: a crash of the daemon's too, its VM processes going with it.
+                 let deferring = local_cell::defer_durability(path);
 -                cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
 +                cells::fork_version(forked, capacity, (path, None)).await?;
-                 Arc::new(open_cell_at(path, None, Some(arena)).await?)
-             }
-             (None, codec::Opening::Create(capacity, kind)) => {
+                 let open_cell = open_cell_at(path, None, Some(arena)).await?;
+                 deferring.opened();
+                 Arc::new(open_cell)

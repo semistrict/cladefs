@@ -47,7 +47,7 @@ use bucket_cell::recovery::{Places, Seal};
 use bucket_cell::trace;
 use bucket_cell::wal::{Rebased, Wal};
 use extent_frame::segment::{CellId, Chain, Contents, Footer, Location, NewVersion, epoch_of};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -506,17 +506,6 @@ impl<D: Dir> Write<'_, D> {
         Ok(self.file.write_at(data, self.offset + at)?)
     }
 
-    /// cladefs: `data`, the whole write's bytes, as its file is to store them, for a caller writing
-    /// them by an I/O of its own, as an image's device does: encrypted in place if the cell
-    /// is (TASK-411.5). They go to the file it names, at the offset it names; written in whole
-    /// sectors if a write of them stops short, from the last whole sector written, they are what
-    /// they are whatever writes them again.
-    pub fn stored(&self, mut data: Aligned) -> Result<Stored<'_, D::File>, Error> {
-        ensure!(data.len() as u64 == self.len, "{} bytes of a write of {}", data.len(), self.len);
-        self.file.encrypt(self.offset, data.as_mut_slice())?;
-        Ok(Stored { file: self.file.file(), offset: self.offset, bytes: data })
-    }
-
     /// Records the write, whose data is in the file: reads see it, and the next commit includes
     /// it.
     pub fn finish(mut self) {
@@ -538,14 +527,6 @@ impl<D: Dir> Write<'_, D> {
             log::warn!("extent store: waiting for {len} bytes at {offset} of a segment: {err}");
         }
     }
-}
-
-/// cladefs: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
-/// in `file`, encrypted if the cell is.
-pub struct Stored<'a, F> {
-    pub file: &'a Arc<F>,
-    pub offset: u64,
-    pub bytes: Aligned,
 }
 
 impl<D: Dir> Drop for Write<'_, D> {
@@ -1503,6 +1484,26 @@ impl Places for Local {
 
     fn free(&mut self, extent: ExtentId) {
         self.extents.remove(&extent);
+    }
+}
+
+/// cladefs: what a relocation did ([`LocalCell::relocate`]): the bytes it relocated, and the
+/// commit that names them where they went, if it relocated any: one that changes nothing the
+/// guest reads, its state the commit's before it but where they are (doc-27).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Relocated {
+    pub bytes: u64,
+    pub commit: Option<u64>,
+}
+
+/// cladefs: a relocation that failed after it relocated what it says ([`LocalCell::relocate`]),
+/// committed: the context of its error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartlyRelocated(pub Relocated);
+
+impl std::fmt::Display for PartlyRelocated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relocating, {} bytes relocated", self.0.bytes)
     }
 }
 
@@ -2598,11 +2599,17 @@ impl<D: Dir> LocalCell<D> {
     /// write to it goes on with, it relocates nothing. A copy that fails is dead space, as a write dropped is; what it
     /// copied before is committed, and it fails, saying so.
     /// Refused, the cell unchanged, unless each one's bytes are as many as where it was read holds.
-    pub async fn relocate(&self, relocating: Vec<Relocating>) -> Result<u64, Error> {
+    pub async fn relocate(&self, relocating: Vec<Relocating>) -> Result<Relocated, Error> {
         for Relocating { extent, from, data } in &relocating {
             let read = data.len() as u64;
             ensure!(read == from.len, "{extent:?} relocated with {read} bytes of {}", from.len);
         }
+        // cladefs: within its disk's allowance and its tenant's limits, as a guest's write is,
+        // room left for what the cell's own work adds for it (doc-22; Codex's review of
+        // fa1912379): refused, it relocates nothing, held until its copies land.
+        let bytes = relocating.iter().map(|relocating| relocating.from.len).sum();
+        let _pledge =
+            self.dir.footprint().map(|footprint| footprint.admit(bytes, 0)).transpose()?;
         let (relocated, failed) = {
             let committing = self.committing.lock().await;
             let mut state = self.between_writes(&committing).await?;
@@ -2611,11 +2618,11 @@ impl<D: Dir> LocalCell<D> {
             relocated.context("relocating the extent store's extents")?
         };
         // Durable, as the uploader takes only what is.
-        if relocated > 0 {
+        if relocated.commit.is_some() {
             self.flush().await?;
         }
         match failed {
-            Some(failed) => Err(failed.context(format!("relocating, {relocated} bytes relocated"))),
+            Some(failed) => Err(failed.context(PartlyRelocated(relocated))),
             None => Ok(relocated),
         }
     }
@@ -2627,9 +2634,9 @@ impl<D: Dir> LocalCell<D> {
         &self,
         state: &mut State<D::File>,
         relocating: Vec<Relocating>,
-    ) -> Result<(u64, Option<Error>), Error> {
+    ) -> Result<(Relocated, Option<Error>), Error> {
         if state.segments.has_full() || self.run_goes_on(state) {
-            return Ok((0, None));
+            return Ok((Relocated::default(), None));
         }
         let (mut changes, mut relocated, mut failed) = (Vec::new(), 0, None);
         for Relocating { extent, from, data } in relocating {
@@ -2659,7 +2666,7 @@ impl<D: Dir> LocalCell<D> {
             relocated += from.len;
         }
         if changes.is_empty() {
-            return Ok((0, failed));
+            return Ok((Relocated::default(), failed));
         }
         let epoch = state.epoch + 1;
         state.trim_kept(epoch);
@@ -2672,7 +2679,7 @@ impl<D: Dir> LocalCell<D> {
             relocated,
         )?;
         self.queue_flush(state, epoch, records, Vec::new());
-        Ok((relocated, failed))
+        Ok((Relocated { bytes: relocated, commit: Some(epoch) }, failed))
     }
 
     /// cladefs: whether an extent the guest has open ends its run at the open segment's end, where
@@ -4080,6 +4087,28 @@ impl<D: Dir> LocalCell<D> {
     /// Their live bytes counted the first time it is asked, walking every extent the cell holds.
     pub fn sparse(&self, pinned: impl Fn(&str) -> bool) -> Result<Vec<Sparse>, Error> {
         Ok(self.state()?.extents.sparse(pinned))
+    }
+
+    /// cladefs: how many bytes a relocation now would take ([`LocalCell::relocate`]): what the open
+    /// segment has room for, none while the guest has filled a segment since its last commit or a
+    /// run of an extent it has open ends where a copy would go, as a relocation then relocates
+    /// nothing: what a round reads no more than (the verifying review of d33a6c360).
+    pub fn relocation_room(&self) -> Result<u64, Error> {
+        let state = self.state()?;
+        if state.segments.has_full() || self.run_goes_on(&state) {
+            return Ok(0);
+        }
+        let open = state.segments.len(state.segments.open_segment());
+        Ok(self.options.segment_limit().saturating_sub(open))
+    }
+
+    /// cladefs: the extents the cell holds in each of its segments in the bucket `keys` names,
+    /// where they are, by offset: what its writer reads to relocate out of them (doc-27).
+    pub fn held_in(
+        &self,
+        keys: &HashSet<String>,
+    ) -> Result<HashMap<String, Vec<(ExtentId, Location)>>, Error> {
+        Ok(self.state()?.extents.held_in(keys))
     }
 
     pub fn usage(&self) -> Result<Usage, Error> {

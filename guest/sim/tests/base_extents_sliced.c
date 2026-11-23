@@ -24,8 +24,7 @@ static void drop_ranges(struct sim_mount *mount, struct file *file)
 	int err;
 
 	filemap_invalidate_lock(inode->i_mapping);
-	err = cladefs_dax_changed(mount->info->dax, mount->info->dax_volume, inode, inode->i_ino, 0,
-			       MAX_LFS_FILESIZE);
+	err = cladefs_vfs_inode(inode)->data->punch_drop(inode, 0, MAX_LFS_FILESIZE);
 	filemap_invalidate_unlock(inode->i_mapping);
 	check(!err, "dropping ino %lu's ranges: %d", inode->i_ino, err);
 }

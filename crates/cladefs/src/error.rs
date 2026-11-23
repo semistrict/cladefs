@@ -92,12 +92,6 @@ impl From<local_cell::upload::Failure> for Error {
     }
 }
 
-/// cladefs: `failure` as [`Error`] has it, for what returns `anyhow`'s: its causes, or its errno as
-/// context, say its errno once it is an [`Error`] again.
-pub(crate) fn anyhow_of(failure: local_cell::upload::Failure) -> anyhow::Error {
-    Error::from(failure).0
-}
-
 impl From<crate::faults::Failpoint> for Error {
     fn from(failpoint: crate::faults::Failpoint) -> Self {
         Self::new(anyhow::Error::new(failpoint))

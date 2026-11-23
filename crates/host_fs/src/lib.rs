@@ -12,8 +12,8 @@
 //!
 //! Under `--cfg madsim`, each simulated host has a disk of its own in memory, of the same calls,
 //! which keeps what a host's file system would have made durable: a file's contents as of its
-//! last sync, a directory's entries of files as of its last sync, and directories once made
-//! (`local_cell::MemDir`'s model). A host started again, killed before,
+//! last sync, a directory's entries as of its last sync, and directories once made ([`mem`], the
+//! crash model `local_cell::MemDir` is of too). A host started again, killed before,
 //! finds its disk as a crash left it, at its first call since: what was durable, and, as the
 //! seed says, any of what happened since, in order, each block written since its file's last sync
 //! there whole, not at all, garbage, or torn (FoundationDB's simulation's power losses do as much).
@@ -21,6 +21,7 @@
 //! with its death.
 
 pub mod crash;
+pub mod mem;
 
 #[cfg(not(madsim))]
 pub use std::fs::{
@@ -104,7 +105,7 @@ pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<()> {
 /// (`EINVAL`).
 pub fn data_ranges(file: &File, size: u64) -> io::Result<Vec<std::ops::Range<u64>>> {
     #[cfg(madsim)]
-    return Ok(file.data_ranges(size));
+    return file.data_ranges(size);
     #[cfg(not(madsim))]
     return descriptor::data_ranges(file, size);
 }

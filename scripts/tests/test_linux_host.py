@@ -174,8 +174,8 @@ class Lima(Synced, unittest.TestCase):
         self.vm, checkout = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
         built(self.vm / "cladefs-test", checkout)
         (self.vm / "cladefs-test" / ".by-content").touch()
-        for name in ["lib/lima.sh", "lib/linux-host-setup.sh", "lib/measurement.sh", "test-linux.sh",
-                     "build-commit.sh"]:
+        for name in ["lib/lima.sh", "lib/linux-host-setup.sh", "lib/measurement.sh",
+                     "lib/host-packages.sh", "host-packages.txt", "test-linux.sh", "build-commit.sh"]:
             (checkout / "scripts" / name).parent.mkdir(parents=True, exist_ok=True)
             (checkout / "scripts" / name).symlink_to(SCRIPTS / name)
         for name, text in [("bench.sh", SAYS), ("test.sh", SAYS), ("settings.sh", SETTINGS)]:

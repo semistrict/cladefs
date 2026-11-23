@@ -351,7 +351,7 @@ pub async fn get(bucket: &impl Bucket, key: &str) -> Result<Option<Object>, Refu
 /// Counts a failure, `error`, of a request of `key`, and waits before the request goes again:
 /// credentials expired, until the store takes a cheap request of `key` again ([`readmitted`]).
 /// A refusal ends the request (board 5861): the one a call met it found is its caller's to answer.
-async fn failed(
+pub(crate) async fn failed(
     bucket: &impl Bucket,
     failures: &mut u32,
     error: Error,

@@ -235,12 +235,16 @@ fn sweeping(
 /// cladefs: drops from `replicas` what the heads of `bucket`'s cells name no more: every
 /// configuration's logs before the active one, and all of a cell gone or deleted; nothing of a
 /// cell whose head names no configuration (doc-21). A head that can't be read keeps what its cell
-/// has.
+/// has. Its directory's scans, reads and unlinks run off the runtime's workers, as they block for as
+/// long as the disk takes (board 5378).
 pub(super) async fn sweep(
-    replicas: &Replicas<HostDir>,
+    replicas: &Arc<Replicas<HostDir>>,
     bucket: &impl bucket_cell::bucket::Bucket,
 ) -> Result<(), String> {
-    for (cell, _) in replicas.cells().map_err(|err| err.to_string())? {
+    let listing = replicas.clone();
+    let listed =
+        super::run::off_the_runtime(move || listing.cells().map_err(|err| err.to_string()));
+    for (cell, _) in listed.await?? {
         let head = match bucket_cell::head::get(bucket, cell).await {
             Ok(head) => head,
             Err(err) => {
@@ -263,8 +267,9 @@ pub(super) async fn sweep(
                 }
             }
         };
-        // On the sweep's own thread, which nothing else waits on: its file I/O blocks it alone.
-        replicas.sweep(cell, swept).map_err(|err| err.to_string())?;
+        let sweeping = replicas.clone();
+        let swept = move || sweeping.sweep(cell, swept).map_err(|err| err.to_string());
+        super::run::off_the_runtime(swept).await??;
     }
     Ok(())
 }

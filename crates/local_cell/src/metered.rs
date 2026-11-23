@@ -9,13 +9,12 @@
 //! around it. A write is counted as the page cache takes it; what changes a directory, as it is
 //! changed, once the directory under it has changed it.
 
-use crate::cached::{CachedDir, CachedFile};
+use crate::cached::CachedDir;
 use crate::dir::{Dir, DirFile, File};
 use crate::footprint::{FileLen, Footprint};
 use crate::pages::PageCache;
 use bucket_cell::host_disk::HostDisk;
 use std::io;
-use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -201,22 +200,6 @@ impl<F: File> MeteredFile<F> {
     /// The file under it.
     pub fn under(&self) -> &F {
         &self.file
-    }
-}
-
-impl<F: File> MeteredFile<CachedFile<F>> {
-    /// As [`CachedFile::settle`].
-    pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
-        self.file.settle(range)
-    }
-
-    /// As [`CachedFile::settle_for_write`], counting the file as far as `range` goes: what the
-    /// caller writes there, on the file under it ([`HostFile::host_file`](crate::HostFile)), as an
-    /// image's device does.
-    pub fn settle_for_write(&self, range: Range<u64>) -> io::Result<()> {
-        self.file.settle_for_write(range.clone())?;
-        self.len.grow(&self.footprint, range.end);
-        Ok(())
     }
 }
 

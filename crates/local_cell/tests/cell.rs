@@ -330,6 +330,30 @@ async fn segments_freed_past_half_are_sparse() {
     assert_eq!(sparse(false), [], "freed whole");
 }
 
+/// cladefs: doc-27 (board 6214; Codex's review of fa1912379): a relocation is admitted to its
+/// cell's disk as a guest's write is: on a disk as full as its allowance lets it be, it is refused
+/// for room, the cell unchanged, its extent still in the bucket.
+#[tokio::test(flavor = "multi_thread")]
+async fn relocations_are_admitted_to_the_disk_as_writes_are() {
+    let dir = MemDir::with_capacity(64 << 20);
+    let cell = create(dir.clone(), 1 << 20);
+    for sequence in 0..4 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let first = closed_one(&cell).await;
+    cell.acknowledged(first.number).await.unwrap();
+    let Some(Place::Bucket(from)) = cell.place(extent(0)).unwrap() else { panic!("not uploaded") };
+    let full = dir.footprint().bytes();
+    dir.disk().disk().govern(full, 64 << 20, false);
+    let relocating =
+        Relocating { extent: extent(0), from: from.clone(), data: pattern(0, 0, BLOCK) };
+    let refused = cell.relocate(vec![relocating]).await.unwrap_err();
+    assert!(refused.downcast_ref::<local_cell::footprint::DiskFull>().is_some(), "{refused:#}");
+    assert_eq!(cell.place(extent(0)).unwrap(), Some(Place::Bucket(from)));
+}
+
 /// cladefs: doc-27 (board 6214): a relocation copies the extents its writer read from the cell's
 /// segments in the bucket into the open segment, in a commit of its own, which names them there.
 /// The guest's extent open stays open, and takes its next write; its free not yet committed is
@@ -377,7 +401,7 @@ async fn relocations_commit_alone_and_leave_the_guests_extents_open() {
         relocating(2, &at[2], BLOCK),
         relocating(3, &at[3], BLOCK),
     ]);
-    assert_eq!(relocated.await.unwrap(), BLOCK as u64);
+    assert_eq!(relocated.await.unwrap().bytes, BLOCK as u64);
     assert_eq!(
         cell.place(extent(0)).unwrap(),
         Some(Place::Run { cell: CELL.id, number: 1, offset: 2 * BLOCK as u64 })
@@ -428,7 +452,7 @@ async fn extents_the_cell_opened_with_relocate() {
     state.next_sequence = 6;
     let cell = created_on(MemDir::new(), 1 << 20, state, WRITER);
     let relocating = Relocating { extent: extent(5), from: location, data: pattern(5, 0, BLOCK) };
-    assert_eq!(cell.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+    assert_eq!(cell.relocate(vec![relocating]).await.unwrap().bytes, BLOCK as u64);
     let place = cell.place(extent(5)).unwrap();
     assert_eq!(place, Some(Place::Run { cell: CELL.id, number: 0, offset: 0 }));
     let mut read = vec![0; BLOCK];
@@ -455,7 +479,7 @@ async fn frees_pending_across_a_relocation_are_the_next_commits() {
     let Some(Place::Bucket(from)) = cell.place(extent(1)).unwrap() else { panic!("in the bucket") };
     cell.free(extent(0)).unwrap();
     let relocating = Relocating { extent: extent(1), from, data: pattern(1, 0, BLOCK) };
-    assert_eq!(cell.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+    assert_eq!(cell.relocate(vec![relocating]).await.unwrap().bytes, BLOCK as u64);
     assert!(cell.close_now().await.unwrap());
     let relocated = closed_one(&cell).await;
     cell.acknowledged(relocated.number).await.unwrap();
@@ -499,7 +523,7 @@ async fn relocations_leave_the_guests_writes_to_seal_in_place() {
     cell.write(extent(12), 0, &pattern(12, 0, BLOCK)).await.unwrap();
     cell.free(extent(12)).unwrap();
     let copied = local_cell::written().copied;
-    assert_eq!(cell.relocate(vec![relocating(0)]).await.unwrap(), BLOCK as u64);
+    assert_eq!(cell.relocate(vec![relocating(0)]).await.unwrap().bytes, BLOCK as u64);
     cell.commit(None).await.unwrap();
     assert_eq!(local_cell::written().copied, copied, "the guest's commit copied");
     assert_eq!(
@@ -509,7 +533,7 @@ async fn relocations_leave_the_guests_writes_to_seal_in_place() {
 
     // A run the guest writes on, which a copy at its end would split: the relocation yields.
     cell.write(extent(11), 0, &pattern(11, 0, BLOCK)).await.unwrap();
-    assert_eq!(cell.relocate(vec![relocating(1)]).await.unwrap(), 0);
+    assert_eq!(cell.relocate(vec![relocating(1)]).await.unwrap().bytes, 0);
     cell.write(extent(11), BLOCK as u64, &pattern(11, BLOCK, BLOCK)).await.unwrap();
     cell.commit(None).await.unwrap();
     assert_eq!(local_cell::written().copied, copied, "the guest's commit copied");
@@ -519,7 +543,7 @@ async fn relocations_leave_the_guests_writes_to_seal_in_place() {
     for sequence in 20..20 + filled {
         cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
     }
-    assert_eq!(cell.relocate(vec![relocating(1)]).await.unwrap(), 0);
+    assert_eq!(cell.relocate(vec![relocating(1)]).await.unwrap().bytes, 0);
     assert_eq!(cell.place(extent(1)).unwrap(), Some(Place::Bucket(from(1))));
     cell.commit(None).await.unwrap();
     assert_eq!(local_cell::written().copied, copied, "the guest's commit copied");

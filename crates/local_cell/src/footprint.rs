@@ -1035,11 +1035,6 @@ mod tests {
                 let did = step(&dir, &mut rng, &mut open);
                 agrees(&dir, dir.footprint(), before, &format!("seed {seed}, step {at}, {did}"));
             }
-            if let Some(file) = open.iter().find(|file| file.size().unwrap() > 0) {
-                let before = dir.footprint().bytes();
-                file.settle_for_write(0..file.size().unwrap() + 3 * GRANULE).unwrap();
-                assert!(dir.footprint().bytes() >= before, "seed {seed}");
-            }
         }
     }
 

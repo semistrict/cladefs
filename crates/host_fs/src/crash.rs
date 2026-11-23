@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what a power loss leaves of a write made since its file's last sync, as both crash
-//! models have it: each simulated host's disk (`sim`, under madsim) and the cells' own crash tests'
-//! (`local_cell::MemDisk`) (board 5748, as FoundationDB's `AsyncFileNonDurable` has it).
+//! cladefs: what a power loss leaves of a write made since its file's last sync, as the file system
+//! in memory has it ([`crate::mem`]), which each simulated host's disk and the cells' own crash
+//! tests' directories are (board 5748, as FoundationDB's `AsyncFileNonDurable` has it).
 //!
 //! A write lands in sectors of [`SECTOR`] bytes at the file's offsets, as a drive writes them, a
 //! write's first and last sectors partial if it is unaligned. Each sector is kept or not, at

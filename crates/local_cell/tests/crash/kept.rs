@@ -92,9 +92,11 @@ impl Host {
             keys: bucket_cell::keys::testing::host(),
         };
         // Checkpoints often, so that the collector's passes find segments recoveries no longer
-        // read, which they compact.
+        // read, which they compact. cladefs: no relocations where the collector compacts (doc-27
+        // step 1).
+        let (checkpoint_every, relocate) = (4, false);
         let options =
-            upload::Options { interval, checkpoint_every: 4, ..upload::Options::default() };
+            upload::Options { interval, checkpoint_every, relocate, ..upload::Options::default() };
         upload::open(recovering, OPTIONS, self.bucket(), (holder, options), &runtime).await
     }
 

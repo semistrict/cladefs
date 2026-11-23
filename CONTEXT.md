@@ -595,5 +595,5 @@ code does not have yet are said so.
 - **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too
   (`CLADEFS_E2E_REPEATS`, `repeat-K.json`).
 - **room**: a segment's free space alone. A tenant's is its **in-flight** budget (`SetTenantInFlight`); a peer stream's, its **credit**.
-- **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
+- **type names**: two types of one name are one concept; unrelated ones get names of their own (`RingView`, `TableFooter`, `TABLE_BLOCK`).
 - **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.

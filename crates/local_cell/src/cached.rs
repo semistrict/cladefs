@@ -19,7 +19,6 @@ use crate::pages::{Cached, PageCache, WeakCached};
 use crate::sync::Mutex;
 use std::collections::HashMap;
 use std::io;
-use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -214,7 +213,7 @@ impl<D: Dir> Dir for CachedDir<D> {
     fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
         let cached = self.cached(path);
         if let Some(cached) = &cached {
-            cached.settle(0..u64::MAX)?;
+            cached.write_back_whole()?;
         }
         let given = self.shared.dir.give(path, to)?;
         if given && let Some(cached) = cached {
@@ -248,26 +247,6 @@ impl<F: File> CachedFile<F> {
         match self {
             Self::Raw(file) => file,
             Self::Cached(cached) => cached.file(),
-        }
-    }
-
-    /// Writes back the pages the cache holds dirty in `range`, if the file is cached: what an I/O
-    /// of a caller's own on the file under it ([`HostFile::host_file`](crate::HostFile)) is to be
-    /// preceded by, as an image's device's is, so that it reads what was written.
-    pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
-        match self {
-            Self::Raw(_) => Ok(()),
-            Self::Cached(cached) => cached.settle(range),
-        }
-    }
-
-    /// As [`CachedFile::settle`] does, before a write of a caller's own on the file under it,
-    /// which also drops the pages there and takes the file to go as far as `range` at least, so
-    /// that what the caller writes no page hides, and reads see all of it.
-    pub fn settle_for_write(&self, range: Range<u64>) -> io::Result<()> {
-        match self {
-            Self::Raw(_) => Ok(()),
-            Self::Cached(cached) => cached.settle_for_write(range),
         }
     }
 }

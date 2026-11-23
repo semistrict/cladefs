@@ -44,32 +44,37 @@ echo "codex ran"
 
 FAKE_HOTBED = """#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE/hotbed.log"
+# Its answer: JSON for --json, else plain text, as hotbed prints.
+answer() {
+    if [[ " $args " == *" --json "* ]]; then echo "$1"; else echo "plain text: ask with --json"; fi
+}
+args=$*
 case "$1 $2" in
     "session current")
         if [[ -n ${FAKE_NO_SESSION:-} ]]; then exit 1; fi
-        echo '{"version":"1","ok":true,"command":"session current","data":{"id":"test-sess"}}'
+        answer '{"version":"1","ok":true,"command":"session current","data":{"id":"test-sess"}}'
         ;;
     "session start")
-        echo '{"version":"1","ok":true,"command":"session start","data":{"id":"new-sess"}}'
+        answer '{"version":"1","ok":true,"command":"session start","data":{"id":"new-sess"}}'
         ;;
     "session end")
-        echo '{"version":"1","ok":true,"command":"session end","data":{}}'
+        answer '{"version":"1","ok":true,"command":"session end","data":{}}'
         ;;
     "review request")
-        echo '{"version":"1","ok":true,"command":"review request","data":{"id":77}}'
+        answer '{"version":"1","ok":true,"command":"review request","data":{"id":77}}'
         ;;
     "review start"|"review finish"|"review fail")
-        echo '{"version":"1","ok":true,"command":"review","data":{"id":77}}'
+        answer '{"version":"1","ok":true,"command":"review","data":{"id":77}}'
         ;;
     "review findings")
         while (($#)); do
             if [[ $1 == --file ]]; then cp "$2" "$FAKE/findings.json"; fi
             shift
         done
-        echo '{"version":"1","ok":true,"command":"review findings","data":{"findings":[{"id":1}]}}'
+        answer '{"version":"1","ok":true,"command":"review findings","data":{"findings":[{"id":1}]}}'
         ;;
     "review link")
-        echo '{"version":"1","ok":true,"command":"review link","data":{"url":"http://hotbed.local/reviews/77"}}'
+        answer '{"version":"1","ok":true,"command":"review link","data":{"url":"http://hotbed.local/reviews/77"}}'
         ;;
     *)
         echo "unexpected hotbed args: $*" >&2
@@ -97,6 +102,7 @@ class ReviewChangeTest(unittest.TestCase):
             **os.environ,
             "PATH": f"{self.fake / 'bin'}:{os.environ['PATH']}",
             "FAKE": str(self.fake),
+            "CODEX_MODEL": "test-model",
         }
         env.pop("HOTBED_SESSION", None)
         if extra_env:
@@ -132,18 +138,21 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         findings = f"{self.fake / 'review.md.findings.json'}"
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
-            "session current",
+            "session current --json",
             "review request -s test-sess --title Codex review: origin/main (board 6902) "
             "--instructions verifying-reviewer instructions; what HEAD brings beyond origin/main "
             "(`git diff origin/main...HEAD`, `git log origin/main..HEAD`), serving board 6902 "
-            "--base origin/main --head HEAD",
-            "review start -s test-sess 77",
+            "--base origin/main --head HEAD --json",
+            "review start -s test-sess 77 --model test-model",
             f"review findings -s test-sess 77 --file {findings}",
             "review finish -s test-sess 77 --summary Codex review, 1 finding(s): "
             "One finding survives review.",
-            "review link 77",
+            "review link 77 --json",
         ])
         self.assertIn("This is hotbed review 77.", (self.fake / "stdin").read_text())
+        # Codex runs on the model the review records.
+        args = (self.fake / "args").read_text().splitlines()
+        self.assertEqual(args[:5], ["exec", "-m", "test-model", "--sandbox", "read-only"])
         self.assertIn("hotbed review 77, http://hotbed.local/reviews/77", done.stderr)
         recorded = json.loads((self.fake / "findings.json").read_text())
         self.assertEqual([f["file"] for f in recorded["findings"]], ["src/lib.rs"])
@@ -153,8 +162,8 @@ class ReviewChangeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout, "no findings\n")
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
-            "session current",
-            "review start -s test-sess 77",
+            "session current --json",
+            "review start -s test-sess 77 --model test-model",
             "review fail -s test-sess 77 --reason Codex's report carries no findings for hotbed "
             f"(see {self.fake / 'review.md'})",
         ])
@@ -163,10 +172,10 @@ class ReviewChangeTest(unittest.TestCase):
         done = self.review("--commit", "abc123", "--review", "77", extra_env={"FAKE_NONE": "1"})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual((self.fake / "hotbed.log").read_text().splitlines(), [
-            "session current",
-            "review start -s test-sess 77",
+            "session current --json",
+            "review start -s test-sess 77 --model test-model",
             "review finish -s test-sess 77 --summary Codex review, 0 finding(s): no findings",
-            "review link 77",
+            "review link 77 --json",
         ])
 
     def test_without_a_session_one_is_started_and_ended(self):
@@ -174,7 +183,8 @@ class ReviewChangeTest(unittest.TestCase):
                            extra_env={"FAKE_FINDINGS": "1", "FAKE_NO_SESSION": "1"})
         self.assertEqual(done.returncode, 0, done.stderr)
         log = (self.fake / "hotbed.log").read_text().splitlines()
-        self.assertEqual(log[:3], ["session current", "session start", "review start -s new-sess 77"])
+        self.assertEqual(log[:3], ["session current --json", "session start --json",
+                                   "review start -s new-sess 77 --model test-model"])
         self.assertEqual(log[-1], "session end -s new-sess")
 
     def test_no_change_named_fails(self):

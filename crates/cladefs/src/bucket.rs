@@ -574,6 +574,12 @@ node_local::node_local! {
     static MEMORY: Arc<fetch::Memory> = fetch::Memory::with_parts(fetch::shared_parts().clone());
 }
 
+/// cladefs: the budget of the GETs of the host's fetchers and the memory they keep in, which its
+/// writers' relocation rounds read through too (doc-27, board 6214).
+pub(crate) fn fetching() -> local_cell::upload::Fetching {
+    local_cell::upload::Fetching { budgets: BUDGET.get().clone(), memory: MEMORY.get().clone() }
+}
+
 /// cladefs: the host's fetcher memory, whose tails and unified recent/unpacked parts the memory
 /// governor counts and evicts (board 6026).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -933,10 +939,13 @@ mod tests {
 
     /// Uploads only when a commit waits.
     /// How this process's open cells keep their cells ([`crate::host_cell::keeping`]), but
-    /// uploading nothing until a commit waits for it, or the hour is up.
+    /// uploading nothing until a commit waits for it, or the hour is up. cladefs: and relocating
+    /// nothing, as the tests' collectors compact, which relocations must not run beside (doc-27
+    /// step 1).
     pub(super) fn idle() -> local_cell::upload::Options {
         let keeping = crate::host_cell::keeping().unwrap();
-        local_cell::upload::Options { interval: Duration::from_secs(3600), ..keeping }
+        let (interval, relocate) = (Duration::from_secs(3600), false);
+        local_cell::upload::Options { interval, relocate, ..keeping }
     }
 
     pub(super) fn pattern(seed: u8, len: usize) -> Vec<u8> {

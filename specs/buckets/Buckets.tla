@@ -94,15 +94,15 @@
 (*   that finds its marker in B, once pinned, goes on to its listing: one  *)
 (*   reading the head instead gives up if its version was dropped since,   *)
 (*   its children left referring in A (TLC, 2026-11-18).                   *)
-(* - mirrorHolds: a mirror writes its hold in A after its pin, before it   *)
-(*   reads the head, and deletes it if it gives up; B's collector deletes  *)
-(*   the holds of the versions whose markers it deletes, before them. A    *)
-(*   version's state may name objects of P's own origin cell, which A      *)
-(*   keeps while P's cell is not removed, and A removes P once no          *)
-(*   reference in A stands: the hold keeps P, for the copy's readers in B, *)
-(*   while the copy stands. That is outside the model (P's cell's          *)
-(*   removal, its origin's objects), and TLC finds no violation without    *)
-(*   the rule (2026-11-19): it has no mutation.                            *)
+(* - mirrorHolds (NoMirrorHolds): a mirror writes its hold in A after its  *)
+(*   pin, before it reads the head, and deletes it if it gives up; B's     *)
+(*   collector deletes the holds of the versions whose markers it deletes, *)
+(*   before them. A version's state may name objects of P's own origin     *)
+(*   cell, which A keeps while P's cell is not removed, and A removes P    *)
+(*   once no reference in A stands: the hold keeps P, for the copy's       *)
+(*   readers in B, while the copy stands. That is outside the model (P's   *)
+(*   cell's removal, its origin's objects); MarkedHeld says what it is     *)
+(*   for, a marked copy's hold standing in A (board 8441).                 *)
 (* - mirrorHoldsUnmarked (NoMirrorHoldsUnmarked): a mirror reads its       *)
 (*   marker before its hold, and writes the hold only if the marker is not *)
 (*   there. Writing it first, a mirror begun again after the first marked, *)
@@ -123,11 +123,22 @@
 (*   marker before its parts.                                              *)
 (* - copyRelists (NoCopyRelists): B's collector lists B after it reads A's *)
 (*   head.                                                                 *)
+(* - releasesHeld (NoReleasesHeld): a mirror's pin is a lease, and it      *)
+(*   sends the deletions letting go of its hold and its pin only within    *)
+(*   it, so that each lands before the pin is stale (mirror.rs's           *)
+(*   PIN_HELD). Its host stopped past it as it lets go, the next mirror    *)
+(*   takes its pin over and writes the hold again: a deletion it sent      *)
+(*   unconditionally lands after, and the next mirror marks with no hold   *)
+(*   in A (TLC, 2026-11-22, MarkedHeld; board 8441). A mirror gives up,    *)
+(*   deleting its hold, as it fails too (MirFail), its version still       *)
+(*   named: the next mirror does not. It assumes a deletion so sent lands  *)
+(*   within the lease's other half, which nothing bounds: one in flight    *)
+(*   past it still lands late (board 9229, for deletes conditional on a    *)
+(*   mirror's own write).                                                  *)
 (*                                                                         *)
 (* TLC found these needed no rule (2026-11-18): a fork referring in B at   *)
 (* once when marked (the read again covers it), and a mirror listing the   *)
 (* children before its copy too (its listing after the marker covers it).  *)
-(* Nor, in the model, mirrorHolds (2026-11-19, above).                     *)
 (*                                                                         *)
 (* Not modelled: the root bucket and its registry (TASK-633.9's tests);    *)
 (* P's own collection beyond its versions and its writer's state (which    *)
@@ -135,8 +146,9 @@
 (* head's read that neither its versions nor the writer's state named);    *)
 (* P's cell's removal and its origin's objects (mirrorHolds); writers'     *)
 (* relocations (doc-27: a version's state is immutable, a copy takes the   *)
-(* segments it reads, wherever its writer relocated since); a stale pin    *)
-(* taken over (a lease, doc-23); the children's own data.                  *)
+(* segments it reads, wherever its writer relocated since); the time a     *)
+(* lease lasts (a mirror stopped past its lease is one restarted, the      *)
+(* next taking its pin over, releasesHeld); the children's own data.       *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, TLC
 
@@ -155,7 +167,7 @@ CONSTANTS
 AllRules == {"forksReferFirst", "forksRecheck", "forksLeaveA", "forksRereadBeforeLeaving",
              "mirrorListsAfterMark", "mirrorRereadsBeforeRetiring", "mirrorPins", "mirrorChecks",
              "mirrorResumesMarked", "mirrorHolds", "mirrorHoldsUnmarked", "markerAfterCopy",
-             "copiesKeptWhileAlive", "markerGoesFirst", "copyRelists"}
+             "copiesKeptWhileAlive", "markerGoesFirst", "copyRelists", "releasesHeld"}
 
 R(rule) == rule \in Rules
 
@@ -181,10 +193,11 @@ VARIABLES
     mir,        \* mir[v]: v's mirror into B: [pc, kids, copied]
     gc,         \* gc[i]: pass i
     down,       \* the buckets down
-    passes, downs, restarts
+    passes, downs, restarts,
+    late        \* deletions a mirror stopped past its lease sent, landing later: <<bucket, ref>>
 
 vars == <<vers, cut, parts, ended, objs, rec, refs, marked, marker, fork, mir, gc, down, passes,
-          downs, restarts>>
+          downs, restarts, late>>
 
 Up(b) == b \notin down
 
@@ -230,13 +243,14 @@ CutVersion(S) ==
     /\ cut' = cut \cup {v}
     /\ parts' = [parts EXCEPT ![v] = S]
     /\ objs' = [objs EXCEPT !["A"] = @ \cup S]
-    /\ UNCHANGED <<ended, rec, refs, marked, marker, fork, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<ended, rec, refs, marked, marker, fork, mir, gc, down, passes, downs, restarts,
+                   late>>
 
 DropVersion(v) ==
     /\ "drop" \in Can /\ v \in vers /\ Up("A")
     /\ vers' = vers \ {v}
     /\ UNCHANGED <<cut, parts, ended, objs, rec, refs, marked, marker, fork, mir, gc, down, passes,
-                   downs, restarts>>
+                   downs, restarts, late>>
 
 \* P deleted: its head, naming no version, and no writer.
 EndP ==
@@ -244,7 +258,7 @@ EndP ==
     /\ ended' = TRUE
     /\ vers' = {}
     /\ UNCHANGED <<cut, parts, objs, rec, refs, marked, marker, fork, mir, gc, down, passes, downs,
-                   restarts>>
+                   restarts, late>>
 
 -----------------------------------------------------------------------------
 (* Forks into B. *)
@@ -257,7 +271,7 @@ StartFork(c, v) ==
     /\ fork' = [fork EXCEPT ![c] = [pc |-> "record", v |-> v, at |-> {}]]
     /\ mir' = IF "mirror" \in Can /\ mir[v].pc = "idle"
               THEN [mir EXCEPT ![v].pc = "pin"] ELSE mir
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, gc, down, passes, downs, restarts, late>>
 
 \* Its record, in B, being made.
 ForkRecord(c) ==
@@ -265,7 +279,7 @@ ForkRecord(c) ==
     /\ q # None /\ q.pc = "record" /\ Up("B")
     /\ rec' = [rec EXCEPT ![c] = [v |-> q.v, kind |-> "forking", deleted |-> FALSE]]
     /\ fork' = [fork EXCEPT ![c].pc = IF R("forksReferFirst") THEN "where" ELSE "check"]
-    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, mir, gc, down, passes, downs, restarts, late>>
 
 \* Where its reference goes, read in B: there if its version's mirror is marked, else in A.
 ForkWhere(c) ==
@@ -273,7 +287,8 @@ ForkWhere(c) ==
     /\ q # None /\ q.pc = "where" /\ Up("B")
     /\ fork' = [fork EXCEPT ![c].pc = "refer",
                             ![c].at = {IF q.v \in marker THEN "B" ELSE "A"}]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, mir, gc, down, passes, downs, restarts,
+                   late>>
 
 \* Its reference written there: a request after the marker's read.
 ForkRefer(c) ==
@@ -281,7 +296,7 @@ ForkRefer(c) ==
     /\ q # None /\ q.pc = "refer" /\ \A b \in q.at : Up(b)
     /\ refs' = [b \in Buckets |-> IF b \in q.at THEN refs[b] \cup {<<q.v, c>>} ELSE refs[b]]
     /\ fork' = [fork EXCEPT ![c].pc = IF R("forksReferFirst") THEN "check" ELSE "make"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, mir, gc, down, passes, downs, restarts, late>>
 
 \* The head naming its version read, in A: dropped, the fork fails, its child deleted. Having
 \* referred in A, on to the marker's read again (forksRecheck).
@@ -296,14 +311,15 @@ ForkCheck(c) ==
                                                [] R("forksRecheck") /\ q.at = {"A"} -> "recheck"
                                                [] OTHER -> "make"]
           /\ UNCHANGED rec
-    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, mir, gc, down, passes, downs, restarts, late>>
 
 \* The marker read again, in B: there now, on to a reference in B.
 ForkRecheck(c) ==
     LET q == fork[c] IN
     /\ q # None /\ q.pc = "recheck" /\ Up("B")
     /\ fork' = [fork EXCEPT ![c].pc = IF q.v \in marker THEN "referB" ELSE "make"]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, mir, gc, down, passes, downs, restarts,
+                   late>>
 
 \* Its reference written in B; then, to leave A (forksLeaveA).
 ForkReferB(c) ==
@@ -311,7 +327,7 @@ ForkReferB(c) ==
     /\ q # None /\ q.pc = "referB" /\ Up("B")
     /\ refs' = [refs EXCEPT !["B"] = @ \cup {<<q.v, c>>}]
     /\ fork' = [fork EXCEPT ![c].pc = IF R("forksLeaveA") THEN "leave" ELSE "make"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, mir, gc, down, passes, downs, restarts, late>>
 
 \* A's head read again, in A (forksRereadBeforeLeaving): naming its version still, P alive, its
 \* reference in A deleted; else it stays.
@@ -321,7 +337,7 @@ ForkLeave(c) ==
     /\ refs' = IF ~R("forksRereadBeforeLeaving") \/ q.v \in vers
                THEN [refs EXCEPT !["A"] = @ \ {<<q.v, c>>}] ELSE refs
     /\ fork' = [fork EXCEPT ![c].pc = "make"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, mir, gc, down, passes, downs, restarts, late>>
 
 \* The child made, in B.
 ForkMake(c) ==
@@ -329,12 +345,13 @@ ForkMake(c) ==
     /\ q # None /\ q.pc = "make" /\ Up("B")
     /\ rec' = [rec EXCEPT ![c].kind = "fork"]
     /\ fork' = [fork EXCEPT ![c] = None]
-    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, mir, gc, down, passes, downs, restarts, late>>
 
 DeleteChild(c) ==
     /\ "delete" \in Can /\ Live(c) /\ Up("B")
     /\ rec' = [rec EXCEPT ![c].deleted = TRUE]
-    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, fork, mir, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, refs, marked, marker, fork, mir, gc, down, passes, downs, restarts,
+                   late>>
 
 -----------------------------------------------------------------------------
 (* Mirrors into B. *)
@@ -366,27 +383,30 @@ MirPin(v) ==
                                        [] v \in marker /\ R("mirrorResumesMarked") -> Resume(v)
                                        [] OTHER -> "hold",
                               !.kids = early]]
-       /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts>>
+       /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts,
+                      late>>
 
 \* Its hold written in A, create-only, before it reads the head (mirrorHolds).
 MirHold(v) ==
     /\ mir[v].pc = "hold" /\ Up("A")
     /\ refs' = [refs EXCEPT !["A"] = @ \cup {Hold(v)}]
     /\ mir' = [mir EXCEPT ![v].pc = IF R("mirrorHoldsUnmarked") THEN Resume(v) ELSE "read"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* Without mirrorHoldsUnmarked, its marker read in B after its hold.
 MirRead(v) ==
     /\ mir[v].pc = "read" /\ Up("B")
     /\ mir' = [mir EXCEPT ![v].pc = Resume(v)]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
+                   late>>
 
 \* A's head read after the pin (mirrorChecks): the version dropped, or P deleted, the mirror given
 \* up.
 MirCheck(v) ==
     /\ mir[v].pc = "check" /\ Up("A")
     /\ mir' = [mir EXCEPT ![v].pc = IF v \in vers THEN "copy" ELSE GiveUp]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
+                   late>>
 
 \* A part copied, A to B, the same bytes at the same key: or, there already in B, taken as copied.
 MirCopy(v, o) ==
@@ -395,14 +415,15 @@ MirCopy(v, o) ==
        ELSE /\ Up("A") /\ o \in objs["A"]
             /\ objs' = [objs EXCEPT !["B"] = @ \cup {o}]
     /\ mir' = [mir EXCEPT ![v].copied = @ \cup {o}]
-    /\ UNCHANGED <<UNCH, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* A part to copy gone from B and A: the mirror given up.
 MirGiveUp(v) ==
     /\ mir[v].pc = "copy" /\ Up("A") /\ Up("B")
     /\ \E o \in parts[v] \ mir[v].copied : o \notin objs["B"] /\ o \notin objs["A"]
     /\ mir' = [mir EXCEPT ![v].pc = GiveUp]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
+                   late>>
 
 \* The marker, create-only: the switch, once every part is copied (markerAfterCopy).
 MirMark(v) ==
@@ -410,7 +431,7 @@ MirMark(v) ==
     /\ R("markerAfterCopy") => mir[v].copied = parts[v]
     /\ marker' = marker \cup {v}
     /\ mir' = [mir EXCEPT ![v].pc = IF R("mirrorListsAfterMark") THEN "list" ELSE "retire"]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, fork, gc, down, passes, downs, restarts, late>>
 
 \* The children referring in A listed, after the marker (mirrorListsAfterMark), and referred in B.
 MirList(v) ==
@@ -418,7 +439,7 @@ MirList(v) ==
     /\ mir[v].pc = "list" /\ Up("A") /\ Up("B")
     /\ refs' = [refs EXCEPT !["B"] = @ \cup {<<v, c>> : c \in kids}]
     /\ mir' = [mir EXCEPT ![v] = [@ EXCEPT !.pc = "retire", !.kids = kids]]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* A's head read again (mirrorRereadsBeforeRetiring): naming its version still, P alive, their
 \* references in A retired, marked; else they stay.
@@ -429,21 +450,21 @@ MirRetire(v) ==
        /\ refs' = [refs EXCEPT !["A"] = @ \ Rs]
        /\ marked' = [marked EXCEPT !["A"] = @ \cup (Rs \cap refs["A"])]
        /\ mir' = [mir EXCEPT ![v].pc = "unpin"]
-       /\ UNCHANGED <<UNCH, objs, rec, marker, fork, gc, down, passes, downs, restarts>>
+       /\ UNCHANGED <<UNCH, objs, rec, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* Given up, its hold deleted in A (mirrorHolds).
 MirUnhold(v) ==
     /\ mir[v].pc = "unhold" /\ Up("A")
     /\ refs' = [refs EXCEPT !["A"] = @ \ {Hold(v)}]
     /\ mir' = [mir EXCEPT ![v].pc = "unpin"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* Its pin dropped: done.
 MirUnpin(v) ==
     /\ mir[v].pc = "unpin" /\ Up("B")
     /\ refs' = [refs EXCEPT !["B"] = @ \ {Pin(v)}]
     /\ mir' = [mir EXCEPT ![v].pc = "done"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, gc, down, passes, downs, restarts, late>>
 
 \* A mirror begun again once done ("again"): by a host that asked for it, having read no marker
 \* before the first mirror marked (or none since B's collector deleted it), or by B's collector
@@ -452,15 +473,43 @@ MirAgain(v) ==
     /\ "again" \in Can /\ restarts < MaxRestarts /\ mir[v].pc = "done"
     /\ mir' = [mir EXCEPT ![v] = [MirIdle EXCEPT !.pc = "pin"]]
     /\ restarts' = restarts + 1
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, late>>
 
-\* Its host dies: it starts again from its pin, what it wrote kept.
+\* Failing, as a request it can't go on past does (an error), it gives up: its hold deleted, its pin
+\* dropped (mirror.rs's let_go), as it would begun again, its version named still.
+MirFail(v) ==
+    /\ "fail" \in Can /\ mir[v].pc \in {"hold", "check", "copy"}
+    /\ mir' = [mir EXCEPT ![v].pc = GiveUp]
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs, restarts,
+                   late>>
+
+\* The deletions a mirror letting go at its step pc has sent, of its hold and of its pin, as
+\* references in their buckets.
+Releasing(v, pc) ==
+    CASE pc = "unhold" -> {<<"A", Hold(v)>>, <<"B", Pin(v)>>}
+      [] pc = "unpin" -> {<<"B", Pin(v)>>}
+      [] OTHER -> {}
+
+\* Its host dies, or stops past its lease: it starts again from its pin, what it wrote kept, the
+\* next mirror taking its pin over once stale. Stopped as it lets go, it sent its deletions, retried
+\* while their buckets were down: within its lease, landing in it (releasesHeld), each landed
+\* before it stopped, or was never sent; without the rule, they land later (LateLand), the next
+\* mirror's hold and pin by then.
 MirRestart(v) ==
     /\ "crash" \in Can /\ restarts < MaxRestarts
     /\ mir[v].pc \notin {"idle", "pin", "done"}
     /\ mir' = [mir EXCEPT ![v] = [MirIdle EXCEPT !.pc = "pin"]]
     /\ restarts' = restarts + 1
+    /\ late' = IF R("releasesHeld") THEN late ELSE late \cup Releasing(v, mir[v].pc)
     /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, gc, down, passes, downs>>
+
+\* A deletion a mirror stopped past its lease sent, landing.
+LateLand(l) ==
+    LET b == l[1] IN
+    /\ l \in late /\ Up(b)
+    /\ refs' = [refs EXCEPT ![b] = @ \ {l[2]}]
+    /\ late' = late \ {l}
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, gc, down, passes, downs, restarts>>
 
 -----------------------------------------------------------------------------
 (* The collector. *)
@@ -516,7 +565,8 @@ GcStart(kind, c) ==
                           [GcIdle EXCEPT !.pc = "retire", !.kind = kind, !.c = c,
                                          !.alive = ~(rec[c] # None /\ rec[c].deleted)]]
        /\ passes' = i
-       /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, down, downs, restarts>>
+       /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, down, downs, restarts,
+                      late>>
 
 \* The second read: of P in A, the references under P in A; of P's copy, B listed after A's head
 \* (copyRelists), or A's head after it.
@@ -530,7 +580,7 @@ GcList(i) ==
                           CopyNext([g EXCEPT !.rs = refs["B"], !.ms = marker, !.os = objs["B"]])
                      [] OTHER -> CopyNext([g EXCEPT !.alive = ~ended, !.vs = vers])]
        /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, down, passes, downs,
-                      restarts>>
+                      restarts, late>>
 
 \* Of P's copy in B, the holds in A of the versions whose markers go deleted (mirrorHolds).
 GcUnhold(i) ==
@@ -538,7 +588,7 @@ GcUnhold(i) ==
     /\ g.pc = "unhold" /\ Up("A")
     /\ refs' = [refs EXCEPT !["A"] = @ \ {Hold(v) : v \in GoingMarkers(g)}]
     /\ gc' = [gc EXCEPT ![i].pc = "unmark"]
-    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, marked, marker, fork, mir, down, passes, downs, restarts, late>>
 
 \* Of P's copy in B: the markers going deleted first (markerGoesFirst); without the rule, the parts
 \* first.
@@ -549,7 +599,7 @@ GcUnmark(i) ==
        THEN marker' = marker \ GoingMarkers(g) /\ UNCHANGED objs
        ELSE objs' = [objs EXCEPT !["B"] = @ \ GoingParts(g)] /\ UNCHANGED marker
     /\ gc' = [gc EXCEPT ![i].pc = "delete"]
-    /\ UNCHANGED <<UNCH, rec, refs, marked, fork, mir, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, rec, refs, marked, fork, mir, down, passes, downs, restarts, late>>
 
 \* The parts going deleted: of P in A, those neither its head nor a reference named; of its copy in
 \* B, after the markers (or, without markerGoesFirst, the markers after the parts).
@@ -563,7 +613,7 @@ GcDelete(i) ==
        THEN objs' = [objs EXCEPT !["B"] = @ \ GoingParts(g)] /\ UNCHANGED marker
        ELSE marker' = marker \ GoingMarkers(g) /\ UNCHANGED objs
     /\ gc' = [gc EXCEPT ![i] = GcIdle]
-    /\ UNCHANGED <<UNCH, rec, refs, marked, fork, mir, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, rec, refs, marked, fork, mir, down, passes, downs, restarts, late>>
 
 \* A deleted child's references retired, marked, in bucket b, if it holds one there.
 GcRetire(i, b) ==
@@ -572,7 +622,7 @@ GcRetire(i, b) ==
     IN /\ g.pc = "retire" /\ Up(b) /\ ~g.alive /\ Rs # {}
        /\ refs' = [refs EXCEPT ![b] = @ \ Rs]
        /\ marked' = [marked EXCEPT ![b] = @ \cup Rs]
-       /\ UNCHANGED <<UNCH, objs, rec, marker, fork, mir, gc, down, passes, downs, restarts>>
+       /\ UNCHANGED <<UNCH, objs, rec, marker, fork, mir, gc, down, passes, downs, restarts, late>>
 
 \* The child's pass ended, once it holds no reference, or was not deleted.
 GcRetired(i) ==
@@ -580,7 +630,8 @@ GcRetired(i) ==
     /\ g.pc = "retire"
     /\ ~g.alive => \A b \in Buckets : ~\E r \in refs[b] : r[2] = g.c
     /\ gc' = [gc EXCEPT ![i] = GcIdle]
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, down, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, down, passes, downs,
+                   restarts, late>>
 
 -----------------------------------------------------------------------------
 (* Buckets going down, and coming back. *)
@@ -589,12 +640,13 @@ GoDown(b) ==
     /\ "down" \in Can /\ downs < MaxDowns /\ Up(b)
     /\ down' = down \cup {b}
     /\ downs' = downs + 1
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, gc, passes, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, gc, passes, restarts, late>>
 
 ComeBack(b) ==
     /\ b \in down
     /\ down' = down \ {b}
-    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, gc, passes, downs, restarts>>
+    /\ UNCHANGED <<UNCH, objs, rec, refs, marked, marker, fork, mir, gc, passes, downs, restarts,
+                   late>>
 
 -----------------------------------------------------------------------------
 
@@ -613,6 +665,7 @@ Init ==
     /\ gc = [i \in 1..MaxPasses |-> GcIdle]
     /\ down = {}
     /\ passes = 0 /\ downs = 0 /\ restarts = 0
+    /\ late = {}
 
 ForkStep(c) ==
     \/ ForkRecord(c) \/ ForkWhere(c) \/ ForkRefer(c) \/ ForkCheck(c) \/ ForkRecheck(c)
@@ -630,7 +683,8 @@ Next ==
     \/ \E S \in SUBSET Objects : CutVersion(S)
     \/ EndP
     \/ \E v \in Versions : DropVersion(v) \/ MirStep(v) \/ MirRestart(v)
-                           \/ MirAgain(v)
+                           \/ MirAgain(v) \/ MirFail(v)
+    \/ \E l \in late : LateLand(l)
     \/ \E c \in Children : ForkStep(c) \/ DeleteChild(c) \/ GcStart("child", c)
                            \/ \E v \in Versions : StartFork(c, v)
     \/ \E kind \in {"P", "copy"} : GcStart(kind, None)
@@ -661,6 +715,7 @@ TypeOK ==
     /\ \A b \in Buckets : objs[b] \subseteq Objects
     /\ marker \subseteq cut
     /\ down \subseteq Buckets
+    /\ \A l \in late : l[1] \in Buckets
 
 \* Every child made reads its version whole, from where the resolver sends it; every version P's
 \* head names, and the writer's state, are whole in A.
@@ -696,6 +751,14 @@ MirroredChildrenOnB ==
 \* cell in A for good (mirrorHolds, mirrorHoldsUnmarked).
 HoldsMarked ==
     \A v \in Versions : Hold(v) \in refs["A"] => v \in marker \/ mir[v].pc \notin {"idle", "done"}
+
+\* A marked copy's hold stands in A (mirrorHolds): from before its marker until B's collector
+\* deletes both, the hold first, the pass deleting it then about to delete the marker. It keeps P's cell,
+\* and what the version inherits from P's origin, in A while readers in B read the copy.
+MarkedHeld ==
+    \A v \in marker :
+        \/ Hold(v) \in refs["A"]
+        \/ \E i \in 1..MaxPasses : gc[i].pc = "unmark" /\ v \in GoingMarkers(gc[i])
 
 \* Reached, as models of specs/buckets/mutations show they are violated (Reaches*): a child made, a
 \* mirror done with a child of its version made, a copy collected, its marker gone, and two
