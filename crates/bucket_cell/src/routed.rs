@@ -300,10 +300,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn get(&self, key: &str) -> Result<Object, Error> {
-        if self.read_here_first(key).await?
-            && let Ok(object) = self.home.get(key).await
-        {
-            return Ok(object);
+        // cladefs: the cell's bucket asked only where the mirror copied not what is asked, never
+        // as this bucket fails (board 8547): its failure is the read's, asked again as it is.
+        if self.read_here_first(key).await? {
+            match self.home.get(key).await {
+                Err(Error::NotFound) => {}
+                answered => return answered,
+            }
         }
         match self.member(key).await? {
             Some(member) => member.get(key).await,
@@ -312,10 +315,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
-        if self.read_here_first(key).await?
-            && let Ok(bytes) = self.home.get_range(key, range.clone()).await
-        {
-            return Ok(bytes);
+        // cladefs: the cell's bucket asked only where the mirror copied not what is asked, never
+        // as this bucket fails (board 8547): its failure is the read's, asked again as it is.
+        if self.read_here_first(key).await? {
+            match self.home.get_range(key, range.clone()).await {
+                Err(Error::NotFound) => {}
+                answered => return answered,
+            }
         }
         match self.member(key).await? {
             Some(member) => member.get_range(key, range).await,
@@ -324,10 +330,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
-        if self.read_here_first(key).await?
-            && let Ok(meta) = self.home.head(key).await
-        {
-            return Ok(meta);
+        // cladefs: the cell's bucket asked only where the mirror copied not what is asked, never
+        // as this bucket fails (board 8547): its failure is the read's, asked again as it is.
+        if self.read_here_first(key).await? {
+            match self.home.head(key).await {
+                Err(Error::NotFound) => {}
+                answered => return answered,
+            }
         }
         match self.member(key).await? {
             Some(member) => member.head(key).await,
@@ -500,7 +509,9 @@ impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
     ) -> futures::future::BoxFuture<'a, Result<usize, crate::bucket::Refused>> {
         Box::pin(async move {
             let Some(route) = &self.route else { return Ok(0) };
-            let Ok(Some(number)) = self.own_number(route).await else { return Ok(0) };
+            // cladefs: its identity asked until its bucket answers, as `marked` asks it (board
+            // 8547): none only for a bucket never formatted, whose references are all its own.
+            let Some(number) = self.own_number_answered(route).await? else { return Ok(0) };
             let theirs: Vec<&str> = (keys.iter().copied())
                 .filter(|key| layout::routed_to(key).is_some_and(|of| of != number))
                 .collect();
@@ -519,5 +530,184 @@ impl Resolve<ObjectBucket> for Registered {
         number: u16,
     ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
         Box::pin(async move { Ok(Arc::new(self.reach(&self.entry(home, number).await?).await?)) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{Direct, SimBucket};
+    use futures::executor::block_on;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A cell of bucket 2, whose version at 3 bucket 1 holds a mirror of.
+    const PARENT: layout::CellId = layout::CellId { tenant: 1, id: 2 << 48 | 5 };
+
+    /// A bucket of the simulation's, whose reads of `failing` fail as `fails` says, each in turn,
+    /// and which counts the requests it is asked.
+    struct Scripted {
+        objects: Direct,
+        failing: String,
+        fails: Mutex<VecDeque<Error>>,
+        requests: AtomicUsize,
+    }
+
+    impl Scripted {
+        fn new(failing: &str) -> Self {
+            let (fails, requests) = Default::default();
+            Self { objects: Direct(SimBucket::new()), failing: failing.to_owned(), fails, requests }
+        }
+
+        /// What a read of `key` fails with, if it does: counted either way.
+        fn fails(&self, key: &str) -> Option<Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            (key == self.failing).then(|| self.fails.lock().unwrap().pop_front()).flatten()
+        }
+    }
+
+    impl Bucket for Scripted {
+        async fn get(&self, key: &str) -> Result<Object, Error> {
+            match self.fails(key) {
+                Some(error) => Err(error),
+                None => self.objects.get(key).await,
+            }
+        }
+
+        async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
+            match self.fails(key) {
+                Some(error) => Err(error),
+                None => self.objects.get_range(key, range).await,
+            }
+        }
+
+        async fn head(&self, key: &str) -> Result<Meta, Error> {
+            match self.fails(key) {
+                Some(error) => Err(error),
+                None => self.objects.head(key).await,
+            }
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.objects.list(prefix).await
+        }
+
+        async fn list_delimited(&self, prefix: &str, page: Page<'_>) -> Result<Listing, Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.objects.list_delimited(prefix, page).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: crate::Bytes,
+            mode: PutMode,
+        ) -> Result<Version, Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.objects.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.objects.delete(key).await
+        }
+
+        async fn delete_if(&self, key: &str, version: &Version) -> Result<(), Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.objects.delete_if(key, version).await
+        }
+
+        fn now(&self) -> u64 {
+            self.objects.now()
+        }
+    }
+
+    /// Opens bucket 2 as the one it holds.
+    struct Opens(Arc<Scripted>);
+
+    impl Resolve<Scripted> for Opens {
+        fn open<'a>(
+            &'a self,
+            _: &'a Scripted,
+            number: u16,
+        ) -> futures::future::BoxFuture<'a, Result<Arc<Scripted>, crate::Error>> {
+            assert_eq!(number, 2, "bucket 2 alone");
+            Box::pin(async move { Ok(self.0.clone()) })
+        }
+    }
+
+    /// board 8547: a read of an object of a cell of another bucket mirrored here, its get, ranged
+    /// get or HEAD, goes to the cell's bucket only where this one has no copy of it (NotFound):
+    /// this bucket out of reach, or refusing it, the read fails so, the cell's bucket asked
+    /// nothing, the cross-region request and its egress never paid for this bucket's failure.
+    #[test]
+    fn mirrored_reads_go_to_their_cells_bucket_only_for_what_is_not_here() {
+        let key = layout::segment(PARENT, 1, 1);
+        let (home, member) = (Arc::new(Scripted::new(&key)), Arc::new(Scripted::new(&key)));
+        block_on(async {
+            let details = crate::identity::Details::default();
+            crate::identity::format(&home.objects, &details, Default::default()).await.unwrap();
+            let marker = layout::encode(&layout::Mirror::NOW);
+            home.objects
+                .put(&layout::mirror(PARENT, 3), marker.into(), PutMode::Create)
+                .await
+                .unwrap();
+            member.objects.put(&key, vec![7; 10].into(), PutMode::Create).await.unwrap();
+        });
+        let routed = RoutedBucket::new(home.clone(), Arc::new(Opens(member.clone())));
+        let read = |which: &str| {
+            block_on(async {
+                match which {
+                    "get" => routed.get(&key).await.map(drop),
+                    "get-range" => routed.get_range(&key, ByteRange::Bounded(0..4)).await.map(drop),
+                    _ => routed.head(&key).await.map(drop),
+                }
+            })
+        };
+        for which in ["get", "get-range", "head"] {
+            for error in [Error::Unavailable, Error::Refused(Refusal::Denied)] {
+                home.fails.lock().unwrap().push_back(error);
+                assert_eq!(read(which), Err(error), "{which}");
+                assert_eq!(member.requests.load(Ordering::Relaxed), 0, "{which}, {error}");
+            }
+            // Not copied here: read there.
+            home.fails.lock().unwrap().push_back(Error::NotFound);
+            assert_eq!(read(which), Ok(()), "{which}");
+            assert_eq!(member.requests.swap(0, Ordering::Relaxed), 1, "{which}");
+        }
+    }
+
+    /// board 8547: a routed bucket retiring references of a mirror here, its identity out of reach,
+    /// asks it again until it answers, and retires them then: never takes the failure for "none to
+    /// retire", reporting none retired.
+    #[test]
+    fn retiring_asks_its_identity_until_it_answers() {
+        use crate::mirror::Here as _;
+        let home = Arc::new(Scripted::new(layout::IDENTITY));
+        let member = Arc::new(Scripted::new(""));
+        let child = layout::CellId { tenant: 1, id: 1 << 48 | 9 };
+        let reference = layout::reference(PARENT, 3, child);
+        block_on(async {
+            let details = crate::identity::Details::default();
+            crate::identity::format(&home.objects, &details, Default::default()).await.unwrap();
+            let bytes = layout::encode(&layout::Reference::of(1));
+            home.objects.put(&reference, bytes.into(), PutMode::Create).await.unwrap();
+        });
+        home.fails.lock().unwrap().extend([Error::Unavailable, Error::Unavailable]);
+        let routed = RoutedBucket::new(home.clone(), Arc::new(Opens(member)));
+        let retired = block_on(routed.retire(&[reference.as_str()]));
+        assert_eq!(retired, Ok(1));
+        assert!(home.fails.lock().unwrap().is_empty(), "its identity asked until it answered");
+        let gone = block_on(home.objects.head(&reference)).map(drop);
+        assert_eq!(gone, Err(Error::NotFound), "{reference} not retired");
+
+        // Unreadable, read the same again: refused.
+        let identity = block_on(home.objects.get(layout::IDENTITY)).unwrap().meta.version;
+        let garbage = home.objects.put(layout::IDENTITY, vec![1].into(), PutMode::Update(identity));
+        block_on(garbage).unwrap();
+        let routed = RoutedBucket::new(home.clone(), Arc::new(Opens(Arc::new(Scripted::new("")))));
+        let refused = block_on(routed.retire(&[reference.as_str()]));
+        assert_eq!(refused, Err(Refused::of(layout::IDENTITY, Refusal::Unreadable)));
     }
 }
