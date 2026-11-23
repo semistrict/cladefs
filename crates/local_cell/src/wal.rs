@@ -142,8 +142,8 @@ impl StartFile {
 /// extents were sealed in durable with it (TASK-301): the runs themselves, for a flush that seals
 /// little, which then syncs its log alone, as a database's write-ahead log holds its pages; or the
 /// CRC32C of each, which recovery checks against the segment's raw data, for one whose data it
-/// syncs beside its records. Records of logs written before either are their contents alone,
-/// which nothing checks: their flushes synced the data first.
+/// syncs beside its records. cladefs: a record authentic and whole that doesn't decode as one is
+/// refused, never read in another form (board 10062).
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LogRecord {
     pub contents: Contents,
@@ -272,26 +272,25 @@ impl LogRecord {
         }
         let Some(header) = LogHeader::of(bytes, segment) else { return Ok((Vec::new(), 0)) };
         let bytes = bytes.get(LOG_RECORDS as usize..).unwrap_or_default();
-        let unauthentic = std::cell::Cell::new(None);
+        let refused = std::cell::Cell::new(None);
         let (records, end) = crate::layout::decode_with(bytes, header.salt, |at, payload| {
             let (payload, mac) = payload.split_at_checked(payload.len().checked_sub(MAC_LEN)?)?;
             let at = LOG_RECORDS + at as u64;
             let mac = mac.try_into().expect("a MAC's bytes");
             if encryption.is_some_and(|encryption| !encryption.verify(at, payload, mac)) {
-                unauthentic.set(Some(at));
+                refused.set(Some((at, "is not authentic")));
                 return None;
             }
-            // Not a record of this build's: one of before runs were held, its runs synced.
-            bincode::deserialize::<Self>(payload).ok().or_else(|| {
-                // Not a record of the older form either: not whole.
-                let contents = bincode::deserialize::<Contents>(payload).ok()?;
-                Some(Self { contents, runs: Runs::Synced })
-            })
-        });
-        match unauthentic.get() {
-            Some(at) => {
-                Err(anyhow::anyhow!("{segment:?}'s log: its record at {at} is not authentic"))
+            // Hashed whole, and authentic where it is checked: a record of another form, never
+            // read as one, nor taken for the log's torn end (board 10062).
+            let record = bincode::deserialize::<Self>(payload).ok();
+            if record.is_none() {
+                refused.set(Some((at, "is not a record of this log's format")));
             }
+            record
+        });
+        match refused.get() {
+            Some((at, why)) => Err(anyhow::anyhow!("{segment:?}'s log: its record at {at} {why}")),
             None => Ok((records, LOG_RECORDS as usize + end)),
         }
     }
@@ -1937,5 +1936,36 @@ mod tests {
         let err = recover(&dir, CELL, None).err().expect("v3 WAL must be refused");
         assert!(err.to_string().contains("unsupported format"), "{err:#}");
         assert_eq!(dir.files(), before, "refused recovery must preserve every file byte-for-byte");
+    }
+
+    /// Board 10062: a record hashed whole and authentic that is not a `LogRecord`, such as the
+    /// contents alone that logs held before runs were (TASK-301), is refused, never read as
+    /// another form of record nor taken for the log's torn end, which would drop it and every
+    /// record after it.
+    #[test]
+    fn records_of_another_form_are_refused() {
+        let dir = MemDir::new();
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let seg = segment(0);
+        let raw = dir.create(&open_segment_path(seg), true).unwrap();
+        raw.write_at(&[0xab; 4096], 0).unwrap();
+        raw.sync().unwrap();
+        let enc = encryption();
+        let mut payload = bincode::serialize(&commit(1, 1, 0)).unwrap();
+        let mac = enc.mac(LOG_RECORDS, &payload);
+        payload.extend_from_slice(&mac);
+        let log = dir.create(&log_path(seg), false).unwrap();
+        log.write_at(&log_header(7, seg, &enc), 0).unwrap();
+        log.write_at(&crate::layout::frame_salted(&payload, 7), LOG_RECORDS).unwrap();
+        log.sync().unwrap();
+        let before = dir.files();
+        let err = recover(&dir, CELL, None).err().expect("a contents-only record is refused");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{seg:?}'s log: its record at {LOG_RECORDS} is not a record of this log's format"
+            )
+        );
+        assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
     }
 }
