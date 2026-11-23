@@ -332,7 +332,6 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
 
     // cladefs: each cell's writer's, and its followers' together (TASK-111.5, board 8563).
     let vms = super::stats::vms();
-    type Gauge = fn(&super::stats::Vm) -> Option<u64>;
     let series: [(&str, &str, Gauge); 6] = [
         ("vm_window_mappings", "Ranges a VM's DAX window maps.", |vm| Some(vm.window?.mappings)),
         ("vm_window_mapped_bytes", "Bytes those ranges span.", |vm| Some(vm.window?.mapped_bytes)),
@@ -359,14 +358,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     for (name, help, value) in series {
         let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
         let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
-        let mut summed = std::collections::BTreeMap::new();
-        for vm in &vms {
-            if let Some(value) = value(vm) {
-                let role = if vm.follower { "follower" } else { "writer" };
-                *summed.entry((vm.cell, role)).or_insert(0) += value;
-            }
-        }
-        for ((cell, role), value) in summed {
+        for ((cell, role), value) in by_cell_and_role(&vms, value) {
             let _ = writeln!(out, "cladefsd_{name}{{cell=\"{cell}\",role=\"{role}\"}} {value}");
         }
     }
@@ -695,6 +687,27 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     out
 }
 
+/// cladefs: a gauge of each VM process, if it has it.
+type Gauge = fn(&super::stats::Vm) -> Option<u64>;
+
+/// cladefs: `value` of `vms`, summed by their cell and role, `writer` or `follower` (board 8563):
+/// saturated, as what VM processes said, which may be anything, a window's budget `u64::MAX`, would
+/// wrap, or panic a scrape.
+fn by_cell_and_role(
+    vms: &[super::stats::Vm],
+    value: Gauge,
+) -> std::collections::BTreeMap<(crate::CellId, &'static str), u64> {
+    let mut summed = std::collections::BTreeMap::new();
+    for vm in vms {
+        if let Some(value) = value(vm) {
+            let role = if vm.follower { "follower" } else { "writer" };
+            let sum: &mut u64 = summed.entry((vm.cell, role)).or_insert(0);
+            *sum = sum.saturating_add(value);
+        }
+    }
+    summed
+}
+
 /// The daemon's gauges, as of now, each with its name, without `cladefsd_`, and what it is:
 /// what its metrics and stats report (TASK-111.4). The memory's limit only if it has one, and
 /// the disk's.
@@ -728,10 +741,10 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         (
             "window_private_pages",
             "Private copies of pages the guests wrote, as their VM processes last said.",
+            // cladefs: as VM processes said, which may say anything: saturated, not wrapped.
             (super::stats::vms().iter())
                 .filter(|vm| vm.window.is_some())
-                .map(|vm| vm.stage.private)
-                .sum(),
+                .fold(0, |sum, vm| sum.saturating_add(vm.stage.private)),
         ),
         (
             "memory_bytes",
@@ -815,6 +828,29 @@ fn label_value(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// board 8563: a cell's followers' gauges, each as its VM process said, saturate as they are
+    /// summed: two saying budgets of `u64::MAX` and 1, which a hostile VM process may, panicked
+    /// every scrape (overflow checks) or summed to 0. Its writer's apart, by role.
+    #[test]
+    fn followers_said_gauges_saturate_as_they_are_summed() {
+        let cell = crate::CellId { tenant: 7, id: 9 };
+        let vm = |follower, budget| super::super::stats::Vm {
+            connection: 0,
+            cell,
+            path: Default::default(),
+            follower,
+            build: None,
+            stage: Default::default(),
+            budget: Some(budget),
+            window: None,
+            answered: None,
+            guest: None,
+        };
+        let vms = [vm(true, u64::MAX), vm(true, 1), vm(false, 3)];
+        let summed: Vec<_> = by_cell_and_role(&vms, |vm| vm.budget).into_iter().collect();
+        assert_eq!(summed, [((cell, "follower"), u64::MAX), ((cell, "writer"), 3)]);
+    }
 
     /// board 8561: scraped while requests are served, each kind's histogram is whole: its buckets'
     /// cumulative counts never fall, none is past `+Inf`, and `+Inf` is `_count`. Its count read

@@ -3129,7 +3129,9 @@ mod tests {
         assert_eq!(data, pattern(1, BLOCK));
         // Each request of the bucket the read made: its kind, and the request it names.
         let mut made: Vec<(String, String)> = (lines.lock().unwrap().iter())
-            .filter_map(|line| {
+            // cladefs: after the record's time (board 8571).
+            .filter_map(|line| line.split_once(' '))
+            .filter_map(|(_, line)| {
                 line.strip_prefix("DEBUG bucket_cell::object_bucket: object storage: ")
             })
             .map(|line| {

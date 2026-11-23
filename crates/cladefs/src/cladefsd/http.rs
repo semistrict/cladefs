@@ -210,30 +210,44 @@ impl Client<'_> {
     #[cfg(test)]
     pub const NONE: Client<'static> = Client(None);
 
-    /// Whether it hung up: its connection ended, or reset. Asked without waiting. A client that
-    /// shuts down its connection's writing half, waiting to read, counts as gone, as no scraper,
-    /// browser or `go tool pprof` does that.
+    /// Whether it hung up: its connection ended, or reset. Asked without waiting: what it sent
+    /// past its request, which means nothing here, read and dropped, so that the end behind it is
+    /// seen (a byte left there, peeked, hid it for good). A client that shuts down its
+    /// connection's writing half, waiting to read, counts as gone, as no scraper, browser or `go
+    /// tool pprof` does that.
     pub fn hung_up(&self) -> bool {
         let Some(stream) = self.0 else { return false };
         if let Err(err) = stream.set_nonblocking(true) {
             log::warn!("cladefsd: asking whether an HTTP client hung up: {err}");
             return true;
         }
-        let peeked = stream.peek(&mut [0]);
+        let gone = ended(stream);
         if let Err(err) = stream.set_nonblocking(false) {
             log::warn!("cladefsd: asking whether an HTTP client hung up: {err}");
             return true;
         }
-        match peeked {
-            Ok(0) => true,
-            Ok(_) => false,
-            Err(err) => !matches!(
-                err.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ),
-        }
+        gone
     }
 }
+
+/// cladefs: whether `stream`, not blocking, has ended or reset: what it has to read read and
+/// dropped, [`HUNG_UP_READ`] at most, as one sending on is there.
+fn ended(mut stream: &TcpStream) -> bool {
+    let mut dropped = [0; 4096];
+    let mut read = 0;
+    while read < HUNG_UP_READ {
+        match stream.read(&mut dropped) {
+            Ok(0) => return true,
+            Ok(bytes) => read += bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return err.kind() != std::io::ErrorKind::WouldBlock,
+        }
+    }
+    false
+}
+
+/// cladefs: the most bytes [`Client::hung_up`] reads and drops of a client at once.
+const HUNG_UP_READ: usize = 64 << 10;
 
 /// What `method` asks of `target`, a path and its query, of `pages`: the metrics, at `/metrics`;
 /// the z-pages, under `/z/`. None, if `client` hung up before it was made.

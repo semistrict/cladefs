@@ -2427,9 +2427,9 @@ fn metrics_are_served_after_pages_panic() {
     assert!(scraped.starts_with("HTTP/1.1 200 OK\r\n"), "{scraped}");
 }
 
-/// board 8559: a CPU profile whose client hangs up ends then, within a second, rather than
-/// sample on for the 300 seconds it asked for, holding one of the server's turns and refusing
-/// every other profile (409).
+/// board 8559: a CPU profile whose client hangs up ends then, within a second, whatever it sent
+/// after its request, rather than sample on for the 300 seconds it asked for, holding one of the
+/// server's turns and refusing every other profile (409).
 #[test]
 fn profiles_end_as_their_clients_hang_up() {
     use std::io::Write as _;
@@ -2445,6 +2445,9 @@ fn profiles_end_as_their_clients_hang_up() {
         }
     };
     until(true, "the profile was never taken");
+    // Bytes past its request, which a peek at what it sent saw for good, the end behind them not
+    // (hotbed review 66).
+    gone.write_all(b"x").unwrap();
     drop(gone);
     until(false, "the profile went on, its client gone");
     let next = http(address, "GET /z/pprof/profile?seconds=1 HTTP/1.1");
