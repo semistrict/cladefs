@@ -129,6 +129,7 @@ extent_frame = { path = "crates/extent_frame" }
 extent_keys = { path = "crates/extent_keys" }
 bucket_cell = { path = "crates/bucket_cell" }
 base32_id = { path = "crates/base32_id" }
+formats = { path = "crates/formats" }
 node_local = { path = "crates/node_local" }
 host_fs = { path = "crates/host_fs" }
 fxfs = { path = "crates/fxfs" }

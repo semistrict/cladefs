@@ -3,9 +3,11 @@ id: doc-11
 title: Upgrading cladefs in production
 type: other
 created_date: '2026-10-31 20:30'
-updated_date: '2026-11-16 22:52'
+updated_date: '2026-11-23 12:00'
 ---
 # Upgrading cladefs in production (TASK-141)
+
+**2026-11-23: formats freeze (doc-28, board 10033).** A frozen family of formats is read by every later build from its oldest version on, converting on read; rules 1, 2 and 4 below hold only for families not frozen yet, and for what doc-28 leaves unfrozen (the VM process and daemon's wire, caches). A host's drain stays the upgrade; past a version change of a frozen family, the new build reads in place what the old wrote.
 
 AGENTS.md's rule, the user's (2026-11-05): **no migrations, ever**. A format changes outright whenever that is the better design, and new code refuses the old one (`Error::Format` and its kind): no release reads, converts or upgrades another's data, no component is kept working beside one of another format, and nothing is kept to read old data. This replaces the two-release plan (formats read one release back, migrated at open, a skew matrix, golden cells, rollback) this document held before.
 

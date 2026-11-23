@@ -465,7 +465,10 @@ How much of what was ordered a crash may lose: at most a second's worth.
 What a daemon does on SIGTERM: every open cell closed and its commits uploaded before it exits.
 
 **Format**:
-The version an on-disk, bucket or wire format names; a reader refuses every other, and nothing migrates.
+The version an on-disk, bucket or wire format names. A **frozen** family's (doc-28) every later build reads from its oldest on, converting on read; one not frozen yet, its reader refuses every other.
+
+**Frozen** (a format family):
+One whose golden corpus is under `formats/` (doc-28): every later build reads every version of it from its oldest on, and a change is a new version, never an edit of an old one.
 
 ### Followers
 

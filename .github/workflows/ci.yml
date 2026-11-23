@@ -332,6 +332,17 @@ jobs:
             BEFORE=$(git merge-base origin/main "$AFTER")
           fi
           scripts/test-weakening.py "$BEFORE..$AFTER"
+      # A commit breaking a frozen format (a corpus case changed or gone, a family's oldest raised)
+      # names the user's agreement in a 'Breaks-format:' line (scripts/format-freeze.py, doc-28).
+      - name: Commits that break frozen formats name the user's agreement
+        env:
+          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ $BEFORE == 0000000000000000000000000000000000000000 ]]; then
+            BEFORE=$(git merge-base origin/main "$AFTER")
+          fi
+          scripts/format-freeze.py "$BEFORE..$AFTER"
 
   # TASK-330.1: the sandboxes' short mode, LangSmith's CI's topology on the runner's KVM (two extent
   # daemons, an S3 bucket on one ext4 disk, more vCPUs than CPUs), which found TASK-310 and TASK-311

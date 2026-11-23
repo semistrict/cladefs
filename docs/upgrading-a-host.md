@@ -17,6 +17,12 @@ their formats are the same. A VM moves only to a host whose build has the same f
 
 ## What a format change refuses
 
+Formats are freezing (doc-28, board 10033): once a family is frozen (its golden corpus under
+`formats/`), a newer build reads every version of it from its oldest on, so its row below no longer
+refuses the older build's data: the new daemon reads its cell directories, replica directory and
+ephemeral cells in place. A rollback is still refused past any version change. Until its family
+freezes, a row holds as written.
+
 Read the release's notes for which of these changed. Each one changed means what its row says:
 
 | Format | Refused when | How it shows |
