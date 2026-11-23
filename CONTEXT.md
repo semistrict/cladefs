@@ -239,6 +239,10 @@ Making a bucket never formatted the root of buckets of its own, number 1 (`clade
 **Adding** (a bucket):
 Giving a bucket never formatted the next number, by a conditional write of the root bucket's registry, then copying the registry to every bucket (`cladefsctl add-bucket`).
 
+**Bucket's clock**:
+The time by the bucket's backend, which dates its objects, as a host reads it: from the dates of the backend's responses, never the host's own clock (a bucket of files or memory dates by the host's, its own). Never ahead of the backend's, so that a window measured from an object's date closes late, never early; every collector lease and grace period is by it.
+_Avoid_: now, wall clock, host time (the host's own)
+
 **Bucket settings**:
 What a bucket is formatted or added with, fixed for good in its identity: each per bucket (a bucket added takes the root's unless asked otherwise) or clade-wide (every bucket the root's). The head slots are one.
 _Avoid_: config, options (a process's), parameters

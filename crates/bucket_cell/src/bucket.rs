@@ -312,7 +312,12 @@ pub trait Bucket: Send + Sync + 'static {
         crate::identity::DEFAULT_HEAD_SLOTS
     }
 
-    /// The backend's clock, which [`Meta::modified`] is in.
+    /// The backend's clock, which [`Meta::modified`] is in, in milliseconds since the Unix epoch,
+    /// never the host's own (board 8467): its time now, at least, and never ahead of it, so that a
+    /// window measured from an object's date by it closes late, never early, and a lease taken by
+    /// it ends by the backend's time for every host alike ([`crate::clock`]). A backend over
+    /// HTTP's, as its responses date them; of files and memory, the host's, which they date
+    /// objects by.
     fn now(&self) -> u64;
 
     /// Waits before a request that failed `failures` times in a row goes again.

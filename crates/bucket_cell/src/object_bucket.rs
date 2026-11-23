@@ -38,6 +38,7 @@ use crate::bucket::{
     Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Refusal, Version,
 };
 use crate::client::Client;
+use crate::clock::Clock;
 use crate::layout::{self, Kind};
 pub use crate::routed::{Resolve, RoutedBucket};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
@@ -49,7 +50,6 @@ use object_store::{
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single bucket's objects under a prefix (for multi-bucket routing, wrap in [`RoutedBucket`]).
 pub struct ObjectBucket {
@@ -76,6 +76,8 @@ pub struct ObjectBucket {
     /// (TASK-691). Never the defaults a bucket not yet formatted goes by, which its formatting,
     /// by any handle, replaces (board 5534).
     settings: std::sync::OnceLock<crate::identity::Settings>,
+    /// cladefs: its backend's clock, as it dates objects ([`Bucket::now`], board 8467).
+    clock: Clock,
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
@@ -607,13 +609,16 @@ impl Drop for Timed<'_> {
 }
 impl ObjectBucket {
     /// The objects of `backend` under `prefix`, a path of segments separated by `/`, or empty.
-    /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it.
+    /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it;
+    /// and dates objects by the host's clock, as they do ([`Clock::Host`]): a backend that dates
+    /// them by its own, a cloud's, is reached by its URL ([`ObjectBucket::from_url`]).
     pub fn new(backend: Arc<dyn ObjectStore>, prefix: &str) -> Self {
         Self::paged(backend, None, prefix)
     }
 
     /// cladefs: the objects of `backend` under `prefix`, a level of which `pages`, the same
-    /// backend, lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's.
+    /// backend, lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's. Dated by
+    /// the host's clock, as [`ObjectBucket::new`]'s.
     pub fn paged(
         backend: Arc<dyn ObjectStore>,
         pages: Option<Arc<dyn PaginatedListStore>>,
@@ -634,14 +639,15 @@ impl ObjectBucket {
             objectids,
             rewrites,
             settings,
+            clock: Clock::Host,
         }
     }
 
     /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its
     /// backend needs.
     fn reached(reached: Reached) -> Self {
-        let Reached { objects, pages, prefix, rewrite_every } = reached;
-        Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every)
+        let Reached { objects, pages, prefix, rewrite_every, clock } = reached;
+        Self { clock, ..Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every) }
     }
 
     /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
@@ -874,6 +880,9 @@ pub(crate) struct Reached {
     /// [`GCS_REWRITE_EVERY`], or a degraded backend's that refuses them faster
     /// ([`crate::faults::Fault::rewrite_every`]).
     pub rewrite_every: std::time::Duration,
+    /// cladefs: its clock, as it dates objects (board 8467): the host's, of files and memory; of a
+    /// cloud's, as its responses date them.
+    pub clock: Clock,
 }
 
 /// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
@@ -980,13 +989,13 @@ pub(crate) fn reach(
     client: &Client,
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
-    let (backend, pages, path): (Arc<dyn ObjectStore>, _, Path) = match url.scheme() {
+    let (backend, pages, path, clock): (Arc<dyn ObjectStore>, _, Path, _) = match url.scheme() {
         // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
         "file" => {
             let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
             let local =
                 crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
-            (Arc::new(local), None, Path::default())
+            (Arc::new(local), None, Path::default(), Clock::Host)
         }
         _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
     };
@@ -1005,26 +1014,31 @@ pub(crate) fn reach(
         }
         None => (backend, pages),
     };
-    Ok(Reached { objects, pages, prefix: path.as_ref().to_owned(), rewrite_every })
+    Ok(Reached { objects, pages, prefix: path.as_ref().to_owned(), rewrite_every, clock })
 }
 
 /// The backend of a URL of a cloud's, or of memory, the same backend as it lists a level of keys a
-/// page a request, if it does, and the path it names in it, as `object_store::parse_url_opts`
-/// makes them, but with `client`.
+/// page a request, if it does, the path it names in it, as `object_store::parse_url_opts` makes
+/// them, but with `client`; and its clock: a cloud's, as its responses date them, memory's the
+/// host's.
 fn cloud(
     url: &url::Url,
     options: impl IntoIterator<Item = (String, String)>,
     client: &Client,
-) -> object_store::Result<(Arc<dyn ObjectStore>, Pages, Path)> {
+) -> object_store::Result<(Arc<dyn ObjectStore>, Pages, Path, Clock)> {
     use object_store::ObjectStoreScheme as Scheme;
     let (scheme, path) = Scheme::parse(url)?;
     let path = Path::parse(path)?;
+    let served = Arc::new(crate::clock::Served::default());
     // The client's options first, which the environment's add to.
     macro_rules! built {
         ($builder:ty) => {{
             let builder = (<$builder>::new().with_url(url.as_str()))
                 .with_client_options(client.options())
-                .with_http_connector(*client);
+                .with_http_connector(crate::client::Connector {
+                    client: *client,
+                    clock: served.clone(),
+                });
             let builder = options.into_iter().fold(builder, |builder, (key, value)| {
                 match key.to_ascii_lowercase().parse() {
                     Ok(key) => builder.with_config(key, value),
@@ -1034,12 +1048,14 @@ fn cloud(
                 }
             });
             let built = Arc::new(builder.build()?);
-            (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
+            let pages = Some(built.clone() as Arc<dyn PaginatedListStore>);
+            (built as Arc<dyn ObjectStore>, pages, Clock::Served(served))
         }};
     }
-    let (backend, pages) = match scheme {
+    let (backend, pages, clock) = match scheme {
         Scheme::Memory => {
-            (Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>, None)
+            let memory = Arc::new(object_store::memory::InMemory::new());
+            (memory as Arc<dyn ObjectStore>, None, Clock::Host)
         }
         Scheme::AmazonS3 => built!(object_store::aws::AmazonS3Builder),
         Scheme::GoogleCloudStorage => built!(object_store::gcp::GoogleCloudStorageBuilder),
@@ -1049,7 +1065,7 @@ fn cloud(
             return Err(object_store::Error::Generic { store: "cladefs", source });
         }
     };
-    Ok((backend, pages, path))
+    Ok((backend, pages, path, clock))
 }
 
 /// What a request's failure means to cells. Failures other than the ones the protocol answers
@@ -1445,7 +1461,7 @@ impl Bucket for ObjectBucket {
     }
 
     fn now(&self) -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+        self.clock.now()
     }
 
     fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
@@ -1461,7 +1477,10 @@ fn backoff(failures: u32) -> std::time::Duration {
 
 /// Checks that `bucket` honours the conditional writes cells rely on, with an object of its
 /// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
-/// of a version that is not the object's, and one of the object's version succeeds. cladefs: a step
+/// of a version that is not the object's, and one of the object's version succeeds. cladefs: and
+/// that its clock is its backend's ([`Bucket::now`], board 8467): within [`crate::clock::SKEW`] of
+/// the date the backend gave the object as it was updated, as a read of it says, so that no window
+/// measured against the backend's dates closes early by more ([`crate::clock::checked`]). A step
 /// failing as a bucket out of reach does, `Unavailable`, says nothing of what the backend honours:
 /// the probe begins again, with an object of its own anew, as a conditional write that failed so
 /// may or may not have landed, backing off as the bucket's requests do (TASK-699). A refusal fails it
@@ -1544,6 +1563,7 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     if stale != Err(Error::Precondition) {
         return refused("an update of another version", &stale);
     }
+    let started = std::time::Instant::now();
     let updated =
         bucket.put(&key, bytes::Bytes::from_static(b"updated"), PutMode::Update(version)).await;
     if let Some(failed) = failed(&updated) {
@@ -1551,6 +1571,18 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     }
     if updated.is_err() {
         return refused("an update of the object's version", &updated);
+    }
+    // cladefs: its clock, against the date its backend gave what it just wrote (board 8467).
+    match bucket.head(&key).await {
+        Ok(meta) => {
+            if let Err(off) = crate::clock::checked(meta.modified, bucket.now(), started.elapsed())
+            {
+                return Probed::Answered(Err(format!("{key}: {off}")));
+            }
+        }
+        Err(Error::Unavailable) => return Probed::Unavailable(key),
+        Err(Error::Expired) => return Probed::Expired(key),
+        Err(error) => return Probed::Answered(Err(format!("reading {key}: {error}"))),
     }
     match bucket.delete(&key).await {
         Err(Error::Unavailable | Error::Expired) => Probed::Unavailable(key),
@@ -3304,13 +3336,58 @@ pub(crate) mod tests {
     }
 
     /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
-    fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
+    pub(crate) fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
         let url = format!("s3://{}/{prefix}", crate::s3_server::BUCKET);
         Arc::new(ObjectBucket::reached(reach(&url, server.options(), client).unwrap()))
     }
 
-    fn runtime() -> tokio::runtime::Runtime {
+    pub(crate) fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// Board 8467: a bucket over HTTP keeps its backend's clock, as its responses date it, whatever
+    /// the host's: none before its first response; then never ahead of the backend's, and within
+    /// a second and a round trip of it, of the date its backend gives what it writes too, the
+    /// backend's clock an hour behind the host's or ahead, or stepped forward a day. Its probe
+    /// passes it; it refuses one whose backend dates no response, and one whose clock reads ahead
+    /// of the backend's by more than [`crate::clock::SKEW`], as the host's clock did.
+    #[test]
+    fn buckets_keep_their_backends_clock() {
+        use crate::clock::{Clock, SKEW};
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let (hour, day) = (3_600_000, 86_400_000);
+        let served = |ahead: i64| Clock::Host.now().checked_add_signed(ahead).unwrap();
+        // Read as the backend's clock reads `served`: at most a second and a round trip behind it.
+        let reads = |now: u64, served: u64| {
+            assert!(now <= served && now + 2_000 >= served, "{now} for {served}");
+        };
+        for ahead in [-hour, hour] {
+            server.clock_ahead(ahead);
+            let bucket = s3(&server, "clock", &Client::DEFAULT);
+            assert_eq!(bucket.now(), 0);
+            let put = bucket.put("dated", vec![1].into(), PutMode::Overwrite);
+            serving.block_on(put).unwrap();
+            let modified = serving.block_on(bucket.head("dated")).unwrap().modified;
+            reads(bucket.now(), served(ahead));
+            assert!(modified <= bucket.now() && bucket.now() < modified + 2_000, "{modified}");
+            server.clock_ahead(ahead + day);
+            serving.block_on(bucket.head("dated")).unwrap();
+            reads(bucket.now(), served(ahead + day));
+            assert_eq!(serving.block_on(probe(&*bucket, 1)), Ok(()));
+        }
+
+        server.dating(false);
+        let undated = s3(&server, "undated", &Client::DEFAULT);
+        let key = format!("probe/{}", base32_id::Padded(1));
+        let none = "the bucket's clock has no time: none of its backend's responses carried a \
+                    date it could read (`Date`)";
+        assert_eq!(serving.block_on(probe(&*undated, 1)), Err(format!("{key}: {none}")));
+        server.dating(true);
+        let ahead = Watched::new(s3(&server, "ahead", &Client::DEFAULT), SKEW + 2_000, None);
+        let refused = serving.block_on(probe(&ahead, 1)).unwrap_err();
+        let said = "ms ahead of the date its backend gave it";
+        assert!(refused.starts_with(&key) && refused.contains(said), "{refused}");
     }
 
     /// board 5861: what a bucket refuses for good, its helpers that retry failures till they pass
@@ -3688,7 +3765,8 @@ pub(crate) mod tests {
         const SIZE: usize = 8 << 20;
         runtime().block_on(async {
             let bucket = ObjectBucket::from_url(&url).unwrap();
-            let run = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let run = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+            let run = run.as_nanos();
             let keys: Vec<String> = (0..OBJECTS).map(|n| format!("uploads-{run:x}/{n}")).collect();
             let start = std::time::Instant::now();
             let puts = keys

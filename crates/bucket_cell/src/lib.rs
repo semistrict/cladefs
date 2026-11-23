@@ -59,6 +59,7 @@ pub mod cache;
 pub mod cell;
 pub mod checkpoint;
 pub mod client;
+pub mod clock;
 pub mod collector;
 pub mod direct;
 pub mod evidence;

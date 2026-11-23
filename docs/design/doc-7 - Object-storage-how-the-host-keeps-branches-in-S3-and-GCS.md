@@ -1388,6 +1388,21 @@ The rest of a pass, unchanged within the cell:
 **Time** (the grace period, by the cell's clock) only spares readers that just looked an extent up
 a round trip; correctness does not depend on it.
 
+**The bucket's clock** (board 8467, 8471) is the backend's, which dates objects, never a host's
+own: every window measured from an object's date (the grace period, an unmade head's hour, a
+failed head's marks' day, a mirror's pin going stale, read evidence's week) and every collector
+lease's `until` and `ended`, and a sweep's start, are read by `Bucket::now`, which for a bucket over
+HTTP keeps the best lower bound the dates of the backend's responses give (`Date`, whole seconds),
+gone on since by the host's monotonic clock less 500 ppm of drift (`bucket_cell::clock`). So it is
+never ahead of the backend's, and a second and a round trip behind at most of a busy bucket: a
+window closes late, never early, whatever a host's own clock reads or however it steps, and every
+host's sweeps and leases go by one clock, a host whose clock ran fast starving no other's sweep
+(`Left::Swept`) nor holding cells past their time. It assumes the backend's clock goes on, never
+back, as a cloud's does. A bucket of files or memory dates objects by the host's clock, its own. A
+bucket's probe, at a host's first attach and `cladefs-gc`'s start, refuses one whose clock is more
+than 10 s off the date the backend gives what the probe writes (`clock::SKEW`), or whose responses
+carry no date.
+
 **The model's bounds** (`scripts/check-tla.sh`; on a laptop, every model and mutation of the default
 run under ten minutes): the models of before, with a cell each for two branches (`CellEach`,
 every fork, point and point's fork across cells, as hosts make them) and the root's cell shared with

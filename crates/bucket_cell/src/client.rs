@@ -58,9 +58,20 @@ impl Client {
     }
 }
 
-impl HttpConnector for Client {
+/// cladefs: what connects a bucket's backend: [`Client`]'s, each response's date heard by the
+/// bucket's clock (`Date`, [`crate::clock::Served`], board 8467). The credentials' requests a
+/// backend makes go through it too, to its cloud's endpoints, dated by that cloud's clocks.
+#[derive(Debug)]
+pub(crate) struct Connector {
+    pub client: Client,
+    pub clock: Arc<crate::clock::Served>,
+}
+
+impl HttpConnector for Connector {
     fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
-        Ok(HttpClient::new(Watched { client: reqwest_client(options)?, stall: self.stall }))
+        let client = reqwest_client(options)?;
+        let (stall, clock) = (self.client.stall, self.clock.clone());
+        Ok(HttpClient::new(Watched { client, stall, clock }))
     }
 }
 
@@ -185,11 +196,13 @@ fn stalled(stall: Duration) -> HttpError {
     HttpError::new(HttpErrorKind::Timeout, Stalled(stall))
 }
 
-/// reqwest's client, whose requests time out once they stall.
+/// reqwest's client, whose requests time out once they stall, and whose responses' dates `clock`
+/// hears.
 #[derive(Debug)]
 struct Watched {
     client: reqwest::Client,
     stall: Duration,
+    clock: Arc<crate::clock::Served>,
 }
 
 #[async_trait::async_trait]
@@ -209,6 +222,10 @@ impl object_store::client::HttpService for Watched {
             Either::Left((response, _)) => response.map_err(http_error)?,
             Either::Right(((), _)) => return Err(stalled(self.stall)),
         };
+        // As it arrived, headers read: a failure's response is dated as well as any.
+        if let Some(date) = response.headers().get(reqwest::header::DATE) {
+            self.clock.heard(date.as_bytes(), std::time::Instant::now());
+        }
         let (parts, body) = hyper::Response::<reqwest::Body>::from(response).into_parts();
         let body = Receiving { body, stall: self.stall, waiting: None };
         Ok(HttpResponse::from_parts(parts, HttpResponseBody::new(body)))

@@ -4637,6 +4637,40 @@ mod tests {
         assert_eq!((report, asked), (skipped, idle(cell)));
     }
 
+    /// Board 8467's AC #2: a host an hour ahead of its bucket's backend, by its own clock, defers
+    /// what a pass compacted for the grace period by the backend's, as every host does: the
+    /// compacted segments kept by the pass in full after, and by one skipping the cell; deleted by
+    /// the pass once the backend's clock passed their moves' dates by the grace period. By the
+    /// host's own clock, that pass in full deleted them at once.
+    #[test]
+    fn grace_periods_are_by_the_backends_clock() {
+        use crate::client::Client;
+        use crate::object_bucket::tests::{runtime, s3};
+        use crate::s3_server::S3Server;
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let behind = -3_600_000;
+        server.clock_ahead(behind);
+        let bucket = s3(&server, "grace", &Client::DEFAULT);
+        let segments = serving.block_on(mostly_freed(bucket.clone()));
+        let cell = test_cell(1);
+        let options = Options { compact_below: 0.5, grace: 600_000 };
+        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
+        let mut pass = |holder| serving.block_on(collector.collect_cell(&*bucket, cell, holder));
+        let left = || {
+            let listed = serving.block_on(bucket::list(&*bucket, &cell.prefix())).unwrap();
+            let keys: BTreeSet<String> = listed.into_iter().map(|meta| meta.key).collect();
+            segments.iter().filter(|segment| keys.contains(*segment)).count()
+        };
+        assert_eq!(pass(1).unwrap().compacted, SEGMENTS as usize);
+        assert_eq!(pass(2).unwrap(), Report::default());
+        assert_eq!(pass(3).unwrap(), Report { skipped: 1, ..Report::default() });
+        assert_eq!(left(), SEGMENTS as usize);
+        server.clock_ahead(behind + 600_000 + 2_000);
+        assert_eq!(pass(4).unwrap().deleted, SEGMENTS as usize);
+        assert_eq!(left(), 0);
+    }
+
     /// TASK-395.6: a pass skips nothing it went by more than the cell for. A clone being made in
     /// the cell, of a version in another, its pass reads the version's record for: deleted then,
     /// with nothing of the cell's changed, the next pass gives the clone up, as a pass in full
