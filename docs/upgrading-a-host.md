@@ -27,6 +27,9 @@ Read the release's notes for which of these changed. Each one changed means what
 | Cells in the bucket (`bucket_cell` `layout::FORMAT`) | A daemon reads a cell of another format | The cell is refused, and the collector's pass stops, deleting nothing. |
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
+| Replica directory (`local_cell::replica` `MAGIC`, its `incarnation` file's first line, `cladefs replicas 2`) | The new daemon opens a replica directory (`CLADEFSD_REPLICAS`) of another format | The daemon refuses to start: `Error: serving peers: the replica directory: incarnation: not "cladefs replicas 2"`. Delete the directory: the host comes back as a new member, as after a lost disk (below). |
+| Peer service (`cladefsd::peers::PROTOCOL`, and `cladefsd::peers::formats`, which names it with the cell directory, extent frame and bucket layout formats) | A live migration's source and target are of different formats: the target refuses its prepare, before it notes, refers to or stages anything (board 8455); and a hand-over whose staged cell doesn't open as the cell prepared is refused | `MigrateCell` fails with `ENOTSUP`; the source logs "preparing migration M at PEER: ... the source's formats (...) are not this host's (...): refused" and serves the cell on. A refused hand-over is `HandOverCell`'s `EAGAIN`, the cell served on the source again. |
+| Ephemeral host's files (`ephemeral_host::FORMAT`, the first line of `CLADEFSD_EPHEMERAL`'s `incarnation`, each `cells/` note and each `accepted/` record: `cladefs ephemeral host 1`) | The new daemon opens the directory, or reads a note or record, of another format (board 8461) | The daemon refuses to start: `Error: reading DIR/incarnation: a file of format "...", not "cladefs ephemeral host 1": refused`, or the same of a note. Nothing is deleted: the cells' directories, their notes and their references stay as they were. |
 
 Names change too, refused the same way, never read under both. Since TASK-503 the control API is
 `cladefs.cladefsd.v1.Cladefsd` (Go: `go/cladefsd/v1`), not `cladefs.extentd.v1.Extentd`, whose
@@ -39,6 +42,37 @@ with the host's build. The guest kernel's filesystem module is `cladefs` too: a 
 with `mount -t cladefs` (`fxfs` is an unknown type), sets `cladefs.*` parameters and reads the
 `cladefs` tracepoints and `/proc/fs/cladefs`, so guest images and agents move with the guest
 kernel. The VM snapshots and cell directories are unchanged.
+
+### Daemons of two builds side by side
+
+In steps 1 to 6 the hosts of a clade run two builds, and their daemons call each other over the
+peer service (`peer.proto`, `CLADEFSD_PEER_ADDRESS`), unauthenticated (board 8437):
+
+- `GetPart` names no format, and needs none: a part is the bucket's bytes, the same to every
+  build, and the asker checks it against its own tail of the object, fetching it from the bucket
+  on any failure.
+- A live migration of an ephemeral cell (`MigrateCell`, `HandOverCell`) checks formats by name,
+  as the table says: an ephemeral cell moves only between hosts of the same formats. A target
+  takes a migration only to a new name in its `CLADEFSD_EPHEMERAL_CELLS` directory, and only of a
+  source in its own bucket (`CLADEFSD_BUCKET`); a host without the variable takes none
+  (`ENOTSUP` at the source). So drain a host of ephemeral cells by migrating them to a host of its
+  own build. Past a change of any format `cladefsd::peers::formats` names, or of the ephemeral
+  host's files, its ephemeral cells can't follow it to the new build: their only copy is on its
+  disk, and nothing reads it there. Stop their VMs and delete them (`DeleteCell`) before the drain.
+- The replication calls (`Incarnation`, `Append`, `Fence`, `ReadLog`, `DropLogs`) name no format
+  yet: a member of another build is not refused by name. Across a change of the write-ahead log's
+  format (`local_cell::wal` `LOG_MAGIC`), a member reads a log of the other build's as empty when
+  it starts again, so a commit told Replicated may be lost (board 8457, which adds the check).
+  Until then, across such a change, a replicated cell's members' logs must hold nothing its
+  bucket lacks before a member of the new build starts: close the cell on its writer's host (its
+  VM stopped or moved, which a drain does, uploading every commit) before any of its members'
+  hosts is upgraded, and open it again only once they all run one build.
+
+A host's replica directory is never copied to another host, nor restored (`operating-a-host.md`,
+"Replicated cells' replica directories"): it stays on its host across the upgrade, opened by the
+new daemon if its format is the same. If its format changed, the new daemon refuses to start
+(above): delete the directory, and the host comes back as a new member of a new incarnation,
+which its cells' configurations replace as they replace a lost disk.
 
 A wire or device protocol change alone leaves cell directories and cells readable: VMs move by
 snapshot to a host of the new build only if the device protocol is the same, and stop and boot
