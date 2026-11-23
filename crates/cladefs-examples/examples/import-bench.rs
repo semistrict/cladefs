@@ -26,12 +26,18 @@
 //! bytes for the large file's and of entries for the others', the time setting the directories'
 //! times takes, and what compacting Fxfs's trees cost meanwhile: the allocator's, and the object
 //! stores' (TASK-92.46).
+//!
+//! With `IMPORT_BENCH_IMAGE=DIR`, the filesystem is on a new image in DIR (`Storage::create`), as
+//! `cladefsctl import`'s is, rather than in memory: its device's writes, flushes and commits are
+//! timed with the layers, closing it waits for its uploads, and the large file is then read back
+//! from the image mounted again, its pages cold (board 8260).
 
 use cladefs::import::Importer;
 use cladefs::import::testing::{Entry, Kind, layer, whiteout};
 use cladefs::{Options, Storage, TreeCompactions};
 use futures::executor::block_on;
 use std::num::NonZeroU8;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// How many small files a directory holds.
@@ -115,8 +121,13 @@ fn main() {
     let small_files_bytes = 4 * entries as u64 * (SMALL as u64 + Storage::BLOCK_SIZE as u64);
     let capacity = ((large_mib as u64 + 256) << 20) + small_files_bytes;
     let capacity = capacity.next_multiple_of(Storage::BLOCK_SIZE as u64);
+    let image = std::env::var_os("IMPORT_BENCH_IMAGE").map(|dir| PathBuf::from(dir).join("image"));
     block_on(async {
-        let fs = options.format(Storage::memory(capacity)).await.unwrap();
+        let storage = match &image {
+            Some(path) => Storage::create(path, capacity).await.unwrap(),
+            None => Storage::memory(capacity),
+        };
+        let fs = options.format(storage).await.unwrap();
         let mut importer = Importer::new(&fs);
         apply(&mut importer, "large file", &large, large_mib, "MiB").await;
         apply(&mut importer, "small files", &small_files, entries, "entry").await;
@@ -128,6 +139,20 @@ fn main() {
         let compactions = fs.compactions().unwrap();
         compacted("allocator", &compactions.allocator);
         compacted("object stores", &compactions.stores);
-        fs.close().await.unwrap();
+        let start = Instant::now();
+        let storage = fs.close().await.unwrap();
+        rate("closing", 1, "close", start.elapsed());
+        let Some(path) = &image else { return };
+        storage.close().await;
+        let fs = options.mount(Storage::open(path).await.unwrap()).await.unwrap();
+        let (large, _) = fs.root().lookup(b"large").await.unwrap();
+        let mut buf = vec![0; 1 << 20];
+        let start = Instant::now();
+        for mib in 0..large_mib {
+            assert_eq!(large.read((mib as u64) << 20, &mut buf).await.unwrap(), buf.len());
+        }
+        rate("reading large file", large_mib, "MiB", start.elapsed());
+        fs.close().await.unwrap().close().await;
+        Storage::delete(path).await.unwrap();
     });
 }
