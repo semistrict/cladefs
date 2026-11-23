@@ -21,15 +21,16 @@
 #                                          its own as scripts/test.sh runs them (Linux, as its
 #                                          daemon is)
 #
-# Needs a nightly toolchain with llvm-tools (`rustup toolchain install nightly --component
-# llvm-tools`) and cargo-llvm-cov (MIT/Apache-2.0); CLADEFS_COVERAGE_TOOLCHAIN names another
-# toolchain than `nightly`.
+# Needs a nightly toolchain with llvm-tools, guest/rust's dated one unless CLADEFS_COVERAGE_TOOLCHAIN
+# names another (`rustup toolchain install nightly-YYYY-MM-DD --component llvm-tools`; the one
+# nightly the repository pins, board 8603), and cargo-llvm-cov (MIT/Apache-2.0).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 which=${1:?usage: scripts/sim-coverage.sh local|madsim [OUT]}
 out=${2:-$root/target/sim-coverage/$which}
-toolchain=${CLADEFS_COVERAGE_TOOLCHAIN:-nightly}
+toolchain=${CLADEFS_COVERAGE_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"$/\1/p' \
+    "$root/guest/rust/rust-toolchain.toml")}
 mkdir -p "$out"
 
 # The protocol's code: the stores' uploads, replication and cells, the bucket's writer and heads,

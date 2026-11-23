@@ -165,9 +165,9 @@ class Ci(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/guest-kernel", sandboxes)
         key = ("key: sandboxes-cargo-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock',"
                " 'vendor/firecracker.lock') }}")
-        restore = sandboxes.index("uses: actions/cache/restore@v6")
+        restore = sandboxes.index("uses: actions/cache/restore@")
         build = sandboxes.index('CLADEFS_E2E_BUILD_ONLY="$HOME/sandboxes-artifacts"')
-        save = sandboxes.index("uses: actions/cache/save@v6")
+        save = sandboxes.index("uses: actions/cache/save@")
         self.assertLess(restore, build)
         self.assertLess(build, save)
         self.assertEqual(sandboxes.count(key), 2)
@@ -247,7 +247,8 @@ class Nightly(unittest.TestCase):
         job = int(re.search(r"^    timeout-minutes: (\d+)$", suites, re.MULTILINE).group(1))
         self.assertLess(step, job)
         self.assertLessEqual(job, 360)
-        self.assertIn("      - uses: actions/upload-artifact@v7\n        if: always()\n", suites)
+        self.assertRegex(suites, r"      - uses: actions/upload-artifact@[0-9a-f]{40} # v7[.0-9]*\n"
+                                 r"        if: always\(\)\n")
         self.assertIn("name: guest-suites-${{ matrix.part }}", suites)
 
     def test_the_bucket_is_rustfs_on_the_runner(self):

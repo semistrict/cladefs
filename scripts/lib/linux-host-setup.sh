@@ -98,11 +98,12 @@ host_rust() {
     rustup component add clippy
 }
 
-# pinned_version TOOL prints the version of TOOL the hosts run, its pinned version: Rust's, or
-# that of a tool cargo installs (host_need).
+# pinned_version TOOL prints the version of TOOL the hosts run, its pinned version: Rust's, the
+# one rust-toolchain.toml pins for CI and every build of the workspace (board 8603), or that of a
+# tool cargo installs (host_need).
 pinned_version() {
     case $1 in
-        rust) echo 1.97.1 ;;
+        rust) sed -n 's/^channel = "\(.*\)"$/\1/p' "$host_tools/rust-toolchain.toml" ;;
         cargo-nextest) echo 0.9.143 ;;
         cargo-mutants) echo 27.1.0 ;;
         *) echo "pinned_version: $1 has no version pinned" >&2; return 1 ;;

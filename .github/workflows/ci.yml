@@ -32,6 +32,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# cladefs: the token reads the repository and nothing more (board 8603), as no job writes to it (firecracker-forward's gh
+# reads a public fork's history);
+# actions are pinned by commit, their release in a comment, and Rust by rust-toolchain.toml, so
+# that what CI runs changes by a commit alone (scripts/tests/test_workflows.py).
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.parts }})
@@ -72,7 +79,7 @@ jobs:
     steps:
       # With vendor/firecracker, whose seccompiler cladefs's tests compile Firecracker's seccomp
       # filters with, to run the VMM's side of DAX windows under them (TASK-149.28).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - name: Install the build's tools
@@ -85,21 +92,19 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: clang elfutils sqlite3 fuse3 libseccomp-dev ${{ matrix.packages }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-          components: clippy, rustfmt
-      - uses: taiki-e/install-action@v2
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest
       # Go's latest: go/generate.sh's buf may want a newer Go than go.mod, which `go run` would
       # fetch.
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         if: matrix.parts == 'go'
         with:
           go-version: stable
           cache-dependency-path: go/go.sum
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -159,14 +164,15 @@ jobs:
       CLADEFS_TEST_PARTS: ${{ matrix.parts }}
     steps:
       # With vendor/firecracker, a path dependency of the workspace's, which Cargo reads.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -184,7 +190,7 @@ jobs:
     timeout-minutes: 60
     steps:
       # With vendor/firecracker, a path dependency of the workspace's, which Cargo reads.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       # pjdfstest's build (autotools, a C compiler) and prove (perl's), fuse3 for /dev/fuse's
@@ -193,8 +199,9 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: clang fuse3 autoconf automake gcc make perl
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v6
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -206,7 +213,7 @@ jobs:
         run: cargo build --locked -p cladefs --bin cladefs-mount
       - name: pjdfstest on FUSE mounts of new stores, as root
         run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/debug/cladefs-mount
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: pjdfstest-fuse-logs
@@ -229,7 +236,7 @@ jobs:
     timeout-minutes: 60
     steps:
       # With vendor/firecracker, a path dependency of the workspace's, which Cargo reads.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       # libseccomp, which Firecracker's seccompiler links, a dependency of cladefs's tests.
@@ -237,11 +244,12 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: clang libseccomp-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -253,7 +261,7 @@ jobs:
         run: scripts/test-rustfs.sh --no-fail-fast
       - name: The Azure tests, against Azurite
         run: scripts/test-azurite.sh --no-fail-fast
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
@@ -275,18 +283,19 @@ jobs:
       CLADEFS_SOAK_SECS: 300
     steps:
       # With vendor/firecracker, whose seccompiler cladefs's tests build with (TASK-149.28).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
           packages: clang libseccomp-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - name: Rust, as rust-toolchain.toml pins it
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -319,7 +328,7 @@ jobs:
     timeout-minutes: 5
     if: github.event_name != 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Commits that weaken checks say why
@@ -362,13 +371,13 @@ jobs:
       run:
         working-directory: guide
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: guide/package.json
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
           cache: pnpm
@@ -381,7 +390,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: vendor/firecracker is ahead of the base's
@@ -402,7 +411,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           submodules: true
@@ -448,7 +457,7 @@ jobs:
       KERNEL: ${{ github.workspace }}/target/sim-kernel
       BUILD: ${{ github.workspace }}/target/sim
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Whole, or a smoke run
@@ -461,7 +470,7 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: clang lld llvm
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/sim-kernel
           key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
@@ -474,7 +483,7 @@ jobs:
         env:
           SEEDS: ${{ steps.scope.outputs.scope == 'full' && 3000 || 200 }}
         run: guest/sim/zloop.sh -s "$SEEDS" -d "$BUILD/logs"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: guest-sim-logs
@@ -491,7 +500,7 @@ jobs:
       KERNEL: ${{ github.workspace }}/target/sim-kernel
       BUILD: ${{ github.workspace }}/target/sim
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Whole, or a smoke run
@@ -504,7 +513,7 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: clang lld llvm
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/sim-kernel
           key: sim-kernel-${{ hashFiles('scripts/build-guest-kernel.sh', 'guest/sim/kernel-tree.sh', 'guest/linux/patches/*') }}
@@ -519,7 +528,7 @@ jobs:
           else
             guest/sim/sweep.sh -s "$GITHUB_RUN_NUMBER/12" -d "$BUILD/sweep"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: guest-sim-sweep-logs
