@@ -32,7 +32,8 @@
 //!
 //! `CLADEFS_SOAK_SECS` says how long it runs (default 300 s, CI's; 1,800 or more each night, Hunt's
 //! `soak` job), the phases each a fraction of it. Ignored by the workspace's suite, which it would
-//! outlast: `cargo nextest run -p cladefs --lib --run-ignored all -E
+//! outlast, and optimized, as a debug build's daemon falls behind the guests' rate on CI's runners
+//! (board 7056): `cargo nextest run -p cladefs --lib --cargo-profile sim --run-ignored all -E
 //! 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'`.
 //! `crates/cladefs/mutants.sh` puts back TASK-314's dropped failures and TASK-317's copy of each
 //! upload's bytes for each try, and sees this fail.
@@ -322,6 +323,22 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
             writes_failed - writes_failed_before
         );
         writes_failed_before = writes_failed;
+        // Before the bucket fails, every VM process kept to its rate, at which they write past the
+        // lag bound while it fails: a host too slow to write that fast commits nothing waiting at
+        // the bound, which says nothing of the daemon (board 7056, a debug build on CI's runners).
+        if fault.failing == Failing::Not && answered_again.is_none() {
+            let due = (rate as f64 * began.elapsed().as_secs_f64() * 0.9) as u64;
+            for (vm, wrote) in wrote.iter().enumerate() {
+                let bytes = wrote.bytes.load(Ordering::Relaxed);
+                assert!(
+                    bytes >= due,
+                    "the bucket {name}: VM process {vm} wrote {} MiB, behind its rate's {} MiB: \
+                     the host is too slow for the soak",
+                    bytes >> 20,
+                    due >> 20
+                );
+            }
+        }
         let statuses = cells::upload_statuses();
         let pending: u64 = statuses.iter().map(|(_, status)| status.pending_bytes).sum();
         let sample = process::last();

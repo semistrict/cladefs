@@ -300,11 +300,14 @@ jobs:
           sudo chown "$USER" /mnt/tmp
           echo TMPDIR=/mnt/tmp >> "$GITHUB_ENV"
           df -h /mnt
+      # Optimized, its debug checks kept: a debug build's daemon took most of the runner's four
+      # CPUs to write at the soak's rate, and on its slower runners, a third of them, fell behind,
+      # never reaching the lag bound while the bucket failed (board 7056).
       - name: Build
-        run: cargo nextest run -p cladefs --lib --no-run
+        run: cargo nextest run -p cladefs --lib --cargo-profile sim --no-run
       - name: The daemon against a degraded bucket, five minutes
         run: >-
-          cargo nextest run -p cladefs --lib --run-ignored all --no-capture
+          cargo nextest run -p cladefs --lib --cargo-profile sim --run-ignored all --no-capture
           -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
   # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
