@@ -182,18 +182,25 @@ pub(crate) struct Framed<F> {
     pub parts: Parts,
     /// Its opening's number.
     id: u64,
+    /// The host's unpacked-part cache holding parts unpacked from this opening.
+    unpacked: Arc<Unpacked>,
 }
 
 impl<F: File> Framed<F> {
-    pub(crate) fn new(file: Arc<F>, parts: Parts) -> Self {
-        Self { file, parts, id: OPENED.fetch_add(1, Ordering::Relaxed) }
+    pub(crate) fn new(file: Arc<F>, parts: Parts, unpacked: Arc<Unpacked>) -> Self {
+        Self { file, parts, id: OPENED.fetch_add(1, Ordering::Relaxed), unpacked }
     }
 
     /// The framed file `file`, which must be whole, as far as its trailer and table say; `path`
     /// names it. cladefs: read holding `keys`, the cell's (TASK-411.3).
-    pub(crate) fn open(file: F, path: &str, keys: &dyn Keys) -> Result<Self, Error> {
+    pub(crate) fn open(
+        file: F,
+        path: &str,
+        keys: &dyn Keys,
+        unpacked: Arc<Unpacked>,
+    ) -> Result<Self, Error> {
         match read_parts(&file, keys).with_context(|| path.to_owned())? {
-            Some(parts) => Ok(Self::new(Arc::new(file), parts)),
+            Some(parts) => Ok(Self::new(Arc::new(file), parts, unpacked)),
             None => bail!("{path} is not a whole framed file"),
         }
     }
@@ -213,7 +220,7 @@ impl<F: File> Framed<F> {
 /// number never another's (TASK-603).
 impl<F> Drop for Framed<F> {
     fn drop(&mut self) {
-        unpacked().forget(self.id);
+        self.unpacked.forget(self.id);
     }
 }
 
@@ -485,30 +492,61 @@ impl Default for Unpacked {
 /// A part unpacked: its file's opening, and its number.
 type Key = (u64, u64);
 
-/// cladefs: the process's parts unpacked lately ([`Unpacked`]), sharing `bucket_cell::fetch`'s
-/// unified `PartMemory` off Shuttle (board 6026). Under Shuttle, an execution's: each run of a
-/// schedule starts with nothing unpacked, as its replay does, and runs at once evict none of each
-/// other's parts (TASK-675).
+/// cladefs: the process's default host's parts unpacked lately outside `madsim` ([`Unpacked`]),
+/// sharing `bucket_cell::fetch`'s unified `PartMemory` off Shuttle (board 6026). Under Shuttle,
+/// an execution's: each run of a schedule starts with nothing unpacked, as its replay does, and
+/// runs at once evict none of each other's parts (TASK-675).
+#[cfg(not(madsim))]
 pub fn unpacked() -> &'static Unpacked {
     #[cfg(not(feature = "shuttle"))]
     {
-        node_local::node_local! {
-            static UNPACKED: Unpacked = Unpacked { parts: bucket_cell::fetch::shared_parts().clone() };
-        }
-        UNPACKED.get()
+        crate::Host::process().unpacked()
     }
     #[cfg(feature = "shuttle")]
     {
         shuttle::lazy_static! {
-            static ref UNPACKED: Unpacked = Unpacked {
+            static ref UNPACKED: Arc<Unpacked> = Arc::new(Unpacked {
                 parts: PartMemory::new(bucket_cell::fetch::RECENT),
-            };
+            });
         }
         &UNPACKED
     }
 }
 
+/// cladefs: `Arc<Unpacked>` for a cell directory: its host's, or, for `MemDir` / Shuttle, an
+/// isolated or Shuttle-execution-scoped cache.
+pub(crate) fn unpacked_for(host: Option<&Arc<crate::Host>>) -> Arc<Unpacked> {
+    #[cfg(feature = "shuttle")]
+    {
+        let _ = host;
+        shuttle::lazy_static! {
+            static ref UNPACKED: Arc<Unpacked> = Arc::new(Unpacked {
+                parts: PartMemory::new(bucket_cell::fetch::RECENT),
+            });
+        }
+        Arc::clone(&UNPACKED)
+    }
+    #[cfg(not(feature = "shuttle"))]
+    {
+        if let Some(host) = host {
+            return Arc::clone(host.unpacked());
+        }
+        #[cfg(not(madsim))]
+        {
+            Arc::clone(crate::Host::process().unpacked())
+        }
+        #[cfg(madsim)]
+        {
+            Arc::new(Unpacked::default())
+        }
+    }
+}
+
 impl Unpacked {
+    /// Creates an [`Unpacked`] cache backed by `parts`.
+    pub(crate) fn new(parts: Arc<PartMemory>) -> Arc<Self> {
+        Arc::new(Self { parts })
+    }
     /// cladefs: the bytes of the parts it keeps.
     pub fn bytes(&self) -> u64 {
         self.parts.bytes()
@@ -550,7 +588,11 @@ mod tests {
             bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
         );
         file.write_at(&bytes, 0).unwrap();
-        let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
+        let framed = Framed::new(
+            Arc::new(file),
+            Parts::of(&bytes, &extent_frame::NoKeys).unwrap(),
+            unpacked_for(None),
+        );
         let before = unpacked().bytes();
         let part = || {
             let aligned = Arc::new(Aligned::new(4096));
@@ -581,7 +623,11 @@ mod tests {
             bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
         );
         file.write_at(&bytes, 0).unwrap();
-        let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
+        let framed = Framed::new(
+            Arc::new(file),
+            Parts::of(&bytes, &extent_frame::NoKeys).unwrap(),
+            unpacked_for(None),
+        );
         let source = Source::Framed(Arc::new(framed));
         let mut parts = Vec::new();
         let corrupt = source.locate(2 * PART, 4096, &Unpacked::default(), &mut parts).unwrap_err();
@@ -643,7 +689,11 @@ mod tests {
                 bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
             );
             file.write_at(&bytes, 0).unwrap();
-            Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))
+            Arc::new(Framed::new(
+                Arc::new(file),
+                Parts::of(&bytes, &extent_frame::NoKeys).unwrap(),
+                unpacked_for(None),
+            ))
         };
         let open = |files: &Files<u64, _>| {
             let mut open: Vec<u64> = files.files.keys().copied().collect();

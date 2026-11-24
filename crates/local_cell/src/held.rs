@@ -160,6 +160,7 @@ pub(crate) struct Pending {
 impl Pending {
     /// Whether it is still to be held: else its framing took it, or its segment dropped it, and
     /// packing it is for nothing.
+    #[cfg(not(madsim))]
     pub fn wanted(&self) -> bool {
         self.parts.held.lock().unwrap().pending.contains(&self.key)
     }

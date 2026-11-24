@@ -95,11 +95,10 @@ pub const CHECKPOINT_EVERY: u64 = 64;
 /// starts its mirror there; TASK-633.8): nothing unless `child` is of `bucket` and the version of
 /// another's cell, nor for one mirrored there already ([`ObjectBucket::mirror_wanted`]), which
 /// takes its turn before this returns. What it came to is logged.
-fn mirror_wanted(bucket: &Arc<RoutedBucket>, child: CellId, origin: Origin) -> Result<(), Failure> {
+fn mirror_wanted(spawn: &Spawn, bucket: &Arc<RoutedBucket>, child: CellId, origin: Origin) {
     let Origin { parent, at, .. } = origin;
     let mirroring = bucket.mirror_wanted(child, origin);
-    bucket_runtime()?.spawn(async move { logged(mirroring.await, parent, at) });
-    Ok(())
+    spawn(async move { logged(mirroring.await, parent, at) }.boxed());
 }
 
 /// cladefs: the mirror in `bucket` of the version `cell` was forked from, if of another bucket's
@@ -156,32 +155,28 @@ pub struct Runtime {
     pub keys: keys::Host,
 }
 
-node_local::node_local! {
-    /// How many cells' uploaders run in this process ([`open`]): until each, its cell dropped, has
-    /// uploaded what its cell made durable, and stopped.
-    static UPLOADERS: tokio::sync::watch::Sender<usize> = tokio::sync::watch::channel(0).0;
-}
-
-/// How many cells' uploaders run in this process, as it changes: what an extent daemon's drain
+/// How many cells' uploaders run on `host`, as it changes: what an extent daemon's drain
 /// waits to see none of (cladefs TASK-141.4).
-pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
-    UPLOADERS.get().subscribe()
+pub fn uploaders_on(host: &crate::Host) -> tokio::sync::watch::Receiver<usize> {
+    host.uploaders.subscribe()
 }
 
-/// Runs `future` to its end, on the calling thread, as what is called from no runtime's task does:
-/// in the context of the bucket runtime ([`bucket_runtime`]), whose workers run what it spawns,
-/// the connections to buckets it opens among them, which live on after it in their buckets' pools.
-/// cladefs: on that runtime, not one of its own (TASK-449's review): a runtime of each call's own
-/// closed the connections it opened as it returned, each call connecting anew (bucket_cell's
-/// `requests_on_runtimes_dropped_after_connect_anew`); one of the calls' own beside the host's
-/// served, from its own few threads, the sockets of the connections they left in the pool, which
-/// the host's uploads and fetches went on to use.
-/// Called on a thread of a multi-threaded runtime, as a sync path of a test's or a FUSE call's
-/// is, the thread hands its other tasks to another meanwhile, as [`blocking`] does.
+/// How many cells' uploaders run on the process's default host outside `madsim`
+/// ([`uploaders_on`]).
+#[cfg(not(madsim))]
+pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
+    uploaders_on(crate::Host::process())
+}
+
+/// Runs `future` to its end on the calling thread in the context of `host`'s bucket runtime
+/// ([`bucket_runtime_on`]).
 #[allow(clippy::disallowed_methods, reason = "an outermost entry's wait, as above")]
-pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
+pub fn block_on_host<F: std::future::Future>(
+    host: &crate::Host,
+    future: F,
+) -> Result<F::Output, Failure> {
     crate::blocks!("upload::block_on");
-    let runtime = bucket_runtime()?;
+    let runtime = bucket_runtime_on(host)?;
     // Never reached under madsim, whose one thread `blocks!` refuses to block.
     #[cfg(madsim)]
     return Ok(runtime.block_on(future));
@@ -194,29 +189,49 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
     }
 }
 
-/// cladefs: runs `future` to its end as [`block_on`] does, on the calling thread in the bucket
-/// runtime's context, which its bucket calls need, its output as it is: what callers outside the
-/// daemon block on its async paths with, at their outermost entry, as cladefsctl, FUSE storage and
-/// the tests do (TASK-685.3). Panics if the runtime can't be made.
-pub fn wait_on<F: std::future::Future>(future: F) -> F::Output {
-    block_on(future).expect("the bucket runtime")
+/// Runs `future` to its end on the process's default host's bucket runtime outside `madsim`
+/// ([`block_on_host`]).
+#[cfg(not(madsim))]
+pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
+    block_on_host(crate::Host::process(), future)
 }
 
-/// cladefs: the runtime the host's uploaders and fetches run on (TASK-34, TASK-449's review), one
-/// for the process: every cell's uploader and fetches, and the calls from no runtime's task
-/// ([`block_on`]), so that one runtime serves every connection to the host's buckets. A bucket's
-/// connections are tasks of the runtime they opened on (`reqwest`'s, as `object_store` uses it,
-/// spawns them there), which stay in the bucket's pool for the next request, whatever its runtime.
-/// Sized by the host, not by how many cells it serves, as each cell waits on object storage mostly,
-/// and does its disk work in `block_in_place`, which leaves the runtime's threads to the others.
-/// Its threads hold their lists of the shared locks they take from their start ([`crate::shared`]).
-/// Made at its first need; a making that fails, a thread not spawned, is made anew at the next, not
-/// kept failed for the process's life.
-pub fn bucket_runtime() -> Result<&'static tokio::runtime::Runtime, Failure> {
-    node_local::node_local! {
-        static BUCKET_RUNTIME: Retried<tokio::runtime::Runtime> = Retried::new();
+/// Under `madsim`, [`block_on`] panics immediately via `crate::blocks!` (tested by
+/// `local_cell/tests/madsim.rs`).
+#[cfg(madsim)]
+pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
+    drop(future);
+    crate::blocks!("upload::block_on");
+    unreachable!()
+}
+
+/// cladefs: runs `future` to its end as [`block_on_host`] does, panicking if the runtime can't be
+/// made.
+pub fn wait_on_host<F: std::future::Future>(host: &crate::Host, future: F) -> F::Output {
+    block_on_host(host, future).expect("the bucket runtime")
+}
+
+/// cladefs: runs `future` to its end on the process's default host's bucket runtime outside
+/// `madsim` ([`wait_on_host`]).
+#[cfg(not(madsim))]
+pub fn wait_on<F: std::future::Future>(future: F) -> F::Output {
+    wait_on_host(crate::Host::process(), future)
+}
+
+/// Per-host bucket Tokio runtime holder, owned by [`crate::Host`].
+pub(crate) struct BucketRuntime(Retried<tokio::runtime::Runtime>);
+
+impl BucketRuntime {
+    pub(crate) const fn new() -> Self {
+        Self(Retried::new())
     }
-    BUCKET_RUNTIME.get().get_or_make(|| {
+}
+
+/// cladefs: `host`'s bucket runtime (TASK-34, TASK-449's review): every cell's uploader and
+/// fetches on `host`, so that one runtime serves every connection to `host`'s buckets. Made at
+/// its first need; a making that fails, a thread not spawned, is made anew at the next.
+pub fn bucket_runtime_on(host: &crate::Host) -> Result<&tokio::runtime::Runtime, Failure> {
+    host.bucket_runtime.0.get_or_make(|| {
         failing!("upload::bucket_runtime");
         let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
         let mut building = tokio::runtime::Builder::new_multi_thread();
@@ -226,6 +241,12 @@ pub fn bucket_runtime() -> Result<&'static tokio::runtime::Runtime, Failure> {
         building.on_thread_start(crate::shared::prepare_thread);
         building.enable_all().build().map_err(|err| Failure::local(err, "the bucket runtime"))
     })
+}
+
+/// cladefs: the process's default host's bucket runtime outside `madsim` ([`bucket_runtime_on`]).
+#[cfg(not(madsim))]
+pub fn bucket_runtime() -> Result<&'static tokio::runtime::Runtime, Failure> {
+    bucket_runtime_on(crate::Host::process())
 }
 
 /// cladefs: a value made at its first need and kept once made, a making that fails keeping
@@ -459,13 +480,26 @@ pub async fn open_with_head<D: Dir>(
     let handle = runtime.handle.clone();
     let spawn: Spawn = Arc::new(move |task| drop(handle.spawn(task)));
     let uploads = runtime.uploads.clone();
-    let shared = Shared::new(options, uploads, (sleep, spawn), runtime.keys.clone());
+    let host = recovering.host().cloned().or_else(|| {
+        #[cfg(not(madsim))]
+        {
+            Some(Arc::clone(crate::Host::process()))
+        }
+        #[cfg(madsim)]
+        {
+            None
+        }
+    });
+    let shared =
+        Shared::new_on(host.clone(), options, uploads, (sleep, spawn), runtime.keys.clone());
     let (started, start) = futures::channel::oneshot::channel();
     let stopped = Arc::new(Stopped::default());
     let stop = stopped.clone();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
     let cell = recovering.cell();
-    UPLOADERS.get().send_modify(|running| *running += 1);
+    if let Some(host) = &host {
+        host.uploaders.send_modify(|running| *running += 1);
+    }
     // A task, not a thread of its own (TASK-34).
     runtime.handle.spawn(async move {
         let ran = std::panic::AssertUnwindSafe(async {
@@ -492,7 +526,9 @@ pub async fn open_with_head<D: Dir>(
         // at once (`Dir::claim` refusing a second opening), as cladefsd does a cell an image it
         // imported made (TASK-165.6).
         drop(uploader);
-        UPLOADERS.get().send_modify(|running| *running -= 1);
+        if let Some(host) = &host {
+            host.uploaders.send_modify(|running| *running -= 1);
+        }
         stop.say();
         fail::fail_point!("upload::stopped");
     });
@@ -644,6 +680,8 @@ pub struct Uploader<D: Dir> {
 }
 
 pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
+    /// Its host context, when backed by a host directory (or process default off madsim).
+    pub(super) host: Option<Arc<crate::Host>>,
     /// The cell, once opened.
     cell: std::sync::OnceLock<Arc<LocalCell<D>>>,
     /// The cell's writer, once it took the cell, and as it takes it again (TASK-204).
@@ -965,7 +1003,7 @@ impl<D: Dir> Uploader<D> {
             Ok(()) => {}
         }
         inheriting.made();
-        mirror_wanted(&self.bucket, child.cell, at.origin)?;
+        mirror_wanted(&self.shared.spawn, &self.bucket, child.cell, at.origin);
         Ok(())
     }
 
@@ -1203,13 +1241,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
     /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the
     /// host's (TASK-411.3); its keeper run on `spawn`.
-    pub(crate) fn new(
+    pub(crate) fn new_on(
+        host: Option<Arc<crate::Host>>,
         options: Options,
         uploads: Arc<Budget>,
         (clock, spawn): (Clock, Spawn),
         keys: keys::Host,
     ) -> Arc<Self> {
         Arc::new(Self {
+            host,
             cell: std::sync::OnceLock::new(),
             writer: Default::default(),
             token: Default::default(),

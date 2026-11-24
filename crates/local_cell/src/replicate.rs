@@ -53,107 +53,152 @@ const HOT_BYTES: u64 = 16 << 20;
 /// Node-wide accounting and governor eviction hook for replication hot buffers (board 6902):
 /// counts every byte held across all live [`Replicator`] instances (including pinned take-time
 /// seeds) and lets the daemon's memory governor cap and reclaim persisted buffers under pressure.
-struct HotBudget {
+pub(crate) struct HotBudget {
     total: AtomicU64,
     limit: AtomicU64,
     replicators: Mutex<Vec<Weak<Shared>>>,
 }
 
 impl HotBudget {
-    fn new() -> Self {
-        Self {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
             total: AtomicU64::new(0),
             limit: AtomicU64::new(u64::MAX),
             replicators: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn size_to(&self, limit: u64) {
+        self.limit.store(limit, Ordering::Relaxed);
+    }
+
+    pub(crate) fn evict_to(&self, target: u64) -> u64 {
+        if self.total.load(Ordering::Relaxed) <= target {
+            return 0;
+        }
+        let live: Vec<Arc<Shared>> = {
+            let mut list = self.replicators.lock().unwrap();
+            list.retain(|weak| weak.strong_count() > 0);
+            list.iter().filter_map(Weak::upgrade).collect()
+        };
+        let mut evicted = 0u64;
+        loop {
+            let mut progress = false;
+            for shared in &live {
+                if self.total.load(Ordering::Relaxed) <= target {
+                    return evicted;
+                }
+                let mut state = shared.state.lock().unwrap();
+                if state.has_source {
+                    let freed = state.evict_one_persisted();
+                    if freed > 0 {
+                        evicted += freed;
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                return evicted;
+            }
         }
     }
 }
 
-node_local::node_local! {
-    static HOT: HotBudget = HotBudget::new();
+/// Total bytes held in hot replication buffers across all live replicators on `host`,
+/// including pinned take-time seeds (board 6902).
+pub fn hot_bytes_on(host: &crate::Host) -> u64 {
+    host.hot_budget.bytes()
 }
 
-/// Total bytes held in hot replication buffers across all live replicators on this host,
-/// including pinned take-time seeds (board 6902).
+/// Total bytes held in hot replication buffers on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn hot_bytes() -> u64 {
-    HOT.get().total.load(Ordering::Relaxed)
+    hot_bytes_on(crate::Host::process())
 }
 
 /// cladefs: what a take holds of its fenced members' logs as it reads them (board 8453), counted
-/// with the hot replication buffers ([`hot_bytes`]), which the daemon's memory governor counts and
-/// makes room for, from when a read is asked for to when the take is done with it: a member's
+/// with the hot replication buffers ([`hot_bytes_on`]), which the daemon's memory governor counts
+/// and makes room for, from when a read is asked for to when the take is done with it: a member's
 /// copy is the take's to hold whole, as it checks it whole, so nothing of it is evicted, but the
 /// governor shrinks what else it governs for it (one memory budget).
-#[derive(Default)]
-pub(crate) struct Holding(u64);
+pub(crate) struct Holding {
+    bytes: u64,
+    budget: Option<Arc<HotBudget>>,
+}
 
 impl Holding {
+    /// Holds nothing, counted against `budget` when given.
+    pub(crate) fn on(budget: Option<Arc<HotBudget>>) -> Self {
+        Self { bytes: 0, budget }
+    }
+
+    /// Holds nothing, uncounted.
+    pub(crate) fn none() -> Self {
+        Self { bytes: 0, budget: None }
+    }
+
     /// Holds `bytes` more.
     pub(crate) fn hold(&mut self, bytes: u64) {
-        HOT.get().total.fetch_add(bytes, Ordering::Relaxed);
-        self.0 += bytes;
+        if let Some(budget) = &self.budget {
+            budget.total.fetch_add(bytes, Ordering::Relaxed);
+        }
+        self.bytes += bytes;
     }
 
     /// Holds `bytes` fewer, of those it holds.
     pub(crate) fn release(&mut self, bytes: u64) {
-        let bytes = bytes.min(self.0);
-        HOT.get().total.fetch_sub(bytes, Ordering::Relaxed);
-        self.0 -= bytes;
+        let bytes = bytes.min(self.bytes);
+        if let Some(budget) = &self.budget {
+            budget.total.fetch_sub(bytes, Ordering::Relaxed);
+        }
+        self.bytes -= bytes;
     }
 
     /// Holds `bytes`, more or fewer than it held.
     pub(crate) fn hold_only(&mut self, bytes: u64) {
-        match bytes.checked_sub(self.0) {
+        match bytes.checked_sub(self.bytes) {
             Some(more) => self.hold(more),
-            None => self.release(self.0 - bytes),
+            None => self.release(self.bytes - bytes),
         }
     }
 }
 
 impl Drop for Holding {
     fn drop(&mut self) {
-        HOT.get().total.fetch_sub(self.0, Ordering::Relaxed);
+        if let Some(budget) = &self.budget {
+            budget.total.fetch_sub(self.bytes, Ordering::Relaxed);
+        }
     }
 }
 
-/// Sets the node-wide soft cap on hot replication buffers (called by the daemon's memory
-/// governor): new flushes past this cap evict persisted chunks as soon as they hit local disk.
+/// Sets `host`'s soft cap on hot replication buffers (called by the daemon's memory governor):
+/// new flushes past this cap evict persisted chunks as soon as they hit local disk.
+pub fn size_hot_to_on(host: &crate::Host, limit: u64) {
+    host.hot_budget.size_to(limit);
+}
+
+/// Sets the process's default host's soft cap on hot replication buffers outside `madsim`.
+#[cfg(not(madsim))]
 pub fn size_hot_to(limit: u64) {
-    HOT.get().limit.store(limit, Ordering::Relaxed);
+    size_hot_to_on(crate::Host::process(), limit);
 }
 
-/// Evicts persisted, non-pinned hot replication chunks across live replicators until total hot
-/// bytes are at most `target` (or only unpersisted/pinned chunks remain), returning bytes freed.
+/// Evicts persisted, non-pinned hot replication chunks across live replicators on `host` until
+/// total hot bytes are at most `target` (or only unpersisted/pinned chunks remain), returning
+/// bytes freed.
+pub fn evict_hot_to_on(host: &crate::Host, target: u64) -> u64 {
+    host.hot_budget.evict_to(target)
+}
+
+/// Evicts persisted, non-pinned hot replication chunks on the process's default host outside
+/// `madsim`.
+#[cfg(not(madsim))]
 pub fn evict_hot_to(target: u64) -> u64 {
-    let budget = HOT.get();
-    if budget.total.load(Ordering::Relaxed) <= target {
-        return 0;
-    }
-    let live: Vec<Arc<Shared>> = {
-        let mut list = budget.replicators.lock().unwrap();
-        list.retain(|weak| weak.strong_count() > 0);
-        list.iter().filter_map(Weak::upgrade).collect()
-    };
-    let mut evicted = 0u64;
-    loop {
-        let mut progress = false;
-        for shared in &live {
-            if budget.total.load(Ordering::Relaxed) <= target {
-                return evicted;
-            }
-            let mut state = shared.state.lock().unwrap();
-            if state.has_source {
-                let freed = state.evict_one_persisted();
-                if freed > 0 {
-                    evicted += freed;
-                    progress = true;
-                }
-            }
-        }
-        if !progress {
-            return evicted;
-        }
-    }
+    evict_hot_to_on(crate::Host::process(), target)
 }
 
 /// Seed for `own_frame` rapidhash integrity checks: fixed for good, as the replica directory is
@@ -466,6 +511,8 @@ pub struct Flushed {
 /// A replicated cell's writer's replicator: what its members hold, and what is replicated.
 pub struct Replicator {
     shared: Arc<Shared>,
+    /// Its host, whose bucket runtime runs its member tasks when started.
+    host: Option<Arc<crate::Host>>,
     /// Each member's link, by its place among [`State::members`].
     links: Mutex<Vec<Arc<dyn MemberLink>>>,
     /// Whether each member is served by a task of its own ([`Replicator::run_tasks`]), or
@@ -530,8 +577,9 @@ struct Group {
     members: std::ops::Range<usize>,
 }
 
-#[derive(Default)]
 struct State {
+    /// Its host's hot-buffer budget.
+    budget: Arc<HotBudget>,
     /// Each log's length, until its segment is in the bucket.
     logs: BTreeMap<u64, u64>,
     /// Hot in-memory batches per log, ordered by offset.
@@ -584,17 +632,36 @@ impl Drop for State {
 }
 
 impl State {
+    fn new(budget: Arc<HotBudget>) -> Self {
+        Self {
+            budget,
+            logs: BTreeMap::new(),
+            hot: BTreeMap::new(),
+            hot_bytes: 0,
+            has_source: false,
+            dropped: None,
+            last: 0,
+            members: Vec::new(),
+            active: None,
+            pending: None,
+            replicated: 0,
+            fenced: None,
+            broken: None,
+            stopping: false,
+        }
+    }
+
     fn add_hot(&mut self, len: u64) {
         if len > 0 {
             self.hot_bytes += len;
-            HOT.get().total.fetch_add(len, Ordering::Relaxed);
+            self.budget.total.fetch_add(len, Ordering::Relaxed);
         }
     }
 
     fn sub_hot(&mut self, len: u64) {
         if len > 0 {
             self.hot_bytes -= len;
-            HOT.get().total.fetch_sub(len, Ordering::Relaxed);
+            self.budget.total.fetch_sub(len, Ordering::Relaxed);
         }
     }
 
@@ -602,7 +669,7 @@ impl State {
         self.hot.clear();
         if self.hot_bytes > 0 {
             let len = std::mem::take(&mut self.hot_bytes);
-            HOT.get().total.fetch_sub(len, Ordering::Relaxed);
+            self.budget.total.fetch_sub(len, Ordering::Relaxed);
         }
     }
 
@@ -753,7 +820,7 @@ impl State {
             }
         }
         self.sub_hot(freed);
-        let budget = HOT.get();
+        let budget = Arc::clone(&self.budget);
         while self.hot_bytes > HOT_BYTES
             || budget.total.load(Ordering::Relaxed) > budget.limit.load(Ordering::Relaxed)
         {
@@ -775,10 +842,25 @@ enum Sending {
 }
 
 impl Replicator {
-    /// A replicator of a configuration of `f`, its members reached by `links` (2f of them, the
-    /// writer aside), started after the commit of epoch `base`, which none holds, backed by
-    /// `source` for catch-up when lagging or replacing: `notify` called once more is replicated,
+    /// A replicator on `host` of a configuration of `f`, its members reached by `links` (2f of
+    /// them, the writer aside), started after the commit of epoch `base`, which none holds, backed
+    /// by `source` for catch-up when lagging or replacing: `notify` called once more is replicated,
     /// or the writer is fenced.
+    pub fn start_on(
+        host: Option<Arc<crate::Host>>,
+        f: usize,
+        base: u64,
+        source: Option<Arc<dyn LogSource>>,
+        links: Vec<Arc<dyn MemberLink>>,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        let replicator = Self::idle_on(host, f, base, source, links, notify);
+        replicator.run_tasks();
+        replicator
+    }
+
+    /// [`Replicator::start_on`] on the process's default host outside `madsim`.
+    #[cfg(not(madsim))]
     pub fn start(
         f: usize,
         base: u64,
@@ -786,23 +868,23 @@ impl Replicator {
         links: Vec<Arc<dyn MemberLink>>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let replicator = Self::idle(f, base, source, links, notify);
-        replicator.run_tasks();
-        replicator
+        Self::start_on(Some(Arc::clone(crate::Host::process())), f, base, source, links, notify)
     }
 
-    /// A replicator as [`Replicator::start`] makes it, whose members nothing serves yet: by a
-    /// task each once [`Replicator::run_tasks`] starts them, or a turn at a time as
+    /// A replicator on `host` as [`Replicator::start_on`] makes it, whose members nothing serves
+    /// yet: by a task each once [`Replicator::run_tasks`] starts them, or a turn at a time as
     /// [`Replicator::drive`] is called, as the simulation's scheduler does, so that a seed decides
     /// what each member is sent and when (TASK-680).
-    pub fn idle(
+    pub fn idle_on(
+        host: Option<Arc<crate::Host>>,
         f: usize,
         base: u64,
         source: Option<Arc<dyn LogSource>>,
         links: Vec<Arc<dyn MemberLink>>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let mut state = State::default();
+        let budget = host.as_ref().map_or_else(HotBudget::new, |h| Arc::clone(&h.hot_budget));
+        let mut state = State::new(Arc::clone(&budget));
         state.has_source = source.is_some();
         state.members = vec![Member::default(); links.len()];
         state.active = Some(Group { f, members: 0..links.len() });
@@ -815,16 +897,29 @@ impl Replicator {
             notify: Box::new(notify),
         });
         {
-            let mut list = HOT.get().replicators.lock().unwrap();
+            let mut list = budget.replicators.lock().unwrap();
             list.retain(|weak| weak.strong_count() > 0);
             list.push(Arc::downgrade(&shared));
         }
         Arc::new(Self {
             shared,
+            host,
             links: Mutex::new(links),
             threaded: false.into(),
             tasks: Mutex::default(),
         })
+    }
+
+    /// [`Replicator::idle_on`] on the process's default host outside `madsim`.
+    #[cfg(not(madsim))]
+    pub fn idle(
+        f: usize,
+        base: u64,
+        source: Option<Arc<dyn LogSource>>,
+        links: Vec<Arc<dyn MemberLink>>,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Self::idle_on(Some(Arc::clone(crate::Host::process())), f, base, source, links, notify)
     }
 
     /// Serves each member by a task of its own, on the host's bucket runtime, from now on, and
@@ -855,7 +950,20 @@ impl Replicator {
     /// runtime, which their links' calls run on too (doc-24 step 10). A runtime that can't be had
     /// breaks the replicator, whose commits then wait for the bucket.
     fn serve(&self, first: usize, links: Vec<Arc<dyn MemberLink>>) {
-        let runtime = match crate::upload::bucket_runtime() {
+        let runtime = match &self.host {
+            Some(host) => host.bucket_runtime().map(|rt| rt.handle().clone()),
+            None => {
+                #[cfg(not(madsim))]
+                {
+                    crate::upload::bucket_runtime().map(|rt| rt.handle().clone())
+                }
+                #[cfg(madsim)]
+                {
+                    Ok(tokio::runtime::Handle::current())
+                }
+            }
+        };
+        let runtime = match runtime {
             Ok(runtime) => runtime,
             Err(err) => {
                 let why = format!("the bucket runtime, to serve the members on: {err}");

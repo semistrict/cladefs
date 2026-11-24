@@ -187,13 +187,10 @@ pub struct PageCache {
     frames: Arc<Frames>,
 }
 
-/// The process's page cache, which every cell's files share ([`crate::HostDir`]).
+/// The process's default host's page cache outside `madsim` ([`crate::Host::pages`]).
+#[cfg(not(madsim))]
 pub fn shared() -> &'static Arc<PageCache> {
-    node_local::node_local! {
-        /// The daemon's, each simulated node's its own (doc-24).
-        static SHARED: Arc<PageCache> = PageCache::new(Options::default());
-    }
-    SHARED.get()
+    crate::Host::process().pages()
 }
 
 impl PageCache {

@@ -214,6 +214,12 @@ pub trait Dir: Send + Sync + 'static {
     fn footprint(&self) -> Option<&Arc<crate::footprint::Footprint>> {
         None
     }
+
+    /// cladefs: the host context owning this directory's locks, page cache, footprints, and
+    /// uploaders, if it is a host directory ([`HostDir`]).
+    fn host(&self) -> Option<&Arc<crate::Host>> {
+        None
+    }
 }
 
 /// The whole of `file`, read as it is: a cell's file that holds no extents' data, whose reads
@@ -270,21 +276,37 @@ pub type HostDir = crate::Metered<crate::CachedDir<DiskDir>>;
 pub type HostFile = crate::MeteredFile<crate::CachedFile<DiskFile>>;
 
 impl HostDir {
-    /// The directory at `path`, which exists, its extents' files through the process's page cache
-    /// ([`crate::pages::shared`]). Its files are opened bypassing the host's page cache, or not
-    /// at all: a file system that refuses to fails their openings (`InvalidInput`), never falling
-    /// back to the host's cache, a second memory (TASK-433, TASK-433.6).
-    /// cladefs: its changes counted in its cell's footprint, the one this process counts it in
-    /// already if it opened it before ([`crate::footprint`]): the first opening while no other
-    /// is alive lists it.
-    pub fn new(path: &Path) -> io::Result<Self> {
-        Self::on(DiskDir::new(path)?, crate::pages::shared().clone())
+    /// The directory at `path` on `host`, which exists, its extents' files through `host`'s page
+    /// cache ([`crate::Host::pages`]). Its files are opened bypassing the host's page cache, or
+    /// not at all: a file system that refuses to fails their openings (`InvalidInput`), never
+    /// falling back to the host's cache, a second memory (TASK-433, TASK-433.6).
+    /// cladefs: its changes counted in its cell's footprint on `host`.
+    pub fn new_on(host: &Arc<crate::Host>, path: &Path) -> io::Result<Self> {
+        Self::on_host(host, DiskDir::new_on(host, path)?, host.pages().clone())
     }
 
-    /// `dir`, its extents' files through `cache`, its changes counted in its cell's footprint.
-    pub fn on(dir: DiskDir, cache: Arc<crate::pages::PageCache>) -> io::Result<Self> {
-        let footprint = crate::footprint::of_host(&dir.path, &dir.disk)?;
+    /// The directory at `path` on the process's default host outside `madsim` ([`HostDir::new_on`]).
+    #[cfg(not(madsim))]
+    pub fn new(path: &Path) -> io::Result<Self> {
+        Self::new_on(crate::Host::process(), path)
+    }
+
+    /// `dir` on `host`, its extents' files through `cache`, its changes counted in its cell's
+    /// footprint.
+    pub fn on_host(
+        host: &Arc<crate::Host>,
+        dir: DiskDir,
+        cache: Arc<crate::pages::PageCache>,
+    ) -> io::Result<Self> {
+        let footprint = crate::footprint::of_host_on(host, &dir.path, &dir.disk)?;
         Self::over(crate::CachedDir::over(dir, cache), footprint)
+    }
+
+    /// `dir`, its extents' files through `cache`, its changes counted in its cell's footprint on
+    /// `dir`'s host.
+    pub fn on(dir: DiskDir, cache: Arc<crate::pages::PageCache>) -> io::Result<Self> {
+        let host = Arc::clone(&dir.host);
+        Self::on_host(&host, dir, cache)
     }
 
     /// The directory's path.
@@ -296,6 +318,7 @@ impl HostDir {
 /// cladefs: a directory of the host's, its files bypassing the host's page cache: what a
 /// [`HostDir`] holds its extents' files in a page cache of the process's over.
 pub struct DiskDir {
+    host: Arc<crate::Host>,
     path: PathBuf,
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
@@ -309,15 +332,22 @@ pub struct DiskDir {
 }
 
 impl DiskDir {
-    /// The directory at `path`, which exists.
-    pub fn new(path: &Path) -> io::Result<Self> {
+    /// The directory at `path` on `host`, which exists.
+    pub fn new_on(host: &Arc<crate::Host>, path: &Path) -> io::Result<Self> {
         use host_fs::MetadataExt as _;
         let handle = Arc::new(host_fs::File::open(path)?);
         let metadata = handle.metadata()?;
         let id = (metadata.dev(), metadata.ino());
-        let disk = bucket_cell::host_disk::HostDisk::of(path)?;
-        let deferral = crate::deferral::of(path);
-        Ok(Self { path: path.to_owned(), handle, id, disk, deferral })
+        let disk = bucket_cell::host_disk::HostDisk::of_on(host.bucket(), path)?;
+        let deferral = crate::deferral::of_on(host, path);
+        Ok(Self { host: Arc::clone(host), path: path.to_owned(), handle, id, disk, deferral })
+    }
+
+    /// The directory at `path` on the process's default host outside `madsim`
+    /// ([`DiskDir::new_on`]).
+    #[cfg(not(madsim))]
+    pub fn new(path: &Path) -> io::Result<Self> {
+        Self::new_on(crate::Host::process(), path)
     }
 
     /// cladefs: a rename of a file in it, in flight until what is returned goes, if its
@@ -467,7 +497,7 @@ impl Dir for DiskDir {
         let deadline = std::time::Instant::now() + TAKE_WAIT;
         loop {
             {
-                let mut taken = TAKEN.get().lock().unwrap();
+                let mut taken = self.host.dirs.taken.lock().unwrap();
                 if let Some((count, _)) = taken.get_mut(&id) {
                     *count += 1;
                     return Ok(());
@@ -489,7 +519,7 @@ impl Dir for DiskDir {
     }
 
     fn let_go(&self) {
-        let mut taken = TAKEN.get().lock().unwrap();
+        let mut taken = self.host.dirs.taken.lock().unwrap();
         let Some((count, _)) = taken.get_mut(&self.id) else { return };
         *count -= 1;
         if *count > 0 {
@@ -500,7 +530,8 @@ impl Dir for DiskDir {
     }
 
     fn claim(&self) -> io::Result<()> {
-        let mut claimed = closed_in(CLAIMED.get().lock().unwrap(), self.id)?;
+        let mut claimed =
+            closed_in(&self.host.dirs, self.host.dirs.claimed.lock().unwrap(), self.id)?;
         if claimed.contains_key(&self.id) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -512,15 +543,15 @@ impl Dir for DiskDir {
     }
 
     fn closing(&self) {
-        if let Some(closing) = CLAIMED.get().lock().unwrap().get_mut(&self.id) {
+        if let Some(closing) = self.host.dirs.claimed.lock().unwrap().get_mut(&self.id) {
             *closing = true;
         }
     }
 
     fn unclaim(&self) {
-        CLAIMED.get().lock().unwrap().remove(&self.id);
-        UNCLAIMED.get().notify_all();
-        UNCLAIMED_EVENT.get().notify(usize::MAX);
+        self.host.dirs.claimed.lock().unwrap().remove(&self.id);
+        self.host.dirs.unclaimed.notify_all();
+        self.host.dirs.unclaimed_event.notify(usize::MAX);
     }
 
     fn barrier(&self) -> io::Result<()> {
@@ -553,38 +584,43 @@ impl Dir for DiskDir {
     fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
         Some(&self.disk)
     }
+
+    fn host(&self) -> Option<&Arc<crate::Host>> {
+        Some(&self.host)
+    }
 }
 
-node_local::node_local! {
-    /// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and
-    /// inodes: how many takings of each, and the lock they hold, a process's, which its death lets
-    /// go, a simulated host's too (`host_fs::Flock`).
-    static TAKEN: Mutex<BTreeMap<DirId, (usize, host_fs::Flock)>> = Mutex::new(BTreeMap::new());
+/// cladefs: per-host table of taken directory locks and open/closing cell claims, owned by
+/// [`crate::Host`].
+pub(crate) struct Locks {
+    /// The directories this host has taken ([`Dir::take`]), by their devices and inodes.
+    taken: Mutex<BTreeMap<DirId, (usize, host_fs::Flock)>>,
+    /// The directories whose cells this host has open ([`Dir::claim`]), and whether closing.
+    claimed: Mutex<BTreeMap<DirId, bool>>,
+    /// Woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a cell closing.
+    unclaimed: std::sync::Condvar,
+    /// Said as a claim goes ([`Dir::unclaim`]), for async waits ([`closed_on`]).
+    unclaimed_event: event_listener::Event,
 }
 
-node_local::node_local! {
-    /// cladefs: the directories whose cells this process has open ([`Dir::claim`]), and whether
-    /// each is closing ([`Dir::closing`]).
-    static CLAIMED: Mutex<BTreeMap<DirId, bool>> = Mutex::new(BTreeMap::new());
+impl Locks {
+    pub(crate) fn new() -> Self {
+        Self {
+            taken: Mutex::new(BTreeMap::new()),
+            claimed: Mutex::new(BTreeMap::new()),
+            unclaimed: std::sync::Condvar::new(),
+            unclaimed_event: event_listener::Event::new(),
+        }
+    }
 }
 
-node_local::node_local! {
-    /// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a cell closing.
-    static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
-}
-
-node_local::node_local! {
-    /// cladefs: said as a claim goes ([`Dir::unclaim`]), for what waits for a cell closing holding
-    /// no thread ([`closed`]).
-    static UNCLAIMED_EVENT: event_listener::Event = event_listener::Event::new();
-}
-
-/// cladefs: `claimed`, [`CLAIMED`] locked, once no cell of the directory `id` is closing in this
-/// process, which it waits for a while ([`CLOSING_WAIT`]): `WouldBlock` if one still is.
-fn closed_in(
-    mut claimed: std::sync::MutexGuard<'static, BTreeMap<DirId, bool>>,
+/// cladefs: `claimed`, `locks.claimed` locked, once no cell of the directory `id` is closing on
+/// this host, which it waits for a while ([`CLOSING_WAIT`]): `WouldBlock` if one still is.
+fn closed_in<'a>(
+    locks: &'a Locks,
+    mut claimed: std::sync::MutexGuard<'a, BTreeMap<DirId, bool>>,
     id: DirId,
-) -> io::Result<std::sync::MutexGuard<'static, BTreeMap<DirId, bool>>> {
+) -> io::Result<std::sync::MutexGuard<'a, BTreeMap<DirId, bool>>> {
     let deadline = std::time::Instant::now() + CLOSING_WAIT;
     while claimed.get(&id) == Some(&true) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -596,25 +632,25 @@ fn closed_in(
         }
         fail::fail_point!("dir::claim_waits");
         // cladefs: never under madsim, where an opening of a cell waits for its close first,
-        // holding no thread ([`closed`]), then claims it, awaiting nothing between (doc-24,
+        // holding no thread ([`closed_on`]), then claims it, awaiting nothing between (doc-24,
         // TASK-685.3). The wait stays for what claims from a thread of its own, an outermost
         // entry's (board 2946): the sync openings, `LocalCell::recover` and what opens over it,
         // which tests and tools call as they are, have no `closed` to await first; and off madsim
         // a cell another thread begins closing between an opening's `closed` and its claim is
         // waited for here, rather than refused as one open.
         crate::blocks!("an opening, waiting for a cell of its directory closing in the process");
-        claimed = UNCLAIMED.get().wait_timeout(claimed, left).unwrap().0;
+        claimed = locks.unclaimed.wait_timeout(claimed, left).unwrap().0;
     }
     Ok(claimed)
 }
 
-/// cladefs: returns once no cell of the directory at `path` is closing in this process, waiting
+/// cladefs: returns once no cell of the directory at `path` is closing on `host`, waiting
 /// for one that is a while, as an opening of it does ([`Dir::claim`]), holding no thread:
 /// `WouldBlock` if it still is. What reads in the bucket what a cell's close uploads, a fork of a
 /// version its closing cell made, say, waits for the close so (TASK-644); and an opening of the
 /// cell, first, so that its claim finds none closing (doc-24). Nothing at `path`, nothing closes
 /// there.
-pub async fn closed(path: &Path) -> io::Result<()> {
+pub async fn closed_on(host: &crate::Host, path: &Path) -> io::Result<()> {
     use host_fs::MetadataExt as _;
     let metadata = match crate::upload::blocking(|| host_fs::metadata(path)) {
         Ok(metadata) => metadata,
@@ -624,8 +660,8 @@ pub async fn closed(path: &Path) -> io::Result<()> {
     let id = (metadata.dev(), metadata.ino());
     let closing = async {
         loop {
-            let unclaimed = UNCLAIMED_EVENT.get().listen();
-            if CLAIMED.get().lock().unwrap().get(&id) != Some(&true) {
+            let unclaimed = host.dirs.unclaimed_event.listen();
+            if host.dirs.claimed.lock().unwrap().get(&id) != Some(&true) {
                 return;
             }
             fail::fail_point!("dir::claim_waits");
@@ -635,6 +671,12 @@ pub async fn closed(path: &Path) -> io::Result<()> {
     tokio::time::timeout(CLOSING_WAIT, closing).await.map_err(|_| {
         io::Error::new(io::ErrorKind::WouldBlock, "this process is still closing the cell")
     })
+}
+
+/// cladefs: [`closed_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub async fn closed(path: &Path) -> io::Result<()> {
+    closed_on(crate::Host::process(), path).await
 }
 
 /// cladefs: how long an opening waits for a cell of its directory closing in this process

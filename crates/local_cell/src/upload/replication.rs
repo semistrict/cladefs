@@ -339,7 +339,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 };
                 (seed, seeding, recovering, short, ahead)
             }
-            _ => (Vec::new(), crate::replicate::Holding::default(), recovering, None, false),
+            _ => (Vec::new(), crate::replicate::Holding::none(), recovering, None, false),
         };
         // cladefs: taken by force from too few members: what may be lost noted in the cell's
         // description, which its status says from now on, while this placement holds it; or, of an
@@ -577,7 +577,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let waker = move || {
             changed.notify(usize::MAX);
         };
-        let replicator = crate::replicate::Replicator::idle(f, base, source, links, waker);
+        let replicator =
+            crate::replicate::Replicator::idle_on(self.host.clone(), f, base, source, links, waker);
         if !members.drives(&replicator) {
             replicator.run_tasks();
         }
@@ -962,7 +963,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         let members = self.members()?;
         let mut logs = Vec::with_capacity(copies.len());
-        let mut holding = crate::replicate::Holding::default();
+        let mut holding =
+            crate::replicate::Holding::on(self.host.as_ref().map(|h| Arc::clone(&h.hot_budget)));
         {
             for (log, held) in copies {
                 let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };

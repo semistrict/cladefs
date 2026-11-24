@@ -1283,7 +1283,12 @@ impl<F: File> Segments<F> {
             None => {
                 let path = segment_path(number);
                 let keys = self.keys.of(number.cell);
-                let framed = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
+                let framed = Arc::new(Framed::open(
+                    dir.open(&path, true)?,
+                    &path,
+                    &keys,
+                    crate::framed::unpacked_for(dir.host()),
+                )?);
                 self.files.insert(number, framed)
             }
         };
@@ -1319,7 +1324,8 @@ impl<F: File> Segments<F> {
         let path = segment_path(number);
         let keys = self.keys.of(number.cell);
         let file = dir.open(&path, true).with_context(|| format!("opening {path}"))?;
-        let framed = Arc::new(Framed::open(file, &path, &keys)?);
+        let framed =
+            Arc::new(Framed::open(file, &path, &keys, crate::framed::unpacked_for(dir.host()))?);
         Ok(Some(self.files.insert(number, framed).file.clone()))
     }
 
@@ -1720,7 +1726,7 @@ fn frame_segment<D: Dir>(
                 let nanos = started.elapsed().as_nanos() as u64;
                 SEGMENT_CLOSE_NS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
                 return Ok((
-                    Arc::new(Framed::new(file, parts)),
+                    Arc::new(Framed::new(file, parts, crate::framed::unpacked_for(dir.host()))),
                     How { in_place: true, len, read, held: 0 },
                 ));
             }
@@ -1740,7 +1746,11 @@ fn frame_segment<D: Dir>(
             let nanos = started.elapsed().as_nanos() as u64;
             SEGMENT_CLOSE_NS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
             return Ok((
-                Arc::new(Framed::new(Arc::new(file), parts)),
+                Arc::new(Framed::new(
+                    Arc::new(file),
+                    parts,
+                    crate::framed::unpacked_for(dir.host()),
+                )),
                 How { in_place: false, len, read, held: 0 },
             ));
         }
@@ -1768,7 +1778,7 @@ fn frame_segment<D: Dir>(
         let nanos = started.elapsed().as_nanos() as u64;
         SEGMENT_CLOSE_NS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
         return Ok((
-            Arc::new(Framed::new(Arc::new(file), parts)),
+            Arc::new(Framed::new(Arc::new(file), parts, crate::framed::unpacked_for(dir.host()))),
             How { in_place: false, len, read: len, held: 0 },
         ));
     }
@@ -1824,8 +1834,9 @@ fn frame_segment<D: Dir>(
         false => None,
     };
     let how = How { in_place: framed.is_some(), len, read, held };
+    let unpacked = crate::framed::unpacked_for(dir.host());
     let framed = match framed {
-        Some(file) => Framed::new(file, parts),
+        Some(file) => Framed::new(file, parts, unpacked),
         None => {
             let file = dir.create(path, true)?;
             // Where the framed file is in its directory, not yet written: whole only once its
@@ -1836,7 +1847,7 @@ fn frame_segment<D: Dir>(
             // it back a piece at a time before it syncs it ([`make_durable`], TASK-401).
             write_framed(&file, &packed, 0)?;
             write_framed(&file, &tail, end)?;
-            Framed::new(Arc::new(file), parts)
+            Framed::new(Arc::new(file), parts, unpacked)
         }
     };
     timing.took(framing_phase::WRITE);

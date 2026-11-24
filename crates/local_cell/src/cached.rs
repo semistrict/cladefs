@@ -230,6 +230,10 @@ impl<D: Dir> Dir for CachedDir<D> {
     fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
         self.shared.dir.disk()
     }
+
+    fn host(&self) -> Option<&Arc<crate::Host>> {
+        self.shared.dir.host()
+    }
 }
 
 /// A file of a [`CachedDir`]: one of its extents' files, through the page cache, or any other, as

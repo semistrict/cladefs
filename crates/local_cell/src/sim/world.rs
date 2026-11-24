@@ -1562,7 +1562,7 @@ impl World {
         let kept = Arc::<Mutex<Vec<BoxFuture<'static, ()>>>>::default();
         let keeping = kept.clone();
         let spawn: Spawn = Arc::new(move |task| keeping.lock().unwrap().push(task));
-        let uploader = Shared::new(options, uploads, (intervals.clock(), spawn), keys);
+        let uploader = Shared::new_on(None, options, uploads, (intervals.clock(), spawn), keys);
         let (started, start) = futures::channel::oneshot::channel();
         let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {

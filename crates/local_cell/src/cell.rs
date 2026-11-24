@@ -361,8 +361,13 @@ impl<D: Dir> crate::replicate::LogSource for CellLogSource<D> {
                                     let file = self.dir.open(&path, true)?;
                                     let keys = self.keys.of(self.cell.id);
                                     framed = Some(
-                                        crate::framed::Framed::open(file, &path, &keys)
-                                            .map_err(io::Error::other)?,
+                                        crate::framed::Framed::open(
+                                            file,
+                                            &path,
+                                            &keys,
+                                            crate::framed::unpacked_for(self.dir.host()),
+                                        )
+                                        .map_err(io::Error::other)?,
                                     );
                                 }
                                 Err(err) => return Err(err),
@@ -949,6 +954,11 @@ impl<D: Dir> Recovering<D> {
     /// The cell.
     pub fn cell(&self) -> CellId {
         self.file.cell
+    }
+
+    /// Its directory's host context, if backed by a host directory.
+    pub(crate) fn host(&self) -> Option<&Arc<crate::Host>> {
+        self.dir.host()
     }
 
     /// cladefs: the last commit its write-ahead log holds, if it holds any.
@@ -2402,13 +2412,13 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<Vec<Located<D::File>>, Error> {
         let end = offset + len;
         let held_end = end.min(entry.len).max(offset);
-        let unpacked = crate::framed::unpacked();
+        let unpacked = crate::framed::unpacked_for(self.dir.host());
         let mut parts = Vec::new();
         match &entry.data {
             Data::Own => {
                 if held_end > offset {
                     let source = self.own_source(state, extent)?;
-                    source.locate(offset, held_end - offset, unpacked, &mut parts)?;
+                    source.locate(offset, held_end - offset, &unpacked, &mut parts)?;
                 }
             }
             Data::Bucket(location) => bail!(BucketData { extent, location: location.clone() }),
@@ -2418,7 +2428,7 @@ impl<D: Dir> LocalCell<D> {
                         None => parts.push(Located::Zeros(end - start)),
                         Some((number, at)) => {
                             let source = self.segment_file(state, number)?;
-                            source.locate(at, end - start, unpacked, &mut parts)?;
+                            source.locate(at, end - start, &unpacked, &mut parts)?;
                         }
                     }
                 }
@@ -2465,7 +2475,8 @@ impl<D: Dir> LocalCell<D> {
     /// A part of a framed file, unpacked from `stored`, its stored bytes and any after them, read
     /// from its file, checked against its CRC; reads of it find it unpacked for a while.
     pub fn unpack(&self, part: &Packed<D::File>, stored: Aligned) -> Result<Arc<Aligned>, Error> {
-        part.unpack(stored, crate::framed::unpacked())
+        let unpacked = crate::framed::unpacked_for(self.dir.host());
+        part.unpack(stored, &unpacked)
     }
 
     /// Frees `extent`, which may be open, if the cell holds it.
@@ -3080,7 +3091,10 @@ impl<D: Dir> LocalCell<D> {
             }
         };
         written::wrote(written::Kind::Own, tail.len());
-        state.own_files.sealed(extent, Arc::new(Framed::new(file, parts)));
+        state.own_files.sealed(
+            extent,
+            Arc::new(Framed::new(file, parts, crate::framed::unpacked_for(self.dir.host()))),
+        );
         Ok(copied)
     }
 
@@ -3110,7 +3124,11 @@ impl<D: Dir> LocalCell<D> {
         let (tail, parts) = packer.finish_parts(&own_footer(extent));
         file.write_at(&tail, end)?;
         written::wrote(written::Kind::Own, tail.len());
-        let framed = Arc::new(Framed::new(Arc::new(file), parts));
+        let framed = Arc::new(Framed::new(
+            Arc::new(file),
+            parts,
+            crate::framed::unpacked_for(self.dir.host()),
+        ));
         state.own_files.sealed(extent, framed);
         Ok(())
     }
@@ -3584,7 +3602,7 @@ impl<D: Dir> LocalCell<D> {
                         return Err(error);
                     }
                 };
-                self.durability.with(Mutex::lock).finish(last);
+                self.durability.with(Mutex::lock).finish(last, self.dir.host().map(Arc::as_ref));
                 drop(records);
                 // cladefs: the entries of the segments opened its syncs made durable: no making of
                 // them durable syncs them again (TASK-369).

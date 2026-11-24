@@ -44,8 +44,10 @@ use crate::raw::RawFile;
 use crate::timings::runnable_ns;
 use extent_frame::{ObjectKey, PART, PackedPart, PartPacker, RawPart};
 use std::io;
+#[cfg(not(madsim))]
+use std::sync::Condvar;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
 
 /// cladefs: the most part buffers ([`Buffer`]) and compressors ([`PartPacker`]) kept for framings
 /// to come: two segments' worth of parts, 64 MiB, and as many compressors. Taken afresh, each
@@ -342,14 +344,17 @@ fn stored(index: u64, data: Buffer, packer: &mut PartPacker) -> Stored {
 
 /// cladefs: how many threads pack parts ahead ([`pack_ahead`]), the process's cells': at the host's
 /// lowest priority, so that they take only what CPU nothing else wants.
+#[cfg(not(madsim))]
 const PACKING_AHEAD: usize = 2;
 
 /// cladefs: the most parts waiting to be packed ahead, a MiB each: past them, the packing is too
 /// far behind for a part's framing to find it packed, and it skips them ([`Pending::skip`]).
+#[cfg(not(madsim))]
 const WAITING_MOST: usize = 64;
 
 /// cladefs: the parts waiting to be packed ahead, and the threads packing them, started as there
 /// are parts for them, and kept for the process's life.
+#[cfg(not(madsim))]
 struct Ahead {
     waiting: Mutex<(std::collections::VecDeque<Waiting>, usize)>,
     ready: Condvar,
@@ -357,12 +362,16 @@ struct Ahead {
 
 /// cladefs: a part waiting to be packed ahead ([`pack_ahead`]): its index in its segment, which its
 /// packing takes (`PartPacker::pack`, TASK-411.2), its bytes, and where it is to be held.
+#[cfg(not(madsim))]
 type Waiting = (u64, Buffer, Pending);
 
-node_local::node_local! {
-    static AHEAD: Ahead =
-        Ahead { waiting: Mutex::new((std::collections::VecDeque::new(), 0)), ready: Condvar::new() };
-}
+#[cfg(not(madsim))]
+/// cladefs: outside the simulation (`pack_ahead` skips under madsim): background low-priority
+/// pack-ahead queue shared by the process's idle worker threads.
+static AHEAD: std::sync::LazyLock<Ahead> = std::sync::LazyLock::new(|| Ahead {
+    waiting: Mutex::new((std::collections::VecDeque::new(), 0)),
+    ready: Condvar::new(),
+});
 
 /// cladefs: packs `data`, part `part` of a segment's data a look ahead took ([`look_ahead`]), on a
 /// thread of [`PACKING_AHEAD`], at the host's lowest priority, and holds it as `pending` says, if
@@ -374,47 +383,53 @@ node_local::node_local! {
 /// by 10-30 versions). Skipped, if too many wait already ([`WAITING_MOST`]).
 pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
     // cladefs: none under madsim, which runs one thread: the framing packs them (doc-24).
-    if cfg!(madsim) {
+    #[cfg(madsim)]
+    {
+        let _ = (part, data);
         pending.skip();
-        return;
     }
-    let mut waiting = AHEAD.get().waiting.lock().unwrap();
-    if waiting.0.len() >= WAITING_MOST {
-        drop(waiting);
-        pending.skip();
-        return;
-    }
-    waiting.0.push_back((part, data, pending));
-    if waiting.1 < PACKING_AHEAD {
-        let spawned = std::thread::Builder::new().name("store packing ahead".into()).spawn(packing);
-        match spawned {
-            Ok(_) => waiting.1 += 1,
-            Err(err) if waiting.1 == 0 => {
-                log::warn!("extent store: a thread to pack parts ahead: {err}");
-                let refused: Vec<_> = waiting.0.drain(..).collect();
-                drop(waiting);
-                refused.into_iter().for_each(|(_, _, pending)| pending.skip());
-                return;
-            }
-            // Packers run already: they take it.
-            Err(_) => {}
+    #[cfg(not(madsim))]
+    {
+        let mut waiting = AHEAD.waiting.lock().unwrap();
+        if waiting.0.len() >= WAITING_MOST {
+            drop(waiting);
+            pending.skip();
+            return;
         }
+        waiting.0.push_back((part, data, pending));
+        if waiting.1 < PACKING_AHEAD {
+            let spawned =
+                std::thread::Builder::new().name("store packing ahead".into()).spawn(packing);
+            match spawned {
+                Ok(_) => waiting.1 += 1,
+                Err(err) if waiting.1 == 0 => {
+                    log::warn!("extent store: a thread to pack parts ahead: {err}");
+                    let refused: Vec<_> = waiting.0.drain(..).collect();
+                    drop(waiting);
+                    refused.into_iter().for_each(|(_, _, pending)| pending.skip());
+                    return;
+                }
+                // Packers run already: they take it.
+                Err(_) => {}
+            }
+        }
+        AHEAD.ready.notify_one();
     }
-    AHEAD.get().ready.notify_one();
 }
 
 /// cladefs: a thread packing parts ahead ([`pack_ahead`]), as they wait, for the process's life.
+#[cfg(not(madsim))]
 fn packing() {
     lowest_priority();
     let mut packer = PartPacker::new();
     loop {
         let (part, data, pending) = {
-            let mut waiting = AHEAD.get().waiting.lock().unwrap();
+            let mut waiting = AHEAD.waiting.lock().unwrap();
             loop {
                 if let Some(next) = waiting.0.pop_front() {
                     break next;
                 }
-                waiting = AHEAD.get().ready.wait(waiting).unwrap();
+                waiting = AHEAD.ready.wait(waiting).unwrap();
             }
         };
         if pending.wanted() {
@@ -426,6 +441,7 @@ fn packing() {
 /// cladefs: has the calling thread run at the host's lowest priority: Linux's idle scheduling
 /// class, which runs it only on CPUs nothing else wants, or else its lowest niceness; macOS's
 /// background band. Logged if refused: it runs at its priority then.
+#[cfg(not(madsim))]
 fn lowest_priority() {
     #[cfg(target_os = "linux")]
     {
