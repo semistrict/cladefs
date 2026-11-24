@@ -714,14 +714,16 @@ pub(super) async fn hand_over_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<
     if let_go_handed_over_at(daemon, &host, &path).await? {
         return Ok(());
     }
-    let marked = local_cell::upload::blocking(|| marker_at(&path))?;
+    let marking = path.clone();
+    let marked = super::cells::blocking(move || marker_at(&marking)).await?;
     let Handing { outgoing, under_way, unmarked } = handing(daemon, &path, marked)?;
     // Held alone, the cell changes no more: rounds are over.
     if let Some(under_way) = under_way {
         under_way.stop().await;
     }
     if unmarked {
-        local_cell::upload::blocking(|| give_up_to(daemon, &path, &outgoing))?;
+        let (daemon, path, outgoing) = (daemon.clone(), path.clone(), outgoing.clone());
+        super::cells::blocking(move || give_up_to(&daemon, &path, &outgoing)).await?;
     }
     ask(daemon, &host, &path, &outgoing).await
 }
@@ -810,13 +812,17 @@ fn marker_at(path: &Path) -> Result<Option<Marker>, Errno> {
 /// did, asked again after a failure or a crash letting it go (board 5730).
 async fn let_go_handed_over_at(
     daemon: &Daemon,
-    host: &ephemeral_host::Host,
+    host: &Arc<ephemeral_host::Host>,
     path: &Path,
 ) -> Result<bool, Errno> {
-    let handed = local_cell::upload::blocking(|| host.handed_over(path)).map_err(|err| {
-        log::error!("cladefsd: the journal: {err:#}");
-        Errno::EIO
-    })?;
+    let (journal, looking) = (host.clone(), path.to_owned());
+    let handed = super::cells::blocking(move || {
+        journal.handed_over(&looking).map_err(|err| {
+            log::error!("cladefsd: the journal: {err:#}");
+            Errno::EIO
+        })
+    })
+    .await?;
     for entry in &handed {
         log::info!("cladefsd: {} handed over: letting it go", entry.child);
         let_go(daemon, host, entry).await?;
@@ -829,7 +835,7 @@ async fn let_go_handed_over_at(
 /// of here; refused, served here again (`EAGAIN`); unanswered, given up still (`ENOTCONN`).
 async fn ask(
     daemon: &Daemon,
-    host: &ephemeral_host::Host,
+    host: &Arc<ephemeral_host::Host>,
     path: &Path,
     outgoing: &Outgoing,
 ) -> Result<(), Errno> {
@@ -889,23 +895,25 @@ async fn ask(
     count(&COUNTS.accepted, 1);
     // Accepted: noted so in the cell's entry, durably, then let go of, as asking again, or the
     // daemon starting again, finds it noted (board 5730).
-    let handed = local_cell::upload::blocking(|| -> Result<Entry, Errno> {
-        let cell = local_cell::host_cell(path).map_err(|_| Errno::EIO)?;
-        let entry = host.entry(cell).map_err(|err| {
+    let (path, host, peer) = (path.to_owned(), host.clone(), outgoing.peer.clone());
+    let journal = host.clone();
+    let handed = super::cells::blocking(move || {
+        let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
+        let entry = journal.entry(cell).map_err(|err| {
             log::warn!("cladefsd: the journal: {err:#}");
             Errno::EIO
         })?;
         let entry = entry.ok_or(Errno::EIO)?;
-        let peer = outgoing.peer.clone();
         let handed =
             Entry { migrating: Some(Migrating::HandedOver { id: migration, peer }), ..entry };
-        host.note(&handed).map_err(|err| {
+        journal.note(&handed).map_err(|err| {
             log::warn!("cladefsd: noting {} handed over: {err:#}", path.display());
             Errno::EIO
         })?;
         Ok(handed)
-    })?;
-    let_go(daemon, host, &handed).await
+    })
+    .await?;
+    let_go(daemon, &host, &handed).await
 }
 
 /// Ends the migration of the ephemeral cell at `path` (`AbortMigration`, board 8577), as the
@@ -927,14 +935,16 @@ pub(super) async fn abort_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), 
     // Nothing of it under way, given up or handed over: nothing to end, its guest running or not.
     // A hand-over gives it up only under way, which a migration begun since is.
     let under_way = daemon.migrations.outgoing.lock().unwrap().contains_key(&path);
-    let (handed, has_marker) = local_cell::upload::blocking(|| -> Result<_, Errno> {
-        let handed = host.handed_over(&path).map_err(|err| {
+    let (journal, looking) = (host.clone(), path.clone());
+    let (handed, has_marker) = super::cells::blocking(move || {
+        let handed = journal.handed_over(&looking).map_err(|err| {
             log::error!("cladefsd: the journal: {err:#}");
             Errno::EIO
         })?;
-        let has_marker = !under_way && handed.is_empty() && marker_at(&path)?.is_some();
+        let has_marker = !under_way && handed.is_empty() && marker_at(&looking)?.is_some();
         Ok((handed, has_marker))
-    })?;
+    })
+    .await?;
     if !under_way && handed.is_empty() && !has_marker {
         return Err(Errno::ENOENT);
     }
@@ -942,7 +952,8 @@ pub(super) async fn abort_on(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), 
     if let_go_handed_over_at(daemon, &host, &path).await? {
         return Err(Errno::EEXIST);
     }
-    let Some(marker) = local_cell::upload::blocking(|| marker_at(&path))? else {
+    let marking = path.clone();
+    let Some(marker) = super::cells::blocking(move || marker_at(&marking)).await? else {
         // Held alone, no hand-over goes on: its hand-over failed before giving the cell up, if
         // it began, which leaves it not given up, a migration under way still.
         return match take_moving(daemon, &path, true)? {
@@ -1003,7 +1014,11 @@ async fn abort_moving(moving: &Outgoing) -> Result<(), Errno> {
 /// still, then its target is told it may forget it accepted the migration, then this host's
 /// reference and the entry go (`sourceRetiresLast`). `EIO` if the directory does not go, the entry
 /// kept, from which asking again goes on.
-async fn let_go(daemon: &Daemon, host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Errno> {
+async fn let_go(
+    daemon: &Daemon,
+    host: &Arc<ephemeral_host::Host>,
+    entry: &Entry,
+) -> Result<(), Errno> {
     let Some(Migrating::HandedOver { id: migration, peer }) = &entry.migrating else {
         return Err(Errno::EINVAL);
     };
@@ -1039,20 +1054,26 @@ async fn let_go(daemon: &Daemon, host: &ephemeral_host::Host, entry: &Entry) -> 
     .await?;
     crate::faults::crashpoint!("migration::let_go");
     release(daemon, peer, *migration).await;
-    match host.retire(entry).await {
-        Ok(()) => Ok(()),
-        // The entry gone, its directory's sync failing: let go of all the same (board 5721), as
-        // asking again would find nothing to go on from (`ENOENT`). A crash may bring the entry
-        // back, which the daemon starting lets go of again, each step again as before.
-        Err(err) if matches!(local_cell::upload::blocking(|| host.entry(child)), Ok(None)) => {
-            log::warn!("cladefsd: {child} let go of, its entry's removal not durable: {err:#}");
-            Ok(())
+    let retired = host.retire_reference(entry).await;
+    let journal = host.clone();
+    let retired = super::cells::blocking(move || {
+        let retired = retired.and_then(|()| journal.forget(child));
+        match retired {
+            Ok(()) => Ok(()),
+            // The entry gone, its directory's sync failing: let go of all the same (board 5721), as
+            // asking again would find nothing to go on from (`ENOENT`). A crash may bring the entry
+            // back, which the daemon starting lets go of again, each step again as before.
+            Err(err) if matches!(journal.entry(child), Ok(None)) => {
+                log::warn!("cladefsd: {child} let go of, its entry's removal not durable: {err:#}");
+                Ok(())
+            }
+            Err(err) => {
+                log::warn!("cladefsd: retiring {child}'s reference, handed over: {err:#}");
+                Err(Errno::EIO)
+            }
         }
-        Err(err) => {
-            log::warn!("cladefsd: retiring {child}'s reference, handed over: {err:#}");
-            Err(Errno::EIO)
-        }
-    }
+    });
+    retired.await
 }
 
 /// Tells the target at `peer` it may forget it accepted `migration`, its cell let go of here
@@ -1071,7 +1092,7 @@ async fn release(daemon: &Daemon, peer: &str, migration: u64) {
 /// asking again.
 pub(super) async fn let_go_handed_over_on(
     daemon: &Daemon,
-    host: &ephemeral_host::Host,
+    host: &Arc<ephemeral_host::Host>,
 ) -> anyhow::Result<usize> {
     let mut let_go_of = 0;
     for entry in local_cell::upload::blocking(|| host.entries())? {
@@ -2371,6 +2392,60 @@ pub(super) mod target {
                 assert_eq!(host.entries().unwrap(), vec![], "its entry kept");
                 assert!(!host.accepted(migration));
             }
+        }
+
+        /// A source hand-over must write its durable marker away from the control worker.
+        #[test]
+        fn hand_overs_write_the_source_marker_on_a_blocking_thread() {
+            let daemon = Daemon::new();
+            let dir = tempfile::tempdir().unwrap();
+            let (_, root) = target_host(dir.path());
+            let path = root.join("vm");
+            host_fs::create_dir(&path).unwrap();
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let worker = std::thread::current().id();
+            let (marking, marked) = std::sync::mpsc::channel();
+            // Holding a listener without serving gives the migration a destination without an
+            // answer. The caller below stops as soon as the durable marker has been written.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let marker = Marker {
+                migration: 0x27,
+                peer: listener.local_addr().unwrap().to_string(),
+                incarnation: 1,
+                token: 1,
+            };
+            let outgoing = Arc::new(Outgoing::resumed(&daemon, marker).unwrap());
+            daemon
+                .migrations
+                .outgoing
+                .lock()
+                .unwrap()
+                .insert(path.clone(), Underway::Moving(outgoing));
+            fail::cfg_callback("migration::marking", move || {
+                marking.send(std::thread::current().id()).unwrap();
+            })
+            .unwrap();
+            runtime.block_on(async {
+                let hand_over = hand_over_on(&daemon, path.clone());
+                let marked = async {
+                    loop {
+                        if super::super::super::run::off_the_runtime({
+                            let path = path.clone();
+                            move || marker_at(&path).unwrap().is_some()
+                        }).await.unwrap() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                };
+                tokio::select! {
+                    result = hand_over => panic!("hand-over answered before it reached the peer: {result:?}"),
+                    result = tokio::time::timeout(Duration::from_secs(5), marked) => result.unwrap(),
+                }
+            });
+            fail::remove("migration::marking");
+            assert_ne!(marked.try_recv().unwrap(), worker);
         }
 
         /// The cell 1/7's locks held, by requests of its migrations and those waiting for it.

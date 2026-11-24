@@ -369,12 +369,18 @@ impl Host {
     /// Retires `entry`'s reference, then the entry: retiring it again, after either failed,
     /// finishes it.
     pub async fn retire(&self, entry: &Entry) -> Result<(), Error> {
+        self.retire_reference(entry).await?;
+        local_cell::upload::blocking(|| self.forget(entry.child))
+    }
+
+    /// Retires the bucket reference, leaving the caller to forget the journal entry.
+    pub async fn retire_reference(&self, entry: &Entry) -> Result<(), Error> {
         let bucket = crate::host_cell::bucket(&entry.bucket)?;
         let (origin, child) = (entry.origin, entry.child);
         let unreferred =
             bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child);
         unreferred.await.map_err(bucket_cell::Error::from)?;
-        local_cell::upload::blocking(|| self.forget(child))
+        Ok(())
     }
 
     /// Removes the cell directory at the path of `entry`, a migration's being taken here, if it is
