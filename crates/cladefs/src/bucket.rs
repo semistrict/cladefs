@@ -925,7 +925,10 @@ mod tests {
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
         let cell = cell.unwrap_or_else(crate::host_cell::new_alone);
-        OpenCell::create_kept_with(path, capacity, cell, &url_of(bucket), keeping).await
+        crate::open_cell::Opening::here()?
+            .with_keeping(keeping)
+            .create_kept(path, capacity, crate::CellOf::Named(cell), &url_of(bucket))
+            .await
     }
 
     /// Has the cell directory at `path` name `bucket` as the bucket its cell is kept in: a host
@@ -951,11 +954,7 @@ mod tests {
         path: impl AsRef<std::path::Path>,
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
-        OpenCell::open_with(
-            path,
-            crate::open_cell::Opening { keeping, ..crate::open_cell::Opening::here()? },
-        )
-        .await
+        crate::open_cell::Opening::here()?.with_keeping(keeping).open(path).await
     }
 
     /// Uploads only when a commit waits.
@@ -1407,8 +1406,7 @@ mod tests {
         let (freeing, writing) = (paths.pop().unwrap(), paths.pop().unwrap());
         drop(parent);
         let open = async |path: &std::path::PathBuf| {
-            let opening = crate::open_cell::Opening { arena: None, guest: false, keeping: idle() };
-            OpenCell::open_with(path, opening).await.unwrap()
+            crate::open_cell::Opening::keeping(idle()).for_host().open(path).await.unwrap()
         };
         let name = if version { "version" } else { "live" };
         // The heap once the page cache has let go of the files closed, and of the pages it holds:
@@ -2806,7 +2804,11 @@ mod tests {
         measure(
             "create",
             Box::pin(async {
-                let made = OpenCell::create_kept_with(&base, 1 << 30, cell, &url, idle()).await;
+                let made = crate::open_cell::Opening::here()
+                    .unwrap()
+                    .with_keeping(idle())
+                    .create_kept(&base, 1 << 30, crate::CellOf::Named(cell), &url)
+                    .await;
                 open_cell = Some(made.unwrap());
             }),
         )
@@ -3274,7 +3276,13 @@ mod tests {
             Some(crate::Errno::ESTALE)
         );
         // Taken, its log dropped: the open cell holds the cell as it is, its local commit lost.
-        OpenCell::take(&path, 1 << 30, cell, None).await.unwrap();
+        crate::open_cell::Opening::here()
+            .unwrap()
+            .take(&path, 1 << 30, cell, None)
+            .await
+            .unwrap()
+            .close()
+            .await;
         let first = reopened(&path, idle()).await.unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }

@@ -1100,9 +1100,12 @@ impl Command {
                 cell.close().await;
             }
             Self::Take { dir, capacity, cell, token, force } => {
-                let mut opening = cladefs::Opening::here()?;
-                opening.keeping.force = force;
-                OpenCell::take_with(&dir, (capacity, cell, token), opening).await?.close().await;
+                cladefs::Opening::here()?
+                    .force(force)
+                    .take(&dir, capacity, cell, token)
+                    .await?
+                    .close()
+                    .await;
             }
             Self::Place { dir, token, force: false } => OpenCell::place(&dir, token)?,
             Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,

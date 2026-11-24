@@ -7,7 +7,7 @@
 //! for them. It goes once none of them holds it, and nothing allocates in it after.
 
 use cladefs::pages::Arena;
-use cladefs::{Access, ExtentId, OpenCell, VolatileSlice};
+use cladefs::{Access, ExtentId, OpenCell, Opening, VolatileSlice};
 use futures::executor::block_on;
 
 /// A cell opened in an arena pages its extents in, through its window, once what made the arena
@@ -27,7 +27,7 @@ async fn cells_hold_their_arenas() {
 
     let held = Arena::new().unwrap();
     let arena = held.id();
-    let open = OpenCell::open_in(&path, Some(held.clone())).await.unwrap();
+    let open = Opening::here().unwrap().arena(Some(held.clone())).open(&path).await.unwrap();
     // What made it lets go of it, as a tenant's going does.
     drop(held);
     let window = open.create_dax_window(ps, None).unwrap();
