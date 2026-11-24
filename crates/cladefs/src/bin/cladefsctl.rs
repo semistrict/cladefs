@@ -1107,8 +1107,12 @@ impl Command {
                     .close()
                     .await;
             }
-            Self::Place { dir, token, force: false } => OpenCell::place(&dir, token)?,
-            Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,
+            Self::Place { dir, token, force: false } => {
+                local_cell::upload::blocking(|| OpenCell::place(&dir, token))?
+            }
+            Self::Place { dir, token, force: true } => {
+                local_cell::upload::blocking(|| OpenCell::place_forced(&dir, token))?
+            }
             Self::Sync { dir } => {
                 let cell = OpenCell::open(&dir).await?;
                 let synced = cell.wait_uploaded().await;
@@ -1154,7 +1158,7 @@ impl Command {
                 dst.display()
             ),
             Self::Delete { dir } => {
-                let bucket = OpenCell::bucket_at(&dir)?;
+                let bucket = local_cell::upload::blocking(|| OpenCell::bucket_at(&dir))?;
                 OpenCell::delete(&dir, bucket.as_deref()).await?
             }
             Self::Drop { dir } => OpenCell::delete(&dir, None).await?,
@@ -1175,13 +1179,13 @@ impl Command {
             }
             Self::Public { dir } => {
                 let cell = OpenCell::open(&dir).await?;
-                let made = cell.make_public();
+                let made = local_cell::upload::blocking(|| cell.make_public());
                 cell.close().await;
                 made?;
             }
             Self::PublicAttachOnly { dir } => {
                 let cell = OpenCell::open(&dir).await?;
-                let made = cell.make_public_attach_only();
+                let made = local_cell::upload::blocking(|| cell.make_public_attach_only());
                 cell.close().await;
                 made?;
             }
@@ -1190,10 +1194,10 @@ impl Command {
                 let ancestry = based.ancestry();
                 based.close().await;
                 let cell = OpenCell::open(&dir).await?;
-                let attached = match base.canonicalize() {
+                let attached = local_cell::upload::blocking(|| match base.canonicalize() {
                     Ok(base) => cell.attach_base(&base, &ancestry).map_err(anyhow::Error::from),
                     Err(err) => Err(err.into()),
-                };
+                });
                 cell.close().await;
                 attached?;
             }

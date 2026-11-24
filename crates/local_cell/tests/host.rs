@@ -99,14 +99,14 @@ fn openings_wait_for_a_cell_closing() {
 async fn cells_open_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let cell = create(&path);
+    let cell = host_fs::may_block(|| create(&path));
     let started = std::time::Instant::now();
-    let again = open_host(&path).err().expect("opened twice");
+    let again = host_fs::may_block(|| open_host(&path)).err().expect("opened twice");
     assert_eq!(format!("{again:#}"), "taking the cell directory: this process has the cell open");
     assert!(delete_host(&path, async |_| Ok(())).await.is_err(), "deleted an open cell");
     assert!(started.elapsed() < std::time::Duration::from_secs(1), "waited for itself");
     drop(cell);
-    drop(open_host(&path).unwrap());
+    drop(host_fs::may_block(|| open_host(&path)).unwrap());
 }
 
 /// cladefs: a cell is no cell until its maker says it is whole: one whose maker stopped part way,
@@ -116,23 +116,27 @@ async fn cells_open_once() {
 async fn cells_unmade_refuse_to_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    std::fs::create_dir(&path).unwrap();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    create_host(&path, description, "memory:///host", bucket_cell::cell::Kind::Fxfs).unwrap();
-    let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
-    let cell = making.open(OPTIONS, Opening::new(CELL)).unwrap();
+    let cell = host_fs::may_block(|| {
+        std::fs::create_dir(&path).unwrap();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        create_host(&path, description, "memory:///host", bucket_cell::cell::Kind::Fxfs).unwrap();
+        let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
+        making.open(OPTIONS, Opening::new(CELL)).unwrap()
+    });
     cell.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).await.unwrap();
     cell.commit(None).await.unwrap();
     // Its maker gone, part way.
     drop(cell);
-    let refused = open_host(&path).err().expect("an unmade cell opened");
-    assert_eq!(refused.downcast_ref::<Unmade>(), Some(&Unmade), "{refused:#}");
-    let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
-    let cell = making.open(OPTIONS, Opening::new(CELL)).unwrap();
-    cell.made().unwrap();
-    drop(cell);
-    let cell = open_host(&path).unwrap();
-    assert_eq!(cell.extent(ExtentId::new(CELL.id, 1)).unwrap(), Some((BLOCK as u64, false)));
+    host_fs::may_block(|| {
+        let refused = open_host(&path).err().expect("an unmade cell opened");
+        assert_eq!(refused.downcast_ref::<Unmade>(), Some(&Unmade), "{refused:#}");
+        let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
+        let cell = making.open(OPTIONS, Opening::new(CELL)).unwrap();
+        cell.made().unwrap();
+        drop(cell);
+        let cell = open_host(&path).unwrap();
+        assert_eq!(cell.extent(ExtentId::new(CELL.id, 1)).unwrap(), Some((BLOCK as u64, false)));
+    });
 }
 
 /// cladefs: a cell in a directory whose file system can't bypass the host's page cache, as the
@@ -179,14 +183,14 @@ fn placements_name_their_token_in_the_description() {
 async fn deleting_cells() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let open_cell = create(&path);
+    let open_cell = host_fs::may_block(|| create(&path));
     open_cell.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).await.unwrap();
     open_cell.commit(None).await.unwrap();
     drop(open_cell);
     let deleted = std::cell::Cell::new(None);
     delete_host(&path, async |cell| Ok(deleted.set(Some(cell)))).await.unwrap();
     assert_eq!((deleted.get(), path.exists()), (Some(CELL), false));
-    assert!(open_host(&path).is_err(), "the deleted cell opened");
+    assert!(host_fs::may_block(|| open_host(&path)).is_err(), "the deleted cell opened");
 }
 
 /// A directory is taken by one process at a time: a taking waits for another's to be let go, and

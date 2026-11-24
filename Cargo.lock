@@ -2106,7 +2106,9 @@ dependencies = [
  "libc",
  "log",
  "madsim",
+ "madsim-tokio",
  "node_local",
+ "tempfile",
 ]
 
 [[package]]

@@ -51,8 +51,10 @@ pub(super) async fn boot_daemon(
     #[cfg(not(madsim))]
     super::require_open_files()?;
     super::server::require_peer_pidfds()?;
-    super::server::resolve_roots_on(daemon).map_err(anyhow::Error::msg)?;
-    super::storage::open_part_cache(daemon).map_err(anyhow::Error::msg)?;
+    local_cell::upload::blocking(|| super::server::resolve_roots_on(daemon))
+        .map_err(anyhow::Error::msg)?;
+    local_cell::upload::blocking(|| super::storage::open_part_cache(daemon))
+        .map_err(anyhow::Error::msg)?;
     // cladefs: where traces of what VMs read go, if anywhere (TASK-702.1).
     super::reads::configure_on(daemon).map_err(anyhow::Error::msg)?;
     // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
@@ -65,14 +67,16 @@ pub(super) async fn boot_daemon(
     // handed over let go of (board 5730), and the references of those it holds no more retired,
     // before it serves; and how long a migration to it is kept, heard nothing of (board 5734).
     if let Some(dir) = set_os("CLADEFSD_EPHEMERAL") {
-        let ephemeral = crate::ephemeral_host::open(Path::new(&dir))?;
+        let ephemeral =
+            local_cell::upload::blocking(|| crate::ephemeral_host::open(Path::new(&dir)))?;
         let let_go = super::migration::let_go_handed_over_on(daemon, &ephemeral).await?;
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
         super::migration::idle().map_err(anyhow::Error::msg)?;
         // cladefs: where ephemeral cells migrated to it go (board 8447): none named, it takes no
         // migrations; one named but not there, it refuses to start.
         if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {
-            let root = super::migration::target::cells_root().map_err(anyhow::Error::msg)?;
+            let root = local_cell::upload::blocking(super::migration::target::cells_root)
+                .map_err(anyhow::Error::msg)?;
             log::info!("cladefsd: ephemeral cells migrated here go in {}", root.display());
         }
         let retired = ephemeral.retire_stale().await?;
@@ -122,7 +126,7 @@ pub(super) async fn boot_daemon(
             Some(dir) => std::path::PathBuf::from(dir),
             None => Path::new(&control).with_file_name("tenants"),
         };
-        host_fs::create_dir_all_durably(&tenants)
+        local_cell::upload::blocking(|| host_fs::create_dir_all_durably(&tenants))
             .with_context(|| format!("making {}", tenants.display()))?;
         serve_control(daemon, &control, tenants)?;
     }

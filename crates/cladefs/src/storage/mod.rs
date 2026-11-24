@@ -131,26 +131,33 @@ impl Storage {
         let (path, bucket) = (path.as_path(), bucket.as_str());
         // What a making that died part way left is no cell: its directory goes, not the bucket's
         // cell, which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
-        if host_cell::unmade(path) {
-            local_cell::remove_cell_dir(path)
-                .with_context(|| format!("removing {}, a cell directory unmade", path.display()))
-                .map_err(Error::new)?;
-        }
-        if !path.exists() {
+        let exists = local_cell::upload::blocking(|| -> Result<bool, Error> {
+            if host_cell::unmade(path) {
+                local_cell::remove_cell_dir(path)
+                    .with_context(|| {
+                        format!("removing {}, a cell directory unmade", path.display())
+                    })
+                    .map_err(Error::new)?;
+            }
+            Ok(host_fs::exists(path))
+        })?;
+        if !exists {
             let keeping = Self::keeping()?;
             let keeping =
                 local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
             let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
             let making = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2);
             let opened = making.await?;
-            opened.made().map_err(Error::new)?;
+            local_cell::upload::blocking(|| opened.made()).map_err(Error::new)?;
             // Closed before it is placed, as `CreateCell` places a cell, and opened again.
             opened.close().await;
             if let Some(token) = token {
-                local_cell::place_host(path, token, false).map_err(Error::new)?;
+                local_cell::upload::blocking(|| local_cell::place_host(path, token, false))
+                    .map_err(Error::new)?;
             }
         } else {
-            let found = local_cell::host_cell(path).map_err(Error::new)?;
+            let found =
+                local_cell::upload::blocking(|| local_cell::host_cell(path)).map_err(Error::new)?;
             let not = match of {
                 host_cell::CellOf::Taken(cell) if found == cell => None,
                 host_cell::CellOf::Taken(cell) => Some(format!("{cell}")),
@@ -218,7 +225,7 @@ impl Storage {
             let opened = host_cell::create_unmade(&path, size, of, kind, None, keeping.clone());
             let opened = opened.await?;
             if whole {
-                opened.made().map_err(Error::new)?;
+                local_cell::upload::blocking(|| opened.made()).map_err(Error::new)?;
             }
             Self::opened(path, opened, keeping).await
         })
@@ -284,7 +291,8 @@ impl Storage {
         let path = path.as_ref().to_owned();
         on_bucket_runtime(async move {
             // As a copy never placed deletes its cell where this process is no host's daemon.
-            let bucket = host_cell::bucket_at(&path).map_err(Error::new)?;
+            let bucket =
+                local_cell::upload::blocking(|| host_cell::bucket_at(&path)).map_err(Error::new)?;
             host_cell::delete(&path, bucket.as_deref(), host_cell::token).await
         })
         .await

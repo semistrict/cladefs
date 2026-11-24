@@ -99,7 +99,7 @@ async fn make_base_dir<F: Future<Output = anyhow::Result<()>>>(
     fill: impl FnOnce(Storage) -> F,
 ) -> Result<(), Error> {
     // cladefs: what an import its process died in left, unmade, is no cell: made anew (TASK-196).
-    if Storage::is_unmade(path) {
+    if local_cell::upload::blocking(|| Storage::is_unmade(path)) {
         Storage::delete(path).await?;
     }
     let storage = Storage::create_unmade_keeping(path, (capacity, tenant), keeping).await?;
@@ -111,7 +111,7 @@ async fn make_base_dir<F: Future<Output = anyhow::Result<()>>>(
         return Err(Error::new(err));
     }
     // Whole once filled, and closed: until then, its making's dying leaves no cell.
-    Storage::made(path)?;
+    local_cell::upload::blocking(|| Storage::made(path))?;
     unfinished.finish();
     Ok(())
 }

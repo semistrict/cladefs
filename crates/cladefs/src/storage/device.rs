@@ -526,7 +526,7 @@ mod tests {
         let in_the_clear = async |storage: &Storage| {
             quiesced(storage).await;
             // As on the disk, what the cell's page cache holds written there first (TASK-433).
-            local_cell::pages::shared().write_back_all().unwrap();
+            host_fs::may_block(|| local_cell::pages::shared().write_back_all().unwrap());
             let pieces = [&small_data[..64], &large_data[..64], &large_data[MIB..MIB + 64]];
             crate::testing::files_holding(dir.path(), &pieces)
         };

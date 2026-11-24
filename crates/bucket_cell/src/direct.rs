@@ -403,7 +403,7 @@ mod tests {
         // What a write failing part way left on the disk: bytes other than the block held.
         let plain = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         plain.write_all_at(&[2; 100], 0).unwrap();
-        let read_only = std::fs::File::open(&path).unwrap();
+        let read_only = File::open(&path).unwrap();
         write_at(&read_only, &mut tail, &[3; 10], 100).unwrap_err();
         write_at(&file, &mut tail, &[4; 10], 100).unwrap();
         let mut read = vec![0; 110];

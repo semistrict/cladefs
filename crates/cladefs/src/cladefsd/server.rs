@@ -393,8 +393,12 @@ impl Tenant {
         id: u64,
         dir: impl AsRef<Path>,
     ) -> std::io::Result<Arc<Self>> {
-        let dir = host_fs::canonicalize(&dir.as_ref())?;
-        let disk = Some(super::disk::Disk::new_on(daemon, id, &dir)?);
+        let dir = dir.as_ref();
+        let (dir, disk) = local_cell::upload::blocking(|| -> std::io::Result<_> {
+            let dir = host_fs::canonicalize(&dir)?;
+            let disk = Some(super::disk::Disk::new_on(daemon, id, &dir)?);
+            Ok((dir, disk))
+        })?;
         let policy = Policy::granted(dir);
         let tenant = Arc::new(Self {
             daemon: Arc::clone(daemon),
@@ -432,7 +436,7 @@ impl Tenant {
     /// own; and a cell put there by other means is no more its than it was.
     fn reaches(&self, path: &Path) -> Result<(), Errno> {
         let Some(id) = self.granted() else { return Ok(()) };
-        match local_cell::host_cell(path) {
+        match local_cell::upload::blocking(|| local_cell::host_cell(path)) {
             Ok(cell) if cell.tenant != id => Err(Errno::EACCES),
             // No cell yet, which it makes of its own cell; or one its opening fails, saying why.
             _ => Ok(()),
@@ -1101,10 +1105,20 @@ fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Sen
     // pool's to be found from wherever they fire (doc-24).
     #[cfg(madsim)]
     {
-        let mut future = Box::pin(future);
+        struct MayBlock<F>(std::pin::Pin<Box<F>>);
+        impl<F: std::future::Future> std::future::Future for MayBlock<F> {
+            type Output = F::Output;
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                host_fs::may_block(|| self.0.as_mut().poll(cx))
+            }
+        }
+        let mut future = MayBlock(Box::pin(future));
         let waker = futures::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
-        if future.as_mut().poll(&mut context).is_pending() {
+        if std::pin::Pin::new(&mut future).poll(&mut context).is_pending() {
             drop(tokio::spawn(future));
         }
     }
@@ -1112,7 +1126,9 @@ fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Sen
     {
         let poll = move |daemon: &Daemon, runnable: async_task::Runnable| {
             let _io = daemon.runtime().enter();
-            runnable.run();
+            // cladefs: runs on `Pool` (dedicated blocking threads, not tokio's workers), entering
+            // `daemon.runtime()` only for timers and spawns (board 10824).
+            host_fs::may_block(|| runnable.run());
         };
         let scheduled = Arc::clone(&daemon);
         let (runnable, task) = async_task::spawn(future, move |runnable| {
@@ -1984,8 +2000,9 @@ impl Connection {
         // restore forked, holds the version's state, or is refused, as it is (TASK-194).
         let mut there = None;
         if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
-            && host_fs::exists(&path)
-            && !crate::host_cell::unmade(path)
+            && local_cell::upload::blocking(|| {
+                host_fs::exists(&path) && !crate::host_cell::unmade(path)
+            })
         {
             let open_cell = Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?);
             cells::at_version(
@@ -2003,7 +2020,7 @@ impl Connection {
             // cladefs: or where a cell's making was left unmade, its host crashing, which is no
             // cell: removed first, as deleting it would (TASK-79.84).
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
-                cells::removed_if_unmade(path)?;
+                local_cell::upload::blocking(|| cells::removed_if_unmade(path))?;
                 let forked = (crate::CellId { tenant, id: cell }, version);
                 // cladefs: a restore's fork, made and opened syncing nothing: durable by its first
                 // flush or its close, before any commit of its VM is (board 7420, the user's

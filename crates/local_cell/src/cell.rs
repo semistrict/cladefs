@@ -1959,7 +1959,7 @@ impl<D: Dir> LocalCell<D> {
                     true => Vec::new(),
                 }
             };
-            self.remove_raw(raw);
+            crate::upload::blocking(|| self.remove_raw(raw));
             drop(self.opened.with(Mutex::lock).take());
         }
         flushed
@@ -2016,7 +2016,9 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<Write<'_, D>, Error> {
         // Not while a commit, or a closing between commits, waits for the writes in progress.
         loop {
-            if let Some(write) = self.try_begin_write(extent, offset, len)? {
+            if let Some(write) =
+                crate::upload::blocking(|| self.try_begin_write(extent, offset, len))?
+            {
                 return Ok(write);
             }
             self.wait_until_writes_resume().await;
@@ -2547,7 +2549,8 @@ impl<D: Dir> LocalCell<D> {
         let mut state = self.between_writes(committing).await?;
         // From its first seal on, the state runs ahead of the files: a commit failing part way
         // fails the cell.
-        let committed = state.failing(|state| self.commit_in(state, root));
+        let committed =
+            crate::upload::blocking(|| state.failing(|state| self.commit_in(state, root)));
         committed.context("committing the extent store")
     }
 
@@ -2614,7 +2617,9 @@ impl<D: Dir> LocalCell<D> {
             let committing = self.committing.lock().await;
             let mut state = self.between_writes(&committing).await?;
             // Its commit's record on, the state runs ahead of the files, as a commit's does.
-            let relocated = state.failing(|state| self.relocate_in(state, relocating));
+            let relocated = crate::upload::blocking(|| {
+                state.failing(|state| self.relocate_in(state, relocating))
+            });
             relocated.context("relocating the extent store's extents")?
         };
         // Durable, as the uploader takes only what is.
@@ -3224,17 +3229,19 @@ impl<D: Dir> LocalCell<D> {
             return Ok(None);
         }
         let epoch = state.epoch;
-        let unframed = state.failing(|state| match state.segments.has_full() {
-            true => {
-                let unframed = state.segments.close_first_full(epoch, state.next_sequence);
-                self.enqueue(state, &unframed);
-                Ok(unframed)
-            }
-            false => self.close_open_segment(state, epoch),
+        let unframed = crate::upload::blocking(|| {
+            state.failing(|state| match state.segments.has_full() {
+                true => {
+                    let unframed = state.segments.close_first_full(epoch, state.next_sequence);
+                    self.enqueue(state, &unframed);
+                    Ok(unframed)
+                }
+                false => self.close_open_segment(state, epoch),
+            })
         });
         let unframed = unframed.context("closing the open segment")?;
         let number = unframed.number();
-        self.frame_behind(&mut state, [unframed]);
+        crate::upload::blocking(|| self.frame_behind(&mut state, [unframed]));
         Ok(Some(number))
     }
 
@@ -3405,31 +3412,33 @@ impl<D: Dir> LocalCell<D> {
     pub async fn closed(&self, limit: usize) -> Result<Vec<Closed<D::File>>, Error> {
         let framing = self.state()?.segments.framings().clone();
         self.wait_for_writings(framing).await?;
-        let mut state = self.state()?;
-        let state = &mut *state;
-        // cladefs: and framed: its framed file is what is uploaded.
-        let segments = &state.segments;
-        let writing = |number| segments.is_writing(SegmentId { cell: self.cell.id, number });
-        let taken: Vec<(u64, Footer, bool, u64)> =
-            (state.wal.take(self.uploadable(), writing, limit))
-                .into_iter()
-                .map(|queued| {
-                    (queued.number, queued.footer.clone(), queued.restamped, queued.data_len())
-                })
-                .collect();
-        let mut closed = Vec::with_capacity(taken.len());
-        for (number, footer, restamped, data_len) in taken {
-            let segment = SegmentId { cell: self.cell.id, number };
-            let file = state.segments.framed_file(&*self.dir, segment)?.file.clone();
-            let mut own = Vec::with_capacity(footer.contents.own.len());
-            for (extent, location) in footer.own() {
-                let file = state.own_files.file(&*self.dir, extent)?;
-                own.push((location.key, file.file.clone()));
+        crate::upload::blocking(|| {
+            let mut state = self.state()?;
+            let state = &mut *state;
+            // cladefs: and framed: its framed file is what is uploaded.
+            let segments = &state.segments;
+            let writing = |number| segments.is_writing(SegmentId { cell: self.cell.id, number });
+            let taken: Vec<(u64, Footer, bool, u64)> =
+                (state.wal.take(self.uploadable(), writing, limit))
+                    .into_iter()
+                    .map(|queued| {
+                        (queued.number, queued.footer.clone(), queued.restamped, queued.data_len())
+                    })
+                    .collect();
+            let mut closed = Vec::with_capacity(taken.len());
+            for (number, footer, restamped, data_len) in taken {
+                let segment = SegmentId { cell: self.cell.id, number };
+                let file = state.segments.framed_file(&*self.dir, segment)?.file.clone();
+                let mut own = Vec::with_capacity(footer.contents.own.len());
+                for (extent, location) in footer.own() {
+                    let file = state.own_files.file(&*self.dir, extent)?;
+                    own.push((location.key, file.file.clone()));
+                }
+                let keys = self.keys.clone();
+                closed.push(Closed { number, footer, file, own, restamped, keys, data_len });
             }
-            let keys = self.keys.clone();
-            closed.push(Closed { number, footer, file, own, restamped, keys, data_len });
-        }
-        Ok(closed)
+            Ok(closed)
+        })
     }
 
     /// cladefs: segment `number`, which [`LocalCell::closed`] gave, the first of the write-ahead
@@ -3451,57 +3460,62 @@ impl<D: Dir> LocalCell<D> {
         if let Some(replicator) = self.replicator() {
             replicator.acknowledged(number);
         }
-        let mut start = self.start.with(Mutex::lock);
-        let after = {
-            let state = self.state()?;
-            match state.wal.first() {
-                Some(queued) if queued.number == number => {
-                    queued.footer.contents.commits.last().copied().or(state.wal.start())
+        // cladefs: writes and syncs the WAL start, removes raw files and logs, and moves
+        // acknowledged segments to the part cache off the bucket runtime's workers (board 10824).
+        crate::upload::blocking(|| {
+            let mut start = self.start.with(Mutex::lock);
+            let after = {
+                let state = self.state()?;
+                match state.wal.first() {
+                    Some(queued) if queued.number == number => {
+                        queued.footer.contents.commits.last().copied().or(state.wal.start())
+                    }
+                    _ => bail!("segment {} is not the first of the write-ahead log", Short(number)),
                 }
-                _ => bail!("segment {} is not the first of the write-ahead log", Short(number)),
+            };
+            // cladefs: failing, it leaves the record before it whole, which the cell goes on with:
+            // the uploader tries again (TASK-539.12). Before, a full disk failed the cell here.
+            start.write(&*self.dir, after).context("recording an acknowledgement")?;
+            let (leaving, raw) = {
+                let mut state = self.state()?;
+                let state = &mut *state;
+                // cladefs: those whose acknowledgements are whole, of a commit spanning segments
+                // all once its last is acknowledged (`Queue::acknowledge`, TASK-338).
+                let whole = state.wal.acknowledge(number).expect("the first, as found");
+                for queued in &whole {
+                    state.release_kept(footer_last(&queued.footer));
+                }
+                state.trim_kept(state.epoch);
+                let mut leaving = Vec::new();
+                for queued in whole {
+                    let footer = &queued.footer;
+                    let key = bucket_cell::layout::segment(self.cell, footer.segment, footer.epoch);
+                    let own: Vec<_> = footer.own().collect();
+                    let segment = SegmentId { cell: self.cell.id, number: queued.number };
+                    let at = (key.as_str(), !queued.restamped);
+                    leaving.extend(state.acknowledge(segment, at, &own, queued.data_len()));
+                }
+                // Those no extent's data is in here any more leave now.
+                let reaped = state.segments.reap().into_iter();
+                leaving.extend(reaped.map(|(number, key)| (segment_path(number), key)));
+                // cladefs: and the raw files and logs of the segments framed whose commits are
+                // durable, as those acknowledged are, which no flush may come to remove
+                // (TASK-165.9).
+                let raw = state.segments.raw(self.durability.with(Mutex::lock).local());
+                (leaving, raw)
+            };
+            self.remove_raw(raw);
+            let done_logs: Vec<SegmentId> = {
+                let mut kept = self.kept_logs.lock().unwrap();
+                let rest = kept.split_off(&SegmentId { cell: self.cell.id, number: number + 1 });
+                std::mem::replace(&mut *kept, rest).into_iter().collect()
+            };
+            for segment in done_logs {
+                self.recycle_or_remove_log(segment);
             }
-        };
-        // cladefs: failing, it leaves the record before it whole, which the cell goes on with: the
-        // uploader tries again (TASK-539.12). Before, a full disk failed the cell here.
-        start.write(&*self.dir, after).context("recording an acknowledgement")?;
-        let (leaving, raw) = {
-            let mut state = self.state()?;
-            let state = &mut *state;
-            // cladefs: those whose acknowledgements are whole, of a commit spanning segments all
-            // once its last is acknowledged (`Queue::acknowledge`, TASK-338).
-            let whole = state.wal.acknowledge(number).expect("the first, as found");
-            for queued in &whole {
-                state.release_kept(footer_last(&queued.footer));
-            }
-            state.trim_kept(state.epoch);
-            let mut leaving = Vec::new();
-            for queued in whole {
-                let footer = &queued.footer;
-                let key = bucket_cell::layout::segment(self.cell, footer.segment, footer.epoch);
-                let own: Vec<_> = footer.own().collect();
-                let segment = SegmentId { cell: self.cell.id, number: queued.number };
-                let at = (key.as_str(), !queued.restamped);
-                leaving.extend(state.acknowledge(segment, at, &own, queued.data_len()));
-            }
-            // Those no extent's data is in here any more leave now.
-            let reaped = state.segments.reap().into_iter();
-            leaving.extend(reaped.map(|(number, key)| (segment_path(number), key)));
-            // cladefs: and the raw files and logs of the segments framed whose commits are durable,
-            // as those acknowledged are, which no flush may come to remove (TASK-165.9).
-            let raw = state.segments.raw(self.durability.with(Mutex::lock).local());
-            (leaving, raw)
-        };
-        self.remove_raw(raw);
-        let done_logs: Vec<SegmentId> = {
-            let mut kept = self.kept_logs.lock().unwrap();
-            let rest = kept.split_off(&SegmentId { cell: self.cell.id, number: number + 1 });
-            std::mem::replace(&mut *kept, rest).into_iter().collect()
-        };
-        for segment in done_logs {
-            self.recycle_or_remove_log(segment);
-        }
-        leave(&*self.dir, self.cache.as_deref(), leaving);
-        Ok(())
+            leave(&*self.dir, self.cache.as_deref(), leaving);
+            Ok(())
+        })
     }
 
     /// cladefs: makes the commits ordered so far durable, in order, as few syncs as they need
@@ -4007,16 +4021,18 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<(), Error> {
         let write = self.begin_write(extent, offset, len).await?;
         let piece = (piece as u64 / SECTOR).max(1) * SECTOR;
-        let mut aligned = Aligned::new(len.min(piece) as usize);
-        let mut at = 0;
-        while at < len {
-            let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece) as usize];
-            fill(at, buf);
-            write.write(buf, at)?;
-            at += buf.len() as u64;
-        }
-        write.finish();
-        Ok(())
+        crate::upload::blocking(|| -> Result<(), Error> {
+            let mut aligned = Aligned::new(len.min(piece) as usize);
+            let mut at = 0;
+            while at < len {
+                let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece) as usize];
+                fill(at, buf);
+                write.write(buf, at)?;
+                at += buf.len() as u64;
+            }
+            write.finish();
+            Ok(())
+        })
     }
 
     /// Sets the most bytes the cell's extents may hold, durably: cladefs: a commit of its own,
@@ -4031,15 +4047,22 @@ impl<D: Dir> LocalCell<D> {
             let block_size = self.block_size as u64;
             ensure!(capacity >= block_size, "a capacity of {capacity} is less than a block");
             state.space.check_capacity(capacity)?;
-            let committed = state.failing(|state| {
-                state.space.set_capacity(capacity);
-                state.uncommitted.take_capacity();
-                let epoch = state.epoch + 1;
-                state.trim_kept(epoch);
-                let (changed, next_sequence) = ((None, Some(capacity)), state.next_sequence);
-                let records =
-                    state.segments.record(epoch, &[], changed, &state.extents, next_sequence)?;
-                self.committed(state, epoch, records)
+            let committed = crate::upload::blocking(|| {
+                state.failing(|state| {
+                    state.space.set_capacity(capacity);
+                    state.uncommitted.take_capacity();
+                    let epoch = state.epoch + 1;
+                    state.trim_kept(epoch);
+                    let (changed, next_sequence) = ((None, Some(capacity)), state.next_sequence);
+                    let records = state.segments.record(
+                        epoch,
+                        &[],
+                        changed,
+                        &state.extents,
+                        next_sequence,
+                    )?;
+                    self.committed(state, epoch, records)
+                })
             });
             committed.context("committing the capacity")?;
         }

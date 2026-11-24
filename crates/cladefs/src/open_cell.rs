@@ -914,7 +914,7 @@ impl OpenCell {
     /// open cell holds it without its data.
     async fn read_stored(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<()> {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
-        match self.local.read(extent, offset, data) {
+        match local_cell::upload::blocking(|| self.local.read(extent, offset, data)) {
             Err(ref error)
                 if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
@@ -922,7 +922,8 @@ impl OpenCell {
                 // cladefs: what the cell holds of it now, if a relocation moved it meanwhile
                 // (doc-27), read as first, into a buffer of its own.
                 let mut here = vec![0; data.len()];
-                let again = || self.local.read(extent, offset, &mut here);
+                let again =
+                    || local_cell::upload::blocking(|| self.local.read(extent, offset, &mut here));
                 let fetcher = self.fetcher();
                 let followed = fetcher.read_following(extent, location, (offset, len), again);
                 match followed.await.map_err(fetch_errno)? {
@@ -1638,7 +1639,7 @@ impl OpenCell {
     pub(crate) async fn uploaded_version_at(&self, path: impl AsRef<Path>) -> Result<u64, Error> {
         let id = self.make_version(None).await?;
         self.make_uploaded().await?;
-        self.open_version_at(path, id)?;
+        host_fs::may_block(|| self.open_version_at(path, id))?;
         Ok(id)
     }
 

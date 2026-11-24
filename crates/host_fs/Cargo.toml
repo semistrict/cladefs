@@ -9,11 +9,16 @@ publish = false
 
 [dependencies]
 libc.workspace = true
-node_local.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(not(madsim))'.dependencies]
+tokio.workspace = true
 [target.'cfg(madsim)'.dependencies]
 log.workspace = true
 madsim = "=0.2.34"
+node_local.workspace = true
 
 [lints]
 workspace = true

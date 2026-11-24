@@ -110,10 +110,11 @@ pub(super) async fn off_the_runtime<T: Send + 'static>(
     #[cfg(not(madsim))]
     {
         let parent = bucket_cell::trace::Parent::current();
-        let done = tokio::task::spawn_blocking(move || parent.run(work)).await;
+        let done =
+            tokio::task::spawn_blocking(move || parent.run(|| host_fs::may_block(work))).await;
         return done.map_err(|err| err.to_string());
     }
     #[cfg(madsim)]
-    return std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+    return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host_fs::may_block(work)))
         .map_err(|_| "it panicked".to_owned());
 }

@@ -6,9 +6,11 @@
 //!
 //! What the daemon keeps on its host's disk, its cell directories, replica directories, part cache,
 //! host state, it reads and writes through this crate rather than `std::fs`. Built normally, the
-//! crate is `std::fs`, re-exported, which costs the daemon nothing, with the calls on a
-//! file's descriptor the daemon makes beside it ([`punch_hole`], [`data_ranges`], [`Flock`]) and
-//! what `Path` asks the file system itself ([`exists`], [`is_dir`]).
+//! crate wraps `std::fs` in inline forwarders, which cost the daemon nothing in release builds
+//! while asserting in debug and test builds that slow disk calls never run directly on an async
+//! runtime thread outside [`may_block`] (board 10824), with the calls on a file's descriptor the
+//! daemon makes beside it ([`punch_hole`], [`data_ranges`], [`Flock`]) and what `Path` asks the
+//! file system itself ([`exists`], [`is_dir`]).
 //!
 //! Under `--cfg madsim`, each simulated host has a disk of its own in memory, of the same calls,
 //! which keeps what a host's file system would have made durable: a file's contents as of its
@@ -20,17 +22,21 @@
 //! A host's locks of files ([`Flock`]) are its disk's, and go with its crash, as a process's go
 //! with its death.
 
+mod blocking;
 pub mod crash;
 pub mod mem;
 
+use blocking::assert_may_block;
+pub use blocking::may_block;
+
 #[cfg(not(madsim))]
-pub use std::fs::{
-    DirEntry, File, FileType, Metadata, OpenOptions, ReadDir, canonicalize, copy, create_dir,
-    create_dir_all, hard_link, metadata, read, read_dir, read_to_string, remove_dir,
-    remove_dir_all, remove_file, rename, symlink_metadata, write,
+mod real;
+#[cfg(not(madsim))]
+pub use real::{
+    DirEntry, File, FileExt, FileType, Metadata, MetadataExt, OpenOptions, OpenOptionsExt, ReadDir,
+    canonicalize, copy, create_dir, create_dir_all, hard_link, metadata, read, read_dir,
+    read_to_string, remove_dir, remove_dir_all, remove_file, rename, symlink_metadata, write,
 };
-#[cfg(not(madsim))]
-pub use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 
 #[cfg(madsim)]
 mod sim;
@@ -90,7 +96,9 @@ pub fn sync_dir(path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Gives the `len` bytes at `offset` of `file` back to its disk, keeping its size: `fallocate`'s
 /// `FALLOC_FL_PUNCH_HOLE` on Linux, `F_PUNCHHOLE` on macOS. The bytes read as zeros after.
+#[track_caller]
 pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    assert_may_block("punch_hole");
     if len == 0 {
         return Ok(());
     }
@@ -103,7 +111,9 @@ pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<()> {
 /// The ranges of `file` below `size` that hold data, holes between them, in order: as `lseek`'s
 /// `SEEK_DATA` and `SEEK_HOLE` find them; the whole of it on a file system that finds none
 /// (`EINVAL`).
+#[track_caller]
 pub fn data_ranges(file: &File, size: u64) -> io::Result<Vec<std::ops::Range<u64>>> {
+    assert_may_block("data_ranges");
     #[cfg(madsim)]
     return file.data_ranges(size);
     #[cfg(not(madsim))]
@@ -111,6 +121,7 @@ pub fn data_ranges(file: &File, size: u64) -> io::Result<Vec<std::ops::Range<u64
 }
 
 /// The bytes of `file` its disk holds, holes not counted: its blocks', as `stat` counts them.
+#[track_caller]
 pub fn allocated(file: &File) -> io::Result<u64> {
     Ok(file.metadata()?.blocks() * 512)
 }
@@ -119,7 +130,9 @@ pub fn allocated(file: &File) -> io::Result<u64> {
 /// `F_FULLFSYNC`), that its file system supports; or, if none, by an `fsync`, which is all there is
 /// then (TASK-92.48). Not std's `sync_all`, which is an `F_FULLFSYNC` there. Under madsim, a sync.
 #[cfg(target_os = "macos")]
+#[track_caller]
 pub fn sync_with(file: &File, syncs: &[libc::c_int]) -> io::Result<()> {
+    assert_may_block("sync_with");
     #[cfg(madsim)]
     {
         let _ = syncs;
@@ -132,7 +145,7 @@ pub fn sync_with(file: &File, syncs: &[libc::c_int]) -> io::Result<()> {
 /// The calls on a file's descriptor, built normally.
 #[cfg(not(madsim))]
 mod descriptor {
-    use std::fs::File;
+    use crate::File;
     use std::io;
     use std::os::fd::AsRawFd as _;
 
@@ -221,5 +234,82 @@ mod descriptor {
                 return Err(err);
             }
         }
+    }
+}
+
+#[cfg(all(test, not(madsim), debug_assertions))]
+mod blocking_tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+
+    /// Board 10824: calling a slow `host_fs` operation directly on a tokio worker panics in
+    /// debug/test builds, while calling it on a plain thread or inside `may_block` succeeds,
+    /// including nested scopes and scopes unwound by a panic.
+    #[test]
+    fn slow_calls_panic_on_async_workers_unless_inside_may_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+
+        // Plain OS thread: allowed without `may_block`.
+        write(&path, b"hello").unwrap();
+        assert_eq!(read(&path).unwrap(), b"hello");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Direct call on a tokio worker panics (free function).
+        let p = path.clone();
+        let err = runtime.block_on(runtime.spawn(async move {
+            let _ = metadata(&p);
+        }));
+        assert!(err.unwrap_err().is_panic(), "host_fs::metadata on a tokio worker must panic");
+
+        // Direct call on an already-open `File` on a tokio worker panics too.
+        let file = File::options().read(true).write(true).open(&path).unwrap();
+        let err = runtime.block_on(runtime.spawn(async move {
+            let _ = file.sync_all();
+        }));
+        assert!(
+            err.unwrap_err().is_panic(),
+            "host_fs::File::sync_all on a tokio worker must panic"
+        );
+
+        // Inside `may_block` (including nested scopes) on a tokio worker: allowed.
+        let p = path.clone();
+        runtime
+            .block_on(runtime.spawn(async move {
+                may_block(|| {
+                    assert!(exists(&p));
+                    let mut file =
+                        may_block(|| File::options().read(true).write(true).open(&p).unwrap());
+                    let mut buf = [0u8; 5];
+                    file.read_exact_at(&mut buf, 0).unwrap();
+                    assert_eq!(&buf, b"hello");
+                    file.write_all(b"world").unwrap();
+                    file.sync_data().unwrap();
+                    let mut back = Vec::new();
+                    let mut reader = File::open(&p).unwrap();
+                    reader.read_to_end(&mut back).unwrap();
+                    assert_eq!(back, b"world");
+                });
+            }))
+            .unwrap();
+
+        // A panic inside `may_block` restores the depth so a later unguarded call still panics.
+        let p = path.clone();
+        let err = runtime.block_on(runtime.spawn(async move {
+            let caught = std::panic::catch_unwind(|| {
+                may_block(|| panic!("boom"));
+            });
+            assert!(caught.is_err());
+            let _ = exists(&p);
+        }));
+        assert!(
+            err.unwrap_err().is_panic(),
+            "host_fs::exists after an unwound may_block scope must still panic"
+        );
     }
 }

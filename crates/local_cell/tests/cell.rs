@@ -53,7 +53,7 @@ fn pattern(seed: u8, offset: usize, len: usize) -> Vec<u8> {
 
 fn create<D: Dir>(dir: D, capacity: u64) -> LocalCell<D> {
     let description = Description { block_size: BLOCK as u32, capacity, cell: CELL };
-    LocalCell::create(dir, description, OPTIONS).unwrap()
+    host_fs::may_block(|| LocalCell::create(dir, description, OPTIONS).unwrap())
 }
 
 /// cladefs: the cell in `dir`, opened where the bucket holds `state` of its cell, its writer's
@@ -82,7 +82,7 @@ fn created_on(
 
 fn read<D: Dir>(cell: &LocalCell<D>, extent: ExtentId, offset: u64, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    cell.read(extent, offset, &mut data).unwrap();
+    host_fs::may_block(|| cell.read(extent, offset, &mut data).unwrap());
     data
 }
 
@@ -136,9 +136,9 @@ async fn reads_what_was_written<D: Dir>(dir: D, reopen: impl Fn(&D) -> D) {
     // Uncommitted writes and frees are gone after reopening.
     cell.write(extent(9), 0, &pattern(9, 0, BLOCK)).await.unwrap();
     cell.free(extent(1)).unwrap();
-    let dir = reopen(cell.dir());
+    let dir = host_fs::may_block(|| reopen(cell.dir()));
     drop(cell);
-    let cell = LocalCell::open(dir, OPTIONS).unwrap();
+    let cell = host_fs::may_block(|| LocalCell::open(dir, OPTIONS).unwrap());
     check(&cell);
     assert_eq!(cell.root().unwrap(), b"root");
     assert!(cell.last_commit().unwrap() >= 1);
@@ -153,8 +153,8 @@ async fn reads_what_was_written_in_memory() {
 async fn reads_what_was_written_on_the_host() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().to_owned();
-    reads_what_was_written(HostDir::new(&path).unwrap(), |dir| HostDir::new(dir.path()).unwrap())
-        .await;
+    let dir = host_fs::may_block(|| HostDir::new(&path).unwrap());
+    reads_what_was_written(dir, |dir| HostDir::new(dir.path()).unwrap()).await;
 }
 
 /// Extents are written once: commits seal them. A cell writes only its cell's extents.
@@ -974,20 +974,20 @@ async fn closed_segments_hold_the_cells_history() {
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_reopen_on_the_host() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let open = || HostDir::new(temp.path()).unwrap();
+    let open = || host_fs::may_block(|| HostDir::new(temp.path()).unwrap());
     let cell = create(open(), 64 << 20);
     cell.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).await.unwrap();
     let state = closed_state(&cell).await;
     cell.write(extent(2), 0, &pattern(2, 0, BLOCK)).await.unwrap();
     cell.commit(Some(b"root")).await.unwrap();
     drop(cell);
-    let cell = LocalCell::open(open(), OPTIONS).unwrap();
+    let cell = host_fs::may_block(|| LocalCell::open(open(), OPTIONS).unwrap());
     assert_eq!(read(&cell, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
     assert_eq!(read(&cell, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
     assert!(cell.last_commit().unwrap() > state.0);
     let state = closed_state(&cell).await;
     drop(cell);
-    let cell = LocalCell::open(open(), OPTIONS).unwrap();
+    let cell = host_fs::may_block(|| LocalCell::open(open(), OPTIONS).unwrap());
     assert_eq!(closed_state(&cell).await.3, state.3);
 }
 
@@ -2399,7 +2399,7 @@ fn open_fds() -> usize {
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_keep_no_more_files_open_than_allowed() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let cell = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
+    let cell = create(host_fs::may_block(|| HostDir::new(temp.path()).unwrap()), 64 << 20);
     let mut open = Vec::new();
     for sequence in 1..=40 {
         cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
@@ -2573,13 +2573,13 @@ fn cached_pages(path: &std::path::Path) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 async fn cell_files_hold_no_pages_in_the_hosts_page_cache() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let cell = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
+    let cell = create(host_fs::may_block(|| HostDir::new(temp.path()).unwrap()), 64 << 20);
     for sequence in 1..=8 {
         cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
         cell.commit(None).await.unwrap();
     }
     // Written back, so that the files hold what was written, written around the host's cache.
-    local_cell::pages::shared().write_back_all().unwrap();
+    host_fs::may_block(|| local_cell::pages::shared().write_back_all()).unwrap();
     let path = |kind| temp.path().join(of(kind, CELL.id)).join(Padded(0).to_string());
     assert_eq!(cached_pages(&path("open-segments")), 0, "the open segment's pages cached");
     assert_eq!(cached_pages(&path("logs")), 0, "the open segment's log's pages cached");

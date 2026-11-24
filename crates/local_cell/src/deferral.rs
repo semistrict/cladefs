@@ -76,7 +76,8 @@ node_local::node_local! {
 /// path and its name, as the parent is there; as it is spelled, if the parent isn't.
 pub(crate) fn key(path: &Path) -> PathBuf {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    let canonical = host_fs::canonicalize(parent.unwrap_or(Path::new(".")));
+    let canonical =
+        crate::upload::blocking(|| host_fs::canonicalize(parent.unwrap_or(Path::new("."))));
     match (canonical, path.file_name()) {
         (Ok(parent), Some(name)) => parent.join(name),
         _ => path.to_owned(),

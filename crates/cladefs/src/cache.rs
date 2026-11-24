@@ -738,7 +738,7 @@ impl StoredExtent {
         let id = self.extent;
         let mut failed = anyhow::Error::new(NoExtent(id));
         for (local, fetcher) in self.holders.open() {
-            match read_local(&local, id, offset, buf) {
+            match local_cell::upload::blocking(|| read_local(&local, id, offset, buf)) {
                 Ok(()) => {
                     stats::add(Counter::PageInBytes, buf.len() as u64);
                     return Ok(Found::Read);

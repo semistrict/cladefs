@@ -94,9 +94,14 @@ impl Opening {
         span.set_with(trace::STORE, || path.display().to_string());
         let opened = async {
             // cladefs: an ephemeral cell's, with no uploader (doc-25, TASK-698.3).
-            let cell = match local_cell::upload::blocking(|| host_cell::is_ephemeral(path)) {
+            let (ephemeral, migrating) = local_cell::upload::blocking(|| {
+                let ephemeral = host_cell::is_ephemeral(path);
+                let migrating = ephemeral && host_fs::exists(&path.join("migrating"));
+                (ephemeral, migrating)
+            });
+            let cell = match ephemeral {
                 // cladefs: given up to a live migration, it opens here no more (TASK-698.4).
-                true if host_fs::exists(&path.join("migrating")) => return Err(Errno::EBUSY.into()),
+                true if migrating => return Err(Errno::EBUSY.into()),
                 true => {
                     let (local, bucket, keys, forked) =
                         host_cell::open_ephemeral(path, &self.keeping).await?;
@@ -178,11 +183,17 @@ impl Opening {
         let path = path.as_ref();
         // cladefs: an open cell made here is opened once, as made, not made, closed and opened
         // again (TASK-449).
-        let opened = if !host_fs::exists(&path) {
+        let existing = local_cell::upload::blocking(|| -> Result<Option<CellId>, Error> {
+            if !host_fs::exists(&path) {
+                return Ok(None);
+            }
+            Ok(Some(local_cell::host_cell(path).map_err(Error::new)?))
+        })?;
+        let opened = if existing.is_none() {
             let kept = self.keeping.clone();
             let of = CellOf::Taken(cell);
             OpenCell::made_placed(path, (capacity, of, token), Kind::Fxfs, kept).await?
-        } else if local_cell::host_cell(path).map_err(Error::new)? != cell {
+        } else if existing != Some(cell) {
             let refused = format!("{} holds another cell than {cell}", path.display());
             return Err(Error::new(anyhow::Error::new(Errno::EEXIST).context(refused)));
         } else {
@@ -208,7 +219,7 @@ impl Opening {
         let path = path.as_ref();
         let kept = (Kind::Fxfs, Some(url), self.keeping.clone());
         let opened = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2).await?;
-        opened.made().map_err(Error::new)?;
+        local_cell::upload::blocking(|| opened.made()).map_err(Error::new)?;
         OpenCell::new(path, opened, self).await
     }
 }

@@ -79,7 +79,7 @@ impl Pool {
         // simulated disk, which is memory (doc-24 step 11).
         #[cfg(madsim)]
         {
-            drop(tokio::spawn(async move { job() }));
+            drop(tokio::spawn(async move { host_fs::may_block(job) }));
             true
         }
         #[cfg(not(madsim))]

@@ -283,7 +283,7 @@ impl Host {
     /// cladefs: fails first if the host's incarnation was decommissioned, as the bucket of any
     /// entry's reference says ([`Host::refuse_decommissioned`], board 8519).
     pub async fn retire_stale(&self) -> Result<usize, Error> {
-        let entries = self.entries()?;
+        let entries = local_cell::upload::blocking(|| self.entries())?;
         self.refuse_decommissioned(&entries).await?;
         let mut retired = 0;
         for entry in entries {
@@ -332,9 +332,12 @@ impl Host {
         }
         // A migration it accepted, crashed before it noted the cell taken: taken, as the
         // hand-over did (TASK-713); the cell its, as its source let it go.
-        if entry.receiving().is_some_and(|(migration, _)| self.accepted(migration)) {
+        if entry
+            .receiving()
+            .is_some_and(|(migration, _)| local_cell::upload::blocking(|| self.accepted(migration)))
+        {
             let taken = Entry { migrating: None, ..entry };
-            self.note(&taken)?;
+            local_cell::upload::blocking(|| self.note(&taken))?;
             if self.holds(&taken)? {
                 return Ok(false);
             }
@@ -348,11 +351,13 @@ impl Host {
             // is one a retry of its migration may take for whole (board 5721).
             self.retire(&entry).await?;
             let staged = staging(&entry.path, migration);
-            if host_fs::exists(&staged)
-                && let Err(err) = host_fs::remove_dir_all(&staged)
-            {
-                log::warn!("cladefsd: dropping {}, given up: {err}", staged.display());
-            }
+            local_cell::upload::blocking(|| {
+                if host_fs::exists(&staged)
+                    && let Err(err) = host_fs::remove_dir_all(&staged)
+                {
+                    log::warn!("cladefsd: dropping {}, given up: {err}", staged.display());
+                }
+            });
             return Ok(true);
         } else if self.holds(&entry)? {
             return Ok(false);
@@ -369,7 +374,7 @@ impl Host {
         let unreferred =
             bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child);
         unreferred.await.map_err(bucket_cell::Error::from)?;
-        self.forget(child)
+        local_cell::upload::blocking(|| self.forget(child))
     }
 
     /// Removes the cell directory at the path of `entry`, a migration's being taken here, if it is

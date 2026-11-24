@@ -63,7 +63,7 @@ pub(crate) fn spawn_or_return<T: Send + 'static>(
     // thread (doc-24).
     #[cfg(madsim)]
     {
-        drop(tokio::spawn(async move { run(work) }));
+        drop(tokio::spawn(async move { host_fs::may_block(|| run(work)) }));
         None
     }
     #[cfg(not(madsim))]

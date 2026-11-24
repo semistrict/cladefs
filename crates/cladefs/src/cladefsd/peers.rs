@@ -418,7 +418,10 @@ pub(super) async fn start_on(
     asking.set(peers);
     crate::bucket::ask_peers(bucket.clone(), asking)?;
     let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS") {
-        Some(dir) => Some(replicas(std::path::Path::new(&dir)).map_err(|err| failed(&err))?),
+        Some(dir) => Some(
+            local_cell::upload::blocking(|| replicas(std::path::Path::new(&dir)))
+                .map_err(|err| failed(&err))?,
+        ),
         None => None,
     };
     if let Some(replicas) = &replicas {

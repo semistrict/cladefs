@@ -1276,11 +1276,13 @@ impl<B: Bucket> Fetcher<B> {
 fn blocking<T>(io: impl FnOnce() -> T) -> T {
     // TASK-685.1: madsim's one thread runs it as it is.
     #[cfg(madsim)]
-    return io();
+    return host_fs::may_block(io);
     #[cfg(not(madsim))]
     match tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(io),
-        _ => io(),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
+            tokio::task::block_in_place(|| host_fs::may_block(io))
+        }
+        _ => host_fs::may_block(io),
     }
 }
 

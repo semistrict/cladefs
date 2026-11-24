@@ -1831,8 +1831,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), "").unrouted());
-        let cache =
-            Arc::new(bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
+        let cache = Arc::new(
+            host_fs::may_block(|| {
+                bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30)
+            })
+            .unwrap(),
+        );
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let open_cell =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
@@ -1925,7 +1929,7 @@ mod tests {
         let extent = write(&open_cell, 1, &noise(1, 4 << 20)).await;
         open_cell.commit_ordered(None).await.unwrap();
         // On the disk, as the open cell's page cache holds it written (TASK-433).
-        local_cell::pages::shared().write_back_all().unwrap();
+        host_fs::may_block(|| local_cell::pages::shared().write_back_all().unwrap());
         let path = dir.path().join(format!(
             "store/extents/{}/{}",
             base32_id::Padded(cell.id),
@@ -1979,13 +1983,13 @@ mod tests {
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = first.cell();
-        OpenCell::place(&first_path, 1).unwrap();
+        host_fs::may_block(|| OpenCell::place(&first_path, 1).unwrap());
         write(&first, 1, &pattern(1, BLOCK)).await;
         first.commit(Some(b"first")).await.unwrap();
 
         // The cell moves to another host, a later placement, while the first still runs.
         drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).await.unwrap());
-        OpenCell::place(&second_path, 2).unwrap();
+        host_fs::may_block(|| OpenCell::place(&second_path, 2).unwrap());
         let second = reopened(&second_path, idle()).await.unwrap();
         assert_eq!(second.root(), Ok(b"first".to_vec()));
         write(&first, 2, &pattern(2, BLOCK)).await;
@@ -1999,7 +2003,7 @@ mod tests {
         assert_eq!(head.unwrap().unwrap().token, 2);
 
         // Placed later still, it does.
-        OpenCell::place(&first_path, 3).unwrap();
+        host_fs::may_block(|| OpenCell::place(&first_path, 3).unwrap());
         let later = reopened(&first_path, idle()).await.unwrap();
         assert_eq!(later.root(), Ok(b"first".to_vec()));
     }
@@ -2013,7 +2017,7 @@ mod tests {
         changes_nothing_once_lost(async |bucket, dir, cell| {
             let second = dir.join("second");
             drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).await.unwrap());
-            OpenCell::place(&second, 2).unwrap();
+            host_fs::may_block(|| OpenCell::place(&second, 2).unwrap());
             drop(reopened(&second, idle()).await.unwrap());
         })
         .await;
@@ -2026,7 +2030,7 @@ mod tests {
         changes_nothing_once_lost(async |bucket, dir, cell| {
             let second = dir.join("second");
             drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).await.unwrap());
-            OpenCell::place(&second, 2).unwrap();
+            host_fs::may_block(|| OpenCell::place(&second, 2).unwrap());
             OpenCell::delete(&second, Some(bucket)).await.unwrap();
         })
         .await;
@@ -2043,7 +2047,7 @@ mod tests {
         let path = dir.path().join("first");
         let open_cell = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = open_cell.cell();
-        OpenCell::place(&path, 1).unwrap();
+        host_fs::may_block(|| OpenCell::place(&path, 1).unwrap());
         let kept = write(&open_cell, 1, &pattern(1, BLOCK)).await;
         open_cell.commit(None).await.unwrap();
         lose(&bucket, dir.path(), cell).await;
@@ -2120,13 +2124,13 @@ mod tests {
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = first.cell();
-        OpenCell::place(&first_path, 1).unwrap();
+        host_fs::may_block(|| OpenCell::place(&first_path, 1).unwrap());
         write(&first, 1, &pattern(1, BLOCK)).await;
         first.commit(Some(b"first")).await.unwrap();
         drop(first);
         // The cell moves to another host, a later placement.
         drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).await.unwrap());
-        OpenCell::place(&second_path, 2).unwrap();
+        host_fs::may_block(|| OpenCell::place(&second_path, 2).unwrap());
         let second = reopened(&second_path, idle()).await.unwrap();
 
         let refused = OpenCell::delete(&first_path, Some(&bucket)).await;
@@ -3286,12 +3290,14 @@ mod tests {
     /// The directory of an open cell of `cell` at `path`, its cell kept in `bucket`, made whole,
     /// and not opened: what opening takes the cell into, as the bucket holds it.
     fn made_for(path: &std::path::Path, cell: crate::CellId, bucket: &Arc<RoutedBucket>) {
-        std::fs::create_dir(path).unwrap();
-        let description =
-            local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 30, cell };
-        let kind = bucket_cell::cell::Kind::Fxfs;
-        local_cell::create_host(path, description, &url_of(bucket), kind).unwrap();
-        local_cell::made_host(path).unwrap();
+        host_fs::may_block(|| {
+            std::fs::create_dir(path).unwrap();
+            let description =
+                local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 30, cell };
+            let kind = bucket_cell::cell::Kind::Fxfs;
+            local_cell::create_host(path, description, &url_of(bucket), kind).unwrap();
+            local_cell::made_host(path).unwrap();
+        });
     }
 
     /// TASK-79.4: an open cell opening takes the cell as of its taking of the head, not as of what
@@ -3434,7 +3440,7 @@ mod tests {
             .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell()))
             .await
             .unwrap();
-        version.make_public().unwrap();
+        host_fs::may_block(|| version.make_public().unwrap());
     }
 
     /// TASK-395.7: a version forks into a cell of another tenant's only while shared: refused with

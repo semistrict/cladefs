@@ -320,21 +320,24 @@ async fn encrypted_cells_serve_reopen_and_fork_into_encrypted_cells_alone() {
     assert_eq!(read(&cell, a, 0, 2 * BLOCK).await, Ok(data.clone()));
     // Nothing of it in the bucket: every file under the open cell's own, as on the disk, what
     // the open cell's page cache holds written there first (TASK-433).
-    local_cell::pages::shared().write_back_all().unwrap();
-    let bucket = dir.path().join("store.bucket");
-    let mut files = vec![bucket.clone()];
-    let mut objects = 0;
-    while let Some(at) = files.pop() {
-        match host_fs::is_dir(&at) {
-            true => files.extend(host_fs::read_dir(&at).unwrap().map(|e| e.unwrap().path())),
-            false => {
-                let bytes = host_fs::read(&at).unwrap();
-                let held = bytes.windows(64).any(|window| window == &data[..64]);
-                assert!(!held, "{} holds the cell's data", at.display());
-                objects += 1;
+    let objects = host_fs::may_block(|| {
+        local_cell::pages::shared().write_back_all().unwrap();
+        let bucket = dir.path().join("store.bucket");
+        let mut files = vec![bucket.clone()];
+        let mut objects = 0;
+        while let Some(at) = files.pop() {
+            match host_fs::is_dir(&at) {
+                true => files.extend(host_fs::read_dir(&at).unwrap().map(|e| e.unwrap().path())),
+                false => {
+                    let bytes = host_fs::read(&at).unwrap();
+                    let held = bytes.windows(64).any(|window| window == &data[..64]);
+                    assert!(!held, "{} holds the cell's data", at.display());
+                    objects += 1;
+                }
             }
         }
-    }
+        objects
+    });
     assert!(objects > 3, "{objects} objects");
     let child = host_cell::fork_child(cell.cell());
     cell.fork_to(dir.path().join("fork"), child).await.unwrap();
@@ -371,7 +374,7 @@ async fn encrypted_cells_serve_reopen_and_fork_into_encrypted_cells_alone() {
     let into = crate::host_cell::named(6);
     let refused = common.fork_to(dir.path().join("into-none"), into).await.unwrap_err();
     assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
-    assert!(!host_fs::exists(&dir.path().join("into-none")));
+    assert!(!host_fs::may_block(|| host_fs::exists(&dir.path().join("into-none"))));
     let found = bucket_cell::head::get(&**common.bucket(), into).await;
     assert_eq!(found.unwrap(), None);
 }
@@ -762,7 +765,7 @@ async fn cells_hold_a_block_at_least() {
     let small = dir.path().join("small");
     let error = OpenCell::create(&small, block - 1).await.err().unwrap();
     assert_eq!(error.to_string(), "the cell is smaller than a block");
-    assert!(!host_fs::exists(&small));
+    assert!(!host_fs::may_block(|| host_fs::exists(&small)));
     let cell = OpenCell::create(dir.path().join("one"), block).await.unwrap();
     assert_eq!(cell.info().unwrap().capacity, block);
 }
@@ -780,7 +783,10 @@ async fn forks_failing_but_at_their_path_say_so() {
         .expect_err("the fork was made");
     drop(made);
     assert_eq!(failed.errno(), None, "{failed:#}");
-    assert!(!host_fs::exists(&fork), "the failed fork's cell directory stays");
+    assert!(
+        !host_fs::may_block(|| host_fs::exists(&fork)),
+        "the failed fork's cell directory stays"
+    );
 }
 
 /// TASK-39.1: the window's mappings, as a snapshot of the VM records them once nothing is
@@ -937,7 +943,7 @@ async fn flipped_bytes_fail_page_ins_and_reads() {
             base32_id::Padded(extent.cell),
             base32_id::Padded(extent.sequence)
         ));
-        let mut bytes = host_fs::read(&path).unwrap();
+        let mut bytes = host_fs::may_block(|| host_fs::read(&path)).unwrap();
         let parts = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap();
         let opened = parts.part(2).unwrap();
         let (place, stored) = (opened.place, opened.stored);
@@ -948,7 +954,7 @@ async fn flipped_bytes_fail_page_ins_and_reads() {
             extent_frame::Encoding::Zstd => stored.offset + stored.len / 2,
         };
         bytes[byte as usize] ^= 0x10;
-        host_fs::write(&path, bytes).unwrap();
+        host_fs::may_block(|| host_fs::write(&path, bytes)).unwrap();
         // Damaged behind the open cell's back: what the open cell's page cache holds of it,
         // clean, goes, so that its reads read the disk (TASK-433).
         local_cell::pages::shared().evict_to(0);
@@ -1604,7 +1610,7 @@ async fn bases_attached_read_and_map_through() {
     assert_eq!(read(&cell, extent, 0, BLOCK).await, Err(Errno::ENOENT));
     assert_eq!(cell.map(extent, 0, ps, 0).await, Err(Errno::ENOENT));
 
-    cell.attach_base(&base, &ancestry).unwrap();
+    host_fs::may_block(|| cell.attach_base(&base, &ancestry).unwrap());
     assert_eq!(read(&cell, extent, 0, ps as usize).await, Ok(data.clone()));
     cell.map(extent, 0, ps, 0).await.unwrap();
     block_on(window.fault(0, Access::Read)).unwrap();
@@ -1620,8 +1626,10 @@ async fn bases_attached_read_and_map_through() {
     cell.map(extent, 0, ps, ps).await.unwrap();
     assert_eq!(write(&cell, extent, 0, &[0; BLOCK]).await, Err(Errno::EPERM));
     // Attaching it again changes nothing.
-    cell.attach_base(&base, &ancestry).unwrap();
-    assert_eq!(cell_dir::attached(&dir.path().join("store")).unwrap().len(), 1);
+    host_fs::may_block(|| {
+        cell.attach_base(&base, &ancestry).unwrap();
+        assert_eq!(cell_dir::attached(&dir.path().join("store")).unwrap().len(), 1);
+    });
 }
 
 /// doc-10: VMs mapping a base share its pages: the cache's one copy, for the attached and for
@@ -1640,8 +1648,10 @@ async fn windows_share_bases_pages() {
         cells.iter().map(|cell| cell.create_dax_window(ps, None).unwrap()).collect();
     let open = one_instance_each();
     for cell in &cells {
-        cell.open_bases(open.clone()).unwrap();
-        cell.attach_base(&base, &ancestry).unwrap();
+        host_fs::may_block(|| {
+            cell.open_bases(open.clone()).unwrap();
+            cell.attach_base(&base, &ancestry).unwrap();
+        });
         cell.map(extent, 0, ps, 0).await.unwrap();
     }
     // Counted before anything pages in: a page-in holds the extent too, a while after the
@@ -1679,7 +1689,9 @@ async fn a_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
     publisher.commit(None).await.unwrap();
     publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).await.unwrap();
     drop(publisher);
-    OpenCell::open(&base).await.unwrap().make_public_attach_only().unwrap();
+    let opened = OpenCell::open(&base).await.unwrap();
+    host_fs::may_block(|| opened.make_public_attach_only().unwrap());
+    drop(opened);
     let tenant = Arena::new().unwrap();
     let publisher =
         Opening::here().unwrap().arena(Some(tenant.clone())).open(&publisher_path).await.unwrap();
@@ -1694,8 +1706,10 @@ async fn a_bases_extent_its_publisher_has_cached_moves_to_the_default_arena() {
 
     let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
     let sandbox = made(&dir.path().join("sandbox"), 1 << 20).await;
-    sandbox.open_bases(one_instance_each()).unwrap();
-    sandbox.attach_base(&base, &ancestry).unwrap();
+    host_fs::may_block(|| {
+        sandbox.open_bases(one_instance_each()).unwrap();
+        sandbox.attach_base(&base, &ancestry).unwrap();
+    });
     let sandbox_window = sandbox.create_dax_window(len as u64, None).unwrap();
     let page_ins = stats::stats().page_ins;
     // Moved as the sandbox maps it, so that its MAP maps every page, none faulted on: moved
@@ -1743,8 +1757,10 @@ async fn an_extent_of_no_published_generation_stays_its_tenants() {
 
     let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
     let sandbox = made(&dir.path().join("sandbox"), 1 << 20).await;
-    sandbox.open_bases(one_instance_each()).unwrap();
-    sandbox.attach_base(&base, &ancestry).unwrap();
+    host_fs::may_block(|| {
+        sandbox.open_bases(one_instance_each()).unwrap();
+        sandbox.attach_base(&base, &ancestry).unwrap();
+    });
     let page_ins = stats::stats().page_ins;
     assert_eq!(read(&sandbox, extent, 0, len).await, Ok(data));
     assert_eq!(stats::stats().page_ins - page_ins, 4, "one page-in a part");
@@ -1780,7 +1796,7 @@ async fn bases_outlast_what_their_cells_free() {
     assert_eq!(read(&publisher, extent, 0, BLOCK).await, Err(Errno::ENOENT));
 
     let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
-    cell.attach_base(&base, &ancestry).unwrap();
+    host_fs::may_block(|| cell.attach_base(&base, &ancestry).unwrap());
     assert_eq!(read(&cell, extent, 0, BLOCK).await, Ok(pattern(5, BLOCK)));
 }
 
@@ -1794,24 +1810,26 @@ async fn bases_stay_attached_through_forks_and_reopening() {
     let (extent, ancestry) = generation(&base, &pattern(6, BLOCK)).await;
     let (only_the_fork, later_ancestry) = generation(&later, &pattern(7, BLOCK)).await;
     let open = one_instance_each();
-    cell.open_bases(open.clone()).unwrap();
-    cell.attach_base(&base, &ancestry).unwrap();
+    host_fs::may_block(|| {
+        cell.open_bases(open.clone()).unwrap();
+        cell.attach_base(&base, &ancestry).unwrap();
+    });
     cell.commit(None).await.unwrap();
 
     let fork = dir.path().join("fork");
     cell.fork_to(&fork, crate::host_cell::fork_child(cell.cell())).await.unwrap();
     let forked = OpenCell::open(&fork).await.unwrap();
-    forked.open_bases(open.clone()).unwrap();
+    host_fs::may_block(|| forked.open_bases(open.clone()).unwrap());
     assert_eq!(read(&forked, extent, 0, BLOCK).await, Ok(pattern(6, BLOCK)));
 
-    forked.attach_base(&later, &later_ancestry).unwrap();
+    host_fs::may_block(|| forked.attach_base(&later, &later_ancestry).unwrap());
     assert_eq!(read(&forked, only_the_fork, 0, BLOCK).await, Ok(pattern(7, BLOCK)));
     assert_eq!(read(&cell, only_the_fork, 0, BLOCK).await, Err(Errno::ENOENT));
 
     drop(cell);
     let cell = OpenCell::open(&path).await.unwrap();
     assert_eq!(read(&cell, extent, 0, BLOCK).await, Err(Errno::ENOENT), "not routed yet");
-    cell.open_bases(open).unwrap();
+    host_fs::may_block(|| cell.open_bases(open).unwrap());
     assert_eq!(read(&cell, extent, 0, BLOCK).await, Ok(pattern(6, BLOCK)));
 }
 
@@ -1825,7 +1843,7 @@ async fn bases_attached_open_when_read() {
     for at in 0..ATTACHED {
         let path = dir.path().join(format!("base-{at}"));
         let (extent, ancestry) = generation(&path, &pattern(at as u8, BLOCK)).await;
-        cell.attach_base(&path, &ancestry).unwrap();
+        host_fs::may_block(|| cell.attach_base(&path, &ancestry).unwrap());
         bases.push((extent, ancestry, path));
     }
     assert_eq!(cell.bases_opened(), 0);
@@ -1849,7 +1867,8 @@ async fn bases_are_not_routed_for_what_a_cell_inherited() {
     let base_cell = crate::host_cell::fork_child(cell.cell());
     cell.fork_to(&base, base_cell).await.unwrap();
     let forked = OpenCell::open(&fork).await.unwrap();
-    forked.attach_base(&base, &OpenCell::open(&base).await.unwrap().ancestry()).unwrap();
+    let ancestry = OpenCell::open(&base).await.unwrap().ancestry();
+    host_fs::may_block(|| forked.attach_base(&base, &ancestry).unwrap());
     assert!(!forked.bases.routes(inherited.cell));
     assert!(forked.bases.routes(base_cell.id));
     forked.free(inherited).unwrap();
@@ -1864,7 +1883,7 @@ async fn bases_are_not_routed_for_what_a_cell_inherited() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cells_whose_public_markers_go_unread_fail_to_open() {
     let (base, dir) = cell(1 << 20).await;
-    base.make_public().unwrap();
+    host_fs::may_block(|| base.make_public().unwrap());
     drop(base);
     let path = dir.path().join("store");
     fail::cfg("extents::public_cells", "return").unwrap();
@@ -2046,7 +2065,9 @@ async fn forks_of_a_version_fetch_their_prediction_ahead() {
 
     // The next, opened where the host keeps the parts it fetches, fetches the two ahead.
     crate::evidence::forget();
-    let cache = bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30).unwrap();
+    let cache =
+        host_fs::may_block(|| bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30))
+            .unwrap();
     let cache = Arc::new(cache);
     let here = Opening::here().unwrap();
     let keeping = local_cell::upload::Options { cache: Some(cache.clone()), ..here.keeping };

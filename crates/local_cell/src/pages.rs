@@ -218,7 +218,7 @@ impl PageCache {
                 loop {
                     tokio::time::sleep(interval).await;
                     let Some(cache) = ticking.upgrade() else { return };
-                    cache.flush_pass(Instant::now());
+                    host_fs::may_block(|| cache.flush_pass(Instant::now()));
                 }
             }));
             cache
@@ -1003,9 +1003,11 @@ impl<F: File> Drop for InFlight<'_, '_, F> {
 impl<F: File> Drop for Shared<F> {
     fn drop(&mut self) {
         // Not as a panic unwinds: its pages' lock may be poisoned, and a second panic aborts.
+        // Dirty pages flushed on drop move off an async worker (board 10824).
         if !self.unlinked.load(Ordering::Relaxed)
             && !std::thread::panicking()
-            && let Err(err) = self.flush(0..u64::MAX, None)
+            && self.dirtied().is_some()
+            && let Err(err) = crate::upload::blocking(|| self.flush(0..u64::MAX, None))
         {
             log::warn!("extent store: writing back a file closed: {err}");
         }

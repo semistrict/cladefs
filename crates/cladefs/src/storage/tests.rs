@@ -35,7 +35,7 @@ async fn image_with(path: &Path, file: &[u8], contents: &[u8]) -> Storage {
 
 /// The bucket the cell directory at `path` names.
 fn bucket_of(path: &Path) -> Arc<RoutedBucket> {
-    host_cell::bucket_at(path).unwrap().expect("a bucket")
+    host_fs::may_block(|| host_cell::bucket_at(path).unwrap().expect("a bucket"))
 }
 
 /// The extents `cell`'s state in `bucket` holds, by their lengths, those it inherited too,
@@ -82,7 +82,7 @@ async fn images_keep_their_cells_in_a_file_bucket_of_their_own() {
     let storage = block_on(image_with(&path, b"file", b"contents"));
     let own = dir.path().canonicalize().unwrap().join("image.bucket");
     let url = format!("file://{}/", own.display());
-    assert_eq!(local_cell::host_bucket(&path).unwrap(), Some(url));
+    assert_eq!(host_fs::may_block(|| local_cell::host_bucket(&path).unwrap()), Some(url));
     let cell = storage.open_cell().cell();
     let (extents, root) = kept(&bucket_of(&path), cell).await;
     assert!(!extents.is_empty() && !root.is_empty());
@@ -205,7 +205,7 @@ async fn images_in_a_hosts_bucket_are_not_collected_here() {
         keeping,
     )
     .await;
-    made.unwrap().made().unwrap();
+    host_fs::may_block(|| made.unwrap().made().unwrap());
     let storage = Storage::open(&path).await.unwrap();
     assert!(storage.collecting().is_none());
     let cell = storage.open_cell();

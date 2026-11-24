@@ -155,7 +155,7 @@ pub async fn delete_host(
 ) -> Result<(), Error> {
     // cladefs: its disk work off the runtime's threads, `before` awaited between (TASK-685.3).
     use crate::upload::blocking;
-    if !host_fs::exists(path.join(DESCRIPTION)) {
+    if !blocking(|| host_fs::exists(path.join(DESCRIPTION))) {
         return blocking(|| remove_cell_dir(path));
     }
     let (cell, dir) = blocking(|| -> Result<_, Error> {
@@ -437,24 +437,27 @@ mod tests {
 
     /// The cell at `path`, opened where the bucket holds nothing of its cell.
     fn open(path: &Path) -> Result<LocalCell<HostDir>, Error> {
-        LocalCell::open(HostDir::new(path)?, Options::default())
+        host_fs::may_block(|| LocalCell::open(HostDir::new(path)?, Options::default()))
     }
 
     /// A cell at `cell` in `temp`, holding an extent: its path.
     async fn stored(temp: &Path) -> PathBuf {
         let path = temp.join("cell");
-        host_fs::create_dir(&path).unwrap();
-        let description = Description {
-            block_size: BLOCK as u32,
-            capacity: 1 << 20,
-            cell: bucket_cell::layout::test_cell(3),
-        };
-        create_host(&path, description, BUCKET, bucket_cell::cell::Kind::Fxfs).unwrap();
-        let cell = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
-        let cell = cell
-            .open(Options::default(), crate::Opening::new(bucket_cell::layout::test_cell(3)))
-            .unwrap();
-        cell.made().unwrap();
+        let cell = host_fs::may_block(|| {
+            host_fs::create_dir(&path).unwrap();
+            let description = Description {
+                block_size: BLOCK as u32,
+                capacity: 1 << 20,
+                cell: bucket_cell::layout::test_cell(3),
+            };
+            create_host(&path, description, BUCKET, bucket_cell::cell::Kind::Fxfs).unwrap();
+            let cell = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
+            let cell = cell
+                .open(Options::default(), crate::Opening::new(bucket_cell::layout::test_cell(3)))
+                .unwrap();
+            cell.made().unwrap();
+            cell
+        });
         cell.write(ExtentId::new(3, 0), 0, &[7; BLOCK]).await.unwrap();
         cell.commit(None).await.unwrap();
         path
@@ -467,16 +470,20 @@ mod tests {
     async fn stopped_deletions_finish() {
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path()).await;
-        host_fs::rename(path.join(DESCRIPTION), path.join("store.deleted")).unwrap();
-        host_fs::remove_dir_all(path.join(crate::layout::LOGS)).unwrap();
+        host_fs::may_block(|| {
+            host_fs::rename(path.join(DESCRIPTION), path.join("store.deleted")).unwrap();
+            host_fs::remove_dir_all(path.join(crate::layout::LOGS)).unwrap();
+        });
         delete_host(&path, async |_| Err(anyhow!("called"))).await.unwrap();
-        assert!(!host_fs::exists(&path));
+        assert!(!host_fs::may_block(|| host_fs::exists(&path)));
 
         let unmade = temp.path().join("unmade");
-        host_fs::create_dir_all(unmade.join("segments")).unwrap();
-        host_fs::write(unmade.join("stray"), "").unwrap();
+        host_fs::may_block(|| {
+            host_fs::create_dir_all(unmade.join("segments")).unwrap();
+            host_fs::write(unmade.join("stray"), "").unwrap();
+        });
         delete_host(&unmade, async |_| Err(anyhow!("called"))).await.unwrap();
-        assert!(!host_fs::exists(&unmade));
+        assert!(!host_fs::may_block(|| host_fs::exists(&unmade)));
     }
 
     /// A deletion calls `before` with the cell, while the cell is open nowhere, before
@@ -488,7 +495,10 @@ mod tests {
         let path = stored(temp.path()).await;
         let opened = open(&path).unwrap();
         let refused = delete_host(&path, async |_| Err(anyhow!("called"))).await;
-        assert!(refused.is_err() && host_fs::exists(&path.join(DESCRIPTION)), "{refused:?}");
+        assert!(
+            refused.is_err() && host_fs::may_block(|| host_fs::exists(&path.join(DESCRIPTION))),
+            "{refused:?}"
+        );
         drop(opened);
         let stopped = delete_host(&path, async |cell| Err(anyhow!("stopped at {cell}"))).await;
         assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/3".to_owned()));
@@ -496,7 +506,7 @@ mod tests {
         let called = std::cell::Cell::new(None);
         delete_host(&path, async |cell| Ok(called.set(Some(cell)))).await.unwrap();
         assert_eq!(
-            (called.get(), host_fs::exists(&path)),
+            (called.get(), host_fs::may_block(|| host_fs::exists(&path))),
             (Some(bucket_cell::layout::test_cell(3)), false)
         );
     }
@@ -515,7 +525,7 @@ mod tests {
             delete_host(path, async |_| Ok(()))
                 .await
                 .unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
-            let left: Vec<_> = host_fs::read_dir(temp).unwrap().collect();
+            let left: Vec<_> = host_fs::may_block(|| host_fs::read_dir(temp).unwrap().collect());
             assert_eq!(left.len(), 0, "stopped {at}: {left:?} left");
         };
         let at = "before the cell went";

@@ -446,7 +446,10 @@ impl Made {
         let url = super::tests::url_of(bucket);
         let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
-        OpenCell::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
+        host_fs::may_block(|| {
+            OpenCell::create_at_version(&self.at(name), (&url, kind), description, version)
+        })
+        .unwrap();
         opening().take(self.at(name), capacity, cell, None).await.unwrap()
     }
 
@@ -878,7 +881,10 @@ async fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let at = dir.path().join("version-b");
     let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
     let kind = bucket_cell::cell::Kind::Fxfs;
-    OpenCell::create_at_version(&at, (&url_of(&bucket_b), kind), description, version).unwrap();
+    host_fs::may_block(|| {
+        OpenCell::create_at_version(&at, (&url_of(&bucket_b), kind), description, version)
+    })
+    .unwrap();
     let opened = opening().take(&at, capacity, cell, None).await.unwrap();
     let child_path = dir.path().join("child");
     let child = opened.fork(&child_path, DEFAULT_TENANT).await.unwrap();

@@ -426,7 +426,7 @@ async fn commands_through_the_daemon() {
     assert!(base.is_public());
     // The fork's directory names its cell, which deleting the cell that took it deleted in the
     // bucket: it opens no more (TASK-165.9: opening takes the cell's head).
-    assert_eq!(local_cell::host_cell(&fork).unwrap().to_string(), cell);
+    assert_eq!(host_fs::may_block(|| local_cell::host_cell(&fork).unwrap()).to_string(), cell);
     let refused = OpenCell::open(&fork).await.err().and_then(|err| err.errno());
     assert_eq!(refused, Some(cladefs::Errno::EROFS));
 }

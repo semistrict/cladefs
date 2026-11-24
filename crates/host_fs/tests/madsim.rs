@@ -31,23 +31,26 @@ struct Boot {
 /// synced; and a file written but synced never, its entry neither. Every boot reads them back and
 /// locks the synced file, held for as long as the host runs.
 async fn boot(host: u8, found: Found) {
-    let root = std::path::PathBuf::from(format!("/disk{host}"));
-    let first = !host_fs::exists(&root);
-    if first {
-        host_fs::create_dir_all(root.join("kept")).unwrap();
-        host_fs::sync_dir(&root).unwrap();
-        host_fs::sync_dir("/").unwrap();
-        let synced = host_fs::File::create(root.join("kept/synced")).unwrap();
-        synced.write_all_at(b"durable", 0).unwrap();
-        synced.sync_all().unwrap();
-        host_fs::sync_dir(root.join("kept")).unwrap();
-        host_fs::write(root.join("kept/unsynced"), vec![7u8; 8192]).unwrap();
-    }
-    let synced = host_fs::read(root.join("kept/synced")).ok();
-    let dir = host_fs::is_dir(root.join("kept"));
-    let lock = host_fs::File::open(root.join("kept/synced")).and_then(host_fs::Flock::try_lock);
-    let lock_refused = lock.as_ref().is_err();
-    found.lock().unwrap().push(Boot { host, synced, dir, lock_refused });
+    let lock = host_fs::may_block(|| {
+        let root = std::path::PathBuf::from(format!("/disk{host}"));
+        let first = !host_fs::exists(&root);
+        if first {
+            host_fs::create_dir_all(root.join("kept")).unwrap();
+            host_fs::sync_dir(&root).unwrap();
+            host_fs::sync_dir("/").unwrap();
+            let synced = host_fs::File::create(root.join("kept/synced")).unwrap();
+            synced.write_all_at(b"durable", 0).unwrap();
+            synced.sync_all().unwrap();
+            host_fs::sync_dir(root.join("kept")).unwrap();
+            host_fs::write(root.join("kept/unsynced"), vec![7u8; 8192]).unwrap();
+        }
+        let synced = host_fs::read(root.join("kept/synced")).ok();
+        let dir = host_fs::is_dir(root.join("kept"));
+        let lock = host_fs::File::open(root.join("kept/synced")).and_then(host_fs::Flock::try_lock);
+        let lock_refused = lock.as_ref().is_err();
+        found.lock().unwrap().push(Boot { host, synced, dir, lock_refused });
+        lock
+    });
     std::future::pending::<()>().await;
     drop(lock);
 }
@@ -98,7 +101,9 @@ fn what_a_crash_keeps_is_the_seeds() {
                     .init(move || {
                         let (found, seen) = (found2.clone(), seen2.clone());
                         async move {
-                            seen.lock().unwrap().push(host_fs::exists("/disk1/kept/unsynced"));
+                            seen.lock().unwrap().push(host_fs::may_block(|| {
+                                host_fs::exists("/disk1/kept/unsynced")
+                            }));
                             boot(1, found).await
                         }
                     })
@@ -127,35 +132,38 @@ fn calls_changing_a_disk_fail_as_its_faults_say() {
     let node = handle.build();
     runtime
         .block_on(node.spawn(async {
-            let errno = |result: std::io::Result<()>| result.unwrap_err().raw_os_error().unwrap();
-            host_fs::create_dir_all("/disk/d").unwrap();
-            let file = host_fs::File::create("/disk/d/f").unwrap();
-            file.write_all_at(b"kept", 0).unwrap();
+            host_fs::may_block(|| {
+                let errno =
+                    |result: std::io::Result<()>| result.unwrap_err().raw_os_error().unwrap();
+                host_fs::create_dir_all("/disk/d").unwrap();
+                let file = host_fs::File::create("/disk/d/f").unwrap();
+                file.write_all_at(b"kept", 0).unwrap();
 
-            host_fs::faults::set(host_fs::faults::Odds {
-                fail: 1.0,
-                ..host_fs::faults::Odds::NONE
+                host_fs::faults::set(host_fs::faults::Odds {
+                    fail: 1.0,
+                    ..host_fs::faults::Odds::NONE
+                });
+                assert!([libc::EIO, libc::ENOSPC].contains(&errno(file.write_all_at(b"gone", 0))));
+                assert_eq!(errno(file.sync_all()), libc::EIO);
+                assert_eq!(errno(host_fs::rename("/disk/d/f", "/disk/d/g")), libc::EIO);
+                assert_eq!(errno(host_fs::remove_file("/disk/d/f")), libc::EIO);
+                assert!([libc::EIO, libc::ENOSPC].contains(&errno(host_fs::create_dir("/disk/e"))));
+                let created = host_fs::File::create_new("/disk/d/new").map(drop);
+                assert!([libc::EIO, libc::ENOSPC].contains(&errno(created)));
+                // Nothing changed; and what reads reads.
+                assert_eq!(host_fs::read("/disk/d/f").unwrap(), b"kept");
+                let names: Vec<_> = host_fs::read_dir("/disk/d")
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert_eq!(names, ["f"]);
+
+                host_fs::faults::set(host_fs::faults::Odds::NONE);
+                file.write_all_at(b"made", 0).unwrap();
+                file.sync_all().unwrap();
+                host_fs::rename("/disk/d/f", "/disk/d/g").unwrap();
+                assert_eq!(host_fs::read("/disk/d/g").unwrap(), b"made");
             });
-            assert!([libc::EIO, libc::ENOSPC].contains(&errno(file.write_all_at(b"gone", 0))));
-            assert_eq!(errno(file.sync_all()), libc::EIO);
-            assert_eq!(errno(host_fs::rename("/disk/d/f", "/disk/d/g")), libc::EIO);
-            assert_eq!(errno(host_fs::remove_file("/disk/d/f")), libc::EIO);
-            assert!([libc::EIO, libc::ENOSPC].contains(&errno(host_fs::create_dir("/disk/e"))));
-            let created = host_fs::File::create_new("/disk/d/new").map(drop);
-            assert!([libc::EIO, libc::ENOSPC].contains(&errno(created)));
-            // Nothing changed; and what reads reads.
-            assert_eq!(host_fs::read("/disk/d/f").unwrap(), b"kept");
-            let names: Vec<_> = host_fs::read_dir("/disk/d")
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name())
-                .collect();
-            assert_eq!(names, ["f"]);
-
-            host_fs::faults::set(host_fs::faults::Odds::NONE);
-            file.write_all_at(b"made", 0).unwrap();
-            file.sync_all().unwrap();
-            host_fs::rename("/disk/d/f", "/disk/d/g").unwrap();
-            assert_eq!(host_fs::read("/disk/d/g").unwrap(), b"made");
         }))
         .unwrap();
 }
@@ -171,13 +179,17 @@ fn which_calls_fail_is_the_seeds() {
             let node = node.build();
             runtime
                 .block_on(node.spawn(async {
-                    host_fs::create_dir_all("/disk").unwrap();
-                    let file = host_fs::File::create("/disk/f").unwrap();
-                    host_fs::faults::set(host_fs::faults::Odds {
-                        fail: 0.5,
-                        ..host_fs::faults::Odds::NONE
-                    });
-                    (0..32u64).map(|at| file.write_all_at(b"x", at).is_err()).collect::<Vec<_>>()
+                    host_fs::may_block(|| {
+                        host_fs::create_dir_all("/disk").unwrap();
+                        let file = host_fs::File::create("/disk/f").unwrap();
+                        host_fs::faults::set(host_fs::faults::Odds {
+                            fail: 0.5,
+                            ..host_fs::faults::Odds::NONE
+                        });
+                        (0..32u64)
+                            .map(|at| file.write_all_at(b"x", at).is_err())
+                            .collect::<Vec<_>>()
+                    })
                 }))
                 .unwrap()
         })
@@ -212,18 +224,20 @@ fn a_crash_damages_no_byte_a_write_leaves_as_it_was() {
                     .init(move || {
                         let read = read2.clone();
                         async move {
-                            if host_fs::exists("/log") {
-                                read.lock().unwrap().push(host_fs::read("/log").unwrap());
-                            } else {
-                                let log = host_fs::File::create("/log").unwrap();
-                                log.write_all_at(&[b'a'; SYNCED], 0).unwrap();
-                                log.sync_all().unwrap();
-                                host_fs::sync_dir("/").unwrap();
-                                // The record synced, written again, and the next after it.
-                                let mut page = vec![b'a'; SYNCED];
-                                page.resize(1024, b'b');
-                                log.write_all_at(&page, 0).unwrap();
-                            }
+                            host_fs::may_block(|| {
+                                if host_fs::exists("/log") {
+                                    read.lock().unwrap().push(host_fs::read("/log").unwrap());
+                                } else {
+                                    let log = host_fs::File::create("/log").unwrap();
+                                    log.write_all_at(&[b'a'; SYNCED], 0).unwrap();
+                                    log.sync_all().unwrap();
+                                    host_fs::sync_dir("/").unwrap();
+                                    // The record synced, written again, and the next after it.
+                                    let mut page = vec![b'a'; SYNCED];
+                                    page.resize(1024, b'b');
+                                    log.write_all_at(&page, 0).unwrap();
+                                }
+                            });
                             std::future::pending::<()>().await
                         }
                     })
@@ -244,4 +258,21 @@ fn a_crash_damages_no_byte_a_write_leaves_as_it_was() {
     }
     let garbage = |log: &Vec<u8>| log.len() == 1024 && log[SYNCED..].iter().any(|&b| b != b'b');
     assert!(logs.iter().any(garbage), "no seed's crash made garbage of the new bytes");
+}
+
+/// Board 10824: calling `host_fs` directly inside a simulated host's async task without
+/// `may_block` panics in debug/test builds, so the full-stack simulation catches unmarked blocking
+/// disk calls too.
+#[cfg(debug_assertions)]
+#[test]
+fn slow_calls_panic_in_madsim_tasks_without_may_block() {
+    let runtime = madsim::runtime::Runtime::new();
+    let node =
+        runtime.create_node().name("host").ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).build();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = runtime.block_on(node.spawn(async {
+            let _ = host_fs::exists("/disk");
+        }));
+    }));
+    assert!(failed.is_err(), "host_fs::exists in a madsim task without may_block must panic");
 }

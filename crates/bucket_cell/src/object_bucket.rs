@@ -3579,7 +3579,10 @@ pub(crate) mod tests {
             // bucket's are: fetched from the S3 server once, then read, and served to the region's
             // peers (`stored_part`), from the cache, by another fetcher of the host's.
             let cache_dir = tempfile::tempdir().unwrap();
-            let cache = Arc::new(crate::cache::Cache::open(cache_dir.path(), 64 << 20).unwrap());
+            let cache = Arc::new(
+                host_fs::may_block(|| crate::cache::Cache::open(cache_dir.path(), 64 << 20))
+                    .unwrap(),
+            );
             let keys = crate::testing::ring_of(&*routed, child).await.unwrap();
             let fetcher = |memory: Arc<crate::fetch::Memory>| {
                 std::mem::forget(memory.keys().hold(keys.clone()));

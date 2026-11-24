@@ -74,7 +74,7 @@ async fn public_bases_are_shared_read_only() {
     let extent = ExtentId { cell: base.cell().id, sequence: 1 };
     base.write(extent, 0, &[cladefs::VolatileSlice::from(&base_bytes[..])]).await.unwrap();
     base.commit(None).await.unwrap();
-    base.make_public().unwrap();
+    host_fs::may_block(|| base.make_public().unwrap());
     drop(base);
     let forks = [dir.path().join("one/fork"), dir.path().join("two/fork")];
     // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the cell with.
@@ -90,13 +90,13 @@ async fn public_bases_are_shared_read_only() {
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
     let base_in_one = dir.path().join("one/base");
     // Of a cell of its own (TASK-364), refused as public.
-    cladefs::Opening::here()
+    let cell = cladefs::Opening::here()
         .unwrap()
         .create(&base_in_one, 1 << 24, cladefs::CellOf::New(1))
         .await
-        .unwrap()
-        .make_public()
         .unwrap();
+    host_fs::may_block(|| cell.make_public().unwrap());
+    drop(cell);
     let refused = CellClient::connect(&one, &base_in_one, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
 

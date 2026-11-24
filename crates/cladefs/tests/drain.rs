@@ -88,7 +88,7 @@ async fn sigterm_closes_every_cell_durable_and_uploaded() {
     let taken: PathBuf = other.join("taken");
     // TASK-364: its VM manager makes the cell there first, as the one its tenant, cell
     // and ID name; taken from the bucket.
-    let full = local_cell::host_cell(&path).unwrap();
+    let full = host_fs::may_block(|| local_cell::host_cell(&path).unwrap());
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
     cladefs::Opening::here()

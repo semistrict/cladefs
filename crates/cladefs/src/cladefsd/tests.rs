@@ -19,7 +19,7 @@ const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 /// The ID of the cell at `path`, as its description names it (TASK-364): what a VM process's
 /// cell, which names its ID alone, is in the bucket.
 fn cell_at(path: &std::path::Path) -> crate::CellId {
-    local_cell::host_cell(path).unwrap()
+    host_fs::may_block(|| local_cell::host_cell(path).unwrap())
 }
 
 fn host() {
@@ -209,7 +209,7 @@ async fn keeps_cells_in_the_buckets_their_descriptions_name() {
     let made = crate::host_cell::create_unmade(&path, 1 << 20, of, Kind::Fxfs, Some(&url), keeping)
         .await
         .unwrap();
-    made.made().unwrap();
+    host_fs::may_block(|| made.made().unwrap());
     drop(made);
     let (client, served) = connect(&path, 1 << 20);
     let extent = ExtentId { cell: cell.id, sequence: 1 };
@@ -2361,21 +2361,24 @@ async fn earlier_placements_open_no_cells() {
     std::thread::spawn(move || serve(listener));
     let (path, earlier) = (dir.path().join("store"), dir.path().join("earlier"));
     let cell = OpenCell::create(&path, 1 << 24).await.unwrap().cell();
-    OpenCell::place(&path, 5).unwrap();
+    host_fs::may_block(|| OpenCell::place(&path, 5).unwrap());
     let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     write(&client, ExtentId { cell: cell.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
     client.commit(Some(b"placed at 5")).unwrap();
     drop(client);
 
     // A copy of the cell's made here, not opened, which would take its head: placed before.
-    std::fs::create_dir(&earlier).unwrap();
-    let description = local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 24, cell };
-    local_cell::create_host(&earlier, description, "memory:///cells", Kind::Fxfs).unwrap();
-    local_cell::made_host(&earlier).unwrap();
-    OpenCell::place(&earlier, 3).unwrap();
+    host_fs::may_block(|| {
+        std::fs::create_dir(&earlier).unwrap();
+        let description =
+            local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 24, cell };
+        local_cell::create_host(&earlier, description, "memory:///cells", Kind::Fxfs).unwrap();
+        local_cell::made_host(&earlier).unwrap();
+        OpenCell::place(&earlier, 3).unwrap();
+    });
     let refused = CellClient::connect(&socket, &earlier, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::ESTALE));
-    OpenCell::place(&earlier, 6).unwrap();
+    host_fs::may_block(|| OpenCell::place(&earlier, 6).unwrap());
     let later = CellClient::connect(&socket, &earlier, 1 << 24).unwrap();
     assert_eq!(later.root().unwrap(), b"placed at 5");
 }
@@ -2392,7 +2395,7 @@ async fn fenced_cells_answer_ordered_commits_erofs() {
     std::thread::spawn(move || serve(listener));
     let path = |name: &str| dir.path().join(name);
     let cell = OpenCell::create(path("first"), 1 << 24).await.unwrap().cell();
-    OpenCell::place(path("first"), 5).unwrap();
+    host_fs::may_block(|| OpenCell::place(path("first"), 5).unwrap());
     let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
     let extent = |sequence| ExtentId { cell: cell.id, sequence };
     write(&first, extent(1), 0, &pattern(1, BLOCK)).unwrap();
@@ -5764,7 +5767,7 @@ async fn public_slabs_wait_for_the_vm_processes_they_were_staged_to_alone() {
     let bytes = pattern(1, EXTENT as usize);
     open_cell.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
     open_cell.commit(None).await.unwrap();
-    open_cell.make_public().unwrap();
+    host_fs::may_block(|| open_cell.make_public().unwrap());
     let base_cell = open_cell.cell();
     drop(open_cell);
     let opened = OpenCell::open(&base).await.unwrap();
@@ -5964,7 +5967,7 @@ async fn vm_processes_of_any_tenant_write_no_public_base() {
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
     let open_cell = OpenCell::create(&base, 1 << 24).await.unwrap();
     open_cell.commit(None).await.unwrap();
-    open_cell.make_public().unwrap();
+    host_fs::may_block(|| open_cell.make_public().unwrap());
     let forked = crate::host_cell::fork_child(open_cell.cell());
     drop(open_cell);
     let opened = OpenCell::open(&base).await.unwrap();

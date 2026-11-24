@@ -242,7 +242,7 @@ fn bucket_named(host: Option<String>, path: &Path) -> anyhow::Result<String> {
     if let Some(url) = host {
         return Ok(url);
     }
-    let path = host_fs::canonicalize(&path)?;
+    let path = upload::blocking(|| host_fs::canonicalize(&path))?;
     let name = path.file_name().ok_or_else(|| anyhow::anyhow!("{} has no name", path.display()))?;
     let own = path.with_file_name(format!("{}{OWN_BUCKET}", name.to_string_lossy()));
     let url = url::Url::from_directory_path(&own)
@@ -920,7 +920,7 @@ pub(crate) async fn delete_with(
     path: &Path,
     elsewhere: impl AsyncFnOnce(&Path, CellId) -> Result<(), Failure>,
 ) -> Result<(), Error> {
-    if !host_fs::exists(&path) {
+    if !upload::blocking(|| host_fs::exists(&path)) {
         return Err(Errno::ENOENT.into());
     }
     let deleting = async |cell| -> anyhow::Result<()> {
@@ -961,12 +961,14 @@ mod tests {
         let made =
             create_unmade(&path, MIB, new(), cell::Kind::Fxfs, None, keeping().unwrap()).await;
         let cell = made.unwrap().local.description().cell;
-        assert!(unmade(&path));
+        assert!(host_fs::may_block(|| unmade(&path)));
         let refused = open(&path, keeping().unwrap()).await.err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
         assert_eq!(refused.downcast_ref::<local_cell::Unmade>(), Some(&local_cell::Unmade));
-        local_cell::made_host(&path).unwrap();
-        assert!(!unmade(&path));
+        host_fs::may_block(|| {
+            local_cell::made_host(&path).unwrap();
+            assert!(!unmade(&path));
+        });
         assert_eq!(
             open(&path, keeping().unwrap())
                 .await
@@ -984,7 +986,7 @@ mod tests {
         use bucket_cell::identity::{self, Details, Entry};
         let dir = tempfile::tempdir().unwrap();
         let url = |name: &str| {
-            host_fs::create_dir(dir.path().join(name)).unwrap();
+            host_fs::may_block(|| host_fs::create_dir(dir.path().join(name))).unwrap();
             format!("file://{}", dir.path().join(name).display())
         };
         let (root, home, other, late) = (url("root"), url("home"), url("other"), url("late"));
@@ -1058,7 +1060,10 @@ mod tests {
         .await;
         let Err(Failure::Bucket(refused)) = refused.map(drop) else { panic!("made") };
         assert_eq!(refused, bucket_cell::Error::NoCell);
-        assert!(!host_fs::exists(&path), "a cell directory of no cell was left");
+        assert!(
+            !host_fs::may_block(|| host_fs::exists(&path)),
+            "a cell directory of no cell was left"
+        );
     }
 
     /// TASK-165.6: a cell made on a host of cladefs's system names the host's bucket; one made
@@ -1069,12 +1074,14 @@ mod tests {
     async fn cells_name_their_hosts_bucket_or_one_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        host_fs::create_dir(&path).unwrap();
-        let host = Some("gs://bucket/prefix".to_owned());
-        assert_eq!(bucket_named(host, &path).unwrap(), "gs://bucket/prefix");
-        let own = host_fs::canonicalize(&dir.path()).unwrap().join("store.bucket");
-        let url = format!("file://{}/", own.display());
-        assert_eq!(bucket_named(None, &path).unwrap(), url);
+        host_fs::may_block(|| {
+            host_fs::create_dir(&path).unwrap();
+            let host = Some("gs://bucket/prefix".to_owned());
+            assert_eq!(bucket_named(host, &path).unwrap(), "gs://bucket/prefix");
+            let own = host_fs::canonicalize(&dir.path()).unwrap().join("store.bucket");
+            let url = format!("file://{}/", own.display());
+            assert_eq!(bucket_named(None, &path).unwrap(), url);
+        });
 
         // Where no host's bucket is, as in this test's process.
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
@@ -1085,22 +1092,25 @@ mod tests {
         let version = bucket_cell::layout::NewVersion { id: 1, keep_last: None };
         uploader.uploaded(local.commit_version(version, false).await.unwrap()).await.unwrap();
         fork_through(&local, &uploader, version.id, &fork, child, |_| Ok(())).await.unwrap();
-        let own = host_fs::canonicalize(&dir.path()).unwrap().join("made.bucket");
-        let url = format!("file://{}/", own.display());
-        for named in [&made, &fork] {
-            assert_eq!(local_cell::host_bucket(named).unwrap(), Some(url.clone()));
-        }
-        assert!(keeps_own_bucket(&local), "a cell directory's own bucket is a host's");
-        // The bucket is this process's one of its URL, whose objects are in its directory.
-        assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
-        // cladefs: under its cell's prefix (TASK-364).
-        let cell = own.join(local.description().cell.prefix());
-        assert!(host_fs::exists(&cell.join("head")), "{:?}", host_fs::read_dir(&cell).unwrap());
+        let own = host_fs::may_block(|| {
+            let own = host_fs::canonicalize(&dir.path()).unwrap().join("made.bucket");
+            let url = format!("file://{}/", own.display());
+            for named in [&made, &fork] {
+                assert_eq!(local_cell::host_bucket(named).unwrap(), Some(url.clone()));
+            }
+            assert!(keeps_own_bucket(&local), "a cell directory's own bucket is a host's");
+            // The bucket is this process's one of its URL, whose objects are in its directory.
+            assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
+            // cladefs: under its cell's prefix (TASK-364).
+            let cell = own.join(local.description().cell.prefix());
+            assert!(host_fs::exists(&cell.join("head")), "{:?}", host_fs::read_dir(&cell).unwrap());
+            own
+        });
         // The cell deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(local);
         delete(&made, Some(&bucket), || Ok(1)).await.unwrap();
-        assert!(!host_fs::exists(&made) && host_fs::exists(&own));
+        assert!(host_fs::may_block(|| !host_fs::exists(&made) && host_fs::exists(&own)));
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, forked));
         assert_eq!(record.unwrap().map(|record| record.deleted()), Some(false));
     }
@@ -1112,13 +1122,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         drop(create(&path, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).await.unwrap());
-        let description = path.join("store");
-        let text = host_fs::read_to_string(&description).unwrap();
-        let older: String = std::iter::once("cladefs extent store 5")
-            .chain(text.lines().skip(1).filter(|line| !line.starts_with("bucket ")))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        host_fs::write(&description, older).unwrap();
+        host_fs::may_block(|| {
+            let description = path.join("store");
+            let text = host_fs::read_to_string(&description).unwrap();
+            let older: String = std::iter::once("cladefs extent store 5")
+                .chain(text.lines().skip(1).filter(|line| !line.starts_with("bucket ")))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            host_fs::write(&description, older).unwrap();
+        });
 
         let format = local_cell::Format { found: "cladefs extent store 5".to_owned() };
         let refused = open(&path, keeping().unwrap()).await.err().unwrap();
@@ -1128,7 +1140,7 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
         let refused = crate::Storage::delete(&path).await.err().unwrap();
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
-        assert!(host_fs::exists(&path.join("store")));
+        assert!(host_fs::may_block(|| host_fs::exists(&path.join("store"))));
     }
 
     /// A cell directory whose deletion stopped once its description was gone, or whose making
@@ -1137,10 +1149,12 @@ mod tests {
     async fn deleting_an_emptied_cell_finishes_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
-        host_fs::create_dir(&path).unwrap();
-        assert!(unmade(&path));
+        host_fs::may_block(|| {
+            host_fs::create_dir(&path).unwrap();
+            assert!(unmade(&path));
+        });
         delete(&path, None, token).await.unwrap();
-        assert!(!host_fs::exists(&path));
+        assert!(!host_fs::may_block(|| host_fs::exists(&path)));
     }
 
     /// TASK-79.20: a cell whose description was never put in place, its host crashing as its
@@ -1150,10 +1164,13 @@ mod tests {
     async fn deleting_a_cell_never_described_removes_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
-        host_fs::create_dir_all(path.join("segments")).unwrap();
-        host_fs::write(path.join("ancestry"), "cladefs cell records 1\n3 /elsewhere\n").unwrap();
-        assert!(unmade(&path));
+        host_fs::may_block(|| {
+            host_fs::create_dir_all(path.join("segments")).unwrap();
+            host_fs::write(path.join("ancestry"), "cladefs cell records 1\n3 /elsewhere\n")
+                .unwrap();
+            assert!(unmade(&path));
+        });
         delete(&path, None, token).await.unwrap();
-        assert!(!host_fs::exists(&path));
+        assert!(!host_fs::may_block(|| host_fs::exists(&path)));
     }
 }

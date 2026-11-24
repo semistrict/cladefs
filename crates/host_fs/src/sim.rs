@@ -10,6 +10,7 @@
 //! since its files' last syncs, its locks of files gone. Its calls fail as the simulation's faults
 //! say, besides ([`faults`]).
 
+use crate::blocking::assert_may_block;
 use crate::mem::{self, components, errno};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -243,11 +244,15 @@ impl DirEntry {
         self.name.clone()
     }
 
+    #[track_caller]
     pub fn file_type(&self) -> io::Result<FileType> {
+        assert_may_block("DirEntry::file_type");
         Ok(self.metadata.kind)
     }
 
+    #[track_caller]
     pub fn metadata(&self) -> io::Result<Metadata> {
+        assert_may_block("DirEntry::metadata");
         Ok(self.metadata.clone())
     }
 }
@@ -258,7 +263,9 @@ pub struct ReadDir(std::vec::IntoIter<DirEntry>);
 impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
 
+    #[track_caller]
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
+        assert_may_block("ReadDir::next");
         self.0.next().map(Ok)
     }
 }
@@ -310,7 +317,9 @@ impl OpenOptions {
         self
     }
 
+    #[track_caller]
     pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+        assert_may_block("OpenOptions::open");
         let path = path.as_ref();
         let disk = disk();
         let mut fs = disk.fs.lock().unwrap();
@@ -366,15 +375,21 @@ impl std::fmt::Debug for Disk {
 }
 
 impl File {
+    #[track_caller]
     pub fn open(path: impl AsRef<Path>) -> io::Result<File> {
+        assert_may_block("File::open");
         OpenOptions::new().read(true).open(path)
     }
 
+    #[track_caller]
     pub fn create(path: impl AsRef<Path>) -> io::Result<File> {
+        assert_may_block("File::create");
         OpenOptions::new().write(true).create(true).truncate(true).open(path)
     }
 
+    #[track_caller]
     pub fn create_new(path: impl AsRef<Path>) -> io::Result<File> {
+        assert_may_block("File::create_new");
         OpenOptions::new().read(true).write(true).create_new(true).open(path)
     }
 
@@ -387,7 +402,9 @@ impl File {
         work(&mut fs)
     }
 
+    #[track_caller]
     pub fn set_len(&self, len: u64) -> io::Result<()> {
+        assert_may_block("File::set_len");
         self.with(|fs| {
             let adds = len > fs.data(self.inode)?.len() as u64;
             faulted(format_args!("setting inode {}'s length to {len}", self.inode), adds)?;
@@ -396,18 +413,24 @@ impl File {
     }
 
     /// Makes its bytes durable, or, of a directory, its entries.
+    #[track_caller]
     pub fn sync_all(&self) -> io::Result<()> {
+        assert_may_block("File::sync_all");
         self.with(|fs| {
             faulted(format_args!("syncing inode {}", self.inode), false)?;
             fs.sync(self.inode)
         })
     }
 
+    #[track_caller]
     pub fn sync_data(&self) -> io::Result<()> {
+        assert_may_block("File::sync_data");
         self.sync_all()
     }
 
+    #[track_caller]
     pub fn metadata(&self) -> io::Result<Metadata> {
+        assert_may_block("File::metadata");
         self.with(|fs| Ok(Metadata::of(fs.stat(self.inode)?)))
     }
 
@@ -520,16 +543,22 @@ impl Seek for File {
     }
 }
 
+#[track_caller]
 pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
+    assert_may_block("metadata");
     with(|fs| Ok(Metadata::of(fs.stat(fs.lookup(path.as_ref())?)?)))
 }
 
 /// As [`metadata`]: a disk in memory has no symbolic links.
+#[track_caller]
 pub fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
+    assert_may_block("symlink_metadata");
     metadata(path)
 }
 
+#[track_caller]
 pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("create_dir");
     let path = path.as_ref();
     with(|fs| {
         faulted(format_args!("making the directory {}", path.display()), true)?;
@@ -537,7 +566,9 @@ pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+#[track_caller]
 pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("create_dir_all");
     with(|fs| {
         let mut at = PathBuf::from("/");
         for name in components(path.as_ref()) {
@@ -555,7 +586,9 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+#[track_caller]
 pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("remove_file");
     let path = path.as_ref();
     with(|fs| {
         faulted(format_args!("removing {}", path.display()), false)?;
@@ -563,7 +596,9 @@ pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+#[track_caller]
 pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("remove_dir");
     let path = path.as_ref();
     with(|fs| {
         faulted(format_args!("removing the directory {}", path.display()), false)?;
@@ -571,7 +606,9 @@ pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+#[track_caller]
 pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("remove_dir_all");
     let path = path.as_ref();
     with(|fs| {
         faulted(format_args!("removing {} and all in it", path.display()), false)?;
@@ -579,7 +616,9 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+#[track_caller]
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("rename");
     let (from, to) = (from.as_ref(), to.as_ref());
     with(|fs| {
         faulted(format_args!("renaming {} to {}", from.display(), to.display()), false)?;
@@ -587,7 +626,9 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
+#[track_caller]
 pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+    assert_may_block("hard_link");
     with(|fs| {
         faulted(
             format_args!("linking {} at {}", from.as_ref().display(), to.as_ref().display()),
@@ -597,31 +638,41 @@ pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()>
     })
 }
 
+#[track_caller]
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    assert_may_block("read");
     with(|fs| {
         read_faulted(format_args!("reading {}", path.as_ref().display()))?;
         Ok(fs.data(fs.lookup(path.as_ref())?)?.to_vec())
     })
 }
 
+#[track_caller]
 pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+    assert_may_block("read_to_string");
     String::from_utf8(read(path)?).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 /// Writes `contents` to the file at `path`, made or cut first, as `std::fs::write` does: synced
 /// not.
+#[track_caller]
 pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    assert_may_block("write");
     let file = File::create(path)?;
     file.write_all_at(contents.as_ref(), 0)
 }
 
+#[track_caller]
 pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
+    assert_may_block("copy");
     let contents = read(from)?;
     write(to, &contents)?;
     Ok(contents.len() as u64)
 }
 
+#[track_caller]
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
+    assert_may_block("read_dir");
     let path = path.as_ref();
     with(|fs| {
         let read = (fs.list(path)?.into_iter())
@@ -636,7 +687,9 @@ pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
 }
 
 /// `path`, absolute, `.` and `..` resolved, if something is there.
+#[track_caller]
 pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+    assert_may_block("canonicalize");
     let path = path.as_ref();
     with(|fs| fs.lookup(path).map(drop))?;
     Ok(std::iter::once(OsStr::new("/").to_owned()).chain(components(path)).collect())
@@ -651,7 +704,9 @@ pub trait FileExt {
 }
 
 impl FileExt for File {
+    #[track_caller]
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        assert_may_block("FileExt::read_at");
         self.with(|fs| {
             let len = buf.len();
             read_faulted(format_args!("reading {len} bytes of inode {} at {offset}", self.inode))?;
@@ -663,14 +718,18 @@ impl FileExt for File {
         })
     }
 
+    #[track_caller]
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        assert_may_block("FileExt::read_exact_at");
         match self.read_at(buf, offset)? {
             read if read == buf.len() => Ok(()),
             _ => Err(io::ErrorKind::UnexpectedEof.into()),
         }
     }
 
+    #[track_caller]
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        assert_may_block("FileExt::write_at");
         self.with(|fs| {
             let len = buf.len();
             faulted(format_args!("writing {len} bytes of inode {} at {offset}", self.inode), true)?;
@@ -679,7 +738,9 @@ impl FileExt for File {
         })
     }
 
+    #[track_caller]
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        assert_may_block("FileExt::write_all_at");
         self.write_at(buf, offset).map(drop)
     }
 }

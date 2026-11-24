@@ -139,7 +139,8 @@ pub(super) fn open_part_cache(daemon: &Daemon) -> Result<Option<Arc<Cache>>, Str
         return Ok(cache.clone());
     }
     let cache = match cache_config()? {
-        Some((dir, capacity)) => match Cache::open(&dir, capacity) {
+        Some((dir, capacity)) => match local_cell::upload::blocking(|| Cache::open(&dir, capacity))
+        {
             Ok(cache) => Some(Arc::new(cache)),
             Err(err) => return Err(format!("CLADEFSD_PART_CACHE: {}: {err}", dir.display())),
         },

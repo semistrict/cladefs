@@ -81,7 +81,7 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
     node_local::starting();
     // Its root on its own disk, in memory, which a kill crashes (host_fs, TASK-685.4): as a host's
     // root is, there before its daemon, durable.
-    host_fs::create_dir_all_durably(root).unwrap();
+    host_fs::may_block(|| host_fs::create_dir_all_durably(root).unwrap());
     let tenants = root.join("tenants").display().to_string();
     // One call: it sets the node's whole environment.
     let mut vars = vec![
@@ -1817,18 +1817,20 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
             }
             guest.close();
             let listed = || {
-                let mut files = Vec::new();
-                let mut dirs = vec![writing.clone()];
-                while let Some(dir) = dirs.pop() {
-                    for entry in host_fs::read_dir(&dir).unwrap() {
-                        let entry = entry.unwrap();
-                        match entry.metadata().unwrap().is_dir() {
-                            true => dirs.push(entry.path()),
-                            false => files.push(entry.path()),
+                host_fs::may_block(|| {
+                    let mut files = Vec::new();
+                    let mut dirs = vec![writing.clone()];
+                    while let Some(dir) = dirs.pop() {
+                        for entry in host_fs::read_dir(&dir).unwrap() {
+                            let entry = entry.unwrap();
+                            match entry.metadata().unwrap().is_dir() {
+                                true => dirs.push(entry.path()),
+                                false => files.push(entry.path()),
+                            }
                         }
                     }
-                }
-                files
+                    files
+                })
             };
             let segments = writing.join("segments");
             for _ in 0..60 {
@@ -1907,10 +1909,12 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     let target_root = roots[1].clone();
     let left = node(1)
         .spawn(async move {
-            let found = host_fs::read_dir(&target_root).unwrap();
-            let names =
-                found.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
-            names.filter(|name| name.contains("guest-cell")).collect::<Vec<_>>()
+            host_fs::may_block(|| {
+                let found = host_fs::read_dir(&target_root).unwrap();
+                let names =
+                    found.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned());
+                names.filter(|name| name.contains("guest-cell")).collect::<Vec<_>>()
+            })
         })
         .await
         .unwrap();
@@ -2109,8 +2113,11 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
     let mut noted = Vec::new();
     for each in 0..3 {
         let cells = roots[each].join("ephemeral/cells");
-        let listed =
-            async move { host_fs::read_dir(cells).is_ok_and(|mut found| found.next().is_some()) };
+        let listed = async move {
+            host_fs::may_block(|| {
+                host_fs::read_dir(cells).is_ok_and(|mut found| found.next().is_some())
+            })
+        };
         if node(each).spawn(listed).await.unwrap() {
             noted.push(each);
         }

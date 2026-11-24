@@ -300,6 +300,8 @@ pub struct DiskDir {
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
     handle: Arc<host_fs::File>,
+    /// The directory's device and inode, fixed for the life of `handle`.
+    id: DirId,
     /// cladefs: the disk of its filesystem (doc-22).
     disk: Arc<bucket_cell::host_disk::HostDisk>,
     /// cladefs: its durability's deferral, if its maker defers it ([`crate::defer_durability`]).
@@ -309,10 +311,13 @@ pub struct DiskDir {
 impl DiskDir {
     /// The directory at `path`, which exists.
     pub fn new(path: &Path) -> io::Result<Self> {
+        use host_fs::MetadataExt as _;
         let handle = Arc::new(host_fs::File::open(path)?);
+        let metadata = handle.metadata()?;
+        let id = (metadata.dev(), metadata.ino());
         let disk = bucket_cell::host_disk::HostDisk::of(path)?;
         let deferral = crate::deferral::of(path);
-        Ok(Self { path: path.to_owned(), handle, disk, deferral })
+        Ok(Self { path: path.to_owned(), handle, id, disk, deferral })
     }
 
     /// cladefs: a rename of a file in it, in flight until what is returned goes, if its
@@ -458,7 +463,7 @@ impl Dir for DiskDir {
     /// lock under the process's takings, and waits between tries with them let go, a taking of the
     /// same directory by another thread here, meanwhile, shared as it is found.
     fn take(&self) -> io::Result<()> {
-        let id = self.id()?;
+        let id = self.id;
         let deadline = std::time::Instant::now() + TAKE_WAIT;
         loop {
             {
@@ -484,52 +489,38 @@ impl Dir for DiskDir {
     }
 
     fn let_go(&self) {
-        let id = match self.id() {
-            Ok(id) => id,
-            Err(err) => {
-                return log::warn!("extent store: letting {} go: {err}", self.path.display());
-            }
-        };
         let mut taken = TAKEN.get().lock().unwrap();
-        let Some((count, _)) = taken.get_mut(&id) else { return };
+        let Some((count, _)) = taken.get_mut(&self.id) else { return };
         *count -= 1;
         if *count > 0 {
             return;
         }
         // Unlocked as it goes.
-        drop(taken.remove(&id));
+        drop(taken.remove(&self.id));
     }
 
     fn claim(&self) -> io::Result<()> {
-        let id = self.id()?;
-        let mut claimed = closed_in(CLAIMED.get().lock().unwrap(), id)?;
-        if claimed.contains_key(&id) {
+        let mut claimed = closed_in(CLAIMED.get().lock().unwrap(), self.id)?;
+        if claimed.contains_key(&self.id) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "this process has the cell open",
             ));
         }
-        claimed.insert(id, false);
+        claimed.insert(self.id, false);
         Ok(())
     }
 
     fn closing(&self) {
-        if let Ok(id) = self.id()
-            && let Some(closing) = CLAIMED.get().lock().unwrap().get_mut(&id)
-        {
+        if let Some(closing) = CLAIMED.get().lock().unwrap().get_mut(&self.id) {
             *closing = true;
         }
     }
 
     fn unclaim(&self) {
-        match self.id() {
-            Ok(id) => {
-                CLAIMED.get().lock().unwrap().remove(&id);
-                UNCLAIMED.get().notify_all();
-                UNCLAIMED_EVENT.get().notify(usize::MAX);
-            }
-            Err(err) => log::warn!("extent store: unclaiming {}: {err}", self.path.display()),
-        }
+        CLAIMED.get().lock().unwrap().remove(&self.id);
+        UNCLAIMED.get().notify_all();
+        UNCLAIMED_EVENT.get().notify(usize::MAX);
     }
 
     fn barrier(&self) -> io::Result<()> {
@@ -625,7 +616,7 @@ fn closed_in(
 /// there.
 pub async fn closed(path: &Path) -> io::Result<()> {
     use host_fs::MetadataExt as _;
-    let metadata = match host_fs::metadata(path) {
+    let metadata = match crate::upload::blocking(|| host_fs::metadata(path)) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
@@ -652,15 +643,6 @@ const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A directory's device and inode, which name it however a path names it.
 type DirId = (u64, u64);
-
-impl DiskDir {
-    /// The directory's device and inode.
-    fn id(&self) -> io::Result<DirId> {
-        use host_fs::MetadataExt as _;
-        let metadata = self.handle.metadata()?;
-        Ok((metadata.dev(), metadata.ino()))
-    }
-}
 
 /// Tries to take the directory through `handle`, a descriptor of it, against other processes'
 /// takings of it ([`Dir::take`]): its lock, through a `dup` of the descriptor, of its open file

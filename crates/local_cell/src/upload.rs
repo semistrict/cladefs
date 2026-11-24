@@ -721,14 +721,16 @@ pub(crate) type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
     // TASK-685.1: madsim's one thread runs it as it is.
     #[cfg(madsim)]
-    return work();
+    return host_fs::may_block(work);
     // cladefs: a current-thread runtime's one thread, as tests' and FUSE storage's are, has no
     // other to hand its tasks to (`block_in_place` panics there): it runs it as it is, as a thread
     // no runtime runs does (TASK-685.3).
     #[cfg(not(madsim))]
     match tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
-        _ => work(),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
+            tokio::task::block_in_place(|| host_fs::may_block(work))
+        }
+        _ => host_fs::may_block(work),
     }
 }
 
@@ -1898,12 +1900,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let (number, tag) = (closed.number, closed.tag());
             // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
             // 2944).
-            let own = blocking(|| {
+            let (own, size) = blocking(|| -> Result<_, Failure> {
                 let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
-                own.collect::<Result<_, Failure>>()
+                let own = own.collect::<Result<_, Failure>>()?;
+                let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
+                Ok((own, size))
             })?;
             let (footer, data_len) = (closed.footer.clone(), closed.data_len);
-            let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
             let closed = Arc::new(closed);
             let body = Body::new(size, move || blocking(|| closed.bytes()));
             let segment = writer.add_segment(Objects { footer, segment: body, own, data_len })?;

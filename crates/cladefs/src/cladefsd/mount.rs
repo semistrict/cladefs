@@ -182,8 +182,10 @@ pub(super) async fn close_on(daemon: &Daemon) -> Result<(), Error> {
     let mountpoint = mount.mountpoint().to_owned();
     // cladefs: outside the simulation: FUSE (doc-24).
     let closed = tokio::task::spawn_blocking(move || {
-        mount.unmount(true)?;
-        mount.join()
+        host_fs::may_block(|| {
+            mount.unmount(true)?;
+            mount.join()
+        })
     });
     closed.await.map_err(Error::new)?.map_err(|err| {
         err.context(format!("closing the cells mounted at {}", mountpoint.display()))

@@ -91,14 +91,16 @@ const VERSION_WAIT: std::time::Duration = std::time::Duration::MAX;
 /// The path that names the cell at `path` in the daemon's [`table`]: whichever way a request
 /// names it.
 pub(super) fn cell_dir_key(path: &Path) -> PathBuf {
-    if let Ok(path) = host_fs::canonicalize(&path) {
-        return path;
-    }
-    // A cell not yet made: where it will be.
-    match (path.parent().map(host_fs::canonicalize), path.file_name()) {
-        (Some(Ok(parent)), Some(name)) => parent.join(name),
-        _ => path.to_owned(),
-    }
+    local_cell::upload::blocking(|| {
+        if let Ok(path) = host_fs::canonicalize(&path) {
+            return path;
+        }
+        // A cell not yet made: where it will be.
+        match (path.parent().map(host_fs::canonicalize), path.file_name()) {
+            (Some(Ok(parent)), Some(name)) => parent.join(name),
+            _ => path.to_owned(),
+        }
+    })
 }
 
 /// cladefs: holds the cell at `path` on `daemon` for the daemon's FUSE mount of cells, which
@@ -478,7 +480,9 @@ pub(super) async fn open_cell_at(
     let open_cell = attached(daemon, path, async |keeping| {
         let opening = Opening { arena: own, guest: true, keeping };
         match new {
-            Some(New { capacity, kind, tenant }) if !host_fs::exists(&path) => {
+            Some(New { capacity, kind, tenant })
+                if !local_cell::upload::blocking(|| host_fs::exists(&path)) =>
+            {
                 let of = CellOf::New(tenant);
                 OpenCell::create_kind_with(path, capacity, (of, kind), opening).await
             }
@@ -488,10 +492,12 @@ pub(super) async fn open_cell_at(
     .await?;
     // cladefs: a fork attached to it opens when first read through to, awaited (doc-24, step 5).
     let for_bases = Arc::clone(daemon);
-    let bases = open_cell.open_bases(Arc::new(move |base| {
-        let (daemon, base, arena) = (Arc::clone(&for_bases), base.to_owned(), arena.clone());
-        Box::pin(async move { self::base(&daemon, &base, arena.as_ref()).await })
-    }));
+    let bases = local_cell::upload::blocking(|| {
+        open_cell.open_bases(Arc::new(move |base| {
+            let (daemon, base, arena) = (Arc::clone(&for_bases), base.to_owned(), arena.clone());
+            Box::pin(async move { self::base(&daemon, &base, arena.as_ref()).await })
+        }))
+    });
     // cladefs: what is attached to it unread, its disk failing, closed again, as every open cell
     // the daemon lets go of is (board 5748: dropped open, it panicked).
     if let Err(err) = bases {
@@ -521,7 +527,7 @@ async fn base(
     if let Some(open_cell) = open(hold.instance())? {
         return Ok(open_cell);
     }
-    if !host_fs::exists(&path) {
+    if !local_cell::upload::blocking(|| host_fs::exists(&path)) {
         return Err(Errno::ENOENT);
     }
     let opened = attached(daemon, path, async |keeping| {
@@ -540,10 +546,13 @@ pub(super) async fn attach(
     base: PathBuf,
     allowed: impl FnOnce(&Path, &Path) -> bool + Send + 'static,
 ) -> Result<(), Errno> {
-    let base = host_fs::canonicalize(&base).map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound => Errno::ENOENT,
-        _ => Errno::EIO,
-    })?;
+    let base = blocking(move || {
+        host_fs::canonicalize(&base).map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => Errno::ENOENT,
+            _ => Errno::EIO,
+        })
+    })
+    .await?;
     let (public, ancestry) = match daemon.table.instance(&cell_dir_key(&base)) {
         Some(open_cell) => (open_cell.is_public(), open_cell.ancestry()),
         None => {
@@ -747,8 +756,12 @@ async fn take_cell(
 ) -> Result<OpenCell, Errno> {
     let cell = match cell {
         Some(cell) => cell,
-        None if !host_fs::exists(&path) => return Err(Errno::ENOENT),
-        None => local_cell::host_cell(path).map_err(|_| Errno::ENOENT)?,
+        None => local_cell::upload::blocking(|| {
+            if !host_fs::exists(&path) {
+                return Err(Errno::ENOENT);
+            }
+            local_cell::host_cell(path).map_err(|_| Errno::ENOENT)
+        })?,
     };
     attached(daemon, path, async |keeping| {
         let opening = Opening { arena: None, guest: false, keeping };
@@ -786,7 +799,7 @@ async fn opened_version(
     let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
     let dir = version_dir(daemon, cell, version)?;
     let held = hold_within(daemon, &dir, VERSION_WAIT).await?;
-    if host_fs::exists(&dir) && !crate::host_cell::unmade(&dir) {
+    if local_cell::upload::blocking(|| host_fs::exists(&dir) && !crate::host_cell::unmade(&dir)) {
         return Ok(dir);
     }
     // Their paths alone: a reference to a cell kept across its sync would keep it from closing
@@ -851,7 +864,7 @@ pub(super) async fn fork_version(
     match fork_kept(daemon, &from, capacity, (path, tenant)).await {
         (Err(errno), Opened::Before) if cell_at_fault(errno) => {
             // What a crash left at `path` goes first, as before any restore's.
-            removed_if_unmade(path)?;
+            local_cell::upload::blocking(|| removed_if_unmade(path))?;
             fork_kept(daemon, &from, capacity, (path, tenant)).await.0
         }
         (forked, _) => forked,
@@ -868,7 +881,7 @@ pub(super) async fn fork_of_version(
 ) -> Result<CellId, Errno> {
     let _child = hold_to_fork(daemon, &to).await?;
     fork_version(daemon, (cell, version), OpenCell::BLOCK_SIZE as u64, (&to, tenant)).await?;
-    local_cell::host_cell(&to).map_err(|_| Errno::EIO)
+    local_cell::upload::blocking(|| local_cell::host_cell(&to)).map_err(|_| Errno::EIO)
 }
 
 /// cladefs: forks the version `version` of `cell` on `daemon` to `to`, an ephemeral cell kept on
@@ -1009,7 +1022,8 @@ async fn fork_from_cell(
     let _child = hold_to_fork(daemon, to).await?;
     let key = cell_dir_key(from);
     // A new cell of `tenant`'s, or of the cell's tenant's (TASK-364).
-    let from_cell = local_cell::host_cell(from).map_err(|_| Errno::ENOENT)?;
+    let from_cell =
+        local_cell::upload::blocking(|| local_cell::host_cell(from)).map_err(|_| Errno::ENOENT)?;
     let tenant = tenant.unwrap_or(from_cell.tenant);
     let was_kept = kept(daemon, &key).is_some();
     match fork_held(daemon, from, to, tenant, &key).await {
@@ -1179,7 +1193,7 @@ pub(super) async fn sync(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), Errn
 /// Deletes the cell at `path` on `daemon`, or the fork whose handle it is, and its branch in its
 /// bucket ([`OpenCell::delete`], [`bucket_of`]): `EBUSY` while a connection has it open.
 pub(super) async fn delete(daemon: &Arc<Daemon>, path: PathBuf) -> Result<(), Errno> {
-    let bucket = bucket_of(daemon, &path)?;
+    let bucket = local_cell::upload::blocking(|| bucket_of(daemon, &path))?;
     delete_alone(daemon, path, Some(bucket)).await
 }
 
@@ -1228,7 +1242,7 @@ pub(super) async fn resize(
                 Some(open_cell) => open_cell,
                 None => {
                     close_kept(daemon, hold.as_ref().and_then(Hold::take_kept)).await;
-                    if !host_fs::exists(&key) {
+                    if !local_cell::upload::blocking(|| host_fs::exists(&key)) {
                         return Err(Errno::ENOENT);
                     }
                     Arc::new(open_here(daemon, &key).await?)
@@ -1321,7 +1335,7 @@ pub(super) async fn stat(daemon: &Arc<Daemon>, path: PathBuf) -> Result<CellStat
         return state_of(&open_cell, true);
     }
     let _held = hold(daemon, &path).await?;
-    if !host_fs::exists(&path) {
+    if !local_cell::upload::blocking(|| host_fs::exists(&path)) {
         return Err(Errno::ENOENT);
     }
     let open_cell = open_here(daemon, &path).await?;
