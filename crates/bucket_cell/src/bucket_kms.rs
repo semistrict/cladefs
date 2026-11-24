@@ -71,12 +71,18 @@ pub struct BucketKms<B> {
     /// in use ([`BucketKms::fenced`]): so that no object sealed under a key removed lands unseen
     /// by the check (board 8487, hotbed review 79).
     sealing: Arc<tokio::sync::RwLock<()>>,
-    /// Each tenant's KEK as last read, and when.
-    held: Mutex<HashMap<u64, Held>>,
+    held: Mutex<HeldKeks>,
     fresh_for: Duration,
     /// The identity of its bucket (TASK-633.6), which the keys it wraps name, once read: 0 for a
     /// bucket of none, its keys bound to no bucket.
     identity: Mutex<Option<u64>>,
+}
+
+#[derive(Default)]
+struct HeldKeks {
+    tenants: HashMap<u64, Held>,
+    /// Advanced under the same lock that publishes reads, even if no KEK was held.
+    generation: u64,
 }
 
 /// A tenant's KEK as a host read it.
@@ -178,22 +184,30 @@ impl<B: Bucket> BucketKms<B> {
     /// `make`, made. Refused if the object is a tombstone, or missing and not to be made: the
     /// tenant is destroyed.
     async fn kek(&self, tenant: u64, make: bool) -> Result<Arc<TenantKek>, Error> {
-        let held = self
-            .held
-            .lock()
-            .unwrap()
-            .get(&tenant)
-            .and_then(|held| (held.read.elapsed() < self.fresh_for).then(|| held.kek.clone()));
-        if let Some(kek) = held {
-            return Ok(kek);
-        }
-        let read = Instant::now();
+        let (read, generation) = {
+            let held = self.held.lock().unwrap();
+            if let Some(kept) = held.tenants.get(&tenant)
+                && kept.read.elapsed() < self.fresh_for
+            {
+                return Ok(kept.kek.clone());
+            }
+            (Instant::now(), held.generation)
+        };
         let kek = self.read(tenant, make).await;
         let mut held = self.held.lock().unwrap();
+        if held.generation != generation {
+            return Err(Error::Io {
+                tenant,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "the bucket KMS cache was invalidated during a KEK read",
+                ),
+            });
+        }
         match &kek {
-            Ok(kek) => held.insert(tenant, Held { kek: kek.clone(), read }),
+            Ok(kek) => held.tenants.insert(tenant, Held { kek: kek.clone(), read }),
             // Unread: none held, so that the next asks again; the error is the caller's.
-            Err(_) => held.remove(&tenant),
+            Err(_) => held.tenants.remove(&tenant),
         };
         kek
     }
@@ -269,7 +283,9 @@ impl<B: Bucket> Kms for BucketKms<B> {
     }
 
     fn forget(&self, tenant: u64) {
-        self.held.lock().unwrap().remove(&tenant);
+        let mut held = self.held.lock().unwrap();
+        held.generation += 1;
+        held.tenants.remove(&tenant);
     }
 }
 
@@ -1258,6 +1274,47 @@ mod tests {
             assert_eq!(unwrapped.expose(), first_key.expose());
             let unwrapped = block_on(kms.unwrap_dyn(7, &second_wrapped)).unwrap();
             assert_eq!(unwrapped.expose(), second_key.expose());
+        }
+    }
+
+    #[test]
+    fn a_kek_read_before_invalidation_cannot_return_or_be_held_afterward() {
+        use crate::testing::Fault;
+        use std::task::{Context, Poll};
+
+        for shred in [false, true] {
+            let sim = SimBucket::new();
+            let master = Secret::random();
+            let key = Secret::random();
+            let writer = host(&sim, &[&master]);
+            let wrapped = sim.served(writer.wrap(7, &key)).0.unwrap();
+            let reader = host(&sim, &[&master]);
+            reader.identify(0);
+
+            let mut reading = std::pin::pin!(reader.unwrap(7, &wrapped));
+            let mut context = Context::from_waker(futures::task::noop_waker_ref());
+            assert!(reading.as_mut().poll(&mut context).is_pending());
+            let get = format!("get {}", layout::kek(7));
+            assert_eq!(sim.describe(0), get);
+            sim.complete(0, Fault::None);
+            // The answer already contains the old KEK, but the reader has yet to consume it.
+            if shred {
+                assert_eq!(sim.served(reader.destroy(7)).0.unwrap(), Destroyed::Now);
+            } else {
+                reader.forget(7);
+            }
+            assert!(matches!(
+                reading.as_mut().poll(&mut context),
+                Poll::Ready(Err(Error::Io { tenant: 7, source }))
+                    if source.kind() == std::io::ErrorKind::Interrupted
+            ));
+            let (next, asked) = sim.served(reader.unwrap(7, &wrapped));
+            assert_eq!(asked, [get]);
+            if shred {
+                assert!(matches!(next, Err(Error::Destroyed { tenant: 7 })));
+            } else {
+                assert_eq!(next.unwrap().expose(), key.expose());
+            }
         }
     }
 
