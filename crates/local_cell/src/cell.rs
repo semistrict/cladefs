@@ -2711,7 +2711,6 @@ impl<D: Dir> LocalCell<D> {
         let len = data.as_slice().len() as u64;
         let open = state.segments.open_segment();
         let (file, at) = state.segments.append(len)?;
-        state.segments.appended(open, at, len);
         let piece = Piece { segment: open, offset: at, extent_offset: 0, len };
         // A test's: the copy's write failing, as a disk's would.
         let write = || -> Result<(), Error> {
@@ -2723,6 +2722,7 @@ impl<D: Dir> LocalCell<D> {
             state.uncommitted.let_go(len);
             return Err(error.into());
         }
+        state.segments.appended(open, at, len);
         written::wrote(written::Kind::Relocated, data.as_slice().len());
         self.see_ahead(state);
         Ok(piece)
@@ -4282,6 +4282,26 @@ fn paint(pieces: &[Piece], start: u64, end: u64) -> Vec<Span> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "shuttle"))]
+    #[test]
+    fn failed_relocation_does_not_complete_a_part_for_looking_ahead() {
+        let _scenario = fail::FailScenario::setup();
+        let description = Description {
+            block_size: 4096,
+            capacity: 2 * extent_frame::PART,
+            cell: bucket_cell::layout::test_cell(1),
+        };
+        let cell =
+            LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
+        let mut state = cell.lock();
+        fail::cfg("relocate::write", "1*return").unwrap();
+        let error = cell
+            .copy_relocated(&mut state, &Aligned::new(extent_frame::PART as usize))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "failpoint relocate::write");
+        assert!(state.segments.take_seeing().is_empty());
+    }
 
     /// The cell's own tests under Shuttle (the `shuttle` feature), which only they can run:
     /// `cargo nextest run -p local_cell --features shuttle --lib shuttle_tests::`.
