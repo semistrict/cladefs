@@ -150,6 +150,14 @@ struct Inner<C, S, P> {
     /// woken as its holder lets it go, and none of another's, as every cell's were, at each
     /// cell's letting go (TASK-92.5). From the first that waits until then.
     waiting: HashMap<PathBuf, Event>,
+    /// Under Shuttle: live [`Hold`]s per key and whether any key ever had two at once (board
+    /// 10956). Counted under `inner`'s lock where holds are issued and released: counting outside
+    /// it lets a releasing holder decrement before `Hold::drop` takes the lock, or a claim passing
+    /// a going connection drop that connection (and its hold) before returning the new hold.
+    #[cfg(all(test, feature = "shuttle"))]
+    live_holds: HashMap<PathBuf, usize>,
+    #[cfg(all(test, feature = "shuttle"))]
+    two_holders: bool,
 }
 
 /// A key's entry: who holds its cell, and what is open of it meanwhile.
@@ -368,6 +376,14 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             },
         };
         self.entries.insert(key.to_owned(), entry);
+        #[cfg(all(test, feature = "shuttle"))]
+        {
+            let count = self.live_holds.entry(key.to_owned()).or_default();
+            *count += 1;
+            if *count > 1 {
+                self.two_holders = true;
+            }
+        }
         Ok(Claimed::Held { kept: evicted, _passed: passed })
     }
 }
@@ -375,7 +391,14 @@ impl<C: Writer, S, P> Inner<C, S, P> {
 impl<C, S, P> CellTable<C, S, P> {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner { entries: HashMap::new(), waiting: HashMap::new() })),
+            inner: Arc::new(Mutex::new(Inner {
+                entries: HashMap::new(),
+                waiting: HashMap::new(),
+                #[cfg(all(test, feature = "shuttle"))]
+                live_holds: HashMap::new(),
+                #[cfg(all(test, feature = "shuttle"))]
+                two_holders: false,
+            })),
         }
     }
 
@@ -434,6 +457,12 @@ impl<C, S, P> CellTable<C, S, P> {
         inner.entries.values().all(Entry::is_stale)
     }
 
+    /// Whether two [`Hold`]s for any key ever overlapped under `inner`'s lock (board 10956).
+    #[cfg(all(test, feature = "shuttle"))]
+    pub fn two_holders(&self) -> bool {
+        self.inner.lock().unwrap().two_holders
+    }
+
     /// cladefs: the cell at `key`, a writer's that went, closing, is closed: those waiting for it may
     /// claim it ([`Open::Closing`]). Called as its last reference goes, its writer's connection
     /// having said so (`OpenCell::keep_until_closed`).
@@ -449,6 +478,13 @@ impl<C, S, P> CellTable<C, S, P> {
     /// has open any more; those waiting for it alone are woken.
     fn release(&self, key: &Path) {
         let mut inner = self.inner.lock().unwrap();
+        #[cfg(all(test, feature = "shuttle"))]
+        if let Some(count) = inner.live_holds.get_mut(key) {
+            *count -= 1;
+            if *count == 0 {
+                inner.live_holds.remove(key);
+            }
+        }
         let left = inner.entries.remove(key).map_or(Open::Nothing, Entry::into_open);
         let discarded = match rules().open_outlives_holders {
             true if !left.is_nothing() => {
@@ -1012,7 +1048,7 @@ mod shuttle_tests {
                 // Refused only if another holder took the cell from under it, which the run's
                 // check of the holders reports.
                 if let Err(refused) = write(table, &counts, &conn) {
-                    let two = counts.two_holders.load(Ordering::SeqCst);
+                    let two = counts.two_holders.load(Ordering::SeqCst) || table.two_holders();
                     assert!(two, "the first writer was refused: {refused:?}");
                 }
                 wrote_tx.send(()).unwrap();
@@ -1061,7 +1097,7 @@ mod shuttle_tests {
         let hold = table.hold(Path::new(KEY), None).unwrap();
         close(hold.take_kept());
         drop(hold);
-        let two = counts.two_holders.load(Ordering::SeqCst);
+        let two = counts.two_holders.load(Ordering::SeqCst) || table.two_holders();
         assert!(!two, "two holders hold the cell at once");
         let most = counts.most_open.load(Ordering::SeqCst);
         assert!(most <= 1, "the cell is open twice at once: {most} at most");
