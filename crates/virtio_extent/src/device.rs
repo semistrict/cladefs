@@ -353,8 +353,11 @@ impl Device {
             }
             self.cell = None;
         }
-        // cladefs: no guest is asked for its stats until a driver activates it again, the cell
-        // answering meanwhile (TASK-111.4).
+        // cladefs: release the transport's interrupt references so a PCI reset can tear down its
+        // MSI-X vector group and no notice fires while inactive; no guest is asked for its stats
+        // until a driver activates it again, the cell answering meanwhile (TASK-111.4).
+        self.notices.resizing.set_interrupt(None);
+        self.following.set_interrupt(None);
         self.notices.stats.set_interrupt(None);
     }
 

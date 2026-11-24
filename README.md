@@ -211,7 +211,7 @@ candidate for the next pin is qualified against the current one under their load
 - **Hosts:** Linux 6.1 or later with KVM, on x86-64 and aarch64.
 - **Guests:** Amazon Linux's 6.18 kernel with cladefs's patches and Fxfs built in
   (`scripts/build-guest-kernel.sh`).
-- **VMM:** Firecracker 1.16.1 with cladefs's series of changes (`vendor/firecracker`, a
+- **VMM:** Firecracker 1.18.0 with cladefs's series of changes (`vendor/firecracker`, a
   submodule). `crates/virtio_extent` is the device without its transport, for another VMM to host.
 - **macOS:** the workspace builds and its tests run there. VMs and FUSE mounts need Linux.
 - **Formats change without migration:** on-disk, bucket and wire formats change when that is the
