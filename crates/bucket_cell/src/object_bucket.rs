@@ -1653,6 +1653,13 @@ impl Bucket for ObjectBucket {
         self.object_delete_if(key, version)
     }
 
+    fn supports_conditional_delete(
+        &self,
+        _key: &str,
+    ) -> impl Future<Output = Result<bool, Error>> + Send {
+        std::future::ready(Ok(!matches!(self.deletes, Deletes::Refused)))
+    }
+
     fn now(&self) -> u64 {
         self.clock.now()
     }
@@ -1787,6 +1794,52 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
 pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
+
+    #[test]
+    fn mirrors_leave_no_pin_or_hold_when_either_bucket_refuses_conditional_deletes() {
+        struct Source(Arc<ObjectBucket>);
+
+        impl Resolve for Source {
+            fn open<'a>(
+                &'a self,
+                _home: &'a ObjectBucket,
+                number: u16,
+            ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>>
+            {
+                assert_eq!(number, 2);
+                Box::pin(std::future::ready(Ok(self.0.clone())))
+            }
+        }
+
+        futures::executor::block_on(async {
+            for (source_refuses, destination_refuses) in
+                [(true, false), (false, true), (true, true)]
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let Two { mut home, mut other, .. } = Two::new(dir.path()).await;
+                if source_refuses {
+                    other.deletes = Deletes::Refused;
+                }
+                if destination_refuses {
+                    home.deletes = Deletes::Refused;
+                }
+                let other = Arc::new(other);
+                let bucket = home.routed(Arc::new(Source(other.clone())));
+                let own = bucket.own();
+                let parent = test_cell(2 << 48 | 1);
+                let error = crate::mirror::mirror(&bucket, &*own, 1, parent, 3).await.unwrap_err();
+                assert!(matches!(
+                    error,
+                    crate::Error::Refused(crate::bucket::Refused {
+                        refusal: crate::bucket::Refusal::Request,
+                        ..
+                    })
+                ));
+                assert!(own.object_list(&parent.prefix()).await.unwrap().is_empty());
+                assert!(other.object_list(&parent.prefix()).await.unwrap().is_empty());
+            }
+        });
+    }
 
     /// TASK-633.8: a version of a cell of another bucket forked into this one, mirrored here: its
     /// hold made in the parent's bucket, its objects copied, its marker made, its child's reference
@@ -2031,6 +2084,10 @@ pub(crate) mod tests {
             self.deleted.lock().unwrap().push(key.to_owned());
             self.taken(key).await?;
             self.own.delete_if(key, version).await
+        }
+
+        async fn supports_conditional_delete(&self, key: &str) -> Result<bool, Error> {
+            self.own.supports_conditional_delete(key).await
         }
 
         fn now(&self) -> u64 {

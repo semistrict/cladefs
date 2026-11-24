@@ -200,7 +200,8 @@ fn counted_member_in(dir: &std::path::Path, with: bool, bucket: Arc<RoutedBucket
     use futures::StreamExt as _;
     let heads = bucket.clone();
     let cache = Arc::new(Cache::open(&dir.join("cache"), u64::MAX).unwrap());
-    let replicas = with.then(|| super::replicas(&dir.join("replicas")).unwrap());
+    let replicas = with
+        .then(|| super::replicas(crate::Host::process().local(), &dir.join("replicas")).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -662,7 +663,7 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
 fn sweeps_drop_what_heads_name_no_more() {
     use bucket_cell::layout::{Configuration, Fsync, Member, Replication, Wish};
     let dir = tempfile::tempdir().unwrap();
-    let replicas = super::replicas(dir.path()).unwrap();
+    let replicas = super::replicas(crate::Host::process().local(), dir.path()).unwrap();
     let ours = replicas.incarnation();
     let (cell, gone) = (crate::CellId { tenant: 3, id: 9 }, crate::CellId { tenant: 3, id: 10 });
     let unconfigured = crate::CellId { tenant: 3, id: 11 };
@@ -847,7 +848,7 @@ fn takes_refuse_members_answering_more_logs_than_a_member_holds() {
     let dir = tempfile::tempdir().unwrap();
     // Logs a member of this build never holds so many of, its files left as one would, before it
     // opens its directory again.
-    drop(super::replicas(&dir.path().join("replicas")).unwrap());
+    drop(super::replicas(crate::Host::process().local(), &dir.path().join("replicas")).unwrap());
     for log in 0..=replica::LOGS_MOST as u64 {
         let [tenant, cell, number, epoch, log] = [3, 9, 1, 4, log * 2 + 1].map(base32_id::Padded);
         let path = dir.path().join(format!("replicas/{tenant}.{cell}.{number}.{epoch}.{log}"));
@@ -919,7 +920,9 @@ fn peers_are_served_after_accepts_fail() {
         let bucket = crate::bucket::peers::tests::holding(&noise(1)).0;
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), u64::MAX).unwrap());
         let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
-        let replicas = Some(super::replicas(&dir.path().join("replicas")).unwrap());
+        let replicas = Some(
+            super::replicas(crate::Host::process().local(), &dir.path().join("replicas")).unwrap(),
+        );
         let server = Server {
             daemon: Daemon::process().clone(),
             bucket: URL.to_owned(),
@@ -1249,6 +1252,22 @@ fn peers_connections_past_their_most_are_closed() {
     assert_eq!(kept.kind(), std::io::ErrorKind::WouldBlock, "{kept}");
 }
 
+#[test]
+fn only_structured_fencing_refusals_fence_a_writer() {
+    use local_cell::replicate::LinkError;
+
+    let status = refused(replica::Error::Refused(Refused::Format {
+        log: "log".into(),
+        found: "fenced".into(),
+    }));
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(matches!(link_error(&status), LinkError::Refused(_)), "{status:?}");
+
+    let fenced = refused(replica::Error::Refused(Refused::Fenced { promise: 7 }));
+    assert_eq!(fenced.code(), Code::FailedPrecondition);
+    assert!(matches!(link_error(&fenced), LinkError::Fenced(_)), "{fenced:?}");
+}
+
 /// board 8445: a member admits a replication call only by its cell's head, read from the bucket
 /// for it: a fence at `u64::MAX`, or past the head's epoch, and a drop through `u64::MAX`, refused
 /// over gRPC, nothing promised or dropped, the writer appending still; a cell with no head refused
@@ -1267,7 +1286,7 @@ fn members_admit_calls_by_their_cells_heads() {
         let unasked = |status: Status| {
             assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
             assert!(status.message().ends_with(": refused"), "{status:?}");
-            assert!(!status.message().contains("fenced"), "{status:?}");
+            assert!(matches!(link_error(&status), local_cell::replicate::LinkError::Refused(_)));
         };
         // No head: every call refused.
         unasked(
@@ -1381,8 +1400,7 @@ fn peer_calls_carry_their_trace_and_are_counted_on_both_sides() {
     // which the bucket's making, on futures' executor, may not.
     let exporter = InMemorySpanExporter::default();
     let processor = SimpleSpanProcessor::new(exporter.clone());
-    let export = super::super::zpages::tracez::Export::new(processor, Box::new(Sampler::AlwaysOn));
-    super::super::otel::install(Sampler::AlwaysOn, Some(export));
+    super::super::otel::install(Sampler::AlwaysOn, processor);
     let runtime = crate::bucket::bucket_runtime().unwrap();
     let mut client = super::member(&runtime, &address).unwrap();
     let asking_within = bucket_cell::trace::Span::start("a writer's work");
@@ -1453,8 +1471,7 @@ fn a_parts_bucket_requests_for_a_peer_are_on_its_trace() {
     // Once the bucket is made, on futures' executor, where the in-memory exporter may not export.
     let exporter = InMemorySpanExporter::default();
     let processor = SimpleSpanProcessor::new(exporter.clone());
-    let export = super::super::zpages::tracez::Export::new(processor, Box::new(Sampler::AlwaysOn));
-    super::super::otel::install(Sampler::AlwaysOn, Some(export));
+    super::super::otel::install(Sampler::AlwaysOn, processor);
     let asking = bucket_cell::trace::Span::start("a fetcher's read");
     let trace = asking.context().unwrap().span().span_context().trace_id();
     let runtime = crate::bucket::bucket_runtime().unwrap();

@@ -146,7 +146,7 @@ impl std::fmt::Debug for Token {
 ///
 /// A call failing as the network does, or with a 412, 429 or 5xx, is made again, [`TRIES`] times
 /// in all, after [`BACKOFF`], then four times that; each connection may take [`CONNECT_TIMEOUT`],
-/// each request [`REQUEST_TIMEOUT`]. Its calls run on a Tokio runtime of its own, a thread, so that
+/// each request [`REQUEST_TIMEOUT`]. Its calls run on the shared KMS runtime, so that
 /// whatever polls its futures, of any executor or none, waits for them alone. It logs nothing, and
 /// no error says its token; the bytes of keys and of OpenBao's replies it holds are zeroed when
 /// dropped, as far as its HTTP client lets it (not that client's own buffers).
@@ -175,16 +175,24 @@ pub(super) fn from_url(url: &str, vars: &Vars, origin: Origin) -> Result<super::
     Ok(Arc::new(OpenBao::of(url, token, origin)?))
 }
 
-impl OpenBao {
-    /// The KMS `url` names (see [`OpenBao`]), calling with `token`: the host's own.
-    pub fn new(url: &str, token: Token) -> Result<Self, String> {
-        Self::of(url, token, Origin::Host)
-    }
+pub(super) fn check_url(url: &str, origin: Origin) -> Result<(), String> {
+    ParsedUrl::of(url, origin).map(drop)
+}
 
-    /// The same, `url` of `origin`: one the registry of buckets records reaches a host the host
-    /// allows alone, over TLS but on this host, and names none of its files (board 8525), refused
-    /// before any is opened.
-    fn of(url: &str, token: Token, origin: Origin) -> Result<Self, String> {
+struct ParsedUrl {
+    tls: bool,
+    ca: Option<String>,
+    origin: url::Url,
+    mount: Vec<String>,
+    namespace: Option<HeaderValue>,
+    names: KeyNames,
+    shown: String,
+}
+
+impl ParsedUrl {
+    /// A recorded URL reaches only the permitted hosts, uses TLS remotely, and names no host
+    /// files. The checks run before opening any of the files (board 8525).
+    fn of(url: &str, origin: Origin) -> Result<Self, String> {
         let at = |why: &dyn std::fmt::Display| format!("{url:?}: {why}");
         let parsed = url::Url::parse(url).map_err(|err| at(&err))?;
         let tls = match parsed.scheme() {
@@ -228,7 +236,23 @@ impl OpenBao {
         key_name(&names.of(0)).map_err(|why| at(&why))?;
         let namespace = (namespace.map(HeaderValue::from_str).transpose())
             .map_err(|_| at(&"the namespace is no HTTP header's value"))?;
+        let endpoint = format!("{}://{host}:{port}/", if tls { "https" } else { "http" });
+        let origin = url::Url::parse(&endpoint).map_err(|err| at(&err))?;
+        let shown = format!("{}://{host}:{port}/{}", parsed.scheme(), mount.join("/"));
+        Ok(Self { tls, ca: ca.map(str::to_owned), origin, mount, namespace, names, shown })
+    }
+}
 
+impl OpenBao {
+    /// The KMS `url` names (see [`OpenBao`]), calling with `token`: the host's own.
+    pub fn new(url: &str, token: Token) -> Result<Self, String> {
+        Self::of(url, token, Origin::Host)
+    }
+
+    fn of(url: &str, token: Token, origin: Origin) -> Result<Self, String> {
+        let at = |why: &dyn std::fmt::Display| format!("{url:?}: {why}");
+        let ParsedUrl { tls, ca, origin, mount, namespace, names, shown } =
+            ParsedUrl::of(url, origin)?;
         let mut client = reqwest::Client::builder()
             .user_agent(concat!("cladefs/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
@@ -236,7 +260,8 @@ impl OpenBao {
             .redirect(reqwest::redirect::Policy::none())
             .https_only(tls);
         if let Some(path) = ca {
-            let pem = std::fs::read(path).map_err(|err| at(&format!("the CAs {path:?}: {err}")))?;
+            let pem =
+                std::fs::read(&path).map_err(|err| at(&format!("the CAs {path:?}: {err}")))?;
             let cas = reqwest::Certificate::from_pem_bundle(&pem)
                 .map_err(|err| at(&format!("the CAs {path:?}: {err}")))?;
             if cas.is_empty() {
@@ -245,12 +270,8 @@ impl OpenBao {
             client = client.tls_certs_only(cas);
         }
         let client = client.build().map_err(|err| at(&err))?;
-        let origin = format!("{}://{host}:{port}/", if tls { "https" } else { "http" });
-        let origin = url::Url::parse(&origin).map_err(|err| at(&err))?;
         let token = Credentials::new(token).map_err(|why| at(&why))?;
-        let runtime =
-            Background::new("cladefs-openbao").map_err(|err| at(&format!("its runtime: {err}")))?;
-        let shown = format!("{}://{host}:{port}/{}", parsed.scheme(), mount.join("/"));
+        let runtime = Background::shared().map_err(|err| at(&format!("its runtime: {err}")))?;
         let inner = Inner { client, origin, mount, namespace, names, token, shown };
         Ok(Self { inner: Arc::new(inner), runtime })
     }

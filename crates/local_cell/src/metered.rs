@@ -187,6 +187,10 @@ impl<D: Dir> Dir for Metered<D> {
     fn footprint(&self) -> Option<&Arc<Footprint>> {
         Some(&self.shared.footprint)
     }
+
+    fn host(&self) -> Option<&Arc<crate::Host>> {
+        self.shared.dir.host()
+    }
 }
 
 /// A file of a [`Metered`] directory: its writes counted as far as they go.

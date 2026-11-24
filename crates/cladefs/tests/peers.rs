@@ -10,7 +10,11 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::cladefsd::control::Client;
+use cladefs::cladefsd::control::proto::{
+    ForkCellRequest, MakeVersionRequest, SetPeersRequest, StatCellRequest, SyncCellRequest,
+};
+use cladefs::testing::Control;
+use cladefs::testing::control_path;
 use cladefs::{CellClient, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -34,7 +38,7 @@ impl Drop for KillOnDrop {
 struct Daemon {
     _process: KillOnDrop,
     vms: PathBuf,
-    control: Client,
+    control: Control,
     stats: PathBuf,
 }
 
@@ -61,7 +65,7 @@ fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
         assert!(Instant::now() < deadline, "the daemon never served");
         std::thread::sleep(Duration::from_millis(20));
     }
-    let control = Client::connect(&control).unwrap();
+    let control = Control::connect(&control).unwrap();
     Daemon { _process: process, vms, control, stats }
 }
 
@@ -138,14 +142,48 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     }
     client.commit(None).unwrap();
     drop(client);
-    first.control.sync_cell(&base).unwrap();
-    let version = first.control.make_version(&base, None).unwrap();
-    first.control.sync_cell(&base).unwrap();
-    let stated = first.control.stat_cell(&base).unwrap();
+    first
+        .control
+        .call(async |client| client.sync_cell(SyncCellRequest { path: control_path(&base) }).await)
+        .map(drop)
+        .unwrap();
+    let version = first
+        .control
+        .call(async |client| {
+            client
+                .make_version(MakeVersionRequest { path: control_path(&base), keep_last: 0 })
+                .await
+        })
+        .map(|response| response.version)
+        .unwrap();
+    first
+        .control
+        .call(async |client| client.sync_cell(SyncCellRequest { path: control_path(&base) }).await)
+        .map(drop)
+        .unwrap();
+    let stated = first
+        .control
+        .call(async |client| client.stat_cell(StatCellRequest { path: control_path(&base) }).await)
+        .unwrap();
     let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
 
     let fork = hosts[1].join("fork");
-    second.control.fork_version(from, &fork).unwrap();
+    second
+        .control
+        .call(async |client| {
+            let cladefs::CellVersion { tenant, cell, version } = from;
+            client
+                .fork_cell(ForkCellRequest {
+                    to: control_path(&fork),
+                    tenant,
+                    cell,
+                    version,
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .unwrap();
     let client = CellClient::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
@@ -193,11 +231,47 @@ fn peers_are_set_at_runtime() {
     }
     let [me, other] = addresses();
     let peered = daemon(&hosts[0], &bucket, Some(&[me.clone()]));
-    peered.control.set_peers(&[&me, &other]).unwrap();
-    let refused = peered.control.set_peers(&[&me, "nowhere"]).unwrap_err();
+    peered
+        .control
+        .call(async |client| {
+            client
+                .set_peers(SetPeersRequest {
+                    addresses: (&[&me, &other])
+                        .iter()
+                        .map(|address| (*address).to_owned())
+                        .collect(),
+                })
+                .await
+        })
+        .map(drop)
+        .unwrap();
+    let refused = peered
+        .control
+        .call(async |client| {
+            client
+                .set_peers(SetPeersRequest {
+                    addresses: (&[&me, "nowhere"])
+                        .iter()
+                        .map(|address| (*address).to_owned())
+                        .collect(),
+                })
+                .await
+        })
+        .map(drop)
+        .unwrap_err();
     assert_eq!(refused.errno(), Some(cladefs::Errno::EINVAL));
     let alone = daemon(&hosts[1], &bucket, None);
-    let refused = alone.control.set_peers(&[&me]).unwrap_err();
+    let refused = alone
+        .control
+        .call(async |client| {
+            client
+                .set_peers(SetPeersRequest {
+                    addresses: (&[&me]).iter().map(|address| (*address).to_owned()).collect(),
+                })
+                .await
+        })
+        .map(drop)
+        .unwrap_err();
     assert_eq!(refused.errno(), Some(cladefs::Errno::ENOTSUP));
 }
 

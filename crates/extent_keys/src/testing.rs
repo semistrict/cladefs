@@ -78,6 +78,10 @@ impl<K: Kms> Kms for Counted<K> {
         self.inner.forget(tenant)
     }
 
+    fn prewrap(&self) -> bool {
+        self.inner.prewrap()
+    }
+
     fn names(&self) -> Option<&crate::kms::KeyNames> {
         self.inner.names()
     }
@@ -218,6 +222,10 @@ impl<K: Kms> Kms for Forgetting<K> {
 
     fn forget(&self, tenant: u64) {
         self.inner.forget(tenant)
+    }
+
+    fn prewrap(&self) -> bool {
+        self.inner.prewrap()
     }
 
     fn names(&self) -> Option<&crate::kms::KeyNames> {

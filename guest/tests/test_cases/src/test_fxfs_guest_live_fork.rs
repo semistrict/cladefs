@@ -28,6 +28,8 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
+    use cladefs::cladefsd::control::proto::ForkCellRequest;
+    use cladefs::testing::control_path;
     use std::ffi::CString;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
@@ -85,7 +87,17 @@ mod host {
             let mut answers = stream.try_clone()?;
             BufReader::new(stream).read_line(&mut said)?;
             anyhow::ensure!(said == "frozen\n", "the guest said {said:?}");
-            crate::common::control(&cladefsd)?.fork_cell(&cell_dir, &fork)?;
+            crate::common::control(&cladefsd)?
+                .call(async |client| {
+                    client
+                        .fork_cell(ForkCellRequest {
+                            from: control_path(&cell_dir),
+                            to: control_path(&fork),
+                            ..Default::default()
+                        })
+                        .await
+                })
+                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             writeln!(answers, "forked")?;
             // One after the other: they boot from the same root filesystem's image.
             wait(source)?;

@@ -22,7 +22,11 @@ pub mod host {
     use crate::measure::{HostMemory, Requests, Served};
     use crate::vm::{Firecracker, Vm};
     use anyhow::Context;
-    use cladefs::cladefsd::control::Client;
+    use cladefs::cladefsd::control::proto::{
+        AttachBaseRequest, ForkCellRequest, MakePublicRequest,
+    };
+    use cladefs::testing::Control;
+    use cladefs::testing::control_path;
     use cladefs::{Image, Storage};
     use futures::executor::block_on;
     use fxfs_automount::upcall::{Answer, Newest};
@@ -77,13 +81,29 @@ pub mod host {
     /// `path`: public, and the publisher told that it is forked.
     pub fn next_generation(
         stream: &mut UnixStream,
-        control: &Client,
+        control: &Control,
         publisher: &Path,
         path: PathBuf,
     ) -> anyhow::Result<Generation> {
         let manifest = receive(stream)?;
-        control.fork_cell(publisher, &path)?;
-        control.make_public_attach_only(&path)?;
+        control
+            .call(async |client| {
+                client
+                    .fork_cell(ForkCellRequest {
+                        from: control_path(publisher),
+                        to: control_path(&path),
+                        ..Default::default()
+                    })
+                    .await
+            })
+            .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
+        control
+            .call(async |client| {
+                client
+                    .make_public(MakePublicRequest { path: control_path(&path), attach_only: true })
+                    .await
+            })
+            .map(drop)?;
         stream.write_all(b"forked\n")?;
         Ok(Generation { path, manifest })
     }
@@ -92,14 +112,23 @@ pub mod host {
     /// by number, each time it does, and gives it their manifests, until it hangs up.
     pub fn attach_generations(
         stream: UnixStream,
-        control: &Client,
+        control: &Control,
         consumer: &Path,
         generations: &[Generation],
     ) -> anyhow::Result<()> {
         let mut answers = stream.try_clone()?;
         for line in BufReader::new(stream).lines() {
             let generation = &generations[line?.parse::<usize>()?];
-            control.attach_base(consumer, &generation.path)?;
+            control
+                .call(async |client| {
+                    client
+                        .attach_base(AttachBaseRequest {
+                            path: control_path(consumer),
+                            base: control_path(&generation.path),
+                        })
+                        .await
+                })
+                .map(drop)?;
             send(&mut answers, &generation.manifest)?;
         }
         Ok(())
@@ -119,7 +148,7 @@ pub mod host {
 
     /// A [`Manager`]'s answers, for one VM's cell, through the daemon's control API.
     struct Answering {
-        control: Client,
+        control: Control,
         cell_dir: PathBuf,
         names: BTreeMap<String, Generation>,
         newest: BTreeMap<String, String>,
@@ -138,7 +167,17 @@ pub mod host {
             let Some(generation) = self.names.get(name) else {
                 return Answer::Refused(format!("no {name} for this sandbox"));
             };
-            self.control.attach_base(&self.cell_dir, &generation.path).expect("attaching");
+            self.control
+                .call(async |client| {
+                    client
+                        .attach_base(AttachBaseRequest {
+                            path: control_path(&self.cell_dir),
+                            base: control_path(&generation.path),
+                        })
+                        .await
+                })
+                .map(drop)
+                .expect("attaching");
             Answer::Manifest(generation.manifest.clone())
         }
 
@@ -298,7 +337,7 @@ pub mod host {
             &self,
             role: &str,
             cell_dir: &Path,
-            control: &Client,
+            control: &Control,
             generations: &[Generation],
         ) -> anyhow::Result<()> {
             let (vm, stream) = self.run(role, cell_dir, true)?;

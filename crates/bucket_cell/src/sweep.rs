@@ -702,6 +702,13 @@ impl<B: Bucket> Bucket for Counted<B> {
         }
     }
 
+    fn supports_conditional_delete(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = Result<bool, BucketError>> + Send {
+        self.bucket.supports_conditional_delete(key)
+    }
+
     /// One request, as a backend with batch deletes makes it, whatever the bucket under it does.
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), BucketError>> + Send {
         self.count(Request::DeleteBatch);

@@ -11,7 +11,7 @@
 //! image's own bucket's collector runs in the process, after commits ([`collect`]); a host's
 //! bucket's is the host's.
 
-mod collect;
+pub(crate) mod collect;
 mod device;
 #[cfg(test)]
 mod model_tests;
@@ -73,6 +73,20 @@ impl Storage {
     /// The size of the blocks storage is read and written in. Storage sizes are multiples of it.
     pub const BLOCK_SIZE: u32 = host_cell::BLOCK_SIZE;
 
+    /// The image at `path` opened on `host`.
+    pub async fn open_on(host: &Arc<crate::Host>, path: impl AsRef<Path>) -> Result<Self, Error> {
+        let dir = path.as_ref().to_owned();
+        let task_host = host.clone();
+        on_bucket_runtime_on(host, async move {
+            let keeping = Self::keeping_on(&task_host)?;
+            let opened = host_cell::open_on(&task_host, &dir, keeping.clone()).await;
+            let context = || format!("opening {}", dir.display());
+            let opened = opened.map_err(|err| Error::from(err).context(context()))?;
+            Self::opened_on(&task_host, dir, opened, keeping).await
+        })
+        .await
+    }
+
     /// The image at `path`: a cell directory, a fork's or not, its cell kept in the bucket its
     /// description names ([`host_cell::open`]).
     ///
@@ -81,16 +95,9 @@ impl Storage {
     /// budget, TASK-433). Its uploader takes its cell's head as a copy never placed takes it where
     /// this process is no host's daemon ([`host_cell::keeping`]). It fails for an image made by
     /// older code, which kept its cell in no bucket, and which nothing converts.
+    #[cfg(not(madsim))]
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let dir = path.as_ref().to_owned();
-        on_bucket_runtime(async move {
-            let keeping = Self::keeping()?;
-            let opened = host_cell::open(&dir, keeping.clone()).await;
-            let context = || format!("opening {}", dir.display());
-            let opened = opened.map_err(|err| Error::from(err).context(context()))?;
-            Self::opened(dir, opened, keeping).await
-        })
-        .await
+        Self::open_on(crate::Host::process(), path).await
     }
 
     /// A new image at `path`, which must not exist, holding at most `size` bytes. It holds nothing
@@ -98,8 +105,17 @@ impl Storage {
     /// is kept in a file bucket of its own, beside its directory (`<image>.bucket`), which its
     /// forks share and which outlives it; or, on a host of cladefs's system, in the host's bucket
     /// (`CLADEFSD_BUCKET`).
+    #[cfg(not(madsim))]
     pub async fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), true, Self::keeping()?).await
+        let host = crate::Host::process();
+        Self::make_on(
+            host,
+            path.as_ref(),
+            (size, host_cell::DEFAULT_TENANT),
+            true,
+            Self::keeping_on(host)?,
+        )
+        .await
     }
 
     /// cladefs: the image at `path` of the cell `of` says, kept in the bucket at `bucket`
@@ -111,18 +127,26 @@ impl Storage {
     /// which it is placed at, if given, as `Storage::open` takes heads otherwise. If an image is at
     /// `path`, it is opened as [`Storage::open`] opens it, and must be of the cell taken:
     /// `EEXIST` otherwise, and for a new cell.
+    #[cfg(not(madsim))]
     pub async fn take(
         path: impl AsRef<Path>,
         (of, capacity): (host_cell::CellOf, u64),
         bucket: &str,
         token: Option<u64>,
     ) -> Result<Self, Error> {
+        let host = crate::Host::process().clone();
         let (path, bucket) = (path.as_ref().to_owned(), bucket.to_owned());
-        on_bucket_runtime(Self::taken(path, (of, capacity), bucket, token)).await
+        on_bucket_runtime_on(
+            &host,
+            Self::taken_on(host.clone(), path, (of, capacity), bucket, token),
+        )
+        .await
     }
 
     /// [`Storage::take`]'s, on the bucket runtime.
-    async fn taken(
+    #[cfg(not(madsim))]
+    async fn taken_on(
+        host: Arc<crate::Host>,
         path: PathBuf,
         (of, capacity): (host_cell::CellOf, u64),
         bucket: String,
@@ -132,8 +156,8 @@ impl Storage {
         // What a making that died part way left is no cell: its directory goes, not the bucket's
         // cell, which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         let exists = local_cell::upload::blocking(|| -> Result<bool, Error> {
-            if host_cell::unmade(path) {
-                local_cell::remove_cell_dir(path)
+            if host_cell::unmade_on(&host, path) {
+                local_cell::remove_cell_dir_on(host.local(), path)
                     .with_context(|| {
                         format!("removing {}, a cell directory unmade", path.display())
                     })
@@ -142,18 +166,21 @@ impl Storage {
             Ok(host_fs::exists(path))
         })?;
         if !exists {
-            let keeping = Self::keeping()?;
+            let keeping = Self::keeping_on(&host)?;
             let keeping =
                 local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
             let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
-            let making = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2);
+            let making =
+                host_cell::create_unmade_on(&host, path, capacity, of, kept.0, kept.1, kept.2);
             let opened = making.await?;
             local_cell::upload::blocking(|| opened.made()).map_err(Error::new)?;
             // Closed before it is placed, as `CreateCell` places a cell, and opened again.
             opened.close().await;
             if let Some(token) = token {
-                local_cell::upload::blocking(|| local_cell::place_host(path, token, false))
-                    .map_err(Error::new)?;
+                local_cell::upload::blocking(|| {
+                    local_cell::place_host_on(host.local(), path, token, false)
+                })
+                .map_err(Error::new)?;
             }
         } else {
             let found =
@@ -167,49 +194,79 @@ impl Storage {
                 let error = anyhow::anyhow!("{} holds cell {found}, not {not}", path.display());
                 return Err(Error::new(error.context(crate::Errno::EEXIST)));
             }
+            // cladefs: honor the caller's fencing token on an existing cell directory too, and
+            // open through `host_cell::take` so a diverged local log is dropped (TASK-576,
+            // board 2548, board 2702).
+            if let Some(token) = token {
+                local_cell::upload::blocking(|| {
+                    local_cell::place_host_on(host.local(), path, token, false)
+                })
+                .map_err(Error::new)?;
+            }
+            let keeping = Self::keeping_on(&host)?;
+            let opened = host_cell::take_on(&host, path, keeping.clone()).await?;
+            return Self::opened_on(&host, path.to_owned(), opened, keeping).await;
         }
-        Self::open(path).await
+        Self::open_on(&host, path).await
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create`] makes it, unmade until its maker says
     /// it is whole ([`Storage::made`]): what opens it before, or after its maker died part way,
     /// finds no cell (TASK-196). As an import makes one, filling it first.
+    #[cfg(not(madsim))]
     pub async fn create_unmade(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), false, Self::keeping()?).await
+        let host = crate::Host::process();
+        Self::make_on(
+            host,
+            path.as_ref(),
+            (size, host_cell::DEFAULT_TENANT),
+            false,
+            Self::keeping_on(host)?,
+        )
+        .await
     }
 
-    /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one cell of a
-    /// new cell of `tenant`'s (TASK-364), its cell kept as `keeping` says: as the extent daemon's
-    /// cells keep theirs, with the host's cache of the bucket's objects, for an import the daemon
-    /// makes (TASK-237).
-    pub(crate) async fn create_unmade_keeping(
+    /// cladefs: a new image at `path` on `host`, unmade until its maker says it is whole.
+    pub(crate) async fn create_unmade_keeping_on(
+        host: &Arc<crate::Host>,
         path: impl AsRef<Path>,
         (size, tenant): (u64, u64),
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, tenant), false, keeping).await
+        Self::make_on(host, path.as_ref(), (size, tenant), false, keeping).await
     }
 
-    /// How an image this process makes, where no host's daemon serves it, keeps its cell
-    /// ([`host_cell::keeping`]): with no cache of the bucket's objects.
-    fn keeping() -> Result<local_cell::upload::Options, Error> {
-        host_cell::keeping().map_err(Error::new)
+    /// How an image `host` makes keeps its cell.
+    fn keeping_on(host: &crate::Host) -> Result<local_cell::upload::Options, Error> {
+        host_cell::keeping_on(host).map_err(Error::new)
+    }
+
+    /// cladefs: the image at `path` on `host` is whole.
+    pub(crate) fn made_on(host: &crate::Host, path: impl AsRef<Path>) -> Result<(), Error> {
+        local_cell::made_host_on(host.local(), path.as_ref()).map_err(Error::new)
     }
 
     /// cladefs: the image at `path`, made by [`Storage::create_unmade`] and closed since, is whole.
+    #[cfg(not(madsim))]
     pub fn made(path: impl AsRef<Path>) -> Result<(), Error> {
-        local_cell::made_host(path.as_ref()).map_err(Error::new)
+        Self::made_on(crate::Host::process(), path)
+    }
+
+    /// cladefs: whether `path` is unmade on `host`.
+    pub(crate) fn is_unmade_on(host: &crate::Host, path: impl AsRef<Path>) -> bool {
+        host_cell::unmade_on(host, path.as_ref())
     }
 
     /// cladefs: whether `path` is what a making of an image, or of a cell, left unmade, its maker
     /// dying part way: no cell, which deleting finishes (TASK-196).
+    #[cfg(not(madsim))]
     pub fn is_unmade(path: impl AsRef<Path>) -> bool {
-        host_cell::unmade(path.as_ref())
+        Self::is_unmade_on(crate::Host::process(), path)
     }
 
-    /// A new image at `path`, as [`Storage::create`] makes it, a new cell of
-    /// `tenant`'s, whole if `whole`, its cell kept as `keeping` says.
-    async fn make(
+    /// A new image at `path` on `host`, a new cell of `tenant`'s, whole if `whole`.
+    pub(super) async fn make_on(
+        host: &Arc<crate::Host>,
         path: &Path,
         (size, tenant): (u64, u64),
         whole: bool,
@@ -219,33 +276,40 @@ impl Storage {
             return Err(Error::msg("the image is smaller than a block"));
         }
         let path = path.to_owned();
-        on_bucket_runtime(async move {
+        let task_host = host.clone();
+        on_bucket_runtime_on(host, async move {
             let of = host_cell::CellOf::New(tenant);
             let kind = bucket_cell::cell::Kind::Fxfs;
-            let opened = host_cell::create_unmade(&path, size, of, kind, None, keeping.clone());
+            let opened = host_cell::create_unmade_on(
+                &task_host,
+                &path,
+                size,
+                of,
+                kind,
+                None,
+                keeping.clone(),
+            );
             let opened = opened.await?;
             if whole {
                 local_cell::upload::blocking(|| opened.made()).map_err(Error::new)?;
             }
-            Self::opened(path, opened, keeping).await
+            Self::opened_on(&task_host, path, opened, keeping).await
         })
         .await
     }
 
-    /// The storage of the image `opened` at `dir`, its extents in its bucket read through
-    /// `keeping`'s cache, if it has one: an open cell of it, for work that boots no guest
-    /// ([`Opening::guest`]), as its device; and the collector of its own bucket, if it keeps its
-    /// cell in one.
-    async fn opened(
+    /// The storage of the image `opened` at `dir` on `host`.
+    async fn opened_on(
+        host: &Arc<crate::Host>,
         dir: PathBuf,
         opened: Opened,
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
         let collecting = host_cell::keeps_own_bucket(&opened.local).then(|| {
             let url = opened.local.bucket().unwrap_or_default().to_owned();
-            collect::of(&url, &opened.bucket)
+            collect::of_on(host, &url, &opened.bucket)
         });
-        let opening = Opening::keeping(keeping).for_host();
+        let opening = Opening::keeping_on(host.clone(), keeping).for_host();
         let cell = Arc::new(OpenCell::new(&dir, opened, opening).await?);
         let kind = Kind::Image {
             dir,
@@ -282,20 +346,39 @@ impl Storage {
         matches!(self.kind, Kind::Image { .. })
     }
 
+    /// cladefs: the cell this storage serves, if it is an image cell (TASK-562, board 2520).
+    pub(crate) fn cell(&self) -> Option<crate::CellId> {
+        match &self.kind {
+            Kind::Image { cell, .. } => cell.upgrade().map(|cell| cell.cell()),
+            Kind::Memory => None,
+        }
+    }
+
+    /// Deletes the image at `path` on `host`.
+    pub(crate) async fn delete_on(
+        host: &Arc<crate::Host>,
+        path: impl AsRef<Path>,
+    ) -> Result<(), Error> {
+        let path = path.as_ref().to_owned();
+        let task_host = host.clone();
+        on_bucket_runtime_on(host, async move {
+            // As a copy never placed deletes its cell where this process is no host's daemon.
+            let bucket =
+                local_cell::upload::blocking(|| host_cell::bucket_at_on(&task_host, &path))
+                    .map_err(Error::new)?;
+            host_cell::delete_on(&task_host, &path, bucket.as_deref(), host_cell::token).await
+        })
+        .await
+    }
+
     /// Deletes the image at `path`, which nothing in this process has open, a fork or not: its
     /// cell in its bucket, whose collector reclaims what no other cell inherited from it, and
     /// its directory. Its forks live on: their cells are the bucket's, which an image's own
     /// keeps beside its directory, not in it (TASK-165.7). Fails with `ENOENT` if there is none
     /// at `path`.
+    #[cfg(not(madsim))]
     pub async fn delete(path: impl AsRef<Path>) -> Result<(), Error> {
-        let path = path.as_ref().to_owned();
-        on_bucket_runtime(async move {
-            // As a copy never placed deletes its cell where this process is no host's daemon.
-            let bucket =
-                local_cell::upload::blocking(|| host_cell::bucket_at(&path)).map_err(Error::new)?;
-            host_cell::delete(&path, bucket.as_deref(), host_cell::token).await
-        })
-        .await
+        Self::delete_on(crate::Host::process(), path).await
     }
 
     /// cladefs: lets go of the storage, which nothing mounts: an image's open cell closed
@@ -395,14 +478,12 @@ impl fmt::Debug for Storage {
     }
 }
 
-/// cladefs: `work`, a task of the bucket runtime's ([`local_cell::upload::bucket_runtime`]): what
-/// makes, opens and deletes images awaits the cell's timers and the bucket's connections, which
-/// that runtime drives, whatever executor awaits it, FUSE's or a test's; as sync calls of theirs
-/// did, waiting on it (board 5614).
-async fn on_bucket_runtime<T: Send + 'static>(
+/// cladefs: `work`, a task of `host`'s bucket runtime.
+async fn on_bucket_runtime_on<T: Send + 'static>(
+    host: &crate::Host,
     work: impl Future<Output = Result<T, Error>> + Send + 'static,
 ) -> Result<T, Error> {
-    let runtime = local_cell::upload::bucket_runtime().map_err(Error::new)?;
+    let runtime = local_cell::upload::bucket_runtime_on(host.local()).map_err(Error::new)?;
     #[cfg(test)]
     let work = {
         let pace = collect::quickened();

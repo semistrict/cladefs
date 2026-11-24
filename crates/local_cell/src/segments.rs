@@ -362,7 +362,8 @@ impl<F: File> Segments<F> {
             rapidhash::rapidhash(&bytes)
         };
         let salt = new_salt(lifetime, open);
-        let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, keys.encrypting())?;
+        let (dek, key) = keys.try_encrypting()?;
+        let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, (&dek, key))?;
         for kind in [OPEN_SEGMENTS, LOGS] {
             dir.sync_dir(&cell_dir(kind, cell))?;
         }
@@ -821,7 +822,8 @@ impl<F: File> Segments<F> {
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
         let placing = (&mut self.spares, &mut self.prepared);
-        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.encrypting())?;
+        let (dek, key) = self.keys.try_encrypting()?;
+        let (phase, synced) = create_open(dir, next, placing, salt, (&dek, key))?;
         // Nothing fails from here on.
         let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         // What was written to it since the last commit, the next flush syncs, before it appends
@@ -939,7 +941,8 @@ impl<F: File> Segments<F> {
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
         let placing = (&mut self.spares, &mut self.prepared);
-        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.encrypting())?;
+        let (dek, key) = self.keys.try_encrypting()?;
+        let (phase, synced) = create_open(dir, next, placing, salt, (&dek, key))?;
         let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         let segment = self.tracked.get_mut(&number).unwrap();
         let Phase::Open { raw, log } = &segment.phase else {
@@ -1130,7 +1133,11 @@ impl<F: File> Segments<F> {
         }
         self.preparing = true;
         let spare = self.spares.pop();
-        let encryption = new_encryption(self.keys.encrypting());
+        let Ok((dek, key)) = self.keys.try_encrypting() else {
+            self.preparing = false;
+            return None;
+        };
+        let encryption = new_encryption((&dek, key));
         Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next), encryption })
     }
 
@@ -1169,8 +1176,12 @@ impl<F: File> Segments<F> {
             Ok(stale) => {
                 // cladefs: the next's raw file encrypted under a salt of its own, drawn anew
                 // (TASK-411.5).
+                let Ok((dek, key)) = self.keys.try_encrypting() else {
+                    self.preparing = false;
+                    return Preparing::Ended(Some(stale.spare));
+                };
                 let (salt, encryption) =
-                    (new_salt(self.lifetime, next), new_encryption(self.keys.encrypting()));
+                    (new_salt(self.lifetime, next), new_encryption((&dek, key)));
                 let spare = Some(stale.spare);
                 return Preparing::Again(Preparation { segment: next, spare, salt, encryption });
             }
@@ -1272,7 +1283,12 @@ impl<F: File> Segments<F> {
             None => {
                 let path = segment_path(number);
                 let keys = self.keys.of(number.cell);
-                let framed = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
+                let framed = Arc::new(Framed::open(
+                    dir.open(&path, true)?,
+                    &path,
+                    &keys,
+                    crate::framed::unpacked_for(dir.host()),
+                )?);
                 self.files.insert(number, framed)
             }
         };
@@ -1308,7 +1324,8 @@ impl<F: File> Segments<F> {
         let path = segment_path(number);
         let keys = self.keys.of(number.cell);
         let file = dir.open(&path, true).with_context(|| format!("opening {path}"))?;
-        let framed = Arc::new(Framed::open(file, &path, &keys)?);
+        let framed =
+            Arc::new(Framed::open(file, &path, &keys, crate::framed::unpacked_for(dir.host()))?);
         Ok(Some(self.files.insert(number, framed).file.clone()))
     }
 
@@ -1486,9 +1503,9 @@ impl<F: File> Unframed<F> {
         let (path, raw_path) = (framing_path(self.number), open_segment_path(self.number));
         let raw = (raw_path.as_str(), &self.raw);
         let data = (self.len, self.quiet, self.ephemeral, ahead);
-        let encryption = self.keys.encrypting();
+        let (dek, key) = self.keys.try_encrypting()?;
         let (framed, how) =
-            frame_segment(dir, &path, raw, data, (&footer, encryption), &mut timing)?;
+            frame_segment(dir, &path, raw, data, (&footer, (&dek, key)), &mut timing)?;
         timings::framed(self.number, how, timing.end());
         Ok(framed)
     }
@@ -1709,7 +1726,7 @@ fn frame_segment<D: Dir>(
                 let nanos = started.elapsed().as_nanos() as u64;
                 SEGMENT_CLOSE_NS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
                 return Ok((
-                    Arc::new(Framed::new(file, parts)),
+                    Arc::new(Framed::new(file, parts, crate::framed::unpacked_for(dir.host()))),
                     How { in_place: true, len, read, held: 0 },
                 ));
             }
@@ -1729,7 +1746,11 @@ fn frame_segment<D: Dir>(
             let nanos = started.elapsed().as_nanos() as u64;
             SEGMENT_CLOSE_NS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
             return Ok((
-                Arc::new(Framed::new(Arc::new(file), parts)),
+                Arc::new(Framed::new(
+                    Arc::new(file),
+                    parts,
+                    crate::framed::unpacked_for(dir.host()),
+                )),
                 How { in_place: false, len, read, held: 0 },
             ));
         }
@@ -1757,7 +1778,7 @@ fn frame_segment<D: Dir>(
         let nanos = started.elapsed().as_nanos() as u64;
         SEGMENT_CLOSE_NS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
         return Ok((
-            Arc::new(Framed::new(Arc::new(file), parts)),
+            Arc::new(Framed::new(Arc::new(file), parts, crate::framed::unpacked_for(dir.host()))),
             How { in_place: false, len, read: len, held: 0 },
         ));
     }
@@ -1813,8 +1834,9 @@ fn frame_segment<D: Dir>(
         false => None,
     };
     let how = How { in_place: framed.is_some(), len, read, held };
+    let unpacked = crate::framed::unpacked_for(dir.host());
     let framed = match framed {
-        Some(file) => Framed::new(file, parts),
+        Some(file) => Framed::new(file, parts, unpacked),
         None => {
             let file = dir.create(path, true)?;
             // Where the framed file is in its directory, not yet written: whole only once its
@@ -1825,7 +1847,7 @@ fn frame_segment<D: Dir>(
             // it back a piece at a time before it syncs it ([`make_durable`], TASK-401).
             write_framed(&file, &packed, 0)?;
             write_framed(&file, &tail, end)?;
-            Framed::new(Arc::new(file), parts)
+            Framed::new(Arc::new(file), parts, unpacked)
         }
     };
     timing.took(framing_phase::WRITE);

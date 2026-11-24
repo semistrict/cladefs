@@ -22,8 +22,10 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::cladefsd::control::Client;
 use cladefs::cladefsd::control::proto::{CellKind, CreateCellRequest, FsyncLevel};
+use cladefs::cladefsd::control::proto::{StatCellRequest, SyncCellRequest};
+use cladefs::testing::Control;
+use cladefs::testing::control_path;
 use cladefs::{CellClient, CellId, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -49,7 +51,14 @@ struct Daemon {
     dir: PathBuf,
     vms: PathBuf,
     control_socket: PathBuf,
-    control: Client,
+    control: Control,
+}
+
+impl Daemon {
+    fn stat(&self, path: &Path) -> cladefs::cladefsd::control::proto::StatCellResponse {
+        let request = StatCellRequest { path: control_path(path) };
+        self.control.call(async |client| client.stat_cell(request).await).unwrap()
+    }
 }
 
 impl Daemon {
@@ -87,7 +96,7 @@ fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
         process: Some(process),
         dir: dir.to_owned(),
         vms,
-        control: Client::connect(&control).unwrap(),
+        control: Control::connect(&control).unwrap(),
         control_socket: control,
     }
 }
@@ -269,22 +278,37 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     assert_eq!(head(&bucket, cell).end, before, "commits after 2 uploaded: nothing to recover");
 
     let taken = daemons[1].dir.join("taken");
-    daemons[1].control.create_cell(&taken, CAPACITY, cell, (Some(2), false)).unwrap();
+    daemons[1]
+        .control
+        .call(async |client| {
+            client
+                .create_cell(CreateCellRequest {
+                    path: control_path(&taken),
+                    capacity: CAPACITY,
+                    tenant: cell.tenant,
+                    cell: cell.id,
+                    token: Some(2),
+                    force: false,
+                    kind: CellKind::Fxfs.into(),
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .unwrap();
     let client = connect(&daemons[1], &taken);
     check(&client, 1..=acked);
     // One host of three lost, no configuration of f = 1 is to be had: the taker serves degraded,
     // its commits told durable once the bucket holds them, and, the bucket holding all it
     // recovered, drops to f = 0.
     write(&client, 101..=102);
-    let stat = daemons[1].control.stat_cell(&taken).unwrap();
+    let stat = daemons[1].stat(&taken);
     assert!(stat.degraded && stat.active_replicas == 0, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);
     let (number, _, alone) = configuration(&bucket, cell);
     assert_eq!(alone, [addresses[1].clone()]);
     // As StatCell says, the head naming it (Codex's review).
-    until("the configuration said", || {
-        daemons[1].control.stat_cell(&taken).unwrap().configuration == number
-    });
+    until("the configuration said", || daemons[1].stat(&taken).configuration == number);
 
     // The lost host back, a disk of its own new: the cell is replicated again, of all three.
     let mut peers = vec![addresses[0].clone()];
@@ -295,7 +319,7 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     let (_, _, members) = configuration(&bucket, cell);
     assert_eq!(members[0], addresses[1]);
     assert_eq!(members.len(), 3);
-    until("degraded no more", || !daemons[1].control.stat_cell(&taken).unwrap().degraded);
+    until("degraded no more", || !daemons[1].stat(&taken).degraded);
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 105..=106);
@@ -361,7 +385,7 @@ fn replicated_commits_survive_their_daemon_killed_and_reopened() {
     // configuration need hold (`Replicator::base`); then replicated again, told durable with the
     // bucket out of reach.
     write(&client, 101..=102);
-    until("degraded no more", || !daemons[0].control.stat_cell(&cell_dir).unwrap().degraded);
+    until("degraded no more", || !daemons[0].stat(&cell_dir).degraded);
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 103..=104);
@@ -399,7 +423,7 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     assert_eq!(f, 1);
     assert!(now.contains(&addresses[spare]) && !now.contains(&addresses[lost]), "{now:?}");
     until("degraded no more", || {
-        let stat = daemons[0].control.stat_cell(&cell_dir).unwrap();
+        let stat = daemons[0].stat(&cell_dir);
         !stat.degraded && stat.members_up == 2 && stat.configuration > first
     });
     let before = head(&bucket, cell).end;
@@ -423,10 +447,10 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     reachable(&bucket, true);
     let client = waiting.join().unwrap();
     write(&client, 10..=12);
-    let stat = daemons[0].control.stat_cell(&cell_dir).unwrap();
+    let stat = daemons[0].stat(&cell_dir);
     assert!(stat.degraded, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);
-    until("f = 0 said", || daemons[0].control.stat_cell(&cell_dir).unwrap().active_replicas == 0);
+    until("f = 0 said", || daemons[0].stat(&cell_dir).active_replicas == 0);
     write(&client, 13..=14);
     check(&client, 1..=14);
 }
@@ -446,8 +470,14 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let cell = create_replicated(&daemons[0], &cell_dir);
     let client = connect(&daemons[0], &cell_dir);
     write(&client, 1..=2);
-    daemons[0].control.sync_cell(&cell_dir).unwrap();
-    let uploaded = daemons[0].control.stat_cell(&cell_dir).unwrap().uploaded;
+    daemons[0]
+        .control
+        .call(async |client| {
+            client.sync_cell(SyncCellRequest { path: control_path(&cell_dir) }).await
+        })
+        .map(drop)
+        .unwrap();
+    let uploaded = daemons[0].stat(&cell_dir).uploaded;
     let (_, _, members) = configuration(&bucket, cell);
     reachable(&bucket, false);
     write(&client, 3..=4);
@@ -464,15 +494,48 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let spare = (0..4).find(|host| !lost.contains(host)).unwrap();
 
     let refused = daemons[spare].dir.join("refused");
-    let failure = daemons[spare].control.create_cell(&refused, CAPACITY, cell, (Some(2), false));
+    let failure = daemons[spare]
+        .control
+        .call(async |client| {
+            client
+                .create_cell(CreateCellRequest {
+                    path: control_path(&refused),
+                    capacity: CAPACITY,
+                    tenant: cell.tenant,
+                    cell: cell.id,
+                    token: Some(2),
+                    force: false,
+                    kind: CellKind::Fxfs.into(),
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell });
     let failure = failure.err().unwrap();
     assert_eq!(failure.errno(), Some(cladefs::Errno::EIO), "{failure}");
 
     let taken = daemons[spare].dir.join("taken");
-    daemons[spare].control.create_cell(&taken, CAPACITY, cell, (Some(3), true)).unwrap();
+    daemons[spare]
+        .control
+        .call(async |client| {
+            client
+                .create_cell(CreateCellRequest {
+                    path: control_path(&taken),
+                    capacity: CAPACITY,
+                    tenant: cell.tenant,
+                    cell: cell.id,
+                    token: Some(3),
+                    force: true,
+                    kind: CellKind::Fxfs.into(),
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .unwrap();
     let client = connect(&daemons[spare], &taken);
     check(&client, 1..=2);
-    let stat = daemons[spare].control.stat_cell(&taken).unwrap();
+    let stat = daemons[spare].stat(&taken);
     assert_eq!(stat.forced_after, Some(uploaded), "{stat:?}");
     write(&client, 5..=6);
     check(&client, 5..=6);

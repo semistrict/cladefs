@@ -94,9 +94,11 @@ pub(super) async fn fork_storage(storage: &Storage, path: &Path) -> Storage {
     let cell = storage.open_cell();
     let path = path.to_owned();
     let to = path.clone();
-    super::on_bucket_runtime(async move { cell.fork(&to, cell.cell().tenant).await.map(drop) })
-        .await
-        .unwrap();
+    super::on_bucket_runtime_on(crate::Host::process(), async move {
+        cell.fork(&to, cell.cell().tenant).await.map(drop)
+    })
+    .await
+    .unwrap();
     Storage::open(&path).await.unwrap()
 }
 
@@ -398,4 +400,52 @@ fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
         holds(&fs, &forked, "the fork after the pass").await;
         drop(fs.close().await.unwrap());
     });
+}
+
+/// TASK-576 (board 2548): `Storage::take` on an existing cell directory applies the caller's
+/// fencing token and opens through `host_cell::take`, dropping any diverged local log and
+/// catching up to the bucket head.
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_take_reattaches_existing_store_at_new_token_past_diverged_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket_dir = dir.path().join("bucket");
+    std::fs::create_dir(&bucket_dir).unwrap();
+    let url = format!("file://{}", bucket_dir.display());
+    let first_path = dir.path().join("first");
+    let second_path = dir.path().join("second");
+
+    // Take a new cell at token 1, format and write a file, then close.
+    let storage =
+        Storage::take(&first_path, (host_cell::CellOf::New(0), SIZE), &url, Some(1)).await.unwrap();
+    let cell = storage.cell().unwrap();
+    let fs = Filesystem::format(storage).await.unwrap();
+    let (node, _) = fs.root().create(b"one", 0o644, OWNER).await.unwrap();
+    node.write(0, b"first-host").await.unwrap();
+    node.fsync().await.unwrap();
+    drop(fs.close().await.unwrap());
+
+    // Another checkout takes the same cell at token 2 and writes a newer file.
+    let second = Storage::take(&second_path, (host_cell::CellOf::Taken(cell), SIZE), &url, Some(2))
+        .await
+        .unwrap();
+    let fs2 = Filesystem::mount(second).await.unwrap();
+    let (node, _) = fs2.root().create(b"two", 0o644, OWNER).await.unwrap();
+    node.write(0, b"second-host").await.unwrap();
+    node.fsync().await.unwrap();
+    drop(fs2.close().await.unwrap());
+
+    // Re-take on `first_path` (which still exists at token 1) with token 3: must honor token 3
+    // and see `two` from the bucket head.
+    let retaken = Storage::take(&first_path, (host_cell::CellOf::Taken(cell), SIZE), &url, Some(3))
+        .await
+        .unwrap();
+    let bucket = bucket_of(&first_path);
+    let head = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
+    assert_eq!(head.token, 3);
+    let fs3 = Filesystem::mount(retaken).await.unwrap();
+    let (two, _) = fs3.root().lookup(b"two").await.unwrap();
+    let mut buf = [0u8; 11];
+    assert_eq!(two.read(0, &mut buf).await.unwrap(), 11);
+    assert_eq!(&buf, b"second-host");
+    drop(fs3.close().await.unwrap());
 }

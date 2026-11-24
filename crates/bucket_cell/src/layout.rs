@@ -110,7 +110,9 @@ pub struct Child {
 /// range ([`formats::Format::check`]) and refuse trailing bytes, and bucket numbers in keys
 /// ([`ephemeral_hosts`], [`hold`]) are fixed-width base 32 ([`Padded`]). Every later build reads
 /// every version from 31 on.
-pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 31);
+/// 32: `Fsync::Local` removed from `Head`'s replication wish (`Ordered` and `Replicated` alone);
+/// version 31 heads carrying `v31::Fsync::Local` decode as [`Fsync::Ordered`] with a warning.
+pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 32);
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -859,10 +861,99 @@ pub enum Fsync {
     /// In the daemon's memory, in order: survives what leaves the daemon alive.
     #[default]
     Ordered,
-    /// On the writer's host's disk.
-    Local,
     /// On f+1 members' disks (or uploaded): survives the writer's host.
     Replicated,
+}
+
+/// Frozen format 31 head types, kept for decoding existing version 31 heads (doc-28).
+pub(crate) mod v31 {
+    use super::{CellId, Configuration, Version};
+    use fprint::TypeFingerprint;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(
+        Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint,
+    )]
+    pub(crate) enum Fsync {
+        #[default]
+        Ordered,
+        Local,
+        Replicated,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct Wish {
+        pub(crate) f: u8,
+        pub(crate) fsync: Fsync,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct Replication {
+        pub(crate) wish: Wish,
+        pub(crate) configuration: Option<Configuration>,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+    pub(crate) struct Head {
+        pub(crate) format: u32,
+        pub(crate) owner: u64,
+        pub(crate) made: crate::record::Made,
+        pub(crate) kind: Option<crate::cell::Kind>,
+        pub(crate) keks: Vec<crate::keys::Kek>,
+        pub(crate) shredded: bool,
+        pub(crate) deks: Vec<crate::keys::Dek>,
+        pub(crate) inherited: Vec<crate::keys::InheritedDek>,
+        pub(crate) epoch: u64,
+        pub(crate) holder: u64,
+        pub(crate) token: u64,
+        pub(crate) end: u64,
+        pub(crate) swaps: u64,
+        pub(crate) runs: Vec<(u64, u64)>,
+        pub(crate) checkpoint: Option<(u64, u64)>,
+        pub(crate) versions: Vec<Version>,
+        pub(crate) replication: Option<Replication>,
+    }
+
+    impl Head {
+        pub(crate) fn into_current(self, cell: CellId) -> super::Head {
+            let replication = self.replication.map(|replication| {
+                let fsync = match replication.wish.fsync {
+                    Fsync::Ordered => super::Fsync::Ordered,
+                    Fsync::Local => {
+                        log::warn!(
+                            "cladefs: cell {cell}'s format 31 head uses removed Fsync::Local; \
+                             treating as Fsync::Ordered"
+                        );
+                        super::Fsync::Ordered
+                    }
+                    Fsync::Replicated => super::Fsync::Replicated,
+                };
+                super::Replication {
+                    wish: super::Wish { f: replication.wish.f, fsync },
+                    configuration: replication.configuration,
+                }
+            });
+            super::Head {
+                format: super::FORMAT.current,
+                owner: self.owner,
+                made: self.made,
+                kind: self.kind,
+                keks: self.keks,
+                shredded: self.shredded,
+                deks: self.deks,
+                inherited: self.inherited,
+                epoch: self.epoch,
+                holder: self.holder,
+                token: self.token,
+                end: self.end,
+                swaps: self.swaps,
+                runs: self.runs,
+                checkpoint: self.checkpoint,
+                versions: self.versions,
+                replication,
+            }
+        }
+    }
 }
 
 /// cladefs: the most f a cell is replicated with: 2f+1 = 7 copies.
@@ -952,7 +1043,8 @@ impl Head {
         let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
         let format = FORMAT.check(format).map_err(|_| crate::Error::Format { cell, format })?;
         let head: Self = match format {
-            31.. => decode(bytes)?,
+            31 => decode::<v31::Head>(bytes)?.into_current(cell),
+            32.. => decode(bytes)?,
             _ => unreachable!("FORMAT.check enforces oldest..=current"),
         };
         // Runs name every segment: the first from 0, each after the one before, within 0..end.
@@ -1173,15 +1265,35 @@ pub use extent_frame::{Frame, PART, TRAILER, crc};
 /// ([`crate::keys::Ring::encrypting`], TASK-411.3). Nothing is framed in the clear (TASK-411.28).
 pub type EncryptionKey<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
 
+/// cladefs: borrowed or owned encryption key accepted by framing helpers so revocable `Ring`s can
+/// hand out owned `Arc<Secret>` keys without breaking borrowed callers (TASK-637, board 2704).
+pub trait KeyArg {
+    fn as_key(&self) -> EncryptionKey<'_>;
+}
+
+impl KeyArg for (&extent_frame::Secret, extent_frame::KeyId) {
+    fn as_key(&self) -> EncryptionKey<'_> {
+        (self.0, self.1)
+    }
+}
+
+impl KeyArg for (std::sync::Arc<extent_frame::Secret>, extent_frame::KeyId) {
+    fn as_key(&self) -> EncryptionKey<'_> {
+        (&self.0, self.1)
+    }
+}
+
+impl KeyArg for &(std::sync::Arc<extent_frame::Secret>, extent_frame::KeyId) {
+    fn as_key(&self) -> EncryptionKey<'_> {
+        (&self.0, self.1)
+    }
+}
+
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
 /// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs:
 /// encrypted as `encrypting` says (TASK-411.3).
-pub fn with_footer<T: Serialize>(
-    data: &[u8],
-    footer: &T,
-    encrypting: EncryptionKey<'_>,
-) -> Vec<u8> {
-    extent_frame::framed(data, &encode(footer), encrypting)
+pub fn with_footer<T: Serialize>(data: &[u8], footer: &T, encrypting: impl KeyArg) -> Vec<u8> {
+    extent_frame::framed(data, &encode(footer), encrypting.as_key())
 }
 
 /// cladefs: the versioned footer of a segment's object (doc-28, board 10038).
@@ -1210,8 +1322,8 @@ pub fn decode_own_extent_footer(bytes: &[u8]) -> Result<ExtentId, crate::Error> 
 /// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it and its
 /// bucket layout version, so that one copied to another key, encrypted, is refused (TASK-411.3,
 /// doc-28, board 10038), encrypted as `encrypting` says.
-pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: EncryptionKey<'_>) -> Vec<u8> {
-    extent_frame::framed(data, &own_extent_footer(extent), encrypting)
+pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: impl KeyArg) -> Vec<u8> {
+    extent_frame::framed(data, &own_extent_footer(extent), encrypting.as_key())
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs, by a reader holding
@@ -1224,8 +1336,8 @@ pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>
 impl Segment {
     /// Its object, cladefs: encrypted as `encrypting` says (TASK-411.3), its footer versioned
     /// (doc-28, board 10038).
-    pub fn encode(&self, encrypting: EncryptionKey<'_>) -> Vec<u8> {
-        extent_frame::framed(&self.data, &encode_segment_footer(&self.footer), encrypting)
+    pub fn encode(&self, encrypting: impl KeyArg) -> Vec<u8> {
+        extent_frame::framed(&self.data, &encode_segment_footer(&self.footer), encrypting.as_key())
     }
 
     /// The footer of a segment's object, checked against its CRC and [`FORMAT`].

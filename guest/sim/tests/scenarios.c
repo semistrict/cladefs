@@ -304,6 +304,26 @@ static void cladefs_growths_zero_past_a_cut(void)
 	}
 }
 
+/* A growth's tail zeroing dirties its DAX range. The growth must seal what dropping it writes. */
+static void cow_grow_seals_tail_writeback(void)
+{
+	static char expected[PAGE_SIZE];
+	struct cladefs *fs = mount->info->fs;
+	struct cladefs_dax_extent extent = {};
+	struct file *file;
+	u64 ino;
+
+	memset(expected, 'c', 1000);
+	file = new_file(expected, 1000);
+	ino = file_inode(file)->i_ino;
+	check(!sim_fsync(file), "fsync before growth");
+	check(!sim_truncate(file, PAGE_SIZE), "grow through the last page");
+	check(cladefs_dax_extents(fs, ino, 0, PAGE_SIZE, &extent, 1) == 1,
+	      "the grown file's last page has no extent");
+	check(extent.access == CLADEFS_DAX_SEALED, "growth left the tail's writeback unsealed");
+	check_file("after growing the partial page", file, expected, sizeof(expected));
+}
+
 /* A file's ranges gone, as a reflink's, to be mapped again. */
 static void drop_ranges(struct file *file)
 {
@@ -1959,6 +1979,7 @@ static const struct {
 	COW_SCENARIO(cow_rebind_against_mapped_writes),
 	COW_SCENARIO(cow_writeback_against_mapped_writes),
 	COW_SCENARIO(cow_truncate_dirty),
+	COW_SCENARIO(cow_grow_seals_tail_writeback),
 	COW_SCENARIO(cow_punch_dirty),
 	COW_SCENARIO(cow_crash_between_bytes_and_commit),
 	COW_SCENARIO(cow_swap_during_write),

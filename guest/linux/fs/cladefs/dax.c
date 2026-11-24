@@ -2290,8 +2290,7 @@ static int cladefs_dax_private_failed(struct cladefs_dax *dax, u64 offset, unsig
  * a writeback has taken its page, moved its block, and had Fxfs free the old one: the host copying
  * the page at the store, as it would, copied the zeros the window reads there then (guest/sim,
  * seed 2802 at 1,000 operations). A failed PRIVATE fails the write, -EIO, or -ENOMEM if the guest
- * found no memory for its request, nothing dirty, the room given back; what the host made private
- * of it stays so, uncounted until a write makes it dirty, or a MAP or UNMAP frees it. With the
+ * found no memory for its request, nothing dirty, the room given back. With the
  * file's semaphore held shared, which the caller holds until the store or the copy is done
  * (cladefs_dax_iomap_end): no writeback swaps the page out, nor a rebind maps over it, meanwhile.
  *
@@ -3619,8 +3618,8 @@ static int cladefs_dax_zero_tail(struct inode *inode, loff_t old, loff_t size)
 /*
  * Readies the last block of `inode`, `old` bytes long, for Fxfs growing the file to `size` to copy
  * it, zeroed past `old`, through the device: what the window holds past the end zeroed, its stores
- * written back and sealed, and its mapping dropped, which the copy replaces, or the window could
- * hide the copy until eviction. Fxfs's growths zero the block so: a truncate's, and a clone's
+ * written back as the mapping is dropped, then sealed. The drop lets the copy's blocks show in
+ * the window. Fxfs's growths zero the block so: a truncate's, and a clone's
  * (TASK-153.4). With the invalidate_lock held for writing.
  */
 static int cladefs_dax_grow_begin(struct inode *inode, loff_t old, loff_t size)
@@ -3631,11 +3630,11 @@ static int cladefs_dax_grow_begin(struct inode *inode, loff_t old, loff_t size)
 		return 0;
 	err = cladefs_dax_zero_tail(inode, old, size);
 	if (!err)
-		err = cladefs_nofs(cladefs_fsync(cladefs_vfs_fs(inode->i_sb)));
-	if (!err)
 		err = cladefs_dax_break_layouts(inode, round_down(old, PAGE_SIZE));
 	if (!err)
 		err = cladefs_dax_drop(inode, old >> CLADEFS_DAX_SHIFT, old >> CLADEFS_DAX_SHIFT, -1);
+	if (!err)
+		err = cladefs_nofs(cladefs_fsync(cladefs_vfs_fs(inode->i_sb)));
 	return err;
 }
 

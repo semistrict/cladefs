@@ -18,7 +18,9 @@
 
 #![cfg(target_os = "linux")]
 
+use cladefs::cladefsd::control::proto::ForkCellRequest;
 use cladefs::fuse::MountOptions;
+use cladefs::testing::control_path;
 use cladefs::{Filesystem, SetAttr, Storage};
 use futures::executor::block_on;
 use std::ffi::CString;
@@ -765,14 +767,35 @@ fn a_cell_mounted_is_the_mounts_alone() {
     let started = std::time::Instant::now();
     let vm = cladefs::CellClient::connect(dir.path().join("vm.sock"), &cell_dir, CELL_SIZE);
     assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
-    let control = cladefs::cladefsd::control::Client::connect(socket).unwrap();
-    let forked = control.fork_cell(&cell_dir, &dir.path().join("fork"));
+    let control = cladefs::testing::Control::connect(socket).unwrap();
+    let forked = control
+        .call(async |client| {
+            client
+                .fork_cell(ForkCellRequest {
+                    from: control_path(&cell_dir),
+                    to: control_path(&dir.path().join("fork")),
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell });
     assert_eq!(forked.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let waited = started.elapsed();
     assert!(waited < std::time::Duration::from_secs(5), "refused after {waited:?}");
 
     cladefsctl_mount(socket, &["detach", "1", &cell]);
-    control.fork_cell(&cell_dir, &dir.path().join("fork")).unwrap();
+    control
+        .call(async |client| {
+            client
+                .fork_cell(ForkCellRequest {
+                    from: control_path(&cell_dir),
+                    to: control_path(&dir.path().join("fork")),
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .unwrap();
     terminate(child, &m);
 }
 

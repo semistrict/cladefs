@@ -179,15 +179,19 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `cladefs-v1.18.0-r3` of
+The VMM is a submodule: branch `cladefs-v1.18.0-r4` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker),
 Firecracker's v1.18.0 release plus cladefs's changes as one
 linear series, each release of it a branch `cladefs-v1.18.0-rN` (rebased from
 `cladefs-v1.16.1-r11`, TASK-671; earlier releases on v1.16.1 were
 `cladefs-v1.16.1-rN` / `fxdax-v1.16.1-rN`, TASK-269, TASK-273, TASK-437,
-TASK-503). A commit is an upstream submission: the general fixes, which apply
-to v1.18.0 alone; the PCI transport's shared memory regions and device IDs past
-63; and the `cladefs` feature, everything else, so that a build without it is
+TASK-503). Each commit is one upstream submission: five standalone general fixes
+at the base (vCPU exit-code ordering, async-signal-safe fatal signal handlers on
+alternate stacks, virtio features-page replacement preserving
+`device_acked_features()`, vsock snapshot connection resets, and jailer
+`/proc/misc` parsing) so downstream forks can share or drop individual fixes
+cleanly; the PCI transport's shared memory regions and device IDs past 63; and
+the `cladefs` feature, everything else, so that a build without it is
 upstream's. Every
 cladefs VM, on x86-64 and aarch64 alike, runs its devices on virtio-PCI
 (`--enable-pci`): the extent device's DAX window is a BAR of its own, which

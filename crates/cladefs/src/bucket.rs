@@ -19,6 +19,7 @@ use crate::Errno;
 use bucket_cell::bucket_kms::{BucketKms, ByBucket, Unreloaded};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
+#[cfg(not(madsim))]
 use bucket_cell::identity::{Details, Identity, Registry};
 use bucket_cell::keys;
 use bucket_cell::layout::Location;
@@ -74,6 +75,7 @@ impl Host {
 
 /// cladefs: `details` of the bucket at `url`, its URL and provider among them, as the registry of
 /// buckets records them (`bucket_cell::identity`, TASK-633.9).
+#[cfg(not(madsim))]
 fn located(url: &str, details: Details) -> Result<Details, crate::Error> {
     let provider = bucket_cell::object_bucket::provider_of(url)
         .map_err(|err| crate::Error::new(anyhow::anyhow!(err)))?;
@@ -81,6 +83,7 @@ fn located(url: &str, details: Details) -> Result<Details, crate::Error> {
 }
 
 /// cladefs: runs `work` on the bucket runtime, its bucket failure an error with its errno.
+#[cfg(not(madsim))]
 fn on_buckets<T>(
     work: impl std::future::Future<Output = Result<T, bucket_cell::Error>>,
 ) -> Result<T, crate::Error> {
@@ -90,6 +93,7 @@ fn on_buckets<T>(
 /// cladefs: formats the bucket at `url` (`cladefsctl format-bucket`; `bucket_cell::identity`,
 /// TASK-633.9): unless it was formatted or added, the root of buckets of its own, number 1, its
 /// registry recording it, with `details`. Its identity either way.
+#[cfg(not(madsim))]
 pub fn format_bucket(url: &str, details: Details) -> Result<Identity, crate::Error> {
     let details = located(url, details)?;
     let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
@@ -104,6 +108,7 @@ pub fn format_bucket(url: &str, details: Details) -> Result<Identity, crate::Err
 /// opened with its own number's options, its credentials (`CLADEFSD_BUCKET_<N>_*`), the new one
 /// with the number it is to get (board 5550); `EAGAIN` if another addition took that number
 /// first, added under the next, which an addition again finishes.
+#[cfg(not(madsim))]
 pub fn add_bucket(root_url: &str, url: &str, details: Details) -> Result<Identity, crate::Error> {
     let (root_details, details) = (located(root_url, Details::default())?, located(url, details)?);
     // A memory bucket is its process's alone: no other host, nor a later process, reaches it at
@@ -139,6 +144,7 @@ pub fn add_bucket(root_url: &str, url: &str, details: Details) -> Result<Identit
 
 /// cladefs: the registry of buckets in the root of the bucket at `url`, if it has one
 /// (`cladefsctl buckets`, TASK-633.9).
+#[cfg(not(madsim))]
 pub fn bucket_registry(url: &str) -> Result<Option<Registry>, crate::Error> {
     let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
     on_buckets(bucket_cell::identity::registry(&*bucket))
@@ -148,6 +154,7 @@ pub fn bucket_registry(url: &str) -> Result<Option<Registry>, crate::Error> {
 /// by the registry of buckets in its root, or the root bucket's, opened with its own options and
 /// checked to be the one recorded (TASK-633.3). `ENOENT` if no registry records it, `ESTALE` if the
 /// bucket at its URL is another.
+#[cfg(not(madsim))]
 pub async fn bucket_numbered(number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
     let home = Host::from_env().map_err(|err| crate::Error::new(anyhow::anyhow!(err)))?.bucket;
     Ok(crate::host_cell::bucket_numbered(&home, number).await?)
@@ -224,20 +231,82 @@ impl From<crate::faults::Failpoint> for Failure {
     }
 }
 
+/// Explicit per-host bucket, KMS, fetch/upload budget, peer, and member state (board 10962),
+/// replacing the 8 `node_local!` statics previously in `crate::bucket`.
+pub(crate) struct HostState {
+    pooled: std::sync::OnceLock<Arc<keys::CachingKms>>,
+    kms: std::sync::OnceLock<Result<HostKeys, String>>,
+    budget: fetch::Budgets,
+    memory: Arc<fetch::Memory>,
+    uploads: std::sync::OnceLock<Arc<Budget>>,
+    upload_memory: std::sync::OnceLock<u64>,
+    peers: std::sync::OnceLock<(Arc<RoutedBucket>, Arc<peers::Peers>)>,
+    members: std::sync::OnceLock<Arc<dyn local_cell::upload::Members>>,
+}
+
+impl HostState {
+    pub(crate) fn new(parts: Arc<bucket_cell::fetch::PartMemory>) -> Self {
+        Self {
+            pooled: std::sync::OnceLock::new(),
+            kms: std::sync::OnceLock::new(),
+            budget: fetch::Budgets::per_bucket(Limits { requests: 64, bytes: 64 << 20 }),
+            memory: fetch::Memory::with_parts(parts),
+            uploads: std::sync::OnceLock::new(),
+            upload_memory: std::sync::OnceLock::new(),
+            peers: std::sync::OnceLock::new(),
+            members: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn uploads(&self) -> &Arc<Budget> {
+        self.uploads.get_or_init(|| {
+            let bytes = *self.upload_memory.get_or_init(|| UPLOAD_BYTES);
+            Budget::new(Limits { requests: 64, bytes })
+        })
+    }
+}
+
+/// The runtime `host`'s open cells' uploaders run on, and the budget of their uploads and keys.
+pub(crate) fn runtime_on(host: &crate::Host) -> Result<Runtime, Failure> {
+    let state = host.bucket_state();
+    let keys = keys::Host::new(kms_on(host)?, state.memory.keys().clone());
+    Ok(Runtime { handle: bucket_runtime_on(host)?, uploads: state.uploads().clone(), keys })
+}
+
 /// The runtime the host's open cells' uploaders run on, and the budget of their uploads; cladefs:
 /// and the host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime
 /// can't be made, a later call making it anew ([`bucket_runtime`]).
+#[cfg(not(madsim))]
 pub fn runtime() -> Result<Runtime, Failure> {
-    let keys = keys::Host::new(kms()?, MEMORY.get().keys().clone());
-    Ok(Runtime { handle: bucket_runtime()?, uploads: UPLOADS.get().clone(), keys })
+    runtime_on(crate::Host::process())
+}
+
+/// The bucket runtime for `host`.
+pub(crate) fn bucket_runtime_on(host: &crate::Host) -> Result<tokio::runtime::Handle, Failure> {
+    Ok(local_cell::upload::bucket_runtime_on(host.local())?.handle().clone())
 }
 
 /// The runtime every open cell's uploader, and its fetches, run on, and the calls from no runtime's
 /// task (`local_cell::upload::bucket_runtime`, TASK-34, TASK-449's review): one for the process, so
 /// that one runtime serves the connections to the host's buckets, whichever opened them. Fails if
 /// it can't be made, a later call making it anew.
+#[cfg(all(test, not(madsim)))]
 pub(crate) fn bucket_runtime() -> Result<tokio::runtime::Handle, Failure> {
-    Ok(local_cell::upload::bucket_runtime()?.handle().clone())
+    bucket_runtime_on(crate::Host::process())
+}
+
+/// cladefs: `host`'s KMS, initialized on first use.
+pub(crate) fn kms_on(host: &crate::Host) -> Result<Arc<keys::CachingKms>, Failure> {
+    let state = host.bucket_state();
+    if let Some(kms) = state.pooled.get() {
+        return Ok(kms.clone());
+    }
+    let runtime = bucket_runtime_on(host)?;
+    let kms = state.pooled.get_or_init(|| match host_keys_on(host) {
+        Ok(keys) => host_kms(host, keys.kmses.clone(), runtime),
+        Err(why) => host_kms(host, one(Arc::new(Unreached(why.clone()))), runtime),
+    });
+    Ok(kms.clone())
 }
 
 /// cladefs: the host's KMS, as its environment chooses it the first time it is asked for
@@ -249,41 +318,41 @@ pub(crate) fn bucket_runtime() -> Result<tokio::runtime::Handle, Failure> {
 /// cell. Every process that opens open cells refuses to start so first ([`require_kms`],
 /// TASK-411.28). Fails, keeping nothing, if the runtime its pools refill on can't be made
 /// ([`bucket_runtime`], TASK-449's review).
+#[cfg(not(madsim))]
 pub fn kms() -> Result<Arc<keys::CachingKms>, Failure> {
-    if let Some(kms) = POOLED.get().get() {
-        return Ok(kms.clone());
-    }
-    let runtime = bucket_runtime()?;
-    let kms = POOLED.get().get_or_init(|| match host_keys() {
-        Ok(keys) => host_kms(keys.kmses.clone(), runtime),
-        Err(why) => host_kms(one(Arc::new(Unreached(why.clone()))), runtime),
-    });
-    Ok(kms.clone())
+    kms_on(crate::Host::process())
 }
 
-node_local::node_local! {
-    /// cladefs: [`kms`], once made.
-    static POOLED: std::sync::OnceLock<Arc<keys::CachingKms>> = std::sync::OnceLock::new();
+/// cladefs: whether `host` has a KMS ([`kms_on`]).
+pub(crate) fn require_kms_on(host: &crate::Host) -> Result<(), String> {
+    host_keys_on(host).as_ref().map(drop).map_err(|why| format!("the host's KMS: {why}"))
 }
 
 /// cladefs: whether the host has a KMS ([`kms`]): the refusal, naming `CLADEFS_KMS` and
 /// `CLADEFS_MASTER_KEY`, if its environment chooses none, or why the one it chooses can't be had.
 /// What every process that opens open cells asks as it starts, refusing to start with none
 /// (TASK-411.28): cladefsd, cladefsctl, the cladefs CLI's mounts.
+#[cfg(not(madsim))]
 pub fn require_kms() -> Result<(), String> {
-    host_keys().as_ref().map(drop).map_err(|why| format!("the host's KMS: {why}"))
+    require_kms_on(crate::Host::process())
+}
+
+/// cladefs: `host`'s bucket KMS, if [`kms_on`] is that.
+pub(crate) fn bucket_kms_on(host: &crate::Host) -> Option<Arc<BucketKms<ObjectBucket>>> {
+    // None had: the process refused to start (require_kms), but in a tool that needs none.
+    host_keys_on(host).as_ref().ok().and_then(|keys| keys.bucket.clone())
 }
 
 /// cladefs: the host's bucket KMS, if [`kms`] is that (TASK-411.27): what shreds a tenant here
 /// ([`shred_tenant`]).
+#[cfg(not(madsim))]
 pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
-    // None had: the process refused to start (require_kms), but in a tool that needs none.
-    host_keys().as_ref().ok().and_then(|keys| keys.bucket.clone())
+    bucket_kms_on(crate::Host::process())
 }
 
-/// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
-fn host_keys() -> &'static Result<HostKeys, String> {
-    KMS.get().get_or_init(|| {
+/// cladefs: `host`'s KMS ([`kms_on`]), chosen once: or why it has none.
+fn host_keys_on(host: &crate::Host) -> &Result<HostKeys, String> {
+    host.bucket_state().kms.get_or_init(|| {
         // cladefs: the environment read once, the variables KMSes read alone, which the host's
         // KMSes keep (board 8593).
         let vars = match extent_keys::kms::Vars::from_env() {
@@ -293,7 +362,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
                 return Err(why);
             }
         };
-        let own = || host_bucket().map(|bucket| bucket.own().clone());
+        let own = || host_bucket_on(host).map(|bucket| bucket.own().clone());
         match bucket_cell::bucket_kms::from_vars(&vars, own) {
             Ok(chosen) => {
                 let bucket = chosen.bucket().cloned();
@@ -303,7 +372,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
                 // wrapped under it rather than their own bucket's (board 6908).
                 let home = match crate::host_cell::host_bucket_url() {
                     None => None,
-                    Some(_) => Some(host_bucket()?),
+                    Some(_) => Some(host_bucket_on(host)?),
                 };
                 let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match home {
                     Some(home) => {
@@ -335,10 +404,10 @@ fn host_keys() -> &'static Result<HostKeys, String> {
     })
 }
 
-/// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_BUCKET`).
-fn host_bucket() -> Result<Arc<RoutedBucket>, String> {
+/// cladefs: `host`'s bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_BUCKET`).
+fn host_bucket_on(host: &crate::Host) -> Result<Arc<RoutedBucket>, String> {
     let url = crate::host_cell::host_bucket_url().ok_or("CLADEFSD_BUCKET names none")?;
-    crate::host_cell::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
+    crate::host_cell::bucket_on(host, &url).map_err(|err| format!("{url}: {err:#}"))
 }
 
 /// cladefs: the host's KMSes, a bucket's each (TASK-633.6), its own as its environment chose it,
@@ -355,33 +424,47 @@ fn one(kms: extent_keys::kms::Shared) -> Arc<dyn keys::Kmses> {
     Arc::new(keys::OneKms(kms))
 }
 
-/// cladefs: the host's over `kmses`: its pools of new cell KEKs refilled in batches on `runtime`,
+/// cladefs: `host`'s over `kmses`: its pools of new cell KEKs refilled in batches on `runtime`,
 /// the uploaders', off the paths of forks, which take from them (TASK-411.4). Installs a
-/// revocation callback so any KMS refusal immediately halts open cells on this host.
-fn host_kms(kmses: Arc<dyn keys::Kmses>, runtime: tokio::runtime::Handle) -> Arc<keys::CachingKms> {
+/// revocation callback so any KMS refusal immediately halts open cells on `host`.
+fn host_kms(
+    host: &crate::Host,
+    kmses: Arc<dyn keys::Kmses>,
+    runtime: tokio::runtime::Handle,
+) -> Arc<keys::CachingKms> {
     let kms = keys::CachingKms::over(kmses, Some(keys::Pooling::on(runtime)));
-    kms.set_on_revoked(Arc::new(|tenant, buckets, why| {
-        on_kms_revoked(tenant, buckets, why);
+    let weak = host.weak();
+    kms.set_on_revoked(Arc::new(move |tenant, buckets, why| {
+        if let Some(host) = weak.upgrade() {
+            on_kms_revoked_on(&host, tenant, buckets, why);
+        }
     }));
     kms
 }
 
 /// cladefs: invoked by [`keys::CachingKms`] whenever a KMS reports that `tenant`'s KEK is
-/// revoked, destroyed, or missing: immediately halts open cells of `tenant` in the affected
-/// buckets and evicts their extent-cache pages without waiting for external fan-out, preserving
-/// multi-bucket per-KMS isolation (TASK-633.6).
-fn on_kms_revoked(tenant: u64, buckets: &std::collections::BTreeSet<u16>, why: &str) {
+/// revoked, destroyed, or missing: immediately halts open cells of `tenant` on `host` in the
+/// affected buckets and evicts their extent-cache pages without waiting for external fan-out,
+/// preserving multi-bucket per-KMS isolation (TASK-633.6).
+fn on_kms_revoked_on(
+    host: &crate::Host,
+    tenant: u64,
+    buckets: &std::collections::BTreeSet<u16>,
+    why: &str,
+) {
     let all_buckets = buckets.is_empty() || buckets.contains(&bucket_cell::identity::NAMED);
     let matches = |cell: crate::CellId| {
         cell.tenant == tenant
             && (all_buckets || buckets.contains(&bucket_cell::objectid::bucket_of(cell.id)))
     };
     let halted = format!("as tenant {tenant}'s keys were revoked by its KMS: {why}");
-    let stores = crate::halt::halt_cells(matches, Errno::EACCES, &halted);
-    let (bytes, extents) = crate::cache::forget(matches);
+    let stores = crate::halt::halt_cells_on(host, matches, Errno::EACCES, &halted);
+    crate::fuse::server::forget_cells(matches);
+    let (bytes, extents) = host.cache().forget(matches);
     let (rings, kept) = if all_buckets {
         let scope = keys::Scope::Tenant(tenant);
-        (MEMORY.get().keys().forget(scope), MEMORY.get().forget_kept(scope))
+        let state = host.bucket_state();
+        (state.memory.keys().forget(scope), state.memory.forget_kept(scope))
     } else {
         (0, 0)
     };
@@ -393,17 +476,20 @@ fn on_kms_revoked(tenant: u64, buckets: &std::collections::BTreeSet<u16>, why: &
     }
 }
 
-/// cladefs: has the host use `kms` as its KMS, before any open cell opens: tests' (TASK-411.3).
-/// Once.
-pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.get()
+/// cladefs: has `host` use `kms` as its KMS, before any open cell opens. Once.
+#[cfg(not(madsim))]
+pub(crate) fn set_kms_on(host: &crate::Host, kms: extent_keys::kms::Shared) -> Result<(), String> {
+    host.bucket_state()
+        .kms
         .set(Ok(HostKeys { kmses: one(kms), bucket: None, by_bucket: None }))
         .map_err(|_| "the host's KMS is set already".to_owned())
 }
 
-node_local::node_local! {
-    /// cladefs: the host's KMS ([`host_keys`]).
-    static KMS: std::sync::OnceLock<Result<HostKeys, String>> = std::sync::OnceLock::new();
+/// cladefs: has the host use `kms` as its KMS, before any open cell opens: tests' (TASK-411.3).
+/// Once.
+#[cfg(not(madsim))]
+pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
+    set_kms_on(crate::Host::process(), kms)
 }
 
 /// cladefs: the KMS tests' and benches' processes encrypt under, their environment naming none
@@ -419,12 +505,13 @@ pub mod testing {
     /// which measures a host's work, a real host's KMS adding its calls. cladefs's tests have it
     /// whatever they do, and the processes they start (the `tests-kms` feature). Before any open
     /// cell opens.
+    #[cfg(not(madsim))]
     pub fn encrypted() {
         let named = ["CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE"]
             .into_iter()
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
         if !named {
-            let set = super::KMS.get().set(Ok(host_keys()));
+            let set = crate::Host::process().bucket_state().kms.set(Ok(host_keys()));
             assert!(set.is_ok(), "the tests' KMS, set before any cell opens");
         }
     }
@@ -452,30 +539,23 @@ pub struct Forgotten {
     pub bytes: u64,
 }
 
-/// cladefs: has the host forget what it holds of `scope`'s keys (doc-16, Shredding; TASK-411.7), as
-/// it is told the tenant's KEK is revoked or destroyed in the KMS, or the cell shredded, `why`
-/// saying which: what the control API's `ForgetTenantKeys` and `ShredCell` do.
-///
-/// Every open cell of the scope's cells is halted, each request failing with `EACCES`, as its
-/// opening would fail; the extent cache lets go of them, and of every extent no other open cell
-/// holds, its pages evicted, unmapped from the windows that map them; its fetchers forget the
-/// open cells' rings and drop what they kept of the scope's objects; its KMS forgets the scope's
-/// cell KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays
-/// in memory: a halted open cell's own ring, and its open segment's key, until whoever holds it
-/// closes it (a VM process whose guest met `EACCES`); the DEKs other open cells hold, which they
-/// inherited; and the pages of extents other open cells hold too (a shared version's fork, a public
-/// base). On disk, everything of the scope's is as its keys encrypted it: open segments,
-/// write-ahead logs, the part cache.
-pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
+/// cladefs: has `host` forget what it holds of `scope`'s keys (doc-16, Shredding; TASK-411.7).
+pub(crate) fn forget_on(host: &crate::Host, scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
-    let stores = crate::halt::halt_cells(|cell| scope.covers(cell), Errno::EACCES, &halted);
-    let (bytes, extents) = crate::cache::forget(|cell| scope.covers(cell));
+    let stores =
+        crate::halt::halt_cells_on(host, |cell| scope.covers(cell), Errno::EACCES, &halted);
+    // cladefs: halt any FUSE mount slots serving cells in `scope` and invalidate their kernel
+    // inodes and dentries so cached file pages are dropped immediately (TASK-562, board 2520,
+    // board 2704).
+    crate::fuse::server::forget_cells(|cell| scope.covers(cell));
+    let (bytes, extents) = host.cache().forget(|cell| scope.covers(cell));
     // Forget keys before bumping `forget_kept`'s generation so no concurrent read can re-open or
     // re-insert plaintext after `forget_kept` runs (board 6026).
-    let rings = MEMORY.get().keys().forget(scope);
-    let kept = MEMORY.get().forget_kept(scope);
+    let state = host.bucket_state();
+    let rings = state.memory.keys().forget(scope);
+    let kept = state.memory.forget_kept(scope);
     // Its KMS, if it made it: one not made yet unwrapped nothing.
-    if let Some(kms) = POOLED.get().get() {
+    if let Some(kms) = state.pooled.get() {
         kms.forget(scope, why);
     }
     let forgotten = Forgotten { stores, rings, kept, extents, bytes };
@@ -483,18 +563,22 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     forgotten
 }
 
-/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::keys::shred`]): its wrapped KEKs taken out of
-/// its head, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
-/// already, its head stays as it is, and the host forgets them all the same: what each host told
-/// of the shredding does. Returns how many generations of its KEK it took out, and what the host
-/// forgot. Only as strong as `bucket` keeps no older version of the cell's head (doc-16).
-pub async fn shred_cell(
+/// cladefs: has the host forget what it holds of `scope`'s keys (doc-16, Shredding; TASK-411.7).
+#[cfg(not(madsim))]
+pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
+    forget_on(crate::Host::process(), scope, why)
+}
+
+/// cladefs: shreds `cell` in `bucket` on `host`, then forgets its keys on `host`.
+#[cfg(not(madsim))]
+pub(crate) async fn shred_cell_on(
+    host: &crate::Host,
     bucket: &impl bucket_cell::Bucket,
     cell: crate::CellId,
 ) -> Result<(usize, Forgotten), bucket_cell::Error> {
     let removed = bucket_cell::keys::shred(bucket, cell).await?;
     let why = bucket_cell::keys::shredded(cell).to_string();
-    Ok((removed, forget(keys::Scope::Cell(cell), &why)))
+    Ok((removed, forget_on(host, keys::Scope::Cell(cell), &why)))
 }
 
 /// cladefs: why [`shred_tenant`] refused or failed, distinguishing invalid input (`EINVAL`),
@@ -512,10 +596,24 @@ pub enum ShredError {
     Failed(String),
 }
 
-/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::keys::shred`]), publishes
+/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::keys::shred`]): its wrapped KEKs taken out of
+/// its head, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
+/// already, its head stays as it is, and the host forgets them all the same: what each host told
+/// of the shredding does. Returns how many generations of its KEK it took out, and what the host
+/// forgot. Only as strong as `bucket` keeps no older version of the cell's head (doc-16).
+#[cfg(not(madsim))]
+pub async fn shred_cell(
+    bucket: &impl bucket_cell::Bucket,
+    cell: crate::CellId,
+) -> Result<(usize, Forgotten), bucket_cell::Error> {
+    shred_cell_on(crate::Host::process(), bucket, cell).await
+}
+
+/// cladefs: shreds `cell` in `bucket` on `host`, publishes
 /// [`bucket_cell::events::Publish::CellShredded`] to the root bucket's `events` object so other
-/// hosts forget its keys without fan-out, and has this host forget its keys immediately.
-pub async fn shred_cell_and_publish(
+/// hosts forget its keys without fan-out, and has `host` forget its keys immediately.
+pub(crate) async fn shred_cell_and_publish_on(
+    host: &crate::Host,
     bucket: &RoutedBucket,
     cell: crate::CellId,
 ) -> Result<(usize, Forgotten), bucket_cell::Error> {
@@ -523,17 +621,27 @@ pub async fn shred_cell_and_publish(
     let auth = bucket_cell::events::authority(bucket).await?;
     bucket_cell::events::publish(&*auth, bucket_cell::events::Publish::CellShredded(cell)).await?;
     let why = bucket_cell::keys::shredded(cell).to_string();
-    Ok((removed, forget(keys::Scope::Cell(cell), &why)))
+    Ok((removed, forget_on(host, keys::Scope::Cell(cell), &why)))
 }
 
-/// cladefs: shreds `tenant` under the bucket KMS of every bucket the host reaches (doc-16, The
-/// bucket KMS; TASK-411.27, TASK-633.6): its KEK object in each replaced by a tombstone, so that no
-/// key its KEK wrapped unwraps anywhere and none is made it again
-/// ([`bucket_cell::bucket_kms::ByBucket::shred`]), and publishes `TenantShredded` to the root
-/// bucket's `events` object; then has this host forget its keys ([`forget`]) once at least one
-/// bucket was tombstoned (board 5552). Refuses the default tenant 0 (`EINVAL`), non-bucket KMS
-/// (`ENOTSUP`), and unreachable/failing buckets (`EIO`, board 5394).
-pub async fn shred_tenant(
+/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::keys::shred`]), publishes
+/// [`bucket_cell::events::Publish::CellShredded`] to the root bucket's `events` object so other
+/// hosts forget its keys without fan-out, and has this host forget its keys immediately.
+#[cfg(not(madsim))]
+pub async fn shred_cell_and_publish(
+    bucket: &RoutedBucket,
+    cell: crate::CellId,
+) -> Result<(usize, Forgotten), bucket_cell::Error> {
+    shred_cell_and_publish_on(crate::Host::process(), bucket, cell).await
+}
+
+/// cladefs: shreds `tenant` under `host`'s bucket KMS of every bucket `host` reaches (doc-16, The
+/// bucket KMS; TASK-411.27, TASK-633.6), publishes `TenantShredded` to the root bucket's `events`
+/// object, and forgets `tenant`'s keys on `host` once at least one bucket was tombstoned (board
+/// 5552). Refuses the default tenant 0 (`EINVAL`), non-bucket KMS (`ENOTSUP`), and unreachable or
+/// failing buckets (`EIO`, board 5394).
+pub(crate) async fn shred_tenant_on(
+    host: &crate::Host,
     tenant: u64,
 ) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), ShredError> {
     use bucket_cell::bucket_kms::{Destroyed, Shredded};
@@ -541,8 +649,8 @@ pub async fn shred_tenant(
         return Err(ShredError::InvalidTenant("cannot shred the default tenant (0)".to_owned()));
     }
     // None had: the process refused to start (require_kms); nothing to shred under.
-    let keys = host_keys().as_ref().ok();
-    let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms()) {
+    let keys = host_keys_on(host).as_ref().ok();
+    let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms_on(host)) {
         (Some(by_bucket), _) => by_bucket.shred(tenant).await,
         (None, Some(kms)) => {
             let mut shredded = Shredded::default();
@@ -557,24 +665,23 @@ pub async fn shred_tenant(
              CLADEFS_KMS): destroy the tenant's KEK in its KMS, then have every host forget its keys"
         )));
     }
-    // Only forget local keys when at least one bucket was actually tombstoned (board 5552).
-    if shredded.destroyed.is_empty() {
-        let failed: Vec<String> =
-            shredded.failed.iter().map(|(number, why)| format!("bucket {number}: {why}")).collect();
-        return Err(ShredError::Failed(format!(
-            "tenant {tenant}: shredded in no bucket: {}",
-            failed.join("; ")
-        )));
-    }
-    let now = shredded.destroyed.iter().any(|(_, destroyed)| *destroyed == Destroyed::Now);
-    let destroyed = if now { Destroyed::Now } else { Destroyed::Already };
-    let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
-    let forgotten = forget(keys::Scope::Tenant(tenant), &why);
     // cladefs: the buckets it did not shred in (TASK-633.6): under another KMS, or out of reach.
     let left: Vec<String> = (shredded.named.iter())
         .map(|(number, url)| format!("bucket {number}'s KMS {url} keeps its KEK: destroy it there"))
         .chain(shredded.failed.iter().map(|(number, why)| format!("bucket {number}: {why}")))
         .collect();
+    // cladefs: if no bucket tombstone was confirmed, do not halt open cells or poison the KMS
+    // cache (board 5552, board 2704).
+    if shredded.destroyed.is_empty() {
+        return Err(ShredError::Failed(format!(
+            "tenant {tenant}: shredded in no bucket: {}",
+            left.join("; ")
+        )));
+    }
+    let now = shredded.destroyed.iter().any(|(_, destroyed)| *destroyed == Destroyed::Now);
+    let destroyed = if now { Destroyed::Now } else { Destroyed::Already };
+    let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
+    let forgotten = forget_on(host, keys::Scope::Tenant(tenant), &why);
     if !left.is_empty() {
         let done: Vec<String> = shredded.destroyed.iter().map(|(n, _)| n.to_string()).collect();
         let message = format!(
@@ -592,11 +699,21 @@ pub async fn shred_tenant(
     Ok((destroyed, forgotten))
 }
 
+/// cladefs: shreds `tenant` under the bucket KMS of every bucket the host reaches (doc-16, The
+/// bucket KMS; TASK-411.27, TASK-633.6).
+#[cfg(not(madsim))]
+pub async fn shred_tenant(
+    tenant: u64,
+) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), ShredError> {
+    shred_tenant_on(crate::Host::process(), tenant).await
+}
+
 /// cladefs: standalone, keyless tenant shred directly against the bucket at `url` (and every
 /// bucket in its registry), needing neither a running extent daemon nor `CLADEFS_MASTER_KEY`.
 /// Tombstones `tenants/<tenant>/kek` in every bucket-KMS bucket and publishes `TenantShredded` to
 /// the root bucket's `events` object so all extent daemons halt open cells and `cladefs-gc` reaps
 /// the tenant's cells.
+#[cfg(not(madsim))]
 pub fn shred_tenant_bucket(
     url: &str,
     tenant: u64,
@@ -644,6 +761,7 @@ pub fn shred_tenant_bucket(
 
 /// cladefs: standalone cell shred directly against the bucket at `url`, needing no running extent
 /// daemon: strips wrapped KEKs from `cell`'s head and publishes `CellShredded` to `events`.
+#[cfg(not(madsim))]
 pub fn shred_cell_bucket(url: &str, cell: crate::CellId) -> Result<usize, crate::Error> {
     let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
     on_buckets(async move {
@@ -658,6 +776,7 @@ pub fn shred_cell_bucket(url: &str, cell: crate::CellId) -> Result<usize, crate:
 /// cladefs: publishes a bucket-wide peer list update for the bucket at `url` to the root bucket's
 /// `events` object so every extent daemon on that bucket converges without host fan-out. Returns
 /// the new peer generation.
+#[cfg(not(madsim))]
 pub fn set_peers_bucket(url: &str, addresses: Vec<String>) -> Result<u64, crate::Error> {
     for address in &addresses {
         if !address.contains(':')
@@ -684,25 +803,33 @@ pub fn set_peers_bucket(url: &str, addresses: Vec<String>) -> Result<u64, crate:
     })
 }
 
-/// cladefs: reloads what of the host's KMS configuration reloads live (board 8487; doc-16, What
-/// reloads), as [`ByBucket::reload`] does, whole or not at all; then has its pools of new cell KEKs
-/// of each tenant renamed dropped, wrapped under the old name as they are
-/// ([`keys::CachingKms::renamed`]). Refused, changing nothing, by a host with no KMSes by bucket
-/// (no `CLADEFSD_BUCKET`, or no KMS at all), which has no bucket to check renames against.
-pub async fn reload_kms() -> Result<bucket_cell::bucket_kms::Reloaded, Unreloaded> {
+/// cladefs: reloads `host`'s live KMS configuration (board 8487).
+pub(crate) async fn reload_kms_on(
+    host: &crate::Host,
+) -> Result<bucket_cell::bucket_kms::Reloaded, Unreloaded> {
     let unsupported = |why: String| Unreloaded::Unsupported(format!("the host's KMS: {why}"));
-    let keys = host_keys().as_ref().map_err(|why| unsupported(why.clone()))?;
+    let keys = host_keys_on(host).as_ref().map_err(|why| unsupported(why.clone()))?;
     let by_bucket = keys.by_bucket.as_ref().ok_or_else(|| {
         unsupported("reloads with a bucket of the host's own alone (CLADEFSD_BUCKET)".to_owned())
     })?;
     let reloaded = by_bucket.reload().await?;
     // Its KMS, if it made it: one not made yet pooled nothing.
-    if let Some(kms) = POOLED.get().get() {
+    if let Some(kms) = host.bucket_state().pooled.get() {
         for &tenant in &reloaded.renamed {
             kms.renamed(tenant);
         }
     }
     Ok(reloaded)
+}
+
+/// cladefs: reloads what of the host's KMS configuration reloads live (board 8487; doc-16, What
+/// reloads), as [`ByBucket::reload`] does, whole or not at all; then has its pools of new cell KEKs
+/// of each tenant renamed dropped, wrapped under the old name as they are
+/// ([`keys::CachingKms::renamed`]). Refused, changing nothing, by a host with no KMSes by bucket
+/// (no `CLADEFSD_BUCKET`, or no KMS at all), which has no bucket to check renames against.
+#[cfg(not(madsim))]
+pub async fn reload_kms() -> Result<bucket_cell::bucket_kms::Reloaded, Unreloaded> {
+    reload_kms_on(crate::Host::process()).await
 }
 
 /// cladefs: a KMS the environment chose that can't be had (a bad `CLADEFS_KMS`, master keys
@@ -737,59 +864,41 @@ impl Unreached {
     }
 }
 
-/// cladefs: how many open cells' uploaders run in this process, as it changes: what an extent
-/// daemon's drain waits to see none of (TASK-141.4): the daemon's, Linux's and the simulation's.
+/// cladefs: how many open cells' uploaders run on `host`, as it changes (TASK-141.4).
 #[cfg(any(target_os = "linux", madsim))]
-pub(crate) fn uploaders() -> tokio::sync::watch::Receiver<usize> {
-    local_cell::upload::uploaders()
+pub(crate) fn uploaders_on(host: &crate::Host) -> tokio::sync::watch::Receiver<usize> {
+    local_cell::upload::uploaders_on(host.local())
 }
 
-node_local::node_local! {
-    /// The GETs of extents' data a host has in flight: one connection to object storage gives
-    /// roughly 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB.
-    /// cladefs: so many for each bucket its open cells read (TASK-633.4), so that one slow or
-    /// failing, another cloud region's, holds up none of another's.
-    static BUDGET: fetch::Budgets = {
-        fetch::Budgets::per_bucket(Limits { requests: 64, bytes: 64 << 20 })
-        };
+/// cladefs: the budget of the GETs of `host`'s fetchers and the memory they keep in (doc-27).
+pub(crate) fn fetching_on(host: &crate::Host) -> local_cell::upload::Fetching {
+    let state = host.bucket_state();
+    local_cell::upload::Fetching { budgets: state.budget.clone(), memory: state.memory.clone() }
 }
 
-node_local::node_local! {
-    /// What a host's open cells' reads keep in memory, objects' tails and the parts fetched/unpacked
-    /// last: unified with `local_cell::unpacked()` via `fetch::shared_parts()` and governed by
-    /// `cladefsd::memory` (TASK-92.21, TASK-92.22, board 6026).
-    static MEMORY: Arc<fetch::Memory> = fetch::Memory::with_parts(fetch::shared_parts().clone());
-}
-
-/// cladefs: the budget of the GETs of the host's fetchers and the memory they keep in, which its
-/// writers' relocation rounds read through too (doc-27, board 6214).
-pub(crate) fn fetching() -> local_cell::upload::Fetching {
-    local_cell::upload::Fetching { budgets: BUDGET.get().clone(), memory: MEMORY.get().clone() }
-}
-
-/// cladefs: the host's fetcher memory, whose tails and unified recent/unpacked parts the memory
+/// cladefs: `host`'s fetcher memory, whose tails and unified recent/unpacked parts the memory
 /// governor counts and evicts (board 6026).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn memory() -> &'static Arc<fetch::Memory> {
-    MEMORY.get()
+pub(crate) fn memory_on(host: &crate::Host) -> &Arc<fetch::Memory> {
+    &host.bucket_state().memory
 }
 
-node_local::node_local! {
-    /// The PUTs of objects a host's open cells upload, each holding its object's bytes while it
-    /// goes: bounded in bytes, so that a host whose open cells are far behind, object storage out
-    /// of reach for a while, holds no more than these at once, whatever their number (TASK-79.19);
-    /// and in number, as its GETs are. cladefs: in bytes, its upload memory ([`set_upload_memory`],
-    /// TASK-317).
-    static UPLOADS: Arc<Budget> = {
-        let bytes = *UPLOAD_MEMORY.get().get_or_init(|| UPLOAD_BYTES);
-        Budget::new(Limits { requests: 64, bytes })
-        };
-}
-
-node_local::node_local! {
-    /// cladefs: the most bytes of objects the host's uploads hold at once ([`UPLOADS`]), as
-    /// [`set_upload_memory`] set it, or [`UPLOAD_BYTES`].
-    static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// cladefs: has `host`'s uploads hold at most `bytes` of the objects they upload at once
+/// (TASK-317).
+pub(crate) fn set_upload_memory_on(host: &crate::Host, bytes: u64) -> Result<(), String> {
+    if bytes < crate::OpenCell::MAX_EXTENT {
+        return Err(format!(
+            "an upload memory of {bytes} bytes: less than an extent's {}",
+            crate::OpenCell::MAX_EXTENT
+        ));
+    }
+    let state = host.bucket_state();
+    match state.upload_memory.set(bytes) {
+        Ok(()) => Ok(()),
+        // Set already, to the same: as asked.
+        Err(_) if state.upload_memory.get() == Some(&bytes) => Ok(()),
+        Err(_) => Err("the upload memory is set already, as cells opened".to_owned()),
+    }
 }
 
 /// cladefs: has the host's uploads hold at most `bytes` of the objects they upload at once
@@ -797,19 +906,9 @@ node_local::node_local! {
 /// fall, what waits for it is on the host's disk, their write-ahead logs, and what of it is in
 /// memory is what this lets upload at once. Before any open cell opens; no less than the largest
 /// object an open cell uploads, an extent's of 64 MiB, which goes alone.
+#[cfg(not(madsim))]
 pub fn set_upload_memory(bytes: u64) -> Result<(), String> {
-    if bytes < crate::OpenCell::MAX_EXTENT {
-        return Err(format!(
-            "an upload memory of {bytes} bytes: less than an extent's {}",
-            crate::OpenCell::MAX_EXTENT
-        ));
-    }
-    match UPLOAD_MEMORY.get().set(bytes) {
-        Ok(()) => Ok(()),
-        // Set already, to the same: as asked.
-        Err(_) if UPLOAD_MEMORY.get().get() == Some(&bytes) => Ok(()),
-        Err(_) => Err("the upload memory is set already, as cells opened".to_owned()),
-    }
+    set_upload_memory_on(crate::Host::process(), bytes)
 }
 
 /// cladefs: what the host's uploads hold of the objects they upload, in bytes (TASK-317).
@@ -823,10 +922,17 @@ pub struct UploadMemory {
     pub budget: u64,
 }
 
+/// cladefs: what `host`'s uploads hold now, the most they held, and their budget (TASK-317).
+pub(crate) fn upload_memory_on(host: &crate::Host) -> UploadMemory {
+    let uploads = host.bucket_state().uploads();
+    let (held, max_held) = uploads.held();
+    UploadMemory { held, max_held, budget: uploads.limits().bytes }
+}
+
 /// cladefs: what the host's uploads hold now, the most they held, and their budget (TASK-317).
+#[cfg(not(madsim))]
 pub fn upload_memory() -> UploadMemory {
-    let (held, max_held) = UPLOADS.get().held();
-    UploadMemory { held, max_held, budget: UPLOADS.get().limits().bytes }
+    upload_memory_on(crate::Host::process())
 }
 
 /// cladefs: what [`HostFetcher::read_following`] read: fetched bytes, or what the cell holds, found
@@ -866,20 +972,22 @@ pub(crate) async fn unconstrained<F: std::future::Future>(future: F) -> F::Outpu
 }
 
 impl HostFetcher {
-    /// What reads extents' data from `bucket`, keeping the parts it fetches in `cache`, if given,
-    /// the host's.
-    pub(crate) fn new(
+    /// What reads extents' data from `bucket` on `host`, keeping the parts it fetches in `cache`,
+    /// if given.
+    pub(crate) fn new_on(
+        host: &crate::Host,
         bucket: Arc<RoutedBucket>,
         cache: Option<Arc<Cache>>,
     ) -> Result<Arc<Self>, Failure> {
-        let runtime = bucket_runtime()?;
+        let runtime = bucket_runtime_on(host)?;
         let runs = runtime.clone();
         // A read ahead is for the guest request whose read started it, if any (TASK-260).
         let spawn: fetch::Spawn = Arc::new(move |future| {
             drop(runs.spawn(crate::request::within(crate::request::current(), future)))
         });
-        let peers = PEERS.get().get().filter(|(theirs, _)| Arc::ptr_eq(theirs, &bucket));
-        let parts = fetch::Fetcher::new(bucket, BUDGET.get().clone(), MEMORY.get().clone(), cache);
+        let state = host.bucket_state();
+        let peers = state.peers.get().filter(|(theirs, _)| Arc::ptr_eq(theirs, &bucket));
+        let parts = fetch::Fetcher::new(bucket, state.budget.clone(), state.memory.clone(), cache);
         let parts = match peers {
             Some((_, peers)) => parts.asking(peers.clone()),
             None => parts,
@@ -975,54 +1083,90 @@ impl HostFetcher {
     }
 }
 
-node_local::node_local! {
-    /// cladefs: the hosts sharing the host's bucket, the one they share, which its open cells'
-    /// fetchers of it ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
-    static PEERS: std::sync::OnceLock<(Arc<RoutedBucket>, Arc<peers::Peers>)> =
-        std::sync::OnceLock::new();
+/// cladefs: has `host`'s fetchers of `bucket` ask `peers` for the parts they own before it. Once.
+pub(crate) fn ask_peers_on(
+    host: &crate::Host,
+    bucket: Arc<RoutedBucket>,
+    peers: Arc<peers::Peers>,
+) -> Result<(), String> {
+    host.bucket_state()
+        .peers
+        .set((bucket, peers))
+        .map_err(|_| "the host's peers are set already".to_owned())
 }
 
 /// cladefs: has the fetchers of `bucket`, the host's, made from now on ask `peers`, the hosts
 /// sharing it, for the parts they own before it (TASK-406.2): before any open cell opens. Once.
+#[cfg(not(madsim))]
 pub fn ask_peers(bucket: Arc<RoutedBucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
-    PEERS.get().set((bucket, peers)).map_err(|_| "the host's peers are set already".to_owned())
+    ask_peers_on(crate::Host::process(), bucket, peers)
+}
+
+/// cladefs: the hosts sharing `host`'s bucket, if it asks them for parts ([`ask_peers_on`]).
+pub(crate) fn peers_on(host: &crate::Host) -> Option<Arc<peers::Peers>> {
+    host.bucket_state().peers.get().map(|(_, peers)| peers.clone())
 }
 
 /// cladefs: the hosts sharing the host's bucket, if it asks them for parts ([`ask_peers`]).
+#[cfg(not(madsim))]
 pub fn peers() -> Option<Arc<peers::Peers>> {
-    PEERS.get().get().map(|(_, peers)| peers.clone())
+    peers_on(crate::Host::process())
 }
 
-node_local::node_local! {
-    static MEMBERS: std::sync::OnceLock<Arc<dyn local_cell::upload::Members>> =
-        std::sync::OnceLock::new();
+/// cladefs: has `host`'s replicated cells' configurations be made of `members` from now on. Once.
+pub(crate) fn replicate_with_on(
+    host: &crate::Host,
+    members: Arc<dyn local_cell::upload::Members>,
+) -> Result<(), String> {
+    host.bucket_state()
+        .members
+        .set(members)
+        .map_err(|_| "the host's members are set already".to_owned())
 }
 
 /// cladefs: has the host's replicated cells' configurations be made of `members`, its peers, from
 /// now on (doc-21, TASK-537.3.3): before any open cell opens. Once.
+#[cfg(not(madsim))]
 pub fn replicate_with(members: Arc<dyn local_cell::upload::Members>) -> Result<(), String> {
-    MEMBERS.get().set(members).map_err(|_| "the host's members are set already".to_owned())
+    replicate_with_on(crate::Host::process(), members)
+}
+
+/// cladefs: the hosts `host`'s replicated cells' configurations are made of ([`replicate_with_on`]).
+pub(crate) fn members_on(host: &crate::Host) -> Option<Arc<dyn local_cell::upload::Members>> {
+    host.bucket_state().members.get().cloned()
 }
 
 /// cladefs: the hosts the host's replicated cells' configurations are made of, if it has peers
 /// and a replica directory ([`replicate_with`]).
+#[cfg(not(madsim))]
 pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
-    MEMBERS.get().get().cloned()
+    members_on(crate::Host::process())
+}
+
+/// cladefs: what serves the hosts sharing `bucket` on `host` the parts they ask it for.
+pub(crate) fn serving_peers_on(
+    host: &crate::Host,
+    bucket: Arc<RoutedBucket>,
+    cache: Arc<Cache>,
+) -> Result<Serving, Failure> {
+    let state = host.bucket_state();
+    Ok(Serving {
+        runtime: bucket_runtime_on(host)?,
+        parts: Arc::new(fetch::Fetcher::new(
+            bucket,
+            state.budget.clone(),
+            state.memory.clone(),
+            Some(cache),
+        )),
+    })
 }
 
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as
 /// stored (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its
 /// open cells' fetchers do, with them, under the host's budget, and asking no peer.
+#[cfg(not(madsim))]
 pub fn serving_peers(bucket: Arc<RoutedBucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
-    Ok(Serving {
-        runtime: bucket_runtime()?,
-        parts: Arc::new(fetch::Fetcher::new(
-            bucket,
-            BUDGET.get().clone(),
-            MEMORY.get().clone(),
-            Some(cache),
-        )),
-    })
+    serving_peers_on(crate::Host::process(), bucket, cache)
 }
 
 /// cladefs: what serves the host's peers the parts they ask for ([`serving_peers`]).
@@ -4445,5 +4589,157 @@ mod tests {
         let parent = reopened(dir.path().join("parent"), idle()).await.unwrap();
         parent.commit(Some(b"later")).await.unwrap();
         assert_eq!(parent.wait_uploaded().await, Ok(()));
+    }
+
+    /// TASK-601 (board 2598): `shred_cell` evicts cached extents of a cell even after every
+    /// `OpenCell` of that cell has already been closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shred_cell_evicts_cached_extents_of_closed_store() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        kms.create(1).unwrap();
+        crate::bucket::set_kms(kms).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        let open_cell = kept_in(
+            dir.path().join("closed"),
+            (1 << 30, Some(crate::host_cell::named(1))),
+            &bucket,
+            idle(),
+        )
+        .await
+        .unwrap();
+        let cell = open_cell.cell();
+        let data = noise(1, 4 * BLOCK);
+        let extent = write(&open_cell, 1, &data).await;
+        open_cell.commit(None).await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
+        let mut buf = vec![0u8; data.len()];
+        open_cell
+            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
+            .await
+            .unwrap();
+        assert_eq!(buf, data);
+        // Close the store completely before shredding.
+        open_cell.close().await;
+        assert!(
+            crate::cache::keys().iter().any(|(_, e)| *e == extent),
+            "closed store's extent should still be cached before shred_cell"
+        );
+
+        let (removed, forgotten) = crate::bucket::shred_cell(&*bucket, cell).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(
+            forgotten.extents >= 1,
+            "shred_cell must evict closed store's cached extents: {forgotten:?}"
+        );
+        assert!(
+            !crate::cache::keys().iter().any(|(_, e)| *e == extent),
+            "closed store's extent remained in cache after shred_cell"
+        );
+    }
+
+    /// board 5542: shredding an attached public base refuses subsequent reads of its extents
+    /// through a child `OpenCell` with `EACCES`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shredding_attached_base_refuses_reads_through_child() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        for tenant in [0, 1] {
+            kms.create(tenant).unwrap();
+        }
+        crate::bucket::set_kms(kms).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        let base_path = dir.path().join("base");
+        let base =
+            kept_in(&base_path, (1 << 30, Some(crate::host_cell::named(0))), &bucket, idle())
+                .await
+                .unwrap();
+        let base_cell = base.cell();
+        let data = noise(7, 4 * BLOCK);
+        let extent = write(&base, 1, &data).await;
+        base.commit(None).await.unwrap();
+        base.wait_uploaded().await.unwrap();
+        local_cell::upload::blocking(|| base.make_public_attach_only()).unwrap();
+        base.close().await;
+
+        let child = kept_in(
+            dir.path().join("child"),
+            (1 << 30, Some(crate::host_cell::named(1))),
+            &bucket,
+            idle(),
+        )
+        .await
+        .unwrap();
+        local_cell::upload::blocking(|| child.attach_base(&base_path, &[base_cell.id])).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])]).await.unwrap();
+        assert_eq!(buf, data);
+
+        // Shred the base cell: child reads of the attached base's extent must now return EACCES.
+        crate::bucket::shred_cell(&*bucket, base_cell).await.unwrap();
+        let err = child
+            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
+            .await
+            .unwrap_err();
+        assert_eq!(err, crate::Errno::EACCES);
+        child.close().await;
+    }
+
+    /// board 5552: `shred_tenant` when no bucket destroyed the tenant's KEK (`destroyed` empty)
+    /// must return an error without calling `forget`, leaving live stores serving and the KMS
+    /// cache unpoisoned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shred_tenant_with_no_destroyed_bucket_does_not_halt_or_poison_cache() {
+        use bucket_cell::s3_server::{BUCKET, S3Server};
+        let server = S3Server::start(None);
+        let url = format!("s3://{BUCKET}/shred-5552");
+        let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+        // SAFETY: this test's process is its own (nextest), no open cell open yet.
+        unsafe {
+            std::env::remove_var("CLADEFS_KMS");
+            std::env::set_var("CLADEFSD_BUCKET", &url);
+            std::env::set_var("CLADEFS_MASTER_KEY", &master);
+            for (name, value) in server.options() {
+                std::env::set_var(name.to_ascii_uppercase(), value);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = crate::host_cell::bucket(&url).unwrap();
+        let open_cell = kept_in(
+            dir.path().join("cell"),
+            (1 << 30, Some(crate::host_cell::named(1))),
+            &bucket,
+            idle(),
+        )
+        .await
+        .unwrap();
+        let data = noise(3, 4 * BLOCK);
+        let extent = write(&open_cell, 1, &data).await;
+        open_cell.commit(None).await.unwrap();
+        open_cell.wait_uploaded().await.unwrap();
+
+        // Make the bucket refuse every request with 403 (`Refusal::Denied`, non-retryable) so
+        // `shred_tenant` fails immediately with `destroyed` empty.
+        server.answering(Some(403));
+
+        let err = crate::bucket::shred_tenant(1).await.unwrap_err();
+        assert!(
+            matches!(err, crate::bucket::ShredError::Failed(_))
+                && err.to_string().contains("tenant 1"),
+            "unexpected error: {err}"
+        );
+
+        // Restore bucket: the open cell was NOT halted and the KMS cache was NOT poisoned.
+        server.answering(None);
+        assert_eq!(crate::bucket::kms().unwrap().refuses(open_cell.cell()), None);
+        let mut buf = vec![0u8; data.len()];
+        open_cell
+            .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut buf[..])])
+            .await
+            .unwrap();
+        assert_eq!(buf, data);
+        open_cell.close().await;
     }
 }

@@ -1028,7 +1028,6 @@ dependencies = [
  "astral-tokio-tar",
  "async-task",
  "async-trait",
- "backtrace",
  "base32_id",
  "bitflags 2.13.2",
  "block_device",

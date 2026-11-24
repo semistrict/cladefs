@@ -903,7 +903,7 @@ async fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
-    let wish = bucket_cell::layout::Wish::new(0, bucket_cell::layout::Fsync::Local);
+    let wish = bucket_cell::layout::Wish::new(0, bucket_cell::layout::Fsync::Ordered);
     let (taken, uploader) = host.open_replicated(recovering, 2, wish, peers("d")).await.unwrap();
     taken.made().unwrap();
     assert_eq!(host.contents(&taken).await, expected);

@@ -46,20 +46,30 @@ struct HaltState {
     why: OnceLock<(Errno, String)>,
 }
 
-node_local::node_local! {
-    /// cladefs: the halts of the open cells in the process, each with its cell, held weakly,
-    /// so that a host told to forget a tenant's or a cell's keys halts theirs (TASK-411.7).
-    static HALTS: Mutex<Vec<(CellId, Weak<HaltState>)>> = Mutex::new(Vec::new());
+/// cladefs: per-host weak registry of open cells' halts, owned by [`crate::Host`].
+pub(crate) struct Registry(Mutex<Vec<(CellId, Weak<HaltState>)>>);
+
+impl Registry {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
 }
 
 impl Halt {
-    /// The halt of the open cell at `cell_dir`, of `cell`, not halted: listed among the process's.
-    pub(crate) fn new(cell_dir: &Path, cell: CellId) -> Self {
+    /// The halt of the open cell at `cell_dir` on `host`, of `cell`, not halted: listed among
+    /// `host`'s.
+    pub(crate) fn new_on(host: &crate::Host, cell_dir: &Path, cell: CellId) -> Self {
         let state = Arc::new(HaltState { cell_dir: cell_dir.to_owned(), why: OnceLock::new() });
-        let mut halts = HALTS.get().lock().unwrap();
+        let mut halts = host.halts.0.lock().unwrap();
         halts.retain(|(_, halt)| halt.strong_count() > 0);
         halts.push((cell, Arc::downgrade(&state)));
         Self(state)
+    }
+
+    /// [`Halt::new_on`] on the process's default host outside `madsim`.
+    #[cfg(all(test, not(madsim)))]
+    pub(crate) fn new(cell_dir: &Path, cell: CellId) -> Self {
+        Self::new_on(crate::Host::process(), cell_dir, cell)
     }
 
     /// Halts the open cell, as `why` says, unless it is already: logged once. Its requests fail
@@ -116,12 +126,16 @@ impl HaltState {
     }
 }
 
-/// cladefs: halts every open cell in the process whose cell `scope` says is of it, its requests
-/// failing with `errno` from then on, as `why` says: what a host told a tenant's KEK is revoked or
-/// destroyed, or a cell shredded, does to their open cells (TASK-411.7), which it can't open again
-/// either. Returns how many it halted, those halted already left out.
-pub(crate) fn halt_cells(scope: impl Fn(CellId) -> bool, errno: Errno, why: &str) -> usize {
-    let halts: Vec<Arc<HaltState>> = (HALTS.get().lock().unwrap().iter())
+/// cladefs: halts every open cell on `host` whose cell `scope` says is of it, its requests
+/// failing with `errno` from then on, as `why` says (TASK-411.7). Returns how many it halted,
+/// those halted already left out.
+pub(crate) fn halt_cells_on(
+    host: &crate::Host,
+    scope: impl Fn(CellId) -> bool,
+    errno: Errno,
+    why: &str,
+) -> usize {
+    let halts: Vec<Arc<HaltState>> = (host.halts.0.lock().unwrap().iter())
         .filter(|(cell, _)| scope(*cell))
         .filter_map(|(_, halt)| halt.upgrade())
         .collect();

@@ -106,7 +106,7 @@ pub(super) fn cell_dir_key(path: &Path) -> PathBuf {
 /// cladefs: holds the cell at `path` on `daemon` for the daemon's FUSE mount of cells, which
 /// attaches it (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM
 /// process opening it, or the control API working on it, fails with `EBUSY` at once.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub(crate) async fn hold_mounted(daemon: &Arc<Daemon>, path: &Path) -> Result<MountHold, Errno> {
     let (hold, kept) = daemon.table.hold_mounted(&cell_dir_key(path), CLOSING_WAIT).await?;
     close_kept(daemon, kept).await;
@@ -114,7 +114,7 @@ pub(crate) async fn hold_mounted(daemon: &Arc<Daemon>, path: &Path) -> Result<Mo
 }
 
 /// cladefs: a cell the daemon's FUSE mount holds ([`hold_mounted`]), let go as it is dropped.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Hold);
 
 /// Holds the cell at `path` for `daemon`, which no connection opens meanwhile.
@@ -147,7 +147,8 @@ pub(super) async fn hold_cell_alone(daemon: &Arc<Daemon>, path: &Path) -> Result
 
 async fn hold_alone(daemon: &Arc<Daemon>, path: &Path) -> Result<Hold, Errno> {
     let hold = hold(daemon, path).await?;
-    if hold.instance().is_some() {
+    if let Some(cell) = hold.instance() {
+        inspect(daemon, cell, |_| ());
         return Err(Errno::EBUSY);
     }
     Ok(hold)
@@ -478,7 +479,7 @@ pub(super) async fn open_cell_at(
     let arena = arena.cloned();
     let own = arena.clone();
     let open_cell = attached(daemon, path, async |keeping| {
-        let opening = Opening { arena: own, guest: true, keeping };
+        let opening = Opening::keeping_on(daemon.host.clone(), keeping).arena(own);
         match new {
             Some(New { capacity, kind, tenant })
                 if !local_cell::upload::blocking(|| host_fs::exists(&path)) =>
@@ -531,7 +532,10 @@ async fn base(
         return Err(Errno::ENOENT);
     }
     let opened = attached(daemon, path, async |keeping| {
-        OpenCell::open_base_with(path, arena.cloned(), keeping).await
+        Opening::keeping_on(daemon.host.clone(), keeping)
+            .arena(arena.cloned())
+            .open_base(path)
+            .await
     });
     let open_cell = Arc::new(opened.await?);
     hold.open(&open_cell)?;
@@ -554,7 +558,7 @@ pub(super) async fn attach(
     })
     .await?;
     let (public, ancestry) = match daemon.table.instance(&cell_dir_key(&base)) {
-        Some(open_cell) => (open_cell.is_public(), open_cell.ancestry()),
+        Some(open_cell) => inspect(daemon, open_cell, |cell| (cell.is_public(), cell.ancestry())),
         None => {
             let here = Here::open(daemon, &base, hold(daemon, &base).await?).await?;
             let what = (here.held().open_cell.is_public(), here.held().open_cell.ancestry());
@@ -573,14 +577,15 @@ pub(super) async fn attach(
         return attached;
     }
     let held = hold(daemon, &path).await?;
+    let host = daemon.host.clone();
     blocking(move || {
         let _held = held;
         // An unmade directory is no cell: what its making wrote, plainly, may be torn (board
         // 7420).
-        if !host_fs::exists(&path) || crate::host_cell::unmade(&path) {
+        if !host_fs::exists(&path) || crate::host_cell::unmade_on(&host, &path) {
             return Err(Errno::ENOENT);
         }
-        crate::cell_dir::attach(&path, &base, &ancestry)
+        crate::cell_dir::attach_on(host.local(), &path, &base, &ancestry)
     })
     .await
 }
@@ -606,7 +611,7 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
     let (cache, interval) = (part_cache(daemon)?, upload_interval());
     let held = Some(super::memory::held_parts_on(daemon).clone());
     // cladefs: and the hosts its replicated cells' configurations are made of (doc-21).
-    let members = crate::bucket::members().map(local_cell::upload::MembersOf);
+    let members = crate::bucket::members_on(&daemon.host).map(local_cell::upload::MembersOf);
     let replace_after = replace_after().map_err(|err| {
         log::error!("cladefsd: {err}");
         Errno::EINVAL
@@ -614,7 +619,7 @@ fn keeping(daemon: &Daemon) -> Result<local_cell::upload::Options, Errno> {
     Ok(local_cell::upload::Options {
         cache,
         held,
-        fetching: Some(crate::bucket::fetching()),
+        fetching: Some(crate::bucket::fetching_on(&daemon.host)),
         token,
         interval,
         members,
@@ -643,7 +648,8 @@ pub fn replace_after() -> Result<std::time::Duration, String> {
 /// The cell at `path` as `daemon` opens it to work on it, not a VM.
 async fn open_here(daemon: &Arc<Daemon>, path: &Path) -> Result<OpenCell, Errno> {
     attached(daemon, path, async |keeping| {
-        OpenCell::open_with(path, Opening { arena: None, guest: false, keeping }).await
+        let opening = Opening::keeping_on(daemon.host.clone(), keeping).guest(false);
+        OpenCell::open_with(path, opening).await
     })
     .await
 }
@@ -680,8 +686,9 @@ pub(super) async fn create(
     let _held = hold(daemon, &path).await?;
     // cladefs: what a making its host died in left, unmade, is no cell: made anew (TASK-196).
     let checked = path.clone();
+    let host = daemon.host.clone();
     blocking(move || {
-        removed_if_unmade(&checked)?;
+        removed_if_unmade_on(&host, &checked)?;
         if host_fs::exists(&checked) {
             return Err(Errno::EEXIST);
         }
@@ -699,7 +706,7 @@ pub(super) async fn create(
     // (doc-21, TASK-537.3.1); and its taking forced, if asked (TASK-681).
     attached(daemon, &path, async |keeping| {
         let keeping = local_cell::upload::Options { replication, force, ..keeping };
-        OpenCell::create_placed(&path, (capacity, of, token), kind, keeping).await
+        OpenCell::create_placed_on(&daemon.host, &path, (capacity, of, token), kind, keeping).await
     })
     .await
 }
@@ -718,8 +725,9 @@ pub(super) async fn import(
     // cladefs: what an import its host died in left, unmade, is no cell: made anew
     // (TASK-196).
     let checked = path.clone();
+    let host = daemon.host.clone();
     blocking(move || {
-        removed_if_unmade(&checked)?;
+        removed_if_unmade_on(&host, &checked)?;
         if host_fs::exists(&checked) {
             return Err(Errno::EEXIST);
         }
@@ -737,9 +745,15 @@ pub(super) async fn import(
     .await?;
     // cladefs: awaited, its walk of a layer's entries async (board 5614).
     let imported = (image.as_path(), reference.as_deref());
-    crate::import::make_base_keeping(&path, (capacity, tenant), imported, keeping(daemon)?)
-        .await
-        .map_err(|err| errno_of(format_args!("importing {}", image.display()), err))?;
+    crate::import::make_base_keeping_on(
+        &daemon.host,
+        &path,
+        (capacity, tenant),
+        imported,
+        keeping(daemon)?,
+    )
+    .await
+    .map_err(|err| errno_of(format_args!("importing {}", image.display()), err))?;
     let open_cell = open_here(daemon, &path).await?;
     let cell = open_cell.cell();
     open_cell.close().await;
@@ -764,20 +778,18 @@ async fn take_cell(
         })?,
     };
     attached(daemon, path, async |keeping| {
-        let opening = Opening { arena: None, guest: false, keeping };
+        let opening = Opening::keeping_on(daemon.host.clone(), keeping).guest(false);
         OpenCell::take_with(path, (capacity, cell, None), opening).await
     })
     .await
 }
 
-/// Removes what a cell's making, or a fork's, left at `path`, unmade, its host crashing
-/// (`host_cell::unmade`): no cell, which a fork or a restore to `path` makes anew. Its holder
-/// holds `path`.
-pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
-    if !crate::host_cell::unmade(path) {
+/// Removes what a cell's making, or a fork's, left at `path` on `host`, unmade.
+pub(super) fn removed_if_unmade_on(host: &crate::Host, path: &Path) -> Result<(), Errno> {
+    if !crate::host_cell::unmade_on(host, path) {
         return Ok(());
     }
-    local_cell::remove_cell_dir(path).map_err(|err| {
+    local_cell::remove_cell_dir_on(host.local(), path).map_err(|err| {
         log::warn!("cladefsd: removing {}, a cell unmade: {err:#}", path.display());
         Errno::EIO
     })
@@ -799,14 +811,17 @@ async fn opened_version(
     let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
     let dir = version_dir(daemon, cell, version)?;
     let held = hold_within(daemon, &dir, VERSION_WAIT).await?;
-    if local_cell::upload::blocking(|| host_fs::exists(&dir) && !crate::host_cell::unmade(&dir)) {
+    if local_cell::upload::blocking(|| {
+        host_fs::exists(&dir) && !crate::host_cell::unmade_on(&daemon.host, &dir)
+    }) {
         return Ok(dir);
     }
     // Their paths alone: a reference to a cell kept across its sync would keep it from closing
     // (TASK-648).
     let writers: Vec<PathBuf> = (daemon.table.instances().into_iter())
-        .filter(|(_, open_cell)| open_cell.cell() == cell)
-        .map(|(path, _)| path)
+        .filter_map(|(path, open_cell)| {
+            inspect(daemon, open_cell, |open| (open.cell() == cell).then_some(path))
+        })
         .collect();
     for path in writers {
         sync(daemon, path).await?;
@@ -814,8 +829,8 @@ async fn opened_version(
     // A cell its connection let go of is none of those, while it closes on a blocking thread,
     // uploading its last commits, the version's among them: its close waited for, if the version
     // was made here, before the bucket is read for it (TASK-644).
-    if let Some(of) = crate::host_cell::version_made_of(cell, version) {
-        local_cell::closed(&of).await.map_err(|err| {
+    if let Some(of) = crate::host_cell::version_made_of_on(&daemon.host, cell, version) {
+        local_cell::closed_on(daemon.host.local(), &of).await.map_err(|err| {
             log::warn!("cladefsd: waiting for {} to close: {err}", of.display());
             Errno::EBUSY
         })?;
@@ -825,27 +840,30 @@ async fn opened_version(
     let object = found.map_err(|_| Errno::EIO)?.ok_or(Errno::ENOENT)?;
     let kind = object.kind.ok_or(Errno::ENOENT)?;
     let made = dir.clone();
+    let host = daemon.host.clone();
     blocking(move || {
         let _held = held;
-        removed_if_unmade(&made)?;
+        removed_if_unmade_on(&host, &made)?;
         if let Some(root) = made.parent() {
             host_fs::create_dir_all(root).map_err(|_| Errno::EIO)?;
         }
         let url = crate::host_cell::bucket_for(&made).map_err(|_| Errno::EIO)?;
         let description =
             local_cell::Description { block_size: OpenCell::BLOCK_SIZE, capacity, cell };
-        OpenCell::create_at_version(&made, (&url, kind), description, version).map_err(|err| {
-            errno_of(format_args!("opening version {version} of {cell} here"), err)
-        })?;
+        OpenCell::create_at_version_on(&host, &made, (&url, kind), description, version).map_err(
+            |err| errno_of(format_args!("opening version {version} of {cell} here"), err),
+        )?;
         // What is attached to the cell the version was made of, if made here, is attached to
         // the version's forks, a restored VM's too.
-        match crate::host_cell::version_made_of(cell, version) {
-            Some(of) => crate::cell_dir::inherit_attached(&of, &made).map_err(|err| {
-                errno_of(
-                    format_args!("inheriting what is attached to {}", of.display()),
-                    err.into(),
-                )
-            }),
+        match crate::host_cell::version_made_of_on(&host, cell, version) {
+            Some(of) => {
+                crate::cell_dir::inherit_attached_on(host.local(), &of, &made).map_err(|err| {
+                    errno_of(
+                        format_args!("inheriting what is attached to {}", of.display()),
+                        err.into(),
+                    )
+                })
+            }
             None => Ok(()),
         }
     })
@@ -864,7 +882,7 @@ pub(super) async fn fork_version(
     match fork_kept(daemon, &from, capacity, (path, tenant)).await {
         (Err(errno), Opened::Before) if cell_at_fault(errno) => {
             // What a crash left at `path` goes first, as before any restore's.
-            local_cell::upload::blocking(|| removed_if_unmade(path))?;
+            local_cell::upload::blocking(|| removed_if_unmade_on(&daemon.host, path))?;
             fork_kept(daemon, &from, capacity, (path, tenant)).await.0
         }
         (forked, _) => forked,
@@ -1202,7 +1220,7 @@ fn bucket_of(
     daemon: &Arc<Daemon>,
     path: &Path,
 ) -> Result<Arc<bucket_cell::object_bucket::RoutedBucket>, Errno> {
-    match crate::host_cell::bucket_at(path) {
+    match crate::host_cell::bucket_at_on(&daemon.host, path) {
         Ok(Some(bucket)) => Ok(bucket),
         Ok(None) => daemon_bucket_on(daemon),
         Err(err) => {
@@ -1224,7 +1242,7 @@ async fn delete_alone(
     bucket: Option<Arc<bucket_cell::object_bucket::RoutedBucket>>,
 ) -> Result<(), Errno> {
     let _held = hold_alone(daemon, &path).await?;
-    let deleted = OpenCell::delete(&path, bucket.as_deref()).await;
+    let deleted = OpenCell::delete_on(&daemon.host, &path, bucket.as_deref()).await;
     deleted.map_err(|err| errno_of(format_args!("deleting {}", path.display()), err))
 }
 
@@ -1262,11 +1280,12 @@ pub(super) async fn place(
     force: bool,
 ) -> Result<(), Errno> {
     let held = hold_alone(daemon, &path).await?;
+    let host = daemon.host.clone();
     blocking(move || {
         let _held = held;
         let placed = match force {
-            true => OpenCell::place_forced(&path, token),
-            false => OpenCell::place(&path, token),
+            true => OpenCell::place_forced_on(&host, &path, token),
+            false => OpenCell::place_on(&host, &path, token),
         };
         placed.map_err(|err| errno_of(format_args!("placing {}", path.display()), err))
     })
@@ -1323,16 +1342,41 @@ fn state_of(open_cell: &OpenCell, open: bool) -> Result<CellState, Errno> {
     })
 }
 
+/// Reads an open cell's metadata. If its owner let it go meanwhile, close it in a task of its
+/// own, like a connection's teardown does (board 10569).
+pub(super) fn inspect<T>(
+    daemon: &Daemon,
+    cell: Arc<OpenCell>,
+    read: impl FnOnce(&OpenCell) -> T,
+) -> T {
+    let result = read(&cell);
+    if let Some(cell) = Arc::into_inner(cell) {
+        drop(daemon.spawn(cell.close()));
+    }
+    result
+}
+
 /// The cells open on `daemon`, writers' and others', by their paths (TASK-50.5).
 pub(super) fn list(daemon: &Daemon) -> Result<Vec<(PathBuf, CellState)>, Errno> {
-    let cells = daemon.table.instances();
-    cells.into_iter().map(|(path, open_cell)| Ok((path, state_of(&open_cell, true)?))).collect()
+    let mut listed = Ok(Vec::new());
+    for (path, cell) in daemon.table.instances() {
+        // Even after an error, release every cell through inspect.
+        inspect(daemon, cell, |cell| {
+            if let Ok(cells) = &mut listed {
+                match state_of(cell, true) {
+                    Ok(state) => cells.push((path, state)),
+                    Err(err) => listed = Err(err),
+                }
+            }
+        });
+    }
+    listed
 }
 
 /// What the cell at `path` on `daemon` is, and holds.
 pub(super) async fn stat(daemon: &Arc<Daemon>, path: PathBuf) -> Result<CellState, Errno> {
     if let Some(open_cell) = open_by_connection(daemon, &path) {
-        return state_of(&open_cell, true);
+        return inspect(daemon, open_cell, |cell| state_of(cell, true));
     }
     let _held = hold(daemon, &path).await?;
     if !local_cell::upload::blocking(|| host_fs::exists(&path)) {
@@ -1349,17 +1393,16 @@ pub(super) fn open_count(daemon: &Daemon) -> usize {
     daemon.table.writers()
 }
 
-/// cladefs: the cells open on `daemon`, writers' and others'.
-fn open_instances(daemon: &Daemon) -> Vec<Arc<OpenCell>> {
-    daemon.table.instances().into_iter().map(|(_, open_cell)| open_cell).collect()
-}
-
 /// The cells open for connections on `daemon` whose commits upload now, and what their uploaders
 /// have left to do (`metrics`, TASK-91.3).
 pub(super) fn upload_statuses(daemon: &Daemon) -> Vec<(CellId, local_cell::upload::UploadStatus)> {
-    // Its uploader stopped, or none: no status to show.
-    (open_instances(daemon).iter())
-        .filter_map(|open_cell| Some((open_cell.cell(), open_cell.upload_status().ok()??)))
+    (daemon.table.instances().into_iter())
+        .filter_map(|(_, cell)| {
+            inspect(daemon, cell, |cell| {
+                // An uploader that stopped on error has no live status to show.
+                Some((cell.cell(), cell.upload_status().ok()??))
+            })
+        })
         .collect()
 }
 

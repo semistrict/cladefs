@@ -68,6 +68,11 @@ mod host {
     use crate::vm::{self, Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, bail, ensure};
+    use cladefs::cladefsd::control::proto::{
+        CellKind, CreateCellRequest, DeleteCellRequest, ForkCellRequest, StatCellRequest,
+        SyncCellRequest,
+    };
+    use cladefs::testing::control_path;
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::CString;
@@ -535,8 +540,16 @@ mod host {
                 "the base's VM exited {status}, saying {said:?}"
             );
             let control = control(&self.paths.socket)?;
-            control.sync_cell(&base)?;
-            let cell = control.cell(&base)?;
+            control
+                .call(async |client| {
+                    client.sync_cell(SyncCellRequest { path: control_path(&base) }).await
+                })
+                .map(drop)?;
+            let cell = control
+                .call(async |client| {
+                    client.stat_cell(StatCellRequest { path: control_path(&base) }).await
+                })
+                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             self.ledger.base = Some(cell);
             self.say(format_args!("the base made: cell {cell}"));
             Ok(())
@@ -550,11 +563,31 @@ mod host {
                 let path = self.paths.slot(slot);
                 let state = &mut self.ledger.slots[slot];
                 if self.plan.slots[slot].refork && state.cell.is_some() {
-                    control.delete_cell(&path).with_context(|| format!("deleting slot {slot}"))?;
+                    control
+                        .call(async |client| {
+                            client
+                                .delete_cell(DeleteCellRequest { path: control_path(&path) })
+                                .await
+                        })
+                        .map(drop)
+                        .with_context(|| format!("deleting slot {slot}"))?;
                     *state = SlotState { generation: state.generation + 1, ..Default::default() };
                 }
                 if state.cell.is_none() {
-                    let cell = control.fork_cell(&self.paths.base(), &path)?;
+                    let cell = control
+                        .call(async |client| {
+                            client
+                                .fork_cell(ForkCellRequest {
+                                    from: control_path(&self.paths.base()),
+                                    to: control_path(&path),
+                                    ..Default::default()
+                                })
+                                .await
+                        })
+                        .map(|response| cladefs::CellId {
+                            tenant: response.tenant,
+                            id: response.cell,
+                        })?;
                     state.cell = Some(cell);
                     let generation = state.generation;
                     self.say(format_args!(
@@ -721,10 +754,46 @@ mod host {
             if happened.host_lost {
                 // As another host takes what was the lost host's, from the bucket alone.
                 let base = self.ledger.base.context("no base")?;
-                control.create_cell(&self.paths.base(), CAPACITY, base, (token, false))?;
+                control
+                    .call(async |client| {
+                        client
+                            .create_cell(CreateCellRequest {
+                                path: control_path(&self.paths.base()),
+                                capacity: CAPACITY,
+                                tenant: base.tenant,
+                                cell: base.id,
+                                token: token,
+                                force: false,
+                                kind: CellKind::Fxfs.into(),
+                                ..Default::default()
+                            })
+                            .await
+                    })
+                    .map(|response| cladefs::CellId {
+                        tenant: response.tenant,
+                        id: response.cell,
+                    })?;
                 for slot in 0..SLOTS {
                     let cell = self.ledger.slots[slot].cell.context("a slot with no cell")?;
-                    control.create_cell(&self.paths.slot(slot), CAPACITY, cell, (token, false))?;
+                    control
+                        .call(async |client| {
+                            client
+                                .create_cell(CreateCellRequest {
+                                    path: control_path(&self.paths.slot(slot)),
+                                    capacity: CAPACITY,
+                                    tenant: cell.tenant,
+                                    cell: cell.id,
+                                    token: token,
+                                    force: false,
+                                    kind: CellKind::Fxfs.into(),
+                                    ..Default::default()
+                                })
+                                .await
+                        })
+                        .map(|response| cladefs::CellId {
+                            tenant: response.tenant,
+                            id: response.cell,
+                        })?;
                 }
                 self.say("every cell taken again from the bucket");
             }

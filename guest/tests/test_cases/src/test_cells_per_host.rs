@@ -137,9 +137,11 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
+    use cladefs::cladefsd::control::proto::{ForkCellRequest, ImportImageRequest};
     use cladefs::cladefsd::governor;
     use cladefs::import::testing::oci_layout;
     use cladefs::memory_cell::MemoryCell;
+    use cladefs::testing::control_path;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Write};
@@ -567,7 +569,18 @@ mod host {
         /// fork, the host's memory full.
         fn boot(&self, name: String) -> anyhow::Result<Option<Started>> {
             let fork = self.test_setup.tmp_dir.join(format!("{name}.root"));
-            match control(&self.socket)?.fork_cell(&self.base, &fork) {
+            match control(&self.socket)?
+                .call(async |client| {
+                    client
+                        .fork_cell(ForkCellRequest {
+                            from: control_path(&self.base),
+                            to: control_path(&fork),
+                            ..Default::default()
+                        })
+                        .await
+                })
+                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+            {
                 Err(err) if err.errno() == Some(cladefs::Errno::ENOMEM) => {
                     eprintln!("cells-per-host: {name}'s fork refused: {err:#}");
                     return Ok(None);
@@ -793,7 +806,19 @@ mod host {
             let daemon = crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, None)?;
             let base = dir.join("base");
             let imported = Instant::now();
-            control(&socket)?.import_image(&base, CAPACITY, &layout, None)?;
+            control(&socket)?
+                .call(async |client| {
+                    client
+                        .import_image(ImportImageRequest {
+                            path: control_path(&base),
+                            capacity: CAPACITY,
+                            image: control_path(&layout),
+                            reference: String::new(),
+                            tenant: 0,
+                        })
+                        .await
+                })
+                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             eprintln!("cells-per-host: imported the base in {:.1?}", imported.elapsed());
             let memory = HostMemory::new(daemon.id(), metrics);
             let window = if self.dax { settings.window } else { 0 };

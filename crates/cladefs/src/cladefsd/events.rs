@@ -51,14 +51,19 @@ pub(super) fn start_on(daemon: &Arc<Daemon>) -> anyhow::Result<()> {
         }
     };
     let interval = poll_interval();
+    let polled = Arc::clone(daemon);
     super::run::service(daemon, "cladefsd events", move || async move {
-        run(bucket, interval).await;
+        run(polled, bucket, interval).await;
     })?;
     Ok(())
 }
 
 /// Polls `events` on the root authority bucket forever at `interval`.
-async fn run(bucket: Arc<bucket_cell::object_bucket::RoutedBucket>, interval: Duration) {
+async fn run(
+    daemon: Arc<Daemon>,
+    bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
+    interval: Duration,
+) {
     let mut poller = Poller::new();
     let mut state = Applied::default();
     let mut resolved: Option<(Arc<bucket_cell::object_bucket::ObjectBucket>, u32)> = None;
@@ -76,7 +81,7 @@ async fn run(bucket: Arc<bucket_cell::object_bucket::RoutedBucket>, interval: Du
         }
         if let Some((auth, my_bucket)) = &resolved {
             match poller.poll(&**auth).await {
-                Ok(Some(update)) => state.apply(update, *my_bucket),
+                Ok(Some(update)) => state.apply(&daemon, update, *my_bucket),
                 Ok(None) => {}
                 Err(err) => {
                     log::warn!("cladefsd: polling events: {err}");
@@ -96,22 +101,22 @@ struct Applied {
 }
 
 impl Applied {
-    fn apply(&mut self, update: Update, my_bucket: u32) {
+    fn apply(&mut self, daemon: &Daemon, update: Update, my_bucket: u32) {
         for tenant in update.log.shredded_set() {
             if self.shredded_tenants.insert(tenant) {
                 let why = format!("tenant {tenant}: shredded (bucket events)");
-                crate::bucket::forget(Scope::Tenant(tenant), &why);
+                crate::bucket::forget_on(&daemon.host, Scope::Tenant(tenant), &why);
             }
         }
         for event in update.new_events {
             if let Some(EventKind::CellShredded(shredded)) = event.kind {
                 let cell = shredded.cell_id();
                 let why = bucket_cell::keys::shredded(cell).to_string();
-                crate::bucket::forget(Scope::Cell(cell), &why);
+                crate::bucket::forget_on(&daemon.host, Scope::Cell(cell), &why);
             }
         }
         if !self.decommissioned_logged
-            && let Ok(host) = crate::ephemeral_host::host()
+            && let Ok(host) = crate::ephemeral_host::host_on(&daemon.host)
             && update.log.decommissioned_hosts.binary_search(&host.incarnation()).is_ok()
         {
             self.decommissioned_logged = true;
@@ -123,8 +128,8 @@ impl Applied {
         if let Some(peers) = update.log.peers_for(my_bucket)
             && peers.generation > self.peers_generation
         {
-            if crate::bucket::peers().is_some() {
-                match super::peers::set(peers.addresses.clone()) {
+            if crate::bucket::peers_on(&daemon.host).is_some() {
+                match super::peers::set_on(daemon, peers.addresses.clone()) {
                     Ok(()) => {
                         log::info!(
                             "cladefsd: updated peers for bucket {my_bucket} to generation {} ({} addresses)",

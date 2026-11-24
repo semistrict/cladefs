@@ -101,7 +101,7 @@ impl Disk {
     /// The disk of the tenant of the ID `tenant` on `daemon`, whose directory is `dir`: its cells
     /// counted, those this process hasn't counted yet by one listing each, limited as its ID is.
     pub(super) fn new_on(daemon: &Daemon, tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
-        let allotment = footprint::allotment(dir)?;
+        let allotment = footprint::allotment_on(daemon.host.local(), dir)?;
         let mut registry = daemon.disk.registry.lock().unwrap();
         allotment.set_limit(registry.limit(tenant));
         allotment.set_weight(registry.weight(tenant));
@@ -141,7 +141,7 @@ pub(super) fn set_limit_on(
     bytes: Option<u64>,
 ) -> Result<(), Errno> {
     let Some(id) = tenant else {
-        footprint::set_total_limit(bytes);
+        footprint::set_total_limit_on(daemon.host.local(), bytes);
         return Ok(());
     };
     super::grants::check_tenant(id)?;
@@ -181,14 +181,26 @@ pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
     set_weight_on(Daemon::process(), tenant, weight)
 }
 
+/// The limit of every tenant's disk together on `daemon`, if it has one.
+pub(super) fn total_limit_on(daemon: &Daemon) -> Option<u64> {
+    footprint::total_limit_on(daemon.host.local())
+}
+
 /// The limit of every tenant's disk together, if it has one.
+#[cfg(not(madsim))]
 pub fn total_limit() -> Option<u64> {
-    footprint::total_limit()
+    total_limit_on(Daemon::process())
+}
+
+/// What every tenant's disk takes together on `daemon`.
+pub(super) fn total_on(daemon: &Daemon) -> u64 {
+    footprint::total_on(daemon.host.local()).bytes()
 }
 
 /// What every tenant's disk takes together.
+#[cfg(not(madsim))]
 pub fn total() -> u64 {
-    footprint::total().bytes()
+    total_on(Daemon::process())
 }
 
 /// A tenant's disk, or every tenant's, as the control API reports it ([`count`]).
@@ -207,9 +219,9 @@ pub struct Counted {
 /// and its limit, if it has one: `ENOENT` if no tenant `tenant` is alive. Read, not counted anew.
 pub(super) fn count_on(daemon: &Daemon, tenant: Option<u64>) -> Result<Counted, Errno> {
     let Some(id) = tenant else {
-        let all = footprint::total();
+        let all = footprint::total_on(daemon.host.local());
         let reserved = all.reserved() + all.pledged();
-        return Ok(Counted { bytes: all.bytes(), limit: total_limit(), reserved });
+        return Ok(Counted { bytes: all.bytes(), limit: total_limit_on(daemon), reserved });
     };
     let registry = daemon.disk.registry.lock().unwrap();
     let disks: Vec<_> = registry.alive().filter(|disk| disk.tenant == id).collect();
@@ -328,6 +340,7 @@ pub(super) fn start_on(daemon: &Arc<Daemon>, config: DiskConfig) -> Result<(), S
     if daemon.disk.started.set(()).is_err() {
         return Ok(());
     }
+    let bucket_host = daemon.host.bucket_host().clone();
     let daemon = Arc::downgrade(daemon);
     let mut errors = std::collections::HashSet::new();
     let governing = move || {
@@ -335,7 +348,8 @@ pub(super) fn start_on(daemon: &Arc<Daemon>, config: DiskConfig) -> Result<(), S
         govern_once_on(&daemon, config, &mut errors);
         true
     };
-    let (every, woken) = (super::governor::INTERVAL, host_disk::wait_for_governor);
+    let every = super::governor::INTERVAL;
+    let woken = move |within| host_disk::wait_for_governor_on(&bucket_host, within);
     // cladefs: a thread of its own, or under madsim a task (`super::run`, doc-24 step 12).
     super::run::every("disk governor", every, woken, governing)
         .map_err(|err| format!("starting the disk governor: {err}"))
@@ -353,7 +367,7 @@ pub(super) fn govern_once_on(
     config: DiskConfig,
     errors: &mut std::collections::HashSet<u64>,
 ) {
-    let disks = HostDisk::all();
+    let disks = HostDisk::all_on(daemon.host.bucket_host());
     govern_disks(daemon, &disks, config, errors);
 }
 
@@ -412,7 +426,7 @@ fn govern_disks(
         let was = disk.under_pressure();
         let pressure = super::governor::pressured(was, spare, headroom);
         disk.govern(allowance, headroom, pressure);
-        share(disk, allowance, pressure);
+        share(daemon, disk, allowance, pressure);
         // Urged as it begins: each urging closes the cells' open segments, however little they
         // hold.
         if pressure && !was {
@@ -428,9 +442,10 @@ fn govern_disks(
     }
 }
 
-/// cladefs: each host's disk's gauges, by name: their help, and each disk's value, by its device as
-/// `MAJOR:MINOR` (`super::metrics`, doc-22). What can't be sampled is left out.
-pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
+/// cladefs: each host's disk's gauges on `daemon`, by name.
+pub(super) fn host_disks_on(
+    daemon: &Daemon,
+) -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
     type Gauge = (&'static str, &'static str, fn(&HostDisk, &host_disk::Sample) -> u64);
     let gauges: [Gauge; 12] = [
         ("cladefsd_host_disk_size_bytes", "A disk's filesystem's size.", |_, sample| sample.size),
@@ -480,7 +495,7 @@ pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
             u64::from(disk.under_pressure())
         }),
     ];
-    let sampled: Vec<_> = (HostDisk::all().into_iter())
+    let sampled: Vec<_> = (HostDisk::all_on(daemon.host.bucket_host()).into_iter())
         .filter_map(|disk| {
             // A disk unsampled: left out of the metrics, as one gone is.
             let sample = disk.sample().ok()?;
@@ -499,13 +514,17 @@ pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
         .collect()
 }
 
-/// cladefs: the host's disks as the stats file says them (doc-22, TASK-539.11): after `disks:`,
-/// each disk's device, `MAJOR:MINOR`, and its gauges ([`host_disks`]), `NAME=VALUE`, by the part of
-/// their names after `cladefsd_host_disk_`; disks separated by `;`. `disks: none` before any is
-/// opened.
-pub fn line() -> String {
+/// cladefs: each host's disk's gauges, by name: their help, and each disk's value, by its device as
+/// `MAJOR:MINOR` (`super::metrics`, doc-22). What can't be sampled is left out.
+#[cfg(not(madsim))]
+pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
+    host_disks_on(Daemon::process())
+}
+
+/// cladefs: `daemon`'s disks as the stats file says them.
+pub(super) fn line_on(daemon: &Daemon) -> String {
     let mut by_device: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for (name, _, values) in host_disks() {
+    for (name, _, values) in host_disks_on(daemon) {
         let short = name.trim_start_matches("cladefsd_host_disk_").trim_end_matches("_bytes");
         for (device, value) in values {
             by_device.entry(device).or_default().push(format!("{short}={value}"));
@@ -520,11 +539,17 @@ pub fn line() -> String {
     }
 }
 
+/// cladefs: the host's disks as the stats file says them (doc-22, TASK-539.11).
+#[cfg(not(madsim))]
+pub fn line() -> String {
+    line_on(Daemon::process())
+}
+
 /// cladefs: shares what `disk`'s allowance leaves the tenants by their allotments' weights while it
 /// is under pressure, each allotment on it refused past its share; none otherwise (TASK-539.10).
 /// What its cells in no allotment take, the default tenant's, comes off first.
-fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
-    let on_disk: Vec<_> = (footprint::allotments().into_iter())
+fn share(daemon: &Daemon, disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
+    let on_disk: Vec<_> = (footprint::allotments_on(daemon.host.local()).into_iter())
         .filter(|allotment| Arc::ptr_eq(allotment.disk(), disk))
         .collect();
     if !pressure {

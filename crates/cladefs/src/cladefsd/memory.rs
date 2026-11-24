@@ -96,12 +96,12 @@ impl Registry {
 
     /// Limits every tenant's memory together to the least of the control API's limit and the
     /// governor's allowance.
-    fn apply_total(&self, governed: u64) {
+    fn apply_total(&self, host: &crate::Host, governed: u64) {
         let cap = self.total.unwrap_or(u64::MAX).min(governed);
-        crate::slabs::set_total_cap((cap != u64::MAX).then_some(cap));
+        host.slabs().set_total_cap((cap != u64::MAX).then_some(cap));
         // cladefs: whose the cap is: the governor's, the host's memory, which page-ins finding no
         // page wait out, or the control API's, which they fail past (board 5662).
-        crate::cache::set_total_is_the_hosts(
+        host.cache().set_total_is_the_hosts(
             governed != u64::MAX && governed <= self.total.unwrap_or(u64::MAX),
         );
     }
@@ -118,7 +118,7 @@ pub(super) fn alive_on(daemon: &Daemon, id: u64, dir: &std::path::Path) -> Optio
 pub(super) fn register_on(daemon: &Daemon, tenant: &Arc<Tenant>) {
     let mut registry = daemon.memory.registry.lock().unwrap();
     if let Some(bytes) = registry.limit(tenant.id()) {
-        crate::slabs::set_arena_cap(tenant.arena(), Some(bytes));
+        daemon.host.slabs().set_arena_cap(tenant.arena(), Some(bytes));
     }
     let budget = registry.in_flight.as_ref().and_then(|set| set.get(&tenant.id()).copied());
     tenant.in_flight().set_budget(budget);
@@ -139,7 +139,7 @@ pub(super) fn set_limit_on(
     let Some(id) = tenant else {
         let mut registry = daemon.memory.registry.lock().unwrap();
         registry.total = bytes;
-        registry.apply_total(daemon.memory.governed.load(Ordering::Relaxed));
+        registry.apply_total(&daemon.host, daemon.memory.governed.load(Ordering::Relaxed));
         return Ok(());
     };
     super::grants::check_tenant(id)?;
@@ -150,7 +150,7 @@ pub(super) fn set_limit_on(
         None => limits.remove(&id),
     };
     for tenant in registry.alive().filter(|tenant| tenant.id() == id) {
-        crate::slabs::set_arena_cap(tenant.arena(), bytes);
+        daemon.host.slabs().set_arena_cap(tenant.arena(), bytes);
     }
     Ok(())
 }
@@ -190,13 +190,13 @@ pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
 
 /// cladefs: the memory `daemon`'s governor governs ([`govern_on`]), in bytes.
 pub(super) fn governed_bytes_on(daemon: &Daemon) -> u64 {
-    let fetch_mem = crate::bucket::memory();
-    crate::slabs::arenas_bytes()
+    let fetch_mem = crate::bucket::memory_on(&daemon.host);
+    daemon.host.slabs().arenas_bytes()
         + held_parts_on(daemon).bytes()
-        + local_cell::replicate::hot_bytes()
+        + local_cell::replicate::hot_bytes_on(daemon.host.local())
         + fetch_mem.recent_bytes()
         + fetch_mem.tails_bytes()
-        + local_cell::pages::shared().bytes()
+        + daemon.host.local().pages().bytes()
         + local_cell::framing_buffers_bytes()
 }
 
@@ -214,21 +214,21 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
     // cladefs: its shrinks wait for what they evict this long at most, together (board 8535).
     let deadline = std::time::Instant::now() + PARKED_WAIT;
     let parts = held_parts_on(daemon);
-    let room = allowance.saturating_sub(crate::slabs::arenas_bytes());
+    let room = allowance.saturating_sub(daemon.host.slabs().arenas_bytes());
     if parts.bytes() > room {
         parts.evict_to(room);
     }
     // cladefs: hot replication buffers (board 6902): persisted chunks are derived from the cell's
     // local files (`LogSource`), so evict and size them to the remaining allowance before caches.
     let room = room.saturating_sub(parts.bytes());
-    local_cell::replicate::size_hot_to(room);
-    if local_cell::replicate::hot_bytes() > room {
-        local_cell::replicate::evict_hot_to(room);
+    local_cell::replicate::size_hot_to_on(daemon.host.local(), room);
+    if local_cell::replicate::hot_bytes_on(daemon.host.local()) > room {
+        local_cell::replicate::evict_hot_to_on(daemon.host.local(), room);
     }
     // cladefs: unified recent/unpacked parts (local framed + bucket fetch) and object tails
     // (TASK-603, board 6026).
-    let fetch_mem = crate::bucket::memory();
-    let room = room.saturating_sub(local_cell::replicate::hot_bytes());
+    let fetch_mem = crate::bucket::memory_on(&daemon.host);
+    let room = room.saturating_sub(local_cell::replicate::hot_bytes_on(daemon.host.local()));
     if fetch_mem.recent_bytes() > room {
         fetch_mem.evict_recent_to(room);
     }
@@ -237,7 +237,7 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
         fetch_mem.evict_tails_to(room);
     }
     let room = room.saturating_sub(fetch_mem.tails_bytes());
-    let pages = local_cell::pages::shared();
+    let pages = daemon.host.local().pages();
     // Sized to what it may hold, as Linux's page cache to the memory free (TASK-433.8, board 6001).
     pages.size_to(room);
     if pages.bytes() > room {
@@ -249,8 +249,8 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
     }
     let weighted: Vec<(u64, u64)> = {
         let registry = daemon.memory.registry.lock().unwrap();
-        registry.apply_total(allowance);
-        if crate::slabs::arenas_bytes() <= allowance {
+        registry.apply_total(&daemon.host, allowance);
+        if daemon.host.slabs().arenas_bytes() <= allowance {
             return;
         }
         let mut ids: Vec<u64> = registry.alive().map(|tenant| tenant.id()).collect();
@@ -266,7 +266,7 @@ pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
             log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
         }
     }
-    if crate::slabs::arenas_bytes() > allowance
+    if daemon.host.slabs().arenas_bytes() > allowance
         && let Err(err) = shrink_by(daemon, None, allowance, deadline).await
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
@@ -294,7 +294,7 @@ fn held_by(daemon: &Daemon, id: u64) -> u64 {
     registry
         .alive()
         .filter(|tenant| tenant.id() == id)
-        .map(|tenant| crate::slabs::arena_bytes(tenant.arena()))
+        .map(|tenant| daemon.host.slabs().arena_bytes(tenant.arena()))
         .sum()
 }
 
@@ -320,11 +320,12 @@ async fn shrink_by(
     target: u64,
     deadline: std::time::Instant,
 ) -> Result<u64, Errno> {
+    let slabs = daemon.host.slabs();
     let Some(id) = tenant else {
-        evict_until(None, || crate::slabs::arenas_bytes_in_use() <= target, deadline).await;
+        evict_until(&daemon.host, None, || slabs.arenas_bytes_in_use() <= target, deadline).await;
         // Then the spare slabs, which its evictions' frees may have kept.
-        crate::slabs::release_spares(None);
-        return Ok(crate::slabs::arenas_bytes());
+        slabs.release_spares(None);
+        return Ok(slabs.arenas_bytes());
     };
     let arenas: Vec<_> = (daemon.memory.registry.lock().unwrap().alive())
         .filter(|tenant| tenant.id() == id)
@@ -333,26 +334,18 @@ async fn shrink_by(
     if arenas.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let held = || arenas.iter().map(|arena| crate::slabs::arena_bytes(*arena)).sum::<u64>();
-    let in_use =
-        || arenas.iter().map(|arena| crate::slabs::arena_bytes_in_use(*arena)).sum::<u64>();
+    let held = || arenas.iter().map(|arena| slabs.arena_bytes(*arena)).sum::<u64>();
+    let in_use = || arenas.iter().map(|arena| slabs.arena_bytes_in_use(*arena)).sum::<u64>();
     for arena in &arenas {
-        evict_until(Some(*arena), || in_use() <= target, deadline).await;
-        crate::slabs::release_spares(Some(*arena));
+        evict_until(&daemon.host, Some(*arena), || in_use() <= target, deadline).await;
+        slabs.release_spares(Some(*arena));
     }
     Ok(held())
 }
 
-/// cladefs: evicts the pages of `arena`'s cached extents, or of every arena's, as
-/// `crate::cache::evict_least_used` orders them, until `enough` says so, looked at once the pages
-/// evicted so far are free, or none is left to evict; and returns once those it evicted are free
-/// ([`Parking`]). Each pass of the cache's is synchronous, and ends at the first extent whose
-/// pages it left quarantined, a window's, which it waits for between passes, holding no thread
-/// (board 2946); the next pass orders what is left anew. cladefs: waiting until `deadline` at most
-/// (board 8535): past it, what a pass left quarantined is held still, counted in what `enough`
-/// looks at, as no page freed; and the next pass, which counts what it frees anew, evicts other
-/// extents' for it, waiting for none.
+/// cladefs: evicts the pages of `arena`'s cached extents on `host`, until `enough` says so.
 async fn evict_until(
+    host: &crate::Host,
     arena: Option<crate::slabs::ArenaId>,
     enough: impl Fn() -> bool,
     deadline: std::time::Instant,
@@ -360,7 +353,7 @@ async fn evict_until(
     loop {
         let parking = Parking::new();
         let stop = |_: u64| parking.parked() || enough();
-        parking.counting(|| crate::cache::evict_least_used(arena, stop));
+        parking.counting(|| host.cache().evict_least_used(arena, stop));
         if !parking.parked() {
             return;
         }
@@ -390,7 +383,7 @@ pub(super) fn tenants_on(daemon: &Daemon) -> Vec<TenantMemory> {
             bytes: 0,
             limit: registry.limit(tenant.id()),
         });
-        entry.bytes += crate::slabs::arena_bytes(tenant.arena());
+        entry.bytes += daemon.host.slabs().arena_bytes(tenant.arena());
     }
     let mut memory: Vec<_> = memory.into_values().collect();
     memory.sort_by_key(|memory| memory.tenant);

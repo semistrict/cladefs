@@ -604,6 +604,11 @@ async fn finish_fork(
     let crosses = cell.tenant != child.tenant && cell.tenant != layout::DEFAULT_TENANT;
     if rules().forks_check_versions || crosses {
         let head = head::get(bucket, cell).await?;
+        // cladefs: a shredded cell's versions can never be forked into new cells, even on a host
+        // that was never told of the shred (TASK-545, board 2486, board 2704).
+        if head.as_ref().is_some_and(|head| head.shredded) {
+            return Err(crate::keys::shredded(cell));
+        }
         let named = head.as_ref().and_then(|head| head.version(version));
         let named = named.filter(|named| named.at == origin.at && named.epoch == origin.epoch);
         if rules().forks_check_versions && named.is_none() {

@@ -35,6 +35,9 @@ const RUNTIME_THREADS: usize = 4;
 
 /// Explicit state and runtime of one extent daemon instance.
 pub struct Daemon {
+    /// Explicit per-host context owning `local_cell::Host`, `bucket_cell::Host`, slabs, extent
+    /// cache, bucket/KMS state, ephemeral host, halts, evidence, and collectors (board 10962).
+    pub(crate) host: Arc<crate::Host>,
     /// Whether the daemon accepts VM processes' connections (`serve`), reported by gRPC health.
     pub(super) serving: watch::Sender<bool>,
     /// Whether the control API's health service has reported the latest `serving` state.
@@ -99,10 +102,16 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Creates a fresh extent daemon instance with empty registries and its own consolidated
-    /// runtime (created lazily on first async use outside `madsim`).
+    /// Creates a fresh extent daemon instance with an isolated [`crate::Host`], empty registries,
+    /// and its own consolidated runtime (created lazily on first async use outside `madsim`).
     pub fn new() -> Arc<Self> {
+        Self::with_host(crate::Host::new())
+    }
+
+    /// Creates a fresh extent daemon instance backed by `host`.
+    pub fn with_host(host: Arc<crate::Host>) -> Arc<Self> {
         let daemon = Arc::new(Self {
+            host,
             serving: watch::channel(false).0,
             reported: watch::channel(false).0,
             control_serving: AtomicBool::new(false),
@@ -139,13 +148,20 @@ impl Daemon {
         daemon
     }
 
+    /// The per-host context backing this daemon.
+    pub fn host(&self) -> &Arc<crate::Host> {
+        &self.host
+    }
+
     /// The process's default daemon instance, for standalone tests and legacy free-function entry
-    /// points outside `madsim`. Under `madsim`, callers always pass an explicit `Arc<Daemon>`.
+    /// points outside `madsim`. Shares [`crate::Host::process`] so crate-level free functions and
+    /// daemon entry points act on the same host state. Under `madsim`, callers always pass an
+    /// explicit `Arc<Daemon>`.
     #[cfg(not(madsim))]
     pub fn process() -> &'static Arc<Self> {
         // Outside the simulation: single default daemon for non-madsim tests/examples.
         static PROCESS: OnceLock<Arc<Daemon>> = OnceLock::new();
-        PROCESS.get_or_init(Self::new)
+        PROCESS.get_or_init(|| Self::with_host(crate::Host::process().clone()))
     }
 
     /// The daemon's consolidated Tokio runtime (outside `madsim`), shared by VM socket I/O,
@@ -174,7 +190,7 @@ impl Daemon {
         }
         #[cfg(madsim)]
         {
-            local_cell::upload::wait_on(future)
+            local_cell::upload::wait_on_host(self.host.local(), future)
         }
     }
 

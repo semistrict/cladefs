@@ -435,8 +435,8 @@ pub fn give_to_the_jail(socket: &Path) -> anyhow::Result<()> {
 /// A client of the control API of the extent daemon whose VM socket is at `socket`: at its control
 /// socket, beside it, `<socket>.control` for `<socket>.sock`, as cladefs's scripts/test-e2e.sh and
 /// [`spawn_daemon`] place it.
-pub fn control(socket: &Path) -> Result<cladefs::cladefsd::control::Client, cladefs::Error> {
-    cladefs::cladefsd::control::Client::connect(socket.with_extension("control"))
+pub fn control(socket: &Path) -> Result<cladefs::testing::Control, cladefs::Error> {
+    cladefs::testing::Control::connect(socket.with_extension("control"))
 }
 
 /// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open:

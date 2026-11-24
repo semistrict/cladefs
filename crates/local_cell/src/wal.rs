@@ -771,7 +771,7 @@ impl Recovered {
         if self.closing.is_empty() {
             return Ok(());
         }
-        let encrypting = keys.encrypting();
+        let encrypting = keys.try_encrypting()?;
         for (footer, number) in &self.segments {
             let Some(kept) = self.closing.get(number) else { continue };
             let segment = SegmentId { cell: cell.id, number: *number };
@@ -811,7 +811,8 @@ impl Recovered {
                 crate::written::wrote(crate::written::Kind::Framed, data.len() + tail.len());
             } else {
                 encryption.decrypt(0, &mut data);
-                let framed = extent_frame::framed(&data, &encoded_footer, encrypting);
+                let framed =
+                    extent_frame::framed(&data, &encoded_footer, (&encrypting.0, encrypting.1));
                 file.write_at(&framed, 0)?;
                 crate::written::wrote(crate::written::Kind::Framed, framed.len());
             }

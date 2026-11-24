@@ -155,6 +155,8 @@ const SOURCE_TARBALL: &str = "/opt/lua-5.4.7.tar.gz";
 #[host]
 mod host {
     use super::*;
+    use cladefs::cladefsd::control::proto::{ForkCellRequest, GetCountersRequest};
+    use cladefs::testing::control_path;
 
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::loop_device::LoopIo;
@@ -337,11 +339,39 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             let fork_to = |fork: &Path| -> anyhow::Result<()> {
                 match version {
                     Some(version) => {
-                        crate::common::control(&cladefsd)?.fork_version(version, fork)?;
+                        crate::common::control(&cladefsd)?
+                            .call(async |client| {
+                                let cladefs::CellVersion { tenant, cell, version } = version;
+                                client
+                                    .fork_cell(ForkCellRequest {
+                                        to: control_path(fork),
+                                        tenant,
+                                        cell,
+                                        version,
+                                        ..Default::default()
+                                    })
+                                    .await
+                            })
+                            .map(|response| cladefs::CellId {
+                                tenant: response.tenant,
+                                id: response.cell,
+                            })?;
                     }
                     None => drop(
                         crate::common::control(&cladefsd)?
-                            .fork_cell(&base, fork)
+                            .call(async |client| {
+                                client
+                                    .fork_cell(ForkCellRequest {
+                                        from: control_path(&base),
+                                        to: control_path(fork),
+                                        ..Default::default()
+                                    })
+                                    .await
+                            })
+                            .map(|response| cladefs::CellId {
+                                tenant: response.tenant,
+                                id: response.cell,
+                            })
                             .context("forking the base")?,
                     ),
                 }
@@ -374,12 +404,42 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     _ => (cladefsd.clone(), None),
                 };
                 let daemon_stats = crate::common::control(&socket)?;
-                let before = daemon_stats.counters()?;
+                let counters = || {
+                    daemon_stats
+                        .call(async |client| client.get_counters(GetCountersRequest {}).await)
+                };
+                let before = counters()?;
                 role(test_setup, "fork", &fork, &socket, None)?;
-                let counted = daemon_stats.counters()?.since(&before);
-                for (name, value) in counted.named() {
-                    println!("OBSERVED cladefsd-{name} {value}");
+                let after = counters()?;
+                macro_rules! report {
+                    ($($field:ident),+ $(,)?) => {
+                        $(
+                            let name = stringify!($field).replace('_', "-");
+                            let value = after.$field.saturating_sub(before.$field);
+                            println!("OBSERVED cladefsd-{name} {value}");
+                        )+
+                    };
                 }
+                report!(
+                    maps,
+                    map_ns,
+                    faults,
+                    fault_ns,
+                    page_ins,
+                    page_in_bytes,
+                    fetched_bytes,
+                    reads,
+                    read_bytes,
+                    read_stored_bytes,
+                    prefetches,
+                    unpacks,
+                    commits,
+                    commit_ns,
+                    commit_store_ns,
+                    commit_wait_ns,
+                    segment_closes,
+                    segment_close_ns,
+                );
                 if let Some(mut daemon) = daemon {
                     daemon.kill()?;
                     daemon.wait()?;

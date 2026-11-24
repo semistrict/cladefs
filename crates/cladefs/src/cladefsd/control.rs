@@ -214,6 +214,7 @@ fn most_answer() -> usize {
 /// cladefs: `stats`, as the API has it (TASK-111.4), the guests' histograms left out if
 /// `leave_out_histograms`, and their stats if `leave_out_guests` (board 8581).
 fn stats_response(
+    host: &crate::Host,
     stats: super::stats::HostStats,
     (leave_out_histograms, leave_out_guests): (bool, bool),
 ) -> GetStatsResponse {
@@ -248,7 +249,7 @@ fn stats_response(
         vms: vms.collect(),
         // cladefs: its ephemeral cells' directory's incarnation (board 8521); none opened
         // (ENOTSUP), it keeps no ephemeral cells, which 0 says.
-        incarnation: crate::ephemeral_host::host().map_or(0, |host| host.incarnation()),
+        incarnation: crate::ephemeral_host::host_on(host).map_or(0, |host| host.incarnation()),
     }
 }
 
@@ -385,24 +386,6 @@ pub async fn channel(
     tonic::transport::Endpoint::from_shared(format!("http://{address}"))?.connect().await
 }
 
-/// cladefs: a channel to the control API at the Unix socket `socket`, as [`channel`] makes it: a
-/// blocking client's, cladefsctl's, outside the simulation, which has no Unix sockets (doc-24).
-pub(crate) async fn channel_socket(
-    socket: &Path,
-) -> Result<tonic::transport::Channel, tonic::transport::Error> {
-    #[cfg(not(madsim))]
-    return channel(socket).await;
-    #[cfg(madsim)]
-    panic!("{}: a Unix socket, which the simulation has none of", socket.display());
-}
-
-/// cladefs: a client of the control API at the Unix socket `socket` ([`channel_socket`]).
-async fn connect_socket(
-    socket: &Path,
-) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
-    Ok(client(channel_socket(socket).await?))
-}
-
 /// A client of the control API of the daemon listening at `socket`, which takes answers as large
 /// as the daemon sends ([`MAX_MESSAGE_BYTES`]).
 #[cfg(not(madsim))]
@@ -485,27 +468,33 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
 /// of 0 never makes.
 fn wish(replicas: Option<u32>, fsync: i32) -> Result<Option<bucket_cell::layout::Wish>, Status> {
     use bucket_cell::layout::{Fsync, Wish};
-    let fsync = match FsyncLevel::try_from(fsync) {
-        Ok(FsyncLevel::Ordered) => Fsync::Ordered,
-        Ok(FsyncLevel::Local) => Fsync::Local,
-        Ok(FsyncLevel::Replicated) => Fsync::Replicated,
+    #[allow(deprecated)]
+    let (fsync, local) = match FsyncLevel::try_from(fsync) {
+        Ok(FsyncLevel::Ordered) => (Fsync::Ordered, false),
+        Ok(FsyncLevel::Local) => (Fsync::Ordered, true),
+        Ok(FsyncLevel::Replicated) => (Fsync::Replicated, false),
         Err(_) => return Err(status(Errno::EINVAL)),
     };
     let Some(replicas) = replicas else {
-        return match fsync {
-            Fsync::Ordered => Ok(None),
-            _ => Err(status(Errno::EINVAL)),
-        };
+        if !local && fsync == Fsync::Ordered {
+            return Ok(None);
+        }
+        return Err(status(Errno::EINVAL));
     };
     let f = u8::try_from(replicas).map_err(|_| status(Errno::EINVAL))?;
-    Wish::new(f, fsync).map(Some).ok_or_else(|| status(Errno::EINVAL))
+    let wish = Wish::new(f, fsync).ok_or_else(|| status(Errno::EINVAL))?;
+    if local {
+        log::warn!(
+            "cladefsd: FSYNC_LEVEL_LOCAL is deprecated and removed; using FSYNC_LEVEL_ORDERED"
+        );
+    }
+    Ok(Some(wish))
 }
 
 /// What StatCell's FsyncLevel is of `fsync`.
 fn fsync_level(fsync: bucket_cell::layout::Fsync) -> FsyncLevel {
     match fsync {
         bucket_cell::layout::Fsync::Ordered => FsyncLevel::Ordered,
-        bucket_cell::layout::Fsync::Local => FsyncLevel::Local,
         bucket_cell::layout::Fsync::Replicated => FsyncLevel::Replicated,
     }
 }
@@ -616,7 +605,9 @@ impl Cladefsd for Control {
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
         // directories (doc-21): without them, refused before anything is made.
-        if replication.is_some_and(|wish| wish.f >= 1) && crate::bucket::members().is_none() {
+        if replication.is_some_and(|wish| wish.f >= 1)
+            && crate::bucket::members_on(&self.daemon.host).is_none()
+        {
             return Err(saying(
                 Errno::ENOTSUP,
                 "a replicated cell needs the daemon's peers and replica directory \
@@ -731,8 +722,8 @@ impl Cladefsd for Control {
             // this daemon's own, whose live cells' references it would retire (board 8519): a
             // mistyped ID, refused before anything is written. Its directory not opened (ENOTSUP),
             // the daemon has no incarnation to be.
-            let own =
-                crate::ephemeral_host::host().is_ok_and(|host| host.incarnation() == incarnation);
+            let own = crate::ephemeral_host::host_on(&self.daemon.host)
+                .is_ok_and(|host| host.incarnation() == incarnation);
             if incarnation % 2 == 0 || own {
                 log::warn!(
                     "cladefsd: decommissioning host {said}: refused, no host's to decommission"
@@ -1033,7 +1024,8 @@ impl Cladefsd for Control {
             ms => std::time::Duration::from_millis(ms.into()),
         };
         let stats = super::stats::take_on(&self.daemon, wait, !leave_out_vms).await;
-        let answer = stats_response(stats, (leave_out_histograms, leave_out_guests));
+        let answer =
+            stats_response(&self.daemon.host, stats, (leave_out_histograms, leave_out_guests));
         let smaller = match (leave_out_histograms, leave_out_guests, leave_out_vms) {
             (false, false, _) => "leave out the guests' histograms (leave_out_histograms)",
             (true, false, _) => "leave out the guests' stats (leave_out_guests)",
@@ -1141,7 +1133,7 @@ impl Cladefsd for Control {
         request: Request<SetPeersRequest>,
     ) -> Result<Response<SetPeersResponse>, Status> {
         let SetPeersRequest { addresses } = request.into_inner();
-        reply(super::peers::set(addresses).map(|()| SetPeersResponse {}))
+        reply(super::peers::set_on(&self.daemon, addresses).map(|()| SetPeersResponse {}))
     }
 
     async fn shred_cell(
@@ -1151,8 +1143,9 @@ impl Cladefsd for Control {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::CellId { tenant, id: cell };
         let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?;
-        let shredded =
-            crate::bucket::shred_cell_and_publish(&bucket, cell).await.map_err(|err| {
+        let shredded = crate::bucket::shred_cell_and_publish_on(&self.daemon.host, &bucket, cell)
+            .await
+            .map_err(|err| {
                 let failure = local_cell::upload::Failure::Bucket(err);
                 let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
                 log::error!("cladefsd: shredding cell {cell}: {failure}");
@@ -1178,7 +1171,9 @@ impl Cladefsd for Control {
             false => why,
         };
         let scope = bucket_cell::keys::Scope::Tenant(tenant);
-        let forgotten = cells::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
+        let host = Arc::clone(&self.daemon.host);
+        let forgotten =
+            cells::blocking(move || Ok(crate::bucket::forget_on(&host, scope, &why))).await;
         reply(
             forgotten.map(|forgotten| ForgetTenantKeysResponse {
                 forgotten: Some(forgotten_of(forgotten)),
@@ -1192,15 +1187,16 @@ impl Cladefsd for Control {
     ) -> Result<Response<ShredTenantResponse>, Status> {
         use crate::bucket::ShredError;
         let ShredTenantRequest { tenant } = request.into_inner();
-        let (destroyed, forgotten) = crate::bucket::shred_tenant(tenant).await.map_err(|err| {
-            let errno = match &err {
-                ShredError::InvalidTenant(_) => Errno::EINVAL,
-                ShredError::Unsupported(_) => Errno::ENOTSUP,
-                ShredError::Failed(_) => Errno::EIO,
-            };
-            log::error!("cladefsd: shredding tenant {tenant}: {err}");
-            saying(errno, err.to_string())
-        })?;
+        let (destroyed, forgotten) =
+            crate::bucket::shred_tenant_on(&self.daemon.host, tenant).await.map_err(|err| {
+                let errno = match &err {
+                    ShredError::InvalidTenant(_) => Errno::EINVAL,
+                    ShredError::Unsupported(_) => Errno::ENOTSUP,
+                    ShredError::Failed(_) => Errno::EIO,
+                };
+                log::error!("cladefsd: shredding tenant {tenant}: {err}");
+                saying(errno, err.to_string())
+            })?;
         let shredded_now = destroyed == bucket_cell::bucket_kms::Destroyed::Now;
         Ok(Response::new(ShredTenantResponse {
             shredded_now,
@@ -1214,16 +1210,17 @@ impl Cladefsd for Control {
     ) -> Result<Response<ReloadKmsResponse>, Status> {
         use bucket_cell::bucket_kms::Unreloaded;
         let ReloadKmsRequest {} = request.into_inner();
-        let reloaded = crate::bucket::reload_kms().await.map_err(|refused| {
-            let errno = match &refused {
-                Unreloaded::Malformed(_) => Errno::EINVAL,
-                Unreloaded::InUse(_) => Errno::EBUSY,
-                Unreloaded::Unreached(_) => Errno::EIO,
-                Unreloaded::Unsupported(_) => Errno::ENOTSUP,
-            };
-            log::error!("cladefsd: reloading the KMS: {refused}");
-            saying(errno, format!("reloading the KMS: {refused}"))
-        })?;
+        let reloaded =
+            crate::bucket::reload_kms_on(&self.daemon.host).await.map_err(|refused| {
+                let errno = match &refused {
+                    Unreloaded::Malformed(_) => Errno::EINVAL,
+                    Unreloaded::InUse(_) => Errno::EBUSY,
+                    Unreloaded::Unreached(_) => Errno::EIO,
+                    Unreloaded::Unsupported(_) => Errno::ENOTSUP,
+                };
+                log::error!("cladefsd: reloading the KMS: {refused}");
+                saying(errno, format!("reloading the KMS: {refused}"))
+            })?;
         let ids = |ids: Vec<extent_keys::kms::master::MasterKeyId>| {
             ids.iter().map(ToString::to_string).collect()
         };
@@ -1245,583 +1242,6 @@ fn forgotten_of(forgotten: crate::bucket::Forgotten) -> Forgotten {
     Forgotten { stores: count(stores), rings: count(rings), kept: count(kept), extents, bytes }
 }
 
-/// A client of a daemon's control API that blocks, for callers without a runtime of their own:
-/// cladefsctl, and tests. Its errors carry the errno a call failed with, if it did
-/// ([`crate::Error::errno`]).
-pub struct Client {
-    runtime: tokio::runtime::Runtime,
-    client: CladefsdClient<tonic::transport::Channel>,
-    /// cladefs: how long each call, and the connecting, may take, if bounded (board 8585).
-    timeout: Option<std::time::Duration>,
-}
-
-impl Client {
-    /// A client of the daemon whose control socket is at `socket`.
-    pub fn connect(socket: impl AsRef<Path>) -> Result<Self, crate::Error> {
-        Self::connect_within(socket, None)
-    }
-
-    /// cladefs: a client of the daemon whose control socket is at `socket`, connecting, and then
-    /// each of its calls, within `timeout` if given (board 8585): one that takes longer fails with
-    /// `ETIMEDOUT`, the call's work going on in the daemon, which may still complete it, as the
-    /// API's calls run to their end whether or not their callers wait.
-    pub fn connect_within(
-        socket: impl AsRef<Path>,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<Self, crate::Error> {
-        let socket = socket.as_ref();
-        // cladefs: outside the simulation: a blocking client, cladefsctl's, at its entry.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(crate::Error::new)?;
-        let what =
-            format!("connecting to the extent daemon's control socket at {}", socket.display());
-        // cladefs: outside the simulation, as above.
-        let connected = runtime.block_on(within(timeout, connect_socket(socket)));
-        let client = match connected {
-            Ok(Ok(client)) => client,
-            Ok(Err(err)) => return Err(crate::Error::new(anyhow::Error::new(err).context(what))),
-            Err(timeout) => return Err(timed_out(what, timeout)),
-        };
-        Ok(Self { runtime, client, timeout })
-    }
-
-    /// Makes an empty cell at `path` of `capacity` bytes, of `cell`, an Fxfs cell:
-    /// of a new cell if its cell's ID is 0, and a new cell there if its ID is; placed at `token`
-    /// if given, its taking forced if `force` (TASK-681); and returns its cell (`CreateCell`,
-    /// TASK-364).
-    pub fn create_cell(
-        &self,
-        path: &Path,
-        capacity: u64,
-        cell: crate::CellId,
-        (token, force): (Option<u64>, bool),
-    ) -> Result<crate::CellId, crate::Error> {
-        let request = CreateCellRequest {
-            path: name(path)?,
-            capacity,
-            token,
-            tenant: cell.tenant,
-            cell: cell.id,
-            kind: CellKind::Fxfs.into(),
-            force,
-            ..CreateCellRequest::default()
-        };
-        let response = self
-            .call(format!("making the cell at {}", path.display()), |mut c| async move {
-                c.create_cell(request).await
-            })?;
-        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
-    }
-
-    /// Makes a cell at `path` of `capacity` bytes holding the container image at `image`, the one
-    /// `reference` names in it if given, a new cell of the default tenant's, and
-    /// returns its cell (`ImportImage`).
-    pub fn import_image(
-        &self,
-        path: &Path,
-        capacity: u64,
-        image: &Path,
-        reference: Option<&str>,
-    ) -> Result<crate::CellId, crate::Error> {
-        let request = ImportImageRequest {
-            path: name(path)?,
-            capacity,
-            image: name(image)?,
-            reference: reference.unwrap_or_default().to_owned(),
-            tenant: crate::host_cell::DEFAULT_TENANT,
-        };
-        let response = self.call(format!("importing {}", image.display()), |mut c| async move {
-            c.import_image(request).await
-        })?;
-        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
-    }
-
-    /// Forks the cell at `from` to a new cell at `to`, and returns its cell (`ForkCell`).
-    pub fn fork_cell(&self, from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
-        let request = ForkCellRequest { from: name(from)?, to: name(to)?, ..Default::default() };
-        let what = format!("forking the cell at {} to {}", from.display(), to.display());
-        let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
-        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
-    }
-
-    /// Forks the version `from` to a new cell at `to`, on any host, and returns its cell
-    /// (`ForkCell`'s `version`).
-    pub fn fork_version(
-        &self,
-        from: crate::CellVersion,
-        to: &Path,
-    ) -> Result<crate::CellId, crate::Error> {
-        let crate::CellVersion { tenant, cell, version } = from;
-        let request =
-            ForkCellRequest { to: name(to)?, version, tenant, cell, ..Default::default() };
-        let what = format!("forking version {version} of cell {cell} to {}", to.display());
-        let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
-        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
-    }
-
-    /// cladefs: forks the version `from` to a new ephemeral cell at `to`, kept on the daemon's host
-    /// alone (doc-25), and returns its cell (`ForkCell`'s `ephemeral`).
-    pub fn fork_ephemeral(
-        &self,
-        from: crate::CellVersion,
-        to: &Path,
-    ) -> Result<crate::CellId, crate::Error> {
-        let crate::CellVersion { tenant, cell, version } = from;
-        let request = ForkCellRequest {
-            to: name(to)?,
-            version,
-            tenant,
-            cell,
-            ephemeral: true,
-            ..Default::default()
-        };
-        let what =
-            format!("forking version {version} of cell {cell} ephemerally to {}", to.display());
-        let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
-        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
-    }
-
-    /// cladefs: begins the live migration of the ephemeral cell at `path` to the daemon
-    /// whose peer address is `peer`, its cell going at `to` there (`MigrateCell`): returns its ID.
-    pub fn migrate_cell(&self, path: &Path, peer: &str, to: &Path) -> Result<u64, crate::Error> {
-        let request =
-            MigrateCellRequest { path: name(path)?, peer: peer.to_owned(), to: name(to)? };
-        let what = format!("migrating the cell at {} to {peer}", path.display());
-        let response = self.call(what, |mut c| async move { c.migrate_cell(request).await })?;
-        Ok(response.migration)
-    }
-
-    /// cladefs: hands the ephemeral cell at `path` over to its migration's target
-    /// (`HandOverCell`).
-    pub fn hand_over_cell(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = HandOverCellRequest { path: name(path)? };
-        let what = format!("handing the cell at {} over", path.display());
-        self.call(what, |mut c| async move { c.hand_over_cell(request).await })?;
-        Ok(())
-    }
-
-    /// cladefs: ends the migration of the ephemeral cell at `path` (`AbortMigration`, board 8577).
-    pub fn abort_migration(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = AbortMigrationRequest { path: name(path)? };
-        let what = format!("aborting the migration of the cell at {}", path.display());
-        self.call(what, |mut c| async move { c.abort_migration(request).await })?;
-        Ok(())
-    }
-
-    /// cladefs: decommissions the host of incarnation `incarnation`, gone for good: its ephemeral
-    /// cells' references retired, `most` of them at most, 0 for the daemon's default (doc-25,
-    /// `DecommissionHost`, board 8523). Returns how many it retired, and how many it left.
-    pub fn decommission_host(
-        &self,
-        incarnation: u64,
-        most: u64,
-    ) -> Result<DecommissionHostResponse, crate::Error> {
-        let request = DecommissionHostRequest { incarnation, most };
-        let what = format!("decommissioning incarnation {}", base32_id::Short(incarnation));
-        self.call(what, |mut c| async move { c.decommission_host(request).await })
-    }
-
-    /// cladefs: the incarnations of hosts with ephemeral cells' references in the buckets, or
-    /// decommissioned there, in order (`ListEphemeralHosts`, board 8521).
-    pub fn ephemeral_hosts(&self) -> Result<Vec<EphemeralHost>, crate::Error> {
-        let what = "listing the ephemeral cells' hosts".to_owned();
-        let request = ListEphemeralHostsRequest {};
-        let response =
-            self.call(what, |mut c| async move { c.list_ephemeral_hosts(request).await })?;
-        Ok(response.hosts)
-    }
-
-    /// Makes a version of the cell at `path`, keeping its newest `keep_last` if given,
-    /// and returns its ID (`MakeVersion`).
-    pub fn make_version(&self, path: &Path, keep_last: Option<u32>) -> Result<u64, crate::Error> {
-        let request = MakeVersionRequest { path: name(path)?, keep_last: keep_last.unwrap_or(0) };
-        let what = format!("making a version of the cell at {}", path.display());
-        let response = self.call(what, |mut c| async move { c.make_version(request).await })?;
-        Ok(response.version)
-    }
-
-    /// The versions of the cell at `path` (`ListVersions`).
-    pub fn list_versions(&self, path: &Path) -> Result<Vec<crate::VersionInfo>, crate::Error> {
-        let request = ListVersionsRequest { path: name(path)? };
-        let what = format!("listing the versions of the cell at {}", path.display());
-        let response = self.call(what, |mut c| async move { c.list_versions(request).await })?;
-        Ok((response.versions.into_iter())
-            .map(|Version { id, uploaded, shared }| crate::VersionInfo { id, uploaded, shared })
-            .collect())
-    }
-
-    /// Drops the versions `ids` of the cell at `path` (`DropVersions`).
-    pub fn drop_versions(&self, path: &Path, ids: &[u64]) -> Result<(), crate::Error> {
-        let request = DropVersionsRequest { path: name(path)?, versions: ids.to_vec() };
-        let what = format!("dropping versions of the cell at {}", path.display());
-        self.call(what, |mut c| async move { c.drop_versions(request).await }).map(drop)
-    }
-
-    /// Shares the version `id` of the cell at `path`, or no longer (`ShareVersion`).
-    pub fn share_version(&self, path: &Path, id: u64, shared: bool) -> Result<(), crate::Error> {
-        let request = ShareVersionRequest { path: name(path)?, version: id, shared };
-        let what = format!("sharing version {id} of the cell at {}", path.display());
-        self.call(what, |mut c| async move { c.share_version(request).await }).map(drop)
-    }
-
-    /// Deletes the cell at `path` (`DeleteCell`).
-    pub fn delete_cell(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = DeleteCellRequest { path: name(path)? };
-        let what = format!("deleting the cell at {}", path.display());
-        self.call(what, |mut c| async move { c.delete_cell(request).await }).map(drop)
-    }
-
-    /// Deletes this host's copy of the cell at `path`, its branch staying in the daemon's bucket
-    /// (`DropCell`).
-    pub fn drop_cell(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = DropCellRequest { path: name(path)? };
-        let what = format!("dropping the cell at {}", path.display());
-        self.call(what, |mut c| async move { c.drop_cell(request).await }).map(drop)
-    }
-
-    /// Sets the capacity of the cell at `path` to `capacity` bytes (`ResizeCell`).
-    pub fn resize_cell(&self, path: &Path, capacity: u64) -> Result<(), crate::Error> {
-        let request = ResizeCellRequest { path: name(path)?, capacity };
-        let what = format!("resizing the cell at {} to {capacity} bytes", path.display());
-        self.call(what, |mut c| async move { c.resize_cell(request).await }).map(drop)
-    }
-
-    /// Places the cell at `path` at the placement whose fencing token is `token` (`PlaceCell`),
-    /// its takings forced if `force`.
-    pub fn place_cell(&self, path: &Path, token: u64, force: bool) -> Result<(), crate::Error> {
-        let request = PlaceCellRequest { path: name(path)?, token, force };
-        let what = format!("placing the cell at {}", path.display());
-        self.call(what, |mut c| async move { c.place_cell(request).await }).map(drop)
-    }
-
-    /// Makes the cell at `path` a public base (`MakePublic`).
-    pub fn make_public(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = MakePublicRequest { path: name(path)?, attach_only: false };
-        let what = format!("making the cell at {} public", path.display());
-        self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
-    }
-
-    /// Makes the fork at `path` public, its cell alone, to attach to cells, not to fork
-    /// (`MakePublic` with `attach_only`).
-    pub fn make_public_attach_only(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = MakePublicRequest { path: name(path)?, attach_only: true };
-        let what = format!("making the fork at {} public to attach", path.display());
-        self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
-    }
-
-    /// Attaches the fork at `base` to the cell at `path` (`AttachBase`).
-    pub fn attach_base(&self, path: &Path, base: &Path) -> Result<(), crate::Error> {
-        let request = AttachBaseRequest { path: name(path)?, base: name(base)? };
-        let what = format!("attaching {} to {}", base.display(), path.display());
-        self.call(what, |mut c| async move { c.attach_base(request).await }).map(drop)
-    }
-
-    /// What the cell at `path` is, and holds (`StatCell`).
-    pub fn stat_cell(&self, path: &Path) -> Result<StatCellResponse, crate::Error> {
-        let request = StatCellRequest { path: name(path)? };
-        let what = format!("asking what the cell at {} holds", path.display());
-        self.call(what, |mut c| async move { c.stat_cell(request).await })
-    }
-
-    /// The cells the daemon serves, with what each is and holds (`ListCells`).
-    pub fn list_cells(&self) -> Result<Vec<ListedCell>, crate::Error> {
-        let what = "listing the daemon's cells".to_owned();
-        let listed =
-            self.call(what, |mut c| async move { c.list_cells(ListCellsRequest {}).await })?;
-        Ok(listed.stores)
-    }
-
-    /// The ID of the cell at `path` (`StatCell`'s `tenant`, `cell` and
-    /// `cell`, TASK-364).
-    pub fn cell(&self, path: &Path) -> Result<crate::CellId, crate::Error> {
-        let stat = self.stat_cell(path)?;
-        Ok(crate::CellId { tenant: stat.tenant, id: stat.cell })
-    }
-
-    /// The commit number of the latest commit of the cell at `path` (`StatCell`'s `committed`).
-    pub fn committed(&self, path: &Path) -> Result<u64, crate::Error> {
-        Ok(self.stat_cell(path)?.committed)
-    }
-
-    /// Waits until every commit of the cell at `path` is in the daemon's bucket (`SyncCell`).
-    pub fn sync_cell(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = SyncCellRequest { path: name(path)? };
-        let what = format!("waiting for the cell at {} to be uploaded", path.display());
-        self.call(what, |mut c| async move { c.sync_cell(request).await }).map(drop)
-    }
-
-    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose cells are in `dir`,
-    /// its VM socket, given to `uid` and `gid` where named, and returns its path (`Grant`).
-    pub fn grant(
-        &self,
-        tenant: u64,
-        dir: &Path,
-        uid: Option<u32>,
-        gid: Option<u32>,
-    ) -> Result<PathBuf, crate::Error> {
-        let request = GrantRequest { tenant, dir: name(dir)?, uid, gid };
-        let what = format!("granting tenant {tenant}", tenant = base32_id::Short(tenant));
-        let response = self.call(what, |mut c| async move { c.grant(request).await })?;
-        Ok(response.socket.into())
-    }
-
-    /// Revokes the tenant `tenant`'s grant: its VM socket goes, its VM processes connected keep
-    /// their cells (`Revoke`).
-    pub fn revoke(&self, tenant: u64) -> Result<(), crate::Error> {
-        let request = RevokeRequest { tenant };
-        let what = format!("revoking tenant {tenant}", tenant = base32_id::Short(tenant));
-        self.call(what, |mut c| async move { c.revoke(request).await }).map(drop)
-    }
-
-    /// Limits the memory of the tenant `tenant`, or of every tenant without one, to `bytes`, or
-    /// lifts the limit without them (`SetMemoryLimit`).
-    pub fn set_memory_limit(
-        &self,
-        tenant: Option<u64>,
-        bytes: Option<u64>,
-    ) -> Result<(), crate::Error> {
-        let request = SetMemoryLimitRequest { tenant, bytes };
-        let what = format!("limiting the memory of {}", whom(tenant, "every tenant"));
-        self.call(what, |mut c| async move { c.set_memory_limit(request).await }).map(drop)
-    }
-
-    /// cladefs: weighs the memory of the tenant `tenant` against the others' (`SetMemoryWeight`,
-    /// TASK-358).
-    pub fn set_memory_weight(&self, tenant: u64, weight: u64) -> Result<(), crate::Error> {
-        let request = SetMemoryWeightRequest { tenant, weight };
-        let what =
-            format!("weighing the memory of tenant {tenant}", tenant = base32_id::Short(tenant));
-        self.call(what, |mut c| async move { c.set_memory_weight(request).await }).map(drop)
-    }
-
-    /// cladefs: sets the bytes in flight the connections of the tenant `tenant`, or of every tenant
-    /// without one, share to `bytes`, or to the default without them (`SetTenantInFlight`,
-    /// TASK-149.35).
-    pub fn set_tenant_in_flight(
-        &self,
-        tenant: Option<u64>,
-        bytes: Option<u64>,
-    ) -> Result<(), crate::Error> {
-        let request = SetTenantInFlightRequest { tenant, bytes };
-        let what = format!("setting the bytes in flight of {}", whom(tenant, "every tenant"));
-        self.call(what, |mut c| async move { c.set_tenant_in_flight(request).await }).map(drop)
-    }
-
-    /// Evicts pages until the tenant `tenant`, or the daemon without one, holds at most `target`
-    /// bytes, or none is left to evict, and returns what it holds then (`ShrinkMemory`).
-    pub fn shrink_memory(&self, tenant: Option<u64>, target: u64) -> Result<u64, crate::Error> {
-        let request = ShrinkMemoryRequest { tenant, target_bytes: target };
-        let what = format!("shrinking the memory of {}", whom(tenant, "the daemon"));
-        let response = self.call(what, |mut c| async move { c.shrink_memory(request).await })?;
-        Ok(response.bytes)
-    }
-
-    /// cladefs: limits the disk of the tenant `tenant`, or of every tenant without one, to `bytes`,
-    /// or lifts the limit without them (`SetDiskLimit`, TASK-94).
-    pub fn set_disk_limit(
-        &self,
-        tenant: Option<u64>,
-        bytes: Option<u64>,
-    ) -> Result<(), crate::Error> {
-        let request = SetDiskLimitRequest { tenant, bytes };
-        let what = format!("limiting the disk of {}", whom(tenant, "every tenant"));
-        self.call(what, |mut c| async move { c.set_disk_limit(request).await }).map(drop)
-    }
-
-    /// cladefs: has the hosts sharing the daemon's bucket be those at `addresses`, each `HOST:PORT`
-    /// (`SetPeers`, TASK-406.2).
-    pub fn set_peers(&self, addresses: &[&str]) -> Result<(), crate::Error> {
-        let addresses = addresses.iter().map(|address| (*address).to_owned()).collect();
-        let request = SetPeersRequest { addresses };
-        let what = "setting the daemon's peers".to_owned();
-        self.call(what, |mut c| async move { c.set_peers(request).await }).map(drop)
-    }
-
-    /// cladefs: shreds the cell `cell` in the daemon's bucket, its wrapped KEKs taken out of its
-    /// object, and has the daemon forget its keys (`ShredCell`, TASK-411.7): how many generations
-    /// of its KEK it took out, 0 if it was shredded already, and what the daemon forgot.
-    pub fn shred_cell(&self, cell: crate::CellId) -> Result<(u32, Forgotten), crate::Error> {
-        let request = ShredCellRequest { tenant: cell.tenant, cell: cell.id };
-        let what = format!("shredding cell {cell}");
-        let response = self.call(what, |mut c| async move { c.shred_cell(request).await })?;
-        Ok((response.keks_removed, response.forgotten.unwrap_or_default()))
-    }
-
-    /// cladefs: has the daemon forget what it holds of the keys of the tenant `tenant`, whose KEK
-    /// is revoked or destroyed in the KMS, as `why` says (`ForgetTenantKeys`, TASK-411.7): what it
-    /// forgot.
-    pub fn forget_tenant_keys(&self, tenant: u64, why: &str) -> Result<Forgotten, crate::Error> {
-        let request = ForgetTenantKeysRequest { tenant, why: why.to_owned() };
-        let what = format!("having the daemon forget tenant {tenant}'s keys");
-        let response =
-            self.call(what, |mut c| async move { c.forget_tenant_keys(request).await })?;
-        Ok(response.forgotten.unwrap_or_default())
-    }
-
-    /// cladefs: shreds the tenant `tenant` under the daemon's bucket KMS, its KEK object replaced
-    /// by a tombstone, and has the daemon forget its keys (`ShredTenant`, TASK-411.27): whether
-    /// this call shredded it (not already), and what the daemon forgot.
-    pub fn shred_tenant(&self, tenant: u64) -> Result<(bool, Forgotten), crate::Error> {
-        let request = ShredTenantRequest { tenant };
-        let what = format!("shredding tenant {tenant}");
-        let response = self.call(what, |mut c| async move { c.shred_tenant(request).await })?;
-        Ok((response.shredded_now, response.forgotten.unwrap_or_default()))
-    }
-
-    /// cladefs: reloads what of the daemon's KMS configuration reloads live (`ReloadKms`, board
-    /// 8487): the tenants renamed, and the bucket KMSes whose master keys changed.
-    pub fn reload_kms(&self) -> Result<ReloadKmsResponse, crate::Error> {
-        let what = "reloading the daemon's KMS".to_owned();
-        self.call(what, |mut c| async move { c.reload_kms(ReloadKmsRequest {}).await })
-    }
-
-    /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,
-    /// counted now, in bytes, and its limit, if it has one (`GetTenantDisk`, TASK-94).
-    pub fn tenant_disk(&self, tenant: Option<u64>) -> Result<(u64, Option<u64>), crate::Error> {
-        let response = self.get_tenant_disk(tenant)?;
-        Ok((response.bytes, response.limit_bytes))
-    }
-
-    /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,
-    /// counted now, its limit and what is reserved of it, as `GetTenantDisk` answers (board 8585).
-    pub fn get_tenant_disk(
-        &self,
-        tenant: Option<u64>,
-    ) -> Result<GetTenantDiskResponse, crate::Error> {
-        let request = GetTenantDiskRequest { tenant };
-        let what = format!("counting the disk of {}", whom(tenant, "every tenant"));
-        self.call(what, |mut c| async move { c.get_tenant_disk(request).await })
-    }
-
-    /// cladefs: weighs the disk of the tenant `tenant` against the others' (`SetDiskWeight`, board
-    /// 8585).
-    pub fn set_disk_weight(&self, tenant: u64, weight: u64) -> Result<(), crate::Error> {
-        let request = SetDiskWeightRequest { tenant, weight };
-        let what =
-            format!("weighing the disk of tenant {tenant}", tenant = base32_id::Short(tenant));
-        self.call(what, |mut c| async move { c.set_disk_weight(request).await }).map(drop)
-    }
-
-    /// cladefs: what the daemon, its VM processes and their guests counted, as of one moment, each
-    /// with its build (`GetStats`, TASK-111.4): the VM processes' answers waited for `wait` at
-    /// most, the daemon's default if none.
-    pub fn stats(
-        &self,
-        wait: Option<std::time::Duration>,
-    ) -> Result<GetStatsResponse, crate::Error> {
-        let wait_ms = wait.map_or(0, |wait| u32::try_from(wait.as_millis()).unwrap_or(u32::MAX));
-        self.get_stats(GetStatsRequest { wait_ms, ..GetStatsRequest::default() })
-    }
-
-    /// cladefs: what the daemon, its VM processes and their guests counted, as `request` asks
-    /// (`GetStats`): what to wait for, and what to leave out (board 8581).
-    pub fn get_stats(&self, request: GetStatsRequest) -> Result<GetStatsResponse, crate::Error> {
-        self.call("asking the extent daemon for its stats".to_owned(), |mut c| async move {
-            c.get_stats(request).await
-        })
-    }
-
-    /// cladefs: the daemon's counters, as `GetCounters` answers, its bucket's with them (board
-    /// 8585).
-    pub fn get_counters(&self) -> Result<GetCountersResponse, crate::Error> {
-        self.call("asking the extent daemon for its counters".to_owned(), |mut c| async move {
-            c.get_counters(GetCountersRequest {}).await
-        })
-    }
-
-    /// The daemon's counters (`GetCounters`).
-    pub fn counters(&self) -> Result<crate::stats::Stats, crate::Error> {
-        let response = self.get_counters()?;
-        Ok(crate::stats::Stats {
-            maps: response.maps,
-            map_ns: response.map_ns,
-            faults: response.faults,
-            fault_ns: response.fault_ns,
-            page_ins: response.page_ins,
-            page_in_bytes: response.page_in_bytes,
-            fetched_bytes: response.fetched_bytes,
-            reads: response.reads,
-            read_bytes: response.read_bytes,
-            read_stored_bytes: response.read_stored_bytes,
-            prefetches: response.prefetches,
-            unpacks: response.unpacks,
-            // The VM processes' changes to their windows, which the API doesn't report
-            // (`Stats::stage_ops`).
-            stage_ops: 0,
-            stage_ns: 0,
-            commits: response.commits,
-            commit_ns: response.commit_ns,
-            commit_store_ns: response.commit_store_ns,
-            commit_wait_ns: response.commit_wait_ns,
-            segment_closes: response.segment_closes,
-            segment_close_ns: response.segment_close_ns,
-            // The maps the daemon sent the VM processes' windows, which the API doesn't report.
-            stage_maps: 0,
-            stage_map_bytes: 0,
-            stage_overwrites: 0,
-            stage_leave_outs: 0,
-            cache_trims: 0,
-            cache_trim_ns: 0,
-            fault_stores: 0,
-            fault_refusals: 0,
-            fault_waits: 0,
-            stage_segments: 0,
-            stage_private_runs: 0,
-            stage_private_pages: 0,
-            stage_private_ns: 0,
-            vm_private_requests: 0,
-            vm_private_request_ns: 0,
-            predicted_read: 0,
-            predicted_unread: 0,
-            read_unpredicted: 0,
-            prefetch_page_ins: 0,
-        })
-    }
-
-    /// Makes the call `call` makes with a client, and returns its response; or, failed, an error
-    /// saying it was `what` ([`failed`]).
-    fn call<T, F>(
-        &self,
-        what: String,
-        call: impl FnOnce(CladefsdClient<tonic::transport::Channel>) -> F,
-    ) -> Result<T, crate::Error>
-    where
-        F: Future<Output = Result<Response<T>, Status>>,
-    {
-        // cladefs: outside the simulation: the blocking client's call.
-        match self.runtime.block_on(within(self.timeout, call(self.client.clone()))) {
-            Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(status)) => Err(failed(what, status)),
-            Err(timeout) => Err(timed_out(what, timeout)),
-        }
-    }
-}
-
-/// cladefs: what `future` gives, within `timeout` if given; or, once that is over, the timeout
-/// (board 8585).
-async fn within<T>(
-    timeout: Option<std::time::Duration>,
-    future: impl Future<Output = T>,
-) -> Result<T, std::time::Duration> {
-    match timeout {
-        // The timeout's error says no more than that it is over.
-        Some(timeout) => tokio::time::timeout(timeout, future).await.map_err(|_| timeout),
-        None => Ok(future.await),
-    }
-}
-
-/// cladefs: the error of a call, `what`, that took longer than `timeout` (board 8585):
-/// `ETIMEDOUT`, saying that the daemon may still complete it, as it runs its calls to their end.
-fn timed_out(what: String, timeout: std::time::Duration) -> crate::Error {
-    let said = format!(
-        "no answer within {timeout:?}: the extent daemon may still complete the call, as it \
-         completes every call whether or not its caller waits"
-    );
-    crate::Error::new(anyhow::Error::new(Errno::ETIMEDOUT).context(said).context(what))
-}
-
 /// The error of a call that failed with `status`, saying it was `what`: with the errno it failed
 /// with, if any ([`crate::Error::errno`] finds it), and what the daemon said of it (board 8583),
 /// unless it said no more than the errno's name ([`status`]); without an errno, the status whole.
@@ -1835,20 +1255,6 @@ pub fn failed(what: String, status: Status) -> crate::Error {
         },
         None => anyhow::Error::new(status).context(what),
     })
-}
-
-/// The tenant `tenant`, as an error says it, in base 32 as cells say it; or, without one,
-/// `none`.
-fn whom(tenant: Option<u64>, none: &str) -> String {
-    tenant.map_or_else(
-        || none.to_owned(),
-        |tenant| format!("tenant {tenant}", tenant = base32_id::Short(tenant)),
-    )
-}
-
-/// `path`, as a request names it: `EINVAL` unless it is UTF-8.
-fn name(path: &Path) -> Result<String, crate::Error> {
-    path.to_str().map(str::to_owned).ok_or_else(|| crate::Error::from(Errno::EINVAL))
 }
 
 #[cfg(test)]

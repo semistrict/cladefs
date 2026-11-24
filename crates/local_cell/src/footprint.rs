@@ -132,7 +132,7 @@ impl Footprint {
         change(&self.tally);
         if let Some(allotment) = &*allotment {
             change(&allotment.tally);
-            change(&TOTAL.get().tally);
+            change(&allotment.total.tally);
         }
         if let Some(disk) = &self.disk {
             change(&disk.cells);
@@ -166,10 +166,10 @@ impl Footprint {
         let mut allotted = self.allotment.lock().unwrap();
         if let Some(was) = allotted.take() {
             moved(&self.tally, &was.tally, false);
-            moved(&self.tally, &TOTAL.get().tally, false);
+            moved(&self.tally, &was.total.tally, false);
         }
         moved(&self.tally, &allotment.tally, true);
-        moved(&self.tally, &TOTAL.get().tally, true);
+        moved(&self.tally, &allotment.total.tally, true);
         *allotted = Some(allotment.clone());
     }
 
@@ -208,7 +208,9 @@ impl Footprint {
             Some(allotment) if over(&allotment.tally, &allotment.limit) => {
                 Some(DiskFull::Allotment)
             }
-            Some(_) if over(&TOTAL.get().tally, &TOTAL.get().limit) => Some(DiskFull::Total),
+            Some(allotment) if over(&allotment.total.tally, &allotment.total.limit) => {
+                Some(DiskFull::Total)
+            }
             Some(allotment) if over(&allotment.tally, &allotment.share) => Some(DiskFull::Share),
             _ => self.disk.as_ref().and_then(|disk| disk_full(disk)),
         };
@@ -226,19 +228,23 @@ impl Footprint {
         };
         drop(pledge);
         if begins {
+            let total_bytes = allotment.as_ref().map_or(0, |a| a.total.tally.bytes());
+            let total_lim = allotment
+                .as_ref()
+                .and_then(|a| Some(a.total.limit.load(Ordering::Relaxed)).filter(|l| *l != NONE));
             log::warn!(
                 "extent store: {} refuses writes (ENOSPC): {full}; it takes {} bytes, its \
-                 allotment {:?} of {:?}, every allotment {} of {:?}, its disk {:?}",
+                 allotment {:?} of {:?}, every allotment {total_bytes} of {total_lim:?}, its disk {:?}",
                 self.path.as_deref().map_or("a cell".into(), |path| path.display().to_string()),
                 self.bytes(),
                 allotment.as_ref().map(|allotment| allotment.bytes()),
                 allotment.as_ref().and_then(|allotment| allotment.limit()),
-                total().bytes(),
-                total_limit(),
                 self.disk,
             );
         }
-        host_disk::wake_governor();
+        if let Some(disk) = &self.disk {
+            disk.wake_governor();
+        }
         Err(full)
     }
 
@@ -472,6 +478,8 @@ pub struct Allotment {
     /// What it keeps while its disk is under pressure, its share by weight, or [`NONE`]
     /// otherwise: past it, its writes are refused (doc-22, TASK-539.10).
     share: AtomicU64,
+    /// Every allotment on its host together.
+    total: Arc<Total>,
 }
 
 /// An allotment's weight unless it is set: each alike.
@@ -483,28 +491,35 @@ struct Total {
     limit: AtomicU64,
 }
 
-node_local::node_local! {
-    /// Every allotment's, together.
-    static TOTAL: Total = Total { tally: Tally::new(), limit: AtomicU64::new(NONE) };
+/// Per-host footprint state (total tally/limit, allotments, and cell directory ledger), owned by
+/// [`crate::Host`].
+pub(crate) struct State {
+    total: Arc<Total>,
+    allotments: std::sync::Mutex<Vec<Arc<Allotment>>>,
+    ledger: std::sync::Mutex<Option<HashMap<DirId, Arc<Footprint>>>>,
 }
 
-node_local::node_local! {
-    /// Every allotment made: kept for the process's life, as their cells' files are on its disk,
-    /// granted or not.
-    static ALLOTMENTS: std::sync::Mutex<Vec<Arc<Allotment>>> = std::sync::Mutex::new(Vec::new());
+impl State {
+    pub(crate) fn new() -> Self {
+        Self {
+            total: Arc::new(Total { tally: Tally::new(), limit: AtomicU64::new(NONE) }),
+            allotments: std::sync::Mutex::new(Vec::new()),
+            ledger: std::sync::Mutex::new(None),
+        }
+    }
 }
 
-/// The allotment of the directory `dir`, a tenant's: the one made already, or one made now,
-/// counting the cells in it as they were counted, and those not counted yet, closed, as one
+/// The allotment of the directory `dir` on `host`, a tenant's: the one made already, or one made
+/// now, counting the cells in it as they were counted, and those not counted yet, closed, as one
 /// listing of each finds them.
-pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
+pub fn allotment_on(host: &Arc<crate::Host>, dir: &Path) -> io::Result<Arc<Allotment>> {
     let dir = host_fs::canonicalize(dir)?;
     let made = {
-        let mut allotments = ALLOTMENTS.get().lock().unwrap();
+        let mut allotments = host.footprints.allotments.lock().unwrap();
         if let Some(made) = allotments.iter().find(|allotment| allotment.dir == dir) {
             return Ok(made.clone());
         }
-        let disk = HostDisk::of(&dir)?;
+        let disk = HostDisk::of_on(host.bucket(), &dir)?;
         let made = Arc::new(Allotment {
             dir,
             tally: Tally::new(),
@@ -513,24 +528,32 @@ pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
             disk,
             weight: AtomicU64::new(DEFAULT_WEIGHT),
             share: AtomicU64::new(NONE),
+            total: Arc::clone(&host.footprints.total),
         });
         allotments.push(made.clone());
         made
     };
     let counted: Vec<_> = {
-        let ledger = LEDGER.get().lock().unwrap();
+        let ledger = host.footprints.ledger.lock().unwrap();
         ledger.iter().flat_map(|ledger| ledger.values()).cloned().collect()
     };
     for footprint in counted.iter().filter(|footprint| made.holds(footprint)) {
-        allot_nearest(footprint);
+        allot_nearest_on(host, footprint);
     }
-    count_cells_in(&made.dir)?;
+    count_cells_in_on(host, &made.dir)?;
     Ok(made)
 }
 
-/// Counts the footprint of each cell in `dir` not counted yet, at any depth: one listing of each.
-/// A cell directory is one holding its description, or what its deletion or making leaves of it.
-fn count_cells_in(dir: &Path) -> io::Result<()> {
+/// [`allotment_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
+    allotment_on(crate::Host::process(), dir)
+}
+
+/// Counts the footprint of each cell in `dir` on `host` not counted yet, at any depth: one listing
+/// of each. A cell directory is one holding its description, or what its deletion or making leaves
+/// of it.
+fn count_cells_in_on(host: &Arc<crate::Host>, dir: &Path) -> io::Result<()> {
     for entry in host_fs::read_dir(dir)? {
         let path = entry?.path();
         if !host_fs::is_dir(&path) {
@@ -540,23 +563,28 @@ fn count_cells_in(dir: &Path) -> io::Result<()> {
             .iter()
             .any(|name| host_fs::exists(path.join(name)));
         if !cell {
-            count_cells_in(&path)?;
+            count_cells_in_on(host, &path)?;
             continue;
         }
         let id = dir_id(&path)?;
-        let counted =
-            LEDGER.get().lock().unwrap().as_ref().is_some_and(|ledger| ledger.contains_key(&id));
+        let counted = host
+            .footprints
+            .ledger
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|ledger| ledger.contains_key(&id));
         if !counted {
-            drop(crate::HostDir::new(&path)?);
+            drop(crate::HostDir::new_on(host, &path)?);
         }
     }
     Ok(())
 }
 
-/// Counts `footprint` in the allotment whose directory holds it, the nearest, if any does.
-fn allot_nearest(footprint: &Footprint) {
+/// Counts `footprint` in the allotment on `host` whose directory holds it, the nearest, if any does.
+fn allot_nearest_on(host: &crate::Host, footprint: &Footprint) {
     let nearest = {
-        let allotments = ALLOTMENTS.get().lock().unwrap();
+        let allotments = host.footprints.allotments.lock().unwrap();
         let holding = allotments.iter().filter(|allotment| allotment.holds(footprint));
         holding.max_by_key(|allotment| allotment.dir.as_os_str().len()).cloned()
     };
@@ -667,7 +695,7 @@ fn disk_full(disk: &HostDisk) -> Option<DiskFull> {
     let (allowance, cache) = (disk.allowance(), disk.cache.get());
     let committed = disk.cells.committed();
     if committed.saturating_add(cache) > allowance {
-        host_disk::wake_governor();
+        disk.wake_governor();
     }
     let band = disk.headroom() / 4;
     (committed.saturating_add(cache.saturating_sub(band)) > allowance).then_some(DiskFull::Disk)
@@ -693,24 +721,49 @@ impl Drop for Pledge {
     }
 }
 
-/// Every allotment made.
+/// Every allotment made on `host`.
+pub fn allotments_on(host: &crate::Host) -> Vec<Arc<Allotment>> {
+    host.footprints.allotments.lock().unwrap().clone()
+}
+
+/// Every allotment made on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn allotments() -> Vec<Arc<Allotment>> {
-    ALLOTMENTS.get().lock().unwrap().clone()
+    allotments_on(crate::Host::process())
 }
 
-/// What every allotment's cells' files take together.
+/// What every allotment's cells' files on `host` take together.
+pub fn total_on(host: &crate::Host) -> &Tally {
+    &host.footprints.total.tally
+}
+
+/// What every allotment's cells' files on the process's default host take together outside
+/// `madsim`.
+#[cfg(not(madsim))]
 pub fn total() -> &'static Tally {
-    &TOTAL.get().tally
+    total_on(crate::Host::process())
 }
 
-/// Every tenant's limit, if set.
+/// Every tenant's limit on `host`, if set.
+pub fn total_limit_on(host: &crate::Host) -> Option<u64> {
+    Some(host.footprints.total.limit.load(Ordering::Relaxed)).filter(|limit| *limit != NONE)
+}
+
+/// Every tenant's limit on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn total_limit() -> Option<u64> {
-    Some(TOTAL.get().limit.load(Ordering::Relaxed)).filter(|limit| *limit != NONE)
+    total_limit_on(crate::Host::process())
 }
 
-/// Limits every allotment together to `bytes`, or lifts the limit, without.
+/// Limits every allotment on `host` together to `bytes`, or lifts the limit, without.
+pub fn set_total_limit_on(host: &crate::Host, bytes: Option<u64>) {
+    host.footprints.total.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
+}
+
+/// Limits every allotment on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn set_total_limit(bytes: Option<u64>) {
-    TOTAL.get().limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
+    set_total_limit_on(crate::Host::process(), bytes);
 }
 
 /// `own`, a footprint's tally, counted in `tally`, or no longer, if not `more`.
@@ -831,13 +884,6 @@ impl FileLen {
 /// A cell directory of the host's, by its device and inode.
 type DirId = (u64, u64);
 
-node_local::node_local! {
-    /// The footprints of the cells of the host's this process has opened, by their directories:
-    /// kept while their cells are closed, until their directories are removed.
-    static LEDGER: std::sync::Mutex<Option<HashMap<DirId, Arc<Footprint>>>> =
-        std::sync::Mutex::new(None);
-}
-
 /// The directory at `path`'s device and inode.
 fn dir_id(path: &Path) -> io::Result<DirId> {
     use host_fs::MetadataExt as _;
@@ -845,11 +891,15 @@ fn dir_id(path: &Path) -> io::Result<DirId> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-/// The footprint of the cell whose directory is at `path`, on `disk`: the one counted already,
-/// if it was opened in this process before.
-pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footprint>> {
+/// The footprint of the cell whose directory is at `path` on `host`, on `disk`: the one counted
+/// already, if it was opened on `host` before.
+pub(crate) fn of_host_on(
+    host: &crate::Host,
+    path: &Path,
+    disk: &Arc<HostDisk>,
+) -> io::Result<Arc<Footprint>> {
     let id = dir_id(path)?;
-    let mut ledger = LEDGER.get().lock().unwrap();
+    let mut ledger = host.footprints.ledger.lock().unwrap();
     let footprints = ledger.get_or_insert_with(HashMap::new);
     if let Some(footprint) = footprints.get(&id) {
         return Ok(footprint.clone());
@@ -857,15 +907,16 @@ pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footp
     let footprint = Footprint::new(Some(host_fs::canonicalize(path)?), Some(disk.clone()));
     footprints.insert(id, footprint.clone());
     drop(ledger);
-    allot_nearest(&footprint);
+    allot_nearest_on(host, &footprint);
     Ok(footprint)
 }
 
-/// Forgets the footprint of the cell whose directory is at `path`, if it was counted: removed.
-/// `forgotten` runs between, the cell directory removed by it if it is `Ok`. A directory that is
-/// not there was counted by none; one whose identity can't be read fails it, never left counted
-/// for good.
-pub(crate) fn removing<T>(
+/// Forgets the footprint of the cell whose directory is at `path` on `host`, if it was counted:
+/// removed. `forgotten` runs between, the cell directory removed by it if it is `Ok`. A directory
+/// that is not there was counted by none; one whose identity can't be read fails it, never left
+/// counted for good.
+pub(crate) fn removing_on<T>(
+    host: &crate::Host,
     path: &Path,
     forgotten: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
@@ -875,7 +926,7 @@ pub(crate) fn removing<T>(
         Err(err) => return Err(anyhow::Error::new(err).context(format!("{}", path.display()))),
     };
     let removed = forgotten()?;
-    let mut ledger = LEDGER.get().lock().unwrap();
+    let mut ledger = host.footprints.ledger.lock().unwrap();
     let footprint = id.and_then(|id| ledger.as_mut().and_then(|ledger| ledger.remove(&id)));
     if let Some(footprint) = footprint {
         footprint.forget();

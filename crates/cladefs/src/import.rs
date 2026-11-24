@@ -64,46 +64,48 @@ const ROOT: &[u8] = b"";
 /// filesystem of the image `image`, checked: the image `reference` names in an OCI image layout
 /// (see [`OciImage::open`]), or, if `image` is a file, the image of that one layer, which
 /// `reference` cannot name. A cell that cannot be made whole is deleted.
+#[cfg(not(madsim))]
 pub async fn make_base(
     path: impl AsRef<Path>,
     capacity: u64,
     image: &Path,
     reference: Option<&str>,
 ) -> Result<(), Error> {
-    let keeping = crate::host_cell::keeping().map_err(Error::new)?;
+    let host = crate::Host::process();
+    let keeping = crate::host_cell::keeping_on(host).map_err(Error::new)?;
     let made = (capacity, crate::host_cell::DEFAULT_TENANT);
-    make_base_dir(path.as_ref(), made, keeping, |storage| fill(storage, image, reference)).await
+    make_base_dir_on(host, path.as_ref(), made, keeping, |storage| fill(storage, image, reference))
+        .await
 }
 
-/// cladefs: makes a base at `path` as [`make_base`] does, its cell kept as `keeping` says: as the
-/// extent daemon's cells keep theirs, with the host's cache of the bucket's objects, which what
-/// the bucket acknowledged of the image goes into, and the import's check reads (TASK-237).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) async fn make_base_keeping(
+/// cladefs: makes a base at `path` on `host`, its cell kept as `keeping` says (TASK-237).
+#[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
+pub(crate) async fn make_base_keeping_on(
+    host: &std::sync::Arc<crate::Host>,
     path: impl AsRef<Path>,
     (capacity, tenant): (u64, u64),
     (image, reference): (&Path, Option<&str>),
     keeping: local_cell::upload::Options,
 ) -> Result<(), Error> {
     let filled = |storage| fill(storage, image, reference);
-    make_base_dir(path.as_ref(), (capacity, tenant), keeping, filled).await
+    make_base_dir_on(host, path.as_ref(), (capacity, tenant), keeping, filled).await
 }
 
-/// Makes a cell directory at `path`, which must not exist, of `capacity` bytes, a new cell
-/// of `tenant`'s, which `fill` fills. A cell that `fill` fails to fill, or panics filling, is
-/// deleted, as is one whose making is given up on, its future dropped as `fill` fills it.
-async fn make_base_dir<F: Future<Output = anyhow::Result<()>>>(
+/// Makes a cell directory at `path` on `host`, of `capacity` bytes, a new cell of `tenant`'s.
+async fn make_base_dir_on<F: Future<Output = anyhow::Result<()>>>(
+    host: &std::sync::Arc<crate::Host>,
     path: &Path,
     (capacity, tenant): (u64, u64),
     keeping: local_cell::upload::Options,
     fill: impl FnOnce(Storage) -> F,
 ) -> Result<(), Error> {
     // cladefs: what an import its process died in left, unmade, is no cell: made anew (TASK-196).
-    if local_cell::upload::blocking(|| Storage::is_unmade(path)) {
-        Storage::delete(path).await?;
+    if local_cell::upload::blocking(|| Storage::is_unmade_on(host, path)) {
+        Storage::delete_on(host, path).await?;
     }
-    let storage = Storage::create_unmade_keeping(path, (capacity, tenant), keeping).await?;
-    let unfinished = Unfinished(Some(path.to_owned()));
+    let storage =
+        Storage::create_unmade_keeping_on(host, path, (capacity, tenant), keeping).await?;
+    let unfinished = Unfinished { host: host.clone(), path: Some(path.to_owned()) };
     // The future filling it, which owns its storage, closes it as it ends, failed or not, before
     // the deletion, which needs it closed.
     if let Err(err) = fill(storage).await {
@@ -111,7 +113,7 @@ async fn make_base_dir<F: Future<Output = anyhow::Result<()>>>(
         return Err(Error::new(err));
     }
     // Whole once filled, and closed: until then, its making's dying leaves no cell.
-    local_cell::upload::blocking(|| Storage::made(path))?;
+    local_cell::upload::blocking(|| Storage::made_on(host, path))?;
     unfinished.finish();
     Ok(())
 }
@@ -119,25 +121,28 @@ async fn make_base_dir<F: Future<Output = anyhow::Result<()>>>(
 /// A cell being made, at the path it holds, which is deleted unless it is
 /// [`finish`](Self::finish)ed: as filling it fails ([`delete`](Self::delete)), or panics, or the
 /// future making it is dropped, as this drops. The future filling it, which owns its storage, is
-/// made after this, so it is dropped first, closing the storage, which [`Storage::delete`] needs
+/// made after this, so it is dropped first, closing the storage, which [`Storage::delete_on`] needs
 /// closed.
-struct Unfinished(Option<PathBuf>);
+struct Unfinished {
+    host: std::sync::Arc<crate::Host>,
+    path: Option<PathBuf>,
+}
 
 impl Unfinished {
     /// Keeps the cell, made whole.
     fn finish(mut self) {
-        self.0 = None;
+        self.path = None;
     }
 
     /// Deletes the cell, half made.
     async fn delete(mut self) {
-        delete_half_made(self.0.take().expect("a cell being made")).await;
+        delete_half_made(self.host.clone(), self.path.take().expect("a cell being made")).await;
     }
 }
 
 /// Deletes the cell half made at `path` ([`Unfinished`]).
-async fn delete_half_made(path: PathBuf) {
-    if let Err(err) = Storage::delete(&path).await {
+async fn delete_half_made(host: std::sync::Arc<crate::Host>, path: PathBuf) {
+    if let Err(err) = Storage::delete_on(&host, &path).await {
         log::error!("cladefs: deleting the cell half made at {}: {err:#}", path.display());
     }
 }
@@ -148,12 +153,12 @@ impl Drop for Unfinished {
     /// task its host dies before leaves the cell unmade, which its next making deletes
     /// (TASK-196).
     fn drop(&mut self) {
-        let Some(path) = self.0.take() else { return };
-        let deleting = delete_half_made(path);
+        let Some(path) = self.path.take() else { return };
+        let deleting = delete_half_made(self.host.clone(), path);
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => drop(runtime.spawn(deleting)),
             // No runtime: the thread is the dropper's to block.
-            Err(_) => local_cell::upload::wait_on(deleting),
+            Err(_) => local_cell::upload::wait_on_host(self.host.local(), deleting),
         }
     }
 }
@@ -1125,7 +1130,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let made = catch_unwind(AssertUnwindSafe(|| {
-            block_on(make_base_dir(
+            block_on(make_base_dir_on(
+                crate::Host::process(),
                 &path,
                 (64 << 20, crate::host_cell::DEFAULT_TENANT),
                 keeping(),
@@ -1149,7 +1155,8 @@ mod tests {
         let path = dir.path().join("store");
         block_on(async {
             let (formatted, filling) = oneshot::channel();
-            let made = Box::pin(make_base_dir(
+            let made = Box::pin(make_base_dir_on(
+                crate::Host::process(),
                 &path,
                 (64 << 20, crate::host_cell::DEFAULT_TENANT),
                 keeping(),
@@ -1180,7 +1187,8 @@ mod tests {
         use crate::import::testing::{Entry, Kind, layer};
         let Ok(path) = std::env::var(CHILD_CELL_DIR) else { return };
         let half = layer(&[Entry::new("half", Kind::File(b"half an image"))]).unwrap();
-        let made = block_on(make_base_dir(
+        let made = block_on(make_base_dir_on(
+            crate::Host::process(),
             Path::new(&path),
             (64 << 20, crate::host_cell::DEFAULT_TENANT),
             keeping(),

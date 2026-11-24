@@ -30,7 +30,7 @@ tail and drop it as the head acknowledges it.
 
 | Question | Decision |
 |---|---|
-| Who waits for Replicated | A per-cell option: fsync waits for Ordered (today's default), Local or Replicated. In a replicated cell, sync, syncfs and unmount wait for Replicated rather than Uploaded. |
+| Who waits for Replicated | A per-cell option: fsync waits for Ordered (today's default) or Replicated (deprecated `FSYNC_LEVEL_LOCAL` maps to Ordered with a warning). In a replicated cell, sync, syncfs and unmount wait for Replicated rather than Uploaded. |
 | Copies | A majority quorum: 2f+1 members counting the writer, f+1 acknowledgements (the writer's own Local counts as one), f per cell. |
 | Authority | The bucket. The epoch and the replica set change only by conditional writes of the head. The commit path never touches the bucket, and the peers run no consensus. |
 | Placement | The writer picks its peers itself, from a pool: any other hosts of its cloud region, those sharing the cell's bucket (the user, 2026-11-19: no failure-domain rule; see Decisions: the pool is the existing peer list). |

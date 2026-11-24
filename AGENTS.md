@@ -84,6 +84,24 @@ after the batch's test run.
 
 A branch lives only as long as the batch on it: once its tests pass, it goes into main, is pushed, and is deleted, locally and on the remote. Pushing to main needs no question. Never leave finished work waiting on a branch, nor start a batch from a branch other than main: merge main in often, so that nothing drifts far from it.
 
+## NEVER accidentally revert `vendor/firecracker` when committing
+
+**WARNING:** `vendor/firecracker` is a git submodule. When another session advances it on `main`
+and you pull, merge, or rebase in an older worktree, git updates the branch's pointer to the new
+commit but leaves the submodule checkout on disk at its old commit—so `git status` shows
+`modified: vendor/firecracker`. Running `git add -A`, `git add .`, or `git commit -a` then
+**silently reverts `vendor/firecracker`** back to the stale commit (this broke `main` in
+`b781ff302` / TASK-166 and `dc265368e` / board 10879).
+
+- **Never use `git add -A`, `git add .`, or `git commit -a`.** Stage explicit file paths only.
+- **Check `git diff --cached -- vendor/firecracker`** before every commit and push: unless you
+  intentionally updated the Firecracker series, `vendor/firecracker` must not appear in your diff.
+- If `vendor/firecracker` shows modified after a pull, merge, or rebase, sync it to `HEAD` with
+  `git submodule update --init vendor/firecracker`—never `git add vendor/firecracker`.
+- Intentional Firecracker series updates must also update `.gitmodules` and
+  `vendor/firecracker.rewrites` (when rewriting a series), and pass
+  `scripts/firecracker-forward.sh origin/main HEAD`.
+
 ## Tasks: the board
 
 Tasks live on the team board, channel `tasks`: a Vercel Board (`@vercel/board`, Apache-2.0) that
@@ -231,9 +249,9 @@ reaching what those can't reach, or reach only by luck: a pure function's edge c
 malformed inputs, an interleaving. A unit test restating its code (a map's insert and remove, a
 getter, a constant) is never written; one found is deleted, saying so in a `Weakens-tests:` line.
 
-## A daemon's statics are per simulated host, or say why not
+## A daemon's state lives on Host/Daemon, not in statics (or say why)
 
-madsim runs every simulated host in one process, on one thread (doc-24): a `static` that is not `node_local!`, a `thread_local!`'s among them, is shared by all of them, and a host's state kept in one leaks to the others and outlives the host's kill (board 5450's part cache; board 7451's replicator, whose tasks ran on the process's bucket runtime after their host was lost). `scripts/rust-rules.py`'s `process-wide-static` rule finds each static in the crates the simulation runs: make it `node_local!`, or say over it why it is the process's (a count of the whole process's, a fact of the hardware, a pool of spare buffers, outside the simulation).
+madsim runs every simulated host in one process, on one thread (doc-24): a mutable `static`, a `thread_local!`'s among them, is shared by all of them, and a host's state kept in one leaks to the others and outlives the host's kill (board 5450's part cache; board 7451's replicator, whose tasks ran on the process's bucket runtime after their host was lost). `scripts/rust-rules.py`'s `process-wide-static` rule finds each static in the crates the simulation runs: keep per-host state on an explicit `Host`/`Daemon` context instead (`bucket_cell::Host`, `local_cell::Host`, `cladefs::Host`, `cladefsd::Daemon`; board 10774, board 10962), or say over it why it is the process's (a count of the whole process's, a fact of the hardware, a pool of spare buffers, outside the simulation).
 
 ## Never write a test around a bug
 

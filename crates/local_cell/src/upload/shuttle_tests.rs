@@ -216,7 +216,8 @@ impl Session {
         let never: Clock = Arc::new(|_| futures::future::pending().boxed());
         let spawn: Spawn = Arc::new(|task| drop(shuttle::future::spawn(task)));
         let options = Options { token: holder, ..Options::default() };
-        let uploader = Shared::new(
+        let uploader = Shared::new_on(
+            None,
             options,
             Budget::new(Limits::UNBOUNDED),
             (never, spawn),

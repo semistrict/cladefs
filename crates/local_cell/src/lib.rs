@@ -162,7 +162,9 @@ mod cached;
 mod dir;
 mod durability;
 mod extents;
-pub use durability::{LAG_BUCKETS, Lags, durability_lags};
+#[cfg(not(madsim))]
+pub use durability::durability_lags;
+pub use durability::{LAG_BUCKETS, Lags, durability_lags_on};
 pub use extents::{OWN_ENTRY_BYTES, Own, Sparse, own_held};
 mod framed;
 mod frames;
@@ -175,7 +177,9 @@ mod cell;
 mod deferral;
 mod host;
 mod kept;
-pub use deferral::{Deferring, defer_durability};
+#[cfg(not(madsim))]
+pub use deferral::defer_durability;
+pub use deferral::{Deferring, defer_durability_on};
 mod making;
 pub use making::Making;
 mod layout;
@@ -216,17 +220,27 @@ pub use cell::{
     NotQuiescent, Opening, Options, Parent, PartlyRelocated, Recovering, Relocated, Relocating,
     SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
-pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
+#[cfg(not(madsim))]
+pub use dir::closed;
+pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed_on};
 /// cladefs: where a cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
-pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacked, unpacks};
+#[cfg(not(madsim))]
+pub use framed::unpacked;
+pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacks};
 pub use framing::{
     buffers_bytes as framing_buffers_bytes, evict_buffers_to as evict_framing_buffers_to,
 };
 pub use host::{
+    Host, create_host_at_version_on, create_host_ephemeral_on, create_host_on, create_host_with_on,
+    delete_host_on, deleting_host, host_bucket, host_cell, host_ephemeral,
+    host_local_checkpoint_on, host_token, host_version, left_unmade_on, made_host_on, place,
+    place_host_on, remove_cell_dir_on, unmade_host_on,
+};
+#[cfg(not(madsim))]
+pub use host::{
     create_host, create_host_at_version, create_host_ephemeral, create_host_with, delete_host,
-    deleting_host, host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token,
-    host_version, left_unmade, made_host, place, place_host, remove_cell_dir, unmade_host,
+    host_local_checkpoint, left_unmade, made_host, place_host, remove_cell_dir, unmade_host,
 };
 pub use layout::{DESCRIPTION, DESCRIPTION_HEADER, Description, FORMAT, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};

@@ -24,13 +24,14 @@
 //! table's keys are.
 
 use crate::sync::{Condvar, Mutex};
-use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// The durability of a cell directory its maker defers. See the module's docs.
 pub(crate) struct Deferral {
+    /// Its host, whose deferred-durability table holds it while active.
+    host: Weak<crate::Host>,
     /// Its directory's canonical path ([`key`]).
     path: PathBuf,
     /// What its settling listed, a test's to see.
@@ -66,12 +67,6 @@ enum State {
     Failed,
 }
 
-node_local::node_local! {
-    /// The cell directories whose durability is deferred, by their canonical paths ([`key`]).
-    static DEFERRED: std::sync::Mutex<HashMap<PathBuf, Arc<Deferral>>> =
-        std::sync::Mutex::new(HashMap::new());
-}
-
 /// The key of the cell directory at `path`, which may not be there yet: its parent's canonical
 /// path and its name, as the parent is there; as it is spelled, if the parent isn't.
 pub(crate) fn key(path: &Path) -> PathBuf {
@@ -84,14 +79,15 @@ pub(crate) fn key(path: &Path) -> PathBuf {
     }
 }
 
-/// Defers the durability of the cell to be made at `path` (the module's docs), until its
+/// Defers the durability of the cell to be made at `path` on `host` (the module's docs), until its
 /// settling: the cell made there, and opened, by its maker, who says so of what is returned
 /// ([`Deferring::opened`]). If it is not made whole, the deferral ends as what is returned goes,
 /// its directory's syncs its own again, as its maker's failure removes it; if it is made, and not
 /// opened, it settles then, as a fork's making would have made it durable.
-pub fn defer_durability(path: &Path) -> Deferring {
+pub fn defer_durability_on(host: &Arc<crate::Host>, path: &Path) -> Deferring {
     let path = key(path);
     let deferral = Arc::new(Deferral {
+        host: Arc::downgrade(host),
         path: path.clone(),
         #[cfg(test)]
         listed: Mutex::new(Vec::new()),
@@ -100,8 +96,14 @@ pub fn defer_durability(path: &Path) -> Deferring {
         state: Mutex::new(Stage { state: State::Making, renaming: 0 }),
         settled: Condvar::new(),
     });
-    DEFERRED.get().lock().unwrap().insert(path, deferral.clone());
+    host.deferred.lock().unwrap().insert(path, deferral.clone());
     Deferring { deferral, opened: false }
+}
+
+/// [`defer_durability_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn defer_durability(path: &Path) -> Deferring {
+    defer_durability_on(crate::Host::process(), path)
 }
 
 /// A cell's deferred durability, as its maker holds it ([`defer_durability`]).
@@ -141,20 +143,20 @@ impl Drop for Deferring {
     }
 }
 
-/// The deferral of the cell directory at `path`, if its durability is deferred.
-pub(crate) fn of(path: &Path) -> Option<Arc<Deferral>> {
-    DEFERRED.get().lock().unwrap().get(&key(path)).cloned()
+/// The deferral of the cell directory at `path` on `host`, if its durability is deferred.
+pub(crate) fn of_on(host: &crate::Host, path: &Path) -> Option<Arc<Deferral>> {
+    host.deferred.lock().unwrap().get(&key(path)).cloned()
 }
 
-/// Ends the deferral of the cell directory at `path`, if its durability is deferred: removed.
-pub(crate) fn forget(path: &Path) {
-    DEFERRED.get().lock().unwrap().remove(&key(path));
+/// Ends the deferral of the cell directory at `path` on `host`, if its durability is deferred.
+pub(crate) fn forget_on(host: &crate::Host, path: &Path) {
+    host.deferred.lock().unwrap().remove(&key(path));
 }
 
-/// Whether the cell directory at `path` is whole in this process, unmade on the disk as its
-/// durability is deferred.
-pub(crate) fn made_here(path: &Path) -> bool {
-    of(path).is_some_and(|deferral| deferral.made())
+/// Whether the cell directory at `path` is whole on `host`, unmade on the disk as its durability
+/// is deferred.
+pub(crate) fn made_here_on(host: &crate::Host, path: &Path) -> bool {
+    of_on(host, path).is_some_and(|deferral| deferral.made())
 }
 
 impl Deferral {
@@ -238,7 +240,8 @@ impl Deferral {
 
     /// Ends its deferral: forgotten, its directory's next users syncing as their own.
     fn forget(&self) {
-        let mut deferred = DEFERRED.get().lock().unwrap();
+        let Some(host) = self.host.upgrade() else { return };
+        let mut deferred = host.deferred.lock().unwrap();
         if deferred.get(&self.path).is_some_and(|alive| std::ptr::eq(&**alive, self)) {
             deferred.remove(&self.path);
         }
@@ -338,7 +341,7 @@ mod tests {
         file.sync().unwrap();
         crate::made_host(&path).unwrap();
         deferring.opened();
-        let deferral = of(&path).unwrap();
+        let deferral = of_on(crate::Host::process(), &path).unwrap();
         // The rename stops past its start, as it renames, until let go.
         let (arrived, released) = (StdArc::new(Barrier::new(2)), StdArc::new(Barrier::new(2)));
         let (at, go) = (arrived.clone(), released.clone());

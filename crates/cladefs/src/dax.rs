@@ -357,7 +357,7 @@ enum Translation {
     /// In its second stage alone, another process's (a VMM's) or another range of this one's.
     Stage(Arc<dyn SecondStage>),
     /// In host memory: a reservation of host address space, at `base`, as long as the window.
-    Host { base: usize },
+    Host { base: usize, slabs: Arc<crate::slabs::HostSlabs> },
 }
 
 /// A mapping of a window: a range of its source's pages, from `page`, up to the window's `end`,
@@ -619,7 +619,12 @@ impl Window {
     /// A window of `size` bytes, which must be a multiple of the page size, whose pages are mapped
     /// in `second_stage`, or, without one, in this process's memory; whose stage copies on write
     /// if `copying`, which a window in this process's memory has none to.
-    fn new(size: u64, second_stage: Option<Arc<dyn SecondStage>>, copying: bool) -> Result<Self> {
+    fn new(
+        slabs: Arc<crate::slabs::HostSlabs>,
+        size: u64,
+        second_stage: Option<Arc<dyn SecondStage>>,
+        copying: bool,
+    ) -> Result<Self> {
         if size == 0 || !size.is_multiple_of(page_size()) {
             return Err(Errno::EINVAL);
         }
@@ -629,7 +634,9 @@ impl Window {
         }
         let translation = match second_stage {
             Some(stage) => Translation::Stage(stage),
-            None => Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)? },
+            None => {
+                Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)?, slabs }
+            }
         };
         let state = SharedLock::new("window", Mutex::new(WindowState::new()));
         Ok(Self { size, translation, state, copying })
@@ -654,8 +661,8 @@ impl Window {
     }
 
     fn host_base(&self) -> Option<usize> {
-        match self.translation {
-            Translation::Host { base } => Some(base),
+        match &self.translation {
+            Translation::Host { base, .. } => Some(*base),
             Translation::Stage(_) => None,
         }
     }
@@ -1083,7 +1090,7 @@ impl Window {
     fn unmap_range(&self, start: u64, len: u64, private: Private) {
         match &self.translation {
             Translation::Stage(stage) => stage.unmap(start, len, private),
-            Translation::Host { base } => {
+            Translation::Host { base, .. } => {
                 let at = base + start as usize;
                 reserve(Some(at), len as usize).expect("the window's memory reserved again");
             }
@@ -1094,8 +1101,8 @@ impl Window {
     fn map_run(&self, offset: u64, location: PhysLocation, len: u64) {
         match &self.translation {
             Translation::Stage(stage) => stage.map(offset, location, len),
-            Translation::Host { base } => {
-                let fd = crate::pages::arena_memory(location.arena).expect("the page's arena");
+            Translation::Host { base, slabs } => {
+                let fd = slabs.arena_fd(location.arena).expect("the page's arena");
                 let prot = libc::PROT_READ;
                 let at = (base + offset as usize) as *mut libc::c_void;
                 // SAFETY: Maps pages of physical memory, shared, over the window's reservation,
@@ -1126,7 +1133,7 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
-        if let Translation::Host { base } = self.translation {
+        if let Translation::Host { base, .. } = self.translation {
             // SAFETY: The reservation is the window's own.
             let status = unsafe { libc::munmap(base as *mut libc::c_void, self.size as usize) };
             debug_assert_eq!(status, 0, "unreserve a window: {}", std::io::Error::last_os_error());
@@ -1193,27 +1200,49 @@ pub(crate) struct Dax {
 }
 
 impl Dax {
+    /// A window of `size` bytes on `host` whose pages are mapped in `second_stage`, or, without
+    /// one, in this process's memory, and a handle to it.
+    pub(crate) fn new_on(
+        host: &crate::Host,
+        size: u64,
+        second_stage: Option<Arc<dyn SecondStage>>,
+    ) -> Result<(Self, DaxWindow)> {
+        Self::with_stage_on(host, size, second_stage, false)
+    }
+
     /// A window of `size` bytes whose pages are mapped in `second_stage`, or, without one, in this
     /// process's memory, and a handle to it.
+    #[cfg(all(test, not(madsim)))]
     pub fn new(size: u64, second_stage: Option<Arc<dyn SecondStage>>) -> Result<(Self, DaxWindow)> {
-        Self::with_stage(size, second_stage, false)
+        Self::new_on(crate::Host::process(), size, second_stage)
+    }
+
+    /// cladefs: as [`Dax::new_on`], a window whose `second_stage` copies on write.
+    pub(crate) fn copying_on(
+        host: &crate::Host,
+        size: u64,
+        second_stage: Arc<dyn SecondStage>,
+    ) -> Result<(Self, DaxWindow)> {
+        Self::with_stage_on(host, size, Some(second_stage), true)
     }
 
     /// cladefs: as [`Dax::new`], a window whose `second_stage` copies on write (backlog doc-13,
     /// doc-26): a writer's.
+    #[cfg(all(test, not(madsim)))]
     pub fn copying(size: u64, second_stage: Arc<dyn SecondStage>) -> Result<(Self, DaxWindow)> {
-        Self::with_stage(size, Some(second_stage), true)
+        Self::copying_on(crate::Host::process(), size, second_stage)
     }
 
-    fn with_stage(
+    fn with_stage_on(
+        host: &crate::Host,
         size: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
         copying: bool,
     ) -> Result<(Self, DaxWindow)> {
-        let window = Arc::new(Window::new(size, second_stage, copying)?);
+        let window = Arc::new(Window::new(Arc::clone(host.slabs()), size, second_stage, copying)?);
         let dax = Self {
             window: window.clone(),
-            zeros: crate::cache::zeros()?,
+            zeros: host.cache().zeros()?,
             #[cfg(all(test, target_os = "linux"))]
             _faults: None,
         };
@@ -1241,7 +1270,12 @@ impl Dax {
             stage.copy_on_write(most)?;
         }
         let copying = most.is_some();
-        let (mut dax, window) = Self::with_stage(stage.size(), Some(stage.clone()), copying)?;
+        let (mut dax, window) = Self::with_stage_on(
+            crate::Host::process(),
+            stage.size(),
+            Some(stage.clone()),
+            copying,
+        )?;
         dax._faults = Some(stage.serve(dax.window.clone())?);
         Ok((dax, window))
     }
@@ -1352,9 +1386,8 @@ impl WindowChangeKind {
 }
 
 impl WindowChanges {
-    /// cladefs: enough that a refused access's page's history reaches back past the many MAPs of a
-    /// busy guest (TASK-121).
-    const MOST: usize = 1 << 16;
+    /// Recent changes kept for DAX refusal diagnostics (board 10549).
+    const MOST: usize = 256;
 
     /// The most refused pages awaiting a change ([`WindowChanges::refused`]): the oldest go first.
     const MOST_REFUSED: usize = 1024;

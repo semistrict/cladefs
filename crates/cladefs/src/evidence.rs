@@ -63,23 +63,40 @@ struct Kept {
     predicted: Option<(Instant, Predicted)>,
 }
 
-node_local::node_local! {
-    /// What the host keeps of each version's evidence of each tenant's.
-    static HOST: Mutex<HashMap<Of, Kept>> = Mutex::new(HashMap::new());
+/// Per-host read-evidence predictions and recordings cache, owned by [`crate::Host`].
+pub(crate) struct HostEvidence(Mutex<HashMap<Of, Kept>>);
+
+impl HostEvidence {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
 }
 
-/// Forgets what the host keeps of every version's evidence, as a host restarted has: for tests
+/// Forgets what `host` keeps of every version's evidence, as a host restarted has: for tests
 /// of what is read and recorded once an interval.
 #[cfg(test)]
-pub(crate) fn forget() {
-    HOST.get().lock().unwrap().clear();
+pub(crate) fn forget_on(host: &crate::Host) {
+    host.evidence.0.lock().unwrap().clear();
 }
 
-/// How many versions' evidence of a tenant's the host keeps: for tests of which cells read it.
+/// [`forget_on`] on the process's default host outside `madsim`.
+#[cfg(all(test, not(madsim)))]
+pub(crate) fn forget() {
+    forget_on(crate::Host::process());
+}
+
+/// How many versions' evidence of a tenant's `host` keeps: for tests of which cells read it.
 #[cfg(test)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn kept_on(host: &crate::Host) -> usize {
+    host.evidence.0.lock().unwrap().len()
+}
+
+/// [`kept_on`] on the process's default host outside `madsim`.
+#[cfg(all(test, not(madsim)))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn kept() -> usize {
-    HOST.get().lock().unwrap().len()
+    kept_on(crate::Host::process())
 }
 
 /// What a cell opened for a guest reads its extents through: what its prefetch reads them into
@@ -108,7 +125,8 @@ impl Evidence {
     /// `reading` says, opened now: its version's prediction, read now if the host read none of
     /// recordings in the interval, and read ahead; and its guest's boot, recorded if no fork here
     /// began a recording of the version in the interval.
-    pub(crate) fn opened(
+    pub(crate) fn opened_on(
+        host_ctx: &Arc<crate::Host>,
         forked: Forked,
         own: CellId,
         bucket: Arc<RoutedBucket>,
@@ -119,7 +137,7 @@ impl Evidence {
         let now = Instant::now();
         let fresh = |at: &Instant| now.saturating_duration_since(*at) < EVERY;
         let runtime = reading.fetcher.runtime().clone();
-        let mut host = HOST.get().lock().unwrap();
+        let mut host = host_ctx.evidence.0.lock().unwrap();
         // What it read or recorded an interval ago or more it keeps no more, but for `of`.
         host.retain(|kept, Kept { recorded, predicted }| {
             *kept == of

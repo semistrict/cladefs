@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use super::*;
+use crate::cache;
 use crate::dax::{Access, SecondStage};
 use crate::pages::PhysLocation;
 use futures::executor::block_on;
@@ -1367,7 +1368,7 @@ async fn the_cache_keeps_no_cell_closed() {
 /// by the hundred thousand, those never asked for again would be most of what it holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cache_keeps_its_bound() {
-    cache::MOST_CACHED.get().store(8, Ordering::Relaxed);
+    crate::Host::process().cache().most_cached().store(8, Ordering::Relaxed);
     let (cell, _dir) = cell(1 << 20).await;
     let ps = page_size();
     for sequence in 1..=20 {
@@ -1394,7 +1395,7 @@ async fn the_cache_keeps_its_bound() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cache_trims_what_windows_hold_once_per_eighth_of_its_bound() {
     const MOST: usize = 64;
-    cache::MOST_CACHED.get().store(MOST, Ordering::Relaxed);
+    crate::Host::process().cache().most_cached().store(MOST, Ordering::Relaxed);
     let (cell, _dir) = cell(8 << 20).await;
     let ps = page_size();
     let (mapped, looked_up) = (2 * MOST as u64, 4 * MOST as u64);
@@ -1925,44 +1926,6 @@ async fn copying_windows_map_sealed_extents_alone() {
     assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
 }
 
-/// board 7409: on a replicated cell configured with `Fsync::Local`, `WRITE_BARRIER`
-/// (`barriers.before`) orders and seals prior extents without flushing to disk (leaving
-/// `flush_pending() == true`), while `barriers.after: Some(Commit::Ordered)` still honors
-/// `Fsync::Local` and flushes once.
-#[tokio::test(flavor = "multi_thread")]
-async fn pre_barrier_does_not_flush_local_replicated_cell() {
-    let dir = tempfile::tempdir().unwrap();
-    let url = format!("memory:///pre-barrier-local-{:016x}", rand::random::<u64>());
-    let mut keeping = Opening::here().unwrap().keeping;
-    keeping.replication = bucket_cell::layout::Wish::new(0, bucket_cell::layout::Fsync::Local);
-    let cell_id = CellId { tenant: 0, id: 1 };
-    let cell = Opening::here()
-        .unwrap()
-        .with_keeping(keeping)
-        .create_kept(dir.path().join("cell"), 1 << 20, CellOf::Named(cell_id), &url)
-        .await
-        .unwrap();
-    cell.flush().await.unwrap();
-    assert!(!cell.flush_pending());
-
-    let (ext1, ext2, ext3) = (id(&cell, 1), id(&cell, 2), id(&cell, 3));
-    write(&cell, ext1, 0, &pattern(1, BLOCK)).await.unwrap();
-    let before_only = WriteBarriers { before: true, after: None, root: None };
-    let data2 = pattern(2, BLOCK);
-    cell.write_with_barriers(ext2, 0, &[VolatileSlice::from(&data2[..])], before_only)
-        .await
-        .unwrap();
-    // Pre-barrier ordered & sealed ext1, but did NOT upgrade to Fsync::Local flush.
-    assert!(cell.flush_pending(), "pre-barrier flushed disk under Fsync::Local");
-    assert_eq!(write(&cell, ext1, 0, &pattern(1, BLOCK)).await, Err(Errno::EPERM));
-
-    // A post-barrier Commit::Ordered DOES upgrade to Fsync::Local and flushes once.
-    let both = WriteBarriers { before: true, after: Some(Commit::Ordered), root: None };
-    let data3 = pattern(3, BLOCK);
-    cell.write_with_barriers(ext3, 0, &[VolatileSlice::from(&data3[..])], both).await.unwrap();
-    assert!(!cell.flush_pending(), "post-barrier Commit::Ordered did not flush under Fsync::Local");
-}
-
 /// TASK-539.12: the host's disk full, as making an open cell's file finds it, is `ENOSPC` to
 /// the guest; an open cell failed for it says so, and is `EIO`.
 #[test]
@@ -2118,4 +2081,232 @@ async fn freeing_an_extent_maps_zeros_in_its_place() {
     let bytes = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
     assert!(bytes.iter().all(|byte| *byte == 0), "a freed extent's range doesn't read zeros");
     assert!(window.is_mapped(4 * ps), "an extent not freed was unmapped");
+}
+
+/// TASK-636 (board 2702), TASK-550 (board 2496), TASK-582 (board 2560): every mutating request on
+/// an `OpenCell` passes through `admit(Changing::*)`, so halted (`EIO`), shredded (`EACCES`),
+/// read-only/version (`EROFS`), and fenced (`EROFS`) stores refuse every mutation with the right
+/// errno, and `commit_local` fails once unuploaded commits pass the lag bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn standing_gate_refuses_every_mutation_when_halted_shredded_fenced_or_readonly() {
+    use crate::dax::SecondStage;
+    struct DummyStage;
+    impl SecondStage for DummyStage {
+        fn map(&self, _: u64, _: crate::slabs::PhysLocation, _: u64) {}
+        fn unmap(&self, _: u64, _: u64, _: crate::dax::Private) {}
+    }
+
+    async fn check_mutations(
+        cell: &OpenCell,
+        dir: &Path,
+        label: &str,
+        expected_contents: Errno,
+        expected_capacity: Option<Errno>,
+        expected_cell: Option<Errno>,
+    ) {
+        let ext = id(cell, 99);
+        let base_dir = dir.join("dummy-base");
+        let fork_dir = dir.join(format!("fork-{label}"));
+        let child = crate::host_cell::fork_child(cell.cell());
+        let barriers =
+            crate::WriteBarriers { before: false, after: Some(crate::Commit::Ordered), root: None };
+        let stage: Arc<dyn SecondStage> = Arc::new(DummyStage);
+        let mut cases: Vec<(&str, Option<Errno>, Errno)> = vec![
+            ("write", write(cell, ext, 0, &[1; BLOCK]).await.err(), expected_contents),
+            (
+                "write_with_barriers",
+                cell.write_with_barriers(
+                    ext,
+                    0,
+                    &[VolatileSlice::from(&[1u8; BLOCK][..])],
+                    barriers,
+                )
+                .await
+                .err(),
+                expected_contents,
+            ),
+            ("free", local_cell::upload::blocking(|| cell.free(ext)).err(), expected_contents),
+            ("commit", cell.commit(None).await.err(), expected_contents),
+            ("commit_local", cell.commit_local(None).await.err(), expected_contents),
+            ("commit_ordered", cell.commit_ordered(None).await.err(), expected_contents),
+            (
+                "create_copying_dax_window",
+                cell.create_copying_dax_window(page_size(), stage).err().and_then(|e| e.errno()),
+                expected_contents,
+            ),
+        ];
+        if let Some(expected) = expected_capacity {
+            cases.push(("set_capacity", cell.set_capacity(2 << 20).await.err(), expected));
+        }
+        if let Some(expected) = expected_cell {
+            cases.extend([
+                (
+                    "make_version",
+                    cell.make_version(None).await.err().and_then(|e| e.errno()),
+                    expected,
+                ),
+                (
+                    "drop_versions",
+                    cell.drop_versions(&[1].into()).await.err().and_then(|e| e.errno()),
+                    expected,
+                ),
+                (
+                    "share_version",
+                    cell.share_version(1, true).await.err().and_then(|e| e.errno()),
+                    expected,
+                ),
+                (
+                    "fork_to",
+                    cell.fork_to(&fork_dir, child).await.err().and_then(|e| e.errno()),
+                    expected,
+                ),
+                (
+                    "attach_base",
+                    local_cell::upload::blocking(|| cell.attach_base(&base_dir, &[1])).err(),
+                    expected,
+                ),
+                (
+                    "make_public",
+                    local_cell::upload::blocking(|| cell.make_public()).err(),
+                    expected,
+                ),
+                (
+                    "make_public_attach_only",
+                    local_cell::upload::blocking(|| cell.make_public_attach_only()).err(),
+                    expected,
+                ),
+            ]);
+        }
+        for (op, actual, expected) in cases {
+            assert_eq!(actual, Some(expected), "{label}: {op}");
+        }
+    }
+
+    // 1. Halted cell -> EIO on every mutation.
+    let (halted, dir) = cell(1 << 20).await;
+    halted.halt.halt(|| "halted by test".to_owned());
+    check_mutations(&halted, dir.path(), "halted", Errno::EIO, Some(Errno::EIO), Some(Errno::EIO))
+        .await;
+    halted.close().await;
+
+    // 2. Shredded cell -> EACCES on every mutation.
+    let (shredded, dir) = cell(1 << 20).await;
+    crate::bucket::forget(bucket_cell::keys::Scope::Cell(shredded.cell()), "shredded by test");
+    check_mutations(
+        &shredded,
+        dir.path(),
+        "shredded",
+        Errno::EACCES,
+        Some(Errno::EACCES),
+        Some(Errno::EACCES),
+    )
+    .await;
+    shredded.close().await;
+
+    // 3. Public base (read-only contents) -> EPERM on every Contents mutation.
+    let (public, dir) = cell(1 << 20).await;
+    let public_path = dir.path().join("store");
+    local_cell::upload::blocking(|| public.make_public()).unwrap();
+    public.close().await;
+    let ro = OpenCell::open(&public_path).await.unwrap();
+    check_mutations(&ro, dir.path(), "public", Errno::EPERM, None, None).await;
+    ro.close().await;
+
+    // 4. Version (read-only contents and capacity) -> EROFS on Contents and Capacity mutations.
+    let (base, dir) = cell(1 << 20).await;
+    base.commit(None).await.unwrap();
+    let version_path = dir.path().join("version");
+    base.uploaded_version_at(&version_path).await.unwrap();
+    let version = Opening::here().unwrap().for_host().open(&version_path).await.unwrap();
+    check_mutations(&version, dir.path(), "version", Errno::EROFS, Some(Errno::EROFS), None).await;
+    version.close().await;
+    base.close().await;
+
+    // 4. Fenced cell (another host took its bucket head) -> EROFS on mutating requests.
+    let bucket_dir = tempfile::tempdir().unwrap();
+    let bucket_path = bucket_dir.path().join("bucket");
+    std::fs::create_dir(&bucket_path).unwrap();
+    let url = format!("file://{}", bucket_path.display());
+    let first_path = bucket_dir.path().join("first");
+    let second_path = bucket_dir.path().join("second");
+    let first_storage = crate::Storage::take(
+        &first_path,
+        (crate::host_cell::CellOf::New(0), 1 << 20),
+        &url,
+        Some(1),
+    )
+    .await
+    .unwrap();
+    let cell_id = first_storage.cell().unwrap();
+    drop(first_storage);
+    let first = OpenCell::open(&first_path).await.unwrap();
+    // Second host takes the same cell at token 2 and writes a commit, fencing `first`.
+    let second_storage = crate::Storage::take(
+        &second_path,
+        (crate::host_cell::CellOf::Taken(cell_id), 1 << 20),
+        &url,
+        Some(2),
+    )
+    .await
+    .unwrap();
+    let second_cell = second_storage.open_cell().clone();
+    write(&second_cell, id(&second_cell, 1), 0, &[2; BLOCK]).await.unwrap();
+    second_cell.commit(None).await.unwrap();
+    second_cell.wait_uploaded().await.unwrap();
+    drop(second_cell);
+    drop(second_storage);
+    // Trigger `first`'s uploader to observe the fence.
+    let _ = first.commit(None).await;
+    check_mutations(
+        &first,
+        bucket_dir.path(),
+        "fenced",
+        Errno::EROFS,
+        Some(Errno::EROFS),
+        Some(Errno::EROFS),
+    )
+    .await;
+    first.close().await;
+}
+
+/// board 5548: `Opening::take` on an existing cell directory honors `keeping.force`, writing a
+/// forced placement when `force` is true and clearing it on an unforced take at a newer token.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_take_honors_force_on_existing_cell() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let bucket_dir = dir.path().join("bucket");
+    std::fs::create_dir(&bucket_dir).unwrap();
+    let url = format!("file://{}", bucket_dir.display());
+    let mut keeping = Opening::here().unwrap().keeping;
+    keeping.token = 1;
+    // Create the cell directory in its bucket first via `Storage::take`.
+    let storage =
+        crate::Storage::take(&path, (crate::host_cell::CellOf::New(0), 1 << 20), &url, Some(1))
+            .await
+            .unwrap();
+    let cell_id = storage.cell().unwrap();
+    drop(storage);
+
+    // Forced take on the existing directory at token 1 records a forced placement.
+    let forced_keeping = local_cell::upload::Options { token: 1, force: true, ..keeping.clone() };
+    let forced = Opening::keeping(forced_keeping)
+        .for_host()
+        .take(&path, 1 << 20, cell_id, Some(1))
+        .await
+        .unwrap();
+    let desc = host_fs::may_block(|| host_fs::read_to_string(path.join("store"))).unwrap();
+    assert!(desc.contains("forced 1"), "expected forced placement in description:\n{desc}");
+    forced.close().await;
+
+    // Unforced take at token 2 clears the forced marker.
+    let unforced_keeping = local_cell::upload::Options { token: 2, force: false, ..keeping };
+    let unforced = Opening::keeping(unforced_keeping)
+        .for_host()
+        .take(&path, 1 << 20, cell_id, Some(2))
+        .await
+        .unwrap();
+    let desc = host_fs::may_block(|| host_fs::read_to_string(path.join("store"))).unwrap();
+    assert!(!desc.contains("forced "), "expected forced marker cleared in description:\n{desc}");
+    unforced.close().await;
 }

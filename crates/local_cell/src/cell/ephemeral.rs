@@ -155,7 +155,7 @@ impl LocalCheckpoint {
         &self.keys
     }
 
-    fn encode(&self, encrypting: (&extent_frame::Secret, extent_frame::KeyId)) -> Vec<u8> {
+    fn encode(&self, encrypting: impl bucket_cell::layout::KeyArg) -> Vec<u8> {
         let mut own = self.own.clone();
         own.sort_unstable_by_key(|(id, _)| *id);
         let rest = Rest {
@@ -177,7 +177,7 @@ impl LocalCheckpoint {
             entries,
             crate::layout::versioned(&rest),
             &[],
-            encrypting,
+            encrypting.as_key(),
             bucket_cell::layout::FORMAT.current,
         )
     }
@@ -240,7 +240,7 @@ impl LocalCheckpoint {
     pub(crate) fn write<D: Dir>(
         &self,
         dir: &D,
-        encrypting: (&extent_frame::Secret, extent_frame::KeyId),
+        encrypting: impl bucket_cell::layout::KeyArg,
     ) -> Result<(), Error> {
         dir.replace(LOCAL_CHECKPOINT, &self.encode(encrypting))
             .context("writing an ephemeral cell's local checkpoint")?;
@@ -582,7 +582,7 @@ impl<D: Dir> LocalCell<D> {
         bucket: Option<&str>,
         kind: Option<Kind>,
         checkpoint: &LocalCheckpoint,
-        encrypting: (&extent_frame::Secret, extent_frame::KeyId),
+        encrypting: impl bucket_cell::layout::KeyArg,
         extra: impl FnOnce(&mut crate::Making<'_, D>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         Self::make_described(dir, description, bucket, kind, (None, true), |making| {
@@ -684,7 +684,7 @@ impl<D: Dir> LocalCell<D> {
             .collect();
 
         // All covered segments are already framed durably in `segments/<cell>/<n>`.
-        ephemeral.local_checkpoint(given_back).write(&*self.dir, self.keys.encrypting())?;
+        ephemeral.local_checkpoint(given_back).write(&*self.dir, self.keys.try_encrypting()?)?;
         self.start.with(Mutex::lock).write(&*self.dir, ephemeral.based.last_commit)?;
         for (number, _) in &covered {
             logs.by_segment.remove(&segment(*number));

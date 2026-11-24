@@ -4667,6 +4667,38 @@ fn writers_wait_for_a_cell_its_writer_left_to_the_daemons_work() {
     assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 }
 
+/// A metadata reader can become the cell's last owner when its writer closes during inspection.
+#[test]
+fn inspections_close_the_last_cell_reference_away_from_the_reader() {
+    use futures::FutureExt as _;
+    use std::sync::Arc;
+
+    struct Closed(std::sync::mpsc::Sender<std::thread::ThreadId>);
+    impl Drop for Closed {
+        fn drop(&mut self) {
+            self.0.send(std::thread::current().id()).unwrap();
+        }
+    }
+
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let cell =
+        Arc::new(control(crate::OpenCell::create(dir.path().join("store"), 1 << 24)).unwrap());
+    let id = cell.cell();
+    let (closed, observed) = std::sync::mpsc::channel();
+    cell.keep_until_closed(Box::new(Closed(closed)));
+    let reader = std::thread::current().id();
+    let read = control(async {
+        super::cells::inspect(super::Daemon::process(), cell.clone(), |open| {
+            // The writer releases its reference while the reader is taking its snapshot.
+            crate::open_cell::release(cell).now_or_never().unwrap();
+            open.cell()
+        })
+    });
+    assert_eq!(read, id);
+    assert_ne!(observed.recv_timeout(std::time::Duration::from_secs(10)).unwrap(), reader);
+}
+
 /// TASK-644: a fork of a version made right after its writer's connection went, its cell closing
 /// on a blocking thread, its uploader uploading its last commits, the version's among them, waits
 /// for the close before it reads the bucket for the version. Before, it found no open cell
@@ -7432,7 +7464,9 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
 /// serving daemon's incarnation.
 #[test]
 fn hosts_are_decommissioned_through_the_control_api() {
-    use super::control::proto::EphemeralHost;
+    use super::control::proto::{
+        DecommissionHostRequest, EphemeralHost, GetStatsRequest, ListEphemeralHostsRequest,
+    };
     use bucket_cell::layout::{self, Kind};
     host();
     let ps = page_size() as usize;
@@ -7447,7 +7481,7 @@ fn hosts_are_decommissioned_through_the_control_api() {
     let tenants = dir.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
     std::thread::spawn(move || super::control::serve_control(listener, tenants));
-    let api = super::control::Client::connect(&control_socket).unwrap();
+    let api = crate::testing::Control::connect(&control_socket).unwrap();
     let parent = CellClient::connect(&socket, dir.path().join("parent"), 1 << 24).unwrap();
     write(&parent, ExtentId { cell: parent.cell(), sequence: 1 }, 0, &pattern(1, ps)).unwrap();
     parent.commit(Some(b"root")).unwrap();
@@ -7476,21 +7510,62 @@ fn hosts_are_decommissioned_through_the_control_api() {
         fork(name).unwrap();
     }
     assert_eq!(references(), 3);
-    assert_eq!(api.stats(None).unwrap().incarnation, incarnation);
+    assert_eq!(
+        api.call(async |client| {
+            client.get_stats(GetStatsRequest { ..Default::default() }).await
+        })
+        .unwrap()
+        .incarnation,
+        incarnation
+    );
 
     // Its own, or an even one, which no host makes: refused, nothing retired.
-    assert_eq!(api.decommission_host(incarnation, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    assert_eq!(
+        api.call(async |client| {
+            client
+                .decommission_host(DecommissionHostRequest { incarnation: incarnation, most: 0 })
+                .await
+        })
+        .map_err(errno),
+        Err(Some(Errno::EINVAL))
+    );
     let even = incarnation ^ 1;
-    assert_eq!(api.decommission_host(even, 0).map_err(errno), Err(Some(Errno::EINVAL)));
-    assert_eq!(api.decommission_host(0, 0).map_err(errno), Err(Some(Errno::EINVAL)));
+    assert_eq!(
+        api.call(async |client| {
+            client.decommission_host(DecommissionHostRequest { incarnation: even, most: 0 }).await
+        })
+        .map_err(errno),
+        Err(Some(Errno::EINVAL))
+    );
+    assert_eq!(
+        api.call(async |client| {
+            client.decommission_host(DecommissionHostRequest { incarnation: 0, most: 0 }).await
+        })
+        .map_err(errno),
+        Err(Some(Errno::EINVAL))
+    );
     assert_eq!(references(), 3);
     let listed = EphemeralHost { incarnation, references: 3, decommissioned: false };
-    assert_eq!(api.ephemeral_hosts().unwrap(), vec![listed]);
+    assert_eq!(
+        api.call(async |client| {
+            client.list_ephemeral_hosts(ListEphemeralHostsRequest {}).await
+        })
+        .map(|response| response.hosts)
+        .unwrap(),
+        vec![listed]
+    );
 
     // The daemon serving of another incarnation now, the lost host's, as its log printed it,
     // decommissioned: two at a time, then the rest, then none.
     let serving = crate::ephemeral_host::open(&serving_dir).unwrap();
-    assert_eq!(api.stats(None).unwrap().incarnation, serving.incarnation());
+    assert_eq!(
+        api.call(async |client| {
+            client.get_stats(GetStatsRequest { ..Default::default() }).await
+        })
+        .unwrap()
+        .incarnation,
+        serving.incarnation()
+    );
     let printed = crate::ephemeral_host::opened(&lost_dir, incarnation);
     let given = printed.rsplit(' ').next().unwrap();
     let parsed = base32_id::parse(given).unwrap();
@@ -7498,13 +7573,41 @@ fn hosts_are_decommissioned_through_the_control_api() {
     let done = |response: super::control::proto::DecommissionHostResponse| {
         (response.retired, response.left)
     };
-    assert_eq!(api.decommission_host(parsed, 2).map(done).unwrap(), (2, 1));
+    assert_eq!(
+        api.call(async |client| {
+            client.decommission_host(DecommissionHostRequest { incarnation: parsed, most: 2 }).await
+        })
+        .map(done)
+        .unwrap(),
+        (2, 1)
+    );
     assert_eq!(references(), 1);
-    assert_eq!(api.decommission_host(parsed, 0).map(done).unwrap(), (1, 0));
+    assert_eq!(
+        api.call(async |client| {
+            client.decommission_host(DecommissionHostRequest { incarnation: parsed, most: 0 }).await
+        })
+        .map(done)
+        .unwrap(),
+        (1, 0)
+    );
     assert_eq!(references(), 0);
-    assert_eq!(api.decommission_host(parsed, 0).map(done).unwrap(), (0, 0));
+    assert_eq!(
+        api.call(async |client| {
+            client.decommission_host(DecommissionHostRequest { incarnation: parsed, most: 0 }).await
+        })
+        .map(done)
+        .unwrap(),
+        (0, 0)
+    );
     let listed = EphemeralHost { incarnation, references: 0, decommissioned: true };
-    assert_eq!(api.ephemeral_hosts().unwrap(), vec![listed]);
+    assert_eq!(
+        api.call(async |client| {
+            client.list_ephemeral_hosts(ListEphemeralHostsRequest {}).await
+        })
+        .map(|response| response.hosts)
+        .unwrap(),
+        vec![listed]
+    );
 
     // The lost host alive after all: its next fork refused, leaving nothing in the bucket; its
     // start refused.
@@ -7829,4 +7932,33 @@ fn large_writes_waiting_for_replies_do_not_gather_unbounded_payloads() {
         "peak heap {} MiB for {WRITES} concurrent 4 MiB writes (expected < 16 MiB)",
         peak >> 20
     );
+}
+
+/// board 5386: a write `OPEN` of a public base (which is read-only) with no other holder must
+/// check `may_write` before publishing the hold and close the `OpenCell` through `release().await`
+/// rather than dropping it synchronously on the runtime, returning `EROFS` cleanly.
+#[test]
+fn refused_write_open_of_public_base_releases_cleanly_with_erofs() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("public-base");
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    // Create the cell, mark it public, and close it so no other holder keeps it open.
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let cell = OpenCell::create(&store, 1 << 24).await.unwrap();
+        local_cell::upload::blocking(|| cell.make_public()).unwrap();
+        cell.close().await;
+    });
+
+    // Opening the public base for writing must fail with EPERM and not panic or leak the hold.
+    let err = CellClient::connect(&socket, &store, 1 << 24).map(drop).unwrap_err();
+    assert_eq!(err.errno(), Some(Errno::EPERM), "expected EPERM, got {err:#}");
+
+    // A second attempt also gets EPERM (the first did not leave a wedged hold behind).
+    let again = CellClient::connect(&socket, &store, 1 << 24).map(drop).unwrap_err();
+    assert_eq!(again.errno(), Some(Errno::EPERM), "expected EPERM again, got {again:#}");
 }

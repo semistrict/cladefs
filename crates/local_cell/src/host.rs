@@ -13,28 +13,165 @@ use crate::layout::{CellFile, DESCRIPTION, Description};
 use anyhow::{Context as _, Error};
 use bucket_cell::cell::Kind;
 use extent_frame::segment::CellId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Makes a new cell at `path`, which must be a directory holding no cell, as `description`
-/// describes. cladefs: its description names `bucket`, the URL of the bucket its cell is kept in,
-/// as every host's cell's does (TASK-165.6); it is unmade until its maker says it is whole
-/// ([`LocalCell::made`], TASK-196). Its description is made last: until it is durable, the
-/// directory is no cell, whatever else is in it. Opening it takes its cell in the bucket
-/// ([`LocalCell::recover`], `crate::upload`), and its cell, of `kind`, whose cell it is (TASK-364,
-/// doc-20).
+/// Explicit per-host state for `local_cell` (board 10962): owns the `bucket_cell::Host`, page
+/// cache, directory locks/claims, disk footprints, uploader count, bucket Tokio runtime,
+/// durability lag histogram, hot replication buffer budget, failed-making unmade set, unpacked
+/// part cache, and deferred-durability table.
+pub struct Host {
+    bucket: Arc<bucket_cell::Host>,
+    pages: OnceLock<Arc<crate::pages::PageCache>>,
+    pub(crate) dirs: crate::dir::Locks,
+    pub(crate) footprints: crate::footprint::State,
+    pub(crate) uploaders: tokio::sync::watch::Sender<usize>,
+    pub(crate) bucket_runtime: crate::upload::BucketRuntime,
+    pub(crate) durability_lags: Mutex<crate::durability::Lags>,
+    pub(crate) hot_budget: Arc<crate::replicate::HotBudget>,
+    pub(crate) left_unmade: Mutex<HashSet<PathBuf>>,
+    unpacked: Arc<crate::framed::Unpacked>,
+    pub(crate) deferred: Mutex<HashMap<PathBuf, Arc<crate::deferral::Deferral>>>,
+}
+
+impl Host {
+    /// Creates a fresh, isolated `local_cell` host context with its own `bucket_cell::Host`.
+    pub fn new() -> Arc<Self> {
+        Self::with_bucket(bucket_cell::Host::new())
+    }
+
+    /// Creates a fresh `local_cell` host context backed by `bucket`.
+    pub fn with_bucket(bucket: Arc<bucket_cell::Host>) -> Arc<Self> {
+        let unpacked = crate::framed::Unpacked::new(Arc::clone(bucket.parts()));
+        Arc::new(Self {
+            bucket,
+            pages: OnceLock::new(),
+            dirs: crate::dir::Locks::new(),
+            footprints: crate::footprint::State::new(),
+            uploaders: tokio::sync::watch::channel(0).0,
+            bucket_runtime: crate::upload::BucketRuntime::new(),
+            durability_lags: Mutex::new(crate::durability::Lags::new()),
+            hot_budget: crate::replicate::HotBudget::new(),
+            left_unmade: Mutex::new(HashSet::new()),
+            unpacked,
+            deferred: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// The process's default `local_cell` host context outside `madsim`.
+    #[cfg(not(madsim))]
+    pub fn process() -> &'static Arc<Self> {
+        // Outside the simulation: single default host context for standalone CLIs and tests.
+        static PROCESS: OnceLock<Arc<Host>> = OnceLock::new();
+        PROCESS.get_or_init(|| Self::with_bucket(Arc::clone(bucket_cell::Host::process())))
+    }
+
+    /// The underlying `bucket_cell::Host`.
+    pub fn bucket(&self) -> &Arc<bucket_cell::Host> {
+        &self.bucket
+    }
+
+    /// This host's shared cell page cache, created on first use.
+    pub fn pages(&self) -> &Arc<crate::pages::PageCache> {
+        self.pages.get_or_init(|| crate::pages::PageCache::new(crate::pages::Options::default()))
+    }
+
+    /// This host's unpacked-part cache (sharing `bucket().parts()`).
+    pub fn unpacked(&self) -> &Arc<crate::framed::Unpacked> {
+        &self.unpacked
+    }
+
+    /// How many cells' uploaders run on this host.
+    pub fn uploaders(&self) -> tokio::sync::watch::Receiver<usize> {
+        crate::upload::uploaders_on(self)
+    }
+
+    /// How long this host's cells' commits waited to be made durable.
+    pub fn durability_lags(&self) -> crate::durability::Lags {
+        crate::durability::durability_lags_on(self)
+    }
+
+    /// Total bytes held in hot replication buffers on this host.
+    pub fn hot_bytes(&self) -> u64 {
+        crate::replicate::hot_bytes_on(self)
+    }
+
+    /// Sets this host's soft cap on hot replication buffers.
+    pub fn size_hot_to(&self, limit: u64) {
+        crate::replicate::size_hot_to_on(self, limit);
+    }
+
+    /// Evicts persisted hot replication chunks on this host down to `target`.
+    pub fn evict_hot_to(&self, target: u64) -> u64 {
+        crate::replicate::evict_hot_to_on(self, target)
+    }
+
+    /// This host's bucket Tokio runtime.
+    pub fn bucket_runtime(&self) -> Result<&tokio::runtime::Runtime, crate::upload::Failure> {
+        crate::upload::bucket_runtime_on(self)
+    }
+
+    /// Runs `future` on this host's bucket runtime.
+    pub fn block_on<F: std::future::Future>(
+        &self,
+        future: F,
+    ) -> Result<F::Output, crate::upload::Failure> {
+        crate::upload::block_on_host(self, future)
+    }
+
+    /// Runs `future` on this host's bucket runtime, panicking if the runtime cannot be made.
+    pub fn wait_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        crate::upload::wait_on_host(self, future)
+    }
+}
+
+/// Makes a new cell at `path` on `host`, which must be a directory holding no cell, as
+/// `description` describes.
+pub fn create_host_on(
+    host: &Arc<Host>,
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+) -> Result<(), Error> {
+    create_host_with_on(host, path, description, bucket, kind, |_| Ok(()))
+}
+
+/// [`create_host_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn create_host(
     path: &Path,
     description: Description,
     bucket: &str,
     kind: Kind,
 ) -> Result<(), Error> {
-    create_host_with(path, description, bucket, kind, |_| Ok(()))
+    create_host_on(Host::process(), path, description, bucket, kind)
 }
 
-/// cladefs: makes a new cell at `path` as [`create_host`] does, `extra` writing what else its
-/// directory holds into its making first, made durable with its description at once
+/// cladefs: makes a new cell at `path` on `host` as [`create_host_on`] does, `extra` writing what
+/// else its directory holds into its making first, made durable with its description at once
 /// ([`Making`](crate::Making), board 7420).
+pub fn create_host_with_on(
+    host: &Arc<Host>,
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+    extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    LocalCell::make_with(
+        &HostDir::new_on(host, path)?,
+        description,
+        Some(bucket),
+        Some(kind),
+        None,
+        extra,
+    )
+}
+
+/// [`create_host_with_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn create_host_with(
     path: &Path,
     description: Description,
@@ -42,12 +179,30 @@ pub fn create_host_with(
     kind: Kind,
     extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
 ) -> Result<(), Error> {
-    LocalCell::make_with(&HostDir::new(path)?, description, Some(bucket), Some(kind), None, extra)
+    create_host_with_on(Host::process(), path, description, bucket, kind, extra)
 }
 
-/// cladefs: makes a new cell at `path` as [`create_host`] does, a cell at the version `version` of
-/// its cell: the cell's state at the version, which nothing writes, and which forks fork
-/// (doc-18, doc-20). Opening it reads the version from the bucket, once the cell's head names it.
+/// cladefs: makes a new cell at `path` on `host` as [`create_host_on`] does, a cell at the version
+/// `version` of its cell.
+pub fn create_host_at_version_on(
+    host: &Arc<Host>,
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+    version: u64,
+) -> Result<(), Error> {
+    LocalCell::make_copy(
+        &HostDir::new_on(host, path)?,
+        description,
+        Some(bucket),
+        Some(kind),
+        Some(version),
+    )
+}
+
+/// [`create_host_at_version_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn create_host_at_version(
     path: &Path,
     description: Description,
@@ -55,17 +210,17 @@ pub fn create_host_at_version(
     kind: Kind,
     version: u64,
 ) -> Result<(), Error> {
-    LocalCell::make_copy(&HostDir::new(path)?, description, Some(bucket), Some(kind), Some(version))
+    create_host_at_version_on(Host::process(), path, description, bucket, kind, version)
 }
 
-/// cladefs: the cell at `path` is whole, as its maker made it ([`LocalCell::made`], TASK-196): the
-/// file saying it is not goes, durably, its maker having let it go.
-pub fn made_host(path: &Path) -> Result<(), Error> {
+/// cladefs: the cell at `path` on `host` is whole, as its maker made it ([`LocalCell::made`],
+/// TASK-196): the file saying it is not goes, durably, its maker having let it go.
+pub fn made_host_on(host: &Arc<Host>, path: &Path) -> Result<(), Error> {
     // cladefs: its durability deferred, its `UNMADE` file goes as it settles (board 7420).
-    if crate::deferral::of(path).is_some_and(|deferral| deferral.mark_made()) {
+    if crate::deferral::of_on(host, path).is_some_and(|deferral| deferral.mark_made()) {
         return Ok(());
     }
-    let dir = HostDir::new(path)?;
+    let dir = HostDir::new_on(host, path)?;
     let made = match dir.remove(UNMADE) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         removed => removed,
@@ -73,50 +228,56 @@ pub fn made_host(path: &Path) -> Result<(), Error> {
     made.and_then(|()| dir.sync_dir("")).with_context(|| format!("making {} whole", path.display()))
 }
 
-node_local::node_local! {
-    /// cladefs: the cell directories that makings which failed in this process left, and failed
-    /// to remove ([`left_unmade`]), by their canonical paths (`deferral::key`).
-    static LEFT: std::sync::Mutex<HashSet<PathBuf>> = std::sync::Mutex::new(HashSet::new());
+/// [`made_host_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn made_host(path: &Path) -> Result<(), Error> {
+    made_host_on(Host::process(), path)
 }
 
-/// cladefs: the directory at `path`, which a making that failed left, its removal failing too,
-/// is no cell in this process, whatever it looks like on the disk ([`unmade_host`]), until it
-/// goes ([`remove_cell_dir`]): its making's last step, `UNMADE`'s removal, may have left it
-/// looking made, undurably, and its maker's caller, told the making failed, makes it again
-/// there, which a cell there refuses (board 10506). A crash of the host or the process after
-/// leaves what made it look made undurable, as a crash after any making's last step.
+/// cladefs: the directory at `path`, which a making that failed on `host` left, its removal
+/// failing too, is no cell on `host`, whatever it looks like on the disk ([`unmade_host_on`]),
+/// until it goes ([`remove_cell_dir_on`]) (board 10506).
+pub fn left_unmade_on(host: &Host, path: &Path) {
+    host.left_unmade.lock().unwrap().insert(crate::deferral::key(path));
+}
+
+/// [`left_unmade_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn left_unmade(path: &Path) {
-    LEFT.get().lock().unwrap().insert(crate::deferral::key(path));
+    left_unmade_on(Host::process(), path);
 }
 
-/// cladefs: whether `path` is a directory a cell's making left unmade, its maker stopping part
-/// way: no cell, which deleting finishes (TASK-79.84, TASK-196). Its description, made last of
-/// its directory, is not there; or it says it was never made whole ([`LocalCell::made`]); or a
-/// making in this process that failed left it ([`left_unmade`]).
-pub fn unmade_host(path: &Path) -> bool {
-    if LEFT.get().lock().unwrap().contains(&crate::deferral::key(path)) {
+/// cladefs: whether `path` is a directory a cell's making left unmade on `host` (TASK-79.84,
+/// TASK-196, board 10506).
+pub fn unmade_host_on(host: &Host, path: &Path) -> bool {
+    if host.left_unmade.lock().unwrap().contains(&crate::deferral::key(path)) {
         return host_fs::is_dir(path);
     }
     // cladefs: whole here, its durability deferred (board 7420).
-    if crate::deferral::made_here(path) {
+    if crate::deferral::made_here_on(host, path) {
         return false;
     }
     host_fs::is_dir(path)
         && (!host_fs::exists(path.join(DESCRIPTION)) || host_fs::exists(path.join(UNMADE)))
 }
 
-/// cladefs: places the cell at `path` (TASK-39.7): records, durably, in its description, the
-/// fencing token its host takes its cell with from then on, the boot ID of the placement it
-/// is, which a later placement's exceeds; its writer takes its cell's head with the epoch of
-/// that taking of the cell. A placement takes the cell only with a token as high as the last
-/// one's: a placement cut off takes no cell back from the one after it.
-/// A cell never placed takes it with its host's (TASK-165.9: the token is the description's).
-/// cladefs: `force`d, this placement's takings of a replicated cell go on with the members of the
-/// configuration its head names that answer, too few for a take (TASK-681): the commits told
-/// replicated that only the others held are lost. A placement after, unforced, is not.
-pub fn place_host(path: &Path, token: u64, force: bool) -> Result<(), Error> {
-    let placed = HostDir::new(path).map_err(Error::new).and_then(|dir| place(&dir, token, force));
+/// [`unmade_host_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn unmade_host(path: &Path) -> bool {
+    unmade_host_on(Host::process(), path)
+}
+
+/// cladefs: places the cell at `path` on `host` (TASK-39.7, TASK-681).
+pub fn place_host_on(host: &Arc<Host>, path: &Path, token: u64, force: bool) -> Result<(), Error> {
+    let placed =
+        HostDir::new_on(host, path).map_err(Error::new).and_then(|dir| place(&dir, token, force));
     placed.with_context(|| format!("placing {}", path.display()))
+}
+
+/// [`place_host_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn place_host(path: &Path, token: u64, force: bool) -> Result<(), Error> {
+    place_host_on(Host::process(), path, token, force)
 }
 
 /// cladefs: places the cell in `dir` at the placement whose fencing token is `token`, its takings
@@ -149,31 +310,32 @@ pub fn host_token(path: &Path) -> Result<Option<u64>, Error> {
 /// again, which calls `before` again unless the directory's removal had begun. A directory with no
 /// description is no cell, but what a cell's making left, or its removal: it goes, `before`
 /// called for nothing. It fails while another process has the cell open, or this one.
-pub async fn delete_host(
+pub async fn delete_host_on(
+    host: &Arc<Host>,
     path: &Path,
     before: impl AsyncFnOnce(CellId) -> Result<(), Error>,
 ) -> Result<(), Error> {
     // cladefs: its disk work off the runtime's threads, `before` awaited between (TASK-685.3).
     use crate::upload::blocking;
     if !blocking(|| host_fs::exists(path.join(DESCRIPTION))) {
-        return blocking(|| remove_cell_dir(path));
+        return blocking(|| remove_cell_dir_on(host, path));
     }
     let (cell, dir) = blocking(|| -> Result<_, Error> {
         let cell = host_cell(path)?;
-        let dir = HostDir::new(path)?;
+        let dir = HostDir::new_on(host, path)?;
         dir.take().context("taking the cell directory")?;
         Ok((cell, dir))
     })?;
-    // cladefs: once no cell of the directory is closing in the process, holding no thread, as an
+    // cladefs: once no cell of the directory is closing on `host`, holding no thread, as an
     // opening awaits it before its claim, which then waits for none (board 2946).
-    crate::closed(path).await.context("waiting for the cell's close")?;
+    crate::closed_on(host, path).await.context("waiting for the cell's close")?;
     let removed = match blocking(|| dir.claim().context("taking the cell directory")) {
         Err(err) => Err(err),
         Ok(()) => {
             let removed = match before(cell).await {
                 Ok(()) => blocking(|| -> Result<(), Error> {
                     failpoint!("delete::cell");
-                    remove_cell_dir(path)
+                    remove_cell_dir_on(host, path)
                 }),
                 Err(err) => Err(err),
             };
@@ -185,27 +347,37 @@ pub async fn delete_host(
     removed
 }
 
-/// The name a cell's description goes by as its directory goes ([`remove_cell_dir`]): its
+/// [`delete_host_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub async fn delete_host(
+    path: &Path,
+    before: impl AsyncFnOnce(CellId) -> Result<(), Error>,
+) -> Result<(), Error> {
+    delete_host_on(Host::process(), path, before).await
+}
+
+/// The name a cell's description goes by as its directory goes ([`remove_cell_dir_on`]): its
 /// [`DESCRIPTION`]'s, `.deleted` after it.
 pub(crate) const DELETED: &str = "store.deleted";
 
-/// Removes the directory of the cell at `cell_dir`, unless it went already: whole, or so that
-/// removing it again finishes it. Its description goes first, renamed to [`DELETED`],
-/// durably, so that the directory is no cell from then on, but one going, which a deletion resumed
-/// finds so; then the rest, then that, then the directory. Then the directory it was in is synced,
-/// so that it is gone durably (TASK-79.77). cladefs: the one way a cell directory goes, whether
-/// it held a cell or what a making left of one, so that what its files took of the host's disk
-/// goes with them (TASK-539.3); the cell opened nowhere.
-pub fn remove_cell_dir(cell_dir: &Path) -> Result<(), Error> {
+/// Removes the directory of the cell at `cell_dir` on `host`, unless it went already: whole, or so
+/// that removing it again finishes it (TASK-79.77, TASK-539.3).
+pub fn remove_cell_dir_on(host: &Host, cell_dir: &Path) -> Result<(), Error> {
     // cladefs: its durability deferred no more: gone (board 7420).
-    crate::deferral::forget(cell_dir);
-    let removed = crate::footprint::removing(cell_dir, || remove_cell(cell_dir));
+    crate::deferral::forget_on(host, cell_dir);
+    let removed = crate::footprint::removing_on(host, cell_dir, || remove_cell(cell_dir));
     // cladefs: what a failed making left gone, its last step failing or not, what is made there
     // next is what it is.
     if !host_fs::exists(cell_dir) {
-        LEFT.get().lock().unwrap().remove(&crate::deferral::key(cell_dir));
+        host.left_unmade.lock().unwrap().remove(&crate::deferral::key(cell_dir));
     }
     removed
+}
+
+/// [`remove_cell_dir_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn remove_cell_dir(cell_dir: &Path) -> Result<(), Error> {
+    remove_cell_dir_on(Host::process(), cell_dir)
 }
 
 /// cladefs: whether the directory at `path` is a cell's going ([`remove_cell_dir`]): its
@@ -344,19 +516,48 @@ pub fn host_ephemeral(path: &Path) -> Result<bool, Error> {
     Ok(cell_file(path)?.ephemeral)
 }
 
-/// cladefs: the local checkpoint of the ephemeral cell at `path`, if it is one (doc-25,
+/// cladefs: the local checkpoint of the ephemeral cell at `path` on `host`, if it is one (doc-25,
 /// TASK-698.3): what deleting it reads its reference of.
-pub fn host_local_checkpoint(path: &Path) -> Result<Option<crate::LocalCheckpoint>, Error> {
+pub fn host_local_checkpoint_on(
+    host: &Arc<Host>,
+    path: &Path,
+) -> Result<Option<crate::LocalCheckpoint>, Error> {
     if !cell_file(path)?.ephemeral {
         return Ok(None);
     }
-    crate::LocalCheckpoint::read(&HostDir::new(path)?).map(Some)
+    crate::LocalCheckpoint::read(&HostDir::new_on(host, path)?).map(Some)
 }
 
-/// cladefs: makes a new ephemeral cell at `path`, which must be a directory holding no cell
-/// (doc-25, TASK-698.3), as `description` describes, naming `bucket`, its parent's, its cell of
-/// `kind`, its local checkpoint `local-checkpoint`, `extra` writing what else it holds into its
-/// making first ([`create_host_with`]): unmade until its maker says it is whole ([`made_host`]).
+/// [`host_local_checkpoint_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
+pub fn host_local_checkpoint(path: &Path) -> Result<Option<crate::LocalCheckpoint>, Error> {
+    host_local_checkpoint_on(Host::process(), path)
+}
+
+/// cladefs: makes a new ephemeral cell at `path` on `host` (doc-25, TASK-698.3).
+pub fn create_host_ephemeral_on(
+    host: &Arc<Host>,
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+    checkpoint: &crate::LocalCheckpoint,
+    encrypting: impl bucket_cell::layout::KeyArg,
+    extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    LocalCell::make_ephemeral(
+        &HostDir::new_on(host, path)?,
+        description,
+        Some(bucket),
+        Some(kind),
+        checkpoint,
+        encrypting,
+        extra,
+    )
+}
+
+/// [`create_host_ephemeral_on`] on the process's default host outside `madsim`.
+#[cfg(not(madsim))]
 pub fn create_host_ephemeral(
     path: &Path,
     description: Description,
@@ -366,11 +567,12 @@ pub fn create_host_ephemeral(
     encrypting: (&extent_frame::Secret, extent_frame::KeyId),
     extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
 ) -> Result<(), Error> {
-    LocalCell::make_ephemeral(
-        &HostDir::new(path)?,
+    create_host_ephemeral_on(
+        Host::process(),
+        path,
         description,
-        Some(bucket),
-        Some(kind),
+        bucket,
+        kind,
         checkpoint,
         encrypting,
         extra,

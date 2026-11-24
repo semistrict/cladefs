@@ -31,7 +31,7 @@
 
 use crate::Error;
 use crate::bucket::{self, Bucket, Meta, PutMode};
-use crate::layout::{self, CellId, EncryptionKey, Origin};
+use crate::layout::{self, CellId, Origin};
 use fprint::TypeFingerprint;
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
@@ -100,9 +100,9 @@ impl Footer {
 }
 
 /// The object of the recording of `units` at `key`, encrypted as `encrypting` says.
-pub fn encode(key: &str, units: &[Unit], encrypting: EncryptionKey<'_>) -> Vec<u8> {
+pub fn encode(key: &str, units: &[Unit], encrypting: impl layout::KeyArg) -> Vec<u8> {
     let footer = Footer { format: layout::FORMAT.current, key: key.to_owned() };
-    layout::with_footer(&layout::encode(&units), &footer, encrypting)
+    layout::with_footer(&layout::encode(&units), &footer, encrypting.as_key())
 }
 
 /// The units of the recording at `key` whose object is `bytes`, by a reader holding `keys`: refused
@@ -122,10 +122,10 @@ pub async fn write(
     bucket: &impl Bucket,
     of: Of,
     units: &[Unit],
-    encrypting: EncryptionKey<'_>,
+    encrypting: impl layout::KeyArg,
 ) -> Result<String, bucket::Error> {
     let key = layout::evidence(of.origin.parent, of.origin.at, of.tenant, rand::random());
-    let bytes = encode(&key, &units[..units.len().min(MOST_UNITS)], encrypting);
+    let bytes = encode(&key, &units[..units.len().min(MOST_UNITS)], encrypting.as_key());
     bucket.put(&key, bytes.into(), PutMode::Create).await?;
     Ok(key)
 }

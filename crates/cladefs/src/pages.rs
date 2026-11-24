@@ -37,11 +37,10 @@ impl Config {
     }
 }
 
-/// Configures the physical memory, which fails with `EBUSY` if it has already been configured or
-/// used, and with `EINVAL` if the memory is not whole slabs ([`crate::slabs::SLAB`]).
-pub fn configure(config: Config) -> Result<(), Error> {
-    // cladefs: under madsim, each simulated host's own memory (doc-24, TASK-685.14).
-    crate::slabs::configure(config.memory_bytes).map_err(|error| {
+/// Configures physical memory on `host`, failing with `EBUSY` if already configured or used, and
+/// with `EINVAL` if the memory is not whole slabs ([`crate::slabs::SLAB`]).
+pub(crate) fn configure_on(host: &crate::Host, config: Config) -> Result<(), Error> {
+    host.slabs().configure(config.memory_bytes).map_err(|error| {
         let errno = match error {
             crate::slabs::ConfigError::InUse => Errno::EBUSY,
             crate::slabs::ConfigError::Invalid(_) => Errno::EINVAL,
@@ -50,17 +49,41 @@ pub fn configure(config: Config) -> Result<(), Error> {
     })
 }
 
+/// Configures the physical memory, which fails with `EBUSY` if it has already been configured or
+/// used, and with `EINVAL` if the memory is not whole slabs ([`crate::slabs::SLAB`]).
+#[cfg(not(madsim))]
+pub fn configure(config: Config) -> Result<(), Error> {
+    configure_on(crate::Host::process(), config)
+}
+
+/// The physical memory of the default arena on `host`.
+pub(crate) fn physical_memory_on(
+    host: &crate::Host,
+) -> std::io::Result<std::sync::Arc<std::os::fd::OwnedFd>> {
+    host.slabs().default_fd()
+}
+
 /// The physical memory of the default arena: a shared memory object (a memfd on Linux), which the
 /// pages of everything but tenants' extents are of (TASK-43), and which a process sharing it maps
 /// them from. cladefs: or why it couldn't be made, as with as many files open as the process may
 /// (board 8491).
+#[cfg(not(madsim))]
 pub fn physical_memory() -> std::io::Result<std::sync::Arc<std::os::fd::OwnedFd>> {
-    crate::slabs::default_fd()
+    physical_memory_on(crate::Host::process())
+}
+
+/// The shared memory object of the physical memory of `arena` on `host`, while it exists.
+pub(crate) fn arena_memory_on(
+    host: &crate::Host,
+    arena: ArenaId,
+) -> Option<std::sync::Arc<std::os::fd::OwnedFd>> {
+    host.slabs().arena_fd(arena)
 }
 
 /// The shared memory object of the physical memory of `arena`, while it exists.
+#[cfg(not(madsim))]
 pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedFd>> {
-    crate::slabs::arena_fd(arena)
+    arena_memory_on(crate::Host::process(), arena)
 }
 
 /// An arena of physical memory of its own (TASK-43), a tenant's, held by what allocates in it: its
@@ -70,25 +93,40 @@ pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedF
 /// allocates in it after, which would fail.
 ///
 /// [`Opening::arena`]: crate::Opening::arena
-pub struct Arena(ArenaId);
+pub struct Arena {
+    id: ArenaId,
+    slabs: std::sync::Arc<crate::slabs::HostSlabs>,
+    cache: std::sync::Arc<crate::cache::ExtentCache>,
+}
 
 impl Arena {
+    /// A new arena on `host`, which holds no page.
+    pub(crate) fn new_on(host: &crate::Host) -> std::io::Result<std::sync::Arc<Self>> {
+        let id = host.slabs().create_arena()?;
+        Ok(std::sync::Arc::new(Self {
+            id,
+            slabs: host.slabs().clone(),
+            cache: host.cache().clone(),
+        }))
+    }
+
     /// A new arena, which holds no page. cladefs: or why its memory object couldn't be made, as
     /// with as many files open as the process may (board 8491).
+    #[cfg(not(madsim))]
     pub fn new() -> std::io::Result<std::sync::Arc<Self>> {
-        Ok(std::sync::Arc::new(Self(crate::slabs::create_arena()?)))
+        Self::new_on(crate::Host::process())
     }
 
     /// Its id, which its pages' locations name ([`PhysLocation`]).
     pub fn id(&self) -> ArenaId {
-        self.0
+        self.id
     }
 }
 
 impl Drop for Arena {
     fn drop(&mut self) {
-        crate::cache::evict_arena(self.0);
-        crate::slabs::remove_arena(self.0);
+        self.cache.evict_arena(self.id);
+        self.slabs.remove_arena(self.id);
     }
 }
 

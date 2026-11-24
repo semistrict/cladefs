@@ -91,7 +91,7 @@ are freed as the cell is next mounted.
 *Added 2026-11-19 (TASK-537.3.6):* a cell made or taken with `replicas` f >= 1 (CreateCell) waits
 for *replicated* where the table above says *uploaded*: its sync family's `COMMIT_UPLOADED`
 returns once f+1 copies hold the commit, or the bucket does, whichever first. Its fsync waits for
-the level its `fsync` asks (`FsyncLevel`: Ordered, Local, or Replicated). Every row keeps ordering,
+the level its `fsync` asks (`FsyncLevel`: Ordered or Replicated; deprecated `FSYNC_LEVEL_LOCAL` maps to Ordered with a warning). Every row keeps ordering,
 as above. With f = 1 (three members):
 
 | Failure | fsync (Replicated) acknowledged | sync acknowledged | Tested by |

@@ -19,8 +19,8 @@ pub use extent_frame::table::TABLE_BLOCK;
 
 /// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting`
 /// gives: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
-pub fn encode(state: &State, encrypting: layout::EncryptionKey<'_>) -> Vec<u8> {
-    encode_kept(state, encrypting).0
+pub fn encode(state: &State, encrypting: impl layout::KeyArg) -> Vec<u8> {
+    encode_kept(state, encrypting.as_key()).0
 }
 
 /// The checkpoint of `state`, as [`encode`] makes it, and the lengths it keeps: cladefs: those of
@@ -29,7 +29,8 @@ pub fn encode(state: &State, encrypting: layout::EncryptionKey<'_>) -> Vec<u8> {
 /// appendix, which a recovery reads with the rest and a lookup never does
 /// (`extent_frame::table::Appendix`): each by the segment's number and its writer's epoch, as its
 /// key names them, as varints, a few bytes each, not its key's tens.
-pub fn encode_kept(state: &State, encrypting: layout::EncryptionKey<'_>) -> (Vec<u8>, Lengths) {
+pub fn encode_kept(state: &State, encrypting: impl layout::KeyArg) -> (Vec<u8>, Lengths) {
+    let encrypting = encrypting.as_key();
     let lengths = state.named_lengths();
     let numbered: Vec<(u64, u64, u64)> = (lengths.iter())
         .filter_map(|(key, len)| match layout::kind(key) {

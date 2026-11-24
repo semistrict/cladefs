@@ -6,10 +6,10 @@
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -2010,7 +2010,7 @@
+@@ -2027,7 +2027,7 @@
                  // call). A host crash before leaves it unmade, as if the restore never was.
                  // cladefs: a crash of the daemon's too, its VM processes going with it.
-                 let deferring = local_cell::defer_durability(path);
+                 let deferring = local_cell::defer_durability_on(daemon.host.local(), path);
 -                cells::fork_version(daemon, forked, capacity, (path, self.tenant.granted()))
 +                cells::fork_version(daemon, forked, capacity, (path, None))
                      .await?;

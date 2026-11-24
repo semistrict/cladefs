@@ -346,7 +346,8 @@ async fn an_image_imported_through_the_control_api_reads_back() {
         .unwrap();
     let (hostname, target) = nodes[0]
         .spawn(async move {
-            let storage = cladefs::Storage::open(&cell).await.unwrap();
+            let daemon = current_daemon().expect("node 0 daemon");
+            let storage = cladefs::Storage::open_on(daemon.host(), &cell).await.unwrap();
             let fs = cladefs::Filesystem::mount(storage).await.unwrap();
             let (etc, _) = fs.root().lookup(b"etc").await.unwrap();
             let (file, attr) = etc.lookup(b"hostname").await.unwrap();

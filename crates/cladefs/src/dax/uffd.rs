@@ -2106,13 +2106,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// their pages would ([`Self::copy`]), mapped writable, so for the guest ahead of its accesses:
     /// doc-13's `PRIVATE`, a `write(2)`'s pages, served here (doc-26), where the daemon made them
     /// once, a round trip each. `ENOMEM`, nothing made private, if they would take the window past
-    /// its private pages; `EINVAL` for a window that doesn't copy on write, a range not within it,
-    /// or one with a page `window` maps nothing at.
+    /// its private pages or eviction keeps them from being named together; `EINVAL` for a window
+    /// that doesn't copy on write, a range not within it, or one with a page `window` maps nothing at.
     ///
     /// The pages `window` names nothing at yet are read in through it first, a read each, each
-    /// naming the rest of its part with it, which finds a page it maps nothing at; then, holding the pages' lock, each page not private
-    /// yet is made so, of what is named there then, in runs ([`Self::privatize`]); one unnamed
-    /// meanwhile, evicted, is read in again, and made private under the lock after.
+    /// naming the rest of its part with it. Retry if a page was evicted meanwhile. Once all pages
+    /// are named or private, check the budget and make the runs private under the same pages' lock
+    /// ([`Self::privatize`]).
     pub(crate) async fn make_private(
         &self,
         window: &dyn Faults,
@@ -2130,8 +2130,10 @@ impl<H: HostMemory> UffdSecondStage<H> {
             return Err(Errno::EINVAL);
         }
         let range = self.page_range(self.base + offset as usize, len as usize);
-        let mut first = true;
-        loop {
+        // A range can span more parts than the cache can hold. Retry transient evictions without
+        // letting such a request fault the same pages indefinitely.
+        const NAME_ATTEMPTS: usize = 4;
+        for _ in 0..NAME_ATTEMPTS {
             for at in range.clone() {
                 let unnamed = {
                     let pages = self.pages.lock().unwrap();
@@ -2143,37 +2145,26 @@ impl<H: HostMemory> UffdSecondStage<H> {
                     read.map_err(|err| if err == Errno::ENOENT { Errno::EINVAL } else { err })?;
                 }
             }
-            // Room for them all, first, as the window maps each: none made private otherwise.
-            if std::mem::take(&mut first) {
-                let pages = self.pages.lock().unwrap();
-                let more = pages.pages[range.clone()].iter().filter(|page| !page.private).count();
-                if pages.private + more as u64 > most {
-                    return Err(Errno::ENOMEM);
-                }
-            }
             let mut pages = self.pages.lock().unwrap();
             if pages.released {
                 return Ok(());
             }
-            // The runs to make private, each its first page and bytes, whatever comes of the rest.
+            let mut needed = pages.pages[range.clone()].iter().filter(|page| !page.private);
+            if pages.private + needed.clone().count() as u64 > most {
+                return Err(Errno::ENOMEM);
+            }
+            if needed.any(|page| page.mapped.is_none()) {
+                continue;
+            }
+            // Keep the lock from the budget check through every run, so a write fault cannot
+            // consume pages promised to this request.
             let mut runs: Vec<(usize, Vec<u8>)> = Vec::new();
-            let (mut unnamed, mut past) = (false, false);
-            let mut made = pages.private;
             for at in range.clone() {
                 let page = pages.pages[at];
                 if page.private {
                     continue;
                 }
-                let Some(mapped) = page.mapped else {
-                    unnamed = true;
-                    continue;
-                };
-                // Past the bound, room taken by writes meanwhile.
-                if made >= most {
-                    past = true;
-                    break;
-                }
-                made += 1;
+                let mapped = page.mapped.expect("the page is named under the lock");
                 let mut bytes = vec![0u8; page_size as usize];
                 self.read_page(mapped.phys, &mut bytes);
                 match runs.last_mut() {
@@ -2192,13 +2183,9 @@ impl<H: HostMemory> UffdSecondStage<H> {
                     prefault.prefault(*first as u64 * page_size, bytes.len() as u64);
                 }
             }
-            if past {
-                return Err(Errno::ENOMEM);
-            }
-            if !unnamed {
-                return Ok(());
-            }
+            return Ok(());
         }
+        Err(Errno::ENOMEM)
     }
 
     /// cladefs: maps the pages of the `len` bytes at `offset` for the guest ahead of its accesses,
@@ -4239,6 +4226,78 @@ mod tests {
         }
         fn fill(&self, _: RawFd, _: u64, _: &[u8]) {}
         fn punch(&self, _: RawFd, _: u64, _: usize) {}
+    }
+
+    #[test]
+    fn private_budget_failure_leaves_the_whole_request_shared() {
+        struct EvictingFaults<'a> {
+            stage: &'a UffdSecondStage<Unchanged>,
+            phys: crate::pages::PhysLocation,
+            take_budget_on_retry: bool,
+        }
+
+        impl Faults for EvictingFaults<'_> {
+            fn size(&self) -> u64 {
+                3 * page_size()
+            }
+
+            fn fault_page(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
+                let ps = page_size();
+                if offset == ps {
+                    // The first page was named when PRIVATE checked it, then evicted before
+                    // the fault on the second page finished.
+                    self.stage.unmap(0, ps, Private::Keep);
+                } else if self.take_budget_on_retry {
+                    // A write fault outside the request takes one of its two available pages.
+                    assert_eq!(offset, 0);
+                    assert!(matches!(
+                        self.stage.copy(self.stage.base + (2 * ps) as usize),
+                        Copied::Private
+                    ));
+                } else {
+                    // The cache can hold only one of the two pages at a time.
+                    assert_eq!(offset, 0);
+                    self.stage.unmap(ps, ps, Private::Keep);
+                }
+                self.stage.map(offset, self.phys, ps);
+                Box::pin(std::future::ready(Ok(())))
+            }
+
+            fn probe(&self, _: u64) -> BoxFuture<'_, Result<()>> {
+                panic!("unexpected probe");
+            }
+        }
+
+        let ps = page_size();
+        let file = TestSource::filled(1, 9);
+        let phys = file.location(0);
+        for take_budget_on_retry in [true, false] {
+            // SAFETY: The host changes no memory at this address.
+            let stage = unsafe {
+                UffdSecondStage::with_host(
+                    64 * ps as usize,
+                    3 * ps,
+                    Unchanged,
+                    Memories::InProcess,
+                    None,
+                    Mappings::new(64),
+                )
+            }
+            .unwrap();
+            stage.copy_on_write(2).unwrap();
+            stage.map(0, phys, ps);
+            stage.map(2 * ps, phys, ps);
+            let faults = EvictingFaults { stage: &stage, phys, take_budget_on_retry };
+            assert_eq!(
+                futures::executor::block_on(stage.make_private(&faults, 0, 2 * ps)),
+                Err(Errno::ENOMEM)
+            );
+            assert_eq!(stage.private_pages(), u64::from(take_budget_on_retry));
+            if take_budget_on_retry {
+                assert!(stage.named(stage.base));
+                assert!(stage.named(stage.base + ps as usize));
+            }
+        }
     }
 
     /// cladefs board 8495: a trim of a full 64 GiB window, every page named, budget + 1 runs

@@ -141,6 +141,7 @@ mod halt;
 mod heap;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod hearing;
+pub mod host;
 mod host_cell;
 mod image;
 pub mod import;
@@ -200,6 +201,7 @@ pub use dax::uffd::{
 pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
 pub use filesystem::{Filesystem, Node, Options};
+pub use host::Host;
 pub use host_cell::CellOf;
 pub use image::{Compactions, Image, TreeCompactions, VolumeMetadata};
 pub use memory::{VolatileSlice, VolatileSliceMut};

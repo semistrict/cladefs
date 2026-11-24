@@ -307,6 +307,18 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(Err(Error::Unsupported))
     }
 
+    /// cladefs: whether [`Bucket::delete_if`] can conditionally delete `key` on the bucket that
+    /// serves it (board 10567): false when the backend refuses conditional deletes
+    /// (`Deletes::Refused`), letting callers like [`crate::mirror::mirror`] refuse up front
+    /// before writing a pin or hold without issuing extra network probe requests.
+    fn supports_conditional_delete(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = Result<bool, Error>> + Send {
+        let _ = key;
+        std::future::ready(Ok(true))
+    }
+
     /// cladefs: deletes the objects at `keys`, at most [`DELETE_BATCH`] of them (TASK-395.5): in
     /// one request where the backend deletes many at once (S3's DeleteObjects), else, as here, one
     /// each, [`DELETES_AT_ONCE`] at once. Deleting none is no error. It fails if a delete did,
@@ -654,6 +666,22 @@ pub(crate) async fn delete_if(
         match bucket.delete_if(key, version).await {
             Ok(()) | Err(Error::Precondition | Error::NotFound) => return Ok(()),
             Err(Error::Unsupported) => return Err(Refused::of(key, Refusal::Request)),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
+    }
+}
+
+/// cladefs: verifies that the bucket serving `key` supports [`Bucket::delete_if`] (board 10567),
+/// retrying transient routing failures and refusing with [`Refusal::Request`] when it does not.
+pub(crate) async fn require_conditional_delete(
+    bucket: &impl Bucket,
+    key: &str,
+) -> Result<(), Refused> {
+    let mut failures = 0;
+    loop {
+        match bucket.supports_conditional_delete(key).await {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(Error::Unsupported) => return Err(Refused::of(key, Refusal::Request)),
             Err(error) => failed(bucket, &mut failures, error, key).await?,
         }
     }

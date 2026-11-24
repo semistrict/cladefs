@@ -65,6 +65,11 @@ pub trait Kms: Send + Sync + 'static {
         let _ = tenant;
     }
 
+    /// Whether wrapping a cell KEK ahead of time can save a KMS request on its creation path.
+    fn prewrap(&self) -> bool {
+        true
+    }
+
     /// cladefs: how it names tenants' KEKs, if by [`KeyNames`]: what a reload of its `keys` file
     /// changes (board 8487). A KMS naming them otherwise has none, as here.
     fn names(&self) -> Option<&KeyNames> {
@@ -84,6 +89,9 @@ pub trait Dyn: Send + Sync + 'static {
     /// [`Kms::forget`].
     fn forget_dyn(&self, tenant: u64);
 
+    /// [`Kms::prewrap`].
+    fn prewrap_dyn(&self) -> bool;
+
     /// [`Kms::names`].
     fn names_dyn(&self) -> Option<&KeyNames>;
 }
@@ -102,6 +110,10 @@ impl<K: Kms> Dyn for K {
 
     fn forget_dyn(&self, tenant: u64) {
         self.forget(tenant)
+    }
+
+    fn prewrap_dyn(&self) -> bool {
+        self.prewrap()
     }
 
     fn names_dyn(&self) -> Option<&KeyNames> {
@@ -150,6 +162,20 @@ pub fn from_url_with(url: &str, vars: &Vars, origin: Origin) -> Result<Shared, S
             "{url:?} names no KMS: local:///DIR, openbao://, aws-kms://, gcp-kms:// or azure-kv:// \
              (doc-16)"
         )),
+    }
+}
+
+/// Checks whether a registry entry may reuse an already-open KMS of the same URL and credentials.
+/// The same URL parsers enforce the recorded origin on both a new instance and a reused one.
+pub fn check_recorded_url(url: &str, trust: &Trust) -> Result<(), String> {
+    let origin = Origin::Recorded(trust);
+    match url.split_once("://").map(|(scheme, _)| scheme) {
+        Some("local") => origin.local().map_err(|why| format!("{url:?}: {why}")),
+        Some("openbao" | "openbaos") => openbao::check_url(url, origin),
+        Some("aws-kms") => aws::check_url(url, origin),
+        Some("gcp-kms") => gcp::check_url(url, origin),
+        Some("azure-kv") => azure::check_url(url, origin),
+        _ => Err(format!("{url:?} names no KMS")),
     }
 }
 

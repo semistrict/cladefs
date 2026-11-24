@@ -4,12 +4,11 @@
 
 //! TASK-258: the daemon's spans, exported to OpenTelemetry's in-memory exporter, as a collector
 //! would get them: a request's and a commit's trees, and their attributes; and none while tracing
-//! is off. cladefs: TASK-672.1: and recorded for `/z/tracez`, exported or not.
+//! is off.
 
 use super::{BLOCK, connect, host, pattern, read, write};
 use crate::ExtentId;
 use crate::cladefsd::otel;
-use crate::cladefsd::zpages::tracez::{self, Export};
 use opentelemetry::Value;
 use opentelemetry_sdk::trace::{
     InMemorySpanExporter, Sampler, SdkTracerProvider, SimpleSpanProcessor, SpanData,
@@ -78,9 +77,7 @@ fn attribute(span: &SpanData, key: &str) -> Option<Value> {
 fn spans_trace_requests_commits_and_uploads() {
     host();
     let exporter = InMemorySpanExporter::default();
-    let export =
-        Export::new(SimpleSpanProcessor::new(exporter.clone()), Box::new(Sampler::AlwaysOn));
-    otel::install(Sampler::AlwaysOn, Some(export));
+    otel::install(Sampler::AlwaysOn, SimpleSpanProcessor::new(exporter.clone()));
     let cell = write_read_commit();
     let spans = exporter.get_finished_spans().unwrap();
     // cladefs: as `TENANT/CELL`, in base 32 (TASK-364, TASK-504).
@@ -145,28 +142,6 @@ fn nothing_is_exported_while_tracing_is_off() {
     assert_eq!(names(exporter.get_finished_spans().unwrap().iter()), Vec::<String>::new());
 }
 
-/// TASK-672.1: spans exported not, as the daemon makes them unless told otherwise, are recorded
-/// for `/z/tracez`: each request counted by its kind, and kept, its trace whole.
-#[test]
-fn spans_are_recorded_unexported() {
-    host();
-    otel::install(Sampler::AlwaysOn, None);
-    write_read_commit();
-    let recorder = tracez::recorder();
-    let counts = recorder.counts();
-    let ended = |name: &str| {
-        let counted = counts.iter().find(|counts| counts.name == name);
-        counted.map_or(0, |counts| counts.ended.iter().sum::<u64>())
-    };
-    assert_eq!(
-        [ended("cladefsd.write"), ended("cladefsd.read"), ended("cladefsd.commit")],
-        [1, 1, 1]
-    );
-    let commits = recorder.samples("cladefsd.commit", None);
-    let names: BTreeSet<String> = names(commits[0].trace.spans.iter()).into_iter().collect();
-    assert!(names.contains("store.commit"), "{names:?}");
-}
-
 /// board 8571: a record logged while a span is current names it, `trace_id` and `span_id`, where
 /// it is to be found in its trace; one logged within none, nothing.
 #[test]
@@ -174,9 +149,7 @@ fn records_logged_within_spans_name_them() {
     let lines = crate::cladefsd::logging::capture();
     host();
     let exporter = InMemorySpanExporter::default();
-    let export =
-        Export::new(SimpleSpanProcessor::new(exporter.clone()), Box::new(Sampler::AlwaysOn));
-    otel::install(Sampler::AlwaysOn, Some(export));
+    otel::install(Sampler::AlwaysOn, SimpleSpanProcessor::new(exporter.clone()));
     let span = bucket_cell::trace::Span::start("test.logged");
     let entered = span.enter();
     log::info!("cladefsd: within a span");

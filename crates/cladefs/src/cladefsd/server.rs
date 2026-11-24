@@ -244,10 +244,11 @@ impl Memory {
     /// An arena of its own, and the default one, each read-only.
     fn new(daemon: &Daemon) -> std::io::Result<Self> {
         use std::os::fd::AsFd;
-        let public = reopen_read_only(crate::pages::physical_memory()?.as_fd())?;
-        let arena = crate::pages::Arena::new()?;
-        let memory =
-            reopen_read_only(crate::pages::arena_memory(arena.id()).expect("a new arena").as_fd())?;
+        let public = reopen_read_only(crate::pages::physical_memory_on(&daemon.host)?.as_fd())?;
+        let arena = crate::pages::Arena::new_on(&daemon.host)?;
+        let memory = reopen_read_only(
+            crate::pages::arena_memory_on(&daemon.host, arena.id()).expect("a new arena").as_fd(),
+        )?;
         let connections = Default::default();
         // cladefs: within every tenant's together (board 8465).
         let in_flight = Arc::new(super::memory::InFlight::of_a_tenant(daemon));
@@ -1019,8 +1020,7 @@ impl Answer {
         }
         // Counted before its reply, which its VM process may then count on.
         super::metrics::served(header.kind, self.started.elapsed(), reply.status != 0);
-        // cladefs: and its span ended, its trace recorded once nothing of it runs, which whoever
-        // waits for the reply may then look for on /z/tracez (TASK-672.1).
+        // End the span before replying so it is ready to export.
         drop(std::mem::replace(&mut self.span, trace::Span::none()));
         // cladefs: and its tenant's, which its reply's bytes are counted in as they're queued.
         drop(self.charge.take());
@@ -1968,11 +1968,6 @@ impl Connection {
         // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
         let open_cell = self.open_held(path, &hold, &how).await?;
-        // A VM process opens no cell to write that its writer may not write
-        // ([`crate::CellAccess::may_write`]): a public base, only forks of it (TASK-43), what it
-        // wrote being every tenant's, its pages the default arena's, which every VM process holds
-        // (TASK-79.17); cladefs: nor a version, which nothing writes (doc-7, Versions).
-        open_cell.access().may_write()?;
         let flushed = open_cell.clone();
         let flushing_daemon = Arc::clone(self.daemon());
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
@@ -2001,18 +1996,22 @@ impl Connection {
         let mut there = None;
         if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
             && local_cell::upload::blocking(|| {
-                host_fs::exists(&path) && !crate::host_cell::unmade(path)
+                host_fs::exists(&path) && !crate::host_cell::unmade_on(&daemon.host, path)
             })
         {
             let open_cell = Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?);
-            cells::at_version(
+            if let Err(err) = cells::at_version(
                 daemon,
                 (crate::CellId { tenant, id: cell }, version),
                 capacity,
                 path,
                 &open_cell,
             )
-            .await?;
+            .await
+            {
+                crate::open_cell::release(open_cell).await;
+                return Err(err);
+            }
             there = Some(open_cell);
         }
         let open_cell = match (there, how) {
@@ -2020,13 +2019,13 @@ impl Connection {
             // cladefs: or where a cell's making was left unmade, its host crashing, which is no
             // cell: removed first, as deleting it would (TASK-79.84).
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
-                local_cell::upload::blocking(|| cells::removed_if_unmade(path))?;
+                local_cell::upload::blocking(|| cells::removed_if_unmade_on(&daemon.host, path))?;
                 let forked = (crate::CellId { tenant, id: cell }, version);
                 // cladefs: a restore's fork, made and opened syncing nothing: durable by its first
                 // flush or its close, before any commit of its VM is (board 7420, the user's
                 // call). A host crash before leaves it unmade, as if the restore never was.
                 // cladefs: a crash of the daemon's too, its VM processes going with it.
-                let deferring = local_cell::defer_durability(path);
+                let deferring = local_cell::defer_durability_on(daemon.host.local(), path);
                 cells::fork_version(daemon, forked, capacity, (path, self.tenant.granted()))
                     .await?;
                 let open_cell = open_cell_at(daemon, path, None, Some(arena)).await?;
@@ -2039,7 +2038,13 @@ impl Connection {
             }
             (None, _) => Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?),
         };
-        hold.open(&open_cell)?;
+        // A VM process opens no cell to write that its writer may not write
+        // ([`crate::CellAccess::may_write`]): checked before publishing via `hold.open`, and every
+        // refused open closes through `release().await` (TASK-43, TASK-79.17, board 5386).
+        if let Err(err) = open_cell.access().may_write().and_then(|()| hold.open(&open_cell)) {
+            crate::open_cell::release(open_cell).await;
+            return Err(err);
+        }
         Ok(open_cell)
     }
 

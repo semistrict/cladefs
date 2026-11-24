@@ -226,7 +226,12 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
+    use cladefs::cladefsd::control::proto::{
+        GetStatsRequest, GrantRequest, ListVersionsRequest, ResizeCellRequest, ShrinkMemoryRequest,
+        StatCellRequest,
+    };
     use cladefs::memory_cell::MemoryCell;
+    use cladefs::testing::control_path;
     use cladefs::{Filesystem, Image, Storage};
     use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
@@ -360,11 +365,33 @@ mod host {
         tenant: u64,
     ) -> anyhow::Result<PathBuf> {
         let control = crate::common::control(cladefsd)?;
-        let versions = control.list_versions(source)?;
+        let versions = control
+            .call(async |client| {
+                client.list_versions(ListVersionsRequest { path: control_path(source) }).await
+            })
+            .map(|response| response.versions)?;
         let version = versions.last().context("the snapshot made no version")?;
-        control.share_version(source, version.id, true)?;
+        let share = cladefs::cladefsd::control::proto::ShareVersionRequest {
+            path: control_path(source),
+            version: version.id,
+            shared: true,
+        };
+        control.call(async |client| client.share_version(share).await)?;
         let id = |name: &str| std::env::var(name).ok().map(|id| id.parse()).transpose();
-        Ok(control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?)
+        let uid = id("CLADEFS_JAIL_UID")?;
+        let gid = id("CLADEFS_JAIL_GID")?;
+        Ok(control
+            .call(async |client| {
+                client
+                    .grant(GrantRequest {
+                        tenant: tenant,
+                        dir: control_path(dir),
+                        uid: uid,
+                        gid: gid,
+                    })
+                    .await
+            })
+            .map(|response| std::path::PathBuf::from(response.socket))?)
     }
 
     fn read_file(fs: &Filesystem, name: &str) -> Vec<u8> {
@@ -487,7 +514,13 @@ mod host {
                 memory_cell.close()?;
                 // The import left the memory's pages in the daemon's memory: evicted, so that the
                 // restores page in what they read, the first of them at least.
-                crate::common::control(&cladefsd)?.shrink_memory(None, 0)?;
+                crate::common::control(&cladefsd)?
+                    .call(async |client| {
+                        client
+                            .shrink_memory(ShrinkMemoryRequest { tenant: None, target_bytes: 0 })
+                            .await
+                    })
+                    .map(|response| response.bytes)?;
             }
             if phase == Some(Phase::Source) {
                 // For another host to restore: the version's cell is in the bucket.
@@ -581,7 +614,18 @@ mod host {
             // (TASK-456.3). What the daemon holds, a shrink to no less than it says (`u64::MAX`).
             if self.memory == Memory::Cell {
                 let control = crate::common::control(&cladefsd)?;
-                let held = || control.shrink_memory(None, u64::MAX);
+                let held = || {
+                    control
+                        .call(async |client| {
+                            client
+                                .shrink_memory(ShrinkMemoryRequest {
+                                    tenant: None,
+                                    target_bytes: u64::MAX,
+                                })
+                                .await
+                        })
+                        .map(|response| response.bytes)
+                };
                 let mut grew = Vec::new();
                 for ((mut firecracker, load), name) in
                     restored.into_iter().zip(&loads).zip(self.restores(phase))
@@ -597,7 +641,14 @@ mod host {
                             let mut most = (0, 0);
                             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                                 let gauges = control
-                                    .stats(Some(std::time::Duration::from_millis(1)))?
+                                    .call(async |client| {
+                                        client
+                                            .get_stats(GetStatsRequest {
+                                                wait_ms: 1,
+                                                ..Default::default()
+                                            })
+                                            .await
+                                    })?
                                     .gauges;
                                 let gauge = |name: &str| gauges.get(name).copied().unwrap_or(0);
                                 most.0 = most.0.max(gauge("window_pages"));
@@ -679,7 +730,17 @@ mod host {
         let control = crate::common::control(cladefsd)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            match control.resize_cell(path, GROWN) {
+            match control
+                .call(async |client| {
+                    client
+                        .resize_cell(ResizeCellRequest {
+                            path: control_path(path),
+                            capacity: GROWN,
+                        })
+                        .await
+                })
+                .map(drop)
+            {
                 Err(error)
                     if error.errno() == Some(cladefs::Errno::EBUSY)
                         && std::time::Instant::now() < deadline =>
@@ -739,7 +800,13 @@ mod host {
                 let mut version = test_setup.tmp_dir.join("snapshot").into_os_string();
                 version.push(".extent-extents");
                 let control = crate::common::control(Path::new(&cladefsd)).expect("control API");
-                control.stat_cell(Path::new(&version)).expect("the snapshot's version");
+                control
+                    .call(async |client| {
+                        client
+                            .stat_cell(StatCellRequest { path: control_path(Path::new(&version)) })
+                            .await
+                    })
+                    .expect("the snapshot's version");
             }
             for (name, path) in cell_dirs {
                 let fs = block_on(async {

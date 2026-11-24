@@ -81,19 +81,22 @@ impl Lags {
     }
 }
 
-node_local::node_local! {
-    /// [`Lags`] of this process's cells.
-    static LAGS: std::sync::Mutex<Lags> = std::sync::Mutex::new(Lags {
-        count: 0,
-        max_us: 0,
-        within_turn: 0,
-        buckets: [0; LAG_BUCKETS],
-    });
+impl Lags {
+    pub(crate) const fn new() -> Self {
+        Self { count: 0, max_us: 0, within_turn: 0, buckets: [0; LAG_BUCKETS] }
+    }
 }
 
-/// cladefs: how long this process's cells' commits waited to be made durable ([`Lags`]).
+/// cladefs: how long `host`'s cells' commits waited to be made durable ([`Lags`]).
+pub fn durability_lags_on(host: &crate::Host) -> Lags {
+    *host.durability_lags.lock().unwrap()
+}
+
+/// cladefs: how long the process's default host's cells' commits waited to be made durable outside
+/// `madsim` ([`Lags`]).
+#[cfg(not(madsim))]
 pub fn durability_lags() -> Lags {
-    *LAGS.get().lock().unwrap()
+    durability_lags_on(crate::Host::process())
 }
 
 /// The commits due to be made durable, which a flush takes, oldest first, and the epoch of the
@@ -126,13 +129,15 @@ impl<T> Durability<T> {
     }
 
     /// The commits up to `last`, a flush's, are durable.
-    pub fn finish(&mut self, last: u64) {
+    pub fn finish(&mut self, last: u64, host: Option<&crate::Host>) {
         debug_assert!(last > self.durable && last <= self.ordered, "flushes finish in order");
         let now = std::time::Instant::now();
-        let mut lags = LAGS.get().lock().unwrap();
+        let mut lags = host.map(|host| host.durability_lags.lock().unwrap());
         for _ in self.durable..last {
             let ordered = self.ordered_at.pop_front().expect("a commit ordered is timed");
-            lags.record(now - ordered);
+            if let Some(lags) = lags.as_deref_mut() {
+                lags.record(now - ordered);
+            }
         }
         self.durable = last;
     }

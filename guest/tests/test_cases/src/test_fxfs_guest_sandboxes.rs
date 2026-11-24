@@ -119,6 +119,8 @@ const COMMANDS: [(&str, &[&str]); 3] = [
 #[host]
 mod host {
     use super::*;
+    use cladefs::cladefsd::control::proto::{ForkCellRequest, ImportImageRequest};
+    use cladefs::testing::control_path;
 
     use crate::common::{
         Measured, ProcessCosts, cgroup_memory, cladefs_guest_should_run, control, resident,
@@ -331,7 +333,17 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         let host = &hosts[sandbox.host];
         let name = sandbox.name();
         let fork = dir.join(format!("{name}.root"));
-        control(&host.socket)?.fork_cell(&host.base, &fork)?;
+        control(&host.socket)?
+            .call(async |client| {
+                client
+                    .fork_cell(ForkCellRequest {
+                        from: control_path(&host.base),
+                        to: control_path(&fork),
+                        ..Default::default()
+                    })
+                    .await
+            })
+            .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
         let (vcpus, memory) = (mode.shape)(sandbox.role);
         let mut machine = Vm::new(vcpus, memory)?;
         machine.guest_kernel()?;
@@ -586,7 +598,22 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 )?;
                 let base = dir.join(format!("{name}.base"));
                 let imported = Instant::now();
-                control(&socket)?.import_image(&base, ROOT_CAPACITY, &layout, None)?;
+                control(&socket)?
+                    .call(async |client| {
+                        client
+                            .import_image(ImportImageRequest {
+                                path: control_path(&base),
+                                capacity: ROOT_CAPACITY,
+                                image: control_path(&layout),
+                                reference: String::new(),
+                                tenant: 0,
+                            })
+                            .await
+                    })
+                    .map(|response| cladefs::CellId {
+                        tenant: response.tenant,
+                        id: response.cell,
+                    })?;
                 eprintln!("sandboxes: {name} imported the image in {:?}", imported.elapsed());
                 hosts.push(Host { name, daemon, socket, base });
             }

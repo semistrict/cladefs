@@ -41,10 +41,12 @@ impl Base {
             Some(open) => open(&self.path).await,
             None => {
                 let arena = attached_to.arenas.own.clone();
+                let host = attached_to.host.clone();
                 // cladefs: boxed, its opening once, which every read's and map's future, and so
                 // every request's, would hold otherwise, some 11 KB (TASK-707).
-                let opening =
-                    Box::pin(async { Opening::here()?.arena(arena).open_base(&self.path).await });
+                let opening = Box::pin(async move {
+                    Opening::here_on(host)?.arena(arena).open_base(&self.path).await
+                });
                 let opened = opening.await.map_err(|err| {
                     log::warn!("cladefs: opening {}, attached: {err:#}", self.path.display());
                     err.errno().unwrap_or(Errno::EIO)
@@ -52,7 +54,11 @@ impl Base {
                 Ok(Arc::new(opened))
             }
         };
-        self.cell.get_or_try_init(open).await.cloned()
+        let base = self.cell.get_or_try_init(open).await?.clone();
+        // cladefs: a shredded or halted attached base serves nothing more (board 5542,
+        // board 2704).
+        base.halt.check()?;
+        Ok(base)
     }
 }
 
@@ -136,8 +142,8 @@ impl OpenCell {
     /// restored is. Attached already, it does nothing. The guest has no part in this (backlog
     /// doc-10).
     pub fn attach_base(&self, base: &Path, cells: &[u64]) -> Result<()> {
-        self.admit(Changing::Cell)?;
-        cell_dir::attach(&self.path, base, cells)?;
+        let _admitted = self.admit(Changing::Cell)?;
+        cell_dir::attach_on(self.host.local(), &self.path, base, cells)?;
         self.bases.add(self.routed(cells), base);
         Ok(())
     }

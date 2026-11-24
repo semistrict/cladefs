@@ -361,8 +361,13 @@ impl<D: Dir> crate::replicate::LogSource for CellLogSource<D> {
                                     let file = self.dir.open(&path, true)?;
                                     let keys = self.keys.of(self.cell.id);
                                     framed = Some(
-                                        crate::framed::Framed::open(file, &path, &keys)
-                                            .map_err(io::Error::other)?,
+                                        crate::framed::Framed::open(
+                                            file,
+                                            &path,
+                                            &keys,
+                                            crate::framed::unpacked_for(self.dir.host()),
+                                        )
+                                        .map_err(io::Error::other)?,
                                     );
                                 }
                                 Err(err) => return Err(err),
@@ -949,6 +954,11 @@ impl<D: Dir> Recovering<D> {
     /// The cell.
     pub fn cell(&self) -> CellId {
         self.file.cell
+    }
+
+    /// Its directory's host context, if backed by a host directory.
+    pub(crate) fn host(&self) -> Option<&Arc<crate::Host>> {
+        self.dir.host()
     }
 
     /// cladefs: the last commit its write-ahead log holds, if it holds any.
@@ -2158,8 +2168,8 @@ impl<D: Dir> LocalCell<D> {
             }
             created => created,
         };
-        let (dek, key) = self.keys.encrypting();
-        let encryption = Arc::new(RawEncryption::new(dek, key));
+        let (dek, key) = self.keys.try_encrypting()?;
+        let encryption = Arc::new(RawEncryption::new(&dek, key));
         Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, encryption))
     }
 
@@ -2402,13 +2412,13 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<Vec<Located<D::File>>, Error> {
         let end = offset + len;
         let held_end = end.min(entry.len).max(offset);
-        let unpacked = crate::framed::unpacked();
+        let unpacked = crate::framed::unpacked_for(self.dir.host());
         let mut parts = Vec::new();
         match &entry.data {
             Data::Own => {
                 if held_end > offset {
                     let source = self.own_source(state, extent)?;
-                    source.locate(offset, held_end - offset, unpacked, &mut parts)?;
+                    source.locate(offset, held_end - offset, &unpacked, &mut parts)?;
                 }
             }
             Data::Bucket(location) => bail!(BucketData { extent, location: location.clone() }),
@@ -2418,7 +2428,7 @@ impl<D: Dir> LocalCell<D> {
                         None => parts.push(Located::Zeros(end - start)),
                         Some((number, at)) => {
                             let source = self.segment_file(state, number)?;
-                            source.locate(at, end - start, unpacked, &mut parts)?;
+                            source.locate(at, end - start, &unpacked, &mut parts)?;
                         }
                     }
                 }
@@ -2465,7 +2475,8 @@ impl<D: Dir> LocalCell<D> {
     /// A part of a framed file, unpacked from `stored`, its stored bytes and any after them, read
     /// from its file, checked against its CRC; reads of it find it unpacked for a while.
     pub fn unpack(&self, part: &Packed<D::File>, stored: Aligned) -> Result<Arc<Aligned>, Error> {
-        part.unpack(stored, crate::framed::unpacked())
+        let unpacked = crate::framed::unpacked_for(self.dir.host());
+        part.unpack(stored, &unpacked)
     }
 
     /// Frees `extent`, which may be open, if the cell holds it.
@@ -2520,6 +2531,7 @@ impl<D: Dir> LocalCell<D> {
     /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for
     /// the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
     pub fn read_kept(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        ensure!(!self.keys.is_revoked(), "cell keys revoked");
         self.read_into_entry(extent, offset, buf, Reader::Kept)
     }
 
@@ -2711,7 +2723,6 @@ impl<D: Dir> LocalCell<D> {
         let len = data.as_slice().len() as u64;
         let open = state.segments.open_segment();
         let (file, at) = state.segments.append(len)?;
-        state.segments.appended(open, at, len);
         let piece = Piece { segment: open, offset: at, extent_offset: 0, len };
         // A test's: the copy's write failing, as a disk's would.
         let write = || -> Result<(), Error> {
@@ -2723,6 +2734,7 @@ impl<D: Dir> LocalCell<D> {
             state.uncommitted.let_go(len);
             return Err(error.into());
         }
+        state.segments.appended(open, at, len);
         written::wrote(written::Kind::Relocated, data.as_slice().len());
         self.see_ahead(state);
         Ok(piece)
@@ -3012,7 +3024,8 @@ impl<D: Dir> LocalCell<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        let mut packer = extent_frame::Packer::new(self.keys.encrypting());
+        let (dek, key) = self.keys.try_encrypting()?;
+        let mut packer = extent_frame::Packer::new((&dek, key));
         let sectors = raw.sectors();
         // cladefs: in place, whole sectors of its raw file, under the raw file's key (TASK-411.23).
         let in_place = len.is_multiple_of(SECTOR);
@@ -3078,7 +3091,10 @@ impl<D: Dir> LocalCell<D> {
             }
         };
         written::wrote(written::Kind::Own, tail.len());
-        state.own_files.sealed(extent, Arc::new(Framed::new(file, parts)));
+        state.own_files.sealed(
+            extent,
+            Arc::new(Framed::new(file, parts, crate::framed::unpacked_for(self.dir.host()))),
+        );
         Ok(copied)
     }
 
@@ -3093,7 +3109,8 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<(), Error> {
         let path = extent_path(extent);
         let file = self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
-        let mut packer = extent_frame::Packer::new(self.keys.encrypting());
+        let (dek, key) = self.keys.try_encrypting()?;
+        let mut packer = extent_frame::Packer::new((&dek, key));
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
@@ -3107,7 +3124,11 @@ impl<D: Dir> LocalCell<D> {
         let (tail, parts) = packer.finish_parts(&own_footer(extent));
         file.write_at(&tail, end)?;
         written::wrote(written::Kind::Own, tail.len());
-        let framed = Arc::new(Framed::new(Arc::new(file), parts));
+        let framed = Arc::new(Framed::new(
+            Arc::new(file),
+            parts,
+            crate::framed::unpacked_for(self.dir.host()),
+        ));
         state.own_files.sealed(extent, framed);
         Ok(())
     }
@@ -3581,7 +3602,7 @@ impl<D: Dir> LocalCell<D> {
                         return Err(error);
                     }
                 };
-                self.durability.with(Mutex::lock).finish(last);
+                self.durability.with(Mutex::lock).finish(last, self.dir.host().map(Arc::as_ref));
                 drop(records);
                 // cladefs: the entries of the segments opened its syncs made durable: no making of
                 // them durable syncs them again (TASK-369).
@@ -3997,6 +4018,7 @@ impl<D: Dir> LocalCell<D> {
 
     /// Reads `buf.len()` bytes at `offset` in `extent`. Bytes never written read as zeros.
     pub fn read(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        ensure!(!self.keys.is_revoked(), "cell keys revoked");
         self.read_into(extent, offset, buf)
     }
 
@@ -4282,6 +4304,26 @@ fn paint(pieces: &[Piece], start: u64, end: u64) -> Vec<Span> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "shuttle"))]
+    #[test]
+    fn failed_relocation_does_not_complete_a_part_for_looking_ahead() {
+        let _scenario = fail::FailScenario::setup();
+        let description = Description {
+            block_size: 4096,
+            capacity: 2 * extent_frame::PART,
+            cell: bucket_cell::layout::test_cell(1),
+        };
+        let cell =
+            LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
+        let mut state = cell.lock();
+        fail::cfg("relocate::write", "1*return").unwrap();
+        let error = cell
+            .copy_relocated(&mut state, &Aligned::new(extent_frame::PART as usize))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "failpoint relocate::write");
+        assert!(state.segments.take_seeing().is_empty());
+    }
 
     /// The cell's own tests under Shuttle (the `shuttle` feature), which only they can run:
     /// `cargo nextest run -p local_cell --features shuttle --lib shuttle_tests::`.

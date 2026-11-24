@@ -80,8 +80,6 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 # so that an `https://` collector is reached by what this crate asks for, never by another crate's
 # turning reqwest's TLS on (board 8569; tests/tracing.rs exports to one).
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
-# cladefs: the frames of spans that waited for the bucket, resolved as /z/tracez shows them (TASK-672.2).
-backtrace = "0.3.77"
 humantime = "2.4.0"
 loom = { workspace = true, optional = true }
 astral-tokio-tar = "0.7.1"

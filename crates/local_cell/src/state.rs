@@ -1144,7 +1144,12 @@ impl<F: File> OwnFiles<F> {
         }
         let path = extent_path(extent);
         let keys = self.keys.of(extent.cell);
-        let file = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
+        let file = Arc::new(Framed::open(
+            dir.open(&path, true)?,
+            &path,
+            &keys,
+            crate::framed::unpacked_for(dir.host()),
+        )?);
         Ok(self.open.insert(extent, file))
     }
 

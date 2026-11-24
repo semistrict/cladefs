@@ -52,7 +52,9 @@ pub(crate) mod host {
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
+    use cladefs::cladefsd::control::proto::ImportImageRequest;
     use cladefs::import::testing::{Entry, Kind, layer, oci_layout};
+    use cladefs::testing::control_path;
     use std::path::Path;
 
     const CAPACITY: u64 = 4 << 30;
@@ -223,7 +225,15 @@ pub(crate) mod host {
             let cell_dir = dir.join("root");
             let capacity = if self.build { BUILD_CAPACITY } else { CAPACITY };
             let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-            control(Path::new(&cladefsd))?.import_image(&cell_dir, capacity, &layout, None)?;
+            let request = ImportImageRequest {
+                path: control_path(&cell_dir),
+                capacity,
+                image: control_path(&layout),
+                reference: String::new(),
+                tenant: 0,
+            };
+            control(Path::new(&cladefsd))?
+                .call(async |client| client.import_image(request).await)?;
 
             let mut vm = if self.build { Vm::new(BUILD_VCPUS, 2048)? } else { Vm::new(2, 2048)? };
             vm.guest_kernel()?;

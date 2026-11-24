@@ -6,7 +6,7 @@
 # Killer: cladefsd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing
 --- a/crates/local_cell/src/footprint.rs
 +++ b/crates/local_cell/src/footprint.rs
-@@ -203,7 +203,7 @@
+@@ -205,7 +205,7 @@
          let over =
              |tally: &Tally, limit: &AtomicU64| tally.committed() > limit.load(Ordering::Relaxed);
          let full = match &allotment {
@@ -14,4 +14,4 @@
 +            Some(allotment) if over(&allotment.tally, &AtomicU64::new(u64::MAX)) => {
                  Some(DiskFull::Allotment)
              }
-             Some(_) if over(&TOTAL.get().tally, &TOTAL.get().limit) => Some(DiskFull::Total),
+             Some(allotment) if over(&allotment.total.tally, &allotment.total.limit) => {
