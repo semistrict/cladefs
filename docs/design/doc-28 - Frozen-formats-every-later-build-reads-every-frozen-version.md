@@ -115,8 +115,10 @@ incompatible change, where it lacks the means to grow (board 10033's subtasks):
   bytes past it; cladefs's records in a cell directory are a family of their own, `cell records`
   (hotbed questions 528, 529).
 - **The peer service says each family's version**, not one opaque string compared whole, so that
-  a member reads a writer's logs whenever it reads their versions.
-- **A snapshot's extent device state says its version before bitcode reads it.**
+  a member reads a writer's logs whenever it reads their versions (board 10054, checked by
+  `buf breaking` in CI).
+- **A snapshot's extent device state says its version before decoding** (`virtio_extent::persist::FORMAT`,
+  frozen at version 2 with `dax_private_max_bytes` in bytes; board 10058).
 - **The segment log's fallback to older records goes** (board 10062): a second, unversioned format.
 - **Numbers in keys and file names are base 32**, as every other: the ephemeral index's bucket,
   holds', replica directories' and the ephemeral host's names. Replica directories' done (board 10046), with

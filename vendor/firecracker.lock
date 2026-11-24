@@ -5352,7 +5352,10 @@ dependencies = [
 name = "virtio_extent"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "cladefs",
+ "formats",
+ "fprint",
  "futures",
  "libc",
  "log",
