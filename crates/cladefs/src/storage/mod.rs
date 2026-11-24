@@ -75,10 +75,20 @@ impl Storage {
 
     /// The image at `path` opened on `host`.
     pub async fn open_on(host: &Arc<crate::Host>, path: impl AsRef<Path>) -> Result<Self, Error> {
+        let keeping = Self::keeping_on(host)?;
+        Self::open_on_keeping(host, path, keeping).await
+    }
+
+    /// The image at `path` opened on `host` with explicit `keeping` options (e.g. a daemon's
+    /// shared `CLADEFSD_PART_CACHE` and fetch budget, board 11363).
+    pub(crate) async fn open_on_keeping(
+        host: &Arc<crate::Host>,
+        path: impl AsRef<Path>,
+        keeping: local_cell::upload::Options,
+    ) -> Result<Self, Error> {
         let dir = path.as_ref().to_owned();
         let task_host = host.clone();
         on_bucket_runtime_on(host, async move {
-            let keeping = Self::keeping_on(&task_host)?;
             let opened = host_cell::open_on(&task_host, &dir, keeping.clone()).await;
             let context = || format!("opening {}", dir.display());
             let opened = opened.map_err(|err| Error::from(err).context(context()))?;
@@ -136,10 +146,25 @@ impl Storage {
         token: Option<u64>,
     ) -> Result<Self, Error> {
         let host = crate::Host::process().clone();
+        let keeping = Self::keeping_on(&host)?;
+        Self::take_on_keeping(&host, path, (of, capacity), bucket, token, keeping).await
+    }
+
+    /// cladefs: as [`Storage::take`], on `host` with explicit `keeping` options (so the daemon's
+    /// FUSE mount shares `CLADEFSD_PART_CACHE`, fetch budgets, and held parts, board 11363).
+    #[cfg(not(madsim))]
+    pub(crate) async fn take_on_keeping(
+        host: &Arc<crate::Host>,
+        path: impl AsRef<Path>,
+        (of, capacity): (host_cell::CellOf, u64),
+        bucket: &str,
+        token: Option<u64>,
+        keeping: local_cell::upload::Options,
+    ) -> Result<Self, Error> {
         let (path, bucket) = (path.as_ref().to_owned(), bucket.to_owned());
         on_bucket_runtime_on(
-            &host,
-            Self::taken_on(host.clone(), path, (of, capacity), bucket, token),
+            host,
+            Self::taken_on(host.clone(), path, (of, capacity), bucket, token, keeping),
         )
         .await
     }
@@ -152,8 +177,11 @@ impl Storage {
         (of, capacity): (host_cell::CellOf, u64),
         bucket: String,
         token: Option<u64>,
+        keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
         let (path, bucket) = (path.as_path(), bucket.as_str());
+        let keeping =
+            local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
         // What a making that died part way left is no cell: its directory goes, not the bucket's
         // cell, which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         let exists = local_cell::upload::blocking(|| -> Result<bool, Error> {
@@ -167,10 +195,7 @@ impl Storage {
             Ok(host_fs::exists(path))
         })?;
         if !exists {
-            let keeping = Self::keeping_on(&host)?;
-            let keeping =
-                local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
-            let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
+            let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping.clone());
             let making =
                 host_cell::create_unmade_on(&host, path, capacity, of, kept.0, kept.1, kept.2);
             let opened = making.await?;
@@ -204,11 +229,10 @@ impl Storage {
                 })
                 .map_err(Error::new)?;
             }
-            let keeping = Self::keeping_on(&host)?;
             let opened = host_cell::take_on(&host, path, keeping.clone()).await?;
             return Self::opened_on(&host, path.to_owned(), opened, keeping).await;
         }
-        Self::open_on(&host, path).await
+        Self::open_on_keeping(&host, path, keeping).await
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create`] makes it, unmade until its maker says

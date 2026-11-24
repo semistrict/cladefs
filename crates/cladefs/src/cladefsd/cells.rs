@@ -597,9 +597,16 @@ async fn attached<T>(
     open: impl AsyncFnOnce(local_cell::upload::Options) -> Result<T, crate::Error>,
 ) -> Result<T, Errno> {
     // The daemon's own first, which the cells naming it share (`host_cell::bucket`).
-    daemon_bucket_on(daemon)?;
-    let keeping = keeping(daemon)?;
+    let keeping = mount_keeping(daemon)?;
     open(keeping).await.map_err(|err| errno_of(format_args!("opening {}", path.display()), err))
+}
+
+/// cladefs: ensures `daemon`'s bucket is open and returns its uploader/cache options for
+/// host-FUSE mounted cells (`crate::fuse::control`, board 11363) so mounted cells share the
+/// daemon's `CLADEFSD_PART_CACHE`, fetch budget, and held-parts pool.
+pub(crate) fn mount_keeping(daemon: &Arc<Daemon>) -> Result<local_cell::upload::Options, Errno> {
+    daemon_bucket_on(daemon)?;
+    keeping(daemon)
 }
 
 /// How `daemon`'s cells' uploaders keep them in their buckets.

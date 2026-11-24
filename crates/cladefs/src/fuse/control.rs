@@ -133,6 +133,7 @@ fn reserve(
 /// [`local_cell::upload::blocking`]'s, its bucket's on the bucket runtime ([`Storage::take`]),
 /// Fxfs's device I/O the I/O engine's.
 async fn mount_cell(
+    daemon: &Arc<crate::cladefsd::Daemon>,
     path: &Path,
     url: &str,
     (of, capacity): (CellOf, u64),
@@ -144,7 +145,9 @@ async fn mount_cell(
         local_cell::upload::blocking(|| std::fs::create_dir_all(tenant))
             .map_err(|err| Error::new(err).context(format!("making {}", tenant.display())))?;
     }
-    let storage = Storage::take(path, (of, capacity), url, token).await?;
+    let keeping = crate::cladefsd::cells::mount_keeping(daemon).map_err(Error::from)?;
+    let storage =
+        Storage::take_on_keeping(&daemon.host, path, (of, capacity), url, token, keeping).await?;
     let mounting = async {
         if !new {
             return Filesystem::mount(storage).await;
@@ -189,7 +192,7 @@ impl Control {
         };
         let shown = cell_path(cell);
         let path = self.source.dir.join(&shown);
-        let mounting = mount_cell(&path, &self.source.bucket, of, token);
+        let mounting = mount_cell(&self.daemon, &path, &self.source.bucket, of, token);
         let open = held_open(Arc::clone(&self.daemon), self.holds.clone(), path.clone(), mounting);
         if let Err(err) = server.attach(&shown, open).await {
             self.holds.lock().unwrap().remove(&path);

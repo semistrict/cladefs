@@ -933,3 +933,73 @@ fn a_daemon_mounts_over_the_mount_of_one_killed() {
     assert_eq!(names(&m), ["0000000000001"]);
     terminate(child, &m);
 }
+
+/// Board 11363: cells mounted through cladefsd's host-FUSE Mount service share the daemon's
+/// `CLADEFSD_PART_CACHE` rather than opening with `cache: None` and re-fetching every read from
+/// object storage.
+#[test]
+fn mounted_cells_read_through_the_daemons_part_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let writer = dir.path().join("writer");
+    std::fs::create_dir(&writer).unwrap();
+    let (writer_child, writer_sock, writer_m) = cladefsd_mounting(&writer, &bucket, 1);
+    let writer_sock_s = writer_sock.to_str().unwrap();
+    let cell =
+        cladefsctl_mount(writer_sock_s, &["create", "1", &CELL_SIZE.to_string()]).trim().to_owned();
+    let payload: Vec<u8> = (0..(2usize << 20)).map(|i| ((i * 31) ^ (i >> 8)) as u8).collect();
+    std::fs::write(writer_m.join("0000000000001").join(&cell).join("blob"), &payload).unwrap();
+    cladefsctl_mount(writer_sock_s, &["detach", "1", &cell]);
+    terminate(writer_child, &writer_m);
+
+    let reader = dir.path().join("reader");
+    let part_cache = reader.join("part-cache");
+    let cells_dir = reader.join("cells");
+    let m = reader.join("mnt");
+    let socket = reader.join("control");
+    std::fs::create_dir_all(&part_cache).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+    let mut command = cladefsd(&reader.join("vm.sock"), &bucket, 2);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_MOUNT", &m)
+        .env("CLADEFSD_MOUNT_STORES", &cells_dir)
+        .env("CLADEFSD_PART_CACHE", &part_cache);
+    let child = serving(command, &socket);
+    let sock_s = socket.to_str().unwrap();
+
+    let get_range_count = || -> u64 {
+        let out = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
+            .env("CLADEFSD_GRPC", sock_s)
+            .args(["counters", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "counters: {}", String::from_utf8_lossy(&out.stderr));
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["object_storage"]["requests"]["get-range"].as_u64().unwrap()
+    };
+
+    // First attach from the bucket populates CLADEFSD_PART_CACHE.
+    cladefsctl_mount(sock_s, &["attach", "1", &cell]);
+    let blob_path = m.join("0000000000001").join(&cell).join("blob");
+    assert_eq!(std::fs::read(&blob_path).unwrap(), payload);
+    let after_first = get_range_count();
+    assert!(after_first > 0, "first read from bucket must issue get-range");
+    assert!(
+        std::fs::read_dir(&part_cache).unwrap().next().is_some(),
+        "CLADEFSD_PART_CACHE must be populated by FUSE reads"
+    );
+
+    // Detach and wipe the local cell dir while keeping CLADEFSD_PART_CACHE: re-attaching and
+    // reading the blob again must hit the local part cache with zero additional get-range calls.
+    cladefsctl_mount(sock_s, &["detach", "1", &cell]);
+    std::fs::remove_dir_all(cells_dir.join("0000000000001").join(&cell)).unwrap();
+    cladefsctl_mount(sock_s, &["attach", "1", &cell]);
+    assert_eq!(std::fs::read(&blob_path).unwrap(), payload);
+    assert_eq!(
+        get_range_count(),
+        after_first,
+        "second FUSE read must serve cached parts from CLADEFSD_PART_CACHE without get-range"
+    );
+    terminate(child, &m);
+}
