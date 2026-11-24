@@ -849,7 +849,6 @@ impl FxFilesystem {
         self.journal.check_journal_space().await
     }
 
-
     pub(crate) async fn reservation_for_transaction<'a>(
         self: &Arc<Self>,
         options: transaction::Options<'a>,

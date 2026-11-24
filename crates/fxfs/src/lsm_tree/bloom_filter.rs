@@ -91,12 +91,7 @@ impl<V: FuzzyHash> BloomFilterReader<V> {
     /// `seed` and `num_hashes` must match the values passed into BloomFilterWriter.
     pub fn read(buf: &[u8], seed: u64, num_hashes: usize) -> Result<Self, Error> {
         ensure!(num_hashes <= MAX_NUM_HASHES, FxfsError::Inconsistent);
-        Ok(Self {
-            data: BitVec::from_bytes(buf),
-            seed,
-            num_hashes,
-            _type: PhantomData::default(),
-        })
+        Ok(Self { data: BitVec::from_bytes(buf), seed, num_hashes, _type: PhantomData::default() })
     }
 
     /// Returns whether the bloom filter *might* contain the given value (or any part of it, for
@@ -334,8 +329,7 @@ mod tests {
                 let mut cursor = std::io::Cursor::new(&mut buf);
                 filter.write(&mut cursor).expect("write failed");
             }
-            let filter = BloomFilterReader::read(&buf[..], 0, num_hashes)
-                .expect("read failed");
+            let filter = BloomFilterReader::read(&buf[..], 0, num_hashes).expect("read failed");
             assert_eq!(filter.maybe_contains(key), MaybeContainsKey::Maybe);
         }
     }

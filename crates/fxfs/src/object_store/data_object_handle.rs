@@ -1862,10 +1862,7 @@ mod tests {
             )
             .await
             .expect("read failed");
-        assert_eq!(
-            &buf[align..block_size],
-            &vec![0u8; block_size - align][..]
-        );
+        assert_eq!(&buf[align..block_size], &vec![0u8; block_size - align][..]);
 
         // Reading entirely past EOF with read_aligned_unchecked fills with zeros.
         let aligned_eof = fs.block_size().align_up(TEST_OBJECT_SIZE).unwrap();
@@ -1898,10 +1895,7 @@ mod tests {
         );
         let mut expected_aligned = vec![0; TEST_OBJECT_SIZE as usize];
         expected_aligned[offset..offset + TEST_DATA.len()].copy_from_slice(TEST_DATA);
-        assert_eq!(
-            &buf[0..TEST_OBJECT_SIZE as usize],
-            &expected_aligned[..]
-        );
+        assert_eq!(&buf[0..TEST_OBJECT_SIZE as usize], &expected_aligned[..]);
         fs.close().await.expect("Close failed");
     }
 
@@ -2004,22 +1998,13 @@ mod tests {
             object.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
             3 * block_size
         );
-        assert_eq!(
-            &buffer[0..2 * block_size],
-            &vec![0xaf; 2 * block_size][..]
-        );
-        assert_eq!(
-            &buffer[2 * block_size..3 * block_size],
-            &vec![0; block_size][..]
-        );
+        assert_eq!(&buffer[0..2 * block_size], &vec![0xaf; 2 * block_size][..]);
+        assert_eq!(&buffer[2 * block_size..3 * block_size], &vec![0; block_size][..]);
         assert_eq!(
             object2.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
             2 * block_size
         );
-        assert_eq!(
-            &buffer[0..2 * block_size],
-            &vec![0xef; 2 * block_size][..]
-        );
+        assert_eq!(&buffer[0..2 * block_size], &vec![0xef; 2 * block_size][..]);
         fs.close().await.expect("Close failed");
     }
 
@@ -2190,18 +2175,12 @@ mod tests {
         // Read back the data and make sure it is what we expect.
         let mut buf = object.allocate_buffer(1048576).await;
         assert_eq!(object.read_aligned(0, buf.as_mut()).await.expect("read failed"), buf.len());
-        assert_eq!(
-            &buf[0..TEST_DATA_OFFSET as usize],
-            &[47; TEST_DATA_OFFSET as usize]
-        );
+        assert_eq!(&buf[0..TEST_DATA_OFFSET as usize], &[47; TEST_DATA_OFFSET as usize]);
         assert_eq!(
             &buf[TEST_DATA_OFFSET as usize..TEST_DATA_OFFSET as usize + TEST_DATA.len()],
             TEST_DATA
         );
-        assert_eq!(
-            &buf[offset as usize..offset as usize + 2048],
-            &[95; 2048]
-        );
+        assert_eq!(&buf[offset as usize..offset as usize + 2048], &[95; 2048]);
     }
 
     #[fuchsia_async::run_singlethreaded(test)]
@@ -2716,10 +2695,7 @@ mod tests {
 
         let mut expected = TEST_DATA.to_vec();
         expected[3..].fill(0);
-        assert_eq!(
-            &buf[offset..offset + expected.len()],
-            &expected[..]
-        );
+        assert_eq!(&buf[offset..offset + expected.len()], &expected[..]);
     }
 
     #[fuchsia_async::run_singlethreaded(test)]
@@ -3225,10 +3201,7 @@ mod tests {
             object.read_aligned(0, buf.as_mut()).await.expect("read failed") as u64,
             expected_size
         );
-        assert_eq!(
-            &buf[0..expected_size as usize],
-            vec![0u8; expected_size as usize].as_slice()
-        );
+        assert_eq!(&buf[0..expected_size as usize], vec![0u8; expected_size as usize].as_slice());
         fs.close().await.expect("Close failed");
     }
 
@@ -3917,8 +3890,7 @@ mod tests {
                 for r in &overwrite {
                     let len = r.length().unwrap() as usize;
                     let (copy_from, rest) = data_slice.split_at(len);
-                    expected_buf_slice[r.start as usize..r.end as usize]
-                        .copy_from_slice(copy_from);
+                    expected_buf_slice[r.start as usize..r.end as usize].copy_from_slice(copy_from);
                     data_slice = rest;
                 }
 
