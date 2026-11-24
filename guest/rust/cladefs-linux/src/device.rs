@@ -779,8 +779,9 @@ fn info_reply(reply: &InfoReply) -> InfoReply {
     }
 }
 
-/// cladefs: what freezes the device with its filesystem (`Fxfs::freeze`), as a snapshot of the VM
-/// needs it, and thaws it (TASK-39.1).
+/// cladefs: what freezes the device with its filesystem (`Filesystem::freeze`), as a snapshot of
+/// the VM needs it, returning a [`FrozenDevice`] guard that owns the closed device gate until
+/// thawed (`TASK-39.1`).
 pub struct Freezer {
     sealer: Sealer,
     /// Whether the device takes FREEZE, and INFO says the cell.
@@ -796,52 +797,85 @@ unsafe impl Send for Freezer {}
 // SAFETY: As above.
 unsafe impl Sync for Freezer {}
 
+/// cladefs: linear guard proving the extent device is frozen — its write/free/commit gate is
+/// closed, open extents were sealed and uploaded (when writable), and the host device was told
+/// `T_FREEZE(FREEZE_FROZEN)` (when supported). Owned by `Filesystem`'s single freeze-thaw state
+/// machine so the device gate can never drift out of sync with filesystem freeze state.
+///
+/// Consuming this guard via [`FrozenDevice::unfreeze`] is the sole path that sends `T_FREEZE(0)`,
+/// refreshes the cell ID, runs the caller's cell update while the gate is still closed, and
+/// reopens the gate. Dropping it without unfreezing still reopens the gate so callers cannot
+/// deadlock.
+pub struct FrozenDevice {
+    sealer: Sealer,
+    freeze: bool,
+    gate: Option<Arc<Gate>>,
+    cell: Arc<AtomicU64>,
+}
+
 impl Freezer {
     /// Closes the device to writes, frees and commits, once those in progress end, seals what is
     /// open, extents minted ahead of writes such as a staging extent, and a write that reached an
     /// extent after the last seal, which no one knows to be open, as the next barrier would, and
-    /// tells the device: nothing is open on it until it thaws (`Freezer::unfreeze`).
-    pub async fn freeze(&self) -> Result<(), Error> {
+    /// tells the device: nothing is open on it until it thaws ([`FrozenDevice::unfreeze`]).
+    pub async fn freeze(&self) -> Result<FrozenDevice, Error> {
         self.gate.close().await;
-        let frozen = async {
-            let device = self.sealer.device;
-            if !self.writes_nothing {
-                let _seal = Seal::begin_with(&self.sealer).await;
-                let commit = op(T_COMMIT, COMMIT_UPLOADED, None, 0, std::ptr::null_mut(), 0);
-                call(device, commit, None).await?;
-            }
-            if self.freeze {
-                let frozen = op(T_FREEZE, FREEZE_FROZEN, None, 0, std::ptr::null_mut(), 0);
-                call(device, frozen, None).await?;
-            }
-            Ok(())
+        // Held in the guard at once so any error or cancellation reopens the gate on drop.
+        let guard = FrozenDevice {
+            sealer: self.sealer.clone(),
+            freeze: self.freeze,
+            gate: Some(self.gate.clone()),
+            cell: self.cell.clone(),
+        };
+        let device = self.sealer.device;
+        if !self.writes_nothing {
+            let _seal = Seal::begin_with(&self.sealer).await;
+            let commit = op(T_COMMIT, COMMIT_UPLOADED, None, 0, std::ptr::null_mut(), 0);
+            call(device, commit, None).await?;
         }
-        .await;
-        if frozen.is_err() {
-            self.gate.open();
+        if self.freeze {
+            let frozen = op(T_FREEZE, FREEZE_FROZEN, None, 0, std::ptr::null_mut(), 0);
+            call(device, frozen, None).await?;
         }
-        frozen
+        Ok(guard)
     }
+}
 
-    /// Tells the device the filesystem thaws, and takes its cell, which is its own
-    /// in a VM restored from a snapshot; returns the cell. Its capacity, which may differ too, is
-    /// for the filesystem to take (`resize`), which compares it with the device's and grows the
-    /// allocator with it (TASK-79.52). The device takes writes, frees and commits again once opened
-    /// (`Freezer::open`).
-    pub async fn unfreeze(&self) -> Result<u64, Error> {
+impl FrozenDevice {
+    /// Tells the device the filesystem thaws, refreshes its cell (which is its own in a VM
+    /// restored from a snapshot), invokes `on_cell` with the updated cell while the gate is still
+    /// closed, and then opens the device to writes, frees and commits again. Its capacity, which
+    /// may differ too, is for the filesystem to take (`resize`), which compares it with the
+    /// device's and grows the allocator with it (TASK-79.52).
+    ///
+    /// On failure, returns `self` unchanged with the gate still closed so the caller can retry.
+    pub async fn unfreeze(mut self, on_cell: impl FnOnce(u64)) -> Result<(), (Self, Error)> {
         if self.freeze {
             let device = self.sealer.device;
             let thawed = op(T_FREEZE, 0, None, 0, std::ptr::null_mut(), 0);
-            call(device, thawed, None).await?;
-            let info = info(device).await?;
+            if let Err(error) = call(device, thawed, None).await {
+                return Err((self, error));
+            }
+            let info = match info(device).await {
+                Ok(info) => info,
+                Err(error) => return Err((self, error)),
+            };
             self.cell.store(info.cell, Ordering::Release);
         }
-        Ok(self.cell.load(Ordering::Acquire))
+        let cell = self.cell.load(Ordering::Acquire);
+        on_cell(cell);
+        if let Some(gate) = self.gate.take() {
+            gate.open();
+        }
+        Ok(())
     }
+}
 
-    /// Opens the device to writes, frees and commits again.
-    pub fn open(&self) {
-        self.gate.open();
+impl Drop for FrozenDevice {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.open();
+        }
     }
 }
 

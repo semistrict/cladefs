@@ -2370,6 +2370,15 @@ module_param_cb(fail_thaw_at, &cladefs_vfs_fail_thaw_at_ops, NULL, 0644);
 MODULE_PARM_DESC(fail_thaw_at, "Fail the next thaw before this step: 1 telling the device, 2 rotating the journal's span (fault injection)");
 
 /*
+ * cladefs: whether `filesystem` is frozen, read from its single authoritative owner in Rust
+ * (`cladefs_is_frozen`): false while closed (`filesystem->filesystem == NULL`). With `lock` held.
+ */
+static bool cladefs_vfs_filesystem_is_frozen(const struct cladefs_vfs_filesystem *filesystem)
+{
+	return filesystem->filesystem && cladefs_is_frozen(filesystem->filesystem);
+}
+
+/*
  * Freezing (fsfreeze, FIFREEZE): the VFS stops a volume's writers and syncs it, and once all the
  * filesystem's volumes are frozen, read-only ones too (cladefs_vfs_settle_frozen), the filesystem is
  * made durable, and holds its background work, compacting and freeing, which writes nothing until
@@ -2383,7 +2392,8 @@ static int cladefs_vfs_filesystem_freeze(struct cladefs_vfs_filesystem *filesyst
 	int err;
 
 	lockdep_assert_held(&filesystem->lock);
-	if (filesystem->frozen || filesystem->volumes_frozen < filesystem->volumes)
+	if (cladefs_vfs_filesystem_is_frozen(filesystem) ||
+	    filesystem->volumes_frozen < filesystem->volumes)
 		return 0;
 	if (dax)
 		cladefs_dax_quiesce(dax);
@@ -2396,7 +2406,6 @@ static int cladefs_vfs_filesystem_freeze(struct cladefs_vfs_filesystem *filesyst
 	/* cladefs: the window's private pages rebound, for the snapshot (doc-13). */
 	if (dax)
 		cladefs_dax_frozen(dax);
-	filesystem->frozen = true;
 	return 0;
 }
 
@@ -2411,14 +2420,13 @@ static int cladefs_vfs_filesystem_thaw(struct cladefs_vfs_filesystem *filesystem
 	int err;
 
 	lockdep_assert_held(&filesystem->lock);
-	if (!filesystem->frozen)
+	if (!cladefs_vfs_filesystem_is_frozen(filesystem))
 		return 0;
 	err = cladefs_nofs(cladefs_thaw(filesystem->filesystem));
 	if (err)
 		return err;
 	if (filesystem->dax)
 		cladefs_dax_thaw(filesystem->dax);
-	filesystem->frozen = false;
 	/*
 	 * cladefs: a store resized while the VM was away, snapshotted, told it nothing: what the device
 	 * says now it takes as if told, before anything thawed sees the filesystem's size.
@@ -2729,11 +2737,10 @@ static void cladefs_vfs_changed(void *arg)
 static long cladefs_vfs_ioc_flush(struct super_block *sb)
 {
 	struct cladefs_vfs_filesystem *filesystem = cladefs_vfs_info(sb)->filesystem;
-	long err = -EBUSY;
+	long err;
 
 	mutex_lock(&filesystem->lock);
-	if (!filesystem->frozen)
-		err = cladefs_nofs(cladefs_flush_volume(cladefs_vfs_fs(sb)));
+	err = cladefs_nofs(cladefs_flush_volume(cladefs_vfs_fs(sb)));
 	mutex_unlock(&filesystem->lock);
 	return err;
 }
@@ -2743,7 +2750,7 @@ static long cladefs_vfs_ioc_manifest(struct super_block *sb, struct cladefs_mani
 {
 	struct cladefs_vfs_filesystem *filesystem = cladefs_vfs_info(sb)->filesystem;
 	struct cladefs_manifest request;
-	ssize_t size = -EINVAL;
+	ssize_t size;
 	void *manifest;
 
 	if (copy_from_user(&request, arg, sizeof(request)))
@@ -2752,8 +2759,7 @@ static long cladefs_vfs_ioc_manifest(struct super_block *sb, struct cladefs_mani
 	if (!manifest)
 		return -ENOMEM;
 	mutex_lock(&filesystem->lock);
-	if (filesystem->frozen)
-		size = cladefs_nofs(cladefs_manifest(cladefs_vfs_fs(sb), manifest, CLADEFS_MANIFEST_MAX));
+	size = cladefs_nofs(cladefs_manifest(cladefs_vfs_fs(sb), manifest, CLADEFS_MANIFEST_MAX));
 	mutex_unlock(&filesystem->lock);
 	if (size >= 0 && size > request.size)
 		size = -ERANGE;
@@ -2770,7 +2776,7 @@ static long cladefs_vfs_ioc_import(struct super_block *sb, struct cladefs_import
 	struct cladefs_vfs_filesystem *filesystem = cladefs_vfs_info(sb)->filesystem;
 	struct cladefs_import request;
 	void *name, *manifest;
-	long err = -EBUSY;
+	long err;
 
 	if (copy_from_user(&request, arg, sizeof(request)))
 		return -EFAULT;
@@ -2785,9 +2791,8 @@ static long cladefs_vfs_ioc_import(struct super_block *sb, struct cladefs_import
 		return PTR_ERR(manifest);
 	}
 	mutex_lock(&filesystem->lock);
-	if (!filesystem->frozen)
-		err = cladefs_nofs(cladefs_import(filesystem->filesystem, name, request.name_size,
-					    manifest, request.manifest_size));
+	err = cladefs_nofs(cladefs_import(filesystem->filesystem, name, request.name_size,
+					  manifest, request.manifest_size));
 	mutex_unlock(&filesystem->lock);
 	kvfree(manifest);
 	kfree(name);
@@ -2983,7 +2988,7 @@ static int cladefs_vfs_filesystem_join(struct cladefs_vfs_info *info, struct fs_
 	if (!filesystem)
 		return -ENOMEM;
 	mutex_lock(&filesystem->lock);
-	if (filesystem->frozen)
+	if (cladefs_vfs_filesystem_is_frozen(filesystem))
 		err = -EBUSY;
 	else if (!filesystem->volumes)
 		err = cladefs_vfs_filesystem_open(filesystem, fc);
@@ -3010,8 +3015,8 @@ static void cladefs_vfs_filesystem_leave(struct cladefs_vfs_info *info)
 	int err;
 
 	mutex_lock(&filesystem->lock);
-	WARN_ON_ONCE(filesystem->frozen && !info->frozen);
-	if (filesystem->volumes == 1 && filesystem->frozen) {
+	WARN_ON_ONCE(cladefs_vfs_filesystem_is_frozen(filesystem) && !info->frozen);
+	if (filesystem->volumes == 1 && cladefs_vfs_filesystem_is_frozen(filesystem)) {
 		err = cladefs_vfs_filesystem_thaw(filesystem);
 		if (err)
 			pr_warn("cladefs: thawing as the last volume left: %d\n", err);

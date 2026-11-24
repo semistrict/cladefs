@@ -2208,7 +2208,8 @@ static void cladefs_dax_work(struct work_struct *work)
 	long max = dax->private_max;
 
 	if (clean || all || atomic_long_read(&dax->private) > max - max / 8)
-		cladefs_dax_relieve(dax, all ? 0 : max - max / 4, !READ_ONCE(dax->frozen));
+		cladefs_dax_relieve(dax, all ? 0 : max - max / 4,
+				    !cladefs_is_frozen(dax->filesystem));
 	cladefs_dax_prune(dax);
 	atomic64_set(&dax->rebinds_done, asked);
 	atomic64_inc(&dax->rounds);
@@ -3324,7 +3325,7 @@ void cladefs_dax_stop(struct cladefs_dax *dax)
 /* cladefs: starts the budget's worker again, unless the filesystem is frozen, and has it run. */
 void cladefs_dax_start(struct cladefs_dax *dax)
 {
-	if (READ_ONCE(dax->frozen))
+	if (cladefs_is_frozen(dax->filesystem))
 		return;
 	WRITE_ONCE(dax->stopping, false);
 	cladefs_dax_kick(dax, false);
@@ -3340,7 +3341,6 @@ void cladefs_dax_start(struct cladefs_dax *dax)
  */
 void cladefs_dax_frozen(struct cladefs_dax *dax)
 {
-	WRITE_ONCE(dax->frozen, true);
 	cladefs_dax_relieve(dax, 0, false);
 	if (atomic_long_read(&dax->private))
 		pr_warn("cladefs: frozen with %ld private pages, %ld dirty: no snapshot\n",
@@ -3359,7 +3359,6 @@ void cladefs_dax_quiesce(struct cladefs_dax *dax)
 /* Starts the budget's worker again, as the filesystem thaws (cladefs_dax_quiesce). */
 void cladefs_dax_thaw(struct cladefs_dax *dax)
 {
-	WRITE_ONCE(dax->frozen, false);
 	cladefs_dax_start(dax);
 }
 

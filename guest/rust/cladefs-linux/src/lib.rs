@@ -488,6 +488,18 @@ pub unsafe extern "C" fn cladefs_thaw(filesystem: *const Filesystem) -> c_int {
     }
 }
 
+/// cladefs: whether `filesystem` is frozen (`Filesystem::is_frozen`), the single authoritative
+/// freeze state across VFS, DAX, Fxfs, and the extent device.
+///
+/// # Safety
+///
+/// `filesystem` is open.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cladefs_is_frozen(filesystem: *const Filesystem) -> bool {
+    // SAFETY: As the caller promises.
+    unsafe { (*filesystem).is_frozen() }
+}
+
 /// cladefs: fault injection (TASK-200): the next thaw fails before its step `step`, 1 telling the
 /// device, 2 renewing the journal's tail, 3 recording it; 0, none (`fs::FAIL_THAW_AT`).
 #[unsafe(no_mangle)]

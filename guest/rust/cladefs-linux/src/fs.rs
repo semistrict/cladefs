@@ -10,15 +10,17 @@
 //! cladefs: what only the guest has is here: its device's DAX, uploaded commits, resizes and
 //! freezes.
 
-use crate::device::{Dax, DeviceStats, ExtentDevice, Freezer, Resizer, Uploading, UploadingGuard};
+use crate::device::{
+    Dax, DeviceStats, ExtentDevice, Freezer, FrozenDevice, Resizer, Uploading, UploadingGuard,
+};
 use anyhow::{Error, anyhow, ensure};
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::{
     FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions,
 };
+use fxfs::object_store::NewChildStoreOptions;
 use fxfs::object_store::journal::{DEFAULT_RECLAIM_SIZE, JournalOptions, LazyFlush};
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{NewChildStoreOptions};
 pub use fxfs_posix::{Attr, DaxExtent, ReaddirStart, SetAttr, StatFs};
 use fxfs_posix::{Platform, SyncCounts};
 use linux_rt::Task;
@@ -79,29 +81,50 @@ pub struct Filesystem {
     resizer: Resizer,
     /// cladefs: what freezes the device with the filesystem (`freeze`).
     freezer: Freezer,
-    /// cladefs: while frozen, how far a thaw has got (`thaw`).
-    frozen: Mutex<Option<Frozen>>,
+    /// cladefs: serializes freeze and thaw transitions so no two callers interleave steps.
+    freeze_lock: futures::lock::Mutex<()>,
+    /// cladefs: single authoritative freeze-thaw state across VFS (`super.c`), DAX (`dax.c`),
+    /// Fxfs (`fs.rs`), and the extent device (`device.rs`). Never held across `.await`.
+    freeze_state: Mutex<FreezeState>,
 }
 
-/// cladefs: a frozen filesystem, as far as thawing it has got: each step of `Filesystem::thaw`
-/// taken once, the next thaw resuming at the one a failed thaw stopped at. Until the last is done,
-/// the filesystem is frozen, as the VFS keeps a superblock whose thaw failed (TASK-200).
+/// cladefs: the filesystem's single authoritative freeze-thaw state.
+///
+/// Transition order:
+/// - `Active` -> `Frozen(Frozen::DeviceFrozen)` (`Filesystem::freeze`): pauses compactions,
+///   flushes graveyard, syncs, holds commits, syncs background frees, flushes uploaded, freezes the
+///   device (returning `FrozenDevice` holding its gate closed); read-only skips journal/commits.
+/// - `Frozen(Frozen::DeviceFrozen)` -> `Frozen(Frozen::JournalRotating)` (`thaw` step 1):
+///   consumes `FrozenDevice` via `unfreeze`, updating the allocator's cell while the device gate
+///   is closed and then reopening the gate (read-only finishes directly to `Active`).
+/// - `Frozen(Frozen::JournalRotating)` -> `Active` (`thaw` step 2): rotates the journal span onto
+///   the new cell, releases held commits, and resumes compactions.
+///
+/// Until the last step succeeds, the filesystem remains frozen, as the VFS keeps a superblock
+/// whose thaw failed, and the next thaw resumes from the stopped step without repeating completed
+/// steps (TASK-200).
+enum FreezeState {
+    Active,
+    Frozen(Frozen),
+    /// A thaw transition is currently running under `freeze_lock` (still frozen to observers).
+    Thawing,
+}
+
 enum Frozen {
-    /// The device closed to writes, frees and commits, and told it is frozen; the filesystem's
-    /// commits held by the task, and its journal's compactions paused, unless it writes nothing.
-    /// Next: telling the device it thaws, taking its cell, and opening it.
-    Closed { commits: Option<Task<()>> },
-    /// The device open again, on its cell, the commits still held. Next: rotating the journal's
-    /// span onto the new cell in `Root` if the cell changed, then letting commits go on.
-    Opened { commits: Option<Task<()>> },
+    /// Step 1 of thaw pending: the device gate is held closed by `device` and the host was told it
+    /// is frozen; commits are held by `commits` (if writable) and compactions paused.
+    DeviceFrozen { device: FrozenDevice, commits: Option<Task<()>> },
+    /// Step 2 of thaw pending: the device is open again on its cell and commits are still held.
+    /// Next: rotating the journal's span onto the new cell, then letting commits go on.
+    JournalRotating { commits: Task<()> },
 }
 
 impl Frozen {
     /// The step it is at, as `cladefs.fail_thaw_at` names it (`FAIL_THAW_AT`).
     fn step(&self) -> u32 {
         match self {
-            Frozen::Closed { .. } => 1,
-            Frozen::Opened { .. } => 2,
+            Frozen::DeviceFrozen { .. } => 1,
+            Frozen::JournalRotating { .. } => 2,
         }
     }
 }
@@ -188,12 +211,16 @@ impl Filesystem {
             sync_counts: Arc::default(),
             resizer,
             freezer,
-            frozen: Mutex::new(None),
+            freeze_lock: futures::lock::Mutex::new(()),
+            freeze_state: Mutex::new(FreezeState::Active),
         })
     }
 
     /// Closes the filesystem, writing back what is dirty, once no volume of it is mounted.
     pub async fn close(self) -> Result<(), Error> {
+        // Release any held freeze guard and commit-hold task so closing cannot deadlock if a final
+        // emergency thaw failed before the last volume left.
+        *self.freeze_state.lock().unwrap() = FreezeState::Active;
         self.filesystem.close().await
     }
 
@@ -211,9 +238,25 @@ impl Filesystem {
         self.filesystem.options().read_only
     }
 
+    /// cladefs: whether the filesystem is frozen (including partially thawed after a failed thaw).
+    /// This is the single authoritative freeze state queried by `super.c`, `dax.c`, and ioctls.
+    pub fn is_frozen(&self) -> bool {
+        !matches!(*self.freeze_state.lock().unwrap(), FreezeState::Active)
+    }
+
+    /// cladefs: whether the filesystem and its extent device are both frozen (no thaw in progress
+    /// or partially completed). Required to read a consistent volume manifest.
+    pub fn is_device_frozen(&self) -> bool {
+        matches!(
+            *self.freeze_state.lock().unwrap(),
+            FreezeState::Frozen(Frozen::DeviceFrozen { .. })
+        )
+    }
+
     /// cladefs: makes the volume `name`, over the base `manifest` describes (backlog doc-10), which
     /// the device must read: one the host attached.
     pub async fn import(&self, name: &str, manifest: &[u8]) -> Result<(), Error> {
+        ensure!(!self.is_frozen(), FxfsError::Unavailable);
         ensure!(!self.read_only(), FxfsError::ReadOnlyFilesystem);
         let root_volume = root_volume((*self.filesystem).clone()).await?;
         root_volume.new_volume_over_base(name, manifest).await?;
@@ -235,10 +278,15 @@ impl Filesystem {
     /// commit. One that writes nothing, opened read-only, has none of those to stop: it closes and
     /// tells the device alone (TASK-202).
     pub async fn freeze(&self) -> Result<(), Error> {
-        ensure!(self.frozen.lock().unwrap().is_none(), FxfsError::InvalidArgs);
+        let _guard = self.freeze_lock.lock().await;
+        ensure!(
+            matches!(*self.freeze_state.lock().unwrap(), FreezeState::Active),
+            FxfsError::InvalidArgs
+        );
         if self.read_only() {
-            self.freezer.freeze().await?;
-            *self.frozen.lock().unwrap() = Some(Frozen::Closed { commits: None });
+            let device = self.freezer.freeze().await?;
+            *self.freeze_state.lock().unwrap() =
+                FreezeState::Frozen(Frozen::DeviceFrozen { device, commits: None });
             return Ok(());
         }
         let journal = self.filesystem.journal();
@@ -263,8 +311,9 @@ impl Filesystem {
                 let _uploading = self.uploading.begin();
                 self.filesystem.device().flush().await?;
             }
-            self.freezer.freeze().await?;
-            *self.frozen.lock().unwrap() = Some(Frozen::Closed { commits: Some(commits) });
+            let device = self.freezer.freeze().await?;
+            *self.freeze_state.lock().unwrap() =
+                FreezeState::Frozen(Frozen::DeviceFrozen { device, commits: Some(commits) });
             anyhow::Ok(())
         }
         .await;
@@ -281,18 +330,29 @@ impl Filesystem {
     /// that step (`Frozen`), which the next thaw goes on from, never taking one twice: the device
     /// may be unreachable meanwhile, as its daemon restarts (TASK-200).
     pub async fn thaw(&self) -> Result<(), Error> {
-        let mut frozen = self.frozen.lock().unwrap().take().ok_or(FxfsError::InvalidArgs)?;
+        let _guard = self.freeze_lock.lock().await;
+        let mut frozen = {
+            let mut state = self.freeze_state.lock().unwrap();
+            match std::mem::replace(&mut *state, FreezeState::Thawing) {
+                FreezeState::Frozen(frozen) => frozen,
+                other => {
+                    *state = other;
+                    return Err(FxfsError::InvalidArgs.into());
+                }
+            }
+        };
         loop {
             frozen = match self.thaw_step(frozen).await {
                 Ok(Some(next)) => next,
                 Ok(None) => break,
                 Err((stopped, error)) => {
                     let step = stopped.step();
-                    *self.frozen.lock().unwrap() = Some(stopped);
+                    *self.freeze_state.lock().unwrap() = FreezeState::Frozen(stopped);
                     return Err(error.context(format!("thawing, at step {step}: still frozen")));
                 }
             };
         }
+        *self.freeze_state.lock().unwrap() = FreezeState::Active;
         self.filesystem.journal().resume_compactions();
         if let Err(error) = self.filesystem.compact_spans_if_needed().await {
             log::warn!("cladefs: post-thaw span compaction failed: {error:#}");
@@ -311,26 +371,28 @@ impl Filesystem {
             return Err((frozen, anyhow!("cladefs.fail_thaw_at: failing before step {step}")));
         }
         match frozen {
-            Frozen::Closed { commits } => match self.freezer.unfreeze().await {
-                Ok(cell) => {
-                    self.filesystem.allocator().set_cell(cell);
-                    self.freezer.open();
-                    // One that writes nothing has no journal to renew.
-                    Ok(commits.is_some().then_some(Frozen::Opened { commits }))
+            Frozen::DeviceFrozen { device, commits } => {
+                match device.unfreeze(|cell| self.filesystem.allocator().set_cell(cell)).await {
+                    Ok(()) => {
+                        // One that writes nothing has no journal to renew.
+                        Ok(commits.map(|commits| Frozen::JournalRotating { commits }))
+                    }
+                    Err((device, error)) => Err((Frozen::DeviceFrozen { device, commits }, error)),
                 }
-                Err(error) => Err((Frozen::Closed { commits }, error)),
-            },
-            Frozen::Opened { commits } => match self.filesystem.rotate_journal_span().await {
-                // Commits go on as the task holding them is dropped, which cancels it.
-                Ok(()) => {
-                    drop(commits);
-                    Ok(None)
+            }
+            Frozen::JournalRotating { commits } => {
+                match self.filesystem.rotate_journal_span().await {
+                    // Commits go on as the task holding them is dropped, which cancels it.
+                    Ok(()) => {
+                        drop(commits);
+                        Ok(None)
+                    }
+                    Err(error) => Err((
+                        Frozen::JournalRotating { commits },
+                        error.context("rotating the journal's span as the filesystem thaws"),
+                    )),
                 }
-                Err(error) => Err((
-                    Frozen::Opened { commits },
-                    error.context("rotating the journal's span as the filesystem thaws"),
-                )),
-            },
+            }
         }
     }
 
@@ -470,6 +532,7 @@ impl GuestFxfs for Fxfs {
     }
 
     async fn flush_volume(&self) -> Result<(), Error> {
+        ensure!(!self.platform().filesystem.is_frozen(), FxfsError::Unavailable);
         // The volume's, which a mount -o ro of a writable filesystem's has too.
         ensure!(!self.read_only(), FxfsError::ReadOnlyFilesystem);
         let filesystem = self.filesystem();
@@ -481,6 +544,7 @@ impl GuestFxfs for Fxfs {
     }
 
     async fn manifest(&self) -> Result<Vec<u8>, Error> {
+        ensure!(self.platform().filesystem.is_device_frozen(), FxfsError::InvalidArgs);
         let objects = self.filesystem().object_manager();
         objects.store(self.volume_id()).ok_or(FxfsError::NotFound)?.manifest().await
     }

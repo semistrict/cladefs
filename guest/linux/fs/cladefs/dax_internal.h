@@ -283,8 +283,6 @@ struct cladefs_dax {
 	atomic_t clean;
 	atomic64_t rebinds_asked, rebinds_done;
 	bool stopping;
-	/* Whether the filesystem is frozen (cladefs_dax_frozen / cladefs_dax_thaw). */
-	bool frozen;
 	/* cladefs: the page-cache inodes in the volumes' `unsealed`, which the worker prunes. */
 	atomic_long_t unsealed;
 	/*

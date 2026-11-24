@@ -129,17 +129,12 @@ struct cladefs_vfs_filesystem {
 	u64 room_syncs_done;
 	/*
 	 * Its superblocks, and how many of those are frozen (`struct cladefs_vfs_info`'s `frozen`),
-	 * read-only ones too (cladefs_vfs_settle_frozen).
+	 * read-only ones too (cladefs_vfs_settle_frozen). Whether the filesystem itself is frozen
+	 * lives in Rust (`cladefs_is_frozen`), the single authoritative owner across VFS, DAX, Fxfs
+	 * and the device.
 	 */
 	unsigned int volumes;
 	unsigned int volumes_frozen;
-	/*
-	 * cladefs: whether the filesystem is frozen, which takes all its volumes frozen: nothing is
-	 * open on the device, so no volume mounts until it thaws, with the first to thaw. A thaw that
-	 * failed leaves it frozen, as the VFS leaves the superblock, for the next to go on from where
-	 * it stopped (cladefs_thaw, TASK-200).
-	 */
-	bool frozen;
 };
 
 /*
