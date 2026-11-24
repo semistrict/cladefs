@@ -413,7 +413,20 @@ async fn rounds_waiting_for_writes_hold_no_upload_back() {
     committed.await.expect("a commit held back").unwrap();
     let uploaded = cell.uploader.uploaded(cell.cell.last_commit().unwrap());
     tokio::time::timeout(Duration::from_secs(10), uploaded).await.expect("held back").unwrap();
-    cell.until("relocated", |cell| [6, 7].iter().all(|&at| cell.in_bucket(at).is_none())).await;
+    // With `interval = 20 ms`, the uploader may already have uploaded the relocated segment before
+    // the poll runs, moving extents 6 and 7 from `None` (local) to a newer bucket segment rather
+    // than `segment_key(0)` (board 11106).
+    let first = segment_key(0);
+    cell.until("relocated", |cell| {
+        [6, 7].iter().all(|&at| cell.in_bucket(at).as_deref() != Some(first.as_str()))
+    })
+    .await;
+    cell.uploader.uploaded(cell.cell.last_commit().unwrap()).await.unwrap();
+    assert_eq!(cell.cell.sparse(|_| false).unwrap(), []);
+    for sequence in [6, 7] {
+        assert_ne!(cell.in_bucket(sequence), Some(first.clone()), "{sequence}");
+        assert_eq!(cell.read_in_bucket(sequence).await, [sequence as u8; BLOCK]);
+    }
     scenario.teardown();
 }
 
