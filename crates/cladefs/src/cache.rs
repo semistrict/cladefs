@@ -88,6 +88,9 @@ pub(crate) struct ExtentCache {
     relief_started: std::sync::Once,
     /// Shared zero page in this host's default arena for DAX windows to map.
     zeros: OnceLock<Arc<Zeros>>,
+    /// Live DAX windows on this host, held weakly so relief can evict their composed host pages
+    /// when a tenant arena or the host is under memory pressure.
+    windows: SharedLock<Mutex<Vec<Weak<crate::dax::Window>>>>,
 }
 
 impl ExtentCache {
@@ -103,7 +106,76 @@ impl ExtentCache {
             total_is_the_hosts: std::sync::atomic::AtomicBool::new(false),
             relief_started: std::sync::Once::new(),
             zeros: OnceLock::new(),
+            windows: SharedLock::new("extent cache windows", Mutex::default()),
         })
+    }
+
+    /// Registers a DAX window weakly so arena relief can evict its composed host pages.
+    pub(crate) fn register_window(&self, window: &Arc<crate::dax::Window>) {
+        let mut windows = self.windows.with(Mutex::lock);
+        windows.retain(|w| w.strong_count() > 0);
+        windows.push(Arc::downgrade(window));
+    }
+
+    /// Allocates one host page in `arena` for a composed DAX page, retrying with backoff while
+    /// the host's total cap is governed and memory may still return (board 5662) rather than
+    /// failing a DAX fault with `ENOMEM` and aborting the VM process.
+    pub(crate) async fn alloc_composed(&self, arena: ArenaId) -> crate::Result<PartSlab> {
+        let mut pause = RETRY_FIRST;
+        loop {
+            let alloc = match self.slabs.alloc(arena, 1, slabs::Wait::No) {
+                Ok(slab) => Ok(slab),
+                Err(slabs::NoMemory) => {
+                    #[cfg(all(not(madsim), not(feature = "shuttle")))]
+                    {
+                        if tokio::runtime::Handle::try_current().is_ok() {
+                            let slabs = self.slabs.clone();
+                            tokio::task::spawn_blocking(move || {
+                                slabs.alloc(arena, 1, slabs::Wait::Yes)
+                            })
+                            .await
+                            .expect("a composed DAX page allocation panicked")
+                        } else {
+                            self.slabs.alloc(arena, 1, slabs::Wait::Yes)
+                        }
+                    }
+                    #[cfg(any(madsim, feature = "shuttle"))]
+                    {
+                        self.slabs.alloc(arena, 1, slabs::Wait::Yes)
+                    }
+                }
+            };
+            match alloc {
+                Ok(slab) => return Ok(slab),
+                Err(slabs::NoMemory)
+                    if self.slabs.room_may_come(arena)
+                        && self.total_is_the_hosts.load(Ordering::Relaxed) =>
+                {
+                    waiting_for_memory();
+                    #[cfg(not(feature = "shuttle"))]
+                    {
+                        if tokio::runtime::Handle::try_current().is_ok() {
+                            tokio::time::sleep(pause).await;
+                        } else {
+                            std::thread::sleep(pause);
+                        }
+                    }
+                    #[cfg(feature = "shuttle")]
+                    {
+                        let _ = pause;
+                        shuttle::thread::yield_now();
+                    }
+                    pause = (pause * 2).min(RETRY_MOST);
+                }
+                Err(slabs::NoMemory) => return Err(crate::Errno::ENOMEM),
+            }
+        }
+    }
+
+    fn live_windows(&self) -> Vec<Arc<crate::dax::Window>> {
+        let mut windows = self.windows.with(Mutex::lock);
+        windows.retain(|w| w.strong_count() > 0);
+        windows.iter().filter_map(Weak::upgrade).collect()
     }
 
     #[cfg(not(feature = "shuttle"))]
@@ -286,6 +358,15 @@ impl ExtentCache {
             evicted += bytes;
             extents += u64::from(bytes > 0);
         }
+        if !enough(evicted) {
+            for window in self.live_windows() {
+                if enough(evicted) {
+                    break;
+                }
+                let base = evicted;
+                evicted += window.evict_composed(arena, |added| enough(base + added));
+            }
+        }
         (evicted, extents)
     }
 
@@ -319,6 +400,9 @@ impl ExtentCache {
             extents.extract_if(|(of, _), _| *of == arena).map(|(_, cached)| cached).collect()
         };
         drop(evicted);
+        for window in self.live_windows() {
+            window.evict_composed(Some(arena), |_| false);
+        }
     }
 
     /// cladefs: forgets the cells whose cells `scope` says are of it, as their host does as it is
@@ -1337,15 +1421,23 @@ impl CachedExtent {
     }
 
     /// cladefs: permanently revokes this cached extent on `cache::forget`, evicting all present
-    /// pages and ensuring any in-flight `Filling` page-in drops its slab without installing it
-    /// (TASK-630, board 2658, board 5544, board 2704).
+    /// pages, unmapping any composed DAX pages derived from this extent even if its parts were
+    /// already evicted, and ensuring any in-flight `Filling` page-in drops its slab without
+    /// installing it (TASK-630, board 2658, board 5544, board 2704; review 102 finding 351).
     pub(crate) fn revoke(&self) -> u64 {
-        {
+        let windows = {
             let mut parts = self.parts.with(Mutex::lock);
             parts.revoked = true;
-        }
+            parts.windows.retain(|_, window| window.strong_count() > 0);
+            parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>()
+        };
         self.changed.notify(usize::MAX);
-        self.evict()
+        let evicted = self.evict();
+        let identity = self as *const Self as *const () as usize;
+        for window in windows {
+            window.unmap_pages_of(identity, &|_| true);
+        }
+        evicted
     }
 
     /// Evicts its parts in memory holding its pages `pages`, as [`CachedExtent::evict`] evicts
@@ -1514,6 +1606,10 @@ impl CachedExtent {
 }
 
 impl Source for CachedExtent {
+    fn is_revoked(&self) -> bool {
+        self.parts.with(Mutex::lock).revoked
+    }
+
     fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
         let (ps, table) = (page_size(), self.parts.with(Mutex::lock));
         if table.revoked {
@@ -1789,6 +1885,86 @@ mod full_host {
                 "forgotten extent remained in cache"
             );
         });
+    }
+
+    /// Review 102 finding 351: at a 1-slab tenant arena cap (`slabs::SLAB`), when a single full
+    /// phase-0 part (`extent_frame::PART == SLAB`) fills the arena as the only eviction candidate,
+    /// faulting a composed sub-page mapping must preserve the copied bytes across relief so
+    /// self-eviction of the source part completes instead of livelocking; and a subsequent
+    /// `cache::forget` / `CachedExtent::revoke` must still unmap that composed page even though
+    /// the source part was already evicted.
+    #[test]
+    fn composed_fault_under_one_slab_cap_does_not_self_evict_livelock() {
+        struct Byte(u8);
+        impl Contents for Byte {
+            fn read<'a>(
+                &'a self,
+                _offset: u64,
+                buf: &'a mut [u8],
+            ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+                buf.fill(self.0);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        let ps = page_size();
+        let unit = ps / 4;
+        let host = crate::Host::process();
+        let cache = host.cache();
+        cache.relieve_pressure();
+        let tenant = crate::pages::Arena::new_on(host).unwrap();
+        let tenant_id = tenant.id();
+        host.slabs().set_arena_cap(tenant_id, Some(slabs::SLAB));
+
+        let cell = crate::CellId { tenant: u64::from(tenant_id.0), id: 102_351 };
+        let extent = ExtentId { cell: cell.id, sequence: 1 };
+        let cached = Arc::new(CachedExtent::new_on(
+            cache,
+            tenant_id,
+            extent,
+            Box::new(Byte(0x6d)),
+            extent_frame::PART,
+        ));
+        let entry = Cached { extent: cached.clone(), holders: Arc::default() };
+        entry.holders.0.with(Mutex::lock).push(Holder { cell, local: Weak::new(), fetcher: None });
+        cache.extents.with(Mutex::lock).insert((tenant_id, extent), entry);
+
+        let source: Arc<dyn Source> = cached.clone();
+        let (mut dax, window) =
+            crate::dax::Dax::with_stage_and_unit_on(host, tenant_id, 2 * ps, unit, None, false)
+                .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // Bring the full 1-slab part into memory so the tenant arena is 100% full.
+            cached.clone().bring_in(0).await.unwrap();
+            assert_eq!(host.slabs().arena_bytes_in_use(tenant_id), slabs::SLAB);
+
+            // Map 1 logical sub-page so the host page requires composition (1-page PartSlab).
+            dax.map(0, &source, 0, unit);
+            let resolved = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                window.fault(0, crate::Access::Read),
+            )
+            .await
+            .expect("composed fault livelocked under 1-slab tenant cap");
+            assert_eq!(resolved, Ok(()));
+            // SAFETY: Host page 0 was just faulted into `window`'s host memory.
+            assert_eq!(unsafe { *window.host_base() }, 0x6d);
+            // Source part was evicted to make room for the 1-page composed slab.
+            assert_eq!(cached.held(), 0);
+
+            // Revoking the extent via `cache::forget` must unmap the composed page even though
+            // `cached` currently has no resident parts.
+            assert_eq!(cache.forget(|c| c == cell), (0, 1));
+            assert_eq!(
+                window.fault(0, crate::Access::Read).await,
+                Err(Errno::EACCES),
+                "revoked composed page remained mapped or re-installed plaintext"
+            );
+        });
+        host.slabs().set_arena_cap(tenant_id, None);
+        drop((dax, window, source, cached, tenant));
     }
 }
 

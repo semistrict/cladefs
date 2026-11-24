@@ -201,6 +201,10 @@ const _: () = assert!(size_of::<UffdMsg>() == 32);
 pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     base: usize,
     size: usize,
+    /// Logical sub-page alignment in bytes (normally [`super::map_unit()`], 4 KiB). When smaller
+    /// than the host page size (e.g. 4 KiB on a 16 KiB arm64 host), private state is tracked per
+    /// `unit`-sized sub-page in [`PageChanges::private_mask`].
+    unit: usize,
     /// What changes the memory: system calls, but in tests.
     host: H,
     /// Physical memory, which the window's pages are mapped from.
@@ -587,17 +591,42 @@ struct PageChanges {
     /// which a guest's access failing lifts ([`guest_access_failed`]): meaningful while
     /// `restricted`.
     for_worker: bool,
-    /// cladefs: whether it is a private page (backlog doc-13): its private memory, filled, mapped
-    /// here as the memory around it is ([`PrivateMemory`]). `mapped` is none then: it is no run.
-    private: bool,
+    /// cladefs: whether non-private sub-pages of this private host page need refreshing
+    /// from the daemon's [`Self::mapped`] before its private memory is mapped back in; while true,
+    /// the host VMA at this page is unfilled anonymous memory registered for missing faults.
+    stale: bool,
+    /// Whether this host page's VMA is currently unfilled `Memory::Anonymous` (either because it
+    /// is `stale` or because `trim()` coalesced multiple stale VMAs into one anonymous span).
+    anon_vma: bool,
+    /// Whether this partially-private host page in a `process_writes` window (`MemoryCell`) is
+    /// mapped write-protected in [`PrivateMemory`] so the next guest write faults and promotes
+    /// `private_mask` to all mapped sub-pages.
+    wp_partial: bool,
+    /// Bitmask of logical `unit`-sized sub-pages currently mapped by the daemon in this host page.
+    mapped_mask: u16,
+    /// cladefs: bitmask of logical `unit`-sized sub-pages that are private (backlog doc-13):
+    /// non-zero means this host page is filled in [`PrivateMemory`]. When `private_mask == 0`,
+    /// the host page is not private. On 4 KiB hosts (`subpages == 1`), only bit 0 is used.
+    private_mask: u16,
     /// cladefs: when the window last changed it, in nanoseconds from the stage's start: what a vCPU
     /// whose access keeps failing tells of ([`describe_windows`]).
     changed: u64,
-    /// What the window maps at the page, if anything.
+    /// What the window maps at the page, if anything (for a stale partially-private page, kept
+    /// left-out with `installed == 0` so the next fault can refresh its non-private sub-pages).
     mapped: Option<Mapped>,
 }
 
 impl PageChanges {
+    /// Whether any sub-page of this host page is private in [`PrivateMemory`].
+    fn is_private(&self) -> bool {
+        self.private_mask != 0
+    }
+
+    /// Whether some, but not all, sub-pages of this host page are private.
+    fn is_partially_private(&self, all_mask: u16) -> bool {
+        self.private_mask != 0 && self.private_mask != all_mask
+    }
+
     /// cladefs: whether a fault restricted it, withheld or read-only, so that it splits the
     /// mapping it is in, as a run does (board 8493).
     fn restricts(&self) -> bool {
@@ -708,6 +737,13 @@ struct Pages {
     /// cladefs: how many of its pages a fault restricted, withheld or read-only, each splitting
     /// the mapping it is in as a run does ([`PageChanges::restricts`], board 8493).
     restrictions: usize,
+    /// Maximal contiguous runs of pages currently mapped as unfilled `Memory::Anonymous`
+    /// (`PageChanges::anon_vma`), counted toward `held()` so stale VMAs stay within the VMA budget.
+    anon_runs: usize,
+    /// Partially-private host pages on `process_writes` (`MemoryCell`) windows mapped
+    /// write-protected (`PageChanges::wp_partial`), each splitting adjacent `PrivateMemory` VMAs
+    /// and therefore counted toward `held()`.
+    wp_partials: usize,
     /// cladefs: the pages a fault restricted, the first restricted first, some unrestricted
     /// since: what a trim lifts, as it must, the oldest first ([`UffdSecondStage::trim`]).
     restricted_order: VecDeque<usize>,
@@ -758,27 +794,37 @@ impl Pages {
         (run.end > at).then_some(start)
     }
 
-    /// cladefs: the runs installed and the pages restricted, what its mappings take of its share
-    /// (board 8493).
+    /// cladefs: the runs installed, the pages restricted, the anonymous stale runs, and the
+    /// write-protected partial pages: what its mappings take of its share (board 8493).
     fn held(&self) -> usize {
-        self.runs.len() + self.restrictions
+        self.runs.len() + self.restrictions + self.anon_runs + self.wp_partials
     }
 
-    /// Changes the pages of `range` with `change`, keeping the runs installed, and the count of
-    /// pages restricted, as they are after it. cladefs: a page starts a run, or follows on in one,
-    /// by itself and its predecessor alone, so only at the pages of `range` and the one after it
-    /// can a run start or end anew: the runs there, and the one before it reaching them, are
-    /// taken out, and made again from what those pages are now, as far as the run the page after
-    /// it was in reaches, if it follows on still. A run taken out keeps when it was used last, as
-    /// do runs it splits into, the latest of their pages' perhaps earlier: those left out first
-    /// are left out later, never sooner (board 8495).
+    /// Changes the pages of `range` with `change`, keeping the runs installed, the count of pages
+    /// restricted, the count of anonymous stale runs, and the count of write-protected partial
+    /// pages as they are after it. cladefs: a page
+    /// starts a run, or follows on in one, by itself and its predecessor alone, so only at the
+    /// pages of `range` and the one after it can a run start or end anew: the runs there, and the
+    /// one before it reaching them, are taken out, and made again from what those pages are now,
+    /// as far as the run the page after it was in reaches, if it follows on still. A run taken out
+    /// keeps when it was used last, as do runs it splits into, the latest of their pages' perhaps
+    /// earlier: those left out first are left out later, never sooner (board 8495).
     fn update(&mut self, range: std::ops::Range<usize>, change: impl FnOnce(&mut [PageChanges])) {
         let (first, end) = (range.start, range.end);
         if first == end {
             return change(&mut self.pages[range]);
         }
         let count = |pages: &[PageChanges]| pages.iter().filter(|page| page.restricts()).count();
+        let count_wp = |pages: &[PageChanges]| pages.iter().filter(|page| page.wp_partial).count();
         let restricted = count(&self.pages[range.clone()]);
+        let wp_before = count_wp(&self.pages[range.clone()]);
+        let last = end.min(self.pages.len() - 1);
+        let anon_starts = |pages: &[PageChanges]| -> usize {
+            (first..=last)
+                .filter(|&i| pages[i].anon_vma && (i == 0 || !pages[i - 1].anon_vma))
+                .count()
+        };
+        let before_anon = anon_starts(&self.pages);
         let mut old: Vec<(usize, Run)> = Vec::new();
         if let Some((&start, &run)) = self.runs.range(..first).next_back()
             && run.end >= first
@@ -790,11 +836,12 @@ impl Pages {
             self.runs.remove(start);
         }
         change(&mut self.pages[range.clone()]);
-        self.restrictions = self.restrictions - restricted + count(&self.pages[range]);
+        self.restrictions = self.restrictions - restricted + count(&self.pages[range.clone()]);
+        self.wp_partials = self.wp_partials - wp_before + count_wp(&self.pages[range]);
+        self.anon_runs = self.anon_runs - before_anon + anon_starts(&self.pages);
         // The run reaching the range from before it, if it still does.
         let mut open =
             old.first().filter(|(start, _)| *start < first).map(|&(start, run)| (start, run.used));
-        let last = end.min(self.pages.len() - 1);
         for at in first..=last {
             let used = self.pages[at].used_installed().unwrap_or(0);
             if let Some((_, latest)) = open.as_mut()
@@ -830,42 +877,112 @@ impl Pages {
         self.pages[range].iter().any(|page| page.mapped.is_some_and(|mapped| mapped.installed()))
     }
 
-    /// cladefs: the private pages of `range`, which a change of it ends, private no more: the runs
-    /// of them, to be emptied ([`UffdSecondStage::empty_private`]).
-    fn take_private(&mut self, range: std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
-        let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
-        for at in range {
-            if !std::mem::take(&mut self.pages[at].private) {
-                continue;
-            }
-            self.private -= 1;
-            match runs.last_mut() {
-                Some(run) if run.end == at => run.end = at + 1,
-                _ => runs.push(at..at + 1),
-            }
-        }
-        runs
-    }
-
-    /// cladefs: what a change of `range` takes away from its memory
-    /// ([`UffdSecondStage::take_away`]): its pages installed, its private pages, which it ends,
-    /// private no more, if `private` says they go, and those it made inaccessible or read-only and
-    /// installed nothing at, which it gives back. Recorded before the change counts itself on the
-    /// pages, which gives back what was withheld. The host's own changes keep the private pages
-    /// (doc-26, spec rule evictionKeepsPrivate), and so does a map (mapsKeepPrivate).
-    fn take_away(&mut self, range: std::ops::Range<usize>, private: Private) -> Taking {
+    /// cladefs: what a change of window byte range `start_off..end_off` takes away from its memory
+    /// ([`UffdSecondStage::take_away`]): its pages installed, its private pages whose private
+    /// sub-pages all end (to be emptied), its partially-private pages that become stale (whose
+    /// VMA must become unfilled anonymous memory until refreshed), its already-stale pages to skip
+    /// remapping to `PrivateMemory`, and those it made inaccessible or read-only and installed
+    /// nothing at, which it gives back.
+    fn take_away_bytes(
+        &mut self,
+        start_off: usize,
+        end_off: usize,
+        private: Private,
+        unit: usize,
+        all_mask: u16,
+        mark_partial_stale: bool,
+    ) -> Taking {
+        let ps = page_size() as usize;
+        let range = start_off / ps..end_off.div_ceil(ps);
         let installed = self.any_installed(range.clone()) && rules().changes_take_away_installed;
         let protected = (range.clone())
             .filter(|&at| {
                 let page = &self.pages[at];
                 (page.withheld || page.restricted)
-                    && !page.private
+                    && !page.is_private()
                     && !page.mapped.is_some_and(|mapped| mapped.installed())
             })
             .collect();
         let ends = private == Private::End || !rules().host_changes_keep_private;
-        let private = if ends { self.take_private(range) } else { Vec::new() };
-        Taking { installed, private, protected }
+        let mut private_runs: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut newly_staled: Vec<usize> = Vec::new();
+        let mut keep_stale: Vec<usize> = Vec::new();
+        let mut stale_ended = false;
+        let mut ended_private = 0u64;
+        self.update(range.clone(), |slice| {
+            for (idx, page) in slice.iter_mut().enumerate() {
+                let at = range.start + idx;
+                let clear_mask = if ends {
+                    let page_start = at * ps;
+                    let page_end = page_start + ps;
+                    let lo = (start_off.max(page_start) - page_start) / unit;
+                    let hi = (end_off.min(page_end) - page_start) / unit;
+                    (((1u32 << (hi - lo)) - 1) << lo) as u16
+                } else {
+                    0
+                };
+                if ends {
+                    page.mapped_mask &= !clear_mask;
+                }
+                if !page.is_private() {
+                    if page.anon_vma {
+                        stale_ended = true;
+                        page.anon_vma = false;
+                    }
+                    continue;
+                }
+                if ends {
+                    let remain = page.private_mask & !clear_mask;
+                    if remain == 0 {
+                        stale_ended |= std::mem::take(&mut page.stale);
+                        stale_ended |= std::mem::take(&mut page.anon_vma);
+                        stale_ended |= std::mem::take(&mut page.wp_partial);
+                        page.private_mask = 0;
+                        ended_private += 1;
+                        match private_runs.last_mut() {
+                            Some(run) if run.end == at => run.end = at + 1,
+                            _ => private_runs.push(at..at + 1),
+                        }
+                    } else {
+                        page.private_mask = remain;
+                        if mark_partial_stale {
+                            if !page.anon_vma {
+                                newly_staled.push(at);
+                            }
+                            page.stale = true;
+                            page.anon_vma = true;
+                            page.wp_partial = false;
+                            keep_stale.push(at);
+                        } else if page.anon_vma {
+                            keep_stale.push(at);
+                        }
+                    }
+                } else if page.is_partially_private(all_mask) {
+                    if mark_partial_stale {
+                        if !page.anon_vma {
+                            newly_staled.push(at);
+                        }
+                        page.stale = true;
+                        page.anon_vma = true;
+                        page.wp_partial = false;
+                        keep_stale.push(at);
+                    } else if page.anon_vma {
+                        keep_stale.push(at);
+                    }
+                } else if page.anon_vma {
+                    keep_stale.push(at);
+                }
+            }
+        });
+        self.private -= ended_private;
+        Taking {
+            installed,
+            private: private_runs,
+            protected,
+            newly_staled,
+            keep_stale,
+            stale_ended,
+        }
     }
 
     /// cladefs: whether the pages of `range` are each installed, in one run of memory from `phys`
@@ -888,15 +1005,25 @@ impl Pages {
 }
 
 /// cladefs: what a change takes away from the memory of the pages it changes, which their memory
-/// must hold no more once it is made ([`Pages::take_away`]), as the window's mapping of them ends.
+/// must hold no more once it is made ([`Pages::take_away_bytes`]), as the window's mapping of them
+/// ends.
 struct Taking {
     /// Whether a page of them is installed.
     installed: bool,
-    /// The runs of private pages among them, to be emptied.
+    /// The runs of private pages among them whose private sub-pages all ended, to be emptied.
     private: Vec<std::ops::Range<usize>>,
     /// The pages among them installed nothing at, private or not, that a fault made inaccessible,
     /// withheld, or read-only, to be made accessible again.
     protected: Vec<usize>,
+    /// Partially-private host pages that just became stale: their VMA must become unfilled
+    /// anonymous memory registered for missing faults (preserving [`PrivateMemory`]).
+    newly_staled: Vec<usize>,
+    /// All host pages in the range that remain stale after the change (newly or previously): must
+    /// not be remapped back to `base_memory` (`PrivateMemory`) by `leave_out_emptying`.
+    keep_stale: Vec<usize>,
+    /// Whether a previously stale private host page ended completely and must be remapped back to
+    /// `base_memory` (unfilled `PrivateMemory`) rather than only punched in place.
+    stale_ended: bool,
 }
 
 /// cladefs: what a guest's write to a page found, on a window that copies on write
@@ -905,10 +1032,23 @@ struct Taking {
 enum Copied {
     /// The page is private: made so now, or before.
     Private,
+    /// Partially private and stale: non-private sub-pages must be refreshed first.
+    Stale,
     /// Past the window's private pages: the write is refused.
     Past,
     /// The window names nothing there yet: to read in first.
     Unnamed,
+}
+
+/// Result of attempting to reinstall a page on fault ([`UffdSecondStage::reinstall`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reinstalled {
+    /// Installed (or already private and fresh): the access can be retried.
+    Done,
+    /// Partially private and stale: caller must refresh non-private sub-pages.
+    Stale,
+    /// Not named by the window (or already installed): fault must go to the window.
+    Miss,
 }
 
 /// What a second stage maps its host memory with.
@@ -935,6 +1075,9 @@ pub(crate) trait HostMemory: Send + Sync + 'static {
     /// Write-protects the `len` bytes at `addr` with userfaultfd.
     fn write_protect(&self, addr: usize, len: usize);
 
+    /// Lifts userfaultfd write protection on the `len` bytes at `addr`.
+    fn write_unprotect(&self, addr: usize, len: usize);
+
     /// Wakes the threads faulting on the `len` bytes at `addr`.
     fn wake(&self, addr: usize, len: usize);
 
@@ -946,6 +1089,11 @@ pub(crate) trait HostMemory: Send + Sync + 'static {
     /// as the object's (`pwrite`): where they are mapped, accesses find them filled, and nothing
     /// maps them that didn't.
     fn fill(&self, fd: RawFd, offset: u64, bytes: &[u8]);
+
+    /// cladefs: overwrites a non-private sub-page slice of an already-filled host page in memory
+    /// object `fd` at `offset` (`pwrite`), used when refreshing stale non-private sub-pages of a
+    /// partially-private host page.
+    fn write_subpage(&self, fd: RawFd, offset: u64, bytes: &[u8]);
 
     /// cladefs: empties the `len` bytes of memory object `fd` at `offset`: faults on them, where
     /// they are mapped, find them unfilled again (`fallocate`'s `FALLOC_FL_PUNCH_HOLE`).
@@ -994,6 +1142,13 @@ impl HostMemory for Syscalls {
             .unwrap_or_else(|err| panic!("write-protect {addr:#x} with userfaultfd: {err}"));
     }
 
+    fn write_unprotect(&self, addr: usize, len: usize) {
+        let range = UffdioRange { start: addr as u64, len: len as u64 };
+        let mut write_protect = UffdioWriteprotect { range, mode: 0 };
+        ioctl(&self.uffd, UFFDIO_WRITEPROTECT, &mut write_protect)
+            .unwrap_or_else(|err| panic!("write-unprotect {addr:#x} with userfaultfd: {err}"));
+    }
+
     fn wake(&self, addr: usize, len: usize) {
         let mut range = UffdioRange { start: addr as u64, len: len as u64 };
         ioctl(&self.uffd, UFFDIO_WAKE, &mut range).expect("wake a faulting thread");
@@ -1004,6 +1159,10 @@ impl HostMemory for Syscalls {
     }
 
     fn fill(&self, fd: RawFd, offset: u64, bytes: &[u8]) {
+        Self::write_at(fd, offset, bytes);
+    }
+
+    fn write_subpage(&self, fd: RawFd, offset: u64, bytes: &[u8]) {
         Self::write_at(fd, offset, bytes);
     }
 
@@ -1250,6 +1409,29 @@ impl UffdSecondStage {
         unsafe { Self::new(base, size, Memories::InProcess, prefault, host_max_map_count()) }
     }
 
+    #[cfg(test)]
+    pub(crate) unsafe fn in_process_with_unit(
+        base: usize,
+        size: u64,
+        unit: usize,
+        prefault: Option<Arc<dyn Prefault>>,
+    ) -> Result<Arc<Self>, Error> {
+        let mappings = Mappings::process(host_max_map_count());
+        let host = Syscalls::open()?;
+        // SAFETY: As the caller promises.
+        unsafe {
+            Self::with_host_and_unit(
+                base,
+                size,
+                unit,
+                host,
+                Memories::InProcess,
+                prefault,
+                mappings,
+            )
+        }
+    }
+
     /// cladefs: the runs of its window's private pages, by their offsets in the window, in order:
     /// the private memory's pages filled (`SEEK_DATA`, `SEEK_HOLE`), which only private pages are.
     /// None for a window that copies nothing. A VM's memory's snapshot writes them (TASK-456.3).
@@ -1384,9 +1566,29 @@ impl<H: HostMemory> UffdSecondStage<H> {
         prefault: Option<Arc<dyn Prefault>>,
         mappings: Arc<Mappings>,
     ) -> Result<Arc<Self>, Error> {
+        let unit = super::map_unit() as usize;
+        // SAFETY: As the caller promises.
+        unsafe { Self::with_host_and_unit(base, size, unit, host, memories, prefault, mappings) }
+    }
+
+    pub(crate) unsafe fn with_host_and_unit(
+        base: usize,
+        size: u64,
+        unit: usize,
+        host: H,
+        memories: Memories,
+        prefault: Option<Arc<dyn Prefault>>,
+        mappings: Arc<Mappings>,
+    ) -> Result<Arc<Self>, Error> {
         let size = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
         let page_size = page_size() as usize;
-        if !base.is_multiple_of(page_size) || size == 0 || !size.is_multiple_of(page_size) {
+        if !base.is_multiple_of(page_size)
+            || size == 0
+            || !size.is_multiple_of(page_size)
+            || unit == 0
+            || !page_size.is_multiple_of(unit)
+            || (page_size / unit) as u64 > crate::pages::MAX_SUBPAGES
+        {
             return Err(Error::msg("DAX window memory must be whole pages"));
         }
         let pages = WindowPages::new(size / page_size).map_err(Error::new)?;
@@ -1395,6 +1597,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
             pages,
             runs: BTreeMap::new(),
             restrictions: 0,
+            anon_runs: 0,
+            wp_partials: 0,
             restricted_order: VecDeque::new(),
             clock: 0,
             released: false,
@@ -1405,6 +1609,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let stage = Arc::new(Self {
             base,
             size,
+            unit,
             host,
             memories,
             prefault,
@@ -1423,6 +1628,68 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let shares: Weak<dyn Share> = Arc::downgrade(&stage) as Weak<dyn Share>;
         mappings.join(shares);
         Ok(stage)
+    }
+
+    /// Number of logical `unit`-sized sub-pages per host page (1 on 4 KiB hosts, 4 on 16 KiB).
+    fn subpages(&self) -> usize {
+        page_size() as usize / self.unit
+    }
+
+    /// Bitmask with every logical sub-page of a host page set.
+    fn all_subpages_mask(&self) -> u16 {
+        ((1u32 << self.subpages()) - 1) as u16
+    }
+
+    /// Bitmask of the logical sub-pages of host page `at` covered by window byte range
+    /// `start_off..end_off` (both multiples of `self.unit`).
+    fn subpage_mask(&self, at: usize, start_off: usize, end_off: usize) -> u16 {
+        let ps = page_size() as usize;
+        let page_start = at * ps;
+        let page_end = page_start + ps;
+        let lo = (start_off.max(page_start) - page_start) / self.unit;
+        let hi = (end_off.min(page_end) - page_start) / self.unit;
+        debug_assert!(lo < hi && hi <= self.subpages());
+        (((1u32 << (hi - lo)) - 1) << lo) as u16
+    }
+
+    /// Replaces the VMA of one host page at `addr` with unfilled anonymous memory registered for
+    /// missing faults, without touching [`PrivateMemory`]: used when a partially-private host page
+    /// becomes stale so the next access traps into userfaultfd to refresh its non-private
+    /// sub-pages.
+    fn mark_stale_vma(&self, addr: usize) {
+        let page_size = page_size() as usize;
+        let writable = libc::PROT_READ | libc::PROT_WRITE;
+        let prot = if rules().register_before_accessible { libc::PROT_NONE } else { writable };
+        self.host.map(addr, page_size, prot, Memory::Anonymous);
+        self.host.register(addr, page_size, UFFDIO_REGISTER_MODE_MISSING);
+        self.host.protect(addr, page_size, writable);
+    }
+
+    /// Maps `base_memory` (`PrivateMemory`) back at host page `addr`, write-protected when
+    /// `want_wp` is true (so a subsequent guest write on a partially-private `MemoryCell` page
+    /// traps into userfaultfd and promotes `private_mask`), and wakes any waiting fault thread.
+    fn map_private_vma(&self, addr: usize, want_wp: bool) {
+        let page_size = page_size() as usize;
+        let writable = libc::PROT_READ | libc::PROT_WRITE;
+        if want_wp {
+            self.host.map(addr, page_size, libc::PROT_READ, self.base_memory(addr));
+            self.host.register(
+                addr,
+                page_size,
+                UFFDIO_REGISTER_MODE_MISSING | UFFDIO_REGISTER_MODE_WP,
+            );
+            if !rules().write_protect_before_writable {
+                self.host.protect(addr, page_size, writable);
+            }
+            self.host.write_protect(addr, page_size);
+            if rules().write_protect_before_writable {
+                self.host.protect(addr, page_size, writable);
+            }
+        } else {
+            self.host.map(addr, page_size, writable, self.base_memory(addr));
+            self.host.register(addr, page_size, UFFDIO_REGISTER_MODE_MISSING);
+        }
+        self.host.wake(addr, page_size);
     }
 
     /// cladefs: leaves the whole window out, as a window that maps nothing yet and faults nothing
@@ -1552,16 +1819,58 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// another: a guest's `UNMAP` of a range of private pages scattered among pages installed, as
     /// a fork's database's are, took two TLB flushes a private page (TASK-276.6).
     fn take_away(&self, addr: usize, len: usize, taking: Taking) {
-        let Taking { installed, private, protected } = taking;
-        if installed || private.len() > 1 {
-            self.leave_out_emptying(addr, len, &private);
+        let Taking { installed, private, protected, newly_staled, keep_stale, stale_ended } =
+            taking;
+        let page_size = page_size() as usize;
+        if keep_stale.is_empty() {
+            if installed || private.len() > 1 || stale_ended {
+                self.leave_out_emptying(addr, len, &private);
+                return;
+            }
+            self.empty_private(&private);
+            for at in protected {
+                let writable = libc::PROT_READ | libc::PROT_WRITE;
+                self.host.protect(self.base + at * page_size, page_size, writable);
+            }
             return;
         }
-        self.empty_private(&private);
-        let page_size = page_size() as usize;
-        for at in protected {
-            let writable = libc::PROT_READ | libc::PROT_WRITE;
-            self.host.protect(self.base + at * page_size, page_size, writable);
+        // At least one host page in `addr..addr+len` remains stale (partially private): never
+        // overwrite its unfilled anonymous VMA with `base_memory` (`PrivateMemory`).
+        let range = self.page_range(addr, len);
+        let mut at = range.start;
+        while at < range.end {
+            if keep_stale.binary_search(&at).is_ok() {
+                at += 1;
+                continue;
+            }
+            let sub_start = at;
+            while at < range.end && keep_stale.binary_search(&at).is_err() {
+                at += 1;
+            }
+            let sub_private: Vec<std::ops::Range<usize>> = private
+                .iter()
+                .filter_map(|run| {
+                    let s = run.start.max(sub_start);
+                    let e = run.end.min(at);
+                    (s < e).then_some(s..e)
+                })
+                .collect();
+            let sub_addr = self.base + sub_start * page_size;
+            let sub_len = (at - sub_start) * page_size;
+            if installed || sub_private.len() > 1 || stale_ended {
+                self.leave_out_emptying(sub_addr, sub_len, &sub_private);
+            } else {
+                self.empty_private(&sub_private);
+                for &p in &protected {
+                    if (sub_start..at).contains(&p) {
+                        let writable = libc::PROT_READ | libc::PROT_WRITE;
+                        self.host.protect(self.base + p * page_size, page_size, writable);
+                    }
+                }
+            }
+        }
+        for at in newly_staled {
+            self.mark_stale_vma(self.base + at * page_size);
         }
     }
 
@@ -1640,7 +1949,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let len = pages.pages.len();
         match WindowPages::new(len) {
             Ok(fresh) => {
-                (pages.pages, pages.private, pages.restrictions) = (fresh, 0, 0);
+                (
+                    pages.pages,
+                    pages.private,
+                    pages.restrictions,
+                    pages.anon_runs,
+                    pages.wp_partials,
+                ) = (fresh, 0, 0, 0, 0);
                 pages.runs.clear();
                 pages.for_workers.clear();
                 pages.restricted_order.clear();
@@ -1649,7 +1964,15 @@ impl<H: HostMemory> UffdSecondStage<H> {
                 log::warn!("cladefs: a released DAX window's pages, anew: {err}: each changed");
                 pages.update(0..len, |pages| {
                     pages.iter_mut().for_each(|page| {
-                        (page.mapped, page.restricted, page.private) = (None, false, false)
+                        (
+                            page.mapped,
+                            page.restricted,
+                            page.private_mask,
+                            page.mapped_mask,
+                            page.stale,
+                            page.anon_vma,
+                            page.wp_partial,
+                        ) = (None, false, 0, 0, false, false, false)
                     })
                 });
                 pages.private = 0;
@@ -1830,6 +2153,18 @@ impl<H: HostMemory> UffdSecondStage<H> {
         // read-only for a moment (`install`) as that thread stored on to them, which a vCPU's VMM
         // retries and a thread of the host's dies of: SIGSEGV in
         // snapshots_after_private_pages_are_rebound_restore_their_bytes, 3 runs in 500.
+        // If a private host page is stale (non-private sub-pages changed by MAP/UNMAP, or
+        // coalesced by trim), refresh its non-private sub-pages from the daemon before mapping
+        // PrivateMemory back in.
+        let promote_on_write = access == Access::Write && self.copying() && !for_worker;
+        if self.is_stale(addr) {
+            self.refresh_stale(window, addr, promote_on_write).await;
+            if for_worker {
+                self.restrict_for_worker(addr);
+            }
+            self.host.wake(addr, page_size);
+            return;
+        }
         if access == Access::Write && self.copying() && !for_worker {
             self.copy_for(window, addr, thread).await;
             self.host.wake(addr, page_size);
@@ -1838,13 +2173,29 @@ impl<H: HostMemory> UffdSecondStage<H> {
         // A page the window maps, left out past the budget, or named and never touched, is
         // installed, as the window names it, without the window; any other fault is the window's
         // to resolve.
-        let reinstalled = !guest_write && self.reinstall(addr);
+        let reinstalled = match if guest_write { Reinstalled::Miss } else { self.reinstall(addr) } {
+            Reinstalled::Done => true,
+            Reinstalled::Stale => {
+                self.refresh_stale(window, addr, promote_on_write).await;
+                if for_worker {
+                    self.restrict_for_worker(addr);
+                }
+                self.host.wake(addr, page_size);
+                return;
+            }
+            Reinstalled::Miss => false,
+        };
         if !reinstalled {
             self.resolve_through(window, addr, access, for_worker, thread).await;
             // cladefs: what the window named for the fault installed now, which the access,
             // retried, finds, rather than faulting again to install it (TASK-276.6).
-            if !guest_write {
-                self.reinstall(addr);
+            if !guest_write && matches!(self.reinstall(addr), Reinstalled::Stale) {
+                self.refresh_stale(window, addr, promote_on_write).await;
+                if for_worker {
+                    self.restrict_for_worker(addr);
+                }
+                self.host.wake(addr, page_size);
+                return;
             }
         }
         // Before the worker retries its write, however its page came to be here. cladefs: one
@@ -1864,11 +2215,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
         // map, which the window refuses then without telling of it as of the guest's access; on a
         // window that copies on write, a worker's write alone, which a run of loads makes.
         let next = offset + page_size as u64;
+        // cladefs: the next page, if any, probed ahead on writes as above.
         if !reinstalled && !guest_write && access == Access::Write && next < window.size() {
             match window.probe(next).await {
                 // cladefs: installed, as the window names it now (TASK-276.6).
                 Ok(()) => {
-                    self.reinstall(addr + page_size);
+                    // Best-effort read-ahead probe: a miss or stale page resolves on the next access.
+                    let _ = self.reinstall(addr + page_size);
                 }
                 Err(Errno::ENOENT | Errno::EINVAL) => {}
                 Err(err) => log::warn!("mapping DAX window offset {next:#x} ahead: {err}"),
@@ -1955,6 +2308,162 @@ impl<H: HostMemory> UffdSecondStage<H> {
         self.pages.lock().unwrap().pages[at].mapped.is_some()
     }
 
+    /// cladefs: whether the page at `addr` is a stale partially-private host page whose
+    /// non-private sub-pages must be refreshed before mapping [`PrivateMemory`] back in.
+    fn is_stale(&self, addr: usize) -> bool {
+        let at = self.page_range(addr, 1).start;
+        let pages = self.pages.lock().unwrap();
+        let page = &pages.pages[at];
+        !pages.released && page.is_private() && page.stale
+    }
+
+    /// cladefs: refreshes the non-private sub-pages of a stale partially-private host page at
+    /// `addr` from what the daemon maps there (bringing it in through `window` if not yet named),
+    /// preserving every private sub-page in [`PrivateMemory`], and remaps [`PrivateMemory`] back
+    /// into the host VMA.
+    async fn refresh_stale(&self, window: &dyn Faults, addr: usize, promote_on_write: bool) {
+        let page_size = page_size() as usize;
+        let at = self.page_range(addr, 1).start;
+        let offset = (addr - self.base) as u64;
+        let all_mask = self.all_subpages_mask();
+        loop {
+            {
+                let mut pages = self.pages.lock().unwrap();
+                if pages.released || !pages.pages[at].is_private() {
+                    return;
+                }
+                if !pages.pages[at].stale {
+                    // Refreshed in place by `STAGE_MAP` while we waited; if its VMA is still
+                    // `Memory::Anonymous`, remap `PrivateMemory` now so the access completes.
+                    if pages.pages[at].anon_vma {
+                        self.restore_coalesced_private(&mut pages, at, promote_on_write);
+                    }
+                    return;
+                }
+                if pages.pages[at].private_mask == all_mask {
+                    self.apply_stale_refresh(&mut pages, at, None, false);
+                    return;
+                }
+                if let Some(mapped) = pages.pages[at].mapped {
+                    let mut bytes = vec![0u8; page_size];
+                    self.read_page(mapped.phys, &mut bytes);
+                    self.apply_stale_refresh(&mut pages, at, Some(&bytes), promote_on_write);
+                    return;
+                }
+            }
+            match window.fault_page(offset).await {
+                Ok(()) => {}
+                Err(Errno::ENOENT) => {
+                    let mut pages = self.pages.lock().unwrap();
+                    if pages.released || !pages.pages[at].is_private() {
+                        return;
+                    }
+                    if !pages.pages[at].stale {
+                        if pages.pages[at].anon_vma {
+                            self.restore_coalesced_private(&mut pages, at, promote_on_write);
+                        }
+                        return;
+                    }
+                    if pages.pages[at].mapped.is_none() {
+                        self.apply_stale_refresh(&mut pages, at, None, promote_on_write);
+                        return;
+                    }
+                }
+                Err(err) => return self.unresolved(window, offset, Access::Read, err).await,
+            }
+        }
+    }
+
+    /// Restores a fresh private host page at `at` whose VMA was temporarily replaced with
+    /// `Memory::Anonymous` (either by [`Self::coalesce_anon_vmas`] or after an in-place
+    /// `PrivateMemory` refresh): reserves VMA budget first (`trim`), then remaps [`PrivateMemory`]
+    /// directly without any daemon round-trip (review 102 findings 349 & 350).
+    fn restore_coalesced_private(&self, pages: &mut Pages, at: usize, promote_on_write: bool) {
+        self.trim(pages, 1, Some(at));
+        let page_size = page_size() as usize;
+        let addr = self.base + at * page_size;
+        let all_mask = self.all_subpages_mask();
+        let mask = pages.pages[at].private_mask;
+        let process_writes = self.process_writes.load(Ordering::Relaxed);
+        let next_mask = if promote_on_write && process_writes {
+            let mapped = pages.pages[at].mapped_mask;
+            mask | if mapped != 0 { mapped } else { all_mask }
+        } else {
+            mask
+        };
+        let want_wp = process_writes && next_mask != all_mask;
+        let now = self.now();
+        pages.update(at..at + 1, |page| {
+            page[0].anon_vma = false;
+            page[0].private_mask = next_mask;
+            page[0].wp_partial = want_wp;
+            page[0].restricted = false;
+            page[0].changed = now;
+        });
+        self.made_locked(pages, addr, page_size, now, || {
+            self.map_private_vma(addr, want_wp);
+        });
+    }
+
+    /// Overwrites only the non-private sub-pages of host page `at` in [`PrivateMemory`] from
+    /// `fresh` (or zeros if `None`, when all non-private sub-pages are unmapped), clears `stale`,
+    /// and maps [`PrivateMemory`] back in place of the unfilled anonymous VMA.
+    ///
+    /// On a `process_writes` window (`MemoryCell`, which has no `PRIVATE` RPC and relies on
+    /// write faults), a write fault promotes `private_mask` to all mapped sub-pages while a read
+    /// fault maps `PrivateMemory` write-protected (`wp_partial = true`) so any subsequent store
+    /// to a reclaimed sub-page traps and promotes `private_mask`.
+    fn apply_stale_refresh(
+        &self,
+        pages: &mut Pages,
+        at: usize,
+        fresh: Option<&[u8]>,
+        promote_on_write: bool,
+    ) {
+        // Reserve VMA budget before splitting any coalesced anonymous span (review 102 finding 350).
+        self.trim(pages, 1, Some(at));
+        let page_size = page_size() as usize;
+        let addr = self.base + at * page_size;
+        let page_offset = (at * page_size) as u64;
+        let private = self.private.get().expect("a stale page of a window that doesn't copy");
+        let fd = private.fd.as_raw_fd();
+        let all_mask = self.all_subpages_mask();
+        let mask = pages.pages[at].private_mask;
+        let process_writes = self.process_writes.load(Ordering::Relaxed);
+        let next_mask = if promote_on_write && process_writes {
+            let mapped = pages.pages[at].mapped_mask;
+            mask | if mapped != 0 { mapped } else { all_mask }
+        } else {
+            mask
+        };
+        let want_wp = process_writes && next_mask != all_mask;
+        let zeros = fresh.is_none().then(|| vec![0u8; self.unit]);
+        let now = self.now();
+        pages.update(at..at + 1, |page| {
+            page[0].stale = false;
+            page[0].anon_vma = false;
+            page[0].private_mask = next_mask;
+            page[0].wp_partial = want_wp;
+            page[0].mapped = None;
+            page[0].restricted = false;
+            page[0].changed = now;
+        });
+        self.made_locked(pages, addr, page_size, now, || {
+            for slot in 0..self.subpages() {
+                if mask & (1u16 << slot) != 0 {
+                    continue;
+                }
+                let within = slot * self.unit;
+                let bytes = match fresh {
+                    Some(buf) => &buf[within..within + self.unit],
+                    None => zeros.as_deref().unwrap(),
+                };
+                self.host.write_subpage(fd, page_offset + within as u64, bytes);
+            }
+            self.map_private_vma(addr, want_wp);
+        });
+    }
+
     /// cladefs: the guest's write to the page at `addr`, of `thread`'s, on a window that copies on
     /// write (doc-26): the page copied here ([`Self::copy`]), once `window` has read it in, a read,
     /// where it names nothing yet, and again if it is evicted or unmapped meanwhile; refused past
@@ -1965,6 +2474,10 @@ impl<H: HostMemory> UffdSecondStage<H> {
             let seen = self.seen(addr);
             match self.copy(addr) {
                 Copied::Private => return,
+                Copied::Stale => {
+                    self.refresh_stale(window, addr, true).await;
+                    return;
+                }
                 Copied::Past => {
                     refused("a write past the window's private pages", offset, thread);
                     if rules().refused_write_read_only {
@@ -1988,7 +2501,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
 
     /// cladefs: makes the page at `addr` private for a guest's write (doc-26), unless it is
     /// already: its private memory filled with what the page the window names there holds, read
-    /// from its arena, and mapped writable in its place ([`Self::privatize`]), all under
+    /// from its arena, and mapped writable in its place ([`Self::privatize_masked`]), all under
     /// the pages' lock, which the window's changes take: a change taking the page away, an evict
     /// whose acknowledgement the daemon frees it after, comes after the copy (spec rule
     /// copyUnderLock). Not past the window's private pages, nor of a page it names nothing at.
@@ -1996,8 +2509,27 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let page_size = page_size() as usize;
         let at = self.page_range(addr, 1).start;
         let most = self.private.get().expect("a window that copies on write").most;
+        let all_mask = self.all_subpages_mask();
         let mut pages = self.pages.lock().unwrap();
-        if pages.released || pages.pages[at].private {
+        if pages.released {
+            return Copied::Private;
+        }
+        if pages.pages[at].is_private() {
+            if pages.pages[at].stale {
+                return Copied::Stale;
+            }
+            if pages.pages[at].anon_vma {
+                self.restore_coalesced_private(&mut pages, at, true);
+                return Copied::Private;
+            }
+            if pages.pages[at].wp_partial {
+                let mapped = pages.pages[at].mapped_mask;
+                pages.update(at..at + 1, |page| {
+                    page[0].private_mask |= if mapped != 0 { mapped } else { all_mask };
+                    page[0].wp_partial = false;
+                });
+                self.host.write_unprotect(addr, page_size);
+            }
             return Copied::Private;
         }
         let Some(mapped) = pages.pages[at].mapped else { return Copied::Unnamed };
@@ -2010,7 +2542,26 @@ impl<H: HostMemory> UffdSecondStage<H> {
             drop(pages);
             self.read_page(mapped.phys, &mut bytes);
             pages = self.pages.lock().unwrap();
-            if pages.released || pages.pages[at].private {
+            if pages.released {
+                return Copied::Private;
+            }
+            if pages.pages[at].is_private() {
+                if pages.pages[at].stale {
+                    return Copied::Stale;
+                }
+                if pages.pages[at].anon_vma {
+                    self.restore_coalesced_private(&mut pages, at, true);
+                    return Copied::Private;
+                }
+                if pages.pages[at].wp_partial {
+                    let mapped_mask = pages.pages[at].mapped_mask;
+                    pages.update(at..at + 1, |page| {
+                        page[0].private_mask |=
+                            if mapped_mask != 0 { mapped_mask } else { all_mask };
+                        page[0].wp_partial = false;
+                    });
+                    self.host.write_unprotect(addr, page_size);
+                }
                 return Copied::Private;
             }
             if pages.private >= most {
@@ -2019,7 +2570,13 @@ impl<H: HostMemory> UffdSecondStage<H> {
         } else {
             self.read_page(mapped.phys, &mut bytes);
         }
-        self.privatize(&mut pages, at, &bytes);
+        // A write fault carries only the host-page address, so mark every mapped sub-page private
+        // (never unmapped sub-pages, which would otherwise leak `private_pages()` on UNMAP).
+        let mask = pages.pages[at].mapped_mask;
+        if mask == 0 {
+            return Copied::Unnamed;
+        }
+        self.privatize_masked(&mut pages, at, &bytes, &[mask]);
         drop(pages);
         if let Some(prefault) = &self.prefault {
             prefault.prefault((addr - self.base) as u64, page_size as u64);
@@ -2049,30 +2606,41 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// writes and never read, a database's log's, are. Pages the window names are installed only
     /// as the guest first touches them ([`SecondStage::map`]), so a run the guest writes before it
     /// reads it is such a run: no `mmap`, and no TLB flush (TASK-276.6).
-    fn privatize(&self, pages: &mut Pages, first: usize, bytes: &[u8]) {
+    fn privatize_masked(&self, pages: &mut Pages, first: usize, bytes: &[u8], masks: &[u16]) {
         let start = std::time::Instant::now();
         // cladefs: room for the run it may split (board 8493).
         self.trim(pages, 1, None);
         let page_size = page_size() as usize;
         let range = first..first + bytes.len() / page_size;
+        debug_assert_eq!(range.len(), masks.len());
         let (addr, len) = (self.base + first * page_size, bytes.len());
         let offset = (addr - self.base) as u64;
         let private = self.private.get().expect("a private page of a window that doesn't copy");
         Self::took(&self.taken.overwritten, pages.any_installed(range.clone()));
         let changes = &pages.pages[range.clone()];
         assert!(
-            !changes.iter().any(|page| page.private),
+            !changes.iter().any(|page| page.is_private()),
             "DAX window offset {offset:#x}, {len:#x} bytes, made private again"
         );
         // As a fault saw it, before the change gives back what was withheld.
         let in_place = changes.iter().all(|page| {
             !page.withheld
                 && !page.restricted
+                && !page.anon_vma
+                && !page.wp_partial
                 && !page.mapped.is_some_and(|mapped| mapped.installed())
         });
         pages.update(range.clone(), |pages| {
-            for page in pages {
-                (page.mapped, page.restricted, page.private) = (None, false, true);
+            for (page, &mask) in pages.iter_mut().zip(masks) {
+                debug_assert_ne!(mask, 0);
+                (
+                    page.mapped,
+                    page.restricted,
+                    page.private_mask,
+                    page.stale,
+                    page.anon_vma,
+                    page.wp_partial,
+                ) = (None, false, mask, false, false, false);
             }
         });
         pages.private += range.len() as u64;
@@ -2109,10 +2677,9 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// its private pages or eviction keeps them from being named together; `EINVAL` for a window
     /// that doesn't copy on write, a range not within it, or one with a page `window` maps nothing at.
     ///
-    /// The pages `window` names nothing at yet are read in through it first, a read each, each
-    /// naming the rest of its part with it. Retry if a page was evicted meanwhile. Once all pages
-    /// are named or private, check the budget and make the runs private under the same pages' lock
-    /// ([`Self::privatize`]).
+    /// Accepts `self.unit`-aligned ranges (4 KiB on both 4 KiB and 16 KiB hosts): on hosts with
+    /// larger pages, sets only the requested sub-page bits in [`PageChanges::private_mask`], and
+    /// refreshes any stale non-private sub-pages first.
     pub(crate) async fn make_private(
         &self,
         window: &dyn Faults,
@@ -2120,66 +2687,133 @@ impl<H: HostMemory> UffdSecondStage<H> {
         len: u64,
     ) -> Result<(), Errno> {
         let page_size = page_size();
+        let unit = self.unit as u64;
         let most = self.private.get().ok_or(Errno::EINVAL)?.most;
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
         if len == 0
-            || !offset.is_multiple_of(page_size)
-            || !len.is_multiple_of(page_size)
+            || !offset.is_multiple_of(unit)
+            || !len.is_multiple_of(unit)
             || end > self.size as u64
         {
             return Err(Errno::EINVAL);
         }
-        let range = self.page_range(self.base + offset as usize, len as usize);
+        let h_start = offset - offset % page_size;
+        let h_end = end.next_multiple_of(page_size);
+        let range = self.page_range(self.base + h_start as usize, (h_end - h_start) as usize);
+        let (start_off, end_off) = (offset as usize, end as usize);
+        let all_mask = self.all_subpages_mask();
         // A range can span more parts than the cache can hold. Retry transient evictions without
         // letting such a request fault the same pages indefinitely.
         const NAME_ATTEMPTS: usize = 4;
         for _ in 0..NAME_ATTEMPTS {
             for at in range.clone() {
-                let unnamed = {
+                let req = self.subpage_mask(at, start_off, end_off);
+                let needs_fault = {
                     let pages = self.pages.lock().unwrap();
-                    let page = &pages.pages[at];
-                    !pages.released && !page.private && page.mapped.is_none()
+                    if pages.released {
+                        false
+                    } else {
+                        let page = &pages.pages[at];
+                        // If sub-page presence is already known and excludes any requested slot,
+                        // refuse immediately without faulting or leaking private bits.
+                        if (page.mapped_mask != 0 || page.is_private())
+                            && (page.mapped_mask & req) != req
+                        {
+                            return Err(Errno::EINVAL);
+                        }
+                        (!page.is_private() && page.mapped.is_none())
+                            || (page.is_private()
+                                && page.stale
+                                && page.private_mask != all_mask
+                                && page.mapped.is_none())
+                    }
                 };
-                if unnamed {
-                    let read = window.fault_page(at as u64 * page_size).await;
-                    read.map_err(|err| if err == Errno::ENOENT { Errno::EINVAL } else { err })?;
+                if needs_fault {
+                    match window.fault_page(at as u64 * page_size).await {
+                        Ok(()) => {}
+                        Err(Errno::ENOENT) => return Err(Errno::EINVAL),
+                        Err(err) => return Err(err),
+                    }
                 }
             }
             let mut pages = self.pages.lock().unwrap();
             if pages.released {
                 return Ok(());
             }
-            let mut needed = pages.pages[range.clone()].iter().filter(|page| !page.private);
-            if pages.private + needed.clone().count() as u64 > most {
+            for at in range.clone() {
+                let req = self.subpage_mask(at, start_off, end_off);
+                if (pages.pages[at].mapped_mask & req) != req {
+                    return Err(Errno::EINVAL);
+                }
+            }
+            let needed_new =
+                pages.pages[range.clone()].iter().filter(|page| !page.is_private()).count() as u64;
+            if pages.private + needed_new > most {
                 return Err(Errno::ENOMEM);
             }
-            if needed.any(|page| page.mapped.is_none()) {
+            let any_unnamed = pages.pages[range.clone()].iter().any(|page| {
+                (!page.is_private() && page.mapped.is_none())
+                    || (page.is_private()
+                        && page.stale
+                        && page.private_mask != all_mask
+                        && page.mapped.is_none())
+            });
+            if any_unnamed {
                 continue;
             }
             // Keep the lock from the budget check through every run, so a write fault cannot
             // consume pages promised to this request.
-            let mut runs: Vec<(usize, Vec<u8>)> = Vec::new();
+            let mut runs: Vec<(usize, Vec<u8>, Vec<u16>)> = Vec::new();
             for at in range.clone() {
+                let mask = self.subpage_mask(at, start_off, end_off);
                 let page = pages.pages[at];
-                if page.private {
+                if page.is_private() {
+                    if page.stale {
+                        if page.private_mask == all_mask {
+                            self.apply_stale_refresh(&mut pages, at, None, false);
+                        } else {
+                            let mapped =
+                                page.mapped.expect("the stale page is named under the lock");
+                            let mut bytes = vec![0u8; page_size as usize];
+                            self.read_page(mapped.phys, &mut bytes);
+                            self.apply_stale_refresh(&mut pages, at, Some(&bytes), false);
+                        }
+                        pages.pages[at].private_mask |= mask;
+                    } else if page.anon_vma {
+                        pages.pages[at].private_mask |= mask;
+                        self.restore_coalesced_private(&mut pages, at, false);
+                    } else {
+                        pages.pages[at].private_mask |= mask;
+                    }
+                    if pages.pages[at].wp_partial
+                        && (!self.process_writes.load(Ordering::Relaxed)
+                            || pages.pages[at].private_mask == all_mask)
+                    {
+                        pages.update(at..at + 1, |page| page[0].wp_partial = false);
+                        self.host.write_unprotect(
+                            self.base + at * page_size as usize,
+                            page_size as usize,
+                        );
+                    }
                     continue;
                 }
                 let mapped = page.mapped.expect("the page is named under the lock");
                 let mut bytes = vec![0u8; page_size as usize];
                 self.read_page(mapped.phys, &mut bytes);
                 match runs.last_mut() {
-                    Some((first, run)) if *first + run.len() / page_size as usize == at => {
-                        run.extend_from_slice(&bytes)
+                    Some((first, run, masks)) if *first + masks.len() == at => {
+                        run.extend_from_slice(&bytes);
+                        masks.push(mask);
                     }
-                    _ => runs.push((at, bytes)),
+                    _ => runs.push((at, bytes, vec![mask])),
                 }
             }
-            for (first, bytes) in &runs {
-                self.privatize(&mut pages, *first, bytes);
+            for (first, bytes, masks) in &runs {
+                self.privatize_masked(&mut pages, *first, bytes, masks);
             }
             drop(pages);
             if let Some(prefault) = &self.prefault {
-                for (first, bytes) in &runs {
+                for (first, bytes, _) in &runs {
                     prefault.prefault(*first as u64 * page_size, bytes.len() as u64);
                 }
             }
@@ -2210,10 +2844,12 @@ impl<H: HostMemory> UffdSecondStage<H> {
             if pages.released {
                 return;
             }
-            // The runs to install: pages named, left out, that a fault would install as they are.
+            // The runs to install: pages named, left out, not private, that a fault would install
+            // as they are.
             let named = |page: &PageChanges| {
                 !page.withheld
                     && !page.restricted
+                    && !page.is_private()
                     && page.mapped.is_some_and(|mapped| !mapped.installed())
             };
             let follows = |before: &PageChanges, page: &PageChanges| {
@@ -2250,6 +2886,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
                         for page in pages {
                             page.made = page.made.wrapping_add(1);
                             page.changed = now;
+                            page.anon_vma = false;
+                            page.wp_partial = false;
                             if let Some(mapped) = &mut page.mapped {
                                 (mapped.installed, mapped.used) = (1, used);
                             }
@@ -2259,10 +2897,12 @@ impl<H: HostMemory> UffdSecondStage<H> {
                     self.install(addr, run.len() * page_size, self.memory(phys));
                 }
             }
-            // cladefs: private pages too, their memory filled here (backlog doc-13).
+            // cladefs: private pages too, their memory filled here (backlog doc-13), unless stale
+            // or currently coalesced into an anonymous VMA.
             let mapped = |page: &PageChanges| {
                 !page.withheld
-                    && (page.private || page.mapped.is_some_and(|mapped| mapped.installed()))
+                    && ((page.is_private() && !page.stale && !page.anon_vma)
+                        || page.mapped.is_some_and(|mapped| mapped.installed()))
             };
             let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
             for at in (first..last).filter(|&at| mapped(&pages.pages[at])) {
@@ -2286,6 +2926,37 @@ impl<H: HostMemory> UffdSecondStage<H> {
         assert!(offset <= self.size && len <= self.size - offset, "out of the second stage");
         (self.base + offset, len)
     }
+    /// Overwrites non-private sub-pages of partially-private host pages directly in
+    /// [`PrivateMemory`] from `phys` (when `STAGE_MAP` already has the backing page in hand),
+    /// remapping `PrivateMemory` back in place of any stale anonymous VMA without leaving extra
+    /// VMAs behind.
+    fn apply_in_place_refreshes(
+        &self,
+        refreshes: &[(usize, crate::pages::PhysLocation, u16, bool, bool)],
+    ) {
+        let Some(private) = self.private.get() else { return };
+        let fd = private.fd.as_raw_fd();
+        let ps = page_size() as usize;
+        let mut buf = vec![0u8; ps];
+        for &(at, phys, mask, remap_vma, want_wp) in refreshes {
+            self.read_page(phys, &mut buf);
+            let page_offset = (at * ps) as u64;
+            for slot in 0..self.subpages() {
+                if mask & (1u16 << slot) != 0 {
+                    continue;
+                }
+                let within = slot * self.unit;
+                self.host.write_subpage(
+                    fd,
+                    page_offset + within as u64,
+                    &buf[within..within + self.unit],
+                );
+            }
+            if remap_vma {
+                self.map_private_vma(self.base + at * ps, want_wp);
+            }
+        }
+    }
 }
 
 impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
@@ -2296,25 +2967,62 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
     /// next to install ahead ([`Self::prefault`]). Installed as it was mapped, every page mapped
     /// took an `mmap` there, and a page the guest then stored to without reading it, a write's,
     /// took another over it, its TLB flushed on every CPU of the process's and the guest's.
-    /// cladefs: a private page there stays, named nothing (doc-26, spec rule mapsKeepPrivate): an
-    /// eviction left it, and the window, which knows nothing of it, maps the rest of its part over
-    /// it as it installs the part again.
+    /// cladefs: a fully-private page there stays, named nothing (doc-26, spec rule mapsKeepPrivate);
+    /// a partially-private page refreshes its non-private sub-pages in place directly from `phys`,
+    /// collapsing any stale anonymous VMA back into `PrivateMemory`.
     fn map(&self, offset: u64, phys: crate::pages::PhysLocation, len: u64) {
         let (addr, len) = self.addr(offset, len);
         let range = self.page_range(addr, len);
         let page_size = page_size();
+        let all_mask = self.all_subpages_mask();
+        let process_writes = self.process_writes.load(Ordering::Relaxed);
         let keeps = if rules().maps_keep_private { Private::Keep } else { Private::End };
         let name = |pages: &mut Pages| {
             let used = pages.tick();
-            let taking = pages.take_away(range.clone(), keeps);
+            let taking = pages.take_away_bytes(
+                offset as usize,
+                offset as usize + len,
+                keeps,
+                self.unit,
+                all_mask,
+                false,
+            );
             Self::took(&self.taken.left_out, taking.installed);
-            pages.update(range, |pages| {
-                for (at, page) in pages.iter_mut().enumerate() {
-                    if page.private {
+            let mut refreshes = Vec::new();
+            let mut wp_added = false;
+            pages.update(range.clone(), |pages| {
+                for (idx, page) in pages.iter_mut().enumerate() {
+                    if page.private_mask == all_mask && rules().maps_keep_private {
                         continue;
                     }
-                    let offset = phys.offset + at as u64 * page_size;
+                    let at = range.start + idx;
+                    let offset = phys.offset + idx as u64 * page_size;
                     let phys = crate::pages::PhysLocation { arena: phys.arena, offset };
+                    if page.is_partially_private(all_mask) {
+                        let mask = page.private_mask;
+                        page.stale = false;
+                        page.mapped = None;
+                        page.restricted = false;
+                        if page.anon_vma {
+                            // Keep an existing anonymous VMA intact so `map()` never splits a
+                            // coalesced span past the VMA budget; `PrivateMemory` is updated in
+                            // place below and remapped lazily on the next touch.
+                            page.wp_partial = false;
+                            refreshes.push((at, phys, mask, false, false));
+                        } else {
+                            let want_wp = process_writes && mask != all_mask;
+                            let remap_vma = page.wp_partial != want_wp;
+                            wp_added |= want_wp && !page.wp_partial;
+                            page.wp_partial = want_wp;
+                            refreshes.push((at, phys, mask, remap_vma, want_wp));
+                        }
+                        continue;
+                    }
+                    // Direct callers (e.g. unit tests) that call `map()` without `window_mapped()`
+                    // still mark the full host page present in `mapped_mask`.
+                    if page.mapped_mask == 0 {
+                        page.mapped_mask = all_mask;
+                    }
                     // Left installed as it was, past the rule, what a fault installs next is it.
                     let installed = u8::from(page.mapped.is_some_and(|m| m.installed()));
                     let installed = if taking.installed { 0 } else { installed };
@@ -2322,23 +3030,42 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                     page.restricted = false;
                 }
             });
-            taking
+            if wp_added && self.trim_for_stale(pages) {
+                for refresh in &mut refreshes {
+                    if pages.pages[refresh.0].anon_vma {
+                        refresh.3 = false;
+                    }
+                }
+            }
+            (taking, refreshes)
         };
-        self.change(addr, len, 1, name, |taking| self.take_away(addr, len, taking));
+        self.change(addr, len, 1, name, |(taking, refreshes)| {
+            self.take_away(addr, len, taking);
+            self.apply_in_place_refreshes(&refreshes);
+        });
     }
 
     fn unmap(&self, offset: u64, len: u64, private: Private) {
-        let (addr, len) = self.addr(offset, len);
-        let range = self.page_range(addr, len);
+        let ps = page_size();
+        let (start_off, end_off) = (offset as usize, (offset + len) as usize);
+        let h_start = offset - offset % ps;
+        let h_end = (offset + len).next_multiple_of(ps);
+        let (h_addr, h_len) = self.addr(h_start, h_end - h_start);
+        let range = self.page_range(h_addr, h_len);
+        let all_mask = self.all_subpages_mask();
         let forget = |pages: &mut Pages| {
-            let taking = pages.take_away(range.clone(), private);
+            let mut taking =
+                pages.take_away_bytes(start_off, end_off, private, self.unit, all_mask, true);
             Self::took(&self.taken.left_out, taking.installed);
             pages.update(range, |pages| {
                 pages.iter_mut().for_each(|page| (page.mapped, page.restricted) = (None, false))
             });
+            if !taking.newly_staled.is_empty() && self.trim_for_stale(pages) {
+                taking.newly_staled.clear();
+            }
             taking
         };
-        self.change(addr, len, 1, forget, |taking| self.take_away(addr, len, taking));
+        self.change(h_addr, h_len, 1, forget, |taking| self.take_away(h_addr, h_len, taking));
     }
 
     /// cladefs: the window's change of a range it mapped, made at once (TASK-91.16): each map of
@@ -2349,9 +3076,22 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
     /// out, then named again: an unmap of the old memory, flushing the host's TLBs and the
     /// hypervisor's mappings, then the guest's accesses faulting the pages in again.
     fn remap(&self, offset: u64, len: u64, private: Private, anew: &[Anew]) {
+        let ps = page_size();
+        let all_mask = self.all_subpages_mask();
+        let process_writes = self.process_writes.load(Ordering::Relaxed);
+        if !offset.is_multiple_of(ps) || !len.is_multiple_of(ps) {
+            self.unmap(offset, len, private);
+            for anew in anew {
+                match *anew {
+                    Anew::Mapped { offset, len } => self.window_mapped(offset, len),
+                    Anew::Map { offset, phys, len } => self.map(offset, phys, len),
+                }
+            }
+            return;
+        }
         let (addr, len) = self.addr(offset, len);
         let range = self.page_range(addr, len);
-        let page_size = page_size() as usize;
+        let page_size = ps as usize;
         let maps: Vec<(usize, usize, crate::pages::PhysLocation)> = (anew.iter())
             .filter_map(|anew| match *anew {
                 Anew::Map { offset, phys, len } => {
@@ -2378,6 +3118,20 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                     });
                 }
             }
+            // Pages covered by a subsequent `Anew::Map` in this batch will be refreshed in place
+            // if partially private, so `take_away_bytes` need not split their VMA with Anonymous.
+            let mut mapped_by_anew = vec![false; range.len()];
+            for &(m_addr, m_len, _) in &maps {
+                let m = self.page_range(m_addr, m_len);
+                mapped_by_anew[m.start - range.start..m.end - range.start].fill(true);
+            }
+            // Snapshot prior VMA state before `take_away_bytes` marks partially-private pages
+            // stale so `Anew::Map` below preserves already-anonymous VMAs without splitting a
+            // coalesced span and avoids redundant remaps on already-mapped `PrivateMemory` pages.
+            let was_anon: Vec<bool> =
+                pages.pages[range.clone()].iter().map(|p| p.anon_vma).collect();
+            let was_wp: Vec<bool> =
+                pages.pages[range.clone()].iter().map(|p| p.wp_partial).collect();
             // Each run of the rest taken away, and its pages mapping nothing, until named anew.
             let mut taken: Vec<(std::ops::Range<usize>, Taking)> = Vec::new();
             let mut at = range.start;
@@ -2390,70 +3144,186 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                 while at < range.end && !kept[at - range.start] {
                     at += 1;
                 }
-                let taking = pages.take_away(start..at, private);
+                let mut taking = pages.take_away_bytes(
+                    start * page_size,
+                    at * page_size,
+                    private,
+                    self.unit,
+                    all_mask,
+                    true,
+                );
                 Self::took(&self.taken.left_out, taking.installed);
                 pages.update(start..at, |pages| {
                     pages.iter_mut().for_each(|page| (page.mapped, page.restricted) = (None, false))
                 });
+                // Remove from `newly_staled` any page that an `Anew::Map` below will immediately
+                // refresh in place (avoiding a pointless Anonymous VMA round-trip).
+                taking.newly_staled.retain(|&p| !mapped_by_anew[p - range.start]);
                 taken.push((start..at, taking));
             }
-            for &(addr, len, phys) in &maps {
-                let mapping = self.page_range(addr, len);
-                if kept[mapping.start - range.start] {
-                    continue;
-                }
-                pages.update(mapping, |pages| {
-                    for (at, page) in pages.iter_mut().enumerate() {
-                        // A private page stays (spec rule mapsKeepPrivate).
-                        if page.private && rules().maps_keep_private {
+            // Apply `Anew::Mapped` and `Anew::Map` atomically in wire order under the same lock,
+            // preventing any TOCTOU race with concurrent `make_private` calls.
+            let gives_back = rules().mapping_gives_back_withheld;
+            let mut extra_withheld = Vec::new();
+            let mut extra_staled = Vec::new();
+            let mut refreshes = Vec::new();
+            let mut wp_added = false;
+            for entry in anew {
+                match *entry {
+                    Anew::Mapped { offset: m_off, len: m_len } => {
+                        let (m_start_off, m_end_off) = (m_off as usize, (m_off + m_len) as usize);
+                        let h_s = m_off - m_off % ps;
+                        let h_e = (m_off + m_len).next_multiple_of(ps);
+                        let (m_addr, m_hlen) = self.addr(h_s, h_e - h_s);
+                        let m_range = self.page_range(m_addr, m_hlen);
+                        pages.update(m_range.clone(), |slice| {
+                            for (idx, page) in slice.iter_mut().enumerate() {
+                                let p = m_range.start + idx;
+                                let mask = self.subpage_mask(p, m_start_off, m_end_off);
+                                page.mapped_mask |= mask;
+                                page.made = page.made.wrapping_add(1);
+                                if gives_back && page.withheld {
+                                    page.withheld = false;
+                                    extra_withheld.push(p);
+                                }
+                                if page.is_partially_private(all_mask)
+                                    && !mapped_by_anew[p - range.start]
+                                {
+                                    if !page.anon_vma {
+                                        extra_staled.push(p);
+                                    }
+                                    page.stale = true;
+                                    page.anon_vma = true;
+                                    page.wp_partial = false;
+                                }
+                            }
+                        });
+                    }
+                    Anew::Map { offset: m_off, phys, len: m_len } => {
+                        let (m_addr, m_len) = self.addr(m_off, m_len);
+                        let mapping = self.page_range(m_addr, m_len);
+                        if kept[mapping.start - range.start] {
                             continue;
                         }
-                        let offset = phys.offset + (at * page_size) as u64;
-                        let phys = crate::pages::PhysLocation { offset, ..phys };
-                        page.mapped = Some(Mapped { phys, installed: 0, used });
+                        pages.update(mapping.clone(), |slice| {
+                            for (idx, page) in slice.iter_mut().enumerate() {
+                                if page.private_mask == all_mask && rules().maps_keep_private {
+                                    continue;
+                                }
+                                let p = mapping.start + idx;
+                                let p_offset = phys.offset + (idx * page_size) as u64;
+                                let p_phys =
+                                    crate::pages::PhysLocation { offset: p_offset, ..phys };
+                                if page.is_partially_private(all_mask) {
+                                    let mask = page.private_mask;
+                                    page.stale = false;
+                                    page.mapped = None;
+                                    page.restricted = false;
+                                    if was_anon[p - range.start] {
+                                        page.anon_vma = true;
+                                        page.wp_partial = false;
+                                        refreshes.push((p, p_phys, mask, false, false));
+                                    } else {
+                                        let want_wp = process_writes && mask != all_mask;
+                                        let prev_wp = was_wp[p - range.start];
+                                        let remap_vma = prev_wp != want_wp;
+                                        wp_added |= want_wp && !prev_wp;
+                                        page.anon_vma = false;
+                                        page.wp_partial = want_wp;
+                                        refreshes.push((p, p_phys, mask, remap_vma, want_wp));
+                                    }
+                                    continue;
+                                }
+                                if page.mapped_mask == 0 {
+                                    page.mapped_mask = all_mask;
+                                }
+                                page.mapped = Some(Mapped { phys: p_phys, installed: 0, used });
+                            }
+                        });
                     }
-                });
+                }
             }
-            taken
+            if (wp_added
+                || !extra_staled.is_empty()
+                || taken.iter().any(|(_, t)| !t.newly_staled.is_empty()))
+                && self.trim_for_stale(pages)
+            {
+                extra_staled.clear();
+                for (_, t) in &mut taken {
+                    t.newly_staled.clear();
+                }
+                for refresh in &mut refreshes {
+                    if pages.pages[refresh.0].anon_vma {
+                        refresh.3 = false;
+                    }
+                }
+            }
+            (taken, extra_withheld, extra_staled, refreshes)
         };
         // The ranges it takes away: between the maps it leaves in place, one more than they.
         let room = maps.len() + 1;
-        self.change(addr, len, room, record, |taken| {
+        self.change(addr, len, room, record, |(taken, extra_withheld, extra_staled, refreshes)| {
             for (run, taking) in taken {
                 let addr = self.base + run.start * page_size;
                 self.take_away(addr, run.len() * page_size, taking);
             }
-        });
-        for anew in anew {
-            if let Anew::Mapped { offset, len } = *anew {
-                self.window_mapped(offset, len);
+            for at in extra_withheld {
+                let addr = self.base + at * page_size;
+                self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
             }
-        }
+            for at in extra_staled {
+                self.mark_stale_vma(self.base + at * page_size);
+            }
+            self.apply_in_place_refreshes(&refreshes);
+        });
     }
 
     fn window_mapped(&self, offset: u64, len: u64) {
-        let (addr, len) = self.addr(offset, len);
-        let page_size = page_size() as usize;
-        let range = self.page_range(addr, len);
+        let ps = page_size();
+        let (start_off, end_off) = (offset as usize, (offset + len) as usize);
+        let h_start = offset - offset % ps;
+        let h_end = (offset + len).next_multiple_of(ps);
+        let (addr, h_len) = self.addr(h_start, h_end - h_start);
+        let page_size = ps as usize;
+        let range = self.page_range(addr, h_len);
+        let all_mask = self.all_subpages_mask();
         let mut pages = self.pages.lock().unwrap();
         if pages.released {
             return;
         }
         // Each page counts the mapping as a change, so that a fault that found nothing there
         // before withholds nothing now. A page withheld is unmapped memory, registered for
-        // missing faults, made accessible again.
+        // missing faults, made accessible again. A partially-private page that is not yet stale
+        // becomes stale so newly mapped non-private sub-pages refresh on next access.
         let gives_back = rules().mapping_gives_back_withheld;
         let withheld: Vec<usize> =
             range.clone().filter(|&at| gives_back && pages.pages[at].withheld).collect();
-        pages.update(range, |pages| {
-            for page in pages {
+        let mut staled = Vec::new();
+        pages.update(range.clone(), |slice| {
+            for (idx, page) in slice.iter_mut().enumerate() {
+                let at = range.start + idx;
+                page.mapped_mask |= self.subpage_mask(at, start_off, end_off);
                 page.made = page.made.wrapping_add(1);
                 page.withheld &= !gives_back;
+                if page.is_partially_private(all_mask) {
+                    if !page.anon_vma {
+                        staled.push(at);
+                    }
+                    page.stale = true;
+                    page.anon_vma = true;
+                    page.wp_partial = false;
+                }
             }
         });
         for at in withheld {
             let addr = self.base + at * page_size;
             self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
+        }
+        let coalesced = !staled.is_empty() && self.trim_for_stale(&mut pages);
+        if !coalesced {
+            for &at in &staled {
+                self.mark_stale_vma(self.base + at * page_size);
+            }
         }
     }
 }
@@ -2601,6 +3471,80 @@ impl<H: HostMemory> UffdSecondStage<H> {
         if kept_restricted && let Some(keep) = keep {
             pages.restricted_order.push_front(keep);
         }
+        self.coalesce_anon_vmas(pages, room, keep);
+    }
+
+    /// Trims runs and restrictions, then coalesces stale anonymous VMAs if `held() > share`;
+    /// returns `true` when `anon_vma`/`wp_partial` spans were just coalesced into an anonymous VMA
+    /// (so callers can skip per-page `mark_stale_vma` calls).
+    fn trim_for_stale(&self, pages: &mut Pages) -> bool {
+        let share = self.share.load(Ordering::Relaxed);
+        if pages.released || pages.held() <= share {
+            return false;
+        }
+        // Evict clean runs and restrictions first via `trim`, then check whether coalescing is
+        // still needed (or already happened inside `trim`).
+        let before = pages.anon_runs + pages.wp_partials;
+        self.trim(pages, 0, None);
+        pages.anon_runs + pages.wp_partials < before
+    }
+
+    /// Coalesces disjoint `anon_vma`/`wp_partial` runs into at most one anonymous VMA per side of
+    /// `keep` when `held() + room > share`, bounding kernel VMAs even under thousands of
+    /// non-adjacent stale or write-protected partial pages (board 8493 / review 100 finding 344 /
+    /// review 102 findings 349 & 350).
+    ///
+    /// Crucially, `page.stale` is NOT set on fresh private pages swept into the coalesced span:
+    /// their [`PrivateMemory`] still holds up-to-date bytes for every sub-page while their daemon
+    /// PTE may remain resident, so their next touch remaps [`PrivateMemory`] directly via
+    /// [`Self::restore_coalesced_private`] without calling the daemon.
+    fn coalesce_anon_vmas(&self, pages: &mut Pages, room: usize, keep: Option<usize>) {
+        let share = self.share.load(Ordering::Relaxed);
+        if pages.held().saturating_add(room) <= share || (pages.anon_runs + pages.wp_partials) <= 1
+        {
+            return;
+        }
+        let page_size = page_size() as usize;
+        let first_anon = pages.pages.iter().position(|p| p.anon_vma || p.wp_partial);
+        let last_anon = pages.pages.iter().rposition(|p| p.anon_vma || p.wp_partial);
+        let (Some(first), Some(last)) = (first_anon, last_anon) else { return };
+        let skip = keep.map(|k| match pages.run_of(k) {
+            Some(start) => start..pages.runs[&start].end,
+            None => k..k + 1,
+        });
+        let mut spans = Vec::with_capacity(2);
+        let total_end = last + 1;
+        match skip {
+            Some(s) if s.start < total_end && s.end > first => {
+                if first < s.start {
+                    spans.push(first..s.start);
+                }
+                if s.end < total_end {
+                    spans.push(s.end..total_end);
+                }
+            }
+            _ => spans.push(first..total_end),
+        }
+        let writable = libc::PROT_READ | libc::PROT_WRITE;
+        let prot = if rules().register_before_accessible { libc::PROT_NONE } else { writable };
+        for span in spans {
+            pages.update(span.clone(), |slice| {
+                for page in slice {
+                    page.anon_vma = true;
+                    page.wp_partial = false;
+                    page.restricted = false;
+                    page.withheld = false;
+                    if let Some(mapped) = &mut page.mapped {
+                        mapped.installed = 0;
+                    }
+                }
+            });
+            let addr = self.base + span.start * page_size;
+            let len = span.len() * page_size;
+            self.host.map(addr, len, prot, Memory::Anonymous);
+            self.host.register(addr, len, UFFDIO_REGISTER_MODE_MISSING);
+            self.host.protect(addr, len, writable);
+        }
     }
 
     /// Installs the page at `addr`, if the window maps it and it is left out, with those left out
@@ -2610,33 +3554,41 @@ impl<H: HostMemory> UffdSecondStage<H> {
     /// TASK-276.6), under the lock the window's changes take: a change since the fault found the
     /// page is what is installed. A private page needs nothing: filled, its fault came before it
     /// was, and its access finds it now.
-    fn reinstall(&self, addr: usize) -> bool {
+    fn reinstall(&self, addr: usize) -> Reinstalled {
         let page_size = page_size() as usize;
         let at = self.page_range(addr, 1).start;
         let mut pages = self.pages.lock().unwrap();
-        if pages.pages[at].private {
-            return true;
+        if pages.pages[at].is_private() {
+            if pages.pages[at].stale {
+                return Reinstalled::Stale;
+            }
+            if pages.pages[at].anon_vma {
+                self.restore_coalesced_private(&mut pages, at, false);
+            }
+            return Reinstalled::Done;
         }
         let used = pages.tick();
-        let Some(mapped) = pages.pages[at].mapped else { return false };
+        let Some(mapped) = pages.pages[at].mapped else { return Reinstalled::Miss };
         if mapped.installed() {
             pages.update(at..at + 1, |page| {
                 if let Some(mapped) = &mut page[0].mapped {
                     mapped.used = used;
                 }
             });
-            return false;
+            return Reinstalled::Miss;
         }
         // cladefs: in room made for it in its share, as it may install a run more (board 8493).
         self.trim(&mut pages, 1, Some(at));
         let phys = mapped.phys;
         // The pages around it left out with it, of memory following on, as far as a chunk's.
         let left_out_with = |page: &PageChanges, distance: i64| {
-            page.mapped.is_some_and(|other| {
-                !other.installed()
-                    && other.phys.arena == phys.arena
-                    && other.phys.offset as i64 - phys.offset as i64 == distance * page_size as i64
-            })
+            !page.is_private()
+                && page.mapped.is_some_and(|other| {
+                    !other.installed()
+                        && other.phys.arena == phys.arena
+                        && other.phys.offset as i64 - phys.offset as i64
+                            == distance * page_size as i64
+                })
         };
         const MOST: usize = 512;
         let mut start = at;
@@ -2668,6 +3620,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
             for page in pages {
                 page.made = page.made.wrapping_add(1);
                 page.changed = now;
+                page.anon_vma = false;
+                page.wp_partial = false;
                 if let Some(mapped) = &mut page.mapped {
                     mapped.installed = 1;
                     mapped.used = used;
@@ -2677,7 +3631,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let len = (end - start) * page_size;
         let _busy = self.busy.doing(Doing::Reinstall, now);
         self.install(self.base + start * page_size, len, self.memory(first));
-        true
+        Reinstalled::Done
     }
 
     /// cladefs: what it holds at window offset `offset` and around it, and what it is doing: for a
@@ -2723,7 +3677,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             self.budget(),
             count(installed),
             count(left_out),
-            count(|page| page.private),
+            count(|page| page.is_private()),
             count(|page| page.withheld),
             count(|page| page.restricted),
             count(|page| page.restricted && page.for_worker),
@@ -2731,7 +3685,11 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let at = (offset / page_size()) as usize;
         if let Some(page) = pages.pages.get(at) {
             let state = match page.mapped {
-                _ if page.private => "private".to_owned(),
+                _ if page.is_private() => format!(
+                    "private(mask={:#x}{})",
+                    page.private_mask,
+                    if page.stale { ", stale" } else { "" }
+                ),
                 Some(mapped) => format!(
                     "{} of {:?} at {:#x}",
                     if mapped.installed() { "installed" } else { "left out" },
@@ -3763,18 +4721,28 @@ mod tests {
         let zeros: PageChanges = unsafe { std::mem::zeroed() };
         let nothing = PageChanges::default();
         assert_eq!(
-            (zeros.made, zeros.withheld, zeros.restricted, zeros.for_worker, zeros.private),
+            (
+                zeros.made,
+                zeros.withheld,
+                zeros.restricted,
+                zeros.for_worker,
+                zeros.stale,
+                zeros.private_mask
+            ),
             (
                 nothing.made,
                 nothing.withheld,
                 nothing.restricted,
                 nothing.for_worker,
-                nothing.private
+                nothing.stale,
+                nothing.private_mask
             )
         );
         assert_eq!((zeros.changed, zeros.mapped.is_none()), (nothing.changed, true));
         let pages = WindowPages::new(4).unwrap();
-        assert!(pages.iter().all(|page| page.mapped.is_none() && !page.private && page.made == 0));
+        assert!(pages.iter().all(|page| {
+            page.mapped.is_none() && !page.is_private() && !page.stale && page.made == 0
+        }));
     }
 
     /// cladefs TASK-164.1 (backlog doc-13): a window's private pages cost its VM process no mapping
@@ -3951,6 +4919,10 @@ mod tests {
             self.syscalls.write_protect(addr, len);
             self.windows.count();
         }
+        fn write_unprotect(&self, addr: usize, len: usize) {
+            self.syscalls.write_unprotect(addr, len);
+            self.windows.count();
+        }
         fn wake(&self, addr: usize, len: usize) {
             self.syscalls.wake(addr, len);
         }
@@ -3959,6 +4931,9 @@ mod tests {
         }
         fn fill(&self, fd: RawFd, offset: u64, bytes: &[u8]) {
             self.syscalls.fill(fd, offset, bytes);
+        }
+        fn write_subpage(&self, fd: RawFd, offset: u64, bytes: &[u8]) {
+            self.syscalls.write_subpage(fd, offset, bytes);
         }
         fn punch(&self, fd: RawFd, offset: u64, len: usize) {
             self.syscalls.punch(fd, offset, len);
@@ -4220,11 +5195,13 @@ mod tests {
         fn protect(&self, _: usize, _: usize, _: libc::c_int) {}
         fn register(&self, _: usize, _: usize, _: u64) {}
         fn write_protect(&self, _: usize, _: usize) {}
+        fn write_unprotect(&self, _: usize, _: usize) {}
         fn wake(&self, _: usize, _: usize) {}
         fn private_memory(&self, _: usize) -> std::io::Result<OwnedFd> {
             Syscalls::private_memory_fd(page_size() as usize)
         }
         fn fill(&self, _: RawFd, _: u64, _: &[u8]) {}
+        fn write_subpage(&self, _: RawFd, _: u64, _: &[u8]) {}
         fn punch(&self, _: RawFd, _: u64, _: usize) {}
     }
 
@@ -4369,5 +5346,470 @@ mod tests {
         assert!(trims >= 3, "{trims} trims");
         assert!(longest < std::time::Duration::from_millis(50), "a trim took {longest:?}");
         assert!(waited < std::time::Duration::from_millis(50), "a wait of {waited:?}");
+    }
+
+    /// Sub-host-page private tracking (e.g. 4 KiB blocks on a 16 KiB arm64 host, exercised on
+    /// every host with `unit = page_size() / 4`):
+    /// - `make_private` on sub-page 0 preserves sibling sub-pages' bytes and allows writing slot 0.
+    /// - Remapping sibling sub-page 1 (with `MAP` / `Private::End`) updates slot 1's bytes on next
+    ///   read WITHOUT losing slot 0's private dirty data.
+    /// - Unmapping sibling sub-page 2 clears slot 2 without losing slot 0's private dirty data.
+    /// - Rebinding sub-page 0 (`MAP` with `Private::End`) once no other sub-page is private drops
+    ///   `private_pages()` back to 0 and empties `PrivateMemory` (`private_runs()` empty).
+    #[test]
+    fn sub_host_page_private_preserves_siblings_and_releases_when_all_end() {
+        let ps = page_size() as usize;
+        let unit = ps / 4;
+        let memory = window_memory(2);
+        // SAFETY: Only the test uses `memory`, which outlives the stage and window.
+        let stage =
+            unsafe { UffdSecondStage::in_process_with_unit(memory, (2 * ps) as u64, unit, None) }
+                .unwrap();
+        let (mut dax, window) =
+            Dax::in_host_memory_copying_with_unit(stage.clone(), unit as u64, Some(2)).unwrap();
+
+        let make_src = |tag: u8| TestSource::filled(1, tag).source();
+        let src_a = make_src(0x11);
+        let src_b = make_src(0x22);
+        let src_c = make_src(0x33);
+        let src_d = make_src(0x44);
+
+        // Host page 0: [slot0=A, slot1=B, slot2=C, slot3=zeros].
+        dax.map(0, &src_a, 0, unit as u64);
+        dax.map(unit as u64, &src_b, 0, unit as u64);
+        dax.map((2 * unit) as u64, &src_c, 0, unit as u64);
+        dax.map_zeros((3 * unit) as u64, unit as u64);
+
+        let read_slot = |slot: usize| {
+            // SAFETY: `memory` is the window's memory, served by `dax`'s fault thread.
+            unsafe { ((memory + slot * unit) as *const u8).read_volatile() }
+        };
+        let write_slot = |slot: usize, val: u8| {
+            // SAFETY: `memory` is the window's memory, served by `dax`'s fault thread.
+            unsafe { ((memory + slot * unit) as *mut u8).write_volatile(val) };
+        };
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0x11, 0x22, 0x33, 0]);
+
+        // Make only slot 0 private and store 0xaa into slot 0.
+        futures::executor::block_on(stage.make_private(&*dax.window, 0, unit as u64)).unwrap();
+        assert_eq!(stage.private_pages(), 1);
+        write_slot(0, 0xaa);
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0xaa, 0x22, 0x33, 0]);
+
+        // Remap sibling slot 1 from B (0x22) -> D (0x44): slot 0 MUST keep 0xaa, slot 1 MUST read 0x44.
+        dax.map(unit as u64, &src_d, 0, unit as u64);
+        assert_eq!(stage.private_pages(), 1);
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0xaa, 0x44, 0x33, 0]);
+
+        // Make slot 2 private as well and store 0xcc: still 1 host page private.
+        futures::executor::block_on(stage.make_private(
+            &*dax.window,
+            (2 * unit) as u64,
+            unit as u64,
+        ))
+        .unwrap();
+        assert_eq!(stage.private_pages(), 1);
+        write_slot(2, 0xcc);
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0xaa, 0x44, 0xcc, 0]);
+
+        // Unmap sibling slot 1: slots 0 and 2 keep their private bytes, slot 1 becomes 0.
+        dax.unmap(unit as u64, unit as u64);
+        assert_eq!(stage.private_pages(), 1);
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0xaa, 0x00, 0xcc, 0]);
+
+        // Rebind slot 0 to D (0x44): slot 2 is STILL private (0xcc), slot 0 now reads 0x44.
+        dax.map(0, &src_d, 0, unit as u64);
+        assert_eq!(stage.private_pages(), 1);
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0x44, 0x00, 0xcc, 0]);
+
+        // Rebind slot 2 to A (0x11): NO sub-page is private anymore -> host page is punched!
+        dax.map((2 * unit) as u64, &src_a, 0, unit as u64);
+        assert_eq!(stage.private_pages(), 0);
+        assert_eq!(stage.private_runs(), Ok(Vec::new()));
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2), read_slot(3)], [0x44, 0x00, 0x11, 0]);
+
+        // Review 100 finding 347: on host page 1, map ONLY slot 0 (`ps..ps+unit`) and leave
+        // slots 1..3 unmapped. `make_private` on an unmapped slot must fail EINVAL, and a guest
+        // write fault (`copy()`) on slot 0 must mark ONLY mapped slot 0 private so unmapping slot 0
+        // drops `private_pages()` back to 0.
+        dax.map(ps as u64, &src_a, 0, unit as u64);
+        assert_eq!(
+            futures::executor::block_on(stage.make_private(
+                &*dax.window,
+                (ps + unit) as u64,
+                unit as u64,
+            )),
+            Err(Errno::EINVAL),
+            "make_private on unmapped sub-page must fail EINVAL"
+        );
+        crate::guest_thread_started();
+        write_slot(4, 0xee);
+        assert_eq!(stage.private_pages(), 1);
+        assert_eq!(read_slot(4), 0xee);
+        assert_eq!(
+            futures::executor::block_on(stage.make_private(
+                &*dax.window,
+                (ps + unit) as u64,
+                unit as u64,
+            )),
+            Err(Errno::EINVAL),
+            "make_private on unmapped sibling of private sub-page must fail EINVAL"
+        );
+        dax.unmap(ps as u64, unit as u64);
+        assert_eq!(
+            stage.private_pages(),
+            0,
+            "unmapping only mapped sub-page must free private page"
+        );
+        assert_eq!(stage.private_runs(), Ok(Vec::new()));
+
+        drop((dax, window, stage));
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, 2 * ps) }, 0);
+    }
+
+    /// Review 100 finding 342: on a `writes_are_guests` (`MemoryCell`) window with sub-host-page
+    /// granularity (`unit = page_size() / 4`), reclaiming one sub-page, reading it back, writing
+    /// new bytes to it, and then reclaiming a sibling sub-page (or evicting the backing extent)
+    /// must preserve the new write rather than clobbering it with old image bytes.
+    #[test]
+    fn sub_host_page_cow_reclaim_write_survives_sibling_reclaim() {
+        let ps = page_size() as usize;
+        let unit = ps / 4;
+        let memory = window_memory(1);
+        // SAFETY: Only the test uses `memory`, which outlives the stage and window.
+        let stage = unsafe { UffdSecondStage::in_process_with_unit(memory, ps as u64, unit, None) }
+            .unwrap();
+        stage.writes_are_guests();
+        let (mut dax, window) =
+            Dax::in_host_memory_copying_with_unit(stage.clone(), unit as u64, Some(1)).unwrap();
+        let src = TestSource::filled(1, 0x11).source();
+        dax.map(0, &src, 0, ps as u64);
+
+        let read_slot = |slot: usize| {
+            // SAFETY: `memory` is the window's live mapping, served by `dax`'s fault thread.
+            unsafe { ((memory + slot * unit) as *const u8).read_volatile() }
+        };
+        let write_slot = |slot: usize, val: u8| {
+            // SAFETY: `memory` is the window's live mapping, served by `dax`'s fault thread.
+            unsafe { ((memory + slot * unit) as *mut u8).write_volatile(val) };
+        };
+
+        // Write slot 0 -> whole host page becomes private (0b1111).
+        write_slot(0, 0xdd);
+        assert_eq!(stage.private_pages(), 1);
+        // Reclaim slot 1 (`Private::End` via re-mapping the image), then read slot 1 back.
+        dax.map(unit as u64, &src, unit as u64, unit as u64);
+        assert_eq!([read_slot(0), read_slot(1)], [0xdd, 0x11]);
+        // Write new data 0x55 into previously reclaimed slot 1 (must trap WP and re-track COW).
+        write_slot(1, 0x55);
+        assert_eq!(read_slot(1), 0x55);
+        // Reclaim sibling slot 2 and verify slot 1 still holds 0x55.
+        dax.map((2 * unit) as u64, &src, (2 * unit) as u64, unit as u64);
+        assert_eq!([read_slot(0), read_slot(1), read_slot(2)], [0xdd, 0x55, 0x11]);
+
+        // Also test writing directly while stale (without reading first) after reclaiming slot 2.
+        write_slot(2, 0x77);
+        dax.map((3 * unit) as u64, &src, (3 * unit) as u64, unit as u64);
+        assert_eq!(
+            [read_slot(0), read_slot(1), read_slot(2), read_slot(3)],
+            [0xdd, 0x55, 0x77, 0x11]
+        );
+
+        drop((dax, window, stage));
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, ps) }, 0);
+    }
+
+    /// Review 100 finding 344: creating many non-adjacent stale partially-private host pages under
+    /// a small VMA budget (`Mappings::new(BUDGET)`) must keep the process's actual `/proc/self/maps`
+    /// VMA count within `2 * BUDGET + 1` by coalescing disjoint anonymous VMAs, without losing
+    /// private sub-page data.
+    #[test]
+    fn sub_host_page_stale_vmas_stay_within_mapping_budget() {
+        const PAGES: usize = 32;
+        const BUDGET: usize = 4;
+        let ps = page_size() as usize;
+        let unit = ps / 4;
+        let size = (PAGES * ps) as u64;
+        let memory = window_memory(PAGES);
+        let windows = Arc::new(CountedWindows {
+            memory: std::sync::Mutex::new(
+                std::iter::once(memory..memory + size as usize).collect(),
+            ),
+            most: AtomicUsize::new(0),
+        });
+        let syscalls = Syscalls::open().unwrap();
+        let counted = Counted { syscalls, windows: windows.clone() };
+        // SAFETY: Only the test uses `memory`, which outlives the stage.
+        let stage = unsafe {
+            UffdSecondStage::with_host_and_unit(
+                memory,
+                size,
+                unit,
+                counted,
+                Memories::InProcess,
+                None,
+                Mappings::new(BUDGET),
+            )
+        }
+        .unwrap();
+        stage.copy_on_write(PAGES as u64).unwrap();
+        let (mut dax, window) = Dax::with_stage_and_unit_on(
+            crate::Host::process(),
+            crate::pages::ArenaId::DEFAULT,
+            size,
+            unit as u64,
+            Some(stage.clone()),
+            true,
+        )
+        .unwrap();
+        // Map every host page with slot 0 = A (present) and slot 1 = B (uncached/anonymous so
+        // remapping slot 1 leaves the page stale until faulted).
+        let src_a = TestSource::filled(1, 0x11).source();
+        let src_b = TestSource::filled(1, 0x22).source();
+        let src_cold = TestSource::anonymous(1).source();
+        for p in 0..PAGES {
+            let base = (p * ps) as u64;
+            dax.map(base, &src_a, 0, unit as u64);
+            dax.map(base + unit as u64, &src_b, 0, unit as u64);
+        }
+        // Make slot 0 private on every even host page (16 non-adjacent host pages).
+        for p in (0..PAGES).step_by(2) {
+            let base = (p * ps) as u64;
+            futures::executor::block_on(stage.make_private(&*dax.window, base, unit as u64))
+                .unwrap();
+        }
+        // Replace slot 1 on every even host page with a cold (not-in-memory) source so each
+        // non-adjacent host page becomes stale (would create 33 VMAs without coalescing).
+        for p in (0..PAGES).step_by(2) {
+            let base = (p * ps) as u64;
+            dax.map(base + unit as u64, &src_cold, 0, unit as u64);
+        }
+        let most = 2 * BUDGET + 1;
+        let seen = windows.most.load(Ordering::Relaxed);
+        assert!(
+            seen <= most,
+            "stale VMAs exceeded budget: saw {seen} VMAs > {most} (BUDGET={BUDGET})"
+        );
+        drop((dax, window, stage));
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, size as usize) }, 0);
+    }
+
+    /// Review 102 finding 348: a cold `MAP` of slot 0 followed by `UNMAP` of slot 0 (before any
+    /// fault installs the host page) must clear slot 0 from `mapped_mask`; a subsequent warm `MAP`
+    /// of sibling slot 1 must not let `make_private` succeed on unmapped slot 0 or leak
+    /// `private_pages()`.
+    #[test]
+    fn sub_host_page_cold_unmap_clears_slot_before_make_private() {
+        let ps = page_size() as usize;
+        let unit = ps / 4;
+        let memory = window_memory(1);
+        // SAFETY: Only the test uses `memory`, which outlives the stage.
+        let stage = unsafe { UffdSecondStage::in_process_with_unit(memory, ps as u64, unit, None) }
+            .unwrap();
+        stage.copy_on_write(1).unwrap();
+        let (mut dax, window) = Dax::with_stage_and_unit_on(
+            crate::Host::process(),
+            crate::pages::ArenaId::DEFAULT,
+            ps as u64,
+            unit as u64,
+            Some(stage.clone()),
+            true,
+        )
+        .unwrap();
+        let cold = TestSource::anonymous(1).source();
+        let warm = TestSource::filled(1, 0x42).source();
+        // Cold MAP slot 0, then UNMAP slot 0 before touching it.
+        dax.map(0, &cold, 0, unit as u64);
+        dax.unmap(0, unit as u64);
+        // Warm MAP sibling slot 1 in the same host page.
+        dax.map(unit as u64, &warm, 0, unit as u64);
+        // PRIVATE on unmapped slot 0 must fail with EINVAL and charge zero private pages.
+        assert_eq!(
+            futures::executor::block_on(stage.make_private(&*dax.window, 0, unit as u64)),
+            Err(Errno::EINVAL)
+        );
+        assert_eq!(stage.private_pages(), 0);
+        drop((dax, window, stage));
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, ps) }, 0);
+    }
+
+    /// Review 102 finding 349: when `coalesce_anon_vmas` sweeps across a fresh partially-private
+    /// middle host page whose daemon PTE is still resident, reading that middle page must not hang
+    /// waiting on `fault_page` and must return its original private and shared sub-page bytes.
+    #[test]
+    fn sub_host_page_coalesced_fresh_partial_private_reads_without_hang() {
+        const PAGES: usize = 32;
+        const BUDGET: usize = 4;
+        const MID: usize = 16;
+        let ps = page_size() as usize;
+        let unit = ps / 4;
+        let size = (PAGES * ps) as u64;
+        let memory = window_memory(PAGES);
+        let syscalls = Syscalls::open().unwrap();
+        // SAFETY: Only the test uses `memory`, which outlives the stage.
+        let stage = unsafe {
+            UffdSecondStage::with_host_and_unit(
+                memory,
+                size,
+                unit,
+                syscalls,
+                Memories::InProcess,
+                None,
+                Mappings::new(BUDGET),
+            )
+        }
+        .unwrap();
+        stage.copy_on_write(PAGES as u64).unwrap();
+        let (mut dax, window) = Dax::with_stage_and_unit_on(
+            crate::Host::process(),
+            crate::pages::ArenaId::DEFAULT,
+            size,
+            unit as u64,
+            Some(stage.clone()),
+            true,
+        )
+        .unwrap();
+        let src_a = TestSource::filled(1, 0x11).source();
+        let src_b = TestSource::filled(1, 0x22).source();
+        let src_cold = TestSource::anonymous(1).source();
+        for p in 0..PAGES {
+            let base = (p * ps) as u64;
+            dax.map(base, &src_a, 0, unit as u64);
+            dax.map(base + unit as u64, &src_b, 0, unit as u64);
+        }
+        // Make slot 0 private on the middle page (leaving its daemon PTE resident!) and write a
+        // distinctive private byte into slot 0.
+        futures::executor::block_on(stage.make_private(
+            &*dax.window,
+            (MID * ps) as u64,
+            unit as u64,
+        ))
+        .unwrap();
+        // SAFETY: Slot 0 of `MID` is mapped writable in `PrivateMemory`.
+        unsafe { *((memory + MID * ps) as *mut u8) = 0xaa };
+
+        // Make surrounding even pages (excluding `MID`) partially private and stale to force
+        // `coalesce_anon_vmas` to sweep across `MID`.
+        for p in (0..PAGES).step_by(2).filter(|&p| p != MID) {
+            let base = (p * ps) as u64;
+            futures::executor::block_on(stage.make_private(&*dax.window, base, unit as u64))
+                .unwrap();
+            dax.map(base + unit as u64, &src_cold, 0, unit as u64);
+        }
+        assert!(
+            stage.pages.lock().unwrap().pages[MID].anon_vma,
+            "middle page should have been swept into the coalesced anonymous span"
+        );
+        // Resolve a read fault on `MID` under a bounded timeout (previously hung forever).
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stage.resolve(&*dax.window, memory + MID * ps, 0, 0),
+            )
+            .await
+            .expect("read of coalesced fresh partially-private middle page hung");
+        });
+        // SAFETY: `resolve` remapped `PrivateMemory` back at `MID`.
+        let (got_priv, got_shared) = unsafe {
+            (*((memory + MID * ps) as *const u8), *((memory + MID * ps + unit) as *const u8))
+        };
+        assert_eq!(got_priv, 0xaa, "private slot 0 lost after coalescing");
+        assert_eq!(got_shared, 0x22, "shared slot 1 lost after coalescing");
+        drop((dax, window, stage));
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, size as usize) }, 0);
+    }
+
+    /// Review 102 finding 350: faulting alternate private pages inside a coalesced anonymous span
+    /// (with no mapping operations in between) must reserve VMA budget and re-coalesce so actual
+    /// `/proc/self/maps` VMAs never exceed `2 * BUDGET + 1`, while returning exact private bytes.
+    #[test]
+    fn sub_host_page_post_coalesce_faults_stay_within_mapping_budget() {
+        const PAGES: usize = 32;
+        const BUDGET: usize = 4;
+        let ps = page_size() as usize;
+        let unit = ps / 4;
+        let size = (PAGES * ps) as u64;
+        let memory = window_memory(PAGES);
+        let windows = Arc::new(CountedWindows {
+            memory: std::sync::Mutex::new(
+                std::iter::once(memory..memory + size as usize).collect(),
+            ),
+            most: AtomicUsize::new(0),
+        });
+        let syscalls = Syscalls::open().unwrap();
+        let counted = Counted { syscalls, windows: windows.clone() };
+        // SAFETY: Only the test uses `memory`, which outlives the stage.
+        let stage = unsafe {
+            UffdSecondStage::with_host_and_unit(
+                memory,
+                size,
+                unit,
+                counted,
+                Memories::InProcess,
+                None,
+                Mappings::new(BUDGET),
+            )
+        }
+        .unwrap();
+        stage.copy_on_write(PAGES as u64).unwrap();
+        let (mut dax, window) = Dax::with_stage_and_unit_on(
+            crate::Host::process(),
+            crate::pages::ArenaId::DEFAULT,
+            size,
+            unit as u64,
+            Some(stage.clone()),
+            true,
+        )
+        .unwrap();
+        let src = TestSource::filled(1, 0x33).source();
+        let src_cold = TestSource::anonymous(1).source();
+        for p in 0..PAGES {
+            dax.map((p * ps) as u64, &src, 0, ps as u64);
+        }
+        // Make middle pages 6..26 fully private with distinct bytes.
+        for p in 6..26 {
+            futures::executor::block_on(stage.make_private(
+                &*dax.window,
+                (p * ps) as u64,
+                ps as u64,
+            ))
+            .unwrap();
+            // SAFETY: Page `p` is mapped writable in `PrivateMemory`.
+            unsafe { *((memory + p * ps) as *mut u8) = (0x80 + p) as u8 };
+        }
+        // Put stale partially-private pages near both ends to force coalescing across 0..32.
+        for p in [0, 2, 4, 27, 29, 31] {
+            let base = (p * ps) as u64;
+            futures::executor::block_on(stage.make_private(&*dax.window, base, unit as u64))
+                .unwrap();
+            dax.map(base + unit as u64, &src_cold, 0, unit as u64);
+        }
+        assert!(
+            stage.pages.lock().unwrap().pages[10].anon_vma,
+            "middle fully-private pages should be coalesced"
+        );
+        // Fault every alternate fully-private page in the middle with no mapping ops in between.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for p in (6..26).step_by(2) {
+            runtime.block_on(stage.resolve(&*dax.window, memory + p * ps, 0, 0));
+            // SAFETY: `resolve` just mapped `PrivateMemory` back at `p`.
+            let got = unsafe { *((memory + p * ps) as *const u8) };
+            assert_eq!(got, (0x80 + p) as u8, "middle private page {p} bytes corrupted");
+        }
+        let most = 2 * BUDGET + 1;
+        let seen = windows.most.load(Ordering::Relaxed);
+        assert!(
+            seen <= most,
+            "post-coalesce faults exceeded VMA budget: saw {seen} VMAs > {most} (BUDGET={BUDGET})"
+        );
+        drop((dax, window, stage));
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory as *mut libc::c_void, size as usize) }, 0);
     }
 }

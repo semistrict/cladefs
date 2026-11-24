@@ -2785,11 +2785,11 @@ impl Peer {
         MAX_STREAM_BYTES + QUEUED_CREDIT + self.mappings.load(Ordering::Relaxed)
     }
 
-    /// Its window is of `size` bytes, whose mappings, a page each at most, a reply to `MAPPINGS`
-    /// holds (TASK-79.43).
+    /// Its window is of `size` bytes, whose mappings, a logical block each at most, a reply to
+    /// `MAPPINGS` holds (TASK-79.43).
     fn set_window(&self, size: u64) {
         assert!(size <= MAX_WINDOW, "a window past the most the daemon gives credit for");
-        let mappings = size / crate::pages::page_size() * MAPPING_BYTES;
+        let mappings = size / crate::dax::map_unit() * MAPPING_BYTES;
         self.mappings.store(mappings, Ordering::Relaxed);
     }
 

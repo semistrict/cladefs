@@ -35,11 +35,10 @@
 //! balloon promises no contents for a page given back (Firecracker's offers no
 //! `VIRTIO_BALLOON_F_PAGE_POISON`).
 //!
-//! A window maps the cell's runs as they are, a page a block, 4 KiB, and mmap maps nothing smaller
-//! than a host's page, nor at an offset of an extent that isn't a whole one: so a host whose pages
-//! are larger (an arm64 kernel of 16 KiB pages) restores no window, refused as it is made
-//! ([`crate::pages::window_fits_host`]), rather than at the guest's first fault (TASK-722's run,
-//! board 5230).
+//! A window maps the cell's runs at its 4 KiB block granularity; on hosts with larger pages (such
+//! as 16 KiB arm64), the daemon composes unaligned or mixed runs into budgeted host pages and
+//! shares aligned runs directly, while the mapper rounds its lazy-mapped node chunks up to whole
+//! host pages so adjacent chunks never straddle a host page boundary.
 
 use crate::error::{Errno, Error};
 use crate::{
@@ -278,7 +277,9 @@ impl MemoryCell {
         if window.is_some() {
             return Err(Error::new(Errno::EINVAL).context("the memory cell has a window already"));
         }
-        let node_bytes = self.blocks.node_bytes();
+        // Round lazy-mapped chunks up to whole host pages so two adjacent chunks never straddle a
+        // host page boundary (e.g. BlockDevice's 696,320-byte node on a 16 KiB host).
+        let node_bytes = self.blocks.node_bytes().next_multiple_of(crate::pages::page_size());
         let words = size.div_ceil(node_bytes).div_ceil(64) as usize;
         let shared = Arc::new(Nodes {
             node_bytes,
@@ -582,26 +583,12 @@ mod tests {
         fail::cfg("memory_cell::spawn_mapper", "1*return").unwrap();
         // SAFETY: The memory is the test's and outlives the memory cell.
         let failed = unsafe { memory_cell.window(base, size, None) };
-        // SAFETY: The memory is the test's, and outlives the memory_cell (unmapped once it goes).
-        let window = unsafe {
-            if ps > page {
-                // This host cannot make any window, so the failure injection wasn't reached.
-                failed
-            } else {
-                assert_eq!(failed.unwrap_err().errno(), Some(Errno::EAGAIN));
-                let reclaimed = memory_cell.reclaim(0, ps);
-                assert_eq!(reclaimed.unwrap_err().errno(), Some(Errno::EINVAL));
-                memory_cell.window(base, size, Some(prefault))
-            }
-        };
         fail::remove("memory_cell::spawn_mapper");
-        // A host of pages larger than the cell's (arm64's 16 KiB) restores no window
-        // (`window_fits_host`).
-        if ps > page {
-            assert_eq!(window.unwrap_err().errno(), Some(Errno::EINVAL));
-            return;
-        }
-        window.unwrap();
+        assert_eq!(failed.unwrap_err().errno(), Some(Errno::EAGAIN));
+        let reclaimed = memory_cell.reclaim(0, ps);
+        assert_eq!(reclaimed.unwrap_err().errno(), Some(Errno::EINVAL));
+        // SAFETY: The memory is the test's, and outlives the memory_cell (unmapped once it goes).
+        unsafe { memory_cell.window(base, size, Some(prefault)) }.unwrap();
         let address = base.as_ptr() as usize;
         let at = |page: u64| address + (page * ps) as usize;
         // The window's bytes of pages `pages`, as the guest reads them.
@@ -655,7 +642,40 @@ mod tests {
         assert_eq!(private_memory_held(size), ps);
         assert!(read(300..400) == image_of(300..400), "the last node reads the image");
 
-        let reclaimed = memory_cell.reclaim(ps, ps / 2);
+        // On hosts with pages larger than the cell's (e.g. 16 KiB arm64), reclaiming one cell page
+        // inside a private host page restores only that cell page while preserving sibling private
+        // cell pages in the same host page; a subsequent write to the reclaimed cell page re-tracks
+        // COW ownership so later sibling reclaims never clobber it (review 100 finding 342).
+        if ps > page {
+            memory_cell.reclaim(6 * ps + page, page).unwrap();
+            assert_eq!(memory_cell.private_runs().unwrap(), vec![6 * ps..7 * ps]);
+            assert_eq!(read(6..7)[0], 0xdd, "sibling cell page stayed private");
+            assert_eq!(
+                &read(6..7)[page as usize..(2 * page) as usize],
+                &image_of(6..7)[page as usize..(2 * page) as usize],
+                "reclaimed cell page reads the image again"
+            );
+            // Write into the reclaimed cell page (slot 1), then reclaim sibling slot 2: slot 1's
+            // new write must survive rather than being overwritten by old image bytes.
+            // SAFETY: Within the window's live mapping, a write of the guest's.
+            unsafe { ((at(6) + page as usize) as *mut u8).write_volatile(0x55) };
+            if ps >= 3 * page {
+                memory_cell.reclaim(6 * ps + 2 * page, page).unwrap();
+                assert_eq!(read(6..7)[0], 0xdd, "slot 0 stayed private");
+                assert_eq!(
+                    read(6..7)[page as usize],
+                    0x55,
+                    "write to previously reclaimed slot 1 survived sibling reclaim"
+                );
+                assert_eq!(
+                    &read(6..7)[(2 * page) as usize..(3 * page) as usize],
+                    &image_of(6..7)[(2 * page) as usize..(3 * page) as usize],
+                    "reclaimed slot 2 reads the image again"
+                );
+            }
+        }
+
+        let reclaimed = memory_cell.reclaim(page, page / 2);
         assert_eq!(reclaimed.unwrap_err().errno(), Some(Errno::EINVAL), "half a page");
         let reclaimed = memory_cell.reclaim(399 * ps, 2 * ps);
         assert_eq!(reclaimed.unwrap_err().errno(), Some(Errno::EINVAL), "past the memory");
@@ -725,12 +745,8 @@ mod tests {
         assert_ne!(base, libc::MAP_FAILED);
         let base = NonNull::new(base.cast::<u8>()).unwrap();
         // SAFETY: The memory is the test's, and outlives `memory_cell`.
-        let window = unsafe { memory_cell.window(base, size, None) };
-        if ps > page {
-            assert_eq!(window.unwrap_err().errno(), Some(Errno::EINVAL));
-            return;
-        }
-        window.unwrap();
+        unsafe { memory_cell.window(base, size, None) }.unwrap();
+        let per_host_page = ps / page;
         crate::guest_thread_started();
         let write_page = |p: u64, data: &[u8]| {
             // SAFETY: Within the window's mapping of `size` bytes.
@@ -749,7 +765,7 @@ mod tests {
         write_page(5, &zeros);
         expected[2 * ps as usize..3 * ps as usize].copy_from_slice(&page2);
         expected[5 * ps as usize..6 * ps as usize].copy_from_slice(&zeros);
-        assert_eq!(memory_cell.private_pages().unwrap(), 2);
+        assert_eq!(memory_cell.private_pages().unwrap(), 2 * per_host_page);
 
         // SAFETY: `base` is the window's mapping and no other thread touches it.
         let v2 = unsafe { memory_cell.snapshot_window(base) }.unwrap();
@@ -768,7 +784,7 @@ mod tests {
         let page9 = pattern(0x42, ps as usize);
         write_page(9, &page9);
         expected[9 * ps as usize..10 * ps as usize].copy_from_slice(&page9);
-        assert_eq!(memory_cell.private_pages().unwrap(), 1);
+        assert_eq!(memory_cell.private_pages().unwrap(), per_host_page);
         // SAFETY: `base` is the window's mapping and no other thread touches it.
         let v3 = unsafe { memory_cell.snapshot_window(base) }.unwrap();
         assert_eq!(memory_cell.private_pages().unwrap(), 0);

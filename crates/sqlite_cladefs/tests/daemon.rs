@@ -125,12 +125,11 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         let read: Vec<u8> =
             connection.query_row("SELECT v FROM t WHERE k = 5000", [], |row| row.get(0)).unwrap();
         assert!(read == marker, "the row of noise reads back otherwise");
-        // In place where the host maps the cell's blocks into a window; a host of larger pages
-        // has none, its reads copied (sqlite_cladefs::daemon, board 5232).
+        // In place on both 4 KiB and 16 KiB hosts (4 KiB blocks composed into host pages as
+        // needed).
         let fetched = database.fetched() - before;
-        let in_place = database.is_mapped();
-        assert_eq!(in_place, cladefs::pages::page_size() <= 4096, "a window where it fits");
-        assert!(if in_place { fetched > 100 } else { fetched == 0 }, "{fetched} pages fetched");
+        assert!(database.is_mapped(), "a window maps the database in place");
+        assert!(fetched > 100, "{fetched} pages fetched");
         drop(connection);
         drop(registration);
         database.close().unwrap();
@@ -341,9 +340,6 @@ fn failed_openings_unmap_their_windows() {
         let pages: u64 = statm.split_whitespace().next().unwrap().parse().unwrap();
         pages * cladefs::pages::page_size()
     }
-    // A window where the host's pages fit the cell's blocks: none on a host of larger pages
-    // (sqlite_cladefs::daemon, board 5232).
-    let windowed = cladefs::pages::page_size() <= 4096;
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
     let cell_dir = dir.path().join("store");
@@ -352,11 +348,7 @@ fn failed_openings_unmap_their_windows() {
     database.close().unwrap();
     drop(database);
     let closed = address_space();
-    assert_eq!(
-        open.saturating_sub(closed) > WINDOW / 2,
-        windowed,
-        "{open} bytes open, {closed} closed"
-    );
+    assert!(open.saturating_sub(closed) > WINDOW / 2, "{open} bytes open, {closed} closed");
     {
         let opened = cladefs::DaemonConnection::connect(&socket)
             .and_then(|daemon| daemon.open_sqlite(&cell_dir, 1 << 30))

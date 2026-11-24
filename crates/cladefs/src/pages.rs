@@ -155,18 +155,23 @@ pub fn max_map_count() -> std::io::Result<Option<u64>> {
     Ok(Some(max.trim().parse().map_err(invalid)?))
 }
 
+/// The most logical sub-pages one host page may hold in a DAX window (e.g. 4 KiB blocks on a 16
+/// KiB or 64 KiB arm64 host): bounded by `u16`'s sub-page private mask in `dax::uffd`.
+pub const MAX_SUBPAGES: u64 = 16;
+
 /// Fails with `EINVAL` unless a window of `block`-byte blocks, as a cell's extents hold them, maps
-/// on a host of `host_page`-byte pages ([`page_size`]): one whose pages are no larger, as mmap maps
-/// whole host pages alone, at offsets of whole ones in an extent. A host of larger pages (an arm64
-/// kernel of 16 KiB, a cell's blocks 4 KiB) maps no extent's blocks into a window: a memory cell
-/// restores none there, and a SQLite cell's block device reads from its device instead (board 5230,
-/// board 5232).
+/// on a host of `host_page`-byte pages ([`page_size`]): either whole host pages per block, or
+/// whole blocks per host page (up to [`MAX_SUBPAGES`] sub-pages per host page, e.g. 4 KiB blocks
+/// on a 16 KiB arm64 host, composed and private-tracked per sub-page in `dax` and `dax::uffd`).
 pub fn window_fits_host(block: u64, host_page: u64) -> Result<(), Error> {
-    match host_page <= block {
+    let fits = block > 0
+        && host_page > 0
+        && (block.is_multiple_of(host_page)
+            || (host_page.is_multiple_of(block) && host_page / block <= MAX_SUBPAGES));
+    match fits {
         true => Ok(()),
         false => Err(Error::new(Errno::EINVAL).context(format!(
-            "a window maps {block}-byte blocks, and this host's pages are {host_page} bytes: mmap \
-             maps none smaller"
+            "a window maps {block}-byte blocks, incompatible with {host_page}-byte host pages"
         ))),
     }
 }

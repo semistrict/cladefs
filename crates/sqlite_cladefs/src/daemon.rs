@@ -8,10 +8,9 @@
 //!
 //! The window is a DAX window in this process's memory, as a VM process's is (doc-13): the daemon
 //! maps its cache's pages there, read-only, and this process's faults there go to it, through
-//! userfaultfd. So a page SQLite reads in place is the cache's page itself. On a host whose pages
-//! are larger than the cell's blocks (an arm64 kernel of 16 KiB pages), no window maps them
-//! (`cladefs::pages::window_fits_host`): the database has none there, and reads copy from the
-//! device, SQLite reading nothing in place (board 5232).
+//! userfaultfd. So a page SQLite reads in place is the cache's page itself (or, on a host whose
+//! pages are larger than 4 KiB such as 16 KiB arm64, a direct or composed host page in the
+//! daemon's budgeted slabs).
 
 use crate::{Database, Options};
 use anyhow::{Context as _, Error, ensure};

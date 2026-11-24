@@ -151,8 +151,10 @@ impl Device {
         config_space.version = VIRTIO_EXTENT_VERSION.to_le();
         config_space.num_request_queues = u32::from(queues).to_le();
         config_space.block_size = cladefs::OpenCell::BLOCK_SIZE.to_le();
-        config_space.map_alignment =
-            u32::try_from(cladefs::pages::page_size()).expect("a page is small").to_le();
+        // cladefs: MAP, UNMAP and PRIVATE accept cell-block-aligned (4 KiB) ranges even on hosts
+        // with larger pages (such as 16 KiB arm64), where the daemon composes unaligned host pages
+        // and the second stage tracks sub-page private state, so 4 KiB guests enable DAX cleanly.
+        config_space.map_alignment = cladefs::OpenCell::BLOCK_SIZE.to_le();
         config_space.max_transfer = MAX_TRANSFER.to_le();
         config_space.max_segments = (u32::from(QUEUE_SIZE) - 2).to_le();
         config_space.max_root = MAX_ROOT.to_le();

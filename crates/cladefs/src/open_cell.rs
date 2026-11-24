@@ -45,7 +45,7 @@ use crate::host_cell;
 #[cfg(not(madsim))]
 use crate::host_cell::CellOf;
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
-use crate::pages::{Arena, ArenaId, page_size};
+use crate::pages::{Arena, ArenaId};
 use crate::stats::{self, Counter};
 use bases::Bases;
 use bucket_cell::cell::Kind;
@@ -1327,7 +1327,7 @@ impl OpenCell {
         size: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
     ) -> Result<DaxWindow, Error> {
-        self.install_dax(|| Ok(Dax::new_on(&self.host, size, second_stage)?))
+        self.install_dax(|| Ok(Dax::new_on(&self.host, self.arenas.own(), size, second_stage)?))
     }
 
     /// cladefs: creates the DAX window as [`create_dax_window`](Self::create_dax_window) does, one
@@ -1341,7 +1341,7 @@ impl OpenCell {
         second_stage: Arc<dyn SecondStage>,
     ) -> Result<DaxWindow, Error> {
         let _admitted = self.admit(Changing::Contents)?;
-        self.install_dax(|| Ok(Dax::copying_on(&self.host, size, second_stage)?))
+        self.install_dax(|| Ok(Dax::copying_on(&self.host, self.arenas.own(), size, second_stage)?))
     }
 
     fn install_dax(
@@ -1422,15 +1422,16 @@ impl OpenCell {
                 None => return Err(Errno::ENOENT),
             },
         };
+        let unit = crate::dax::map_unit();
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
-        if !offset.is_multiple_of(page_size()) {
+        if !offset.is_multiple_of(unit) {
             return Err(Errno::EINVAL);
         }
         let cached: Arc<dyn Source> = match &base {
             Some((base, _)) => base.cached(extent, extent_len).await?,
             None => self.cached(extent, extent_len).await?,
         };
-        let within = end.min(extent_len.next_multiple_of(page_size())).max(offset);
+        let within = end.min(extent_len.next_multiple_of(unit)).max(offset);
         Ok((cached, within - offset))
     }
 

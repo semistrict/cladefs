@@ -37,7 +37,7 @@ pub(crate) mod uffd;
 
 use crate::error::{Errno, Result};
 use crate::open_cell::{MappingContents, WindowMapping};
-use crate::pages::{PhysLocation, page_size};
+use crate::pages::{ArenaId, PhysLocation, page_size};
 use crate::slabs::{PartSlab, VmProcessId};
 use futures::future::BoxFuture;
 use local_cell::shared::SharedLock;
@@ -46,6 +46,14 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use storage_device::ExtentId;
+
+/// The logical alignment of DAX window `MAP`, `UNMAP`, and `PRIVATE` ranges: the cell's block size
+/// (4 KiB), or the host page size if smaller. On hosts with larger pages (such as 16 KiB arm64),
+/// `Window` tracks mappings at this granularity, sharing host-page-aligned runs directly from
+/// cached extents and composing unaligned or mixed host pages into budgeted `PartSlab`s.
+pub(crate) fn map_unit() -> u64 {
+    u64::from(crate::OpenCell::BLOCK_SIZE).min(page_size())
+}
 
 #[cfg(feature = "shuttle")]
 use shuttle::sync::Mutex;
@@ -131,13 +139,13 @@ pub(crate) struct DaxMapping {
 }
 
 /// cladefs: one of the mappings [`Window::map_many`] makes: `len` bytes at the window's `offset`,
-/// of `source`'s pages from its page `page`.
+/// of `source`'s bytes from `source_offset`.
 #[derive(Clone, Copy)]
 struct Piece<'a> {
     offset: u64,
     len: u64,
     source: &'a Arc<dyn Source>,
-    page: u64,
+    source_offset: u64,
 }
 
 /// cladefs: what a window's change makes of a range it unmapped ([`SecondStage::remap`]).
@@ -264,6 +272,12 @@ pub(crate) trait Source: Send + Sync {
     /// ([`Dax::mappings`]); or zeros, cladefs: which a write's private page is made of without a
     /// copy, nor bringing anything in (backlog doc-13).
     fn origin(&self) -> Origin;
+
+    /// Whether this source has been revoked (e.g. tenant KEK destroyed or cell shredded) and must
+    /// not be published into a composed DAX page.
+    fn is_revoked(&self) -> bool {
+        false
+    }
 }
 
 /// What a [`Source`]'s pages are.
@@ -317,15 +331,18 @@ impl DaxWindow {
         self.0.is_mapped(offset)
     }
 
-    /// cladefs: the sealed extent mapped at `offset`, and the offset in it of the page `offset` is
-    /// in, if one is mapped there: what a trace of the guest's reads names a fault by (TASK-702.1).
+    /// cladefs: the sealed extent mapped at `offset`, and the offset in it of the logical block
+    /// `offset` is in, if one is mapped there: what a trace of the guest's reads names a fault by
+    /// (TASK-702.1).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn extent_at(&self, offset: u64) -> Option<(ExtentId, u64)> {
-        let ps = page_size();
+        let unit = self.0.unit;
         let state = self.0.state.with(Mutex::lock);
         let (start, mapping) = state.mapping_at(offset)?;
         match mapping.source.origin() {
-            Origin::Extent(extent) => Some((extent, (mapping.page + (offset - start) / ps) * ps)),
+            Origin::Extent(extent) => {
+                Some((extent, mapping.source_offset + (offset - start) / unit * unit))
+            }
             Origin::Zeros => None,
         }
     }
@@ -357,15 +374,27 @@ enum Translation {
     /// In its second stage alone, another process's (a VMM's) or another range of this one's.
     Stage(Arc<dyn SecondStage>),
     /// In host memory: a reservation of host address space, at `base`, as long as the window.
-    Host { base: usize, slabs: Arc<crate::slabs::HostSlabs> },
+    Host { base: usize },
 }
 
-/// A mapping of a window: a range of its source's pages, from `page`, up to the window's `end`,
-/// read-only.
+/// A mapping of a window: a range of its source's bytes, from `source_offset` (a multiple of the
+/// window's logical unit), up to the window's `end`, read-only.
 struct Mapping {
     end: u64,
     source: Arc<dyn Source>,
-    page: u64,
+    source_offset: u64,
+}
+
+/// A composed host page in a window whose host page size exceeds its logical mapping unit (e.g.
+/// 4 KiB blocks on a 16 KiB arm64 host): a budgeted 1-page [`PartSlab`] holding the assembled
+/// bytes of sub-page or unaligned mappings, together with the `(source_identity, source_phys)`
+/// pages it was copied from so eviction or revocation of any constituent extent unmaps and drops
+/// it.
+struct ComposedPage {
+    slab: PartSlab,
+    deps: Vec<(usize, PhysLocation)>,
+    /// Monotonic touch counter for LRU eviction under arena/host memory relief.
+    touch: u64,
 }
 
 /// A window's mappings and the pages it has mapped, under its lock.
@@ -374,14 +403,20 @@ struct WindowState {
     mappings: BTreeMap<u64, Mapping>,
     /// The starts of the mappings, by the identity of their source ([`source_identity`]).
     by_source: HashMap<usize, BTreeSet<u64>>,
-    /// The pages mapped, by offset, each within a mapping: where in physical memory its source's
-    /// page is.
+    /// The host pages mapped, by host-page-aligned offset: where in physical memory each host page
+    /// is (either directly in a source's slab or in a [`ComposedPage`] below).
     ptes: BTreeMap<u64, PhysLocation>,
-    /// cladefs: of a window whose stage copies on write, the runs of pages, by start and end, that
-    /// the host's own changes took away from the stage keeping its private pages there
-    /// ([`Private::Keep`]): where the stage may have a private page the window has mapped nothing
-    /// at, which the guest's next change there ends (doc-26). Elsewhere, a private page is where
-    /// the window has a page mapped.
+    /// Composed host pages owned by this window, keyed by host-page-aligned window offset (empty
+    /// when `unit == page_size()` or when all mapped host pages are directly aligned).
+    composed: BTreeMap<u64, ComposedPage>,
+    /// Clock incremented whenever a composed host page is installed.
+    composed_clock: u64,
+    /// cladefs: of a window whose stage copies on write, the runs of bytes (logical-unit aligned),
+    /// by start and end, that the host's own changes took away from the stage keeping its private
+    /// pages there ([`Private::Keep`]), or untouched sibling sub-pages of a host page removed by a
+    /// partial [`Private::End`]: where the stage may have a private sub-page the window has mapped
+    /// nothing at, which the guest's next change there ends (doc-26). Elsewhere, a private page is
+    /// where the window has a page mapped.
     kept: BTreeMap<u64, u64>,
     /// cladefs: what those are, counted, for whoever reads them without the lock: the daemon's
     /// gauges (TASK-131.6, TASK-111.5).
@@ -474,6 +509,8 @@ impl WindowState {
             mappings: BTreeMap::new(),
             by_source: HashMap::new(),
             ptes: BTreeMap::new(),
+            composed: BTreeMap::new(),
+            composed_clock: 0,
             kept: BTreeMap::new(),
             gauges,
         }
@@ -486,25 +523,33 @@ impl WindowState {
         self.gauges.pages.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// cladefs: records that the pages at `offsets`, in order, were taken away keeping the private
-    /// pages there ([`WindowState::kept`]), in runs, joined with those around them.
+    /// cladefs: records that the byte range `start..end` was taken away keeping private pages there
+    /// ([`WindowState::kept`]), merged with overlapping or adjacent runs.
+    fn keep_range(&mut self, mut start: u64, mut end: u64) {
+        if start >= end {
+            return;
+        }
+        if let Some((&before, &before_end)) = self.kept.range(..=start).next_back()
+            && before_end >= start
+        {
+            start = before;
+            end = end.max(before_end);
+        }
+        while let Some((&after, &after_end)) = self.kept.range(start..).next()
+            && after <= end
+        {
+            end = end.max(after_end);
+            self.kept.remove(&after);
+        }
+        self.kept.insert(start, end);
+    }
+
+    /// cladefs: records that the host pages at `offsets`, in order, were taken away keeping the
+    /// private pages there ([`WindowState::kept`]), in runs, joined with those around them.
     fn keep(&mut self, offsets: &[u64]) {
         let ps = page_size();
         for &offset in offsets {
-            let (mut start, mut end) = (offset, offset + ps);
-            if let Some((&before, &before_end)) = self.kept.range(..=start).next_back()
-                && before_end >= start
-            {
-                start = before;
-                end = end.max(before_end);
-            }
-            while let Some((&after, &after_end)) = self.kept.range(start..).next()
-                && after <= end
-            {
-                end = end.max(after_end);
-                self.kept.remove(&after);
-            }
-            self.kept.insert(start, end);
+            self.keep_range(offset, offset + ps);
         }
     }
 
@@ -533,11 +578,14 @@ impl WindowState {
         taken
     }
 
-    /// Records that the window has unmapped the page at `offset`, which it had mapped.
-    fn remove_pte(&mut self, offset: u64) {
+    /// Records that the window has unmapped the host page at `offset`, which it had mapped, and
+    /// returns any composed [`PartSlab`] owned at `offset` so the caller can drop (and quarantine)
+    /// it only after sending the corresponding second-stage unmap.
+    fn remove_pte(&mut self, offset: u64) -> Option<PartSlab> {
         if self.ptes.remove(&offset).is_some() {
             self.gauges.pages.fetch_sub(1, Ordering::Relaxed);
         }
+        self.composed.remove(&offset).map(|composed| composed.slab)
     }
 
     /// The mapping `offset` is in, and its start.
@@ -583,7 +631,6 @@ impl WindowState {
     /// Forgets the mappings of `start..end`, keeping what of them is around it, and returns the
     /// sources of those it forgot.
     fn forget(&mut self, start: u64, end: u64) -> Vec<Arc<dyn Source>> {
-        let ps = page_size();
         let mut forgotten = Vec::new();
         for mapping_start in self.overlapping(start, end) {
             let mapping = self.remove(mapping_start);
@@ -592,8 +639,8 @@ impl WindowState {
                 self.insert(mapping_start, before);
             }
             if mapping.end > end {
-                let page = mapping.page + (end - mapping_start) / ps;
-                let after = Mapping { page, source: mapping.source.clone(), ..mapping };
+                let source_offset = mapping.source_offset + (end - mapping_start);
+                let after = Mapping { source_offset, source: mapping.source.clone(), ..mapping };
                 self.insert(end, after);
             }
             forgotten.push(mapping.source);
@@ -602,9 +649,185 @@ impl WindowState {
     }
 }
 
+/// One extent slice contributing to a composed host page.
+struct ComposeSlice {
+    win_within: usize,
+    len: usize,
+    source: Arc<dyn Source>,
+    source_offset: u64,
+}
+
+/// How one host page of a DAX window is backed by its logical mappings.
+enum HostPagePlan {
+    /// No logical mapping overlaps this host page.
+    Unmapped,
+    /// Every overlapping logical mapping is zeros (so the shared zeros page backs it directly).
+    DirectZeros,
+    /// One extent mapping covers the full host page at a host-page-aligned source offset.
+    Direct { source: Arc<dyn Source>, src_page: u64 },
+    /// Unaligned extent offset, multiple mappings, or partial host page: assembled into a
+    /// budgeted 1-page [`PartSlab`].
+    Composed(Vec<ComposeSlice>),
+}
+
+/// Assembled host-page bytes, source-page dependencies, and target arena for a composed DAX page.
+type ComposedBytes = (Vec<u8>, Vec<(usize, PhysLocation)>, ArenaId);
+
+/// Reads all slices of a composed host page from their sources' present slabs into a host-page
+/// buffer, returning `(bytes, deps, arena)` if every constituent source page is present in memory,
+/// or `None` if at least one source host page still needs `bring_in`.
+///
+/// Composed slabs are per-window unshared memory, so a tenant window (`window_arena != DEFAULT`)
+/// always charges its own tenant arena—even when composing from public base extents in
+/// `ArenaId::DEFAULT`—preventing tenant memory cap bypasses.
+fn read_composed_slices(
+    slices: &[ComposeSlice],
+    window_arena: ArenaId,
+) -> Result<Option<ComposedBytes>> {
+    let ps = page_size();
+    let mut buf = vec![0u8; ps as usize];
+    let mut deps = Vec::new();
+    let mut arena = window_arena;
+    for slice in slices {
+        let p_start = slice.source_offset / ps;
+        let p_end = (slice.source_offset + slice.len as u64).div_ceil(ps);
+        let mut covered = 0u64;
+        let mut read_err = None;
+        slice.source.each_present(p_start..p_end, &mut |present| {
+            for page in present.page..present.page + present.count {
+                let page_start = page * ps;
+                let page_end = page_start + ps;
+                let from = slice.source_offset.max(page_start);
+                let to = (slice.source_offset + slice.len as u64).min(page_end);
+                let copy_len = (to - from) as usize;
+                let dst_off = slice.win_within + (from - slice.source_offset) as usize;
+                let phys = PhysLocation {
+                    offset: present.at.offset + (page - present.page) * ps,
+                    ..present.at
+                };
+                if let Some(slab) = present.slab {
+                    let slab_off = (phys.offset - slab.location().offset) + (from - page_start);
+                    if let Err(err) = slab.read(slab_off, &mut buf[dst_off..dst_off + copy_len]) {
+                        log::error!("cladefs: reading slab for composed DAX page: {err}");
+                        read_err = Some(Errno::EIO);
+                    }
+                }
+                if phys.arena != ArenaId::DEFAULT {
+                    debug_assert!(
+                        arena == ArenaId::DEFAULT || arena == phys.arena,
+                        "composed DAX page spans two tenant arenas: {arena:?} vs {:?}",
+                        phys.arena
+                    );
+                    if arena == ArenaId::DEFAULT {
+                        arena = phys.arena;
+                    }
+                }
+                deps.push((source_identity(&slice.source), phys));
+                covered += 1;
+            }
+        });
+        if let Some(err) = read_err {
+            return Err(err);
+        }
+        if covered < p_end - p_start {
+            return Ok(None);
+        }
+    }
+    Ok(Some((buf, deps, arena)))
+}
+
+/// Whether two composed host-page slice plans refer to the exact same sources and byte ranges.
+fn same_compose_slices(a: &[ComposeSlice], b: &[ComposeSlice]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.win_within == y.win_within
+                && x.len == y.len
+                && source_identity(&x.source) == source_identity(&y.source)
+                && x.source_offset == y.source_offset
+        })
+}
+
+/// Assembles `slices` into one host-page buffer, bringing in each missing source host page one at
+/// a time so even a 1-slab tenant cap can compose pages from full-slab parts without needing
+/// multiple parts (or a source part and destination composed slab) resident simultaneously
+/// (review 102 finding 351).
+async fn assemble_composed_slices(
+    slices: &[ComposeSlice],
+    window_arena: ArenaId,
+) -> Result<(ComposedBytes, bool)> {
+    let ps = page_size();
+    let mut buf = vec![0u8; ps as usize];
+    let mut deps = Vec::new();
+    let mut arena = window_arena;
+    let mut waited = false;
+    for slice in slices {
+        let p_start = slice.source_offset / ps;
+        let p_end = (slice.source_offset + slice.len as u64).div_ceil(ps);
+        for page in p_start..p_end {
+            let page_start = page * ps;
+            let page_end = page_start + ps;
+            let from = slice.source_offset.max(page_start);
+            let to = (slice.source_offset + slice.len as u64).min(page_end);
+            let copy_len = (to - from) as usize;
+            let dst_off = slice.win_within + (from - slice.source_offset) as usize;
+            loop {
+                if slice.source.is_revoked() {
+                    return Err(Errno::EACCES);
+                }
+                let mut copied = false;
+                let mut read_err = None;
+                let mut found_phys = None;
+                slice.source.each_present(page..page + 1, &mut |present| {
+                    let phys = PhysLocation {
+                        offset: present.at.offset + (page - present.page) * ps,
+                        ..present.at
+                    };
+                    if let Some(slab) = present.slab {
+                        let slab_off = (phys.offset - slab.location().offset) + (from - page_start);
+                        if let Err(err) = slab.read(slab_off, &mut buf[dst_off..dst_off + copy_len])
+                        {
+                            log::error!("cladefs: reading slab for composed DAX page: {err}");
+                            read_err = Some(Errno::EIO);
+                        }
+                    }
+                    found_phys = Some(phys);
+                    copied = true;
+                });
+                if let Some(err) = read_err {
+                    return Err(err);
+                }
+                if copied {
+                    let phys = found_phys.expect("present page has location");
+                    if phys.arena != ArenaId::DEFAULT {
+                        debug_assert!(
+                            arena == ArenaId::DEFAULT || arena == phys.arena,
+                            "composed DAX page spans two tenant arenas: {arena:?} vs {:?}",
+                            phys.arena
+                        );
+                        if arena == ArenaId::DEFAULT {
+                            arena = phys.arena;
+                        }
+                    }
+                    deps.push((source_identity(&slice.source), phys));
+                    break;
+                }
+                waited |= slice.source.clone().bring_in(page).await?;
+            }
+        }
+    }
+    Ok(((buf, deps, arena), waited))
+}
+
 /// A window. See the module docs.
 pub(crate) struct Window {
     size: u64,
+    /// Logical mapping alignment in bytes (normally [`map_unit()`], 4 KiB).
+    unit: u64,
+    /// Owning cell's tenant arena (`ArenaId::DEFAULT` for tenant 0 / public cells).
+    arena: ArenaId,
+    cache: Arc<crate::cache::ExtentCache>,
+    slabs: Arc<crate::slabs::HostSlabs>,
+    zeros: Arc<dyn Source>,
     translation: Translation,
     /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what
     /// halts its cell: a panic holding it aborts the daemon (`local_cell::shared`, TASK-149.24).
@@ -616,16 +839,22 @@ pub(crate) struct Window {
 }
 
 impl Window {
-    /// A window of `size` bytes, which must be a multiple of the page size, whose pages are mapped
-    /// in `second_stage`, or, without one, in this process's memory; whose stage copies on write
-    /// if `copying`, which a window in this process's memory has none to.
+    /// A window of `size` bytes, which must be a multiple of the host page size, whose pages are
+    /// mapped in `second_stage`, or, without one, in this process's memory; whose stage copies on
+    /// write if `copying`, which a window in this process's memory has none to.
+    #[allow(clippy::too_many_arguments)]
     fn new(
+        cache: Arc<crate::cache::ExtentCache>,
         slabs: Arc<crate::slabs::HostSlabs>,
+        arena: ArenaId,
+        zeros: Arc<dyn Source>,
         size: u64,
+        unit: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
         copying: bool,
     ) -> Result<Self> {
-        if size == 0 || !size.is_multiple_of(page_size()) {
+        let ps = page_size();
+        if size == 0 || !size.is_multiple_of(ps) || unit == 0 || !ps.is_multiple_of(unit) {
             return Err(Errno::EINVAL);
         }
         let len = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
@@ -634,12 +863,10 @@ impl Window {
         }
         let translation = match second_stage {
             Some(stage) => Translation::Stage(stage),
-            None => {
-                Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)?, slabs }
-            }
+            None => Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)? },
         };
         let state = SharedLock::new("window", Mutex::new(WindowState::new()));
-        Ok(Self { size, translation, state, copying })
+        Ok(Self { size, unit, arena, cache, slabs, zeros, translation, state, copying })
     }
 
     fn size(&self) -> u64 {
@@ -662,7 +889,7 @@ impl Window {
 
     fn host_base(&self) -> Option<usize> {
         match &self.translation {
-            Translation::Host { base, .. } => Some(*base),
+            Translation::Host { base } => Some(*base),
             Translation::Stage(_) => None,
         }
     }
@@ -671,20 +898,67 @@ impl Window {
         self.state.with(Mutex::lock).mapping_at(offset).is_some()
     }
 
-    /// Resolves the guest's fault at `offset` for `access`: a load's maps the page
+    /// How the host page at `h_start` (multiple of `page_size()`) is backed by `state.mappings`.
+    fn host_page_plan(&self, state: &WindowState, h_start: u64) -> HostPagePlan {
+        let ps = page_size();
+        let h_end = h_start + ps;
+        let starts = state.overlapping(h_start, h_end);
+        if starts.is_empty() {
+            return HostPagePlan::Unmapped;
+        }
+        if starts.len() == 1 {
+            let m_start = starts[0];
+            let mapping = &state.mappings[&m_start];
+            if mapping.source.origin() == Origin::Zeros {
+                return HostPagePlan::DirectZeros;
+            }
+            if m_start <= h_start && mapping.end >= h_end {
+                let src_off = mapping.source_offset + (h_start - m_start);
+                if src_off.is_multiple_of(ps) {
+                    return HostPagePlan::Direct {
+                        source: mapping.source.clone(),
+                        src_page: src_off / ps,
+                    };
+                }
+            }
+        }
+        let mut slices = Vec::with_capacity(starts.len());
+        for m_start in starts {
+            let mapping = &state.mappings[&m_start];
+            if mapping.source.origin() == Origin::Zeros {
+                continue;
+            }
+            let from = h_start.max(m_start);
+            let to = h_end.min(mapping.end);
+            slices.push(ComposeSlice {
+                win_within: (from - h_start) as usize,
+                len: (to - from) as usize,
+                source: mapping.source.clone(),
+                source_offset: mapping.source_offset + (from - m_start),
+            });
+        }
+        if slices.is_empty() { HostPagePlan::DirectZeros } else { HostPagePlan::Composed(slices) }
+    }
+
+    /// Resolves the guest's fault at `offset` for `access`: a load's maps the host page
     /// ([`Window::resolve`]); a write's is refused, as every page is mapped read-only: cladefs: a
     /// stage that copies on write makes its own private copies (doc-26), and asks the window only
     /// to read.
     pub(crate) async fn fault(&self, offset: u64, access: Access) -> Result<()> {
         use crate::stats::{self, Counter};
-        let page = offset - offset % page_size();
+        let ps = page_size();
+        let h_start = offset - offset % ps;
         let start = std::time::Instant::now();
         let faulted = match access {
-            Access::Read => self.resolve(page).await,
-            Access::Write => match self.is_mapped(page) {
-                true => Err(Errno::EACCES),
-                false => Err(Errno::ENOENT),
-            },
+            Access::Read => self.resolve(h_start).await,
+            Access::Write => {
+                let has_any =
+                    !self.state.with(Mutex::lock).overlapping(h_start, h_start + ps).is_empty();
+                match has_any {
+                    true => Err(Errno::EACCES),
+                    false => Err(Errno::ENOENT),
+                }
+            }
         };
         stats::count_since(Counter::Faults, Counter::FaultNs, start);
         if faulted == Ok(true) {
@@ -693,37 +967,181 @@ impl Window {
         faulted.map(|_| ())
     }
 
-    /// Maps the page at `offset`, which a load's fault was on, bringing it into memory first, with
-    /// those its source brought in with it (`Source::brought_in_with`), and returns whether it
-    /// waited for the page to be brought in. A page evicted, or mapped anew, meanwhile is resolved
-    /// as it is then.
+    /// Maps the host page at `offset` (host-page-aligned), which a load's fault was on, bringing
+    /// its source page(s) into memory first — and for a direct mapping, those its source brought
+    /// in with it (`Source::brought_in_with`) — and returns whether it waited for a page-in. A
+    /// page evicted or mapped anew meanwhile is resolved as it is then.
     async fn resolve(&self, offset: u64) -> Result<bool> {
         let ps = page_size();
         let mut waited = false;
         loop {
-            let (source, page, mapped) = {
-                let state = self.state.with(Mutex::lock);
-                let (start, mapping) = state.mapping_at(offset).ok_or(Errno::ENOENT)?;
+            let step = {
+                let mut state = self.state.with(Mutex::lock);
                 if state.ptes.contains_key(&offset) {
                     return Ok(waited);
                 }
-                let page = mapping.page + (offset - start) / ps;
-                let left = (mapping.end - offset) / ps;
-                (mapping.source.clone(), page, left.min(mapping.source.brought_in_with(page)))
+                match self.host_page_plan(&state, offset) {
+                    HostPagePlan::Unmapped => return Err(Errno::ENOENT),
+                    HostPagePlan::DirectZeros => {
+                        self.install(&mut state, offset, offset + ps);
+                        if state.ptes.contains_key(&offset) {
+                            return Ok(waited);
+                        }
+                        continue;
+                    }
+                    HostPagePlan::Direct { source, src_page } => {
+                        let (_, mapping) = state.mapping_at(offset).expect("direct mapping");
+                        let left = (mapping.end - offset) / ps;
+                        let mapped = left.min(source.brought_in_with(src_page));
+                        ResolveStep::Direct { source, src_page, mapped }
+                    }
+                    HostPagePlan::Composed(slices) => {
+                        match read_composed_slices(&slices, self.arena)? {
+                            Some((buf, deps, arena)) => {
+                                if let Ok(slab) = self.slabs.alloc(arena, 1, crate::slabs::Wait::No)
+                                {
+                                    self.install_composed(&mut state, offset, slab, &buf, deps)?;
+                                    return Ok(waited);
+                                }
+                                ResolveStep::Compose { slices, ready: Some((buf, deps, arena)) }
+                            }
+                            None => ResolveStep::Compose { slices, ready: None },
+                        }
+                    }
+                }
             };
-            waited |= source.clone().bring_in(page).await?;
-            let mut state = self.state.with(Mutex::lock);
-            let same = state.mapping_at(offset).is_some_and(|(start, mapping)| {
-                source_identity(&mapping.source) == source_identity(&source)
-                    && mapping.page + (offset - start) / ps == page
-            });
-            if same {
-                self.install(&mut state, offset, offset + mapped * ps);
-                if state.ptes.contains_key(&offset) {
-                    return Ok(waited);
+            match step {
+                ResolveStep::Direct { source, src_page, mapped } => {
+                    waited |= source.clone().bring_in(src_page).await?;
+                    let mut state = self.state.with(Mutex::lock);
+                    if state.ptes.contains_key(&offset) {
+                        return Ok(waited);
+                    }
+                    let same = matches!(
+                        self.host_page_plan(&state, offset),
+                        HostPagePlan::Direct { source: ref now, src_page: now_page }
+                            if source_identity(now) == source_identity(&source)
+                                && now_page == src_page
+                    );
+                    if same {
+                        self.install(&mut state, offset, offset + mapped * ps);
+                        if state.ptes.contains_key(&offset) {
+                            return Ok(waited);
+                        }
+                    }
+                }
+                ResolveStep::Compose { slices, ready } => {
+                    let (buf, deps, arena) = match ready {
+                        Some(composed) => composed,
+                        None => {
+                            let (composed, slice_waited) =
+                                assemble_composed_slices(&slices, self.arena).await?;
+                            waited |= slice_waited;
+                            composed
+                        }
+                    };
+                    let slab = self.cache.alloc_composed(arena).await?;
+                    let mut state = self.state.with(Mutex::lock);
+                    if state.ptes.contains_key(&offset) {
+                        drop(state);
+                        drop(slab);
+                        return Ok(waited);
+                    }
+                    let same = matches!(
+                        self.host_page_plan(&state, offset),
+                        HostPagePlan::Composed(ref now) if same_compose_slices(&slices, now)
+                    );
+                    if same {
+                        if slices.iter().any(|slice| slice.source.is_revoked()) {
+                            drop(state);
+                            drop(slab);
+                            return Err(Errno::EACCES);
+                        }
+                        self.install_composed(&mut state, offset, slab, &buf, deps)?;
+                        return Ok(waited);
+                    }
+                    drop(state);
+                    drop(slab);
                 }
             }
         }
+    }
+
+    /// Writes `buf` into `slab`, stages it to the VM process if any, records the composed host page
+    /// at `offset` in `state`, and maps it in the second stage.
+    fn install_composed(
+        &self,
+        state: &mut WindowState,
+        offset: u64,
+        slab: PartSlab,
+        buf: &[u8],
+        deps: Vec<(usize, PhysLocation)>,
+    ) -> Result<()> {
+        if let Err(err) = slab.write(0, buf) {
+            log::error!("cladefs: writing composed DAX page at {offset:#x}: {err}");
+            return Err(Errno::EIO);
+        }
+        if let Some(vm) = self.stage().and_then(|stage| stage.vm_process()) {
+            slab.stage_to(vm);
+        }
+        let phys = slab.location();
+        state.composed_clock += 1;
+        let touch = state.composed_clock;
+        state.composed.insert(offset, ComposedPage { slab, deps, touch });
+        state.insert_pte(offset, phys);
+        self.map_pages(&[(offset, phys)]);
+        Ok(())
+    }
+
+    /// Evicts least-recently-used composed host pages of `arena` (or any arena if `None`) until
+    /// `enough(evicted)` returns true, unmapping them with [`Private::Keep`] and dropping their
+    /// slabs only after the stage change is sent and the lock released. Returns bytes freed.
+    pub(crate) fn evict_composed(
+        &self,
+        arena: Option<ArenaId>,
+        mut enough: impl FnMut(u64) -> bool,
+    ) -> u64 {
+        let ps = page_size();
+        let (evicted, dropped) = {
+            let mut state = self.state.with(Mutex::lock);
+            if state.composed.is_empty() {
+                return 0;
+            }
+            let mut victims: Vec<(u64, u64)> = state
+                .composed
+                .iter()
+                .filter(|(_, c)| arena.is_none_or(|a| c.slab.location().arena == a))
+                .map(|(&offset, c)| (c.touch, offset))
+                .collect();
+            if victims.is_empty() {
+                return 0;
+            }
+            victims.sort_unstable();
+            let mut gone = Vec::new();
+            let mut evicted = 0u64;
+            for (_, offset) in victims {
+                if enough(evicted) {
+                    break;
+                }
+                gone.push(offset);
+                evicted += ps;
+            }
+            if gone.is_empty() {
+                return 0;
+            }
+            gone.sort_unstable();
+            let _change = self.change();
+            let mut dropped = Vec::with_capacity(gone.len());
+            for &offset in &gone {
+                if let Some(slab) = state.remove_pte(offset) {
+                    dropped.push(slab);
+                }
+            }
+            self.kept(&mut state, &gone);
+            (evicted, dropped)
+        };
+        drop(dropped);
+        evicted
     }
 
     /// Maps as [`Window::map_as`] does, as the guest's `MAP`, which ends the private pages there.
@@ -745,31 +1163,40 @@ impl Window {
         len: u64,
         private: Private,
     ) {
-        let mut state = self.state.with(Mutex::lock);
-        let _change = self.change();
-        self.map_locked(&mut state, offset, source, source_offset / page_size(), len, private);
+        let dropped = {
+            let mut state = self.state.with(Mutex::lock);
+            let _change = self.change();
+            self.map_locked(&mut state, offset, source, source_offset, len, private)
+        };
+        // Dropped after `_change` sends the stage unmaps and releases the lock, so quarantine parks
+        // behind those unmaps.
+        drop(dropped);
     }
 
-    /// Maps as [`Window::map_as`] says, from `source`'s page `page`, with the window's lock held
-    /// and its stage's change begun.
+    /// Maps as [`Window::map_as`] says, from `source`'s byte `source_offset`, with the window's
+    /// lock held and its stage's change begun; returns composed slabs removed, to be dropped only
+    /// once the stage change has been sent.
     fn map_locked(
         self: &Arc<Self>,
         state: &mut WindowState,
         offset: u64,
         source: &Arc<dyn Source>,
-        page: u64,
+        source_offset: u64,
         len: u64,
         private: Private,
-    ) {
+    ) -> Vec<PartSlab> {
+        let ps = page_size();
         let end = offset + len;
-        let forgotten = self.place(state, offset, source, page, len, private);
+        let (dropped, forgotten) = self.place(state, offset, source, source_offset, len, private);
+        let (h_start, h_end) = (offset - offset % ps, end.next_multiple_of(ps));
         if let Some(stage) = self.stage() {
             stage.window_mapped(offset, len);
         }
         // Its pages in memory are mapped now, so that the guest's first accesses to them do not
         // fault. cladefs: but where a private page stays.
-        self.install(state, offset, end);
+        self.install(state, h_start, h_end);
         self.unmapped(state, forgotten);
+        dropped
     }
 
     /// cladefs: maps each of `pieces`, in order, as [`Window::map_as`] maps the guest's `MAP`, in
@@ -778,54 +1205,73 @@ impl Window {
     /// each made a change of its own, of a run at least (TASK-92.14). What a snapshot's window
     /// held is mapped again so, as its VM is restored.
     fn map_many(self: &Arc<Self>, pieces: &[Piece<'_>]) {
-        let mut state = self.state.with(Mutex::lock);
-        let _change = self.change();
-        let mut anew: Vec<Range<u64>> = Vec::new();
-        for &Piece { offset, source, page, len } in pieces {
-            let forgotten = self.place(&mut state, offset, source, page, len, Private::End);
-            self.unmapped(&state, forgotten);
-            match anew.last_mut() {
-                Some(run) if run.end == offset => run.end += len,
-                _ => anew.push(offset..offset + len),
+        let ps = page_size();
+        let dropped = {
+            let mut state = self.state.with(Mutex::lock);
+            let _change = self.change();
+            let mut mapped_runs: Vec<Range<u64>> = Vec::new();
+            let mut anew: Vec<Range<u64>> = Vec::new();
+            let mut dropped = Vec::new();
+            for &Piece { offset, source, source_offset, len } in pieces {
+                let (removed, forgotten) =
+                    self.place(&mut state, offset, source, source_offset, len, Private::End);
+                dropped.extend(removed);
+                self.unmapped(&state, forgotten);
+                match mapped_runs.last_mut() {
+                    Some(run) if offset >= run.start && offset <= run.end => {
+                        run.end = run.end.max(offset + len);
+                    }
+                    _ => mapped_runs.push(offset..offset + len),
+                }
+                let h_start = offset - offset % ps;
+                let h_end = (offset + len).next_multiple_of(ps);
+                match anew.last_mut() {
+                    Some(run) if h_start >= run.start && h_start <= run.end => {
+                        run.end = run.end.max(h_end);
+                    }
+                    _ => anew.push(h_start..h_end),
+                }
             }
-        }
-        if let Some(stage) = self.stage() {
+            if let Some(stage) = self.stage() {
+                for run in &mapped_runs {
+                    stage.window_mapped(run.start, run.end - run.start);
+                }
+            }
+            let mut pages = Vec::new();
             for run in &anew {
-                stage.window_mapped(run.start, run.end - run.start);
+                self.present(&mut state, run.start, run.end, &mut pages);
             }
-        }
-        let mut pages = Vec::new();
-        for run in &anew {
-            self.present(&mut state, run.start, run.end, &mut pages);
-        }
-        self.map_pages(&pages);
+            self.map_pages(&pages);
+            dropped
+        };
+        drop(dropped);
     }
 
-    /// cladefs: puts the mapping of `len` bytes of `source`'s pages from `page` at `offset` in the
-    /// window's map, in place of what was mapped there and the pages it had there, the private
-    /// pages among them going or staying as `private` says; and returns the sources of the
-    /// mappings it replaced, to tell of ([`Window::unmapped`]). The stage is told of nothing it
-    /// maps anew, nor are its pages mapped, which is for its caller to do.
+    /// cladefs: puts the mapping of `len` bytes of `source` from `source_offset` at `offset` in
+    /// the window's map, in place of what was mapped there and the pages it had there, the private
+    /// pages among them going or staying as `private` says; and returns the composed slabs removed
+    /// and the sources of the mappings it replaced, to tell of ([`Window::unmapped`]). The stage
+    /// is told of nothing it maps anew, nor are its pages mapped, which is for its caller to do.
     fn place(
         self: &Arc<Self>,
         state: &mut WindowState,
         offset: u64,
         source: &Arc<dyn Source>,
-        page: u64,
+        source_offset: u64,
         len: u64,
         private: Private,
-    ) -> Vec<Arc<dyn Source>> {
+    ) -> (Vec<PartSlab>, Vec<Arc<dyn Source>>) {
         let end = offset + len;
         // Whether the window mapped it before, whatever of it this replaces: the guest's MAP of
         // an extent over its own range tells it nothing (TASK-602).
         let first = !state.by_source.contains_key(&source_identity(source));
-        self.unmap_ptes(state, offset, end, private);
+        let dropped = self.unmap_ptes(state, offset, end, private, false);
         let forgotten = state.forget(offset, end);
-        state.insert(offset, Mapping { end, source: source.clone(), page });
+        state.insert(offset, Mapping { end, source: source.clone(), source_offset });
         if first {
             source.mapped(self);
         }
-        forgotten
+        (dropped, forgotten)
     }
 
     /// Maps zeros, `zeros`, read-only, at the window's ranges that map `source`, by its identity,
@@ -835,19 +1281,31 @@ impl Window {
     /// nothing to map. cladefs: the private pages there stay, the guest's, which only its own `MAP`
     /// or `UNMAP` ends (backlog doc-13).
     fn map_zeros_over(self: &Arc<Self>, source: usize, zeros: &Arc<dyn Source>) -> Vec<Range<u64>> {
-        let mut state = self.state.with(Mutex::lock);
-        let _change = self.change();
-        let Some(starts) = state.by_source.get(&source) else { return Vec::new() };
-        let ranges: Vec<Range<u64>> =
-            starts.iter().map(|start| *start..state.mappings[start].end).collect();
-        for range in &ranges {
-            let len = range.end - range.start;
-            if rules().free_maps_zeros {
-                self.map_locked(&mut state, range.start, zeros, 0, len, Private::Keep);
-            } else {
-                self.unmap_locked(&mut state, range.start, len, Private::Keep);
+        let (ranges, dropped) = {
+            let mut state = self.state.with(Mutex::lock);
+            let _change = self.change();
+            let Some(starts) = state.by_source.get(&source) else { return Vec::new() };
+            let ranges: Vec<Range<u64>> =
+                starts.iter().map(|start| *start..state.mappings[start].end).collect();
+            let mut dropped = Vec::new();
+            for range in &ranges {
+                let len = range.end - range.start;
+                if rules().free_maps_zeros {
+                    dropped.extend(self.map_locked(
+                        &mut state,
+                        range.start,
+                        zeros,
+                        0,
+                        len,
+                        Private::Keep,
+                    ));
+                } else {
+                    dropped.extend(self.unmap_locked(&mut state, range.start, len, Private::Keep));
+                }
             }
-        }
+            (ranges, dropped)
+        };
+        drop(dropped);
         ranges
     }
 
@@ -861,7 +1319,7 @@ impl Window {
                 len: mapping.end - start,
                 contents: match mapping.source.origin() {
                     Origin::Extent(extent) => {
-                        MappingContents::Extent { extent, offset: mapping.page * page_size() }
+                        MappingContents::Extent { extent, offset: mapping.source_offset }
                     }
                     Origin::Zeros => MappingContents::Zeros,
                 },
@@ -872,17 +1330,27 @@ impl Window {
     /// Unmaps `len` bytes of the window at `offset`: cladefs: the guest's `UNMAP`, which ends the
     /// private pages there.
     fn unmap(&self, offset: u64, len: u64) {
-        let mut state = self.state.with(Mutex::lock);
-        self.unmap_locked(&mut state, offset, len, Private::End);
+        let dropped = {
+            let mut state = self.state.with(Mutex::lock);
+            self.unmap_locked(&mut state, offset, len, Private::End)
+        };
+        drop(dropped);
     }
 
     /// cladefs: unmaps as [`Window::unmap`] does, with the window's lock held, its private pages
     /// there going or staying as `private` says.
-    fn unmap_locked(&self, state: &mut WindowState, offset: u64, len: u64, private: Private) {
+    fn unmap_locked(
+        &self,
+        state: &mut WindowState,
+        offset: u64,
+        len: u64,
+        private: Private,
+    ) -> Vec<PartSlab> {
         let end = offset + len;
-        self.unmap_ptes(state, offset, end, private);
+        let dropped = self.unmap_ptes(state, offset, end, private, true);
         let forgotten = state.forget(offset, end);
         self.unmapped(state, forgotten);
+        dropped
     }
 
     /// Tells the sources `forgotten` that no longer have a mapping in the window so.
@@ -901,20 +1369,29 @@ impl Window {
     /// staying. cladefs: a tenant's copy of an extent moved to the default arena, which every VM
     /// process may read, so that the window faults on nothing of the copy, which goes (TASK-234).
     pub(crate) fn rebind(self: &Arc<Self>, from: &Arc<dyn Source>, to: Arc<dyn Source>) {
-        let mut state = self.state.with(Mutex::lock);
-        let Some(starts) = state.by_source.remove(&source_identity(from)) else { return };
-        let mut gone = Vec::new();
-        for start in &starts {
-            let end = state.mappings[start].end;
-            gone.extend(state.ptes.range(*start..end).map(|(offset, _)| *offset));
-            state.mappings.get_mut(start).expect("a mapping's start").source = to.clone();
-        }
-        for offset in &gone {
-            state.remove_pte(*offset);
-        }
-        self.kept(&mut state, &gone);
-        state.by_source.entry(source_identity(&to)).or_default().extend(starts);
-        drop(state);
+        let ps = page_size();
+        let dropped = {
+            let mut state = self.state.with(Mutex::lock);
+            let Some(starts) = state.by_source.remove(&source_identity(from)) else { return };
+            let mut gone = BTreeSet::new();
+            for start in &starts {
+                let end = state.mappings[start].end;
+                let (h_start, h_end) = (start - start % ps, end.next_multiple_of(ps));
+                gone.extend(state.ptes.range(h_start..h_end).map(|(offset, _)| *offset));
+                state.mappings.get_mut(start).expect("a mapping's start").source = to.clone();
+            }
+            let gone: Vec<u64> = gone.into_iter().collect();
+            let mut dropped = Vec::new();
+            for &offset in &gone {
+                if let Some(slab) = state.remove_pte(offset) {
+                    dropped.push(slab);
+                }
+            }
+            self.kept(&mut state, &gone);
+            state.by_source.entry(source_identity(&to)).or_default().extend(starts);
+            dropped
+        };
+        drop(dropped);
         from.unmapped(self);
         to.mapped(self);
     }
@@ -924,26 +1401,42 @@ impl Window {
     /// page within its mappings, its stage's, stays (backlog doc-13, spec rule
     /// evictionKeepsPrivate).
     pub(crate) fn unmap_pages_of(&self, source: usize, evicted: &dyn Fn(PhysLocation) -> bool) {
-        let mut state = self.state.with(Mutex::lock);
-        let Some(starts) = state.by_source.get(&source) else { return };
-        let ranges: Vec<(u64, u64)> =
-            starts.iter().map(|start| (*start, state.mappings[start].end)).collect();
-        let mut gone = Vec::new();
-        for (start, end) in ranges {
-            gone.extend(
-                (state.ptes.range(start..end))
-                    .filter(|(_, at)| evicted(**at))
-                    .map(|(offset, _)| *offset),
-            );
-        }
-        for offset in &gone {
-            state.remove_pte(*offset);
-        }
-        self.kept(&mut state, &gone);
+        let ps = page_size();
+        let dropped = {
+            let mut state = self.state.with(Mutex::lock);
+            let Some(starts) = state.by_source.get(&source) else { return };
+            let ranges: Vec<(u64, u64)> =
+                starts.iter().map(|start| (*start, state.mappings[start].end)).collect();
+            let mut gone = BTreeSet::new();
+            for (start, end) in ranges {
+                let (h_start, h_end) = (start - start % ps, end.next_multiple_of(ps));
+                for (&offset, &at) in state.ptes.range(h_start..h_end) {
+                    let hit = match state.composed.get(&offset) {
+                        Some(composed) => {
+                            composed.deps.iter().any(|&(src, dep)| src == source && evicted(dep))
+                        }
+                        None => evicted(at),
+                    };
+                    if hit {
+                        gone.insert(offset);
+                    }
+                }
+            }
+            let gone: Vec<u64> = gone.into_iter().collect();
+            let mut dropped = Vec::new();
+            for &offset in &gone {
+                if let Some(slab) = state.remove_pte(offset) {
+                    dropped.push(slab);
+                }
+            }
+            self.kept(&mut state, &gone);
+            dropped
+        };
+        drop(dropped);
     }
 
-    /// cladefs: unmaps the pages at `offsets`, in order, which the window took away keeping the
-    /// private pages there ([`Private::Keep`]), and, if its stage copies, records them so
+    /// cladefs: unmaps the host pages at `offsets`, in order, which the window took away keeping
+    /// the private pages there ([`Private::Keep`]), and, if its stage copies, records them so
     /// ([`WindowState::kept`]).
     fn kept(&self, state: &mut WindowState, offsets: &[u64]) {
         if self.copying {
@@ -952,18 +1445,18 @@ impl Window {
         self.unmap_runs(offsets, Private::Keep);
     }
 
-    /// Maps, where nothing is mapped, the pages in memory of the mappings of `start..end`: in runs
-    /// of pages consecutive in the window and in an arena's object, each one change of the second
-    /// stage.
+    /// Maps, where nothing is mapped, the host pages in memory of the mappings of `start..end`
+    /// (host-page-aligned): in runs of pages consecutive in the window and in an arena's object,
+    /// each one change of the second stage.
     fn install(&self, state: &mut WindowState, start: u64, end: u64) {
         let mut pages = Vec::new();
         self.present(state, start, end, &mut pages);
         self.map_pages(&pages);
     }
 
-    /// Adds to `pages`, in order, the pages in memory of the mappings of `start..end` where
-    /// nothing is mapped, each its offset in the window and where it is, which it takes as mapped
-    /// from now on: those [`Window::map_pages`] is to map.
+    /// Adds to `pages`, in order, the host pages in memory of the mappings of `start..end`
+    /// (host-page-aligned) where nothing is mapped, each its offset in the window and where it is,
+    /// which it takes as mapped from now on: those [`Window::map_pages`] is to map.
     fn present(
         &self,
         state: &mut WindowState,
@@ -973,35 +1466,108 @@ impl Window {
     ) {
         let ps = page_size();
         let vm = self.stage().and_then(|stage| stage.vm_process());
-        for mapping_start in state.overlapping(start, end) {
-            let mapping = &state.mappings[&mapping_start];
-            let (from, to) = (start.max(mapping_start), end.min(mapping.end));
-            let first = mapping.page + (from - mapping_start) / ps;
-            let ptes = &state.ptes;
-            let mut found = Vec::new();
-            mapping.source.each_present(first..first + (to - from) / ps, &mut |present| {
-                let mut staged = false;
-                for page in present.page..present.page + present.count {
-                    let offset = from + (page - first) * ps;
-                    if ptes.contains_key(&offset) {
-                        continue;
+        if self.unit == ps {
+            for mapping_start in state.overlapping(start, end) {
+                let mapping = &state.mappings[&mapping_start];
+                let (from, to) = (start.max(mapping_start), end.min(mapping.end));
+                let first = (mapping.source_offset + (from - mapping_start)) / ps;
+                let ptes = &state.ptes;
+                let mut found = Vec::new();
+                mapping.source.each_present(first..first + (to - from) / ps, &mut |present| {
+                    let mut staged = false;
+                    for page in present.page..present.page + present.count {
+                        let offset = from + (page - first) * ps;
+                        if ptes.contains_key(&offset) {
+                            continue;
+                        }
+                        let within = (page - present.page) * ps;
+                        found.push((
+                            offset,
+                            PhysLocation { offset: present.at.offset + within, ..present.at },
+                        ));
+                        staged = true;
                     }
-                    let within = (page - present.page) * ps;
-                    found.push((
-                        offset,
-                        PhysLocation { offset: present.at.offset + within, ..present.at },
-                    ));
-                    staged = true;
+                    // Once freed, it waits for the VM process to take it away
+                    // (`slabs::quarantine_with`, TASK-79.9, doc-26).
+                    if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
+                        slab.stage_to(vm);
+                    }
+                });
+                for (offset, at) in found {
+                    state.insert_pte(offset, at);
+                    pages.push((offset, at));
                 }
-                // Once freed, it waits for the VM process to take it away
-                // (`slabs::quarantine_with`, TASK-79.9, doc-26).
-                if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
-                    slab.stage_to(vm);
+            }
+            return;
+        }
+        let h_start = start - start % ps;
+        let h_end = end.next_multiple_of(ps);
+        let mut h_page = h_start;
+        while h_page < h_end {
+            if state.ptes.contains_key(&h_page) {
+                h_page += ps;
+                continue;
+            }
+            match self.host_page_plan(state, h_page) {
+                HostPagePlan::Unmapped => h_page += ps,
+                HostPagePlan::DirectZeros => {
+                    let mut at = None;
+                    self.zeros.each_present(0..1, &mut |present| at = Some(present.at));
+                    if let Some(at) = at {
+                        state.insert_pte(h_page, at);
+                        pages.push((h_page, at));
+                    }
+                    h_page += ps;
                 }
-            });
-            for (offset, at) in found {
-                state.insert_pte(offset, at);
-                pages.push((offset, at));
+                HostPagePlan::Direct { source, src_page } => {
+                    // Batch consecutive aligned host pages of the same mapping in one lookup.
+                    let (_, mapping) = state.mapping_at(h_page).expect("direct mapping");
+                    let limit = mapping.end.min(h_end);
+                    let run_pages = (limit - h_page) / ps;
+                    let mut found = Vec::new();
+                    source.each_present(src_page..src_page + run_pages, &mut |present| {
+                        let mut staged = false;
+                        for page in present.page..present.page + present.count {
+                            let offset = h_page + (page - src_page) * ps;
+                            if state.ptes.contains_key(&offset) {
+                                continue;
+                            }
+                            let within = (page - present.page) * ps;
+                            found.push((
+                                offset,
+                                PhysLocation { offset: present.at.offset + within, ..present.at },
+                            ));
+                            staged = true;
+                        }
+                        if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
+                            slab.stage_to(vm);
+                        }
+                    });
+                    for (offset, at) in found {
+                        state.insert_pte(offset, at);
+                        pages.push((offset, at));
+                    }
+                    h_page += run_pages * ps;
+                }
+                HostPagePlan::Composed(slices) => {
+                    // Best-effort eager composition when all source pages are in memory and a
+                    // budgeted slab is immediately available; otherwise resolved lazily on fault.
+                    if let Ok(Some((buf, deps, arena))) = read_composed_slices(&slices, self.arena)
+                        && let Ok(slab) = self.slabs.alloc(arena, 1, crate::slabs::Wait::No)
+                        && slab.write(0, &buf).is_ok()
+                    {
+                        if let Some(vm) = vm {
+                            slab.stage_to(vm);
+                        }
+                        let phys = slab.location();
+                        state.composed_clock += 1;
+                        let touch = state.composed_clock;
+                        state.composed.insert(h_page, ComposedPage { slab, deps, touch });
+                        state.insert_pte(h_page, phys);
+                        pages.push((h_page, phys));
+                    }
+                    h_page += ps;
+                }
             }
         }
     }
@@ -1038,21 +1604,52 @@ impl Window {
         }
     }
 
-    /// Unmaps the pages the window has mapped of `start..end`. cladefs: its stage's private pages
-    /// there go or stay as `private` says (doc-26). A private page is at a page the window mapped,
-    /// or one the host's changes took away keeping it ([`WindowState::kept`]): the guest's changes
-    /// ([`Private::End`]) unmap those too, which the window maps nothing at.
-    fn unmap_ptes(&self, state: &mut WindowState, start: u64, end: u64, private: Private) {
-        let gone: Vec<u64> = state.ptes.range(start..end).map(|(offset, _)| *offset).collect();
-        for offset in &gone {
-            state.remove_pte(*offset);
+    /// Unmaps the host pages the window has mapped overlapping `start..end` (logical-unit aligned).
+    /// cladefs: its stage's private pages there go or stay as `private` says (doc-26). A private
+    /// page is at a page the window mapped, or one the host's changes took away keeping it
+    /// ([`WindowState::kept`]): the guest's changes ([`Private::End`]) unmap those too, which the
+    /// window maps nothing at, clipped to `start..end` so sibling sub-pages in a larger host page
+    /// keep their private data. Returns composed slabs removed, to be dropped after sending unmaps.
+    fn unmap_ptes(
+        &self,
+        state: &mut WindowState,
+        start: u64,
+        end: u64,
+        private: Private,
+        clear_cold_mapped: bool,
+    ) -> Vec<PartSlab> {
+        let ps = page_size();
+        let (h_start, h_end) = (start - start % ps, end.next_multiple_of(ps));
+        let gone: Vec<u64> = state.ptes.range(h_start..h_end).map(|(offset, _)| *offset).collect();
+        let mut dropped = Vec::new();
+        for &offset in &gone {
+            if let Some(slab) = state.remove_pte(offset) {
+                dropped.push(slab);
+            }
         }
         match private {
             Private::Keep => self.kept(state, &gone),
             Private::End if self.copying && rules().guests_changes_end_private => {
-                let ps = page_size();
                 let mut runs: Vec<Range<u64>> = state.take_kept(start, end);
-                runs.extend(gone.iter().map(|offset| *offset..offset + ps));
+                for &h_page in &gone {
+                    let h_page_end = h_page + ps;
+                    if h_page < start {
+                        state.keep_range(h_page, start);
+                    }
+                    if h_page_end > end {
+                        state.keep_range(end, h_page_end);
+                    }
+                    runs.push(h_page.max(start)..h_page_end.min(end));
+                }
+                // On guest UNMAP of a copying window, also clear logical presence (`mapped_mask`)
+                // for never-resident cold mappings so removed sub-page slots cannot later be made
+                // private alongside a warm sibling slot (review 102 finding 348).
+                if clear_cold_mapped {
+                    for m_start in state.overlapping(start, end) {
+                        let m_end = state.mappings[&m_start].end;
+                        runs.push(m_start.max(start)..m_end.min(end));
+                    }
+                }
                 runs.sort_by_key(|run| run.start);
                 let mut joined: Vec<Range<u64>> = Vec::new();
                 for run in runs {
@@ -1067,10 +1664,11 @@ impl Window {
             }
             Private::End => self.unmap_runs(&gone, private),
         }
+        dropped
     }
 
-    /// Unmaps the pages at `offsets`, in order, in runs of consecutive pages, the private pages
-    /// among them going or staying as `private` says.
+    /// Unmaps the host pages at `offsets`, in order, in runs of consecutive pages, the private
+    /// pages among them going or staying as `private` says.
     fn unmap_runs(&self, offsets: &[u64], private: Private) {
         let ps = page_size();
         let mut runs: Vec<(u64, u64)> = Vec::new();
@@ -1090,9 +1688,13 @@ impl Window {
     fn unmap_range(&self, start: u64, len: u64, private: Private) {
         match &self.translation {
             Translation::Stage(stage) => stage.unmap(start, len, private),
-            Translation::Host { base, .. } => {
-                let at = base + start as usize;
-                reserve(Some(at), len as usize).expect("the window's memory reserved again");
+            Translation::Host { base } => {
+                let ps = page_size();
+                let h_start = start - start % ps;
+                let h_end = (start + len).next_multiple_of(ps);
+                let at = base + h_start as usize;
+                reserve(Some(at), (h_end - h_start) as usize)
+                    .expect("the window's memory reserved again");
             }
         }
     }
@@ -1101,8 +1703,8 @@ impl Window {
     fn map_run(&self, offset: u64, location: PhysLocation, len: u64) {
         match &self.translation {
             Translation::Stage(stage) => stage.map(offset, location, len),
-            Translation::Host { base, slabs } => {
-                let fd = slabs.arena_fd(location.arena).expect("the page's arena");
+            Translation::Host { base } => {
+                let fd = self.slabs.arena_fd(location.arena).expect("the page's arena");
                 let prot = libc::PROT_READ;
                 let at = (base + offset as usize) as *mut libc::c_void;
                 // SAFETY: Maps pages of physical memory, shared, over the window's reservation,
@@ -1117,12 +1719,13 @@ impl Window {
         }
     }
 
-    /// Checks that `len` bytes at `offset` are page aligned and within the window.
+    /// Checks that `len` bytes at `offset` are aligned to the window's logical unit and within
+    /// the window.
     fn check_range(&self, offset: u64, len: u64) -> Result<()> {
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
         if len == 0
-            || !offset.is_multiple_of(page_size())
-            || !len.is_multiple_of(page_size())
+            || !offset.is_multiple_of(self.unit)
+            || !len.is_multiple_of(self.unit)
             || end > self.size()
         {
             return Err(Errno::EINVAL);
@@ -1131,9 +1734,15 @@ impl Window {
     }
 }
 
+/// Next async action for [`Window::resolve`].
+enum ResolveStep {
+    Direct { source: Arc<dyn Source>, src_page: u64, mapped: u64 },
+    Compose { slices: Vec<ComposeSlice>, ready: Option<ComposedBytes> },
+}
+
 impl Drop for Window {
     fn drop(&mut self) {
-        if let Translation::Host { base, .. } = self.translation {
+        if let Translation::Host { base } = self.translation {
             // SAFETY: The reservation is the window's own.
             let status = unsafe { libc::munmap(base as *mut libc::c_void, self.size as usize) };
             debug_assert_eq!(status, 0, "unreserve a window: {}", std::io::Error::last_os_error());
@@ -1200,53 +1809,116 @@ pub(crate) struct Dax {
 }
 
 impl Dax {
-    /// A window of `size` bytes on `host` whose pages are mapped in `second_stage`, or, without
-    /// one, in this process's memory, and a handle to it.
+    /// A window of `size` bytes on `host` (owned by `arena`) whose pages are mapped in
+    /// `second_stage`, or, without one, in this process's memory, and a handle to it.
     pub(crate) fn new_on(
         host: &crate::Host,
+        arena: ArenaId,
         size: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
     ) -> Result<(Self, DaxWindow)> {
-        Self::with_stage_on(host, size, second_stage, false)
+        Self::with_stage_on(host, arena, size, second_stage, false)
     }
 
     /// A window of `size` bytes whose pages are mapped in `second_stage`, or, without one, in this
     /// process's memory, and a handle to it.
     #[cfg(all(test, not(madsim)))]
     pub fn new(size: u64, second_stage: Option<Arc<dyn SecondStage>>) -> Result<(Self, DaxWindow)> {
-        Self::new_on(crate::Host::process(), size, second_stage)
+        Self::new_on(crate::Host::process(), ArenaId::DEFAULT, size, second_stage)
     }
 
     /// cladefs: as [`Dax::new_on`], a window whose `second_stage` copies on write.
     pub(crate) fn copying_on(
         host: &crate::Host,
+        arena: ArenaId,
         size: u64,
         second_stage: Arc<dyn SecondStage>,
     ) -> Result<(Self, DaxWindow)> {
-        Self::with_stage_on(host, size, Some(second_stage), true)
+        Self::with_stage_on(host, arena, size, Some(second_stage), true)
     }
 
     /// cladefs: as [`Dax::new`], a window whose `second_stage` copies on write (backlog doc-13,
     /// doc-26): a writer's.
     #[cfg(all(test, not(madsim)))]
     pub fn copying(size: u64, second_stage: Arc<dyn SecondStage>) -> Result<(Self, DaxWindow)> {
-        Self::copying_on(crate::Host::process(), size, second_stage)
+        Self::copying_on(crate::Host::process(), ArenaId::DEFAULT, size, second_stage)
     }
 
     fn with_stage_on(
         host: &crate::Host,
+        arena: ArenaId,
         size: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
         copying: bool,
     ) -> Result<(Self, DaxWindow)> {
-        let window = Arc::new(Window::new(Arc::clone(host.slabs()), size, second_stage, copying)?);
+        Self::with_stage_and_unit_on(host, arena, size, map_unit(), second_stage, copying)
+    }
+
+    pub(crate) fn with_stage_and_unit_on(
+        host: &crate::Host,
+        arena: ArenaId,
+        size: u64,
+        unit: u64,
+        second_stage: Option<Arc<dyn SecondStage>>,
+        copying: bool,
+    ) -> Result<(Self, DaxWindow)> {
+        let zeros = host.cache().zeros()?;
+        let window = Arc::new(Window::new(
+            Arc::clone(host.cache()),
+            Arc::clone(host.slabs()),
+            arena,
+            zeros.clone(),
+            size,
+            unit,
+            second_stage,
+            copying,
+        )?);
+        host.cache().register_window(&window);
         let dax = Self {
             window: window.clone(),
-            zeros: host.cache().zeros()?,
+            zeros,
             #[cfg(all(test, target_os = "linux"))]
             _faults: None,
         };
         Ok((dax, DaxWindow(window)))
+    }
+
+    #[cfg(all(test, not(madsim)))]
+    pub(crate) fn new_with_unit(
+        size: u64,
+        unit: u64,
+        second_stage: Option<Arc<dyn SecondStage>>,
+    ) -> Result<(Self, DaxWindow)> {
+        Self::with_stage_and_unit_on(
+            crate::Host::process(),
+            ArenaId::DEFAULT,
+            size,
+            unit,
+            second_stage,
+            false,
+        )
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn in_host_memory_copying_with_unit(
+        stage: Arc<uffd::UffdSecondStage>,
+        unit: u64,
+        most: Option<u64>,
+    ) -> crate::error::Result<(Self, DaxWindow), crate::Error> {
+        if let Some(most) = most {
+            stage.copy_on_write(most)?;
+        }
+        let copying = most.is_some();
+        let (mut dax, window) = Self::with_stage_and_unit_on(
+            crate::Host::process(),
+            ArenaId::DEFAULT,
+            stage.size(),
+            unit,
+            Some(stage.clone()),
+            copying,
+        )?;
+        dax._faults = Some(stage.serve(dax.window.clone())?);
+        Ok((dax, window))
     }
 
     /// A window whose second stage is the host memory `stage` takes over, and a handle to it. A
@@ -1272,6 +1944,7 @@ impl Dax {
         let copying = most.is_some();
         let (mut dax, window) = Self::with_stage_on(
             crate::Host::process(),
+            ArenaId::DEFAULT,
             stage.size(),
             Some(stage.clone()),
             copying,
@@ -1302,11 +1975,11 @@ impl Dax {
     pub fn map_many(&mut self, mappings: &[DaxMapping]) {
         let pieces: Vec<Piece<'_>> = (mappings.iter())
             .map(|DaxMapping { offset, len, source }| {
-                let (source, page) = match source {
-                    Some((source, from)) => (source, from / page_size()),
+                let (source, source_offset) = match source {
+                    Some((source, from)) => (source, *from),
                     None => (&self.zeros, 0),
                 };
-                Piece { offset: *offset, len: *len, source, page }
+                Piece { offset: *offset, len: *len, source, source_offset }
             })
             .collect();
         self.window.map_many(&pieces);
@@ -1910,21 +2583,144 @@ pub(crate) mod tests {
         assert_eq!(stage.pages(), Vec::<u64>::new());
     }
 
-    /// Ranges of a window are page aligned, of some pages, and within it.
+    /// Ranges of a window are logical-unit aligned, non-empty, and within it.
     #[test]
     fn ranges_are_whole_pages_within_the_window() {
         let ps = page_size();
+        let unit = map_unit();
         let (dax, window) = Dax::new(4 * ps, None).unwrap();
         assert_eq!(window.size(), 4 * ps);
         assert_eq!(dax.check_range(0, 4 * ps), Ok(()));
         assert_eq!(dax.check_range(3 * ps, ps), Ok(()));
-        for (offset, len) in
-            [(0, 0), (1, ps), (0, ps + 1), (ps, 4 * ps), (4 * ps, ps), (u64::MAX - ps + 1, ps)]
-        {
+        assert_eq!(dax.check_range(unit, unit), Ok(()));
+        for (offset, len) in [
+            (0, 0),
+            (1, unit),
+            (0, unit + 1),
+            (ps, 4 * ps),
+            (4 * ps, unit),
+            (u64::MAX - unit + 1, unit),
+        ] {
             assert_eq!(dax.check_range(offset, len), Err(Errno::EINVAL), "{offset:#x}+{len:#x}");
         }
         assert_eq!(Dax::new(ps + 1, None).err(), Some(Errno::EINVAL));
         assert_eq!(Dax::new(0, None).err(), Some(Errno::EINVAL));
+    }
+
+    /// Sub-host-page mappings (e.g. 4 KiB blocks on a 16 KiB arm64 host, exercised on every host
+    /// with `unit = page_size() / 4`): unaligned source offsets, mixed sources + zeros + unmapped
+    /// slots, eviction, rebind, and free->zeros all produce the exact composed host page bytes
+    /// while preserving host-page-aligned zero-copy mappings and exact logical `window_mappings`.
+    #[test]
+    fn sub_host_page_mappings_compose_evict_rebind_and_free() {
+        let ps = page_size();
+        let unit = ps / 4;
+        // Source A: 2 host pages, each sub-unit tagged with a distinct byte.
+        let make_source = |tags: &[[u8; 4]]| {
+            let pages: Vec<Option<PartSlab>> = tags
+                .iter()
+                .map(|page_tags| {
+                    let slab = crate::slabs::alloc(
+                        crate::slabs::ArenaId::DEFAULT,
+                        1,
+                        crate::slabs::Wait::No,
+                    )
+                    .unwrap();
+                    let mut bytes = vec![0u8; ps as usize];
+                    for (slot, &tag) in page_tags.iter().enumerate() {
+                        bytes[slot * unit as usize..(slot + 1) * unit as usize].fill(tag);
+                    }
+                    slab.write(0, &bytes).unwrap();
+                    Some(slab)
+                })
+                .collect();
+            TestSource::new(Kind::Filled, pages)
+        };
+        let a = make_source(&[[0x10, 0x11, 0x12, 0x13], [0x14, 0x15, 0x16, 0x17]]);
+        let b = make_source(&[[0x20, 0x21, 0x22, 0x23]]);
+        let (mut dax, window) = Dax::new_with_unit(3 * ps, unit, None).unwrap();
+
+        // Host page 0: [A@unit (0x11), Zeros (0), B@2*unit (0x22), unmapped (0)].
+        dax.map(0, &a.source(), unit, unit);
+        dax.map_zeros(unit, unit);
+        dax.map(2 * unit, &b.source(), 2 * unit, unit);
+        // Host page 1: unaligned 1-host-page span crossing A's page 0 -> page 1 (0x12, 0x13, 0x14, 0x15).
+        dax.map(ps, &a.source(), 2 * unit, ps);
+        // Host page 2: aligned direct zero-copy mapping of B page 0 (0x20, 0x21, 0x22, 0x23).
+        dax.map(2 * ps, &b.source(), 0, ps);
+
+        let read_slots = |host_page: u64| -> [u8; 4] {
+            futures::executor::block_on(window.fault(host_page * ps, Access::Read)).unwrap();
+            let mut out = [0u8; 4];
+            for (slot, byte) in out.iter_mut().enumerate() {
+                // SAFETY: `host_page` is mapped in `window`'s host memory.
+                *byte = unsafe {
+                    *window.host_base().add((host_page * ps + slot as u64 * unit) as usize)
+                };
+            }
+            out
+        };
+        assert_eq!(read_slots(0), [0x11, 0x00, 0x22, 0x00]);
+        assert_eq!(read_slots(1), [0x12, 0x13, 0x14, 0x15]);
+        assert_eq!(read_slots(2), [0x20, 0x21, 0x22, 0x23]);
+
+        // Logical mappings preserve exact sub-page offsets and lengths (for VM snapshots).
+        assert_eq!(
+            dax.mappings(),
+            vec![
+                WindowMapping {
+                    window_offset: 0,
+                    len: unit,
+                    contents: MappingContents::Extent { extent: a.extent, offset: unit },
+                },
+                zeros_at(unit, unit),
+                WindowMapping {
+                    window_offset: 2 * unit,
+                    len: unit,
+                    contents: MappingContents::Extent { extent: b.extent, offset: 2 * unit },
+                },
+                WindowMapping {
+                    window_offset: ps,
+                    len: ps,
+                    contents: MappingContents::Extent { extent: a.extent, offset: 2 * unit },
+                },
+                WindowMapping {
+                    window_offset: 2 * ps,
+                    len: ps,
+                    contents: MappingContents::Extent { extent: b.extent, offset: 0 },
+                },
+            ]
+        );
+
+        // Host page 2 is directly mapped (no composed slab), while 0 and 1 are composed.
+        {
+            let state = dax.window.state.with(Mutex::lock);
+            assert!(state.composed.contains_key(&0));
+            assert!(state.composed.contains_key(&ps));
+            assert!(!state.composed.contains_key(&(2 * ps)));
+        }
+
+        // Rebind B -> C: both composed page 0 and direct page 2 unmap and read C on next fault.
+        let c = make_source(&[[0x30, 0x31, 0x32, 0x33]]);
+        dax.window.rebind(&b.source(), c.source());
+        assert_eq!(read_slots(0), [0x11, 0x00, 0x32, 0x00]);
+        assert_eq!(read_slots(2), [0x30, 0x31, 0x32, 0x33]);
+
+        // Evict A's page 1: composed page 1 (which spans A's page 0 and 1) is unmapped, while
+        // composed page 0 (which only depends on A's page 0 and C's page 0) stays mapped.
+        let a_page1 = a.location(1);
+        dax.window.unmap_pages_of(source_identity(&a), &|at| at == a_page1);
+        {
+            let state = dax.window.state.with(Mutex::lock);
+            assert!(state.ptes.contains_key(&0));
+            assert!(!state.ptes.contains_key(&ps));
+            assert!(!state.composed.contains_key(&ps));
+        }
+
+        // Free A -> zeros: page 0's slot 0 becomes 0 while C's slot 2 remains 0x32; page 1 is all 0.
+        assert_eq!(dax.map_zeros_over(&a), vec![0..unit, ps..2 * ps]);
+        assert_eq!(read_slots(0), [0x00, 0x00, 0x32, 0x00]);
+        assert_eq!(read_slots(1), [0x00, 0x00, 0x00, 0x00]);
     }
 
     /// The write fault at `offset` of `window`, resolved.
@@ -2012,5 +2808,91 @@ pub(crate) mod tests {
         changes.record(u64::MAX - 0xfff, 0x2000, WindowChangeKind::Unmap);
         assert_eq!(changes.refused.len(), 1);
         assert_eq!(changes.of(u64::MAX - 0xfff).len(), 1);
+    }
+
+    /// Review 100 finding 345: composed DAX pages built from public-base extents in
+    /// `ArenaId::DEFAULT` inside a tenant-owned window must charge the tenant's own arena (never
+    /// bypassing tenant memory caps via `ArenaId::DEFAULT`) and be evicted by arena relief when
+    /// the tenant's cap is reached.
+    #[test]
+    fn composed_pages_from_default_arena_charge_and_evict_in_window_arena() {
+        let ps = page_size();
+        let unit = ps / 4;
+        let host = crate::Host::process();
+        host.cache().relieve_pressure();
+        let tenant = crate::pages::Arena::new_on(host).unwrap();
+        let tenant_id = tenant.id();
+        // Cap the tenant arena to 4 host pages.
+        host.slabs().set_arena_cap(tenant_id, Some(4 * ps));
+
+        let public_src = TestSource::filled(1, 0x5a).source();
+
+        // Tenant window maps 1 sub-page of the public (`ArenaId::DEFAULT`) source at 10 distinct
+        // host-page offsets (requiring 10 composed slabs > 4-page tenant cap).
+        let (mut dax, window) =
+            Dax::with_stage_and_unit_on(host, tenant_id, 10 * ps, unit, None, false).unwrap();
+        // Snapshot default-arena usage after window creation (which lazily initializes the shared
+        // 1-page `Zeros` slab in `ArenaId::DEFAULT`).
+        let default_after_window = host.slabs().arena_bytes_in_use(ArenaId::DEFAULT);
+        for p in 0..10u64 {
+            dax.map(p * ps, &public_src, 0, unit);
+        }
+        for p in 0..10u64 {
+            futures::executor::block_on(window.fault(p * ps, Access::Read)).unwrap();
+            // SAFETY: `p * ps` was just faulted in `window`'s host memory.
+            let got = unsafe { *window.host_base().add((p * ps) as usize) };
+            assert_eq!(got, 0x5a, "host page {p}");
+        }
+        // Default arena must not have absorbed any composed slabs; tenant arena stayed within cap.
+        assert_eq!(
+            host.slabs().arena_bytes_in_use(ArenaId::DEFAULT),
+            default_after_window,
+            "composed slabs leaked into ArenaId::DEFAULT"
+        );
+        assert!(
+            host.slabs().arena_bytes_in_use(tenant_id) <= 4 * ps,
+            "tenant arena exceeded cap: {} > {}",
+            host.slabs().arena_bytes_in_use(tenant_id),
+            4 * ps
+        );
+        assert!(
+            host.slabs().arena_bytes_in_use(tenant_id) > 0,
+            "composed slabs were not charged to tenant arena"
+        );
+        host.slabs().set_arena_cap(tenant_id, None);
+        drop((dax, window, public_src, tenant));
+    }
+
+    /// Review 100 finding 346 (board 5662): when a governed host's total memory cap is transiently
+    /// full (`total_is_the_hosts == true`), faulting a composed DAX page waits for memory to return
+    /// rather than failing immediately with `ENOMEM` (which would abort the VM process).
+    #[test]
+    fn composed_fault_waits_when_host_total_memory_is_full() {
+        let ps = page_size();
+        let unit = ps / 4;
+        let host = crate::Host::process();
+        host.cache().relieve_pressure();
+        host.cache().set_total_is_the_hosts(true);
+        let src = TestSource::filled(1, 0x3c).source();
+        let (mut dax, window) =
+            Dax::with_stage_and_unit_on(host, ArenaId::DEFAULT, 2 * ps, unit, None, false).unwrap();
+        let blocker = host.slabs().alloc(ArenaId::DEFAULT, 1, crate::slabs::Wait::No).unwrap();
+        let used = host.slabs().arenas_bytes();
+        // Cap total memory at exactly `used`, so allocating 1 composed page blocks until `blocker`
+        // is dropped by another thread.
+        host.slabs().set_total_cap(Some(used));
+        dax.map(0, &src, 0, unit);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(blocker);
+        });
+        futures::executor::block_on(window.fault(0, Access::Read))
+            .expect("composed fault must wait for transient host memory instead of failing ENOMEM");
+        releaser.join().unwrap();
+        // SAFETY: Host page 0 was just faulted in `window`'s host memory.
+        assert_eq!(unsafe { *window.host_base() }, 0x3c);
+        host.slabs().set_total_cap(None);
+        host.cache().set_total_is_the_hosts(false);
+        drop((dax, window, src));
     }
 }

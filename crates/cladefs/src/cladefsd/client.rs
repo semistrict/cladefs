@@ -998,12 +998,11 @@ impl Client {
     /// last did, as it makes them (TASK-91.16).
     fn receive(&self, mut receiver: Receiver) {
         RECEIVING.set(true);
-        // What a reply to MAPPINGS holds at most, past a message's most otherwise: a mapping a page
-        // of its window (TASK-79.43).
+        // What a reply to MAPPINGS holds at most, past a message's most otherwise: a mapping per
+        // logical block of its window (TASK-79.43).
         let mappings = || {
-            let pages =
-                self.stage.get().map_or(0, |stage| stage.size() / crate::pages::page_size());
-            pages * MAPPING_BYTES
+            let blocks = self.stage.get().map_or(0, |stage| stage.size() / crate::dax::map_unit());
+            blocks * MAPPING_BYTES
         };
         let mut told = std::time::Instant::now();
         let mut told_private = told;

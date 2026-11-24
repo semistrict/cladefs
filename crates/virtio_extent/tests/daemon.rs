@@ -29,7 +29,7 @@ fn bounds() -> Bounds {
     Bounds {
         block_size: BLOCK as u64,
         max_extent: MAX_EXTENT,
-        map_alignment: cladefs::pages::page_size(),
+        map_alignment: BLOCK as u64,
         window: 0,
     }
 }
@@ -678,7 +678,8 @@ fn windows_holding_private_pages_take_no_snapshot() {
     let dir = daemon();
     let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
     let vm: Arc<dyn WindowVm> = Arc::new(FakeVm::default());
-    let config = Config { dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let config =
+        Config { capacity: 4 << 20, dax_window_size: Some(4 << 20), ..config(&dir, "store") };
     let mut device = Device::new(config, 1, vm, lost).unwrap();
     device.activate(device.features(), Arc::new(Counted::default())).unwrap();
     let mut space = [0u8; size_of::<ConfigSpace>()];
@@ -726,7 +727,8 @@ fn maps_many_in_one_request() {
     let dir = daemon();
     let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
     let vm = Arc::new(FakeVm::default());
-    let config = Config { dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let config =
+        Config { capacity: 4 << 20, dax_window_size: Some(4 << 20), ..config(&dir, "store") };
     let mut device = Device::new(config, 1, vm.clone(), lost).unwrap();
     device.activate(device.features(), Arc::new(Counted::default())).unwrap();
     let base = vm.host.load(Ordering::Relaxed) as *const u8;
@@ -865,7 +867,8 @@ fn windows_are_where_snapshots_had_them() {
     let dir = daemon();
     let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
     let vm = Arc::new(FakeVm::default());
-    let config = Config { dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let config =
+        Config { capacity: 4 << 20, dax_window_size: Some(4 << 20), ..config(&dir, "store") };
     let mut device = Device::new(config, 1, vm.clone(), lost.clone()).unwrap();
     let region = device.shm_region().unwrap();
     assert_eq!((region.id, region.guest_addr, region.len), (DAX_WINDOW_SHM_ID, 1 << 40, 4 << 20));
@@ -1060,4 +1063,93 @@ fn workers_refuse_an_unwatchable_queue_event() {
             panic!("the device started a queue whose event it cannot watch");
         }
     }
+}
+
+/// 4 KiB-aligned MAP, PRIVATE, UNMAP and snapshot through `virtio_extent::Device` work on both
+/// 4 KiB and 16 KiB hosts (advertising `map_alignment == BLOCK_SIZE` so 4 KiB guests enable DAX).
+#[test]
+fn block_aligned_dax_maps_and_private_work_on_any_host_page_size() {
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let vm = Arc::new(FakeVm::default());
+    let config =
+        Config { capacity: 4 << 20, dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let mut device = Device::new(config, 1, vm.clone(), lost).unwrap();
+    let mut space = [0u8; size_of::<ConfigSpace>()];
+    device.read_config(0, &mut space);
+    let cfg = ConfigSpace::read_from_bytes(&space).unwrap();
+    assert_eq!(u32::from_le(cfg.block_size), BLOCK as u32);
+    assert_eq!(u32::from_le(cfg.map_alignment), BLOCK as u32);
+
+    device.activate(device.features(), Arc::new(Counted::default())).unwrap();
+    let base = vm.host.load(Ordering::Relaxed) as *mut u8;
+    assert!(!base.is_null(), "DAX window slot was not mapped");
+    let cell = u64::from_le(cfg.cell);
+    let id = |sequence: u64| ExtentIdLe { cell: cell.to_le(), sequence: sequence.to_le() };
+
+    // Extent 1: 4 distinct 4 KiB blocks (0x10, 0x11, 0x12, 0x13); Extent 2: 1 block (0x22).
+    let mut ext1 = Vec::with_capacity(4 * BLOCK);
+    for b in 0..4u8 {
+        ext1.extend(std::iter::repeat_n(0x10 + b, BLOCK));
+    }
+    let w1 = bytes(
+        VIRTIO_EXTENT_T_WRITE,
+        0,
+        Some(IoArgs { id: id(1), offset: 0, len: (ext1.len() as u32).to_le(), root_len: 0 }),
+        &ext1,
+    );
+    assert_eq!(serve_with(&device, &w1, RESPONSE).1, 0);
+    let w2 = bytes(
+        VIRTIO_EXTENT_T_WRITE,
+        0,
+        Some(IoArgs { id: id(2), offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 }),
+        &vec![0x22u8; BLOCK],
+    );
+    assert_eq!(serve_with(&device, &w2, RESPONSE).1, 0);
+    let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
+    assert_eq!(serve_with(&device, &commit, RESPONSE).1, 0);
+
+    // Map 4 KiB at unaligned extent offset BLOCK into window offset 0, and 4 KiB at extent offset
+    // 3*BLOCK into window offset BLOCK (same 16 KiB host page on arm64).
+    let map = |seq: u64, ext_off: u64, win_off: u64, len: u64| {
+        let args = MapArgs {
+            id: id(seq),
+            offset: ext_off.to_le(),
+            len: len.to_le(),
+            window_offset: win_off.to_le(),
+        };
+        bytes(VIRTIO_EXTENT_T_MAP, 0, Some(args), &[])
+    };
+    assert_eq!(serve_with(&device, &map(1, BLOCK as u64, 0, BLOCK as u64), RESPONSE).1, 0);
+    assert_eq!(
+        serve_with(&device, &map(1, (3 * BLOCK) as u64, BLOCK as u64, BLOCK as u64), RESPONSE).1,
+        0
+    );
+
+    // SAFETY: Within the mapped DAX window of 4 MiB, served by the activated device.
+    let read_block = |blk: usize| unsafe { base.add(blk * BLOCK).read_volatile() };
+    let write_block = |blk: usize, val: u8| unsafe { base.add(blk * BLOCK).write_volatile(val) };
+    assert_eq!((read_block(0), read_block(1)), (0x11, 0x13));
+
+    // Make block 0 private and dirty it; remap sibling block 1 to extent 2 (0x22) and verify
+    // block 0 retains its dirty byte while block 1 reflects the new mapping.
+    let priv0 = bytes(
+        VIRTIO_EXTENT_T_PRIVATE,
+        0,
+        Some(UnmapArgs { window_offset: 0, len: (BLOCK as u64).to_le() }),
+        &[],
+    );
+    assert_eq!(serve_with(&device, &priv0, RESPONSE).1, 0);
+    write_block(0, 0xaa);
+    assert_eq!(serve_with(&device, &map(2, 0, BLOCK as u64, BLOCK as u64), RESPONSE).1, 0);
+    assert_eq!((read_block(0), read_block(1)), (0xaa, 0x22));
+
+    // Rebind block 0 to extent 2 -> no private pages left -> freeze + snapshot succeeds.
+    assert_eq!(serve_with(&device, &map(2, 0, 0, BLOCK as u64), RESPONSE).1, 0);
+    assert_eq!((read_block(0), read_block(1)), (0x22, 0x22));
+    let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
+    assert_eq!(serve_with(&device, &freeze, RESPONSE).1, 0);
+    device.take_snapshot(|| {}).unwrap();
+    let state = device.state();
+    assert_eq!(state.mappings.len(), 2);
 }

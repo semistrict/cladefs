@@ -23,16 +23,16 @@
      fn origin(&self) -> Origin {
 --- a/crates/cladefs/src/dax.rs
 +++ b/crates/cladefs/src/dax.rs
-@@ -1089,11 +1089,9 @@
+@@ -1116,11 +1116,9 @@
          private: Private,
-     ) -> Vec<Arc<dyn Source>> {
+     ) -> (Vec<PartSlab>, Vec<Arc<dyn Source>>) {
          let end = offset + len;
 -        // Whether the window mapped it before, whatever of it this replaces: the guest's MAP of
 -        // an extent over its own range tells it nothing (TASK-602).
 -        let first = !state.by_source.contains_key(&source_identity(source));
-         self.unmap_ptes(state, offset, end, private);
+         let dropped = self.unmap_ptes(state, offset, end, private, false);
          let forgotten = state.forget(offset, end);
 +        let first = !state.by_source.contains_key(&source_identity(source));
-         state.insert(offset, Mapping { end, source: source.clone(), page });
+         state.insert(offset, Mapping { end, source: source.clone(), source_offset });
          if first {
              source.mapped(self);

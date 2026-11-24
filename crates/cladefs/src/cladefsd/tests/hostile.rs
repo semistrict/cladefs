@@ -144,7 +144,7 @@ const WAIT: Duration = Duration::from_secs(60);
 /// flight, as the protocol bounds it: its requests' stream data, what it queued for it besides,
 /// and as many mappings as a reply to `MAPPINGS` holds of its window (TASK-79.16, TASK-79.43).
 fn credit(window: u64) -> u64 {
-    MAX_STREAM_BYTES + QUEUED_CREDIT + window / page_size() * MAPPING_BYTES
+    MAX_STREAM_BYTES + QUEUED_CREDIT + window / crate::dax::map_unit() * MAPPING_BYTES
 }
 
 /// A word of a message mallory says: as it is, or naming a cell, as the case has it.

@@ -2243,17 +2243,7 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
     memory.commit().unwrap();
     let (one, two) = (dir.path().join("one"), dir.path().join("two"));
     let version = memory.make_version().unwrap();
-    let page = memory.page_size();
     memory.close().unwrap();
-    // A host of pages larger than the cell's (arm64's 16 KiB) restores no window: refused as it is
-    // made (memory_cell's window_fits_host), not at the guest's first fault (board 5230).
-    if ps > page {
-        let memory_cell = MemoryCell::open_forked(&socket, &one, version, size).unwrap();
-        // SAFETY: As restore's below; the window is refused, mapping nothing.
-        let refused = unsafe { memory_cell.window(memory_noreserve(PAGES as usize), size, None) };
-        assert_eq!(refused.unwrap_err().errno(), Some(crate::Errno::EINVAL));
-        return;
-    }
 
     let restore = |path: &Path| {
         let memory_cell = MemoryCell::open_forked(&socket, path, version, size).unwrap();

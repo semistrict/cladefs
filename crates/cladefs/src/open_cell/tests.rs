@@ -5,7 +5,7 @@
 use super::*;
 use crate::cache;
 use crate::dax::{Access, SecondStage};
-use crate::pages::PhysLocation;
+use crate::pages::{PhysLocation, page_size};
 use futures::executor::block_on;
 use std::collections::HashMap;
 use std::sync::Mutex;
