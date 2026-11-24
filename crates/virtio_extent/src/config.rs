@@ -212,4 +212,22 @@ mod tests {
         let private = Config { dax_private_max_bytes: Some(page), ..none };
         assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMaxBytes(page)));
     }
+
+    /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
+    /// otherwise, whatever its size: the window is address space, as large as the data, and its
+    /// private pages are memory, the VM process's. Half a 64 GiB window's pages, as TASK-164.11's
+    /// default had it, would have let a VM hold 32 GiB of them. A window smaller than the default
+    /// holds as many as it has pages; one of a page, one. Configured, its bytes are as many pages
+    /// (TASK-502).
+    #[test]
+    fn a_windows_private_pages_are_not_its_size() {
+        let page = cladefs::pages::page_size();
+        let gib = (1 << 30) / page;
+        assert_eq!(private_max(64 << 30, None), gib);
+        assert_eq!(private_max(2 << 30, None), gib);
+        assert_eq!(private_max(512 << 20, None), (512 << 20) / page);
+        assert_eq!(private_max(64 << 30, Some(16 * page)), 16);
+        assert_eq!(private_max(64 << 30, Some(4 << 30)), 4 * gib);
+        assert_eq!(private_max(page, None), 1);
+    }
 }

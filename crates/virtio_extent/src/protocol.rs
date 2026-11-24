@@ -477,6 +477,21 @@ mod tests {
 
     use super::*;
 
+    /// cladefs TASK-363: an Unsafe device's commits and writes' commits are ordered, not uploaded,
+    /// and nothing else of their flags, nor any other request's, changes.
+    #[test]
+    fn unsafe_requests_are_ordered_only() {
+        let commit = VIRTIO_EXTENT_COMMIT_UPLOADED | VIRTIO_EXTENT_COMMIT_ROOT;
+        assert_eq!(ordered_only(VIRTIO_EXTENT_T_COMMIT, commit), VIRTIO_EXTENT_COMMIT_ROOT);
+        let write =
+            VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED | VIRTIO_EXTENT_WRITE_ROOT;
+        assert_eq!(
+            ordered_only(VIRTIO_EXTENT_T_WRITE, write),
+            VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_ROOT
+        );
+        assert_eq!(ordered_only(VIRTIO_EXTENT_T_READ, u32::MAX), u32::MAX);
+    }
+
     /// A WRITE's flags: an upload and a root only with a commit, nothing unknown.
     #[test]
     fn writes_barriers() {
@@ -512,6 +527,42 @@ mod tests {
         assert_eq!(size_of::<UnmapArgs>(), 16);
         assert_eq!(size_of::<Info>(), 48);
         assert_eq!(size_of::<ResizedArgs>(), 8);
+    }
+
+    /// cladefs TASK-141.3: a driver activating the device having taken fewer features than it
+    /// offers, or others, is refused, naming them; one taking every one isn't. Before, it was
+    /// served, as negotiation has it, its INFOs short of the cell without F_FREEZE.
+    #[test]
+    fn drivers_take_every_feature_offered() {
+        let offered = (1u64 << 32)
+            | (1u64 << 29)
+            | (1 << VIRTIO_EXTENT_F_FREEZE)
+            | (1 << VIRTIO_EXTENT_F_DAX);
+        check_acked(offered, offered).unwrap();
+        let fewer = offered & !(1 << VIRTIO_EXTENT_F_FREEZE);
+        assert_eq!(
+            check_acked(offered, fewer).unwrap_err().to_string(),
+            format!(
+                "the driver took features 0x120000001 of the 0x120000011 offered, where a driver \
+                 of protocol version {VIRTIO_EXTENT_VERSION} takes every one: it is of another"
+            )
+        );
+        // One the device didn't offer: F_MAP_MANY, which this offer leaves out.
+        assert!(check_acked(offered, offered | (1 << VIRTIO_EXTENT_F_MAP_MANY)).is_err());
+    }
+
+    /// cladefs TASK-141.3: a snapshot's device of another protocol version is refused, naming both.
+    #[test]
+    fn snapshots_of_other_protocols_are_refused() {
+        check_version(VIRTIO_EXTENT_VERSION).unwrap();
+        let other = VIRTIO_EXTENT_VERSION + 1;
+        assert_eq!(
+            check_version(other).unwrap_err().to_string(),
+            format!(
+                "The snapshot's extent device is of protocol version {other}, this VMM's \
+                 {VIRTIO_EXTENT_VERSION}: its guest's driver is of another"
+            )
+        );
     }
 
     /// A driver reads the configuration at any offset and length: what is past its end reads as

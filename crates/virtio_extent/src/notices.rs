@@ -196,6 +196,18 @@ impl Notices {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A configuration change interrupt that counts how often it is raised.
+    #[derive(Default)]
+    pub(crate) struct Counted(pub(crate) AtomicUsize);
+
+    impl ConfigInterrupt for Counted {
+        fn config_changed(&self) -> Result<(), BoxError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
 
     /// cladefs TASK-79.41: the guest's answer to a shrink it was asked to take, once a newer shrink
     /// was asked, is that of a shrink no longer asked: the newer stays asked, and the capacity is
@@ -216,6 +228,37 @@ pub(crate) mod tests {
         resizing.changed(4, false);
         resizing.answered(2, true);
         assert_eq!(known(&resizing), (4, 0));
+    }
+
+    /// The guest is told of a capacity's changes once the driver activates the device.
+    #[test]
+    fn capacities_changed_raise_the_interrupt_once_activated() {
+        let resizing = Resizing::default();
+        resizing.changed(8, false);
+        let interrupt = Arc::new(Counted::default());
+        resizing.set_interrupt(Some(interrupt.clone()));
+        resizing.changed(6, true);
+        resizing.answered(6, false);
+        assert_eq!(interrupt.0.load(Ordering::Relaxed), 1);
+        assert_eq!((resizing.capacity(), resizing.asked()), (8, 0));
+    }
+
+    /// cladefs TASK-111.4: the daemon's asks for the guest's stats reach the guest, the
+    /// configuration's `stats_asked` and a configuration change, while the driver takes asks; while
+    /// it doesn't, none is asked, for the cell to answer at once.
+    #[test]
+    fn stats_are_asked_of_guests_that_take_asks() {
+        let asks = StatsAsks::default();
+        assert!(!asks.ask(1));
+        assert_eq!(asks.latest(), 0);
+        let interrupt = Arc::new(Counted::default());
+        asks.set_interrupt(Some(interrupt.clone()));
+        assert!(asks.ask(2));
+        assert_eq!(asks.latest(), 2);
+        assert_eq!(interrupt.0.load(Ordering::Relaxed), 1);
+        asks.set_interrupt(None);
+        assert!(!asks.ask(3));
+        assert_eq!(asks.latest(), 2);
     }
 }
 

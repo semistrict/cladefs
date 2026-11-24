@@ -628,12 +628,140 @@ mod tests {
     use futures::executor::block_on;
     use std::sync::Mutex;
 
+    #[test]
+    fn overrides_name_keys_in_the_ring_or_in_other_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let own = "projects/tenant.example:own/locations/europe-west1/keyRings/r/cryptoKeys/k";
+        std::fs::write(&keys, format!("7 {own}\n8 their-key\n")).unwrap();
+        let url = format!("gcp-kms://{RING}?key=t-{{tenant}}&keys={}", keys.display());
+        let (ring, names) = parse(&url, Origin::Host).unwrap();
+        assert_eq!(qualified(&ring, &names.of(7)), own);
+        assert_eq!(qualified(&ring, &names.of(8)), format!("{RING}/cryptoKeys/their-key"));
+        assert_eq!(qualified(&ring, &names.of(9)), format!("{RING}/cryptoKeys/t-9"));
+    }
+
+    #[test]
+    fn urls_naming_no_key_ring_or_no_keys_are_refused() {
+        let usage = "gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]";
+        let refused = |url: &str| parse(url, Origin::Host).unwrap_err();
+        let url = "gcp-kms://projects/p/locations/l?key=t-{tenant}";
+        assert_eq!(refused(url), format!("{url:?} names no key ring: {usage}"));
+        let url = "gcp-kms://projects/P/locations/l/keyRings/r?key=t-{tenant}";
+        assert_eq!(refused(url), format!("{url:?}: no project \"P\""));
+        let url = "gcp-kms://projects/p/locations/l/keyRings/r%2f?key=t-{tenant}";
+        assert_eq!(
+            refused(url),
+            format!("{url:?}: no key ring \"r%2f\": an ID is 1 to 63 letters, digits, _ and -")
+        );
+        let url = format!("gcp-kms://{RING}?key=t-{{tenant}}&region=x");
+        assert_eq!(refused(&url), format!("{url:?}: no parameter \"region\": {usage}"));
+        let url = format!("gcp-kms://{RING}?key=t/{{tenant}}");
+        assert_eq!(
+            refused(&url),
+            format!(
+                "{url:?}: the key template, \"t/fzzzzzzzzzzzz\", names no key: an ID is 1 to \
+                 63 letters, digits, _ and -"
+            )
+        );
+        let url = format!("gcp-kms://{RING}?key={}{{tenant}}", "k".repeat(51));
+        assert!(refused(&url).contains("an ID is 1 to 63"), "{}", refused(&url));
+        let url = format!("gcp-kms://{RING}");
+        assert_eq!(
+            refused(&url),
+            format!("{url:?}: the KMS URL names no key template: key=...{{tenant}}...")
+        );
+    }
+
+    #[test]
+    fn overrides_naming_no_key_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        std::fs::write(&keys, "a projects/p/locations/l/keyRings/r\n").unwrap();
+        let url = format!("gcp-kms://{RING}?key=t-{{tenant}}&keys={}", keys.display());
+        assert_eq!(
+            parse(&url, Origin::Host).unwrap_err(),
+            format!(
+                "{url:?}: the key overrides' line 1: tenant a's key, \
+                 \"projects/p/locations/l/keyRings/r\", names no key: \
+                 projects/P/locations/L/keyRings/R/cryptoKeys/K"
+            )
+        );
+    }
+
+    #[test]
+    fn tenants_are_bound_as_associated_data() {
+        assert_eq!(aad(42), b"cladefs-tenant:1a");
+        // RFC 3720's check value of CRC32C.
+        assert_eq!(crc32c(b"123456789"), 0xe306_9283);
+    }
+
     /// The key the bodies Cloud KMS answered with name (TASK-411.18's notes).
     const KEY: &str = "projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test/cryptoKeys/fxdax-probe";
 
     fn mapped(op: Op, code: u16, body: &str) -> (String, bool) {
         let Failed { error, transient, .. } = refusal(9, KEY, op, code, body.as_bytes());
         (error.to_string(), transient)
+    }
+
+    /// Cloud KMS's refusals, as it answered them (2026-11-15), and what each means. Its refusals
+    /// of a key version not enabled are `versions_not_enabled_refuse_their_keys_alone`'s (board
+    /// 8479), and of a permission `denials_of_the_hosts_configuration_are_not_revocations`'s.
+    #[test]
+    fn refusals_are_mapped_as_cloud_kms_answers_them() {
+        let not_found = format!(
+            r#"{{"error": {{"code": 404, "message": "CryptoKey {KEY} not found.", "status": "NOT_FOUND"}}}}"#
+        );
+        assert_eq!(
+            mapped(Op::Encrypt, 404, &not_found),
+            ("tenant 9: no KEK in the KMS".into(), false)
+        );
+        assert_eq!(
+            mapped(Op::Decrypt, 404, &not_found),
+            ("tenant 9: no KEK in the KMS".into(), false)
+        );
+        let project = r#"{"error": {"code": 404, "message": "Project 'projects/cladefs-no-such-project-0' not found.", "status": "NOT_FOUND"}}"#;
+        assert_eq!(
+            mapped(Op::Encrypt, 404, project),
+            (
+                format!(
+                    "tenant 9: the KMS failed: Google Cloud KMS, encrypt with {KEY}: HTTP 404, \
+                     NOT_FOUND: Project 'projects/cladefs-no-such-project-0' not found."
+                ),
+                false
+            )
+        );
+        let unauthentic = "tenant 9: not authentic: a wrapped key, refused by the KMS";
+        for body in [
+            r#"{"error": {"code": 400, "message": "Decryption failed.", "status": "INVALID_ARGUMENT"}}"#,
+            r#"{"error": {"code": 400, "message": "Decryption failed: the ciphertext is invalid.", "status": "INVALID_ARGUMENT"}}"#,
+            r#"{"error": {"code": 400, "message": "Decryption failed: verify that 'name' refers to the correct CryptoKey.", "status": "INVALID_ARGUMENT", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "INDECIPHERABLE_CIPHERTEXT_FOR_CRYPTOKEY", "domain": "cloudkms.googleapis.com"}]}}"#,
+        ] {
+            assert_eq!(mapped(Op::Decrypt, 400, body), (unauthentic.into(), false), "{body}");
+        }
+        let checksum = r#"{"error": {"code": 400, "message": "The checksum in field ciphertext_crc32c did not match the data in field ciphertext.", "status": "INVALID_ARGUMENT", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "INVALID_CHECKSUM", "domain": "cloudkms.googleapis.com", "metadata": {"data_field": "ciphertext", "checksum_field": "ciphertext_crc32c"}}]}}"#;
+        assert_eq!(
+            mapped(Op::Decrypt, 400, checksum),
+            (
+                format!(
+                    "tenant 9: the KMS failed: Google Cloud KMS, decrypt with {KEY}: HTTP 400, \
+                     INVALID_ARGUMENT: The checksum in field ciphertext_crc32c did not match the \
+                     data in field ciphertext."
+                ),
+                true
+            )
+        );
+        let unauthenticated = r#"{"error": {"code": 401, "message": "Request had invalid authentication credentials.", "status": "UNAUTHENTICATED"}}"#;
+        assert_eq!(
+            mapped(Op::Encrypt, 401, unauthenticated),
+            (
+                format!(
+                    "tenant 9: the KMS failed: Google Cloud KMS, encrypt with {KEY}: HTTP 401, \
+                     UNAUTHENTICATED: Request had invalid authentication credentials."
+                ),
+                false
+            )
+        );
     }
 
     /// The statuses `google.rpc.Code` has, and none.

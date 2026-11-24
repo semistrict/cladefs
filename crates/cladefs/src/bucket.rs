@@ -1822,6 +1822,95 @@ mod tests {
         }
     }
 
+    /// An open cell's closed segments are the objects of its cell in the bucket, byte for byte, as
+    /// are its extents stored on their own (doc-7, decision 1): the uploader puts its files; and
+    /// once the bucket has acknowledged them, they leave the open cell whole, into the host's
+    /// cache, as those objects, which the open cell's reads read there with the bucket's gone
+    /// (TASK-165.8).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploaded_segments_are_the_cells_files() {
+        use bucket_cell::layout::{self, Footer};
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Arc::new(InMemory::new());
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), "").unrouted());
+        let cache =
+            Arc::new(bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
+        let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
+        let open_cell =
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
+                .await
+                .unwrap();
+        let cell = open_cell.cell();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        write(&open_cell, 2, &pattern(2, 4 << 20)).await;
+        open_cell.commit(Some(b"one")).await.unwrap();
+        write(&open_cell, 3, &pattern(3, 2 * BLOCK)).await;
+        open_cell.commit(Some(b"two")).await.unwrap();
+
+        // The open cell's files of `kind`, by their contents.
+        let files = |kind: &str| -> Vec<Vec<u8>> {
+            let path =
+                dir.path().join("store").join(kind).join(base32_id::Padded(cell.id).to_string());
+            let mut files: Vec<_> = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+                .collect();
+            files.sort();
+            files
+        };
+        // The bucket's objects under `prefix`.
+        let objects = |prefix: String| -> Vec<Vec<u8>> {
+            futures::executor::block_on(async {
+                let listed = bucket_cell::Bucket::list(&*bucket, &prefix).await.unwrap();
+                let mut objects = Vec::new();
+                for meta in listed {
+                    let object = bucket_cell::Bucket::get(&*bucket, &meta.key).await.unwrap();
+                    objects.push(object.bytes);
+                }
+                objects
+            })
+        };
+        // The cell's segments but its writer's fence, which holds no commit.
+        let mut segments: Vec<_> = objects(layout::segments(cell))
+            .into_iter()
+            .filter(|bytes| !layout::footer::<Footer>(bytes).unwrap().contents.commits.is_empty())
+            .collect();
+        segments.sort();
+        assert_eq!(segments.len(), 2);
+        let mut own = objects(layout::extents(cell));
+        own.sort();
+        assert_eq!(own.len(), 1);
+        assert_eq!((files("segments"), files("extents")), (Vec::new(), Vec::new()));
+        assert_eq!(
+            uploaded(&bucket, cell),
+            (
+                vec![(1, pattern(1, BLOCK)), (2, pattern(2, 4 << 20)), (3, pattern(3, 2 * BLOCK))],
+                Some(b"two".to_vec())
+            )
+        );
+        futures::executor::block_on(async {
+            use futures::StreamExt as _;
+            use object_store::{ObjectStore as _, ObjectStoreExt as _};
+            for prefix in ["segments", "extents"] {
+                let prefix = object_store::path::Path::from(prefix);
+                for meta in memory.list(Some(&prefix)).collect::<Vec<_>>().await {
+                    memory.delete(&meta.unwrap().location).await.unwrap();
+                }
+            }
+        });
+        let written =
+            [(1, pattern(1, BLOCK)), (2, pattern(2, 4 << 20)), (3, pattern(3, 2 * BLOCK))];
+        for (sequence, data) in written {
+            let extent = ExtentId { cell: cell.id, sequence };
+            let mut read = vec![0; data.len()];
+            open_cell
+                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
+                .await
+                .unwrap();
+            assert!(read == data, "extent {sequence} reads other data");
+        }
+    }
+
     /// cladefs: a byte the host's disk damaged in a file the uploader puts as it is, a sealed
     /// extent's own, fails the upload, and the commit waiting for it, rather than going to object
     /// storage under the CRC it fails (TASK-153.11).
@@ -1975,6 +2064,28 @@ mod tests {
         let made = open_cell.make_version(None).await.err().and_then(|err| err.errno());
         assert_eq!(made, Some(EROFS));
         assert_eq!(open_cell.set_capacity(2 << 30).await, Err(EROFS));
+    }
+
+    /// TASK-570: a cell names [`bucket_cell::layout::MAX_VERSIONS`] versions at most (doc-18):
+    /// one more, with no window, fails with `EMLINK`, making none, as every acknowledgement after
+    /// would write it into the head; one with a window, which drops the oldest, is made.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cells_make_so_many_versions_at_most() {
+        let most = bucket_cell::layout::MAX_VERSIONS;
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        write(&open_cell, 1, &pattern(1, BLOCK)).await;
+        open_cell.commit(None).await.unwrap();
+        for _ in 0..most {
+            open_cell.make_version(None).await.unwrap();
+        }
+        let refused = open_cell.make_version(None).await.err().and_then(|err| err.errno());
+        assert_eq!(refused, Some(crate::Errno::EMLINK));
+        assert_eq!(open_cell.versions().await.len(), most);
+        open_cell.make_version(Some(1)).await.unwrap();
     }
 
     /// TASK-610: what this process made versions of it keeps for versions their cells name alone:
@@ -3277,6 +3388,45 @@ mod tests {
         OpenCell::take(&path, 1 << 30, cell, None).await.unwrap();
         let first = reopened(&path, idle()).await.unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
+    }
+
+    /// TASK-160.10: an open cell at a version refuses all that would change what it holds, with
+    /// `EROFS`, whoever asks: writes, frees, commits, a resize, a writer taking it over. What
+    /// changes none of its extents it does: it forks, and is made public.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copies_of_versions_refuse_what_would_change_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        let source = kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        let extent = write(&source, 1, &pattern(1, BLOCK)).await;
+        source.commit(Some(b"root")).await.unwrap();
+        let path = dir.path().join("copy");
+        source.uploaded_version_at(&path).await.unwrap();
+        drop(source);
+
+        let version = reopened(&path, idle()).await.unwrap();
+        assert_eq!(version.access().role, crate::CellRole::Version);
+        let capacity = version.info().unwrap().capacity;
+        let own = ExtentId { cell: version.cell().id, sequence: 2 };
+        let refused = [
+            ("set_capacity", version.set_capacity(2 * capacity).await),
+            ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])]).await),
+            ("free", version.free(extent)),
+            ("commit", version.commit(Some(b"changed")).await),
+            ("commit_ordered", version.commit_ordered(None).await),
+        ];
+        for (what, result) in refused {
+            assert_eq!(result, Err(crate::Errno::EROFS), "{what}");
+        }
+        assert_eq!(version.info().unwrap().capacity, capacity);
+        assert_eq!(version.root().unwrap(), b"root");
+        version
+            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell()))
+            .await
+            .unwrap();
+        version.make_public().unwrap();
     }
 
     /// TASK-395.7: a version forks into a cell of another tenant's only while shared: refused with

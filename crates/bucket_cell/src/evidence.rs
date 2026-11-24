@@ -301,6 +301,22 @@ mod tests {
         assert_eq!(read, Some(Read::default()));
     }
 
+    /// A prediction is every unit any recording read, each at its earliest first read, in that
+    /// order.
+    #[test]
+    fn predictions_take_each_unit_at_its_earliest_read() {
+        let extent = ExtentId { cell: 3, sequence: 1 };
+        let other = ExtentId { cell: 3, sequence: 2 };
+        let unit = |extent, mib, first| Unit { extent, mib, first };
+        let recordings = vec![
+            vec![unit(extent, 0, 30), unit(other, 1, 10)],
+            vec![unit(extent, 0, 5), unit(extent, 1, 40)],
+        ];
+        let predicted = Prediction::of(&recordings);
+        let units = vec![unit(extent, 0, 5), unit(other, 1, 10), unit(extent, 1, 40)];
+        assert_eq!(predicted, Prediction { units, recordings: 2 });
+    }
+
     /// The collector deletes all but each tenant's newest [`KEPT`] recordings of each version, every
     /// recording of a version the head names no more, and every one [`KEPT_FOR`] old.
     #[test]

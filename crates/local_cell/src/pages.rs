@@ -1361,6 +1361,28 @@ mod tests {
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
     }
 
+    /// Sized to a governor's room, the cache's bounds are a tenth, a fifth and all of it, the first
+    /// two none below what it was made with (TASK-433.8); sized down again, those two go back to
+    /// them, and what it holds at most is the room, though below what it was made with (board
+    /// 6001).
+    #[test]
+    fn caches_size_to_the_room_a_governor_leaves() {
+        let cache = PageCache::without_flusher(Options::default());
+        let made = Options::default();
+        cache.size_to(4 << 30);
+        let sized = cache.options();
+        assert_eq!(
+            (sized.background, sized.hard, sized.most, sized.expire),
+            ((4 << 30) / 10, (4 << 30) / 5, 4 << 30, made.expire)
+        );
+        cache.size_to(64 << 20);
+        let sized = cache.options();
+        assert_eq!(
+            (sized.background, sized.hard, sized.most),
+            (made.background, made.hard, 64 << 20)
+        );
+    }
+
     /// A range written behind is written back by the flusher, ahead of any threshold or expiry,
     /// waiting for none of it: the rest of the file stays dirty (TASK-433.8).
     #[test]

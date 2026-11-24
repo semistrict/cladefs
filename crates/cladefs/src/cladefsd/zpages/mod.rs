@@ -147,3 +147,13 @@ fn escape(text: &str) -> String {
     }
     escaped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_is_escaped() {
+        assert_eq!(escape("<a href=\"x\">&'"), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
+    }
+}

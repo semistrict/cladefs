@@ -608,6 +608,46 @@ impl ObjectStore for SeededBackend {
 mod tests {
     use super::*;
 
+    /// A fault's words say it, and what it says them as reads back as it.
+    #[test]
+    fn faults_say_their_words() {
+        let fault = Fault::parse("latency-ms=300 failing=no-space").unwrap();
+        let full = Fault {
+            latency: Duration::from_millis(300),
+            failing: Failing::NoSpace,
+            ..Fault::default()
+        };
+        assert_eq!(fault, full);
+        assert_eq!(fault.words(), "latency-ms=300 failing=no-space rewrite-every-ms=0");
+        // cladefs: GCS's rate of an object's writes (TASK-690).
+        let gcs = Fault::parse("rewrite-every-ms=1000").unwrap();
+        assert_eq!(gcs, Fault { rewrite_every: Duration::from_secs(1), ..Fault::default() });
+        assert_eq!(Fault::parse(&gcs.words()), Ok(gcs));
+        assert_eq!(Fault::parse(&fault.words()), Ok(fault));
+        assert_eq!(Fault::parse(" \n"), Ok(Fault::default()));
+        assert_eq!(
+            Fault::parse("failing=unavailable"),
+            Ok(Fault { failing: Failing::Unavailable, ..Fault::default() })
+        );
+        // cladefs: each way of failing reads back as it is said (board 5736).
+        for (failing, name) in Failing::NAMES {
+            let parsed = Fault::parse(&format!("failing={name}")).unwrap();
+            assert_eq!((parsed.failing, parsed.failing.name()), (failing, name));
+        }
+        assert_eq!(
+            Fault::parse("failing=sometimes"),
+            Err("failing=sometimes: one of not, no-space, unavailable, unauthenticated, forbidden, \
+                 expired-token"
+                .to_owned())
+        );
+        assert_eq!(
+            Fault::parse("latency=3"),
+            Err("latency=3: latency-ms=MILLISECONDS, failing=HOW or rewrite-every-ms=MILLISECONDS"
+                .to_owned())
+        );
+        assert_eq!(Fault::parse("latency-ms=soon"), Err("latency-ms=soon is no count".to_owned()));
+    }
+
     /// TASK-690: a bucket as GCS refuses a write of an object within a second of the last one
     /// answered, `429 Too Many Requests`, and takes it after; writes of other objects meanwhile
     /// it takes.

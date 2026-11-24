@@ -1645,6 +1645,92 @@ pub(crate) mod tests {
         unsafe { *window.host_base().add((page * page_size()) as usize) }
     }
 
+    /// Unmapping part of a mapping leaves what is around it.
+    #[test]
+    fn ranges_are_unmapped_where_they_are() {
+        let ps = page_size();
+        let pager = TestSource::paged(4);
+        let stage = Arc::new(Recorded::default());
+        let (mut dax, window) = Dax::new(4 * ps, Some(stage.clone())).unwrap();
+        dax.map(0, &pager.source(), 0, 4 * ps);
+        assert_eq!(stage.pages(), Vec::<u64>::new());
+        pager.supply(2, 7);
+        futures::executor::block_on(window.fault(2 * ps, Access::Read)).unwrap();
+        assert_eq!(stage.pages(), [2]);
+
+        dax.unmap(2 * ps, ps);
+        assert_eq!(stage.pages(), Vec::<u64>::new());
+        assert!(!window.is_mapped(2 * ps) && window.is_mapped(ps) && window.is_mapped(3 * ps));
+        assert_eq!(
+            dax.mappings(),
+            [pager.mapping_at(0, 0, 2 * ps), pager.mapping_at(3 * ps, 3, ps)]
+        );
+    }
+
+    /// The windows' gauges (`live`) follow their mappings, split and unmapped, and their pages,
+    /// mapped and unmapped, and drop to nothing as the windows go; cladefs: and so do each window's
+    /// own (`DaxWindow::gauges`, TASK-111.5), which add up to them, held past their window or not.
+    /// Each test runs in a process of its own (nextest), whose windows are its own.
+    #[test]
+    fn live_gauges_follow_the_windows_mappings_and_pages() {
+        let ps = page_size();
+        let gauges = |mappings, mapped_pages: u64, pages| Live {
+            mappings,
+            mapped_bytes: mapped_pages * ps,
+            pages,
+        };
+        let (source, other) = (TestSource::numbered(4, 1), TestSource::paged(2));
+        let (mut dax, window) = Dax::new(6 * ps, Some(Arc::new(Recorded::default()))).unwrap();
+        let (mut second, second_window) =
+            Dax::new(2 * ps, Some(Arc::new(Recorded::default()))).unwrap();
+        assert_eq!(live(), Live::default());
+        assert_eq!(window.gauges().live(), Live::default());
+
+        dax.map(0, &source.source(), 0, 4 * ps);
+        dax.map(4 * ps, &other.source(), 0, 2 * ps);
+        second.map(0, &TestSource::numbered(2, 5).source(), 0, 2 * ps);
+        assert_eq!(live(), gauges(3, 8, 6));
+        assert_eq!(window.gauges().live(), gauges(2, 6, 4));
+        assert_eq!(second_window.gauges().live(), gauges(1, 2, 2));
+
+        other.supply(1, 3);
+        futures::executor::block_on(window.fault(5 * ps, Access::Read)).unwrap();
+        assert_eq!(live(), gauges(3, 8, 7));
+        assert_eq!(window.gauges().live(), gauges(2, 6, 5));
+
+        // The first mapping split in two around the page unmapped.
+        dax.unmap(ps, ps);
+        assert_eq!(live(), gauges(4, 7, 6));
+        assert_eq!(window.gauges().live(), gauges(3, 5, 4));
+        assert_eq!(second_window.gauges().live(), gauges(1, 2, 2));
+
+        let held = second_window.gauges();
+        drop((second, second_window));
+        assert_eq!(live(), gauges(3, 5, 4));
+        assert_eq!(held.live(), Live::default());
+        drop((dax, window));
+        assert_eq!(live(), Live::default());
+    }
+
+    /// A source's pages unmapped by it, as it evicts them, are unmapped where a window maps them
+    /// alone: the other pages, and other sources', stay mapped.
+    #[test]
+    fn a_sources_evicted_pages_are_unmapped_from_the_window() {
+        let ps = page_size();
+        let (source, other) = (TestSource::numbered(4, 1), TestSource::numbered(2, 9));
+        let stage = Arc::new(Recorded::default());
+        let (mut dax, _window) = Dax::new(6 * ps, Some(stage.clone())).unwrap();
+        dax.map(0, &source.source(), 0, 4 * ps);
+        dax.map(4 * ps, &other.source(), 0, 2 * ps);
+        let evicted: Vec<PhysLocation> = {
+            let mut evicted = Vec::new();
+            source.each_present(1..3, &mut |present| evicted.push(present.at));
+            evicted
+        };
+        dax.window.unmap_pages_of(source_identity(&source), &|at| evicted.contains(&at));
+        assert_eq!(stage.pages(), [0, 3, 4, 5]);
+    }
+
     /// TASK-234: a window rebound from one source to another, the same pages of the same extent
     /// moved, maps nothing of the first, the second's pages as they are faulted on, and its
     /// mappings are the second's: pages loaded before it read the first's bytes, after it the
@@ -1671,6 +1757,23 @@ pub(crate) mod tests {
         }
         dax.window.rebind(&old.source(), new.source());
         assert_eq!(stage.pages(), Vec::<u64>::new());
+    }
+
+    /// Ranges of a window are page aligned, of some pages, and within it.
+    #[test]
+    fn ranges_are_whole_pages_within_the_window() {
+        let ps = page_size();
+        let (dax, window) = Dax::new(4 * ps, None).unwrap();
+        assert_eq!(window.size(), 4 * ps);
+        assert_eq!(dax.check_range(0, 4 * ps), Ok(()));
+        assert_eq!(dax.check_range(3 * ps, ps), Ok(()));
+        for (offset, len) in
+            [(0, 0), (1, ps), (0, ps + 1), (ps, 4 * ps), (4 * ps, ps), (u64::MAX - ps + 1, ps)]
+        {
+            assert_eq!(dax.check_range(offset, len), Err(Errno::EINVAL), "{offset:#x}+{len:#x}");
+        }
+        assert_eq!(Dax::new(ps + 1, None).err(), Some(Errno::EINVAL));
+        assert_eq!(Dax::new(0, None).err(), Some(Errno::EINVAL));
     }
 
     /// The write fault at `offset` of `window`, resolved.

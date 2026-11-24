@@ -1643,6 +1643,40 @@ mod tests {
             .collect()
     }
 
+    /// The extents a writer stored on their own and freed go; one uploaded ahead of the segment
+    /// that will name it stays, as do those its state names, and its head.
+    #[test]
+    fn extents_minted_and_freed_go_and_those_ahead_of_their_segments_stay() {
+        block_on(async {
+            let bucket = memory_bucket();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
+            let first = writer.chain().next_sequence();
+            let (freed, kept) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
+            let own = vec![(freed.sequence, b"freed".to_vec()), (kept.sequence, b"kept".to_vec())];
+            commit(&writer, Commit { tag: 1, own, ..Commit::default() }).await;
+            let gone = writer.location(freed).unwrap().key;
+            commit(&writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
+            let (segment, next) = (writer.chain().next_segment(), writer.chain().next_sequence());
+            let ahead =
+                layout::extent(layout::TEST_CELL, writer.epoch(), segment, ExtentId::new(1, next));
+            let bytes = layout::with_footer(
+                b"ahead",
+                &(),
+                crate::testing::encrypting(layout::test_cell(1)),
+            );
+            let created = bucket::create(&*bucket, &ahead, bytes).await.unwrap();
+            assert!(matches!(created, Created::Created(_)));
+
+            let before = keys(&*bucket).await;
+            let report = collect(&*bucket, 1).await.unwrap();
+            assert_eq!(report, Report { deleted: 1, retired: 0, ..report });
+            let left: Vec<_> = before.into_iter().filter(|key| *key != gone).collect();
+            assert_eq!(keys(&*bucket).await, left);
+            assert!(left.contains(&ahead) && left.contains(&layout::head(test_cell(1))));
+        });
+    }
+
     /// An extent stored on its own, uploaded ahead of the segment that names it, stays, though
     /// the cell's segments landed say its next sequence number is past it: as when the guest
     /// commits extents out of the order it minted them, or the cell closes a segment between
@@ -1681,6 +1715,16 @@ mod tests {
         let recovered = recovery::recover(&*bucket, test_cell(1), None).await.unwrap();
         let location = &recovered.state.extents[&late];
         crate::testing::read(&bucket, late, location).await
+    }
+
+    /// TASK-407: a writer taken over, whose head another taking swapped since, acknowledges
+    /// nothing: its swap fails, though its segment landed and its successor committed and
+    /// checkpointed. The cell holds the successor's commit; the writer's segment, which no head
+    /// names, nor ever will, a pass deletes.
+    #[test]
+    fn writers_taken_over_acknowledge_nothing() {
+        let (acknowledged, last, kept) = block_on(acknowledge_once_taken_over(0));
+        assert_eq!((acknowledged, last, kept), (Err(Error::Fenced), Some(2), false));
     }
 
     /// The head written whatever is there: the writer taken over writes it over its successor's,
@@ -1724,6 +1768,13 @@ mod tests {
         (acknowledged, recovered.ok().and_then(|recovered| recovered.state.last_commit), kept)
     }
 
+    /// TASK-407: a pass between a writer's upload of its segment and its acknowledgement keeps the
+    /// segment, no state naming it: of the head's epoch, at its end, the head may yet name it.
+    #[test]
+    fn segments_uploaded_not_yet_acknowledged_are_kept() {
+        assert_eq!(block_on(acknowledge_past_a_pass()), Some(1));
+    }
+
     /// The collector deleting what no head names yet: the writer's swap names a segment gone, and
     /// the cell is lost (specs/bucket's NoCollectorEpochs).
     #[test]
@@ -1749,6 +1800,14 @@ mod tests {
         writer.acknowledge().await.unwrap();
         let recovered = recovery::recover(&*bucket, test_cell(1), None).await;
         recovered.ok().and_then(|recovered| recovered.state.last_commit)
+    }
+
+    /// TASK-407: two writers' segments of one number land at two keys, each naming its writer's
+    /// epoch: the one taken over lands its segment, never acknowledged, and its successor's, of the
+    /// same number, lands beside it, acknowledged.
+    #[test]
+    fn writers_segments_of_one_number_land_at_their_own_keys() {
+        assert_eq!(block_on(upload_where_a_writer_taken_over_did()), (Ok(()), Some(2)));
     }
 
     /// Keys naming no epoch: the successor's segment finds the one taken over's at its key, and
@@ -1971,6 +2030,95 @@ mod tests {
         fn now(&self) -> u64 {
             self.bucket.now()
         }
+    }
+
+    /// TASK-395.5: over S3, a pass deletes what goes in one DeleteObjects, no DELETE: the server
+    /// and the bucket count one batch, of the segments a cell freed and checkpointed past.
+    #[test]
+    fn passes_delete_in_batches_over_s3() {
+        use crate::s3_server::{BUCKET, S3Server};
+        const SEGMENTS: u64 = 5;
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let server = S3Server::start(None);
+            let url = format!("s3://{BUCKET}/collector");
+            let client = &crate::client::Client::DEFAULT;
+            let (objects, prefix) =
+                crate::object_bucket::object_store_with(&url, server.options(), client).unwrap();
+            let bucket = Arc::new(ObjectBucket::new(objects, &prefix));
+            // Segments each holding an extent, then one freeing them all, checkpointed past: each
+            // a pass deletes.
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
+            let first = writer.chain().next_sequence();
+            let mut freed = Vec::new();
+            for n in 0..SEGMENTS {
+                let extent = ExtentId::new(1, first + n);
+                let extents = vec![(extent, vec![n as u8; 100])];
+                commit(&writer, Commit { tag: n + 1, extents, ..Commit::default() }).await;
+                freed.push(extent);
+            }
+            let segments: Vec<String> =
+                freed.iter().map(|&extent| writer.location(extent).unwrap().key).collect();
+            let frees = Commit { tag: SEGMENTS + 1, frees: freed, ..Commit::default() };
+            commit(&writer, frees).await;
+            writer.checkpoint().await.unwrap();
+
+            let (served, stats) = (server.requests(), bucket.stats());
+            let report = collect(&*bucket, 1).await.unwrap();
+            assert_eq!(report, Report { deleted: SEGMENTS as usize + 1, retired: 0, ..report });
+            let (served_after, stats_after) = (server.requests(), bucket.stats());
+            let served =
+                |kind| served_after.get(kind).unwrap_or(&0) - served.get(kind).unwrap_or(&0);
+            let counted = |request| stats_after.requests(request) - stats.requests(request);
+            assert_eq!((served("delete-objects"), served("delete")), (1, 0));
+            assert_eq!((counted(Request::DeleteBatch), counted(Request::Delete)), (1, 0));
+            let left = keys(&*bucket).await;
+            assert_eq!(segments.iter().filter(|segment| left.contains(segment)).count(), 0);
+        });
+    }
+
+    /// TASK-79.85: a fork no host holds any more, as one whose host left neither its handle nor
+    /// its deletion, is a live cell to the collector, which keeps what it inherited for it. An
+    /// operator finds it among the live cells, and deletes it, whatever placement last took
+    /// it: the next pass frees what only it held.
+    #[test]
+    fn cells_no_host_holds_keep_what_they_inherited_until_deleted() {
+        let bucket = memory_bucket();
+        let (extent, held_in) = block_on(async {
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let base = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
+            let extent = ExtentId::new(1, base.chain().next_sequence());
+            let held_in = base.chain().next_segment();
+            let own = vec![(extent.sequence, b"held".to_vec())];
+            commit(&base, Commit { tag: 1, own, ..Commit::default() }).await;
+            let at = commit_and_fork(&base, Vec::new(), forked(test_cell(2))).await;
+            assert_eq!(base.checkpoint().await, Ok(Some(at)));
+            commit(&base, Commit { tag: 2, frees: vec![extent], ..Commit::default() }).await;
+            base.checkpoint().await.unwrap();
+            // Its host took it, at a placement later than any since, and went.
+            crate::testing::take(&*bucket, test_cell(2), 11, 7).await.unwrap();
+            (extent, held_in)
+        });
+        let kept = || {
+            block_on(keys(&*bucket)).contains(&layout::extent(
+                layout::TEST_CELL,
+                1,
+                held_in,
+                extent,
+            ))
+        };
+        block_on(collect(&*bucket, 1)).unwrap();
+        assert!(kept(), "what the fork inherited went while it is live");
+
+        let live = |cell| block_on(crate::head::live(&*bucket, cell)).unwrap().is_some();
+        assert_eq!((live(test_cell(1)), live(test_cell(2))), (true, true));
+        block_on(lifecycle::delete(&*bucket, test_cell(2), 12, u64::MAX)).unwrap();
+        // The pass over the child's cell retires its reference; the next over its parent's frees.
+        block_on(collect(&*bucket, 2)).unwrap();
+        block_on(collect(&*bucket, 3)).unwrap();
+        assert!(!kept(), "what the fork inherited stayed once it was deleted");
+        assert_eq!((live(test_cell(1)), live(test_cell(2))), (true, false));
     }
 
     /// A bucket that marks cell `child`'s record deleted just before the first read of `key`.
@@ -2283,6 +2431,14 @@ mod tests {
             .unwrap_or_else(|| panic!("{request}: {asked:#?}"))
     }
 
+    /// TASK-395.3, TASK-395.10: a clone of a version writes its reference, under the cell of the
+    /// version's origin, after its record and before it reads the version's; whatever its cell, the
+    /// origin's own too.
+    #[test]
+    fn clones_refer_between_their_records_and_their_versions_read() {
+        assert_eq!(clones_requests(), ["record", "reference", "read"]);
+    }
+
     /// Without the rule, the reference comes first, as before TASK-395.10.
     #[test]
     fn clones_refer_before_their_records_without_clones_record_first() {
@@ -2350,6 +2506,15 @@ mod tests {
         crate::testing::collect_until_quiet(bucket).await.map(drop)
     }
 
+    /// TASK-395.4: a fork to another cell keeps its parent's state at the origin in the
+    /// parent's cell, by its reference, the parent deleted and having freed what the child
+    /// inherited, its checkpoint covering the segments the child, with no checkpoint of its own,
+    /// recovers through.
+    #[test]
+    fn fork_versions_keep_what_children_in_other_cells_inherit() {
+        assert_eq!(block_on(read_forked_from_a_deleted_parent()), Ok(b"held".to_vec()));
+    }
+
     /// Without references, the parent's cell's pass reclaims what the child inherited: it reads its
     /// parent deleted, and lists nothing of the child's cell.
     #[test]
@@ -2371,14 +2536,30 @@ mod tests {
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
+    /// TASK-476: a version keeps its cell's state at it, which its cell freed since and
+    /// checkpointed past, the checkpoint covering the segments recovering the version reads; once
+    /// its writer drops it, the next sweep reclaims it.
+    #[test]
+    fn versions_keep_what_they_name_until_dropped() {
+        assert_eq!(block_on(read_a_version(Dropped::No)), Ok(b"held".to_vec()));
+        let read = block_on(read_a_version(Dropped::Yes));
+        assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
+    }
+
     /// Without the rule `versions_kept`, a pass keeps the cell's state alone, and reclaims what
     /// its version names.
     #[test]
     fn versions_keeping_what_they_name_need_versions_kept() {
         crate::set_rules(crate::Rules { versions_kept: false, ..crate::Rules::ALL });
-        let read = block_on(read_a_version());
+        let read = block_on(read_a_version(Dropped::No));
         crate::set_rules(crate::Rules::ALL);
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Dropped {
+        No,
+        Yes,
     }
 
     /// cladefs: an ephemeral cell's reference keeps its version's state, its cell having dropped
@@ -2475,7 +2656,7 @@ mod tests {
     /// What a version of a cell reads of an extent the cell sealed before it and freed after,
     /// the cell checkpointed past it, sweeps having run until they did nothing more, the version
     /// dropped first if `dropped` says so: read by a reader of another host's.
-    async fn read_a_version() -> Result<Vec<u8>, Error> {
+    async fn read_a_version(dropped: Dropped) -> Result<Vec<u8>, Error> {
         let objects: Arc<InMemory> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
         let cell = test_cell(1);
@@ -2496,6 +2677,9 @@ mod tests {
         writer.acknowledge().await.unwrap();
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
+        if dropped == Dropped::Yes {
+            writer.drop_versions(&BTreeSet::from([0xa])).await.unwrap();
+        }
         sweep(&*bucket).await?;
         let reader = Arc::new(ObjectBucket::new(objects, ""));
         let checkpoints = Checkpoints::new(&*reader, 0);
@@ -2664,6 +2848,16 @@ mod tests {
         crate::testing::read(&reader, later, &location).await
     }
 
+    /// TASK-476: a pass gives up on a restore of a version being made, its host dead, once the
+    /// version's cell's head names it no more: its record deleted, it keeps nothing, and the
+    /// pass, recovering it, fails not.
+    #[test]
+    fn restores_being_made_of_versions_dropped_are_given_up_on() {
+        let (report, record) = block_on(sweep_past_a_restore_of_a_dropped_version());
+        assert_eq!(report.map(drop), Ok(()));
+        assert!(record.deleted(), "{record:?}: given up");
+    }
+
     /// Without the rule `collector_abandons`, the pass recovers that restore, through what a pass
     /// before reclaimed of the version's cell, and fails.
     #[test]
@@ -2720,6 +2914,38 @@ mod tests {
         read_inherited(&Arc::new(ObjectBucket::new(objects, "")), child, extent).await
     }
 
+    /// TASK-395.3, TASK-395.4: a chain of forks across cells, a root's, its child's, its
+    /// grandchild's: the child deleted, its cell keeps its own state at the grandchild's fork
+    /// version, and its reference under the root's cell stays, the child's cell holding the
+    /// grandchild's; the root frees and checkpoints, and the grandchild, with no checkpoint, reads
+    /// what it inherited through both. The grandchild deleted too, the passes retire the
+    /// references down the chain, and the cells of the dead are reclaimed whole but their heads and
+    /// the retired markers of their references (TASK-395.13): no reference is left, and the
+    /// root's cell holds its own alone.
+    #[test]
+    fn references_hold_while_their_childrens_cells_hold_references() {
+        let (read, bucket) = block_on(read_through_a_deleted_child());
+        assert_eq!(read, Ok(b"held".to_vec()));
+        block_on(async {
+            let grandchild = test_cell(3);
+            lifecycle::delete(&*bucket, grandchild, 22, 0).await.unwrap();
+            sweep(&*bucket).await.unwrap();
+        });
+        let left = block_on(keys(&*bucket));
+        let references: Vec<&String> = left.iter().filter(|key| key.contains("/refs/")).collect();
+        assert_eq!(references, Vec::<&String>::new());
+        for cell in [2, 3] {
+            let prefix = layout::CellId { tenant: 1, id: cell }.prefix();
+            let kept: Vec<&String> = (left.iter())
+                .filter(|key| key.starts_with(&prefix))
+                .filter(|key| {
+                    !matches!(layout::kind(key), Kind::Head { .. } | Kind::Retired { .. })
+                })
+                .collect();
+            assert_eq!(kept, Vec::<&String>::new(), "cell {cell}, dead, reclaimed whole");
+        }
+    }
+
     /// The child's reference retired once the child is deleted, though its cell holds the
     /// grandchild's: the root's cell's pass reclaims what the grandchild inherited through it.
     #[test]
@@ -2752,6 +2978,14 @@ mod tests {
             Err(error) => Err(error),
         };
         (read, bucket)
+    }
+
+    /// TASK-395.3: a clone writes its reference before it reads its version's cell's head: a
+    /// clone that read the version live, its cell deleted and swept away as it finishes, keeps
+    /// what it inherited, by its reference.
+    #[test]
+    fn clones_keep_what_they_inherit_as_their_versions_go() {
+        assert_eq!(block_on(read_as_a_version_goes_under_a_clone()), Ok(b"held".to_vec()));
     }
 
     /// The clone's reference written once it is made, as specs/bucket's NoForksReferFirst has
@@ -3054,6 +3288,47 @@ mod tests {
     /// fork of a cell in another cell, the fork live with no checkpoint of its own, lists nothing
     /// outside its cell, reading its parent's state by the checkpoint at the origin alone,
     /// which recording the fork wrote; whether the parent had a checkpoint before the fork, or
+    /// none. The fork reads what it inherited.
+    #[test]
+    fn passes_over_a_live_forks_cell_list_nothing_of_its_parents() {
+        for checkpointed in [true, false] {
+            let bucket = SimBucket::new();
+            let (parent, child) = (test_cell(1), test_cell(2));
+            let ((extent, at, epoch), _) = bucket.served(async {
+                lifecycle::create(&*bucket, parent, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
+                let extent = ExtentId::new(1, writer.chain().next_sequence());
+                if checkpointed {
+                    commit(&writer, Commit { tag: 9, ..Commit::default() }).await;
+                    writer.checkpoint().await.unwrap();
+                }
+                let held = vec![(extent, b"held".to_vec())];
+                (extent, commit_and_fork(&writer, held, forked(child)).await, writer.epoch())
+            });
+            let (report, asked) = bucket.served(collect_cell(&*bucket, child, 7));
+            report.unwrap();
+            let prefix = child.prefix();
+            let outside: Vec<&String> = (asked.iter())
+                .filter(|asked| asked.starts_with("list"))
+                .filter(|asked| !asked.split(' ').nth(1).unwrap().starts_with(&prefix))
+                .collect();
+            assert_eq!(outside, Vec::<&String>::new(), "checkpointed {checkpointed}");
+            let version = format!("get {}", layout::checkpoint(parent, at, epoch));
+            assert!(asked.contains(&version), "{asked:#?}");
+            let direct = Arc::new(Direct(bucket.clone()));
+            assert_eq!(block_on(read_inherited(&direct, child, extent)), Ok(b"held".to_vec()));
+        }
+    }
+
+    /// TASK-395.10: a clone refused by a record of its child's ID there before, of another origin,
+    /// deleted with none, or of its own origin, writes no reference, as it writes it after its own
+    /// record. Each another's, its ID taken: a deleted one too, which is no version deleted
+    /// (TASK-449: no look at the record comes first any more, which refused it so).
+    #[test]
+    fn clones_refused_by_records_there_write_no_references() {
+        assert_eq!(references_left_by_refused_clones(), [false, false, false]);
+    }
+
     /// TASK-395.4's review: without the rule, the reference written first, a clone so refused
     /// takes it back, which no record's origin names; one refused by a record of its own origin
     /// leaves it, that record's to retire. Its host dying first left it (TASK-395.10).
@@ -3198,6 +3473,49 @@ mod tests {
                 keys(&direct).await.iter().filter(|key| key.contains("/refs/")).count();
             (left, references)
         })
+    }
+
+    /// TASK-395.7: a clone of a shared version into another tenant's cell writes its reference
+    /// under the cell of the version's cell, its tenant's, as any clone does; that cell deleted,
+    /// passes keep what the clones inherited, which they read; once the clones go, their references
+    /// are retired, and nothing of any is left but heads.
+    #[test]
+    fn clones_of_shared_versions_in_other_tenants_keep_what_they_inherit_by_references() {
+        use crate::testing::{VERSION, fork_version, versioned_by};
+        block_on(async {
+            let direct = Arc::new(Direct(SimBucket::new()));
+            let origin_cell = test_cell(1);
+            let theirs = |id| CellId { tenant: 2, id };
+            lifecycle::create(&*direct, origin_cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), origin_cell, 10, 0).await.unwrap();
+            let extent = ExtentId::new(1, writer.chain().next_sequence());
+            let at = versioned_by(&writer, vec![(extent, b"held".to_vec())], VERSION).await;
+            writer.share_version(VERSION, true).await.unwrap();
+            let origin = Origin { parent: origin_cell, at, epoch: writer.epoch() };
+            drop(writer);
+            let clones = [theirs(3), theirs(4)];
+            for clone in clones {
+                fork_version(&*direct, clone, VERSION, origin, clone.id).await.unwrap();
+                let reference = layout::reference(origin_cell, at, clone);
+                assert!(reference.starts_with(&origin_cell.prefix()), "{reference}");
+                assert!(keys(&*direct).await.contains(&reference), "{reference}");
+            }
+            lifecycle::delete(&*direct, origin_cell, 21, 0).await.unwrap();
+            for _ in 0..2 {
+                sweep(&*direct).await.unwrap();
+                for clone in clones {
+                    let read = read_inherited(&direct, clone, extent).await;
+                    assert_eq!(read, Ok(b"held".to_vec()), "{clone}");
+                }
+            }
+            for clone in clones {
+                lifecycle::delete(&*direct, clone, 30, u64::MAX).await.unwrap();
+            }
+            sweep(&*direct).await.unwrap();
+            let left = keys(&*direct).await;
+            assert!(!left.iter().any(|key| key.contains("/refs/")), "{left:#?}");
+            assert_eq!(crate::testing::uncollected(&*direct).await, Vec::<String>::new());
+        });
     }
 
     // cladefs: passes that skip cells unchanged since the last pass, and what passes record of the

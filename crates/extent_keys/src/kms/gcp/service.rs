@@ -133,3 +133,78 @@ fn rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed() {
         kms.wrap_dyn(2, &first).await.unwrap();
     });
 }
+
+/// A key's version disabled: nothing wraps under it, the tenant's KEK revoked, nor unwraps what it
+/// wrapped, that version disabled (board 8479); enabled again, what it wrapped unwraps.
+#[test]
+fn disabled_versions_revoke_until_enabled() {
+    let Some(admin) = Admin::from_env("disabled_versions_revoke_until_enabled") else { return };
+    runtime().block_on(async {
+        let name = admin.key("fxdax-test-3").await;
+        let version = admin.primary(&name).await;
+        destroy_all_but(&admin, &name, version).await;
+        let kms = &kms_of(&admin, None);
+        // Enabled, as a run that failed partway may not have left it.
+        admin.set_state(&name, version, "ENABLED").await;
+        let key = &Secret::random();
+        let wrapped = &eventually("a wrap", move || async move {
+            kms.wrap_dyn(3, key).await.map_err(|err| err.to_string())
+        })
+        .await;
+
+        admin.set_state(&name, version, "DISABLED").await;
+        eventually(&format!("version {version} of {name} disabled"), move || async move {
+            let unwrapped = kms.unwrap_dyn(3, wrapped).await.map(drop);
+            let rewrapped = kms.wrap_dyn(3, key).await.map(drop);
+            match (&unwrapped, &rewrapped) {
+                // board 8479: the version's that wrapped the key, of an unwrap; the key's primary,
+                // so the tenant's KEK, of a wrap.
+                (
+                    Err(Error::VersionDisabled { tenant: 3, version: of }),
+                    Err(Error::Revoked { tenant: 3 }),
+                ) if *of == version.to_string() => Ok(()),
+                _ => Err(format!("{unwrapped:?}, {rewrapped:?}")),
+            }
+        })
+        .await;
+
+        admin.set_state(&name, version, "ENABLED").await;
+        let unwrapped =
+            eventually(&format!("version {version} of {name} enabled"), move || async move {
+                kms.unwrap_dyn(3, wrapped).await.map_err(|err| err.to_string())
+            })
+            .await;
+        assert_eq!(unwrapped.expose(), key.expose());
+    });
+}
+
+/// A key whose primary version is destroyed: nothing wraps under it, the tenant's KEK destroyed,
+/// nor unwraps what it wrapped, that version gone (board 8479). The key keeps no version
+/// undestroyed, none billed.
+#[test]
+fn destroyed_primaries_destroy() {
+    let Some(admin) = Admin::from_env("destroyed_primaries_destroy") else { return };
+    runtime().block_on(async {
+        let name = admin.key("fxdax-test-4").await;
+        let version = admin.rotate(&name).await;
+        destroy_all_but(&admin, &name, version).await;
+        let kms = &kms_of(&admin, None);
+        let key = &Secret::random();
+        let wrapped = &kms.wrap_dyn(4, key).await.unwrap();
+        admin.destroy(&name, version).await;
+        eventually(&format!("version {version} of {name} destroyed"), move || async move {
+            let unwrapped = kms.unwrap_dyn(4, wrapped).await.map(drop);
+            let rewrapped = kms.wrap_dyn(4, key).await.map(drop);
+            match (&unwrapped, &rewrapped) {
+                // board 8479: the version's that wrapped the key, of an unwrap; the key's primary,
+                // so the tenant's KEK, of a wrap.
+                (
+                    Err(Error::VersionGone { tenant: 4, version: of }),
+                    Err(Error::Destroyed { tenant: 4 }),
+                ) if *of == version.to_string() => Ok(()),
+                _ => Err(format!("{unwrapped:?}, {rewrapped:?}")),
+            }
+        })
+        .await;
+    });
+}

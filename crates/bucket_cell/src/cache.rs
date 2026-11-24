@@ -1172,6 +1172,41 @@ mod tests {
         keys
     }
 
+    /// Parts read least recently go first, by punching holes where they were, their object's tail
+    /// after its last; an object's last part takes its file with it.
+    #[test]
+    fn keeps_parts_evicting_the_least_recently_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = Object::noise(KEY, 6 * PART, 1);
+        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len()).unwrap();
+        object.keep_tail(&cache);
+        for part in 0..3 {
+            object.keep_part(&cache, part);
+        }
+        assert_eq!(cache.bytes(), 3 * PART + object.tail_len());
+        assert_eq!(object.read(&cache, 0).as_deref(), Some(object.part(0)));
+
+        // Part 1 was read least recently.
+        object.keep_part(&cache, 5);
+        assert_eq!(object.read(&cache, 1), None);
+        let mut hole = vec![1; PART as usize];
+        File::open(cache.path(KEY)).unwrap().read_exact_at(&mut hole, PART).unwrap();
+        assert_eq!(hole, vec![0; PART as usize]);
+        assert_eq!(object.kept(&cache), [0, 2, 5]);
+
+        // The tail goes last, with its object's file.
+        let other = Object::noise(OTHER, 3 * PART, 2);
+        other.keep(&cache);
+        assert_eq!(object.kept(&cache), Vec::<u64>::new());
+        assert!(!cache.path(KEY).exists());
+        assert_eq!(other.kept(&cache), [0, 1, 2]);
+        cache.check();
+        cache.forget(OTHER).unwrap();
+        assert!(!cache.path(OTHER).exists());
+        assert_eq!((cache.bytes(), other.kept(&cache)), (0, vec![]));
+        cache.check();
+    }
+
     /// Evicted parts' blocks are freed, and parts never kept take none. (APFS, which development
     /// on macOS uses, allocates a sparse file's holes as it is written, and frees none it punches.)
     /// On any filesystem that frees what is punched: the file's data, as SEEK_DATA and SEEK_HOLE
@@ -1219,6 +1254,35 @@ mod tests {
         assert_eq!(allocated(&cache, KEY), kept);
     }
 
+    /// TASK-539.6: a limit the disk governor sets evicts what was read least recently down to it
+    /// at once, and keeps what would pass it from being kept; lifted, the cache keeps again. Its
+    /// disk counts what it keeps, and stops counting it as it goes.
+    #[test]
+    fn a_governed_limit_evicts_down_to_it_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = Object::noise(KEY, 4 * PART, 1);
+        let cache = Cache::open(dir.path(), u64::MAX).unwrap();
+        let disk = cache.disk().clone();
+        let counted = disk.cache.get() - cache.bytes();
+        object.keep(&cache);
+        assert_eq!((cache.bytes(), disk.cache.get() - counted), (object.len(), object.len()));
+        object.read(&cache, 2);
+        object.read(&cache, 3);
+        let limit = 2 * PART + object.tail_len();
+        assert_eq!(cache.set_limit(limit).unwrap(), limit);
+        assert_eq!((object.kept(&cache), cache.capacity()), (vec![2, 3], limit));
+        // Kept within it by evicting what was read least recently.
+        object.keep_part(&cache, 0);
+        assert_eq!((object.kept(&cache), cache.bytes()), (vec![0, 3], limit));
+        cache.set_limit(0).unwrap();
+        assert_eq!((cache.bytes(), cache.keys(), disk.cache.get() - counted), (0, vec![], 0));
+        cache.set_limit(u64::MAX).unwrap();
+        object.keep(&cache);
+        assert_eq!(object.kept(&cache), [0, 1, 2, 3]);
+        drop(cache);
+        assert_eq!(disk.cache.get(), counted, "what a cache closed kept counts no more");
+    }
+
     /// TASK-443.8: a fill that can't fit, whatever is evicted, evicts nothing: it emptied the cache
     /// for nothing, as one past a floor the filesystem's free space couldn't meet did. Here the
     /// object filled's own tail can't go while its part is written.
@@ -1233,6 +1297,28 @@ mod tests {
         large.keep_part(&cache, 0);
         assert_eq!((small.kept(&cache), large.kept(&cache)), (vec![0], vec![]));
         assert_eq!(cache.bytes(), small.len() + large.tail_len());
+    }
+
+    /// A part is kept only with its object's tail, where the tail kept says it is stored, and is
+    /// held by its object's key and its number (TASK-407).
+    #[test]
+    fn parts_are_kept_with_their_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        let object = Object::noise(KEY, 2 * PART, 1);
+        object.keep_part(&cache, 0);
+        assert_eq!((cache.bytes(), cache.keys()), (0, Vec::<String>::new()));
+        object.keep_tail(&cache);
+        assert_eq!(cache.tail(KEY).unwrap(), Some(object.tail.clone()));
+        assert!(!cache.holds(KEY, 0));
+        object.keep_part(&cache, 0);
+        assert_eq!(object.read(&cache, 0).as_deref(), Some(object.part(0)));
+        assert_eq!(cache.bytes(), PART + object.tail_len());
+        // What it holds: part 0 of the object, not part 1, nor any part of another key.
+        assert!(cache.holds(KEY, 0));
+        assert!(!cache.holds(KEY, 1));
+        assert!(!cache.holds("segments/0000000000002/0000000000000", 0));
+        cache.check();
     }
 
     /// A part whose bytes changed behind the cache's back, as a torn write leaves them, fails its
@@ -1252,6 +1338,26 @@ mod tests {
         assert_eq!((cache.bytes(), object.read(&cache, 0)), (0, None));
         assert!(!cache.path(KEY).exists());
         cache.check();
+    }
+
+    /// An object whose file went, or shrank, behind the cache's back reads as not kept, and is
+    /// dropped; one whose file can't be read fails.
+    #[test]
+    fn parts_gone_read_as_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART).unwrap();
+        let object = Object::noise(KEY, PART + 100, 1);
+        object.keep(&cache);
+        File::options().write(true).open(cache.path(KEY)).unwrap().set_len(PART).unwrap();
+        assert_eq!((object.read(&cache, 1), cache.bytes()), (None, 0));
+        object.keep(&cache);
+        host_fs::remove_file(cache.path(KEY)).unwrap();
+        assert_eq!((object.read(&cache, 1), cache.bytes()), (None, 0));
+        object.keep(&cache);
+        host_fs::remove_file(cache.path(KEY)).unwrap();
+        host_fs::create_dir(cache.path(KEY)).unwrap();
+        let err = cache.part(KEY, 1).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EISDIR), "{err}");
     }
 
     /// TASK-433.4: what the cache keeps is on its disk alone: none of an object's file, its tail
@@ -1287,6 +1393,45 @@ mod tests {
             pages.iter().filter(|page| **page & 1 == 1).count()
         };
         assert_eq!(cached, 0, "of {} pages", len.div_ceil(page));
+    }
+
+    /// A part larger than the cache isn't kept, and evicts nothing; one that fits beside its tail
+    /// is, evicting what was read before; one kept already is kept once.
+    #[test]
+    fn keeps_parts_that_fit_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (object, other) = (Object::noise(KEY, 1000, 1), Object::noise(OTHER, PART + 100, 2));
+        let capacity = 1000 + object.tail_len() + other.tail_len();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
+        other.keep_tail(&cache);
+        other.keep_part(&cache, 1);
+        other.keep_part(&cache, 1);
+        assert_eq!(cache.bytes(), 100 + other.tail_len());
+        other.keep_part(&cache, 0);
+        assert_eq!(other.kept(&cache), [1]);
+        object.keep(&cache);
+        assert_eq!(object.kept(&cache), [0]);
+        assert_eq!(cache.tail(OTHER).unwrap(), Some(other.tail.clone()));
+        assert_eq!(other.read(&cache, 1), None);
+        assert_eq!(cache.bytes(), capacity);
+        cache.check();
+    }
+
+    /// TASK-92.21: a part dropped whose object's file went meanwhile, as one does that another
+    /// put's eviction of the object's last part removes outside the cache's lock, is dropped, its
+    /// hole gone with the file; and so is the object's tail.
+    #[test]
+    fn parts_dropped_whose_files_went_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART).unwrap();
+        let object = Object::noise(KEY, PART + 100, 1);
+        object.keep(&cache);
+        host_fs::remove_file(cache.path(KEY)).unwrap();
+        cache.forget_part(KEY, 0).unwrap();
+        assert_eq!(cache.bytes(), 100 + object.tail_len());
+        cache.forget_part(KEY, TAIL).unwrap();
+        assert_eq!((cache.bytes(), cache.keys()), (0, Vec::<String>::new()));
+        cache.check();
     }
 
     /// TASK-92.21: keeps, reads and drops of a few objects' tails and parts, in threads at once,
@@ -1399,6 +1544,39 @@ mod tests {
         println!("{reads} reads while {PUTS} parts were kept: at most {most:?}, {all:?} in all");
     }
 
+    /// TASK-165.4: a cache keeps what an earlier one in its directory kept: its tails, and the
+    /// parts it held, counted as they were, but not those it evicted, whose holes it finds.
+    #[test]
+    fn keeps_what_an_earlier_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = Object::noise(KEY, 4 * PART + 100, 1);
+        let other = Object::noise(OTHER, 3000, 2);
+        let capacity = 3 * PART + 100 + object.tail_len() + other.len();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
+        object.keep_tail(&cache);
+        for part in [0, 1, 2, 4] {
+            object.keep_part(&cache, part);
+        }
+        object.read(&cache, 0);
+        other.keep(&cache);
+        // Part 1 goes for it.
+        object.keep_part(&cache, 3);
+        assert_eq!(object.kept(&cache), [0, 2, 3, 4]);
+        let bytes = cache.bytes();
+        drop(cache);
+
+        let cache = Cache::open(dir.path(), capacity).unwrap();
+        cache.check();
+        assert_eq!(cache.bytes(), bytes);
+        assert_eq!(object.kept(&cache), [0, 2, 3, 4]);
+        assert_eq!(other.kept(&cache), [0]);
+        assert_eq!(cache.tail(KEY).unwrap(), Some(object.tail.clone()));
+        for part in [0, 2, 3, 4] {
+            assert_eq!(object.read(&cache, part).as_deref(), Some(object.part(part)));
+        }
+        assert_eq!(cache.bytes(), bytes);
+    }
+
     /// TASK-165.4: a cache opened drops the files an earlier one left that hold no object whose
     /// tail passes its checks, as a crash leaves one whose tail was being written, and anything
     /// else in its directory but objects' files; and directories left empty.
@@ -1459,6 +1637,43 @@ mod tests {
         assert_eq!(object.kept(&cache), [0]);
     }
 
+    /// TASK-165.4: a cache opened with a smaller budget than an earlier one evicts what that one
+    /// kept, by when each object was written last, until what is left fits; limited to nothing,
+    /// it evicts all.
+    #[test]
+    fn budgets_and_limits_hold_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (object, other) = (Object::noise(KEY, 2 * PART, 1), Object::noise(OTHER, PART, 2));
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        object.keep(&cache);
+        other.keep(&cache);
+        let (path, written) = (cache.path(OTHER), SystemTime::now());
+        drop(cache);
+        // The other written after it, as its file says.
+        let file = File::options().write(true).open(&path).unwrap();
+        file.set_modified(written + std::time::Duration::from_secs(10)).unwrap();
+
+        let capacity = PART + object.tail_len() + other.len();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
+        cache.check();
+        assert!(cache.bytes() <= capacity);
+        assert_eq!((object.kept(&cache), other.kept(&cache)), (vec![1], vec![0]));
+        drop(cache);
+
+        let cache = Cache::open(dir.path(), capacity).unwrap();
+        cache.set_limit(0).unwrap();
+        assert_eq!((cache.bytes(), cache.keys(), files(dir.path())), (0, vec![], vec![]));
+    }
+
+    /// TASK-165.4: the filesystems the cache runs on find the holes punched in a file, but APFS,
+    /// whose files a cache then checks each part of as it opens: macOS is for development.
+    #[test]
+    fn filesystems_find_holes_but_apfs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(probed(dir.path()).unwrap(), cfg!(target_os = "linux"));
+        assert_eq!(host_fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
     /// TASK-433.6: a cache on a file system that can't bypass the host's page cache, as the
     /// failpoint makes every one, fails to open, naming its directory, and leaves no file of its
     /// probe there, rather than keep objects in the host's page cache, a memory no budget counts.
@@ -1474,6 +1689,82 @@ mod tests {
         let prefix = format!("{}: {refused}", dir.path().join(FILES).display());
         assert!(err.to_string().starts_with(&prefix), "{err}");
         assert_eq!(files(dir.path()), Vec::<String>::new());
+    }
+
+    /// TASK-165.4: one cache at a time has a directory; another may once it is dropped.
+    #[test]
+    fn one_cache_has_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), PART).unwrap();
+        let err = Cache::open(dir.path(), PART).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+        drop(cache);
+        Cache::open(dir.path(), PART).unwrap();
+    }
+
+    /// TASK-165.4: an object adopted from a file on the cache's filesystem, as a WAL segment
+    /// acknowledged is, is moved in whole, and kept as fetched parts are: read back, evicted as
+    /// they are, and kept by the cache opened next.
+    #[test]
+    fn adopts_whole_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = Object::noise(KEY, 2 * PART + 100, 1);
+        let other = Object::noise(OTHER, PART, 2);
+        let cache = Cache::open(dir.path(), object.len() + other.len() - PART).unwrap();
+        let from = object.write_to(dir.path());
+        assert!(cache.adopt(KEY, &from).unwrap());
+        assert!(!from.exists());
+        assert_eq!(cache.bytes(), object.len());
+        assert_eq!(object.kept(&cache), [0, 1, 2]);
+        object.read(&cache, 1);
+        object.read(&cache, 2);
+        // Part 0 was read least recently.
+        other.keep(&cache);
+        assert_eq!((object.kept(&cache), other.kept(&cache)), (vec![1, 2], vec![0]));
+        cache.check();
+        drop(cache);
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        assert_eq!((object.kept(&cache), other.kept(&cache)), (vec![1, 2], vec![0]));
+    }
+
+    /// TASK-165.4: an object adopted replaces what is kept at its key, and is counted once.
+    #[test]
+    fn adoptions_replace_what_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        let object = Object::noise(KEY, 2 * PART, 1);
+        object.keep_tail(&cache);
+        object.keep_part(&cache, 1);
+        assert!(cache.adopt(KEY, &object.write_to(dir.path())).unwrap());
+        assert_eq!((cache.bytes(), object.kept(&cache)), (object.len(), vec![0, 1]));
+        cache.check();
+    }
+
+    /// TASK-165.4: an object that can't fit, past the budget or the governed limit, isn't adopted:
+    /// its file is left where it was. One holding no object fails.
+    #[test]
+    fn adoptions_past_the_limit_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = Object::noise(KEY, 2 * PART, 1);
+        let other = Object::noise(OTHER, 100, 2);
+        let cache = Cache::open(dir.path(), object.len() - 1).unwrap();
+        other.keep(&cache);
+        let from = object.write_to(dir.path());
+        assert!(!cache.adopt(KEY, &from).unwrap());
+        assert_eq!((cache.bytes(), other.kept(&cache)), (other.len(), vec![0]));
+        drop(cache);
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        cache.set_limit(0).unwrap();
+        assert!(!cache.adopt(KEY, &from).unwrap());
+        assert_eq!((host_fs::read(&from).unwrap(), cache.bytes()), (object.bytes.clone(), 0));
+        assert_eq!(cache.keys(), Vec::<String>::new());
+
+        drop(cache);
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        host_fs::write(&from, b"no object").unwrap();
+        let err = cache.adopt(KEY, &from).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(from.exists());
     }
 
     /// How a crash test cuts the change it crashes at, if a write or a punch: what of it is made.

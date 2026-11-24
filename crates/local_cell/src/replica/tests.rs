@@ -63,6 +63,84 @@ fn promises_survive_crashes() {
     }
 }
 
+/// Board 5420: a fence failing at any of its steps, made again, then the next, fence as they
+/// would have: its promise kept once its file was made, its file made again if a step after failed,
+/// and the promises before it removed by a later fence if their removal failed; reopened, the
+/// promise is the last.
+#[test]
+fn fences_failing_partway_are_made_again() {
+    let acked = own_frame(1, b"acked");
+    let held = [(own_of(0), acked.len() as u64)];
+    for failing in 1..=6 {
+        let dir = MemDir::serial();
+        let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+        let me = (CELL, key(1, 4), replicas.incarnation());
+        replicas.append(me, own_of(0), 0, &acked).unwrap();
+        replicas.fence(me, 4).unwrap();
+        dir.fail_after(Some(failing));
+        let failed = replicas.fence(me, 5);
+        dir.fail_after(None);
+        assert_eq!(replicas.fence(me, 5).unwrap(), held, "{failing}: {failed:?}");
+        assert_eq!(replicas.fence(me, 6).unwrap(), held, "{failing}");
+        let promises: Vec<String> = (dir.files().into_iter())
+            .map(|(name, _)| name)
+            .filter(|name| name.contains(".promise."))
+            .collect();
+        assert_eq!(promises, [promise_path(CELL, 6)], "{failing}");
+        let reopened = Replicas::open(dir.clone(), MOST).unwrap();
+        assert_eq!(refused(reopened.fence(me, 5)), Refused::Fenced { promise: 6 }, "{failing}");
+    }
+}
+
+/// A call naming another incarnation is refused, whatever it is: a directory made anew, its disk
+/// lost, is another member, whose promises are not the old one's (doc-21, Incarnations).
+#[test]
+fn other_incarnations_are_refused() {
+    let replicas = Replicas::open(MemDir::new(), MOST).unwrap();
+    let lost = Replicas::open(MemDir::new(), MOST).unwrap();
+    assert_ne!(replicas.incarnation(), lost.incarnation());
+    let wrong = (CELL, key(1, 4), lost.incarnation());
+    let expected = Refused::Incarnation { asked: lost.incarnation(), ours: replicas.incarnation() };
+    assert_eq!(refused(replicas.append(wrong, own_of(0), 0, b"x")), expected);
+    assert_eq!(refused(replicas.fence(wrong, 5)), expected);
+    assert_eq!(refused(replicas.read(wrong, own_of(0), 0, 1)), expected);
+    assert_eq!(refused(replicas.drop_logs(wrong, None)), expected);
+}
+
+/// A log is appended to at its end or before it: past it, nothing is written and the end is
+/// answered, for the writer to send again from; and a configuration's logs hold at most what the
+/// member holds for one. Own extents' logs, held as sent, whatever their bytes.
+#[test]
+fn appends_past_the_end_or_the_bound_are_refused() {
+    let replicas = Replicas::open(MemDir::new(), 10).unwrap();
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    let (first, second) = (own_of(0), own_of(1));
+    assert_eq!(replicas.append(me, first, 3, b"x").unwrap(), 0, "past the end: nothing written");
+    assert_eq!(replicas.read(me, first, 0, 10).unwrap(), b"");
+    replicas.append(me, first, 0, b"abcdef").unwrap();
+    assert_eq!(replicas.append(me, first, 2, b"cdefgh").unwrap(), 8, "sent again, and more");
+    assert_eq!(replicas.append(me, first, 0, b"abc").unwrap(), 8, "all of it held already");
+    assert_eq!(replicas.read(me, first, 0, 10).unwrap(), b"abcdefgh");
+    assert_eq!(replicas.read(me, first, 3, 4).unwrap(), b"defg", "across frames");
+    let full = Refused::Full { would: 11, most: 10 };
+    assert_eq!(refused(replicas.append(me, second, 0, b"xyz")), full);
+    assert_eq!(replicas.fence(me, 4).unwrap(), [(first, 8)]);
+    replicas.drop_logs(me, Some(first)).unwrap();
+    assert_eq!(replicas.append(me, second, 0, b"xyz").unwrap(), 3, "room once the bucket has it");
+}
+
+/// TASK-537.3.2's review: the bound is a configuration's, as a take installs its own on members
+/// still holding the configuration before, the same commits, until it activates.
+#[test]
+fn takes_install_beside_the_configuration_before() {
+    let replicas = Replicas::open(MemDir::new(), 10).unwrap();
+    let ours = replicas.incarnation();
+    let (old, new) = ((CELL, key(1, 4), ours), (CELL, key(2, 5), ours));
+    replicas.append(old, own_of(0), 0, b"sixsix").unwrap();
+    replicas.fence(old, 5).unwrap();
+    assert_eq!(replicas.append(new, own_of(0), 0, b"sixsix").unwrap(), 6);
+}
+
 /// TASK-537.3.2's review / board 6902: a crash may leave a log's file longer than what was written,
 /// padded with zeros (a direct write's whole blocks, cut back after): its end, reopened, is what
 /// its inner records/frames hold, never the file's size, so a take never takes zeros for commits.
@@ -157,6 +235,43 @@ fn logs_end_at_their_last_whole_frame_after_corrupting_crashes() {
             }
         }
     }
+}
+
+/// Logs the bucket holds, or of configurations the head names no more, are dropped; a sweep of a
+/// cell gone drops its promise too; and a sweep of a replicated cell whose head names no
+/// configuration yet drops nothing (TASK-537.3.2's review), as its first may be being installed.
+#[test]
+fn drops_and_sweeps_remove_what_no_take_reads() {
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let ours = replicas.incarnation();
+    let (old, active, pending) = (key(1, 4), key(2, 5), key(3, 6));
+    for of in [old, active, pending] {
+        for segment in 0..3 {
+            replicas.append((CELL, of, ours), own_of(segment), 0, b"x").unwrap();
+        }
+    }
+    replicas.drop_logs((CELL, active, ours), Some(own_of(1))).unwrap();
+    // Only what the bucket holds of the configuration named: the one before kept, as a
+    // replacement's members drop theirs while the head names the one before (TASK-537.3.5).
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![old, active, pending])]);
+    replicas.drop_logs((CELL, active, ours), None).unwrap();
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![active, pending])]);
+    assert_eq!(replicas.fence((CELL, active, ours), 6).unwrap(), [(own_of(2), 1)]);
+
+    let first = CellId { tenant: 3, id: 12 };
+    replicas.append((first, key(1, 2), ours), own_of(0), 0, b"x").unwrap();
+    replicas.sweep(first, Swept::Unconfigured).unwrap();
+    assert_eq!(replicas.read((first, key(1, 2), ours), own_of(0), 0, 1).unwrap(), b"x");
+
+    let other = CellId { tenant: 3, id: 11 };
+    replicas.append((other, key(4, 2), ours), own_of(0), 0, b"x").unwrap();
+    replicas.fence((other, key(4, 2), ours), 3).unwrap();
+    replicas.sweep(CELL, Swept::Before(pending)).unwrap();
+    replicas.sweep(other, Swept::Gone).unwrap();
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![pending]), (first, vec![key(1, 2)])]);
+    let names: Vec<String> = dir.files().into_iter().map(|(name, _)| name).collect();
+    assert!(!names.iter().any(|name| name.starts_with("3.11.")), "{names:?}");
 }
 
 /// A directory holding a member's files and no incarnation is refused: what it promised can't be

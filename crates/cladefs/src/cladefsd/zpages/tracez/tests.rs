@@ -53,6 +53,15 @@ fn names(sample: &Sample) -> Vec<String> {
     sample.trace.spans.iter().map(|span| span.name.to_string()).collect()
 }
 
+#[test]
+fn latencies_fall_in_censuss_buckets() {
+    let buckets: Vec<usize> = [0, 9_999, 10_000, 999_999, 1_000_000, 5_000_000, 100_000_000_000]
+        .into_iter()
+        .map(|nanos| bucket_of(Duration::from_nanos(nanos)))
+        .collect();
+    assert_eq!(buckets, [0, 0, 1, 2, 3, 3, 8]);
+}
+
 /// A trace is held while a span of it runs, its spans counted as they end; once none runs, its
 /// spans are samples of their names' buckets, the trace whole in each.
 #[test]

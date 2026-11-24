@@ -168,6 +168,28 @@ mod tests {
         ExtentId::new(1, sequence)
     }
 
+    /// The uploader's frees stay until it releases their commits; then those up to the commit
+    /// published go.
+    #[test]
+    fn frees_go_once_released_and_published() {
+        let mut extents = KeptExtents::default();
+        let trimmed = |extents: &mut KeptExtents, published| -> Vec<ExtentId> {
+            extents.trim(published).into_iter().map(|(extent, _)| extent).collect()
+        };
+        extents.insert(extent(1), freed(1, true, 4096));
+        extents.insert(extent(2), freed(2, true, 4096));
+        extents.insert(extent(3), freed(3, true, 4096));
+        assert_eq!(trimmed(&mut extents, 3), []);
+        extents.release(2);
+        assert_eq!(trimmed(&mut extents, 1), [extent(1)]);
+        assert_eq!(trimmed(&mut extents, 3), [extent(2)]);
+        assert_eq!(extents.bytes(), 4096);
+        assert!(extents.get(&extent(3)).is_some_and(|kept| kept.uploader));
+        extents.release(3);
+        assert_eq!(trimmed(&mut extents, 3), [extent(3)]);
+        assert_eq!(extents.bytes(), 0);
+    }
+
     /// An extent kept again is kept as the later free says: its bytes and its commit counted once.
     #[test]
     fn extents_kept_again_count_once() {

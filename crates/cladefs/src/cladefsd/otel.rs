@@ -236,6 +236,56 @@ mod tests {
         }
     }
 
+    /// Another value than `otlp` or `off` is refused, spans started not; none, spans start,
+    /// recorded alone.
+    #[test]
+    fn spans_are_exported_only_if_the_option_says_otlp() {
+        set(OPTION, Some("jaeger"));
+        assert_eq!(
+            from_env(),
+            Err("CLADEFSD_TRACES must be `otlp`, `off` or unset, not `jaeger`".to_owned())
+        );
+        assert!(!bucket_cell::trace::enabled());
+        set(OPTION, None);
+        assert_eq!(from_env(), Ok(Tracing::Recorded));
+        assert!(bucket_cell::trace::enabled(), "spans are recorded, for /z/tracez");
+    }
+
+    /// `off` makes no spans: none recorded, none exported, no tracer provider installed
+    /// (TASK-707).
+    #[test]
+    fn off_makes_no_spans() {
+        set(OPTION, Some("off"));
+        assert_eq!(from_env(), Ok(Tracing::Off));
+        assert!(!bucket_cell::trace::enabled());
+        assert!(PROVIDER.get().is_none());
+    }
+
+    /// What the sampler doesn't keep, recorded spans cost too much to make each of (TASK-707), is
+    /// not made: a span of a trace not sampled records nothing, for `/z/tracez` or export.
+    #[test]
+    fn spans_of_traces_not_sampled_record_nothing() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+        set(OPTION, None);
+        set("OTEL_TRACES_SAMPLER", None);
+        set("OTEL_TRACES_SAMPLER_ARG", Some("0"));
+        assert_eq!(from_env(), Ok(Tracing::Recorded));
+        let tracer = opentelemetry::global::tracer("test");
+        assert!(!tracer.start("not sampled").is_recording());
+    }
+
+    /// A trace the sampler keeps has its spans made, recorded for `/z/tracez`.
+    #[test]
+    fn spans_of_traces_sampled_are_recorded() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+        set(OPTION, None);
+        set("OTEL_TRACES_SAMPLER", None);
+        set("OTEL_TRACES_SAMPLER_ARG", Some("1"));
+        assert_eq!(from_env(), Ok(Tracing::Recorded));
+        let tracer = opentelemetry::global::tracer("test");
+        assert!(tracer.start("sampled").is_recording());
+    }
+
     #[test]
     fn otlp_starts_tracing() {
         set(OPTION, Some("otlp"));
@@ -244,5 +294,19 @@ mod tests {
         assert!(bucket_cell::trace::enabled());
         shutdown(Duration::from_secs(5));
         assert!(!bucket_cell::trace::enabled());
+    }
+
+    #[test]
+    fn traces_are_sampled_by_ratio_unless_opentelemetrys_variables_say_otherwise() {
+        let sampler = || format!("{:?}", default_sampler());
+        set("OTEL_TRACES_SAMPLER", None);
+        set("OTEL_TRACES_SAMPLER_ARG", None);
+        assert_eq!(sampler(), "Ok(Some(ParentBased(TraceIdRatioBased(0.01))))");
+        set("OTEL_TRACES_SAMPLER_ARG", Some("0.5"));
+        assert_eq!(sampler(), "Ok(Some(ParentBased(TraceIdRatioBased(0.5))))");
+        set("OTEL_TRACES_SAMPLER_ARG", Some("2"));
+        assert_eq!(sampler(), "Err(\"OTEL_TRACES_SAMPLER_ARG must be a ratio, 0 to 1: 2\")");
+        set("OTEL_TRACES_SAMPLER", Some("always_on"));
+        assert_eq!(sampler(), "Ok(None)");
     }
 }

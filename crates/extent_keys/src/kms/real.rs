@@ -79,4 +79,15 @@ mod tests {
         let refused = ciphertext(&other_format, "gcp-kms", "k").unwrap_err().0;
         assert_eq!(refused, "a wrapped key, of another format");
     }
+
+    #[test]
+    fn short_and_foreign_bytes_are_refused_by_their_header() {
+        let whole = wrapped("gcp-kms", "key", b"");
+        let local = Wrapped([&b"fxkw\x01"[..], &[0; 52]].concat());
+        for bytes in (0..whole.0.len()).map(|len| Wrapped(whole.0[..len].to_vec())).chain([local]) {
+            let refused = ciphertext(&bytes, "gcp-kms", "key").unwrap_err();
+            assert_eq!(refused, Unauthentic("a wrapped key, by its header"), "{bytes:?}");
+        }
+        assert_eq!(ciphertext(&whole, "gcp-kms", "key"), Ok(&b""[..]));
+    }
 }

@@ -2532,6 +2532,16 @@ mod tests {
         }
     }
 
+    /// TASK-539.12: the host's disk full, as making an open cell's file finds it, is `ENOSPC` to
+    /// the guest; an open cell failed for it says so, and is `EIO`.
+    #[test]
+    fn a_full_disk_is_enospc_and_a_failed_extent_store_eio() {
+        let full = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        assert_eq!(errno(anyhow::Error::new(full).context("creating a raw file")), Errno::ENOSPC);
+        let failed = anyhow::anyhow!("the extent store failed: framing a segment: no space");
+        assert_eq!(errno(failed), Errno::EIO);
+    }
+
     /// Each of the uploader's failures has its errno, as doc-4 and doc-7 have them: a cell this
     /// writer lost is EROFS, not EIO (TASK-160.12).
     #[test]
@@ -2981,6 +2991,35 @@ mod tests {
             matches!(lost, Some(local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(_)))),
             "{lost:?}"
         );
+    }
+
+    /// Reads of sealed extents come from the extent cache (TASK-32): a fork reading what its base
+    /// read before reads nothing from the open cell. Past an extent's end, zeros, as the open cell
+    /// reads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_of_sealed_extents_come_from_the_cache() {
+        let (cell, dir) = cell(1 << 20).await;
+        let extent = id(&cell, 1);
+        write(&cell, extent, 0, &pattern(1, 2 * BLOCK)).await.unwrap();
+        // Open: from the open cell.
+        let before = stats::stats();
+        assert_eq!(read(&cell, extent, 0, 2 * BLOCK).await, Ok(pattern(1, 2 * BLOCK)));
+        assert_eq!(stats::stats().since(&before).read_stored_bytes, 2 * BLOCK as u64);
+        cell.commit(None).await.unwrap();
+
+        let before = stats::stats();
+        let tail = [pattern(1, 2 * BLOCK)[BLOCK..].to_vec(), vec![0; BLOCK]].concat();
+        assert_eq!(read(&cell, extent, BLOCK as u64, 2 * BLOCK).await, Ok(tail));
+        let first = stats::stats().since(&before);
+        assert_eq!((first.read_stored_bytes, first.page_ins), (0, 1));
+
+        let path = dir.path().join("fork");
+        cell.fork_to(&path, crate::host_cell::fork_child(cell.cell())).await.unwrap();
+        let fork = OpenCell::open(&path).await.unwrap();
+        let before = stats::stats();
+        assert_eq!(read(&fork, extent, 0, 2 * BLOCK).await, Ok(pattern(1, 2 * BLOCK)));
+        let again = stats::stats().since(&before);
+        assert_eq!((again.read_stored_bytes, again.page_ins, again.page_in_bytes), (0, 0, 0));
     }
 
     /// Races `steps` on one extent, `rounds` times, a fresh extent each: `prepare` alone first,
@@ -3490,6 +3529,29 @@ mod tests {
         }
     }
 
+    /// cladefs: a reader reading an extent from its start has the parts after the one it reads read
+    /// ahead of it, before it faults on them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn page_ins_read_ahead_of_a_reader_reading_on() {
+        let (cell, _dir) = held(64 << 20).await;
+        let extent = id(&cell, 1);
+        let len = 4 * extent_frame::PART as usize;
+        write(&cell, extent, 0, &pattern(5, len)).await.unwrap();
+        let window = cell.create_dax_window(len as u64, None).unwrap();
+        committed_here(&cell).await;
+        cell.map(extent, 0, len as u64, 0).await.unwrap();
+        let before = stats::stats();
+        block_on(window.fault(0, Access::Read)).unwrap();
+        // The first part, and the two after it, read ahead, in time.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let read = || stats::stats().since(&before).page_in_bytes;
+        while read() < 3 * extent_frame::PART && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let counted = stats::stats().since(&before);
+        assert_eq!((counted.page_ins, counted.page_in_bytes), (3, 3 * extent_frame::PART));
+    }
+
     /// TASK-702.2: forks of a version opened for guests read their tenant's evidence of it, once an
     /// interval for all the forks a host opens, once it holds a recording (board 5337), and the
     /// first of them in the interval records what its guest reads of the version's extents,
@@ -3571,6 +3633,67 @@ mod tests {
             })
             .collect();
         assert_eq!(tenants, [5, 6]);
+    }
+
+    /// TASK-702.3: a fork of a version opened for a guest fetches what its tenant's evidence of the
+    /// version predicts into the host's cache, ahead of its guest: the parts of the extents its
+    /// open cell holds alone, not those of one the version holds and the fork freed. Its guest's
+    /// boot is measured against the prediction.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_of_a_version_fetch_their_prediction_ahead() {
+        use bucket_cell::evidence::UNIT;
+        let (base, dir) = cell(64 << 20).await;
+        let extent = id(&base, 1);
+        write(&base, extent, 0, &pattern(5, 4 * UNIT as usize)).await.unwrap();
+        // An extent the version holds, which the second fork frees.
+        let freed = id(&base, 2);
+        write(&base, freed, 0, &pattern(6, UNIT as usize)).await.unwrap();
+        base.commit(None).await.unwrap();
+        let at = dir.path().join("version");
+        base.uploaded_version_at(&at).await.unwrap();
+        drop(base);
+        let version = OpenCell::open_for_host(&at).await.unwrap();
+        let fork = async |name: &str| {
+            let path = dir.path().join(name);
+            version.fork_to(&path, host_cell::named(5)).await.unwrap();
+            path
+        };
+        let (first, second) = (fork("first").await, fork("second").await);
+
+        // The first boot reads two of the extent's units, and the other extent's.
+        let one = OpenCell::open(&first).await.unwrap();
+        let now = std::time::Instant::now();
+        let at = |ms| now + std::time::Duration::from_millis(ms);
+        one.guest_read(extent, 3 * UNIT, 1, at(1));
+        one.guest_read(extent, UNIT, 1, at(2));
+        one.guest_read(freed, 0, 1, at(3));
+        one.close().await;
+        let worked_on = OpenCell::open_for_host(&second).await.unwrap();
+        worked_on.free(freed).unwrap();
+        worked_on.commit(None).await.unwrap();
+        worked_on.close().await;
+
+        // The next, opened where the host keeps the parts it fetches, fetches the two ahead.
+        crate::evidence::forget();
+        let cache = bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30).unwrap();
+        let cache = Arc::new(cache);
+        let here = Opening::here().unwrap();
+        let keeping = local_cell::upload::Options { cache: Some(cache.clone()), ..here.keeping };
+        let opening = Opening { keeping, ..here };
+        let before = stats::stats();
+        let two = OpenCell::open_with(&second, opening).await.unwrap();
+        two.evidence().unwrap().prefetched().await;
+        assert_eq!(stats::stats().since(&before).prefetches, 2);
+        assert_ne!(cache.bytes(), 0);
+
+        // Its boot reads one of them, and a unit not predicted.
+        two.guest_read(extent, 3 * UNIT, 1, at(1));
+        two.guest_read(extent, 2 * UNIT, 1, at(2));
+        two.close().await;
+        let counted = stats::stats().since(&before);
+        let measured = (counted.predicted_read, counted.predicted_unread, counted.read_unpredicted);
+        assert_eq!(measured, (1, 2, 1));
+        version.close().await;
     }
 
     /// cladefs: a part paged in is pages in a run of physical memory, which a window maps with one
@@ -3807,6 +3930,38 @@ mod tests {
         assert_eq!(take(), [], "a commit changed the window");
         cell.unmap(0, 2 * ps).unwrap();
         assert_eq!(take(), [("unmap", ps)]);
+    }
+
+    /// cladefs: freeing an extent maps zeros where the window mapped it, read-only, rather than
+    /// what kept its pages; others stay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn freeing_an_extent_maps_zeros_in_its_place() {
+        let (cell, _dir) = cell(1 << 20).await;
+        let ps = page_size();
+        let window = cell.create_dax_window(8 * ps, None).unwrap();
+        let (sealed, kept) = (id(&cell, 1), id(&cell, 2));
+        write(&cell, sealed, 0, &pattern(1, 2 * ps as usize)).await.unwrap();
+        write(&cell, kept, 0, &pattern(2, ps as usize)).await.unwrap();
+        cell.commit(None).await.unwrap();
+        cell.map(sealed, 0, 2 * ps, 0).await.unwrap();
+        cell.map(kept, 0, ps, 4 * ps).await.unwrap();
+        assert!(window.is_mapped(0) && window.is_mapped(ps));
+
+        let sealed_pages = cached(sealed).unwrap();
+        let weak = Arc::downgrade(&sealed_pages);
+        drop(sealed_pages);
+        cell.free(sealed).unwrap();
+        // Mapped, but no longer keeping the extent's pages: the sealed extent is gone.
+        assert!(window.is_mapped(0) && window.is_mapped(ps));
+        assert!(weak.upgrade().is_none(), "the window still keeps the freed extent's pages");
+        assert!(cached(sealed).is_none());
+        // Zeros, read-only: an open cell faults rather than writing them.
+        assert_eq!(block_on(window.fault(0, Access::Write)), Err(Errno::EACCES));
+        block_on(window.fault(0, Access::Read)).unwrap();
+        // SAFETY: The test faulted the pages in, and nothing else accesses them.
+        let bytes = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
+        assert!(bytes.iter().all(|byte| *byte == 0), "a freed extent's range doesn't read zeros");
+        assert!(window.is_mapped(4 * ps), "an extent not freed was unmapped");
     }
 
     /// TASK-79.6: an extent freed once sealed is mapped, and written, no more: a fork

@@ -1135,6 +1135,21 @@ impl Segment {
 mod tests {
     use super::*;
 
+    /// TASK-395.2: a delimiter listing of a cell's references gives the parents with forks, and one
+    /// of a parent's, its distinct origins: each prefix read back as what it names, and no
+    /// other.
+    #[test]
+    fn references_list_by_origin() {
+        let (parent, child) = (CellId { tenant: 0xa, id: 0xc }, CellId { tenant: 1, id: 5 });
+        let key = reference(parent, 7, child);
+        assert!(key.starts_with(&origin(parent, 7)));
+        assert!(origin(parent, 7).starts_with(&references(parent)));
+        assert_eq!(referenced_at(parent, &origin(parent, 7)), Some(7));
+        assert_eq!(referenced_at(parent, &references(parent)), None);
+        let other = CellId { tenant: 0xa, id: 0xd };
+        assert_eq!(referenced_at(other, &origin(parent, 7)), None);
+    }
+
     #[test]
     fn kinds() {
         let cell = CellId { tenant: 0xa, id: 0xc };
@@ -1348,5 +1363,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// TASK-476: a head names the versions cut at the segments it names, in order, each once; a
+    /// window keeps the version cutting it and the newest before it alone; and a version is
+    /// dropped, or shared, by its ID. cladefs: each at the epoch of its segment's writer, the
+    /// head's own for a segment it names not (board 6017).
+    #[test]
+    fn heads_name_their_versions() {
+        let cut = |id, keep_last| NewVersion { id, keep_last };
+        let named = |head: &Head| -> Vec<(u64, u64)> {
+            head.versions.iter().map(|version| (version.id, version.at)).collect()
+        };
+        let head = Head::default().naming([(2, &cut(10, None)), (3, &cut(11, None))]);
+        assert_eq!(named(&head), [(10, 2), (11, 3)]);
+        assert_eq!(named(&head.clone().naming([(2, &cut(10, None))])), named(&head), "once");
+        let windowed = head.clone().naming([(4, &cut(12, Some(2)))]);
+        assert_eq!(named(&windowed), [(11, 3), (12, 4)]);
+        let alone = head.clone().naming([(4, &cut(12, Some(0)))]);
+        assert_eq!(named(&alone), [(12, 4)], "a window keeps its own version, at least");
+        let dropped = windowed.clone().without(&BTreeSet::from([11]));
+        assert_eq!(named(&dropped), [(12, 4)]);
+        let twelve = Version { id: 12, at: 4, epoch: 0, shared: false };
+        assert_eq!(windowed.version(12), Some(&twelve));
+        assert!(windowed.clone().sharing(12, true).version(12).unwrap().shared);
+        assert_eq!(windowed.version(10), None);
+        let held = Head { epoch: 5, ..Head::default() }.holding(3, 2);
+        let versions = held.naming([(1, &cut(13, None)), (4, &cut(14, None))]).versions;
+        assert_eq!(versions.iter().map(|version| version.epoch).collect::<Vec<_>>(), [3, 5]);
+    }
+
+    /// TASK-407: a head names each of its segments by its writer's epoch, from its runs, a run a
+    /// takeover; and none past its end. A writer's segments it names next go on its last run if
+    /// it is the writer's, or start one.
+    #[test]
+    fn heads_name_their_segments_by_epoch() {
+        let cell = test_cell(1);
+        let head = Head { end: 0, ..Head::default() }.holding(1, 3).holding(1, 4).holding(3, 6);
+        assert_eq!((head.end, &head.runs[..]), (6, &[(0, 1), (4, 3)][..]));
+        let named: Vec<_> = head.segments(2).collect();
+        assert_eq!(named, [(2, 1), (3, 1), (4, 3), (5, 3)]);
+        assert_eq!(
+            (head.epoch_of(3), head.epoch_of(4), head.epoch_of(6)),
+            (Some(1), Some(3), None)
+        );
+        assert_eq!(head.segment(cell, 5), Some(segment(cell, 5, 3)));
+        assert_eq!(head.clone().holding(3, 5), head, "nothing named twice, nor taken back");
+        let checkpointed = Head { checkpoint: Some((4, 3)), ..head };
+        assert_eq!(checkpointed.checkpoint(cell), Some(checkpoint(cell, 4, 3)));
     }
 }

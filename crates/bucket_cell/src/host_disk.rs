@@ -442,4 +442,10 @@ mod tests {
         assert!(free.abs_diff(blocks * size) < 1024 * size, "{free} bytes, {blocks} of {size}");
         assert!(sample.used <= sample.size && free <= sample.size, "{sample:?}");
     }
+
+    /// A length counts as the granules that hold it, a partial one whole.
+    #[test]
+    fn lengths_count_in_granules() {
+        assert_eq!([0, 1, GRANULE, GRANULE + 1].map(counted), [0, GRANULE, GRANULE, 2 * GRANULE]);
+    }
 }

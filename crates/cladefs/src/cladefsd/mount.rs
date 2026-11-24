@@ -183,3 +183,56 @@ pub(super) async fn close() -> Result<(), Error> {
 pub(super) async fn close() -> Result<(), Error> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(vars: &[(&str, &str)]) -> Result<Option<Config>, String> {
+        Config::from_vars(|name| {
+            vars.iter().find(|(set, _)| *set == name).map(|(_, value)| (*value).to_owned())
+        })
+    }
+
+    #[test]
+    fn a_mount_point_needs_a_directory_of_cells() {
+        assert_eq!(
+            config(&[("CLADEFSD_MOUNT", "/m")]),
+            Err("CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for its \
+                 cell directories"
+                .to_owned())
+        );
+        assert_eq!(
+            config(&[("CLADEFSD_MOUNT", "/m"), ("CLADEFSD_MOUNT_STORES", "/s")]),
+            Ok(Some(Config {
+                mountpoint: "/m".into(),
+                cell_dirs: "/s".into(),
+                allow_other: false
+            }))
+        );
+        assert_eq!(
+            config(&[
+                ("CLADEFSD_MOUNT", "/m"),
+                ("CLADEFSD_MOUNT_STORES", "/s"),
+                ("CLADEFSD_MOUNT_ALLOW_OTHER", "1")
+            ]),
+            Ok(Some(Config { mountpoint: "/m".into(), cell_dirs: "/s".into(), allow_other: true }))
+        );
+    }
+
+    #[test]
+    fn mount_settings_without_a_mount_point_are_refused() {
+        assert_eq!(
+            config(&[("CLADEFSD_MOUNT_STORES", "/s")]),
+            Err("CLADEFSD_MOUNT_STORES is set, but CLADEFSD_MOUNT names no mount point".to_owned())
+        );
+        assert_eq!(
+            config(&[
+                ("CLADEFSD_MOUNT", "/m"),
+                ("CLADEFSD_MOUNT_STORES", "/s"),
+                ("CLADEFSD_MOUNT_ALLOW_OTHER", "yes")
+            ]),
+            Err("CLADEFSD_MOUNT_ALLOW_OTHER is 0 or 1, not yes".to_owned())
+        );
+    }
+}

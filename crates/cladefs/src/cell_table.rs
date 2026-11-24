@@ -1401,4 +1401,27 @@ mod tests {
         drop(held);
         assert!(write(&table, key, &writer).is_ok());
     }
+
+    /// TASK-475.3: the mount attaches no cell a writer writes, nor one followers have open; it
+    /// takes the cell kept open of a cell, to close, as a writer does.
+    #[test]
+    fn the_mount_attaches_cells_nothing_else_has() {
+        let table = Table::new();
+        let key = Path::new("cell");
+        let writer = connection(false);
+        let written = write(&table, key, &writer).unwrap().0;
+        assert_eq!(block_on(table.hold_mounted(key, Duration::ZERO)).err(), Some(Errno::EBUSY));
+        let cell = Arc::new("cell");
+        written.open(&cell).unwrap();
+        drop(written);
+        assert_eq!(block_on(table.hold_mounted(key, Duration::ZERO)).err(), Some(Errno::EBUSY));
+        drop(cell);
+        let other = Path::new("other");
+        let held = table.hold(other, None).unwrap();
+        held.keep("kept").unwrap();
+        drop(held);
+        let (_mounted, kept) = block_on(table.hold_mounted(other, Duration::ZERO)).unwrap();
+        assert_eq!(kept, Some("kept"));
+        assert!(block_on(table.hold_mounted(key, Duration::ZERO)).is_ok());
+    }
 }

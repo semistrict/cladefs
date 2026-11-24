@@ -541,6 +541,85 @@ mod tests {
         KeyNames::new(template, None).unwrap()
     }
 
+    /// The KMS `url` names, the host's own, calling with the standard chain's credentials.
+    fn of_host(url: &str) -> Result<AwsKms, String> {
+        AwsKms::of(url, Credentials::Chain, Origin::Host)
+    }
+
+    #[test]
+    fn urls_name_a_region_a_template_and_perhaps_overrides_and_an_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        std::fs::write(&keys, "1a arn:aws:kms:us-east-1:444455556666:key/abc\n").unwrap();
+        let url = format!(
+            "aws-kms://eu-west-2?key=alias/cladefs-{{tenant}}&keys={}&endpoint=http://127.0.0.1:4599",
+            keys.display()
+        );
+        let kms = of_host(&url).unwrap();
+        assert_eq!(kms.client.region, "eu-west-2");
+        assert_eq!(kms.client.endpoint.as_deref(), Some("http://127.0.0.1:4599"));
+        assert_eq!(kms.names.of(31), "alias/cladefs-z");
+        assert_eq!(kms.names.of(42), "arn:aws:kms:us-east-1:444455556666:key/abc");
+        // Percent-encoded, as a URL's query may be.
+        let kms = of_host("aws-kms://us-east-1/?key=alias%2Ft-%7Btenant%7D").unwrap();
+        assert_eq!((kms.client.endpoint.as_deref(), kms.names.of(3)), (None, "alias/t-3".into()));
+    }
+
+    #[test]
+    fn urls_naming_anything_else_are_refused() {
+        let refused = |url: &str| of_host(url).map(|_| ()).unwrap_err();
+        assert_eq!(
+            refused("aws-kms://?key=k-{tenant}"),
+            "\"aws-kms://?key=k-{tenant}\" names no AWS KMS: aws-kms://REGION?key=TEMPLATE names a \
+             region, as us-east-1"
+        );
+        assert_eq!(
+            refused("aws-kms://us-east-1/keys?key=k-{tenant}"),
+            "\"aws-kms://us-east-1/keys?key=k-{tenant}\" names no AWS KMS: \
+             aws-kms://REGION?key=TEMPLATE names a region alone, then a query"
+        );
+        assert_eq!(
+            refused("aws-kms://us-east-1?key=k-{tenant}&endpiont=http://x"),
+            "\"aws-kms://us-east-1?key=k-{tenant}&endpiont=http://x\" names no AWS KMS: its query \
+             names \"endpiont\": key, keys or endpoint"
+        );
+        assert_eq!(
+            refused("aws-kms://us-east-1?key=shared"),
+            "\"aws-kms://us-east-1?key=shared\" names no AWS KMS: the key template \"shared\" \
+             holds no {tenant}: every tenant would share one KEK"
+        );
+        assert_eq!(
+            refused("aws-kms://us-east-1"),
+            "\"aws-kms://us-east-1\" names no AWS KMS: the KMS URL names no key template: \
+             key=...{tenant}..."
+        );
+        let shared = crate::kms::from_url("aws-kms://us-east-1?key=k").map(|_| ()).unwrap_err();
+        assert_eq!(
+            shared,
+            "\"aws-kms://us-east-1?key=k\" names no AWS KMS: the key template \"k\" holds no \
+             {tenant}: every tenant would share one KEK"
+        );
+    }
+
+    #[test]
+    fn headers_name_the_backend_and_the_key() {
+        let header = header(7, "alias/k-7").unwrap();
+        assert_eq!(header, b"fxka\x01\x00\x09alias/k-7");
+        let wrapped = Wrapped([&header[..], b"blob"].concat());
+        assert_eq!(key_name_of(&wrapped), Ok(("alias/k-7", &b"blob"[..])));
+        let refused = |bytes: &[u8]| key_name_of(&Wrapped(bytes.to_vec())).map(|_| ());
+        let by_header = Err(Unauthentic("a wrapped key, by its header"));
+        assert_eq!(refused(b"fxkw\x01\0\0\0\0\0\0\0\x07\0\0\0\x01"), by_header);
+        assert_eq!(
+            refused(b"fxka\x02\x00\x01kblob"),
+            Err(Unauthentic("a wrapped key, of another format"))
+        );
+        assert_eq!(refused(b"fxka\x01\x00\x09alias/k-"), by_header);
+        assert_eq!(refused(b"fxka\x01\x00\x09alias/k-7"), by_header);
+        assert_eq!(refused(b"fxka\x01\x00"), by_header);
+        assert_eq!(refused(b"fxka\x01\x00\x02\xff\xfeblob"), by_header);
+    }
+
     /// Keys wrapped by another backend, or under another tenant's key, are refused as not
     /// authentic before any call: this KMS's endpoint answers nothing.
     #[test]
@@ -560,6 +639,43 @@ mod tests {
             Err(Error::Unauthentic { tenant: 7, source: Unauthentic(why) })
                 if why == "a wrapped key, under another key than the tenant's"
         );
+    }
+
+    /// The table of [`AwsKms`], for what the emulator never answers (`AccessDeniedException`,
+    /// as it has no IAM; throttling) as for what it does.
+    #[test]
+    fn refusals_map_as_the_table_says() {
+        let of = |code, message| refusal(7, Some(code), message).map(|error| error.to_string());
+        let key = "arn:aws:kms:us-east-1:111122223333:key/k";
+        assert_eq!(of("NotFoundException", None).unwrap(), "tenant 7: no KEK in the KMS");
+        assert_eq!(of("AccessDeniedException", None).unwrap(), "tenant 7: its KEK is revoked");
+        assert_eq!(of("DisabledException", None).unwrap(), "tenant 7: its KEK is revoked");
+        let pending = format!("{key} is pending deletion.");
+        assert_eq!(
+            of("KMSInvalidStateException", Some(&pending)).unwrap(),
+            "tenant 7: its KEK is destroyed"
+        );
+        let importing = format!("{key} is pending import.");
+        assert_eq!(
+            of("KMSInvalidStateException", Some(&importing)).unwrap(),
+            "tenant 7: its KEK is revoked"
+        );
+        for code in ["InvalidCiphertextException", "IncorrectKeyException"] {
+            assert_eq!(
+                of(code, None).unwrap(),
+                "tenant 7: not authentic: a wrapped key, as AWS KMS decrypts it"
+            );
+        }
+        for code in [
+            "ThrottlingException",
+            "KeyUnavailableException",
+            "KMSInternalException",
+            "DependencyTimeoutException",
+            "InvalidKeyUsageException",
+        ] {
+            assert_eq!(of(code, None), None, "{code}");
+        }
+        assert!(refusal(7, None, None).is_none());
     }
 
     /// hotbed review of board 8485: a bucket taking the host's credentials takes the standard
@@ -626,6 +742,48 @@ mod tests {
         wrapped: &Wrapped,
     ) -> Result<Secret, Error> {
         block_on(kms.unwrap_dyn(tenant, wrapped))
+    }
+
+    #[test]
+    #[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
+    fn local_kms_wrapped_keys_unwrap_for_their_tenant() {
+        let (emulator, _, kms) = emulated();
+        let key = Secret::random();
+        let wrapped = wrap_dyn(&kms, TENANT, &key).unwrap();
+        let (name, blob) = key_name_of(&wrapped).unwrap();
+        assert_eq!(name, "alias/cladefs-tenant-z");
+        assert!(!blob.windows(KEY_LEN).any(|w| w == key.expose()), "the blob holds the key");
+        assert_eq!(unwrap_dyn(&kms, TENANT, &wrapped).unwrap().expose(), key.expose());
+        // Another wrap of the same key differs: KMS's own IV.
+        assert_ne!(wrap_dyn(&kms, TENANT, &key).unwrap(), wrapped);
+        // A KMS made anew, as another process's, unwraps it as well.
+        let again = crate::kms::from_url(&emulator.url(TEMPLATE)).unwrap();
+        assert_eq!(unwrap_dyn(&again, TENANT, &wrapped).unwrap().expose(), key.expose());
+    }
+
+    /// Keys are named by key ID, key ARN or alias ARN, each a tenant's override (BYOK), or by an
+    /// alias name, from the template: each wraps and unwraps.
+    #[test]
+    #[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
+    fn local_kms_keys_are_named_by_id_arn_alias_or_alias_arn() {
+        let emulator = LocalAwsKms::start();
+        let key_id = emulator.create_key();
+        emulator.create_alias("alias/tenant-3", &key_id);
+        emulator.create_alias("alias/tenant-4", &key_id);
+        let arn = format!("{}:key/{key_id}", emulator.arn_prefix());
+        let alias_arn = format!("{}:alias/tenant-3", emulator.arn_prefix());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("keys");
+        std::fs::write(&file, format!("1 {key_id}\n2 {arn}\n3 {alias_arn}\n")).unwrap();
+        let url = format!("{}&keys={}", emulator.url("alias/tenant-{tenant}"), file.display());
+        let kms = crate::kms::from_url(&url).unwrap();
+        let named = [(1, key_id), (2, arn), (3, alias_arn), (4, "alias/tenant-4".into())];
+        for (tenant, name) in named {
+            let key = Secret::random();
+            let wrapped = wrap_dyn(&kms, tenant, &key).unwrap_or_else(|err| panic!("{err}"));
+            assert_eq!(key_name_of(&wrapped).unwrap().0, name);
+            assert_eq!(unwrap_dyn(&kms, tenant, &wrapped).unwrap().expose(), key.expose());
+        }
     }
 
     /// Tenants sharing a key, as overrides may name one for both, unwrap none of each other's:
@@ -717,6 +875,67 @@ mod tests {
         assert_matches!(
             unwrap_dyn(&kms, TENANT, &new),
             Err(Error::Unauthentic { tenant: TENANT, .. })
+        );
+    }
+
+    /// A key disabled wraps and unwraps nothing, revoked, until enabled again.
+    #[test]
+    #[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
+    fn local_kms_disabled_keys_are_revoked_until_enabled() {
+        let (emulator, key_id, kms) = emulated();
+        let key = Secret::random();
+        let wrapped = wrap_dyn(&kms, TENANT, &key).unwrap();
+        emulator.disable(&key_id);
+        assert_matches!(unwrap_dyn(&kms, TENANT, &wrapped), Err(Error::Revoked { tenant: TENANT }));
+        assert_eq!(
+            refusal_text(unwrap_dyn(&kms, TENANT, &wrapped)),
+            "tenant 31: its KEK is revoked"
+        );
+        assert_eq!(refusal_text(wrap_dyn(&kms, TENANT, &key)), "tenant 31: its KEK is revoked");
+        emulator.enable(&key_id);
+        assert_eq!(unwrap_dyn(&kms, TENANT, &wrapped).unwrap().expose(), key.expose());
+    }
+
+    /// A key scheduled for deletion wraps and unwraps nothing: destroyed, as it will be.
+    #[test]
+    #[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
+    fn local_kms_keys_pending_deletion_are_destroyed() {
+        let (emulator, key_id, kms) = emulated();
+        let key = Secret::random();
+        let wrapped = wrap_dyn(&kms, TENANT, &key).unwrap();
+        emulator.schedule_deletion(&key_id);
+        assert_matches!(
+            unwrap_dyn(&kms, TENANT, &wrapped),
+            Err(Error::Destroyed { tenant: TENANT })
+        );
+        assert_eq!(
+            refusal_text(unwrap_dyn(&kms, TENANT, &wrapped)),
+            "tenant 31: its KEK is destroyed"
+        );
+        assert_eq!(refusal_text(wrap_dyn(&kms, TENANT, &key)), "tenant 31: its KEK is destroyed");
+    }
+
+    /// A tenant whose key is not in the KMS has no KEK.
+    #[test]
+    #[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
+    fn local_kms_tenants_without_keys_have_no_kek() {
+        let (_emulator, _, kms) = emulated();
+        let wrapped = wrap_dyn(&kms, TENANT, &Secret::random()).unwrap();
+        assert_matches!(
+            wrap_dyn(&kms, 0x2a, &Secret::random()),
+            Err(Error::NoSuchTenant { tenant: 0x2a })
+        );
+        assert_eq!(
+            refusal_text(wrap_dyn(&kms, 0x2a, &Secret::random())),
+            "tenant 42: no KEK in the KMS"
+        );
+        // Tenant 0x2a's own name on the wrapped key, as its header would say.
+        let blob = key_name_of(&wrapped).unwrap().1;
+        let relabelled =
+            Wrapped([&header(42, "alias/cladefs-tenant-1a").unwrap()[..], blob].concat());
+        assert_eq!(
+            refusal_text(unwrap_dyn(&kms, 0x2a, &relabelled)),
+            "tenant 42: no KEK in the KMS"
         );
     }
 

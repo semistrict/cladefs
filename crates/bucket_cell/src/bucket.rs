@@ -887,6 +887,79 @@ pub(crate) async fn conditional_deletes(bucket: &impl Bucket, root: &str, made: 
 mod tests {
     use super::*;
     use futures::executor::block_on;
+    use std::sync::Mutex;
+
+    /// A bucket whose GETs fail so many times, then find nothing, and that records its pauses.
+    struct Flaky {
+        failing: Mutex<u32>,
+        pauses: Mutex<Vec<u32>>,
+    }
+
+    impl Bucket for Flaky {
+        fn get(&self, _: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+            let mut failing = self.failing.lock().unwrap();
+            let result = match *failing {
+                0 => Err(Error::NotFound),
+                _ => Err(Error::Unavailable),
+            };
+            *failing = failing.saturating_sub(1);
+            std::future::ready(result)
+        }
+
+        fn get_range(
+            &self,
+            _: &str,
+            _: ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
+            std::future::ready(Err(Error::Unavailable))
+        }
+
+        fn head(&self, _: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+            std::future::ready(Err(Error::Unavailable))
+        }
+
+        fn list(&self, _: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+            std::future::ready(Err(Error::Unavailable))
+        }
+
+        fn list_delimited(
+            &self,
+            _: &str,
+            _: Page<'_>,
+        ) -> impl Future<Output = Result<Listing, Error>> + Send {
+            std::future::ready(Err(Error::Unavailable))
+        }
+
+        fn put(
+            &self,
+            _: &str,
+            _: Bytes,
+            _: PutMode,
+        ) -> impl Future<Output = Result<Version, Error>> + Send {
+            std::future::ready(Err(Error::Unavailable))
+        }
+
+        fn delete(&self, _: &str) -> impl Future<Output = Result<(), Error>> + Send {
+            std::future::ready(Err(Error::Unavailable))
+        }
+
+        fn now(&self) -> u64 {
+            0
+        }
+
+        fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
+            self.pauses.lock().unwrap().push(failures);
+            std::future::ready(())
+        }
+    }
+
+    /// A request the backend failed goes again, after a pause that counts the failures in a row.
+    #[test]
+    fn failed_requests_pause_counting_their_failures() {
+        let bucket = Flaky { failing: Mutex::new(3), pauses: Mutex::default() };
+        assert_eq!(block_on(get(&bucket, "key")).map(|object| object.is_none()), Ok(true));
+        assert_eq!(*bucket.pauses.lock().unwrap(), [1, 2, 3]);
+    }
 
     /// Objects in memory, of `object_store`'s, whose requests the test fails where they would go
     /// again: what `object_store` refuses but for the protocol's conditions, it says as it says the

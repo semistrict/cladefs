@@ -177,3 +177,26 @@ pub enum SnapshotError {
     )]
     Private(String, u64),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A snapshot's configuration comes back as it was configured. cladefs TASK-502: its private
+    /// pages' cap a count of pages, as snapshots before held it, the configuration's bytes.
+    #[test]
+    fn configurations_come_back_as_configured() {
+        let config = Config {
+            id: "a".into(),
+            tag: "fxfs".into(),
+            path_on_host: "/store".into(),
+            capacity: 1 << 30,
+            dax_window_size: Some(64 << 20),
+            dax_private_max_bytes: Some(16 * cladefs::pages::page_size()),
+            cladefsd_socket: "/cladefsd.sock".into(),
+            cache_type: CacheType::Unsafe,
+        };
+        assert_eq!(ConfigState::from(&config).dax_private_max, Some(16));
+        assert_eq!(Config::from(&ConfigState::from(&config)), config);
+    }
+}

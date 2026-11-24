@@ -1982,6 +1982,34 @@ mod tests {
         assert_eq!(files(&dir, SEGMENTS), [0, 1, 2]);
     }
 
+    /// The queue gives the uploader the segments that are framed, whose commits are durable, in
+    /// order, each once, and is acknowledged in order, its start moving on.
+    #[test]
+    fn queues_give_what_may_upload_in_order() {
+        let footer = |segment, epoch| Footer {
+            cell: CELL,
+            segment,
+            epoch: 2,
+            contents: Contents { commits: vec![tag(2, epoch)], ..Contents::default() },
+        };
+        let mut queue = Queue::new(Some(tag(1, 4)), []);
+        for (number, epoch) in [(1, 5), (2, 6), (3, 7)] {
+            queue.push(number, footer(number, epoch), 100);
+        }
+        assert_eq!(queue.bytes(), 300);
+        let numbers = |taken: Vec<&Queued>| taken.iter().map(|q| q.number).collect::<Vec<_>>();
+        assert_eq!(numbers(queue.take(7, |_| false, 1)), [1]);
+        assert_eq!(numbers(queue.take(7, |number| number == 2, 9)), Vec::<u64>::new());
+        assert_eq!(numbers(queue.take(6, |_| false, 9)), [2]);
+        assert_eq!(numbers(queue.take(7, |_| false, 9)), [3]);
+        assert_eq!(numbers(queue.take(7, |_| false, 9)), Vec::<u64>::new());
+        assert!(queue.acknowledge(2).is_none());
+        let segments =
+            |group: Vec<Queued>| group.iter().map(|q| q.footer.segment).collect::<Vec<_>>();
+        assert_eq!(queue.acknowledge(1).map(segments), Some(vec![1]));
+        assert_eq!((queue.start(), queue.bytes()), (Some(tag(2, 5)), 200));
+    }
+
     /// cladefs: acknowledged, the segments going on with a commit are held until the one ending it
     /// is acknowledged too, then given together, the start past the commit: let go one at a time, a
     /// crash between left a hole in the commit's segments here, which recovery read as the commit

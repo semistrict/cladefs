@@ -26,6 +26,145 @@ fn overrides_naming_no_vault_are_refused() {
     );
 }
 
+#[test]
+fn urls_naming_no_vault_or_no_keys_are_refused() {
+    let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
+    let refused = |url: &str| parse(url, Origin::Host).unwrap_err();
+    let domains = "NAME.vault.azure.net, NAME.managedhsm.azure.net, NAME.vault.azure.cn, \
+                   NAME.managedhsm.azure.cn, NAME.vault.usgovcloudapi.net, \
+                   NAME.managedhsm.usgovcloudapi.net";
+    for host in ["", "V.vault.azure.net", "evil.example", ".vault.azure.net", "a.b.vault.azure.net"]
+    {
+        let url = format!("azure-kv://{host}?key=t-{{tenant}}");
+        assert_eq!(
+            refused(&url),
+            format!("{url:?} names no vault: {host:?} is no vault's host: {domains}: {usage}")
+        );
+    }
+    // Its tokens go to vaults alone, and in the clear to this host alone.
+    for endpoint in ["https://evil.example", "http://10.0.0.1:80", "http://localhost.evil.example"]
+    {
+        let url = format!("azure-kv://v.vault.azure.net?key=t-{{tenant}}&endpoint={endpoint}");
+        assert!(refused(&url).contains("the endpoint, "), "{url}: {}", refused(&url));
+    }
+    let local = "azure-kv://v.vault.azure.net?key=t-{tenant}&endpoint=http://localhost:8443";
+    assert_eq!(parse(local, Origin::Host).unwrap().vault, "http://localhost:8443");
+    let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&region=x";
+    assert_eq!(refused(url), format!("{url:?}: no parameter \"region\": {usage}"));
+    let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&alg=RSA1_5";
+    assert_eq!(
+        refused(url),
+        format!("{url:?}: no algorithm \"RSA1_5\": RSA-OAEP-256, A256KW, CKM_AES_KEY_WRAP")
+    );
+    let url = "azure-kv://v.vault.azure.net?key=t_{tenant}";
+    assert_eq!(
+        refused(url),
+        format!(
+            "{url:?}: the key template, \"t_fzzzzzzzzzzzz\", names no key: a key's name is 1 to \
+             127 letters, digits and -"
+        )
+    );
+    let url = "azure-kv://v.vault.azure.net";
+    assert_eq!(
+        refused(url),
+        format!("{url:?}: the KMS URL names no key template: key=...{{tenant}}...")
+    );
+}
+
+#[test]
+fn credentials_are_found_as_azures_libraries_find_them() {
+    let of = |vars: &[(&str, &str)]| {
+        let vars: Vec<(String, String)> =
+            vars.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+        source(&Vars::new(vars))
+    };
+    let kind = |source: Source| match source {
+        Source::Static(_) => "static".to_owned(),
+        Source::Federated { url, .. } => format!("federated {url}"),
+        Source::Secret { url, .. } => format!("secret {url}"),
+        Source::ManagedIdentity { url, client_id } => format!("managed {url} {client_id:?}"),
+    };
+    let principal = [("AZURE_TENANT_ID", "t"), ("AZURE_CLIENT_ID", "c")];
+    assert_eq!(kind(of(&[(TOKEN_VAR, "x"), principal[0], principal[1]])), "static");
+    let federated = [principal[0], principal[1], ("AZURE_FEDERATED_TOKEN_FILE", "/f")];
+    assert_eq!(
+        kind(of(&federated)),
+        "federated https://login.microsoftonline.com/t/oauth2/v2.0/token"
+    );
+    let secret = [principal[0], principal[1], ("AZURE_CLIENT_SECRET", "s")];
+    assert_eq!(kind(of(&secret)), "secret https://login.microsoftonline.com/t/oauth2/v2.0/token");
+    let sovereign = [secret[0], secret[1], secret[2], ("AZURE_AUTHORITY_HOST", "https://a.cn/")];
+    assert_eq!(kind(of(&sovereign)), "secret https://a.cn/t/oauth2/v2.0/token");
+    assert_eq!(kind(of(&[])), format!("managed {IMDS} None"));
+    assert_eq!(kind(of(&[principal[1]])), format!("managed {IMDS} Some(\"c\")"));
+}
+
+const ID: &str = "https://v.vault.azure.net/keys/t-9";
+
+fn mapped(op: Op, code: u16, body: &str) -> (String, bool, bool) {
+    let Failure { failed, unauthorized } = refusal(9, ID, op, code, body.as_bytes());
+    (failed.error.to_string(), failed.transient, unauthorized)
+}
+
+#[test]
+fn refusals_are_mapped_by_their_codes() {
+    let missing = r#"{"error":{"code":"KeyNotFound","message":"A key with (name/id) t-9 was not found in this key vault."}}"#;
+    assert_eq!(
+        mapped(Op::Wrap, 404, missing),
+        ("tenant 9: no KEK in the KMS".into(), false, false)
+    );
+    let bad = r#"{"error":{"code":"BadParameter","message":"Error decrypting."}}"#;
+    assert_eq!(
+        mapped(Op::Unwrap, 400, bad),
+        ("tenant 9: not authentic: a wrapped key, refused by the KMS".into(), false, false)
+    );
+    assert_eq!(
+        mapped(Op::Wrap, 400, bad),
+        (
+            format!(
+                "tenant 9: the KMS failed: Azure Key Vault, wrapkey with {ID}: HTTP 400, BadParameter: Error decrypting."
+            ),
+            false,
+            false
+        )
+    );
+    let vault = r#"{"error":{"code":"VaultNotFound","message":"no vault"}}"#;
+    assert!(!mapped(Op::Wrap, 404, vault).0.contains("no KEK"));
+    let unauthorized =
+        r#"{"error":{"code":"Unauthorized","message":"AKV10022: Invalid audience."}}"#;
+    assert_eq!(
+        mapped(Op::Wrap, 401, unauthorized),
+        (
+            format!(
+                "tenant 9: the KMS failed: Azure Key Vault, wrapkey with {ID}: HTTP 401, \
+                 Unauthorized: AKV10022: Invalid audience."
+            ),
+            false,
+            true
+        )
+    );
+    assert_eq!(
+        mapped(Op::Wrap, 429, ""),
+        (
+            format!(
+                "tenant 9: the KMS failed: Azure Key Vault, wrapkey with {ID}: HTTP 429, no code: "
+            ),
+            true,
+            false
+        )
+    );
+    assert_eq!(
+        mapped(Op::Unwrap, 503, "<html/>"),
+        (
+            format!(
+                "tenant 9: the KMS failed: Azure Key Vault, unwrapkey with {ID}: HTTP 503, no code: "
+            ),
+            true,
+            false
+        )
+    );
+}
+
 /// A fake of a vault, its authority and the instance metadata service: tokens `token-N`, of
 /// `expires_in` seconds, each fetch answered after `token_delay`; keys of version `v1`, wrapping by
 /// reversing what they are given; a key named `revoked-...` refused (403), `firewalled-...` refused

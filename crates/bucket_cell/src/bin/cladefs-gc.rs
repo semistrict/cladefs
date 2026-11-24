@@ -1128,6 +1128,10 @@ fn main() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn parsed(args: &[&str]) -> Result<Args, String> {
+        parse(args.iter().map(|arg| arg.to_string()))
+    }
+
     /// Each line written, and how many pages of listings by delimiter `bucket` was asked for by
     /// then.
     struct Lines<'a> {
@@ -1202,6 +1206,191 @@ mod tests {
         }
         // Tenants, then tenant 1's cells, tenant 2's in three pages, tenant 3's.
         assert_eq!(bucket.stats().requests(Request::ListDelimited), 6);
+    }
+
+    /// TASK-395.5: a pass says what it did, in how long and by what requests, if it deleted or
+    /// retired something, or failed; nothing if it did nothing, or left its cell to another.
+    #[test]
+    fn passes_say_what_they_did_if_anything() {
+        let mut requests = Requests::default();
+        requests.0[Request::List as usize] = 2;
+        let passed = |outcome| Ran {
+            cell: CellId { tenant: 1, id: 2 },
+            outcome,
+            requests,
+            took: Duration::from_millis(12),
+        };
+        let report = Report { deleted: 2, deleted_bytes: 8192, ..Report::default() };
+        assert_eq!(
+            passed_line(&passed(Outcome::Collected(report))).as_deref(),
+            Some(
+                "cladefs-gc: cell 1/2: deleted 2 (8192 bytes), retired 0 references, in 0.012 s; \
+                 requests: list 2"
+            )
+        );
+        let failed = Outcome::Failed(bucket_cell::Error::Corrupt("x".into()));
+        assert_eq!(
+            passed_line(&passed(failed)).as_deref(),
+            Some("cladefs-gc: collecting cell 1/2: corrupt: x, in 0.012 s; requests: list 2")
+        );
+        let retiring = Report { retired: 1, skipped: 1, ..Report::default() };
+        assert_eq!(
+            passed_line(&passed(Outcome::Collected(retiring))).as_deref(),
+            Some(
+                "cladefs-gc: cell 1/2, unchanged: deleted 0 (0 bytes), retired 1 references, in \
+                 0.012 s; requests: list 2"
+            )
+        );
+        assert_eq!(passed_line(&passed(Outcome::Collected(Report::default()))), None);
+        let skipped = Report { skipped: 1, ..Report::default() };
+        assert_eq!(passed_line(&passed(Outcome::Collected(skipped))), None);
+        assert_eq!(passed_line(&passed(Outcome::Left(bucket_cell::Left::Held))), None);
+    }
+
+    /// TASK-395.5: `--metrics` writes the last sweep's counts in Prometheus' text format: its cells
+    /// by what came of each, why it stopped, if it did, what its passes did, its requests by kind,
+    /// how long its passes took, its slowest, and the process's peak memory.
+    #[test]
+    fn metrics_say_what_the_last_sweep_did() {
+        let mut requests = Requests::default();
+        requests.0[Request::Get as usize] = 40;
+        let swept = Swept {
+            visited: 3,
+            passed: 2,
+            held: 1,
+            failed: 1,
+            report: Report { deleted: 4, deleted_bytes: 4096, ..Report::default() },
+            requests,
+            slowest: vec![(CellId { tenant: 1, id: 2 }, Duration::from_millis(250))],
+            took: Duration::from_millis(1500),
+            ..Swept::default()
+        };
+        let mut passes = Histogram::default();
+        for (millis, outcome) in [
+            (250, Outcome::Collected(Report::default())),
+            (5, Outcome::Collected(Report::default())),
+            (20_000, Outcome::Failed(bucket_cell::Error::Corrupt("x".into()))),
+            (1, Outcome::Left(bucket_cell::Left::Held)),
+        ] {
+            let cell = CellId { tenant: 1, id: 2 };
+            let took = Duration::from_millis(millis);
+            passes.observe(&Ran { cell, outcome, requests: Requests::default(), took });
+        }
+        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_250);
+        let text = metrics(2, &swept, &passes, 64 << 20, now);
+        let expected = "\
+# HELP cladefs_gc_sweeps_total Sweeps the process ran.
+# TYPE cladefs_gc_sweeps_total counter
+cladefs_gc_sweeps_total 2
+# HELP cladefs_gc_sweep_end_timestamp_seconds When its last sweep ended.
+# TYPE cladefs_gc_sweep_end_timestamp_seconds gauge
+cladefs_gc_sweep_end_timestamp_seconds 1700000000.250
+# HELP cladefs_gc_sweep_seconds How long its last sweep took.
+# TYPE cladefs_gc_sweep_seconds gauge
+cladefs_gc_sweep_seconds 1.500000
+# HELP cladefs_gc_sweep_cells The cells of its last sweep, by what came of each.
+# TYPE cladefs_gc_sweep_cells gauge
+cladefs_gc_sweep_cells{outcome=\"passed\"} 2
+cladefs_gc_sweep_cells{outcome=\"skipped\"} 0
+cladefs_gc_sweep_cells{outcome=\"failed\"} 1
+cladefs_gc_sweep_cells{outcome=\"held\"} 1
+cladefs_gc_sweep_cells{outcome=\"swept\"} 0
+# HELP cladefs_gc_sweep_stopped Why its last sweep stopped before it went over every cell, if it did: 1 for the reason.
+# TYPE cladefs_gc_sweep_stopped gauge
+cladefs_gc_sweep_stopped{reason=\"unlisted\"} 0
+cladefs_gc_sweep_stopped{reason=\"unidentified\"} 0
+cladefs_gc_sweep_stopped{reason=\"refusing\"} 0
+cladefs_gc_sweep_stopped{reason=\"capped\"} 0
+cladefs_gc_sweep_stopped{reason=\"asked\"} 0
+# HELP cladefs_gc_sweep_capped_passes The passes of its last sweep that deleted nothing, past its bounds.
+# TYPE cladefs_gc_sweep_capped_passes gauge
+cladefs_gc_sweep_capped_passes 0
+# HELP cladefs_gc_sweep_objects What its last sweep's passes did, in objects.
+# TYPE cladefs_gc_sweep_objects gauge
+cladefs_gc_sweep_objects{action=\"deleted\"} 4
+# HELP cladefs_gc_sweep_bytes What its last sweep's passes did, in bytes, as listed.
+# TYPE cladefs_gc_sweep_bytes gauge
+cladefs_gc_sweep_bytes{action=\"deleted\"} 4096
+# HELP cladefs_gc_sweep_retired_references The references its last sweep's passes retired.
+# TYPE cladefs_gc_sweep_retired_references gauge
+cladefs_gc_sweep_retired_references 0
+# HELP cladefs_gc_sweep_removed_cells The dead cells its last sweep's passes removed whole.
+# TYPE cladefs_gc_sweep_removed_cells gauge
+cladefs_gc_sweep_removed_cells 0
+# HELP cladefs_gc_sweep_requests The requests its last sweep made, by kind.
+# TYPE cladefs_gc_sweep_requests gauge
+cladefs_gc_sweep_requests{request=\"get\"} 40
+cladefs_gc_sweep_requests{request=\"get-range\"} 0
+cladefs_gc_sweep_requests{request=\"head\"} 0
+cladefs_gc_sweep_requests{request=\"list\"} 0
+cladefs_gc_sweep_requests{request=\"create\"} 0
+cladefs_gc_sweep_requests{request=\"update\"} 0
+cladefs_gc_sweep_requests{request=\"overwrite\"} 0
+cladefs_gc_sweep_requests{request=\"delete\"} 0
+cladefs_gc_sweep_requests{request=\"list-delimited\"} 0
+cladefs_gc_sweep_requests{request=\"delete-batch\"} 0
+# HELP cladefs_gc_pass_seconds How long its last sweep's passes took.
+# TYPE cladefs_gc_pass_seconds histogram
+cladefs_gc_pass_seconds_bucket{le=\"0.001\"} 0
+cladefs_gc_pass_seconds_bucket{le=\"0.01\"} 1
+cladefs_gc_pass_seconds_bucket{le=\"0.1\"} 1
+cladefs_gc_pass_seconds_bucket{le=\"1\"} 2
+cladefs_gc_pass_seconds_bucket{le=\"10\"} 2
+cladefs_gc_pass_seconds_bucket{le=\"60\"} 3
+cladefs_gc_pass_seconds_bucket{le=\"600\"} 3
+cladefs_gc_pass_seconds_bucket{le=\"+Inf\"} 3
+cladefs_gc_pass_seconds_sum 20.255000
+cladefs_gc_pass_seconds_count 3
+# HELP cladefs_gc_slowest_pass_seconds Its last sweep's slowest passes, by cell.
+# TYPE cladefs_gc_slowest_pass_seconds gauge
+cladefs_gc_slowest_pass_seconds{cell=\"1/2\"} 0.250000
+# HELP cladefs_gc_peak_resident_bytes The most memory the process held so far.
+# TYPE cladefs_gc_peak_resident_bytes gauge
+cladefs_gc_peak_resident_bytes 67108864
+";
+        assert_eq!(text, expected);
+    }
+
+    /// Command lines of no command, or of flags their commands take not, get the usage.
+    #[test]
+    fn other_command_lines_get_the_usage() {
+        let lines: [&[&str]; 32] = [
+            &[],
+            &["u", "--every"],
+            &["u", "--every", "soon"],
+            &["u", "--fast", "1"],
+            &["u", "--delete-cell", "cell"],
+            &["u", "--delete-cell", "ff"],
+            &["u", "--cells", "--held"],
+            &["u", "--mark-only", "--dry-run"],
+            &["u", "--mark-only", "--mark-only"],
+            &["u", "--dry-run", "--every", "30"],
+            &["u", "--mark-only", "1"],
+            &["u", "--usage", "--dry-run"],
+            &["u", "--dry-run", "--usage"],
+            &["u", "--cell"],
+            &["u", "--cell", "1"],
+            &["u", "--cell", "1/2/3"],
+            &["u", "--cells", "--cell", "X/2"],
+            &["u", "--cells", "--cell", "1/2", "--cell", "1/2"],
+            &["u", "--usage", "--cell", "1/2"],
+            &["u", "--usage", "--tenant"],
+            &["u", "--usage", "--tenant", "X"],
+            &["u", "--usage", "--tenant", "1/2"],
+            &["u", "--usage", "--tenant", "10000000000000000"],
+            &["u", "--tenant", "1", "--usage"],
+            &["u", "--at-once", "many"],
+            &["u", "--lease"],
+            &["u", "--metrics"],
+            &["u", "--metrics", "a", "--metrics", "b"],
+            &["u", "--dry-run", "--at-once", "2"],
+            &["u", "--dry-run", "--metrics", "a"],
+            &["u", "--rotate-master-key", "now"],
+            &["u", "--rotate-master-key", "--dry-run"],
+        ];
+        for args in lines {
+            assert_eq!(parsed(args), Err(usage()), "{args:?}");
+        }
     }
 
     /// board 8511's AC #1: `--lease` and `--every` take finite counts of seconds, from a
