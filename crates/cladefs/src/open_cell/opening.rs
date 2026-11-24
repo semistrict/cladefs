@@ -198,7 +198,11 @@ impl Opening {
             return Err(Error::new(anyhow::Error::new(Errno::EEXIST).context(refused)));
         } else {
             if let Some(token) = token {
-                local_cell::upload::blocking(|| OpenCell::place(path, token))?;
+                let force = self.keeping.force;
+                local_cell::upload::blocking(|| match force {
+                    true => OpenCell::place_forced(path, token),
+                    false => OpenCell::place(path, token),
+                })?;
             }
             host_cell::take(path, self.keeping.clone()).await?
         };

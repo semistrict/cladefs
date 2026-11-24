@@ -1967,11 +1967,6 @@ impl Connection {
         // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
         let open_cell = self.open_held(path, &hold, &how).await?;
-        // A VM process opens no cell to write that its writer may not write
-        // ([`crate::CellAccess::may_write`]): a public base, only forks of it (TASK-43), what it
-        // wrote being every tenant's, its pages the default arena's, which every VM process holds
-        // (TASK-79.17); cladefs: nor a version, which nothing writes (doc-7, Versions).
-        open_cell.access().may_write()?;
         let flushed = open_cell.clone();
         let flushing_daemon = Arc::clone(self.daemon());
         self.start_behind(move |stopped| flush_behind(flushing_daemon, flushed, stopped));
@@ -2004,14 +1999,18 @@ impl Connection {
             })
         {
             let open_cell = Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?);
-            cells::at_version(
+            if let Err(err) = cells::at_version(
                 daemon,
                 (crate::CellId { tenant, id: cell }, version),
                 capacity,
                 path,
                 &open_cell,
             )
-            .await?;
+            .await
+            {
+                crate::open_cell::release(open_cell).await;
+                return Err(err);
+            }
             there = Some(open_cell);
         }
         let open_cell = match (there, how) {
@@ -2038,7 +2037,13 @@ impl Connection {
             }
             (None, _) => Arc::new(open_cell_at(daemon, path, None, Some(arena)).await?),
         };
-        hold.open(&open_cell)?;
+        // A VM process opens no cell to write that its writer may not write
+        // ([`crate::CellAccess::may_write`]): checked before publishing via `hold.open`, and every
+        // refused open closes through `release().await` (TASK-43, TASK-79.17, board 5386).
+        if let Err(err) = open_cell.access().may_write().and_then(|()| hold.open(&open_cell)) {
+            crate::open_cell::release(open_cell).await;
+            return Err(err);
+        }
         Ok(open_cell)
     }
 

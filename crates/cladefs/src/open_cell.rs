@@ -183,7 +183,7 @@ impl CellAccess {
 
 /// cladefs: what a request changes of an open cell, which [`OpenCell::admit`] admits it to change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Changing {
+pub(super) enum Changing {
     /// What it holds: its extents and commits ([`CellAccess::may_write`]).
     Contents,
     /// Its capacity ([`CellAccess::may_resize`]).
@@ -191,6 +191,21 @@ enum Changing {
     /// Its cell, not what it holds: its versions, forks, publicity and bases
     /// ([`CellAccess::may_manage`]).
     Cell,
+}
+
+/// cladefs: witness that an open cell's standing was checked by [`OpenCell::admit`] before a
+/// mutating operation runs (TASK-636, board 2702).
+#[must_use]
+pub(super) struct Admitted<'a>(&'a OpenCell);
+
+impl Admitted<'_> {
+    fn local(&self) -> &Arc<LocalCell<HostDir>> {
+        &self.0.local
+    }
+
+    fn uploader(&self) -> Option<&local_cell::upload::Uploader<HostDir>> {
+        self.0.uploader.as_ref()
+    }
 }
 
 /// An open cell: the extent store a guest's filesystem lives on. See the module docs.
@@ -605,7 +620,8 @@ impl OpenCell {
         path: impl AsRef<Path>,
         tenant: u64,
     ) -> Result<CellId, Error> {
-        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
+        let admitted = self.admit(Changing::Cell)?;
+        let uploader = admitted.uploader().ok_or(Errno::EROFS)?;
         if !uploader.is_at_version() {
             return Err(Errno::EINVAL.into());
         }
@@ -615,7 +631,7 @@ impl OpenCell {
             Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, making)?)
         };
         let forking =
-            host_cell::fork_ephemeral(&self.local, uploader, path.as_ref(), child, inherited);
+            host_cell::fork_ephemeral(admitted.local(), uploader, path.as_ref(), child, inherited);
         self.fork_span(cell).run_async(forking).await?;
         Ok(cell)
     }
@@ -626,8 +642,8 @@ impl OpenCell {
     /// cell of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_cell::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
     async fn new_child(&self, tenant: u64) -> Result<CellId, Error> {
-        self.admit(Changing::Cell)?;
-        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
+        let admitted = self.admit(Changing::Cell)?;
+        let uploader = admitted.uploader().ok_or(Errno::EROFS)?;
         host_cell::may_fork_into(self.cell(), uploader, tenant)?;
         Ok(host_cell::new_cell(uploader.bucket(), tenant).await.map_err(upload_errno)?)
     }
@@ -637,8 +653,8 @@ impl OpenCell {
     /// never are, to show a fork refuses it (`EEXIST`) and harms no other cell (TASK-79.82).
     pub(crate) async fn fork_to(&self, path: impl AsRef<Path>, cell: CellId) -> Result<(), Error> {
         let forking = async {
-            self.admit(Changing::Cell)?;
-            self.fork_at_version(path.as_ref(), cell, false).await
+            let admitted = self.admit(Changing::Cell)?;
+            self.fork_at_version(&admitted, path.as_ref(), cell, false).await
         };
         self.fork_span(cell).run_async(forking).await
     }
@@ -658,11 +674,12 @@ impl OpenCell {
     /// inherits by its reference. Forks are of versions alone (TASK-508.3).
     async fn fork_at_version(
         &self,
+        admitted: &Admitted<'_>,
         path: &Path,
         cell: CellId,
         quiescent: bool,
     ) -> Result<(), Error> {
-        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
+        let uploader = admitted.uploader().ok_or(Errno::EROFS)?;
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
         // (TASK-79.82, TASK-153.9).
@@ -679,16 +696,18 @@ impl OpenCell {
         let id = match (uploader.is_at_version(), quiescent) {
             (true, quiescent) => {
                 if quiescent {
-                    self.at_rest(async { Ok(()) }).await?;
+                    self.at_rest(admitted, async { Ok(()) }).await?;
                 }
-                return host_cell::fork(&self.local, uploader, path, child, inherited).await;
+                return host_cell::fork(admitted.local(), uploader, path, child, inherited).await;
             }
-            (false, true) => self.at_rest(self.commit_version(None, true)).await?,
-            (false, false) => self.commit_version(None, false).await?,
+            (false, true) => {
+                self.at_rest(admitted, self.commit_version(admitted, None, true)).await?
+            }
+            (false, false) => self.commit_version(admitted, None, false).await?,
         };
         self.make_uploaded().await?;
         failpoint!("fork::uploaded");
-        host_cell::fork_through(&self.local, uploader, id, path, child, inherited).await
+        host_cell::fork_through(admitted.local(), uploader, id, path, child, inherited).await
     }
 
     /// cladefs: the bucket the open cell's description names, which its cell is kept in: what its
@@ -818,8 +837,8 @@ impl OpenCell {
     /// shrinks it no lower than what its extents hold (`ENOSPC`). The guest's filesystem, which may
     /// hold more, agrees to a shrink first (the extent daemon's `RESIZE` asks it).
     pub async fn set_capacity(&self, capacity: u64) -> Result<()> {
-        self.admit(Changing::Capacity)?;
-        self.local.set_capacity(capacity).await.map_err(errno)
+        let admitted = self.admit(Changing::Capacity)?;
+        admitted.local().set_capacity(capacity).await.map_err(errno)
     }
 
     /// Reads the bytes at `offset` in `extent` into `buffers`, in order (`READ`). Blocks never
@@ -848,9 +867,18 @@ impl OpenCell {
                 Some((base, _)) => (&**base, true),
                 None => (self, false),
             };
+            // cladefs: re-check halt on each piece and before publishing plaintext into the
+            // caller's buffers so a concurrent `forget` cannot slip data out (board 5542,
+            // board 2704).
+            self.halt.check()?;
+            from.halt.check()?;
             if !from.read_cached(extent, at, data).await? {
+                self.halt.check()?;
+                from.halt.check()?;
                 from.read_stored(extent, at, data).await?;
             }
+            self.halt.check()?;
+            from.halt.check()?;
             let _ = through_base;
             scatter(buffers, done, data);
             done += data.len();
@@ -875,8 +903,16 @@ impl OpenCell {
         stats::add(Counter::ReadBytes, data.len() as u64);
         self.halt.check()?;
         match self.base_holding(extent).await? {
-            Some((base, _)) => base.read_stored(extent, offset, data).await,
-            None => self.read_stored(extent, offset, data).await,
+            Some((base, _)) => {
+                base.halt.check()?;
+                base.read_stored(extent, offset, data).await?;
+                self.halt.check()?;
+                base.halt.check()
+            }
+            None => {
+                self.read_stored(extent, offset, data).await?;
+                self.halt.check()
+            }
         }
     }
 
@@ -885,6 +921,7 @@ impl OpenCell {
     /// by any open cell or fork before (TASK-32). Returns whether it read them: not an open
     /// extent's, nor one the open cell doesn't hold.
     async fn read_cached(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<bool> {
+        self.halt.check()?;
         let Some((len, false)) = self.local.extent(extent).map_err(errno)? else {
             return Ok(false);
         };
@@ -901,9 +938,16 @@ impl OpenCell {
         }
         let cached = self.cached(extent, len).await?;
         match cached.read(offset, bytes).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.halt.check()?;
+                Ok(true)
+            }
+            // A revoked or halted cell must never fall back to `read_stored` (board 5542,
+            // board 2704).
+            Err(Errno::EACCES) => Err(Errno::EACCES),
             // Freed meanwhile, or its page-in failed: as the open cell says.
             Err(errno) => {
+                self.halt.check()?;
                 log::debug!("cladefs: reading {extent:?} at {offset} from the cache: {errno:?}");
                 Ok(false)
             }
@@ -970,7 +1014,7 @@ impl OpenCell {
         offset: u64,
         buffers: &[VolatileSlice<'_>],
     ) -> Result<()> {
-        self.admit(Changing::Contents)?;
+        let admitted = self.admit(Changing::Contents)?;
         let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
         let _opening = self.opening.read(&self.halt).await?;
         // cladefs: from `buffers` to the open cell's file, a piece at a time, as the extent
@@ -978,14 +1022,14 @@ impl OpenCell {
         let fill = |at: u64, piece: &mut [u8]| {
             gather(buffers, at as usize, piece);
         };
-        let written = self.local.write_with(extent, offset, len as u64, Self::PIECE, fill);
+        let written = admitted.local().write_with(extent, offset, len as u64, Self::PIECE, fill);
         written.await.map_err(errno)
     }
 
     /// Frees `extent`, if the open cell holds it (`FREE`).
     pub fn free(&self, extent: ExtentId) -> Result<()> {
-        self.admit(Changing::Contents)?;
-        self.local.free(extent).map_err(errno)?;
+        let admitted = self.admit(Changing::Contents)?;
+        admitted.local().free(extent).map_err(errno)?;
         // cladefs: its pages, unless another open cell that asked for them holds it still, which
         // reads them through itself (TASK-79.7): one that holds it reads them anew.
         let Some(cached) = cache::freed(&self.local, self.arenas.of(extent), extent) else {
@@ -1041,12 +1085,16 @@ impl OpenCell {
 
     /// cladefs: `Ok` if the open cell takes a request changing `what` of it: the one gate every
     /// such request passes first, each refused for the same reasons, the first that holds: the open
-    /// cell halted ([`crate::halt`]), which serves nothing more; its role ([`CellAccess`]); or its
-    /// uploader failed for good ([`OpenCell::uploading`]), whose open cell's commits, and what they
-    /// would hold, are its cell's no more (doc-4: `EROFS` on `WRITE`, `FREE` and `COMMIT` once
-    /// another host took the head). Requests passing their own checks, each its own, let a halted
-    /// open cell resize (TASK-611), a fenced one commit (TASK-550) and make versions (TASK-612).
-    fn admit(&self, what: Changing) -> Result<()> {
+    /// cell closed, halted ([`crate::halt`]), which serves nothing more; its role ([`CellAccess`]);
+    /// or its uploader failed for good ([`OpenCell::uploading`]), whose open cell's commits, and
+    /// what they would hold, are its cell's no more (doc-4: `EROFS` on `WRITE`, `FREE` and `COMMIT`
+    /// once another host took the head). Requests passing their own checks, each its own, let a
+    /// halted open cell resize (TASK-611), a fenced one commit (TASK-550) and make versions
+    /// (TASK-612).
+    pub(super) fn admit(&self, what: Changing) -> Result<Admitted<'_>> {
+        if self.closed {
+            return Err(Errno::EBADF);
+        }
         self.halt.check()?;
         let access = self.access();
         match what {
@@ -1054,7 +1102,8 @@ impl OpenCell {
             Changing::Capacity => access.may_resize(),
             Changing::Cell => access.may_manage(),
         }?;
-        self.uploading()
+        self.uploading()?;
+        Ok(Admitted(self))
     }
 
     /// cladefs: `Ok` unless the open cell's uploader stopped, failed: the open cell's commits are
@@ -1151,9 +1200,9 @@ impl OpenCell {
         span.set_cell(self.cell());
         span.set(trace::LEVEL, request.level());
         span.run_async(async {
-            self.admit(Changing::Contents)?;
+            let admitted = self.admit(Changing::Contents)?;
             let started = std::time::Instant::now();
-            let committed = self.commit_and_wait(root, request).await;
+            let committed = self.commit_and_wait(&admitted, root, request).await;
             stats::count_since(Counter::Commits, Counter::CommitNs, started);
             committed
         })
@@ -1162,14 +1211,19 @@ impl OpenCell {
 
     /// Commits, and waits as `request` says: for the uploader's lag, the host's disk, or object
     /// storage; the commit's phases, each counted ([`stats::Stats::commits`]).
-    async fn commit_and_wait(&self, root: Option<&[u8]>, request: CommitRequest) -> Result<()> {
+    async fn commit_and_wait(
+        &self,
+        admitted: &Admitted<'_>,
+        root: Option<&[u8]>,
+        request: CommitRequest,
+    ) -> Result<()> {
         /// What a commit waits for: a level of [`Commit`]'s, or replicated (doc-21).
         enum Waiting {
             Commit(Commit),
             Replicated,
         }
         let committing = std::time::Instant::now();
-        self.local.commit_ordered(root).await.map_err(errno)?;
+        admitted.local().commit_ordered(root).await.map_err(errno)?;
         stats::add_since(Counter::CommitStoreNs, committing);
         let waiting = std::time::Instant::now();
         // cladefs: in a replicated cell (doc-21, TASK-537.3.3), the guest's fsync waits for the
@@ -1257,7 +1311,7 @@ impl OpenCell {
         size: u64,
         second_stage: Arc<dyn SecondStage>,
     ) -> Result<DaxWindow, Error> {
-        self.admit(Changing::Contents)?;
+        let _admitted = self.admit(Changing::Contents)?;
         self.install_dax(|| Ok(Dax::copying(size, second_stage)?))
     }
 
@@ -1507,10 +1561,11 @@ impl OpenCell {
     /// the newest `keep_last` are kept then, if given, the rest dropped. Returns its ID.
     /// `ENOTSUP` without an uploader, which names versions.
     pub async fn make_version(&self, keep_last: Option<u32>) -> Result<u64, Error> {
+        let admitted = self.admit(Changing::Cell)?;
         // cladefs: its versions counted first, which awaits, then committed at rest, which holds
         // the open cell's opening until it is (TASK-685.3).
         self.within_versions(keep_last).await?;
-        let id = self.at_rest(self.commit_version(keep_last, true)).await?;
+        let id = self.at_rest(&admitted, self.commit_version(&admitted, keep_last, true)).await?;
         let named = self.versions().await.into_iter().map(|version| version.id).collect();
         host_cell::made_version(self.cell(), id, &self.path, &named);
         Ok(id)
@@ -1537,15 +1592,20 @@ impl OpenCell {
 
     /// cladefs: commits a version as [`OpenCell::make_version`] does, of the open cell quiescent if
     /// `quiescent` (`LocalCell::commit_version`), and returns its ID.
-    async fn commit_version(&self, keep_last: Option<u32>, quiescent: bool) -> Result<u64, Error> {
-        self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
+    async fn commit_version(
+        &self,
+        admitted: &Admitted<'_>,
+        keep_last: Option<u32>,
+        quiescent: bool,
+    ) -> Result<u64, Error> {
+        admitted.uploader().ok_or(Errno::ENOTSUP)?;
         let id = rand::random::<u64>().max(1);
         let version = bucket_cell::layout::NewVersion { id, keep_last };
-        self.local.commit_version(version, quiescent).await.map_err(|err| {
-            match err.is::<NotQuiescent>() {
-                true => Error::new(anyhow::Error::new(Errno::EBUSY).context(err)),
-                false => Error::new(err),
-            }
+        admitted.local().commit_version(version, quiescent).await.map_err(|err| match err
+            .is::<NotQuiescent>(
+        ) {
+            true => Error::new(anyhow::Error::new(Errno::EBUSY).context(err)),
+            false => Error::new(err),
         })?;
         Ok(id)
     }
@@ -1571,8 +1631,8 @@ impl OpenCell {
     /// cladefs: drops the versions `ids` names: the head names them no more, those not uploaded yet
     /// never. Forks of one keep what they inherited of it until they go.
     pub async fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Error> {
-        self.admit(Changing::Cell)?;
-        let uploader = self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
+        let admitted = self.admit(Changing::Cell)?;
+        let uploader = admitted.uploader().ok_or(Errno::ENOTSUP)?;
         let dropped = uploader.drop_versions(ids).await.map_err(upload_errno);
         // cladefs: forgotten as made here, dropped or not: a drop that failed may have taken
         // effect, and one that didn't is the caller's to retry, which needs no open cell made here
@@ -1588,8 +1648,8 @@ impl OpenCell {
     /// and opened again took the cell with, so that a version just made is shared, not refused as
     /// unknown (`ENOENT`).
     pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Error> {
-        self.admit(Changing::Cell)?;
-        let uploader = self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
+        let admitted = self.admit(Changing::Cell)?;
+        let uploader = admitted.uploader().ok_or(Errno::ENOTSUP)?;
         self.make_uploaded().await?;
         Ok(uploader.share_version(id, shared).await.map_err(upload_errno)?)
     }
@@ -1646,8 +1706,12 @@ impl OpenCell {
     /// open. Private pages, whose bytes no extent holds (TASK-203, backlog doc-13), are its VM
     /// process's, which refuses its snapshot while it holds any, before it asks for the version
     /// (doc-26).
-    async fn at_rest<T>(&self, then: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
-        self.admit(Changing::Cell)?;
+    async fn at_rest<T>(
+        &self,
+        _admitted: &Admitted<'_>,
+        then: impl Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
+        let _admitted = self.admit(Changing::Cell)?;
         let _opening = self.opening.write(&self.halt).await?;
         if !self.is_quiescent()? {
             let open = "an extent written since the last commit is open";
@@ -1662,7 +1726,8 @@ impl OpenCell {
     /// bytes (TASK-203, backlog doc-13, doc-26). The guest's freeze writes them back and rebinds
     /// them first.
     async fn fork_at_rest(&self, path: &Path, cell: CellId) -> Result<(), Error> {
-        self.fork_span(cell).run_async(self.fork_at_version(path, cell, true)).await
+        let admitted = self.admit(Changing::Cell)?;
+        self.fork_span(cell).run_async(self.fork_at_version(&admitted, path, cell, true)).await
     }
 
     /// cladefs: whether the open cell holds what `other` does, as of their last commits: the same
@@ -1708,8 +1773,8 @@ impl OpenCell {
     /// Open cells opened since take it so; a tenant opens no public open cell itself, only forks of
     /// it.
     pub fn make_public(&self) -> Result<()> {
-        self.admit(Changing::Cell)?;
-        self.mark_public(&self.ancestry())
+        let admitted = self.admit(Changing::Cell)?;
+        self.mark_public(&admitted, &self.ancestry())
     }
 
     /// cladefs: makes the cell public, but not those it inherited from: a fork pinning a
@@ -1717,12 +1782,12 @@ impl OpenCell {
     /// rather than being forked by them (backlog doc-10). Its pages are of the default arena
     /// through it ([`Opening::open_base`]).
     pub fn make_public_attach_only(&self) -> Result<()> {
-        self.admit(Changing::Cell)?;
-        self.mark_public(&[self.cell().id])
+        let admitted = self.admit(Changing::Cell)?;
+        self.mark_public(&admitted, &[self.cell().id])
     }
 
-    fn mark_public(&self, cells: &[u64]) -> Result<()> {
-        cell_dir::mark_public(self.local.dir().path(), cells)
+    fn mark_public(&self, admitted: &Admitted<'_>, cells: &[u64]) -> Result<()> {
+        cell_dir::mark_public(admitted.local().dir().path(), cells)
     }
 
     /// cladefs: the cell, and those it inherited from, nearest first.

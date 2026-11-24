@@ -52,7 +52,11 @@ impl Base {
                 Ok(Arc::new(opened))
             }
         };
-        self.cell.get_or_try_init(open).await.cloned()
+        let base = self.cell.get_or_try_init(open).await?.clone();
+        // cladefs: a shredded or halted attached base serves nothing more (board 5542,
+        // board 2704).
+        base.halt.check()?;
+        Ok(base)
     }
 }
 
@@ -136,7 +140,7 @@ impl OpenCell {
     /// restored is. Attached already, it does nothing. The guest has no part in this (backlog
     /// doc-10).
     pub fn attach_base(&self, base: &Path, cells: &[u64]) -> Result<()> {
-        self.admit(Changing::Cell)?;
+        let _admitted = self.admit(Changing::Cell)?;
         cell_dir::attach(&self.path, base, cells)?;
         self.bases.add(self.routed(cells), base);
         Ok(())

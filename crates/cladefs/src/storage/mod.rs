@@ -167,6 +167,16 @@ impl Storage {
                 let error = anyhow::anyhow!("{} holds cell {found}, not {not}", path.display());
                 return Err(Error::new(error.context(crate::Errno::EEXIST)));
             }
+            // cladefs: honor the caller's fencing token on an existing cell directory too, and
+            // open through `host_cell::take` so a diverged local log is dropped (TASK-576,
+            // board 2548, board 2702).
+            if let Some(token) = token {
+                local_cell::upload::blocking(|| local_cell::place_host(path, token, false))
+                    .map_err(Error::new)?;
+            }
+            let keeping = Self::keeping()?;
+            let opened = host_cell::take(path, keeping.clone()).await?;
+            return Self::opened(path.to_owned(), opened, keeping).await;
         }
         Self::open(path).await
     }
@@ -280,6 +290,14 @@ impl Storage {
     /// at all (TASK-433.6); memory has none to bypass.
     pub fn bypasses_page_cache(&self) -> bool {
         matches!(self.kind, Kind::Image { .. })
+    }
+
+    /// cladefs: the cell this storage serves, if it is an image cell (TASK-562, board 2520).
+    pub(crate) fn cell(&self) -> Option<crate::CellId> {
+        match &self.kind {
+            Kind::Image { cell, .. } => cell.upgrade().map(|cell| cell.cell()),
+            Kind::Memory => None,
+        }
     }
 
     /// Deletes the image at `path`, which nothing in this process has open, a fork or not: its

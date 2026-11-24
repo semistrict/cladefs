@@ -7933,3 +7933,32 @@ fn large_writes_waiting_for_replies_do_not_gather_unbounded_payloads() {
         peak >> 20
     );
 }
+
+/// board 5386: a write `OPEN` of a public base (which is read-only) with no other holder must
+/// check `may_write` before publishing the hold and close the `OpenCell` through `release().await`
+/// rather than dropping it synchronously on the runtime, returning `EROFS` cleanly.
+#[test]
+fn refused_write_open_of_public_base_releases_cleanly_with_erofs() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("public-base");
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    // Create the cell, mark it public, and close it so no other holder keeps it open.
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let cell = OpenCell::create(&store, 1 << 24).await.unwrap();
+        local_cell::upload::blocking(|| cell.make_public()).unwrap();
+        cell.close().await;
+    });
+
+    // Opening the public base for writing must fail with EPERM and not panic or leak the hold.
+    let err = CellClient::connect(&socket, &store, 1 << 24).map(drop).unwrap_err();
+    assert_eq!(err.errno(), Some(Errno::EPERM), "expected EPERM, got {err:#}");
+
+    // A second attempt also gets EPERM (the first did not leave a wedged hold behind).
+    let again = CellClient::connect(&socket, &store, 1 << 24).map(drop).unwrap_err();
+    assert_eq!(again.errno(), Some(Errno::EPERM), "expected EPERM again, got {again:#}");
+}
