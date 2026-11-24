@@ -33,11 +33,11 @@ pub const OBJECT_MAGIC: &[u8; 4] = b"fxkt";
 /// backends' `fxkr`.
 pub const WRAPPED_MAGIC: &[u8; 4] = b"fxkb";
 
-/// The format of a KEK object.
-pub const FORMAT: u8 = 1;
+/// The format of a KEK object, frozen at 1 (doc-28, board 10042).
+pub const FORMAT: formats::Format = formats::Format::new("kms bucket object", 1, 1);
 
-/// The format of a wrapped key: 2 names its bucket (TASK-633.6).
-pub const WRAPPED_FORMAT: u8 = 2;
+/// The format of a wrapped key, frozen at 2: 2 names its bucket (TASK-633.6, doc-28, board 10042).
+pub const WRAPPED_FORMAT: formats::Format = formats::Format::new("kms bucket wrapped", 2, 2);
 
 /// A KEK object's kind: a KEK.
 const KEK: u8 = 1;
@@ -143,9 +143,9 @@ impl KekObject {
         let header = || unauthentic("its KEK object, by its header");
         let rest = bytes.strip_prefix(OBJECT_MAGIC).ok_or_else(header)?;
         let (&format, rest) = rest.split_first().ok_or_else(header)?;
-        if format != FORMAT {
-            return Err(unauthentic("its KEK object, of another format"));
-        }
+        FORMAT
+            .check(u32::from(format))
+            .map_err(|_| unauthentic("its KEK object, of another format"))?;
         let (&kind, rest) = rest.split_first().ok_or_else(header)?;
         let (of, rest) = rest.split_first_chunk::<8>().ok_or_else(header)?;
         if u64::from_be_bytes(*of) != tenant {
@@ -219,11 +219,17 @@ pub fn wrap(tenant: u64, bucket: u64, kek: &TenantKek, key: &Secret) -> Wrapped 
 /// header says: the header alone is read.
 pub fn kek_of(wrapped: &Wrapped) -> Result<(u64, u64, KekId), Unauthentic> {
     let bytes = &wrapped.0;
-    if bytes.len() != WRAPPED_LEN || !bytes.starts_with(WRAPPED_MAGIC) {
+    let Some(after_magic) = bytes.strip_prefix(WRAPPED_MAGIC) else {
         return Err(Unauthentic("a wrapped key, by its header"));
-    }
-    if bytes[WRAPPED_MAGIC.len()] != WRAPPED_FORMAT {
-        return Err(Unauthentic("a wrapped key, of another format"));
+    };
+    let Some(&format) = after_magic.first() else {
+        return Err(Unauthentic("a wrapped key, by its header"));
+    };
+    WRAPPED_FORMAT
+        .check(u32::from(format))
+        .map_err(|_| Unauthentic("a wrapped key, of another format"))?;
+    if bytes.len() != WRAPPED_LEN {
+        return Err(Unauthentic("a wrapped key, by its header"));
     }
     let at = WRAPPED_MAGIC.len() + 1;
     let tenant = u64::from_be_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
@@ -257,7 +263,7 @@ pub fn unwrap(
 fn object_header(kind: u8, tenant: u64) -> Vec<u8> {
     let mut header = Vec::with_capacity(KEK_OBJECT_LEN);
     header.extend_from_slice(OBJECT_MAGIC);
-    header.push(FORMAT);
+    header.push(FORMAT.current as u8);
     header.push(kind);
     header.extend_from_slice(&tenant.to_be_bytes());
     header
@@ -266,7 +272,7 @@ fn object_header(kind: u8, tenant: u64) -> Vec<u8> {
 fn wrapped_header(tenant: u64, bucket: u64, id: KekId) -> [u8; WRAPPED_HEADER_LEN] {
     let mut header = [0; WRAPPED_HEADER_LEN];
     header[..WRAPPED_MAGIC.len()].copy_from_slice(WRAPPED_MAGIC);
-    header[WRAPPED_MAGIC.len()] = WRAPPED_FORMAT;
+    header[WRAPPED_MAGIC.len()] = WRAPPED_FORMAT.current as u8;
     let at = WRAPPED_MAGIC.len() + 1;
     header[at..at + 8].copy_from_slice(&tenant.to_be_bytes());
     header[at + 8..at + 16].copy_from_slice(&bucket.to_be_bytes());
@@ -437,5 +443,122 @@ mod tests {
         let mut format = wrapped.clone();
         format.0[4] = 1;
         assert_eq!(refused(7, &kek, &format), "a wrapped key, of another format");
+        // Another format version with a different length (such as a v1 key lacking the 8-byte
+        // bucket ID, or a future v3 key) is still refused as another format, not a bad header.
+        let v1_short = Wrapped([&b"fxkb\x01"[..], &[0; WRAPPED_LEN - 8 - 5]].concat());
+        assert_eq!(refused(7, &kek, &v1_short), "a wrapped key, of another format");
+        let v3_long = Wrapped([&b"fxkb\x03"[..], &[0; WRAPPED_LEN]].concat());
+        assert_eq!(refused(7, &kek, &v3_long), "a wrapped key, of another format");
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<BucketObject>(env!("CARGO_MANIFEST_DIR"));
+        formats::golden::check::<BucketWrapped>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    const GOLDEN_TENANT: u64 = 7;
+    const GOLDEN_BUCKET: u64 = 0xb0;
+    const GOLDEN_MASTER: [u8; crate::KEY_LEN] = [0x11; crate::KEY_LEN];
+    const GOLDEN_KEK_ID: KekId = KekId([0x22; KEK_ID_LEN]);
+    const GOLDEN_KEK: [u8; crate::KEY_LEN] = [0x33; crate::KEY_LEN];
+    const GOLDEN_DEK: [u8; crate::KEY_LEN] = [0x44; crate::KEY_LEN];
+
+    /// KEK objects and tombstones, sealed and opened under [`GOLDEN_MASTER`] (doc-28, board 10042):
+    /// pins the master key ID label, HKDF info label (`OBJECT_INFO`), and AES-KW wrapping.
+    struct BucketObject;
+
+    impl formats::golden::Family for BucketObject {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let master = MasterKey::new(Secret::from_bytes(&GOLDEN_MASTER));
+            let kek = TenantKek::of(GOLDEN_KEK_ID, Secret::from_bytes(&GOLDEN_KEK));
+            vec![
+                ("kek", KekObject::seal(&master, GOLDEN_TENANT, &kek)),
+                ("tombstone", KekObject::tombstone(GOLDEN_TENANT)),
+            ]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            if version != 1 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decode(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decode(case, bytes).map(drop)
+        }
+    }
+
+    impl BucketObject {
+        fn decode(case: &str, bytes: &[u8]) -> Result<String, String> {
+            let object = KekObject::decode(GOLDEN_TENANT, bytes).map_err(|e| e.to_string())?;
+            let keys = MasterKeys::new(vec![Secret::from_bytes(&GOLDEN_MASTER)])?;
+            match (case, &object) {
+                ("kek", KekObject::Kek { tenant, id, master, .. }) => {
+                    let opened = object.open(&keys).map_err(|e| e.to_string())?;
+                    if opened.id != GOLDEN_KEK_ID || opened.key.expose() != &GOLDEN_KEK {
+                        return Err("unwrapped KEK differs from fixed test key".to_owned());
+                    }
+                    Ok(format!(
+                        "KekObject::Kek {{\n    tenant: {tenant},\n    id: {id:?},\n    master: {master:?},\n    opened: true,\n}}"
+                    ))
+                }
+                ("tombstone", KekObject::Tombstone { tenant }) => {
+                    match object.open(&keys) {
+                        Err(Error::Destroyed { tenant: t }) if t == GOLDEN_TENANT => {}
+                        other => return Err(format!("expected Destroyed, got {other:?}")),
+                    }
+                    Ok(format!("KekObject::Tombstone {{\n    tenant: {tenant},\n}}"))
+                }
+                _ => Err(format!("unexpected case {case:?} decoded as {object:?}")),
+            }
+        }
+    }
+
+    /// Bucket-KMS wrapped keys, wrapped and unwrapped under [`GOLDEN_KEK`] (doc-28, board 10042):
+    /// pins the HKDF info label (`WRAP_INFO`), header layout, and AES-KW wrapping.
+    struct BucketWrapped;
+
+    impl formats::golden::Family for BucketWrapped {
+        const FORMAT: formats::Format = WRAPPED_FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let kek = TenantKek::of(GOLDEN_KEK_ID, Secret::from_bytes(&GOLDEN_KEK));
+            let dek = Secret::from_bytes(&GOLDEN_DEK);
+            vec![("wrapped", wrap(GOLDEN_TENANT, GOLDEN_BUCKET, &kek, &dek).0)]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            if version != 2 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decode(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decode(case, bytes).map(drop)
+        }
+    }
+
+    impl BucketWrapped {
+        fn decode(case: &str, bytes: &[u8]) -> Result<String, String> {
+            if case != "wrapped" {
+                return Err(format!("no case {case}"));
+            }
+            let wrapped = Wrapped(bytes.to_vec());
+            let (tenant, bucket, id) = kek_of(&wrapped).map_err(|e| e.to_string())?;
+            let kek = TenantKek::of(GOLDEN_KEK_ID, Secret::from_bytes(&GOLDEN_KEK));
+            let opened =
+                unwrap(GOLDEN_TENANT, GOLDEN_BUCKET, &kek, &wrapped).map_err(|e| e.to_string())?;
+            if opened.expose() != &GOLDEN_DEK {
+                return Err("unwrapped key differs from fixed test key".to_owned());
+            }
+            Ok(format!(
+                "BucketWrapped {{\n    tenant: {tenant},\n    bucket: {bucket},\n    kek: {id:?},\n    unwrapped: true,\n}}"
+            ))
+        }
     }
 }

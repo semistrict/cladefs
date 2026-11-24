@@ -37,8 +37,8 @@ const DEFAULT_PORT: u16 = 8200;
 /// The start of what a real KMS of cladefs's wraps: its own, then the format of the rest.
 const MAGIC: &[u8; 4] = b"fxkm";
 
-/// The format of what [`OpenBao`] wraps.
-const FORMAT: u8 = 1;
+/// The format of what [`OpenBao`] wraps, frozen at 1 (doc-28, board 10042).
+pub const FORMAT: formats::Format = formats::Format::new("kms openbao", 1, 1);
 
 /// The backend a wrapped key's header names.
 const BACKEND: &[u8] = b"openbao";
@@ -693,7 +693,7 @@ fn header(tenant: u64, name: &str) -> Vec<u8> {
     let name_len = u16::try_from(name.len()).expect("key names are short");
     let mut header = Vec::with_capacity(MAGIC.len() + 2 + BACKEND.len() + 8 + 2 + name.len());
     header.extend_from_slice(MAGIC);
-    header.push(FORMAT);
+    header.push(FORMAT.current as u8);
     header.push(BACKEND.len() as u8);
     header.extend_from_slice(BACKEND);
     header.extend_from_slice(&tenant.to_be_bytes());
@@ -724,9 +724,9 @@ impl<'a> Parsed<'a> {
         if take(MAGIC.len())? != MAGIC {
             return Err(by_header);
         }
-        if take(1)? != [FORMAT] {
-            return Err(Unauthentic("a wrapped key, of another format"));
-        }
+        FORMAT
+            .check(u32::from(take(1)?[0]))
+            .map_err(|_| Unauthentic("a wrapped key, of another format"))?;
         let backend_len = take(1)?[0];
         if take(backend_len.into())? != BACKEND {
             return Err(Unauthentic("a wrapped key, wrapped by another KMS"));
@@ -1386,5 +1386,47 @@ mod tests {
                 port = bao.server.port()
             )
         );
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<OpenBaoEnvelope>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    /// [`OpenBao`] wrapped-key envelope, pinned against accidental change (doc-28, board 10042).
+    struct OpenBaoEnvelope;
+
+    impl OpenBaoEnvelope {
+        fn decode(case: &str, bytes: &[u8]) -> Result<String, String> {
+            if case != "wrapped" {
+                return Err(format!("no case {case}"));
+            }
+            let parsed = Parsed::of(bytes).map_err(|e| e.to_string())?;
+            let name = std::str::from_utf8(parsed.name).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "OpenBaoWrapped {{\n    tenant: {},\n    key: {name:?},\n    version: {},\n    ciphertext: {:?},\n}}",
+                parsed.tenant, parsed.version, parsed.ciphertext
+            ))
+        }
+    }
+
+    impl formats::golden::Family for OpenBaoEnvelope {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let hdr = header(7, "cladefs-tenant-7");
+            vec![("wrapped", [&hdr[..], b"vault:v3:YWJjZGVm"].concat())]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            if version != 1 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decode(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decode(case, bytes).map(drop)
+        }
     }
 }

@@ -1554,6 +1554,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "crc-fast",
+ "formats",
  "fprint",
  "futures",
  "libc",

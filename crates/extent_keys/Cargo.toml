@@ -17,6 +17,7 @@ aws-lc-rs.workspace = true
 # associated data given a piece at a time (`Aead::tag`, board 10553), which aws-lc-rs takes whole.
 aws-lc-sys.workspace = true
 # cladefs: atexit(3), which stops random draws as the process exits (src/random.rs, TASK-650).
+formats.workspace = true
 fprint.workspace = true
 libc.workspace = true
 # cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.

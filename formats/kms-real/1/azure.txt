@@ -1,0 +1,6 @@
+Real {
+    backend: "azure-kv",
+    key: "https://myvault.vault.azure.net/keys/k-7",
+    version: "v1",
+    ciphertext: "azure-ciphertext",
+}

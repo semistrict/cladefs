@@ -37,8 +37,8 @@ pub struct KekVersion {
 /// The start of what [`LocalKms`] wraps: its own, then the format of the rest.
 const MAGIC: &[u8; 4] = b"fxkw";
 
-/// The format of what [`LocalKms`] wraps.
-const FORMAT: u8 = 1;
+/// The format of what [`LocalKms`] wraps, frozen at 1 (doc-28, board 10042).
+pub const FORMAT: formats::Format = formats::Format::new("kms local", 1, 1);
 
 /// The bytes of a wrapped key's header: [`MAGIC`], [`FORMAT`], the tenant (big-endian), and the
 /// version of its KEK (big-endian).
@@ -208,11 +208,17 @@ impl LocalKms {
     /// header alone is read: whether it is authentic only an unwrap tells.
     pub fn kek_of(wrapped: &Wrapped) -> Result<KekVersion, Unauthentic> {
         let bytes = &wrapped.0;
-        if bytes.len() != LOCAL_WRAPPED_LEN || &bytes[..MAGIC.len()] != MAGIC {
+        let Some(after_magic) = bytes.strip_prefix(MAGIC) else {
             return Err(Unauthentic("a wrapped key, by its header"));
-        }
-        if bytes[MAGIC.len()] != FORMAT {
-            return Err(Unauthentic("a wrapped key, of another format"));
+        };
+        let Some(&format) = after_magic.first() else {
+            return Err(Unauthentic("a wrapped key, by its header"));
+        };
+        FORMAT
+            .check(u32::from(format))
+            .map_err(|_| Unauthentic("a wrapped key, of another format"))?;
+        if bytes.len() != LOCAL_WRAPPED_LEN {
+            return Err(Unauthentic("a wrapped key, by its header"));
         }
         let tenant = &bytes[MAGIC.len() + 1..MAGIC.len() + 9];
         let version = &bytes[MAGIC.len() + 9..HEADER_LEN];
@@ -343,7 +349,7 @@ impl Kms for LocalKms {
 fn header(kek: KekVersion) -> [u8; HEADER_LEN] {
     let mut header = [0; HEADER_LEN];
     header[..MAGIC.len()].copy_from_slice(MAGIC);
-    header[MAGIC.len()] = FORMAT;
+    header[MAGIC.len()] = FORMAT.current as u8;
     header[MAGIC.len() + 1..MAGIC.len() + 9].copy_from_slice(&kek.tenant.to_be_bytes());
     header[MAGIC.len() + 9..].copy_from_slice(&kek.version.to_be_bytes());
     header
@@ -504,6 +510,17 @@ mod tests {
             refusal(unwrap(&kms, 7, &bare)),
             "tenant 7: not authentic: a wrapped key, by its header"
         );
+        // Another format version, even with a different payload length, is refused as another
+        // format before checking the v1 fixed length.
+        for wrong in [
+            Wrapped([&b"fxkw\x00"[..]].concat()),
+            Wrapped([&b"fxkw\x02"[..], &[0; LOCAL_WRAPPED_LEN]].concat()),
+        ] {
+            assert_eq!(
+                refusal(unwrap(&kms, 7, &wrong)),
+                "tenant 7: not authentic: a wrapped key, of another format"
+            );
+        }
     }
 
     /// A version's header changed to name another version the tenant has fails AES-KW's check:
@@ -619,5 +636,67 @@ mod tests {
         assert_eq!(mode(&kek_path(&tenant, 2)), 0o600);
         assert_eq!(mode(&tenant.join(REVOKED)), 0o600);
         assert_eq!(fs::metadata(kek_path(&tenant, 2)).unwrap().len(), KEY_LEN as u64);
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<Local>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    const GOLDEN_TENANT: u64 = 7;
+    const GOLDEN_VERSION: u32 = 2;
+    const GOLDEN_KEK: [u8; KEY_LEN] = [0x55; KEY_LEN];
+    const GOLDEN_DEK: [u8; KEY_LEN] = [0x66; KEY_LEN];
+
+    /// [`LocalKms`] wrapped keys, wrapped and unwrapped under a fixed on-disk KEK (doc-28, board
+    /// 10042): pins the header layout, HKDF info label (`WRAP_INFO`), and AES-KW wrapping.
+    struct Local;
+
+    impl Local {
+        fn seeded() -> (tempfile::TempDir, LocalKms) {
+            let (dir, kms) = kms();
+            let tenant = kms.tenant_dir(GOLDEN_TENANT);
+            dir_builder().create(&tenant).unwrap();
+            fs::write(kek_path(&tenant, GOLDEN_VERSION), GOLDEN_KEK).unwrap();
+            (dir, kms)
+        }
+
+        fn decode(case: &str, bytes: &[u8]) -> Result<String, String> {
+            if case != "wrapped" {
+                return Err(format!("no case {case}"));
+            }
+            let wrapped = Wrapped(bytes.to_vec());
+            let version = LocalKms::kek_of(&wrapped).map_err(|e| e.to_string())?;
+            let (_dir, kms) = Self::seeded();
+            let opened = kms.unwrap_now(GOLDEN_TENANT, &wrapped).map_err(|e| e.to_string())?;
+            if opened.expose() != &GOLDEN_DEK {
+                return Err("unwrapped key differs from fixed test key".to_owned());
+            }
+            Ok(format!(
+                "LocalWrapped {{\n    tenant: {},\n    version: {},\n    unwrapped: true,\n}}",
+                version.tenant, version.version
+            ))
+        }
+    }
+
+    impl formats::golden::Family for Local {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let (_dir, kms) = Self::seeded();
+            let wrapped = kms.wrap_now(GOLDEN_TENANT, &Secret::from_bytes(&GOLDEN_DEK)).unwrap();
+            vec![("wrapped", wrapped.0)]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            if version != 1 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decode(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decode(case, bytes).map(drop)
+        }
     }
 }

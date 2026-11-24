@@ -1,0 +1,4 @@
+AwsWrapped {
+    key: "alias/cladefs-tenant-7",
+    blob: "aws-ciphertext-blob",
+}

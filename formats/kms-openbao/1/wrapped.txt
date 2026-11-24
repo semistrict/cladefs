@@ -1,0 +1,6 @@
+OpenBaoWrapped {
+    tenant: 7,
+    key: "cladefs-tenant-7",
+    version: 3,
+    ciphertext: "vault:v3:YWJjZGVm",
+}

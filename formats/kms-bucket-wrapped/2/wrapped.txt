@@ -1,0 +1,6 @@
+BucketWrapped {
+    tenant: 7,
+    bucket: 176,
+    kek: KekId(2222222222222222),
+    unwrapped: true,
+}

@@ -188,8 +188,8 @@ impl Credentials {
 /// `fxkw`, so that neither's is sent to the other.
 const MAGIC: &[u8; 4] = b"fxka";
 
-/// The format of what [`AwsKms`] wraps.
-const FORMAT: u8 = 1;
+/// The format of what [`AwsKms`] wraps, frozen at 1 (doc-28, board 10042).
+pub const FORMAT: formats::Format = formats::Format::new("kms aws", 1, 1);
 
 /// The bytes of a wrapped key's header before its key's name: [`MAGIC`], [`FORMAT`] and the
 /// name's length (big-endian).
@@ -432,7 +432,7 @@ fn header(tenant: u64, name: &str) -> Result<Vec<u8>, Error> {
     })?;
     let mut header = Vec::with_capacity(FIXED_LEN + name.len());
     header.extend_from_slice(MAGIC);
-    header.push(FORMAT);
+    header.push(FORMAT.current as u8);
     header.extend_from_slice(&len.to_be_bytes());
     header.extend_from_slice(name.as_bytes());
     Ok(header)
@@ -442,11 +442,15 @@ fn header(tenant: u64, name: &str) -> Result<Vec<u8>, Error> {
 /// whether it is authentic only the KMS tells.
 fn key_name_of(wrapped: &Wrapped) -> Result<(&str, &[u8]), Unauthentic> {
     let bytes = &wrapped.0;
-    if bytes.len() < FIXED_LEN || &bytes[..MAGIC.len()] != MAGIC {
+    let Some(after_magic) = bytes.strip_prefix(MAGIC) else {
         return Err(Unauthentic("a wrapped key, by its header"));
-    }
-    if bytes[MAGIC.len()] != FORMAT {
-        return Err(Unauthentic("a wrapped key, of another format"));
+    };
+    let Some(&format) = after_magic.first() else {
+        return Err(Unauthentic("a wrapped key, by its header"));
+    };
+    FORMAT.check(u32::from(format)).map_err(|_| Unauthentic("a wrapped key, of another format"))?;
+    if bytes.len() < FIXED_LEN {
+        return Err(Unauthentic("a wrapped key, by its header"));
     }
     let len = u16::from_be_bytes([bytes[MAGIC.len() + 1], bytes[MAGIC.len() + 2]]);
     let (name, blob) = bytes[FIXED_LEN..]
@@ -639,6 +643,63 @@ mod tests {
             Err(Error::Unauthentic { tenant: 7, source: Unauthentic(why) })
                 if why == "a wrapped key, under another key than the tenant's"
         );
+        // Another format version, older or newer (even shorter than v1's fixed header), is refused
+        // unasked (doc-28, board 10042).
+        for wrong in [0u8, FORMAT.current as u8 + 1] {
+            let mut bad_format = Wrapped([&header(7, "k-7").unwrap()[..], b"blob"].concat());
+            bad_format.0[MAGIC.len()] = wrong;
+            assert_eq!(
+                refusal_text(unwrap(&kms, 7, &bad_format)),
+                "tenant 7: not authentic: a wrapped key, of another format"
+            );
+            let short_bad = Wrapped([&MAGIC[..], &[wrong][..]].concat());
+            assert_eq!(
+                refusal_text(unwrap(&kms, 7, &short_bad)),
+                "tenant 7: not authentic: a wrapped key, of another format"
+            );
+        }
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<Aws>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    /// [`AwsKms`] wrapped-key envelope, pinned against accidental change (doc-28, board 10042).
+    struct Aws;
+
+    impl Aws {
+        fn decode(case: &str, bytes: &[u8]) -> Result<String, String> {
+            if case != "wrapped" {
+                return Err(format!("no case {case}"));
+            }
+            let wrapped = Wrapped(bytes.to_vec());
+            let (name, blob) = key_name_of(&wrapped).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "AwsWrapped {{\n    key: {name:?},\n    blob: {:?},\n}}",
+                blob.escape_ascii().to_string()
+            ))
+        }
+    }
+
+    impl formats::golden::Family for Aws {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let hdr = header(7, "alias/cladefs-tenant-7").unwrap();
+            vec![("wrapped", [&hdr[..], b"aws-ciphertext-blob"].concat())]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            if version != 1 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decode(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decode(case, bytes).map(drop)
+        }
     }
 
     /// The table of [`AwsKms`], for what the emulator never answers (`AccessDeniedException`,

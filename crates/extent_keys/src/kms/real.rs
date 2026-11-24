@@ -14,8 +14,8 @@ use crate::{Unauthentic, Wrapped};
 /// [`super::LocalKms`]'s (`fxkw`).
 const MAGIC: &[u8; 4] = b"fxkr";
 
-/// The format of the rest.
-const FORMAT: u8 = 1;
+/// The format of the rest, frozen at 1 (doc-28, board 10042).
+pub const FORMAT: formats::Format = formats::Format::new("kms real", 1, 1);
 
 /// `ciphertext`, what backend `backend` (its URL's scheme) had of the KMS for a key wrapped under
 /// the key named `key`, with the header saying so: [`MAGIC`], [`FORMAT`], the backend's length (a
@@ -26,7 +26,7 @@ pub(super) fn wrapped(backend: &str, key: &str, ciphertext: &[u8]) -> Wrapped {
     let mut bytes =
         Vec::with_capacity(MAGIC.len() + 4 + backend.len() + key.len() + ciphertext.len());
     bytes.extend_from_slice(MAGIC);
-    bytes.push(FORMAT);
+    bytes.push(FORMAT.current as u8);
     bytes.push(backend_len);
     bytes.extend_from_slice(backend.as_bytes());
     bytes.extend_from_slice(&key_len.to_be_bytes());
@@ -46,9 +46,7 @@ pub(super) fn ciphertext<'a>(
     let header = Unauthentic("a wrapped key, by its header");
     let rest = wrapped.0.strip_prefix(MAGIC).ok_or(header)?;
     let (&format, rest) = rest.split_first().ok_or(header)?;
-    if format != FORMAT {
-        return Err(Unauthentic("a wrapped key, of another format"));
-    }
+    FORMAT.check(u32::from(format)).map_err(|_| Unauthentic("a wrapped key, of another format"))?;
     let (&backend_len, rest) = rest.split_first().ok_or(header)?;
     let (named, rest) = rest.split_at_checked(backend_len.into()).ok_or(header)?;
     if named != backend.as_bytes() {
@@ -74,10 +72,77 @@ mod tests {
         assert_eq!(refused("aws-kms", "k"), "a wrapped key, wrapped by another KMS");
         assert_eq!(refused("gcp-kms", "j"), "a wrapped key, wrapped under another key");
         assert_eq!(refused("gcp-kms", "kk"), "a wrapped key, wrapped under another key");
-        let mut other_format = wrapped.clone();
-        other_format.0[4] = 2;
-        let refused = ciphertext(&other_format, "gcp-kms", "k").unwrap_err().0;
-        assert_eq!(refused, "a wrapped key, of another format");
+        for wrong in [0u8, FORMAT.current as u8 + 1] {
+            let mut other_format = wrapped.clone();
+            other_format.0[4] = wrong;
+            let refused = ciphertext(&other_format, "gcp-kms", "k").unwrap_err().0;
+            assert_eq!(refused, "a wrapped key, of another format");
+        }
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<Real>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    /// Real KMS wrapped-key envelopes (`gcp-kms` and `azure-kv`), pinned against accidental change
+    /// (doc-28, board 10042).
+    struct Real;
+
+    const GCP_KEY: &str = "projects/p/locations/l/keyRings/r/cryptoKeys/k-7";
+    const AZURE_KEY: &str = "https://myvault.vault.azure.net/keys/k-7";
+
+    impl formats::golden::Family for Real {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let gcp = wrapped("gcp-kms", GCP_KEY, b"gcp-ciphertext").0;
+            // Azure stores a 1-byte version length, version string, then ciphertext inside `real`.
+            let mut azure_body = vec![2u8];
+            azure_body.extend_from_slice(b"v1");
+            azure_body.extend_from_slice(b"azure-ciphertext");
+            let azure = wrapped("azure-kv", AZURE_KEY, &azure_body).0;
+            vec![("gcp", gcp), ("azure", azure)]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            if version != 1 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decode(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decode(case, bytes).map(drop)
+        }
+    }
+
+    impl Real {
+        fn decode(case: &str, bytes: &[u8]) -> Result<String, String> {
+            let wrapped = Wrapped(bytes.to_vec());
+            match case {
+                "gcp" => {
+                    let ct = ciphertext(&wrapped, "gcp-kms", GCP_KEY).map_err(|e| e.to_string())?;
+                    Ok(format!(
+                        "Real {{\n    backend: \"gcp-kms\",\n    key: {GCP_KEY:?},\n    ciphertext: {:?},\n}}",
+                        ct.escape_ascii().to_string()
+                    ))
+                }
+                "azure" => {
+                    let body =
+                        ciphertext(&wrapped, "azure-kv", AZURE_KEY).map_err(|e| e.to_string())?;
+                    let (&vlen, rest) = body.split_first().ok_or("missing azure version len")?;
+                    let (ver, ct) =
+                        rest.split_at_checked(vlen.into()).ok_or("truncated azure version")?;
+                    let ver = std::str::from_utf8(ver).map_err(|e| e.to_string())?;
+                    Ok(format!(
+                        "Real {{\n    backend: \"azure-kv\",\n    key: {AZURE_KEY:?},\n    version: {ver:?},\n    ciphertext: {:?},\n}}",
+                        ct.escape_ascii().to_string()
+                    ))
+                }
+                _ => Err(format!("no case {case}")),
+            }
+        }
     }
 
     #[test]

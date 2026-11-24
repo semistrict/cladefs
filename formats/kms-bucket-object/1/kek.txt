@@ -1,0 +1,6 @@
+KekObject::Kek {
+    tenant: 7,
+    id: KekId(2222222222222222),
+    master: MasterKeyId(eaabb52a46096fa9),
+    opened: true,
+}

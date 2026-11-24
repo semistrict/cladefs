@@ -1,0 +1,5 @@
+Real {
+    backend: "gcp-kms",
+    key: "projects/p/locations/l/keyRings/r/cryptoKeys/k-7",
+    ciphertext: "gcp-ciphertext",
+}

@@ -1,0 +1,3 @@
+KekObject::Tombstone {
+    tenant: 7,
+}
