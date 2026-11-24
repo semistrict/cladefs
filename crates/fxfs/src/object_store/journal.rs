@@ -242,7 +242,6 @@ pub struct Journal {
     inner: Mutex<Inner>,
     writer_mutex: Mutex<()>,
     sync_mutex: futures::lock::Mutex<()>,
-    trace: AtomicBool,
     // cladefs: bytes per minted position-derived journal span (`JournalOptions::chunk_size`).
     chunk_size: u64,
 
@@ -462,7 +461,6 @@ impl<S: HandleOwner> JournalHandle for DataObjectHandle<S> {
     }
 }
 
-#[fxfs_trace::trace]
 impl Journal {
     pub fn new(
         objects: Arc<ObjectManager>,
@@ -504,18 +502,10 @@ impl Journal {
             }),
             writer_mutex: Mutex::new(()),
             sync_mutex: futures::lock::Mutex::new(()),
-            trace: AtomicBool::new(false),
             chunk_size: options.chunk_size,
             reclaim_event: Event::new(),
             stats: JournalStats::default(),
             writer_end_block: AtomicU64::new(0),
-        }
-    }
-
-    pub fn set_trace(&self, trace: bool) {
-        let old_value = self.trace.swap(trace, Ordering::Relaxed);
-        if trace != old_value {
-            info!(trace; "J: trace");
         }
     }
 
@@ -700,7 +690,6 @@ impl Journal {
     }
 
     /// Reads the latest super-block, and then replays journaled records.
-    #[trace]
     pub async fn replay(
         &self,
         filesystem: Arc<FxFilesystem>,
@@ -1719,16 +1708,9 @@ impl Journal {
 
         let flush = self.inner.lock().position.flushing(checkpoint_offset);
         if !flush.durable || always {
-            let trace = self.trace.load(Ordering::Relaxed);
             if !flush.barriered {
-                if trace {
-                    info!("J: start flush device");
-                }
                 self.objects.allocator().will_flush_device();
                 self.flush_device_recording().await?;
-                if trace {
-                    info!("J: end flush device");
-                }
             }
 
             self.inner.lock().position.device_flushed(checkpoint_offset, flush);
@@ -1740,9 +1722,6 @@ impl Journal {
             }
 
             allocator.did_flush_device(checkpoint_offset, recorded).await;
-            if trace {
-                info!("J: did flush device");
-            }
         }
 
         Ok(())
@@ -2023,7 +2002,6 @@ impl Journal {
                     // committed and we should see this metric updated regularly.
                     let journal_bytes = self.objects.last_end_offset()
                         - inner.super_block_header.journal_checkpoint.file_offset;
-                    fxfs_trace::counter!("journal-bytes", 0, "total" => journal_bytes);
                     // The / 2 is here because after compacting, we cannot reclaim the space until
                     // the _next_ time we flush the device since the super-block is not guaranteed
                     // to persist until then.
@@ -2062,12 +2040,6 @@ impl Journal {
                         inner.compaction_running = false;
                         self.reclaim_event.notify(usize::MAX);
                         pending = false;
-                        fxfs_trace::counter!(
-                            "journal-bytes",
-                            0,
-                            "total" => self.objects.last_end_offset()
-                                - inner.super_block_header.journal_checkpoint.file_offset
-                        );
                     }
                 }
                 if pending {
@@ -2252,7 +2224,6 @@ impl Journal {
         }
     }
 
-    #[trace]
     async fn compact(&self) -> Result<(), Error> {
         assert!(!self.inner.lock().image_builder_mode, "compact called in image builder mode");
         let began = std::time::Instant::now();
@@ -2261,12 +2232,8 @@ impl Journal {
             let ns = began.elapsed().as_nanos() as u64;
             self.stats.compaction_ns.fetch_add(ns, Ordering::Relaxed);
         });
-        let trace = self.trace.load(Ordering::Relaxed);
         let force_major = self.should_force_major_compaction();
         debug!("Compaction starting, force_major={force_major:?}");
-        if trace {
-            info!("J: start compaction, force_major={force_major:?}");
-        }
         // cladefs: box large compaction stages in non-inlined frames so `compact` and `flush_task`
         // stay small on 16 KiB guest kernel stacks (TASK-26.9).
         let earliest_version =
@@ -2275,9 +2242,6 @@ impl Journal {
                 .context("Failed to flush objects")?;
         self.inner.lock().super_block_header.earliest_version = earliest_version;
         crate::boxed(|| self.write_super_block()).await.context("Failed to write superblock")?;
-        if trace {
-            info!("J: end compaction");
-        }
         debug!("Compaction finished");
         Ok(())
     }

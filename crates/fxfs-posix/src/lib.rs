@@ -1775,7 +1775,7 @@ impl<P: Platform> Fxfs<P> {
 
     /// A handle to the object `ino`, of whatever kind, for its attributes.
     fn handle(&self, ino: u64) -> StoreObjectHandle<ObjectStore> {
-        StoreObjectHandle::new(self.volume.clone(), ino, HandleOptions::default(), false)
+        StoreObjectHandle::new(self.volume.clone(), ino, HandleOptions::default())
     }
 
     /// The file `ino`'s handle: the inode's, opened if it isn't yet.

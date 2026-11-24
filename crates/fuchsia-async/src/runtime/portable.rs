@@ -23,7 +23,7 @@ pub mod task {
     use std::pin::Pin;
 
     // NOTE: This isn't quite API equivalent to Fuchsia's JoinHandle.
-    pub use rt::task::{JoinHandle, JoinHandle as CancelableJoinHandle};
+    pub use rt::task::JoinHandle;
 
     impl<T> From<JoinHandle<T>> for Task<T> {
         fn from(task: JoinHandle<T>) -> Self {

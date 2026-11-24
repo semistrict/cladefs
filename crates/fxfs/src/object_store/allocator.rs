@@ -1328,7 +1328,6 @@ impl Drop for Allocator {
     }
 }
 
-#[fxfs_trace::trace]
 impl Allocator {
     /// Returns the object ID for the allocator.
     pub fn object_id(&self) -> u64 {
@@ -1373,7 +1372,6 @@ impl Allocator {
     ///
     /// We also store the object store ID of the store that the allocation should be assigned to so
     /// that we have a means to delete stores without walking their objects.
-    #[trace]
     pub async fn allocate(
         self: &Arc<Self>,
         transaction: &mut Transaction<'_>,
@@ -1547,7 +1545,6 @@ impl Allocator {
 
     /// Marks the given range as allocated, in an extent no allocator mints.  The main use case
     /// for this at this time is for the super-block which needs to be at a fixed location.
-    #[trace]
     pub fn mark_allocated(
         &self,
         transaction: &mut Transaction<'_>,
@@ -1682,7 +1679,6 @@ impl Allocator {
 
     /// Deallocates the given range for the specified object. Its extent dies once the last of it is
     /// deallocated.
-    #[trace]
     pub async fn deallocate(
         &self,
         transaction: &mut Transaction<'_>,

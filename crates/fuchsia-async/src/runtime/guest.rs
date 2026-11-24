@@ -136,9 +136,6 @@ pub mod task {
         }
     }
 
-    /// The same as `JoinHandle`, as on the portable runtime.
-    pub type CancelableJoinHandle<T> = JoinHandle<T>;
-
     impl<T> JoinHandle<T> {
         /// Aborts the task.
         pub fn abort(&self) {

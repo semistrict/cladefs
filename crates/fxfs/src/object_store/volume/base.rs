@@ -100,7 +100,6 @@ impl RootVolume {
         let store =
             ObjectStore::open(&root_store, object_id, Some(Box::new(filesystem.new_tree_cache())))
                 .await?;
-        store.set_trace(filesystem.trace());
         filesystem.object_manager().add_store(store.clone());
         Ok(store)
     }

@@ -19,10 +19,8 @@ pub use implementation::executor::{
     LocalExecutor, LocalExecutorBuilder, MonotonicDuration, MonotonicInstant, SendExecutor,
     SendExecutorBuilder, SpawnableFuture, TestExecutor, TestExecutorBuilder,
 };
-pub use implementation::task::{CancelableJoinHandle, JoinHandle, Task, unblock, yield_now};
+pub use implementation::task::{JoinHandle, Task, unblock, yield_now};
 pub use implementation::timer::Timer;
-
-pub mod epoch;
 
 /// Structured concurrency API for fuchsia-async.
 ///
@@ -32,20 +30,9 @@ pub mod scope;
 pub use scope::{Scope, ScopeHandle};
 
 use futures::prelude::*;
-use futures::task::AtomicWaker;
 use pin_project_lite::pin_project;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, ready};
-
-/// An extension trait to provide `after_now` on `std::time::Duration`.
-pub trait DurationExt {
-    /// Return a `MonotonicInstant` which is a `MonotonicDuration` after the current time.
-    /// `duration.after_now()` is equivalent to `MonotonicInstant::after(duration)`.
-    ///
-    /// This method requires that an executor has been set up.
-    fn after_now(self) -> MonotonicInstant;
-}
+use std::task::{Context, Poll};
 
 /// The time when a Timer should wakeup.
 pub trait WakeupTime {
@@ -62,13 +49,6 @@ impl WakeupTime for std::time::Duration {
     }
 }
 
-impl DurationExt for std::time::Duration {
-    #[allow(clippy::useless_conversion)] // Conversion is optionally needed on Fuchsia.
-    fn after_now(self) -> MonotonicInstant {
-        MonotonicInstant::now() + self.into()
-    }
-}
-
 /// A trait which allows futures to be easily wrapped in a timeout.
 pub trait TimeoutExt: Future + Sized {
     /// Wraps the future in a timeout, calling `on_timeout` to produce a result
@@ -79,23 +59,6 @@ pub trait TimeoutExt: Future + Sized {
         OT: FnOnce() -> Self::Output,
     {
         OnTimeout { timer: time.into_timer(), future: self, on_timeout: Some(on_timeout) }
-    }
-
-    /// Wraps the future in a stall-guard, calling `on_stalled` to produce a result
-    /// when the future hasn't been otherwise polled within the `timeout`.
-    /// This is a heuristic - spurious wakeups will keep the detection from triggering,
-    /// and moving all work to external tasks or threads with force the triggering early.
-    fn on_stalled<OS>(self, timeout: std::time::Duration, on_stalled: OS) -> OnStalled<Self, OS>
-    where
-        OS: FnOnce() -> Self::Output,
-    {
-        OnStalled {
-            timer: timeout.into_timer(),
-            future: self,
-            timeout,
-            on_stalled: Some(on_stalled),
-            waker: Arc::default(),
-        }
     }
 }
 
@@ -131,65 +94,6 @@ where
             return Poll::Ready(item);
         }
         Poll::Pending
-    }
-}
-
-pin_project! {
-    /// A wrapper for a future who's steady progress is monitored and will complete with the
-    /// provided closure if no progress is made before the timeout.
-    #[derive(Debug)]
-    #[must_use = "futures do nothing unless polled"]
-    pub struct OnStalled<F, OS> {
-        #[pin]
-        timer: Timer,
-        #[pin]
-        future: F,
-        timeout: std::time::Duration,
-        on_stalled: Option<OS>,
-        waker: Arc<OnStalledWaker>,
-    }
-}
-
-impl<F: Future, OS> Future for OnStalled<F, OS>
-where
-    OS: FnOnce() -> F::Output,
-{
-    type Output = F::Output;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        // Use a different waker when polling the future so we know whether it was woken or not.
-        let mut woken = this.waker.original_waker.take().is_none();
-        loop {
-            this.waker.original_waker.register(cx.waker());
-            let waker = this.waker.clone().into();
-            let mut cx2 = Context::from_waker(&waker);
-            if let Poll::Ready(item) = this.future.as_mut().poll(&mut cx2) {
-                return Poll::Ready(item);
-            }
-            if woken || this.timer.as_mut().poll(cx).is_pending() {
-                this.timer.set(this.timeout.into_timer());
-                ready!(this.timer.as_mut().poll(cx));
-                // The timer immediately fired.  See if the future was woken.  If it was, we'll
-                // loop around and poll the future again.
-                woken = this.waker.original_waker.take().is_none();
-            }
-            if !woken {
-                return Poll::Ready((this.on_stalled.take().expect("polled after completion"))());
-            }
-        }
-    }
-}
-
-// A different waker is used so we can tell when the future was woken, rather than the timer.
-#[derive(Debug, Default)]
-struct OnStalledWaker {
-    original_waker: AtomicWaker,
-}
-
-impl Wake for OnStalledWaker {
-    fn wake(self: Arc<Self>) {
-        self.original_waker.wake();
     }
 }
 
@@ -253,9 +157,6 @@ mod task_tests {
 
     #[test]
     #[should_panic]
-    // TODO(https://fxbug.dev/42169733): delete the below
-    #[cfg_attr(feature = "variant_asan", ignore)]
-    #[cfg_attr(feature = "variant_hwasan", ignore)]
     fn unblock_fn_panics() {
         run(async move {
             unblock(|| panic!("bad")).await;
@@ -303,31 +204,5 @@ mod timer_tests {
             Either::Left((_, _)) => {}
             Either::Right((_, _)) => panic!("wrong timer fired"),
         }
-    }
-
-    #[test]
-    fn can_detect_stalls() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::Duration;
-        let runs = Arc::new(AtomicU64::new(0));
-        assert_eq!(
-            {
-                let runs = runs.clone();
-                LocalExecutorBuilder::new().build().run_singlethreaded(
-                    async move {
-                        let mut sleep = Duration::from_millis(1);
-                        loop {
-                            Timer::new(sleep).await;
-                            sleep *= 2;
-                            runs.fetch_add(1, Ordering::SeqCst);
-                        }
-                    }
-                    .on_stalled(Duration::from_secs(1), || 1u8),
-                )
-            },
-            1u8
-        );
-        assert!(runs.load(Ordering::SeqCst) >= 9);
     }
 }

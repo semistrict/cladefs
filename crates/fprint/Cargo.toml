@@ -10,10 +10,5 @@ license.workspace = true
 bit-vec.workspace = true
 macros = { package = "fprint-macros", path = "../fprint-macros" }
 
-[dev-dependencies]
-proc-macro2.workspace = true
-quote.workspace = true
-syn.workspace = true
-
 [lints]
 workspace = true

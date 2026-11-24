@@ -33,12 +33,11 @@ use storage_units::BlockSize;
 pub struct ExtentObjectHandle {
     device: Arc<dyn Device>,
     extent: ExtentRange,
-    trace: AtomicBool,
 }
 
 impl ExtentObjectHandle {
     pub fn new(device: Arc<dyn Device>, extent: ExtentRange) -> Self {
-        Self { device, extent, trace: AtomicBool::new(false) }
+        Self { device, extent }
     }
 }
 
@@ -53,13 +52,6 @@ impl ObjectHandle for ExtentObjectHandle {
 
     fn block_size(&self) -> BlockSize {
         BLOCK_SIZE
-    }
-
-    fn set_trace(&self, trace: bool) {
-        let old = self.trace.swap(trace, Ordering::Relaxed);
-        if trace != old {
-            info!(trace; "SBH: trace");
-        }
     }
 }
 
@@ -103,12 +95,11 @@ impl JournalHandle for ExtentObjectHandle {
 pub struct JournalExtentHandle {
     device: Arc<dyn Device>,
     spans: Arc<Mutex<Vec<JournalSpan>>>,
-    trace: Arc<AtomicBool>,
 }
 
 impl JournalExtentHandle {
     pub fn new(device: Arc<dyn Device>, spans: Vec<JournalSpan>) -> Self {
-        Self { device, spans: Arc::new(Mutex::new(spans)), trace: Arc::new(AtomicBool::new(false)) }
+        Self { device, spans: Arc::new(Mutex::new(spans)) }
     }
 
     pub fn device(&self) -> &Arc<dyn Device> {
@@ -304,13 +295,6 @@ impl ObjectHandle for JournalExtentHandle {
     fn block_size(&self) -> BlockSize {
         BLOCK_SIZE
     }
-
-    fn set_trace(&self, trace: bool) {
-        let old = self.trace.swap(trace, Ordering::Relaxed);
-        if trace != old {
-            info!(trace; "JH: trace");
-        }
-    }
 }
 
 #[async_trait]
@@ -320,10 +304,6 @@ impl ReadObjectHandle for JournalExtentHandle {
         let bs = block_size.get();
         ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
         ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
-        let trace = self.trace.load(Ordering::Relaxed);
-        if trace {
-            info!(len = buf.len(), offset; "JH: read");
-        }
         let max_blocks = (buf.len() as u64) / bs;
         let extents: Vec<ExtentId> = {
             let spans = self.spans.lock();

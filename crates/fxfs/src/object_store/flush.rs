@@ -31,7 +31,6 @@ use std::sync::atomic::Ordering;
 /// as a few journals' worth of changes merged.
 const KEPT_LAYER_MAX: usize = 16 << 20;
 
-#[fxfs_trace::trace]
 impl ObjectStore {
     /// Takes a flush lock on self and performs the flush with a default
     /// FlushReason::Journal(ForceMajor::False).
@@ -50,7 +49,6 @@ impl ObjectStore {
     }
 
     /// Performs a flush while already holding a flush guard on self.
-    #[trace("store_object_id" => self.store_object_id)]
     pub async fn flush_guarded_with_reason(&self, reason: FlushReason) -> Result<Version, Error> {
         if self.parent_store.is_none() {
             // Early exit, but still return the earliest version used by a struct in the tree
@@ -77,20 +75,12 @@ impl ObjectStore {
             return Ok(earliest_version);
         }
 
-        let trace = self.trace.load(Ordering::Relaxed);
-        if trace {
-            info!(store_id = self.store_object_id(); "OS: begin flush");
-        }
-
         // cladefs: box flush stages in non-inlined frames to fit 16 KiB guest kernel stacks
         // (TASK-26.9).
         crate::boxed(|| self.flush_layers(reason))
             .await
             .with_context(|| format!("Failed to flush object store {}", self.store_object_id))?;
 
-        if trace {
-            info!(store_id = self.store_object_id(); "OS: end flush");
-        }
         if let Some(callback) = &*self.flush_callback.lock() {
             callback(self);
         }
@@ -270,17 +260,6 @@ impl ObjectStore {
             Mutation::EndFlush,
             AssocObj::Borrowed(&reservation_update),
         );
-
-        if self.trace.load(Ordering::Relaxed) {
-            info!(
-                store_id = self.store_object_id(),
-                old_layer_count = old_layers.len(),
-                new_layer_count = new_layers.len(),
-                total_layer_size,
-                new_store_info:?;
-                "OS: compacting"
-            );
-        }
 
         crate::boxed(|| {
             end_transaction.commit_with_callback(|_| {

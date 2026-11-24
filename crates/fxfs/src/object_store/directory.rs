@@ -96,16 +96,10 @@ impl MutableAttributesInternal {
     }
 }
 
-#[fxfs_trace::trace]
 impl<S: HandleOwner> Directory<S> {
     fn new(owner: Arc<S>, object_id: u64, dir_type: DirType) -> Self {
         Directory {
-            handle: StoreObjectHandle::new(
-                owner,
-                object_id,
-                HandleOptions::default(),
-                /* trace: */ false,
-            ),
+            handle: StoreObjectHandle::new(owner, object_id, HandleOptions::default()),
             is_deleted: AtomicBool::new(false),
             dir_type: Mutex::new(dir_type),
         }
@@ -217,7 +211,6 @@ impl<S: HandleOwner> Directory<S> {
         Ok(Directory::new(owner.clone(), object_id, dir_type))
     }
 
-    #[trace]
     pub async fn open(owner: &Arc<S>, object_id: u64) -> Result<Directory<S>, Error> {
         let store = owner.as_ref().as_ref();
         let dir_type = store
@@ -378,13 +371,11 @@ impl<S: HandleOwner> Directory<S> {
     }
 
     /// Returns the object ID and descriptor for the given child, or None if not found.
-    #[trace]
     pub async fn lookup(&self, name: &str) -> Result<Option<(u64, ObjectDescriptor)>, Error> {
         Ok(self.lookup_ext(name).await?.map(|entry| (entry.object_id, entry.descriptor)))
     }
 
     /// Like lookup, but also returns the key that was found.
-    #[trace]
     pub async fn lookup_ext(&self, name: &str) -> Result<Option<LookupEntry>, Error> {
         if self.is_deleted() {
             return Ok(None);
@@ -2540,8 +2531,7 @@ mod tests {
         );
         transaction.commit().await.expect("commit failed");
         assert_eq!(store.read_symlink(symlink_id).await.expect("read_symlink"), target);
-        let handle =
-            StoreObjectHandle::new(store.clone(), symlink_id, HandleOptions::default(), false);
+        let handle = StoreObjectHandle::new(store.clone(), symlink_id, HandleOptions::default());
         assert_eq!(handle.list_extended_attributes().await.expect("list"), Vec::<Vec<u8>>::new());
 
         fs.close().await.expect("close failed");
@@ -3041,8 +3031,7 @@ mod tests {
             .expect("create_symlink failed");
         transaction.commit().await.expect("commit failed");
 
-        let symlink =
-            StoreObjectHandle::new(store.clone(), symlink_id, HandleOptions::default(), false);
+        let symlink = StoreObjectHandle::new(store.clone(), symlink_id, HandleOptions::default());
 
         fsck(filesystem.clone()).await.unwrap();
         fsck_volume(filesystem.as_ref(), store.store_object_id()).await.unwrap();

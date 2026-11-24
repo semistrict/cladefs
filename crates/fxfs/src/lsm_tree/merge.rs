@@ -242,9 +242,6 @@ pub struct Merger<'a, K, V> {
     // The function to be used for merging items.
     merge_fn: MergeFn<K, V>,
 
-    // If true, additional logging is enabled.
-    trace: bool,
-
     // Tracks statistics related to the LSM tree.
     counters: Arc<lsm_tree::TreeCounters>,
 }
@@ -295,7 +292,6 @@ impl<'a, K: Key + LayerKey + OrdLowerBound> Query<'a, K> {
     }
 }
 
-#[fxfs_trace::trace]
 impl<'a, K: Key + LayerKey + OrdLowerBound, V: Value> Merger<'a, K, V> {
     pub(super) fn new<I: Iterator<Item = &'a dyn Layer<K, V>>>(
         layers: I,
@@ -308,14 +304,12 @@ impl<'a, K: Key + LayerKey + OrdLowerBound, V: Value> Merger<'a, K, V> {
                 .map(|(index, layer)| MergeLayerIterator::new(index as u16, layer))
                 .collect(),
             merge_fn: merge_fn,
-            trace: false,
             counters,
         }
     }
 
     /// Executes `query`, positioning the iterator to the first matching item.  See `Query` for
     /// details.
-    #[trace]
     pub async fn query(
         &mut self,
         query: Query<'_, K>,
@@ -333,7 +327,6 @@ impl<'a, K: Key + LayerKey + OrdLowerBound, V: Value> Merger<'a, K, V> {
         let len = self.iterators.len();
         let mut excessive_partitions = false;
         let pending_iterators = {
-            fxfs_trace::duration!("Merger::filter_layer_files", "len" => len);
             self.iterators
                 .iter_mut()
                 .rev()
@@ -364,8 +357,6 @@ impl<'a, K: Key + LayerKey + OrdLowerBound, V: Value> Merger<'a, K, V> {
             pending_iterators,
             heap: BinaryHeap::with_capacity(layer_count),
             item: CurrentItem::None,
-            trace: self.trace,
-            history: String::new(),
         };
         let owned_key;
         let search_key = match query {
@@ -386,10 +377,6 @@ impl<'a, K: Key + LayerKey + OrdLowerBound, V: Value> Merger<'a, K, V> {
         merger_iter.seek(search_key).await?;
         Ok(merger_iter)
     }
-
-    pub fn set_trace(&mut self, v: bool) {
-        self.trace = v;
-    }
 }
 
 /// This is an iterator that will allow iteration over merged layers.  The primary interface is via
@@ -405,12 +392,6 @@ pub struct MergerIterator<'a, 'b, K, V> {
 
     // The current item.
     item: CurrentItem<'a, 'b, K, V>,
-
-    // If true, logs regarding merger behaviour are appended to history.
-    trace: bool,
-
-    // Holds trace information if trace is true.
-    history: String,
 }
 
 impl<'a, 'b, K: Key + LayerKey + OrdLowerBound, V: Value> MergerIterator<'a, 'b, K, V> {
@@ -440,16 +421,6 @@ impl<'a, 'b, K: Key + LayerKey + OrdLowerBound, V: Value> MergerIterator<'a, 'b,
                 let maybe_second_lowest = self.heap.pop();
                 if let Some(second_lowest) = maybe_second_lowest {
                     let result = (self.merge_fn)(&lowest, &second_lowest);
-                    if self.trace {
-                        writeln!(
-                            self.history,
-                            "merge {:?}, {:?} -> {:?}",
-                            lowest.item(),
-                            second_lowest.item(),
-                            result
-                        )
-                        .unwrap();
-                    }
                     match result {
                         MergeResult::EmitLeft => {
                             self.heap.push(second_lowest);
@@ -531,15 +502,6 @@ impl<'a, 'b, K: Key + LayerKey + OrdLowerBound, V: Value> MergerIterator<'a, 'b,
         while self.needs_more_iterators(search_key) {
             let iter = self.pending_iterators.pop().unwrap();
             let sub_iter = iter.layer.as_ref().unwrap().seek(search_key).await?;
-            if self.trace {
-                writeln!(
-                    self.history,
-                    "merger: search for {:?}, found {:?}",
-                    search_key,
-                    sub_iter.get()
-                )
-                .unwrap();
-            }
             iter.iter = RawIterator::Const(sub_iter);
             iter.set_item_from_iter();
             if iter.is_some() {
@@ -2001,7 +1963,6 @@ mod tests {
 
         let mut merger =
             Merger::new(layer_ref_iter(&skip_lists), |_, _| MergeResult::EmitLeft, counters());
-        merger.set_trace(true);
 
         let mut iter =
             merger.query(Query::LimitedRange(&TestKey(10..20))).await.expect("seek failed");

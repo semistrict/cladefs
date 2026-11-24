@@ -147,7 +147,6 @@ impl Default for TreeCounters {
 }
 
 /// Writes the items yielded by the iterator into the supplied object.
-#[fxfs_trace::trace]
 pub async fn compact_with_iterator<K: Key, V: Value, W: WriteBytes + Send>(
     mut iterator: impl LayerIterator<K, V>,
     num_items: usize,
@@ -177,7 +176,6 @@ pub struct LSMTree<K, V> {
     counters: Arc<TreeCounters>,
 }
 
-#[fxfs_trace::trace]
 impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
     /// Creates a new empty tree.
     pub fn new(merge_fn: merge::MergeFn<K, V>, cache: Option<Box<dyn ObjectCache<K, V>>>) -> Self {

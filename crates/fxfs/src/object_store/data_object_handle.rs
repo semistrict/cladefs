@@ -152,11 +152,10 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         attribute_id: AttributeId,
         size: u64,
         options: HandleOptions,
-        trace: bool,
         overwrite_ranges: &[Range<u64>],
     ) -> Self {
         Self {
-            handle: StoreObjectHandle::new(owner, object_id, options, trace),
+            handle: StoreObjectHandle::new(owner, object_id, options),
             attribute_id,
             content_size: AtomicU64::new(size),
             overwrite_ranges: Mutex::new(AllocatedRanges::new(overwrite_ranges)),
@@ -1482,10 +1481,6 @@ impl<S: HandleOwner> AssociatedObject for DataObjectHandle<S> {
 }
 
 impl<S: HandleOwner> ObjectHandle for DataObjectHandle<S> {
-    fn set_trace(&self, v: bool) {
-        self.handle.set_trace(v)
-    }
-
     fn object_id(&self) -> u64 {
         self.handle.object_id()
     }

@@ -37,10 +37,7 @@ mod runtime;
 pub use self::runtime::*;
 
 /// Asynchronous networking abstractions.
-#[cfg(not(target_os = "none"))]
-pub mod net;
-
-pub use fuchsia_async_macro::{run, run_singlethreaded, run_until_stalled};
+pub use fuchsia_async_macro::{run, run_singlethreaded};
 
 pub mod condition;
 /// Testing support for repeated runs

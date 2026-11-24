@@ -92,7 +92,6 @@ pub struct CachingObjectHandle<S> {
 // SAFETY: Only `buffer` isn't Sync. Access to `buffer` is synchronized with `chunk_states`.
 unsafe impl<S> Sync for CachingObjectHandle<S> {}
 
-#[fxfs_trace::trace]
 impl<S: ReadObjectHandle> CachingObjectHandle<S> {
     pub fn new(source: S) -> Self {
         let block_size = source.block_size();
@@ -188,7 +187,6 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
         }
     }
 
-    #[trace]
     async fn load(&self, chunk_num: usize) -> Result<CachedChunk, Error> {
         // If this future is dropped or reading fails then put the chunk back into the
         // `Missing` state.
@@ -269,10 +267,6 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
 }
 
 impl<S: ReadObjectHandle> ObjectHandle for CachingObjectHandle<S> {
-    fn set_trace(&self, v: bool) {
-        self.source.set_trace(v);
-    }
-
     fn object_id(&self) -> u64 {
         self.source.object_id()
     }

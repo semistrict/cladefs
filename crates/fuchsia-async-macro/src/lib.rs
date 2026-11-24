@@ -31,12 +31,7 @@
 //!         // Actual test code here
 //!         Ok(())
 //!     };
-//!     let mut test_fut = test();
-//!     pin_mut!(test_fut);
-//!     match executor.run_until_stalled(&mut test_fut) {
-//!         Poll::Pending => panic!("Test blocked"),
-//!         Poll::Ready(x) => x,
-//!     }
+//!     executor.run_singlethreaded(test())
 //! }
 //! ```
 //!
@@ -54,7 +49,7 @@
 //!
 //! ```
 //!
-//! #[fuchsia_async::run_until_stalled(test)]
+//! #[fuchsia_async::run_singlethreaded(test)]
 //! async fn test_foo() -> Result<(), Error> {
 //!     // Actual test code here
 //!     Ok(())
@@ -63,20 +58,16 @@
 //!
 //! Using the optional 'test' specifier is preferred to using `#[test]`, as spurious
 //! compilation errors will be generated should `#[test]` be specified before
-//! `#[fuchsia_async::run_until_stalled]`.
+//! `#[fuchsia_async::run_singlethreaded]`. cladefs: without Fuchsia's `run_until_stalled`, which
+//! nothing used (board 10606).
 
 use proc_macro::TokenStream;
-use proc_macro2::Span;
 use quote::{quote, quote_spanned};
 use syn::parse::{Error, Parse, ParseStream};
-use syn::{Ident, parse_macro_input};
+use syn::parse_macro_input;
 
 mod kw {
     syn::custom_keyword!(test);
-}
-
-fn executor_ident() -> Ident {
-    Ident::new("executor", Span::call_site())
 }
 
 fn common(item: TokenStream, run_executor: TokenStream, test: bool) -> TokenStream {
@@ -153,48 +144,6 @@ fn common(item: TokenStream, run_executor: TokenStream, test: bool) -> TokenStre
           }
     };
     output.into()
-}
-
-/// Define an `async` function that should complete without stalling.
-///
-/// If the async function should stall then a `panic` will be raised. For example:
-///
-/// ```
-/// #[fuchsia_async::run_until_stalled]
-/// async fn this_will_fail_and_not_block() -> Result<(), anyhow::Error> {
-///     let () = future::empty().await;
-///     Ok(())
-/// }
-/// ```
-///
-/// will cause an immediate panic instead of hanging.
-///
-/// This is mainly intended for testing, and takes an optional `test` argument.
-///
-/// ```
-/// #[fuchsia_async::run_until_stalled(test)]
-/// async fn test_foo() {}
-/// ```
-#[proc_macro_attribute]
-pub fn run_until_stalled(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let test = parse_macro_input!(attr as Option<kw::test>).is_some();
-    let executor = executor_ident();
-    let run_executor = if test {
-        quote! {
-            ::fuchsia_async::test_support::run_until_stalled_test(true, func, ::fuchsia_async::test_support::TestOptions::default())
-        }
-    } else {
-        quote! {
-            let mut #executor = ::fuchsia_async::TestExecutorBuilder::new().fake_time(true).build();
-            let mut fut = ::std::pin::pin!(func());
-            match #executor.run_until_stalled(&mut fut) {
-                ::core::task::Poll::Ready(result) => result,
-                _ => panic!("Stalled without completing. Consider using \"run_singlethreaded\", \
-                             or check for a deadlock."),
-            }
-        }
-    };
-    common(item, run_executor.into(), test)
 }
 
 /// Define an `async` function that should run to completion on a single thread.

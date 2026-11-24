@@ -36,10 +36,6 @@ pub mod buffer_allocator;
 mod extent;
 
 pub use extent::{ExtentId, ExtentRange, NoExtent, OpenExtents, OtherCell, SealedExtent};
-pub mod splittable_buffer;
-
-pub use splittable_buffer::{SplittableBuffer, SubHandle};
-
 pub mod fake_device;
 
 /// cladefs: the most bytes a device's root holds ([`Device::commit_root`]): an extent device's,

@@ -19,10 +19,8 @@ commit = "90e54e090540aaac37a81494884f4b8a68bc269c"
 # Configuration flags Fuchsia's build sets; unset here. cladefs: and madsim's, which the full-stack
 # simulation's build sets (RUSTFLAGS="--cfg madsim", doc-24).
 unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(detect_lock_cycles)',
     'cfg(madsim)',
     'cfg(fuzz)',
-    'cfg(fuzz_target, values(any()))',
     'cfg(fuzzing)',
 ] }
 
@@ -114,10 +112,7 @@ fuchsia-async = { path = "crates/fuchsia-async" }
 fuchsia-async-macro = { path = "crates/fuchsia-async-macro" }
 fuchsia-sync = { path = "crates/fuchsia-sync" }
 fxfs-unicode = { path = "crates/fxfs-unicode" }
-fxfs_trace = { path = "crates/fxfs_trace" }
-fxfs_trace_macros = { path = "crates/fxfs_trace_macros" }
 storage_ptr_slice = { path = "crates/storage_ptr_slice" }
-storage_trace = { path = "crates/storage_trace" }
 storage_units = { path = "crates/storage_units" }
 storage_xts = { path = "crates/storage_xts" }
 storage_device = { path = "crates/storage_device" }

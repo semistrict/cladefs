@@ -31,7 +31,6 @@ use event_listener::Event;
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
-use fxfs_trace::{TraceFutureExt, trace_future_args};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
@@ -248,7 +247,6 @@ impl std::ops::Deref for OpenFxFilesystem {
 
 pub struct FxFilesystemBuilder {
     format: bool,
-    trace: bool,
     options: Options,
     journal_options: JournalOptions,
     on_new_allocator: Option<Box<dyn Fn(Arc<Allocator>) + Send + Sync>>,
@@ -260,7 +258,6 @@ impl FxFilesystemBuilder {
     pub fn new() -> Self {
         Self {
             format: false,
-            trace: false,
             options: Options::default(),
             journal_options: JournalOptions::default(),
             on_new_allocator: None,
@@ -272,12 +269,6 @@ impl FxFilesystemBuilder {
     /// Sets whether the block device should be formatted when opened. Defaults to `false`.
     pub fn format(mut self, format: bool) -> Self {
         self.format = format;
-        self
-    }
-
-    /// Enables or disables trace level logging. Defaults to `false`.
-    pub fn trace(mut self, trace: bool) -> Self {
-        self.trace = trace;
         self
     }
 
@@ -423,7 +414,6 @@ impl FxFilesystemBuilder {
             flush_task: Mutex::new(None),
             background_tasks: fasync::Scope::new(),
             closed: AtomicBool::new(true),
-            trace: self.trace,
             tree_cache_budget: TreeCacheBudget::new(filesystem_options.object_cache_items),
             graveyard: Graveyard::new(objects.clone(), filesystem_options.graveyard_batch_delay),
             options: filesystem_options,
@@ -433,7 +423,6 @@ impl FxFilesystemBuilder {
 
         filesystem.journal().set_image_builder_mode(image_builder_mode);
 
-        filesystem.journal.set_trace(self.trace);
         if self.format {
             let journal = filesystem.journal.clone();
             let fs = filesystem.clone();
@@ -448,7 +437,6 @@ impl FxFilesystemBuilder {
 
             // Create the root volume directory.
             let root_store = filesystem.root_store();
-            root_store.set_trace(self.trace);
             let root_directory = crate::boxed(|| {
                 Directory::open(&root_store, root_store.root_directory_object_id())
             })
@@ -477,7 +465,6 @@ impl FxFilesystemBuilder {
             crate::offload(move || async move { journal.replay(fs, on_new_allocator).await })
                 .await
                 .context("Journal replay failed")?;
-            filesystem.root_store().set_trace(self.trace);
 
             let compacts = !read_only && !image_builder_mode;
             if compacts {
@@ -541,8 +528,6 @@ pub struct FxFilesystem {
     flush_task: Mutex<Option<fasync::Task<()>>>,
     background_tasks: fasync::Scope,
     closed: AtomicBool,
-    // An event that is signalled when the filesystem starts to shut down.
-    trace: bool,
     graveyard: Arc<Graveyard>,
     /// cladefs: what the caches of its stores' records share (`Options::object_cache_items`).
     tree_cache_budget: Arc<TreeCacheBudget>,
@@ -560,7 +545,6 @@ pub struct FxFilesystem {
     device: DeviceHolder,
 }
 
-#[fxfs_trace::trace]
 impl FxFilesystem {
     pub async fn new_empty(device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
         FxFilesystemBuilder::new().format(true).open(device).await
@@ -694,10 +678,6 @@ impl FxFilesystem {
         &self.graveyard
     }
 
-    pub fn trace(&self) -> bool {
-        self.trace
-    }
-
     pub fn options(&self) -> &Options {
         &self.options
     }
@@ -760,7 +740,6 @@ impl FxFilesystem {
         alloc.max(sys)
     }
 
-    #[trace]
     pub async fn commit_transaction<R: Send>(
         &self,
         transaction: &mut Transaction<'_>,
@@ -865,9 +844,7 @@ impl FxFilesystem {
         let mut flush_task = self.flush_task.lock();
         if flush_task.is_none() {
             let journal = self.journal.clone();
-            *flush_task = Some(fasync::Task::spawn(
-                journal.flush_task().trace(trace_future_args!("Journal::flush_task")),
-            ));
+            *flush_task = Some(fasync::Task::spawn(journal.flush_task()));
         }
     }
 
@@ -881,15 +858,12 @@ impl FxFilesystem {
 
     fn start_clean_transfer_buffer_task(self: &Arc<Self>) {
         let this = self.clone();
-        self.background_tasks.spawn(
-            async move {
-                loop {
-                    fasync::Timer::new(CLEAN_TRANSFER_BUFFER_INTERVAL).await;
-                    this.device().clean_transfer_buffer();
-                }
+        self.background_tasks.spawn(async move {
+            loop {
+                fasync::Timer::new(CLEAN_TRANSFER_BUFFER_INTERVAL).await;
+                this.device().clean_transfer_buffer();
             }
-            .trace(trace_future_args!("Filesystem::clean_transfer_buffer_task")),
-        );
+        });
     }
 
     pub(crate) async fn reservation_for_transaction<'a>(

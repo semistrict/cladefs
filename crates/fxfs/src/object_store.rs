@@ -221,9 +221,6 @@ pub struct ObjectStore {
     // Set once the store's volume is deleted: it flushes no more.
     deleted: AtomicBool,
 
-    // Enable/disable tracing.
-    trace: AtomicBool,
-
     // The number of graveyard entries, updated as they are applied.
     graveyard_entries: AtomicU64,
 
@@ -283,7 +280,6 @@ impl ObjectStore {
             tree: LSMTree::new(merge::merge, None),
             store_info_handle: OnceLock::new(),
             deleted: AtomicBool::new(false),
-            trace: AtomicBool::new(false),
             graveyard_entries: AtomicU64::new(0),
             last_object_id: Mutex::new(0),
             flush_callback: Mutex::new(None),
@@ -387,13 +383,6 @@ impl ObjectStore {
             Ok(())
         } else {
             self.store_info_handle.get().unwrap().txn_write(transaction, 0u64, buf.as_ref()).await
-        }
-    }
-
-    pub fn set_trace(&self, trace: bool) {
-        let old_value = self.trace.swap(trace, Ordering::Relaxed);
-        if trace != old_value {
-            info!(store_id = self.store_object_id(), trace; "OS: trace",);
         }
     }
 
@@ -598,7 +587,6 @@ impl ObjectStore {
             AttributeId::DATA,
             size,
             options,
-            false,
             &overwrite_ranges,
         ))
     }
@@ -639,15 +627,7 @@ impl ObjectStore {
                 ObjectValue::attribute(0, false),
             ),
         );
-        Ok(DataObjectHandle::new(
-            owner.clone(),
-            object_id,
-            AttributeId::DATA,
-            0,
-            options,
-            false,
-            &[],
-        ))
+        Ok(DataObjectHandle::new(owner.clone(), object_id, AttributeId::DATA, 0, options, &[]))
     }
 
     /// Creates an object in the store.

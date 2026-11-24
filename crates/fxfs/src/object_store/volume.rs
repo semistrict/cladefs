@@ -81,7 +81,6 @@ impl RootVolume {
                 Some(Box::new(self.filesystem.new_tree_cache())),
             )
             .await?;
-        store.set_trace(self.filesystem.trace());
 
         // We must register the store here because create will add mutations for the store.
         self.filesystem.object_manager().add_store(store.clone());
@@ -132,7 +131,6 @@ impl RootVolume {
             .store(store_object_id)
             .ok_or(FxfsError::NotFound)
             .context("Missing volume store")?;
-        store.set_trace(self.filesystem.trace());
         // If the layer files are out of date, kick off a full compaction in the background.
         if let Some(scope_guard) = self.filesystem.scope().active_guard()
             && !self.filesystem.options().read_only

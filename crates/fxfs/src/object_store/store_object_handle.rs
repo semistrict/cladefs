@@ -38,7 +38,6 @@ use assert_matches::assert_matches;
 use futures::future::try_join_all;
 use futures::stream::{FuturesOrdered, unfold};
 use futures::{Stream, TryStreamExt, try_join};
-use fxfs_trace::{TraceFutureExt, trace, trace_future_args};
 use std::cmp::min;
 use std::ops::Range;
 use std::sync::Arc;
@@ -144,15 +143,9 @@ pub struct StoreObjectHandle<S: HandleOwner> {
     owner: Arc<S>,
     object_id: u64,
     options: HandleOptions,
-    trace: AtomicBool,
 }
 
 impl<S: HandleOwner> ObjectHandle for StoreObjectHandle<S> {
-    fn set_trace(&self, v: bool) {
-        info!(store_id = self.store().store_object_id, oid = self.object_id(), trace = v; "trace");
-        self.trace.store(v, atomic::Ordering::Relaxed);
-    }
-
     fn object_id(&self) -> u64 {
         return self.object_id;
     }
@@ -173,33 +166,30 @@ struct Watchdog {
 impl Watchdog {
     fn new(increment_seconds: u64, cb: impl Fn(u64) + Send + 'static) -> Self {
         Self {
-            _task: fasync::Task::spawn(
-                async move {
-                    let increment = increment_seconds.try_into().unwrap();
-                    let mut fired_counter = 0;
-                    let mut next_wake = fasync::MonotonicInstant::now();
-                    loop {
-                        next_wake += std::time::Duration::from_secs(increment).into();
-                        // If this isn't being scheduled this will purposely result in fast looping
-                        // when it does. This will be insightful about the state of the thread and
-                        // task scheduling.
-                        if fasync::MonotonicInstant::now() < next_wake {
-                            fasync::Timer::new(next_wake).await;
-                        }
-                        fired_counter += 1;
-                        cb(fired_counter);
+            _task: fasync::Task::spawn(async move {
+                let increment = increment_seconds.try_into().unwrap();
+                let mut fired_counter = 0;
+                let mut next_wake = fasync::MonotonicInstant::now();
+                loop {
+                    next_wake += std::time::Duration::from_secs(increment).into();
+                    // If this isn't being scheduled this will purposely result in fast looping
+                    // when it does. This will be insightful about the state of the thread and
+                    // task scheduling.
+                    if fasync::MonotonicInstant::now() < next_wake {
+                        fasync::Timer::new(next_wake).await;
                     }
+                    fired_counter += 1;
+                    cb(fired_counter);
                 }
-                .trace(trace_future_args!("StoreObjectHandle::Watchdog")),
-            ),
+            }),
         }
     }
 }
 
 impl<S: HandleOwner> StoreObjectHandle<S> {
     /// Make a new StoreObjectHandle for the object with id [`object_id`] in store [`owner`].
-    pub fn new(owner: Arc<S>, object_id: u64, options: HandleOptions, trace: bool) -> Self {
-        Self { owner, object_id, options, trace: AtomicBool::new(trace) }
+    pub fn new(owner: Arc<S>, object_id: u64, options: HandleOptions) -> Self {
+        Self { owner, object_id, options }
     }
 
     pub fn owner(&self) -> &Arc<S> {
@@ -208,10 +198,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
     pub fn store(&self) -> &ObjectStore {
         self.owner.as_ref().as_ref()
-    }
-
-    pub fn trace(&self) -> bool {
-        self.trace.load(atomic::Ordering::Relaxed)
     }
 
     /// Get the default set of transaction options for this object. This is mostly the overall
@@ -281,7 +267,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let mut iter = merger.query(Query::FullRange(&lower_bound)).await?;
         let allocator = self.store().allocator();
         let mut deallocated = 0;
-        let trace = self.trace();
         while let Some(ItemRef {
             key:
                 ObjectKey {
@@ -303,16 +288,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                             ..extent_offset + overlap.end - extent_key.start,
                     );
                     ensure!(block_size.is_aligned(&range.range), FxfsError::Inconsistent);
-                    if trace {
-                        info!(
-                            store_id = self.store().store_object_id(),
-                            oid = self.object_id(),
-                            device_range:? = range,
-                            len = range.len(),
-                            extent_key:?;
-                            "D",
-                        );
-                    }
                     allocator
                         .deallocate(transaction, self.store().store_object_id(), range)
                         .await?;
@@ -337,16 +312,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         extent_offset: u64,
         options: WriteOptions<'_>,
     ) -> Result<MaybeChecksums, Error> {
-        if self.trace() {
-            info!(
-                store_id = self.store().store_object_id(),
-                oid = self.object_id(),
-                extent:?,
-                range:? = (extent_offset..extent_offset + buf.len() as u64),
-                len = buf.len();
-                "W",
-            );
-        }
         let store = self.store();
         let _watchdog = Watchdog::new(10, |count| {
             warn!("Write I/O request blocked for {} seconds", count * 10);
@@ -997,7 +962,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
         let mut allocated = 0;
         let allocator = store.allocator();
-        let trace = self.trace();
         let mut writes = FuturesOrdered::new();
 
         while !buf.is_empty() {
@@ -1010,15 +974,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 crate::boxed(|| allocator.allocate(transaction, store_id, len)).await
             }
             .context("allocation failed")?;
-            if trace {
-                info!(
-                    store_id,
-                    oid = self.object_id(),
-                    device_range:? = allocated_range,
-                    len = allocated_range.len();
-                    "A",
-                );
-            }
             let extent = allocated_range.extent;
             let device_range = allocated_range.range;
             let len = device_range.end - device_range.start;
@@ -1379,7 +1334,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     /// If writing the attribute requires multiple transactions, adds the attribute to the
     /// graveyard. The caller is responsible for removing the attribute from the graveyard when it
     /// commits the last transaction.
-    #[trace]
     pub async fn write_new_attr_in_batches<'a>(
         &'a self,
         transaction: &mut Transaction<'a>,
@@ -1851,7 +1805,6 @@ mod tests {
             object.owner().clone(),
             object.object_id(),
             HandleOptions::default(),
-            false,
         );
 
         let store = fs.root_store();
@@ -1884,7 +1837,6 @@ mod tests {
             object.owner().clone(),
             object.object_id(),
             HandleOptions::default(),
-            false,
         ));
         let basic_a = basic.clone();
         let basic_b = basic.clone();
@@ -1928,7 +1880,6 @@ mod tests {
             object.owner().clone(),
             object.object_id(),
             HandleOptions::default(),
-            false,
         ));
         let basic_a = basic.clone();
         let basic_b = basic.clone();

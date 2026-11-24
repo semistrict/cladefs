@@ -27,9 +27,6 @@ pub trait ObjectHandle: Send + Sync + 'static {
 
     /// Allocates a buffer for doing I/O (read and write) for the object.
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_>;
-
-    /// Sets tracing for this object.
-    fn set_trace(&self, _v: bool) {}
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,10 +136,6 @@ impl<T: ObjectHandle + ?Sized> ObjectHandle for Arc<T> {
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
         (**self).allocate_buffer(size)
     }
-
-    fn set_trace(&self, v: bool) {
-        (**self).set_trace(v)
-    }
 }
 
 #[async_trait]
@@ -182,10 +175,6 @@ impl<T: ObjectHandle + ?Sized> ObjectHandle for Box<T> {
 
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
         (**self).allocate_buffer(size)
-    }
-
-    fn set_trace(&self, v: bool) {
-        (**self).set_trace(v)
     }
 }
 

@@ -21,7 +21,6 @@ use fuchsia_sync::Mutex;
 use futures::StreamExt;
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
-use fxfs_trace::{TraceFutureExt, trace_future_args};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +61,6 @@ enum Message {
     Flush(oneshot::Sender<()>),
 }
 
-#[fxfs_trace::trace]
 impl Graveyard {
     /// Creates a new instance of the graveyard manager, which tombstones in batches `batch_delay`
     /// apart, if set (`Options::graveyard_batch_delay`).
@@ -131,11 +129,8 @@ impl Graveyard {
             if let ReaperTask::Pending(receiver) =
                 std::mem::replace(&mut *reaper_task, ReaperTask::None)
             {
-                *reaper_task = ReaperTask::Running(fasync::Task::spawn(
-                    self.clone()
-                        .reap_task(receiver)
-                        .trace(trace_future_args!("Graveyard::reap_task")),
-                ));
+                *reaper_task =
+                    ReaperTask::Running(fasync::Task::spawn(self.clone().reap_task(receiver)));
             } else {
                 unreachable!();
             }
@@ -271,7 +266,6 @@ impl Graveyard {
     /// behaviour: the entries might or might not be immediately tombstoned, so callers should wait
     /// for this to return before changing to a state where more entries can be added.  Once this
     /// has returned, entries will be tombstoned in the background.
-    #[trace]
     pub async fn initial_reap(self: &Arc<Self>, store: &ObjectStore) -> Result<usize, Error> {
         if store.filesystem().options().skip_initial_reap {
             return Ok(0);
