@@ -261,6 +261,9 @@ pub struct Collector {
     /// cladefs: what its passes may delete, shared with the other passes of their sweep, if
     /// bounded (board 8529).
     budget: Option<Arc<Budget>>,
+    /// cladefs: tenants known to be shredded (from `events`), whose live cells are ended and whose
+    /// read evidence and orphaned ephemeral references are reclaimed.
+    shredded: Arc<BTreeSet<u64>>,
 }
 
 /// cladefs: what a pass over a cell keeps as it reads it, and drops with it.
@@ -284,6 +287,12 @@ impl Collector {
     /// nothing past it (board 8529).
     pub fn budget(self, budget: Option<Arc<Budget>>) -> Self {
         Self { budget, ..self }
+    }
+
+    /// cladefs: one whose passes treat `shredded` tenants as shredded, ending their live cells and
+    /// reclaiming their read evidence (board 2940) and orphaned ephemeral references.
+    pub fn shredded(self, shredded: Arc<BTreeSet<u64>>) -> Self {
+        Self { shredded, ..self }
     }
 
     /// cladefs: whether a pass may delete `objects` objects of `bytes` bytes, as its budget says,
@@ -314,6 +323,11 @@ impl Collector {
             Some(own) => crate::identity::get(own).await?.map(|identity| identity.number),
             None => None,
         };
+        if let Some(log) = crate::events::get(bucket).await? {
+            let mut merged = (*self.shredded).clone();
+            merged.extend(log.shredded_set());
+            self.shredded = Arc::new(merged);
+        }
         let mut cells = std::pin::pin!(crate::cell::listed(bucket));
         let mut report = Report::default();
         let mut failed = None;
@@ -501,6 +515,9 @@ impl Collector {
         cell: CellId,
         holder: u64,
     ) -> Result<Report, Error> {
+        if cell.tenant != layout::DEFAULT_TENANT && self.shredded.contains(&cell.tenant) {
+            lifecycle::delete_existing(bucket, cell, holder, u64::MAX).await?;
+        }
         let found = passed::found(bucket, cell).await?;
         let looked = match &found {
             Some(object) => match self.look(bucket, cell, holder, object).await? {
@@ -586,7 +603,7 @@ impl Collector {
             return Ok((self.trim_evidence(bucket, cell, listed, skipped).await?, None));
         }
         let mut remembered = Remembered::default();
-        let survey = remembered.survey(bucket, cell, taken.epoch, Writes::Some, listed);
+        let survey = remembered.survey(bucket, cell, taken.epoch, Writes::Some, listed, false);
         let Some(pass) = survey.await? else {
             return Ok((Report::default(), None));
         };
@@ -594,18 +611,20 @@ impl Collector {
         if !self.renew(bucket, cell, taken).await? {
             return Ok((report, None));
         }
-        let doomed = pass.fates(bucket)?;
+        let doomed = pass.fates(bucket, &self.shredded)?;
         // A pass a later one took the lease from stops.
         if !self.holds(bucket, cell, taken).await? {
             return Ok((report, None));
         }
         let retired = pass.retired();
+        let shredded_ephemeral = pass.shredded_ephemeral(&self.shredded);
         let removal = pass.removal(&doomed);
         // cladefs: past its sweep's budget, it deletes nothing, as one fenced, and records nothing
         // new, so that the next pass decides anew (board 8529): what it would delete, the head of
         // its cell if it goes whole, and the references it would retire.
         let head = removal.as_ref().and_then(|removal| removal.head);
-        let objects = doomed.len() + usize::from(head.is_some()) + retired.len();
+        let objects =
+            doomed.len() + usize::from(head.is_some()) + retired.len() + shredded_ephemeral.len();
         let objects = objects + pass.recording.stale.len();
         let bytes = doomed.iter().copied().chain(head).map(|meta| meta.size).sum();
         if !self.may_delete(objects, bytes) {
@@ -639,7 +658,15 @@ impl Collector {
         }
         let stale: Vec<&str> = pass.recording.stale.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &stale).await?;
-        report.retired += marked.len() + unmarked.len() + stale.len();
+        if !shredded_ephemeral.is_empty() {
+            let ref_keys: Vec<&str> =
+                shredded_ephemeral.iter().map(|(ref_key, _)| *ref_key).collect();
+            let idx_keys: Vec<&str> =
+                shredded_ephemeral.iter().map(|(_, idx_key)| idx_key.as_str()).collect();
+            bucket::delete_all(bucket, &ref_keys).await?;
+            bucket::delete_all(bucket, &idx_keys).await?;
+        }
+        report.retired += marked.len() + unmarked.len() + stale.len() + shredded_ephemeral.len();
         // cladefs: a dead cell nothing will need again goes whole, its retirements made: its head,
         // then its lease (TASK-455), the collector's own, which the report counts not, as it counts
         // not its taking. It records nothing: nothing is left to record it in.
@@ -652,7 +679,8 @@ impl Collector {
         // What the cell takes now: as listed, less what went.
         let mut usage = pass.recording.usage.clone();
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
-        let listing = pass.recorded_listing(&doomed);
+        let listing =
+            if shredded_ephemeral.is_empty() { pass.recorded_listing(&doomed) } else { None };
         Ok((report, Some(Passed { listing, usage })))
     }
 
@@ -747,12 +775,21 @@ impl Collector {
         let epoch = passed::epoch(bucket, cell).await?;
         let listed = first_listing(bucket, cell).await?;
         let mut remembered = Remembered::default();
-        let Some(pass) = remembered.survey(bucket, cell, epoch, Writes::None, listed).await? else {
+        let shredded_cell =
+            cell.tenant != layout::DEFAULT_TENANT && self.shredded.contains(&cell.tenant);
+        let Some(pass) =
+            remembered.survey(bucket, cell, epoch, Writes::None, listed, shredded_cell).await?
+        else {
             return Ok(DryRun { fenced: true, ..DryRun::default() });
         };
-        let doomed = pass.doomed(bucket)?.into_iter().cloned().collect();
+        let doomed = pass.doomed(bucket, &self.shredded)?.into_iter().cloned().collect();
         let mut retired: Vec<String> = pass.retired().into_iter().map(|(key, _)| key).collect();
         retired.extend(pass.recording.stale.iter().cloned());
+        retired.extend(
+            pass.shredded_ephemeral(&self.shredded)
+                .into_iter()
+                .map(|(ref_key, _)| ref_key.to_owned()),
+        );
         Ok(DryRun { doomed, retired, fenced: fenced(bucket, cell, epoch).await? })
     }
 }
@@ -789,6 +826,7 @@ impl Remembered {
         epoch: u64,
         writes: Writes,
         listed: Option<Listed>,
+        shredded_cell: bool,
     ) -> Result<Option<Pass>, Error> {
         let early = listed.is_some();
         // Without the rule that they are listed after the states, with the candidates, and never
@@ -802,6 +840,14 @@ impl Remembered {
         let objects = listed.as_ref().map(|listed| &listed.objects);
         let checkpoints = Checkpoints::new(bucket, CHECKPOINTS_KEPT).listed(objects);
         let mut record = self.record(bucket, cell, objects).await?;
+        if shredded_cell
+            && let Some(head) = &mut record
+            && !head.deleted()
+        {
+            head.epoch = Head::FINAL;
+            head.token = u64::MAX;
+            head.versions.clear();
+        }
         let mut live = Live::default();
         let read = self.read(bucket, &checkpoints, cell, &mut record, &mut live, writes);
         let read = match read.await {
@@ -943,7 +989,7 @@ impl Collector {
     ) -> Result<Report, Error> {
         let evidence = layout::evidence_of_cell(cell);
         let listed = bucket::under(&listed.objects, &evidence);
-        let doomed = crate::evidence::doomed(cell, &listed, None, bucket.now());
+        let doomed = crate::evidence::doomed(cell, &listed, None, &self.shredded, bucket.now());
         let deleted_bytes = doomed.iter().map(|meta| meta.size).sum::<u64>();
         if !self.may_delete(doomed.len(), deleted_bytes) {
             return Ok(report);
@@ -1445,8 +1491,8 @@ impl Pass {
     /// What goes: everything listed that the live cells and the origins kept do not need, in
     /// the order of its keys ([`Pass::fates`]).
     /// cladefs: the cell's removal too, if it goes whole ([`Pass::removal`], TASK-455).
-    fn doomed(&self, bucket: &impl Bucket) -> Result<Vec<&Meta>, Error> {
-        let mut doomed = self.fates(bucket)?;
+    fn doomed(&self, bucket: &impl Bucket, shredded: &BTreeSet<u64>) -> Result<Vec<&Meta>, Error> {
+        let mut doomed = self.fates(bucket, shredded)?;
         if let Some(removal) = self.removal(&doomed) {
             doomed.extend(removal.head.iter().chain(&removal.lease).copied());
             doomed.sort_by(|a, b| a.key.cmp(&b.key));
@@ -1457,19 +1503,21 @@ impl Pass {
     /// What goes, as [`Pass::doomed`] says, in the order of its keys. cladefs: a cell with no live
     /// cell and no reference, all of it but its records and its object, and the collector's own,
     /// goes. A cell holding moves, of formats before 28, is refused ([`Error::Format`]).
-    fn fates(&self, bucket: &impl Bucket) -> Result<Vec<&Meta>, Error> {
+    fn fates(&self, bucket: &impl Bucket, shredded: &BTreeSet<u64>) -> Result<Vec<&Meta>, Error> {
         let now = bucket.now();
         let goes = Fate::of;
         // cladefs: the read evidence that goes (TASK-702.2): of versions the head names no more,
-        // all of a dead cell's, and all but each tenant's newest of each.
+        // all of a dead cell's, all of shredded tenants' (board 2940), and all but each tenant's
+        // newest of each.
         let named: BTreeSet<u64> = (self.record.as_ref().filter(|head| !head.deleted()))
             .map(|head| head.versions.iter().map(|version| version.at).collect())
             .unwrap_or_default();
         let evidence = bucket::under(&self.objects, &layout::evidence_of_cell(self.cell));
         let evidence: BTreeSet<String> =
-            (crate::evidence::doomed(self.cell, &evidence, Some(&named), now).into_iter())
-                .map(|meta| meta.key.clone())
-                .collect();
+            (crate::evidence::doomed(self.cell, &evidence, Some(&named), shredded, now)
+                .into_iter())
+            .map(|meta| meta.key.clone())
+            .collect();
         let mut doomed = Vec::new();
         for (key, meta) in &self.objects {
             let named = self.named.contains(key);
@@ -1540,6 +1588,27 @@ impl Pass {
         };
         let marked = !record.retires_unmarked();
         vec![(layout::reference(origin.parent, origin.at, self.cell), marked)]
+    }
+
+    /// cladefs: orphaned ephemeral references under this cell whose child belongs to a tenant in
+    /// `shredded`, paired with their ephemeral index keys.
+    fn shredded_ephemeral(&self, shredded: &BTreeSet<u64>) -> Vec<(&str, String)> {
+        if shredded.is_empty() {
+            return Vec::new();
+        }
+        self.objects
+            .keys()
+            .filter_map(|key| match layout::kind(key) {
+                Kind::Ephemeral { parent, at, incarnation, child }
+                    if parent == self.cell
+                        && child.tenant != layout::DEFAULT_TENANT
+                        && shredded.contains(&child.tenant) =>
+                {
+                    Some((key.as_str(), layout::ephemeral_index(incarnation, parent, at, child)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// cladefs: whether its cell holds no live cell and no reference of its own.
@@ -3737,5 +3806,142 @@ mod tests {
         let other = Collector::new();
         let (report, asked) = bucket.served(other.collect_cell(&*bucket, clone, 7));
         assert_eq!((report.unwrap(), asked), (skipped, idle(clone)));
+    }
+
+    /// Collector reaps a shredded tenant's live cells, read evidence (board 2940), and orphaned
+    /// ephemeral references once `TenantShredded` is published to `events`, while preserving
+    /// cross-tenant forks, `tenants/<T>/kek` tombstones, and `events` itself.
+    #[test]
+    fn collector_reaps_shredded_tenant_while_preserving_cross_tenant_forks() {
+        let bucket = memory_bucket();
+        block_on(async {
+            // Tenant 5 creates a shared base cell with one version, and an unshared cell.
+            let shared = CellId { tenant: 5, id: (1 << 48) | 1 };
+            let unshared = CellId { tenant: 5, id: (1 << 48) | 2 };
+            // Tenant 6 creates a base cell (whose read evidence & ephemeral ref tenant 5 holds)
+            // and a cross-tenant fork of tenant 5's shared version.
+            let other_base = CellId { tenant: 6, id: (1 << 48) | 3 };
+            let cross_fork = CellId { tenant: 6, id: (1 << 48) | 4 };
+
+            for cell in [shared, unshared, other_base] {
+                lifecycle::create(&*bucket, cell, 1).await.unwrap();
+            }
+
+            let w_shared = Writer::open(bucket.clone(), shared, 10, 1).await.unwrap();
+            let batch = SegmentBuilder::from(Commit {
+                tag: 1,
+                extents: vec![(ExtentId::new(shared.id, 1), b"shared-data".to_vec())],
+                ..Commit::default()
+            });
+            let cut = layout::NewVersion { id: 0xaa, keep_last: None };
+            let at = w_shared
+                .add_segment(
+                    batch.cut(cut, &mut w_shared.chain()).frame(w_shared.keys().encrypting()),
+                )
+                .unwrap();
+            w_shared.upload(at).await.unwrap();
+            w_shared.acknowledge().await.unwrap();
+            w_shared.share_version(0xaa, true).await.unwrap();
+            let shared_origin = Origin { parent: shared, at, epoch: w_shared.epoch() };
+
+            // Cross-tenant fork into tenant 6 from tenant 5's shared version.
+            let kms = crate::keys::testing::host_kms();
+            lifecycle::fork_version(
+                &*bucket,
+                cross_fork,
+                0xaa,
+                shared_origin,
+                cross_fork.id,
+                crate::keys::Parents::Kms(&kms, None),
+            )
+            .await
+            .unwrap();
+
+            // Unshared cell owned by tenant 5 with data.
+            let w_unshared = Writer::open(bucket.clone(), unshared, 11, 1).await.unwrap();
+            commit(
+                &w_unshared,
+                Commit {
+                    tag: 1,
+                    extents: vec![(ExtentId::new(unshared.id, 1), b"victim-data".to_vec())],
+                    ..Commit::default()
+                },
+            )
+            .await;
+
+            // Other tenant's base cell with read evidence written by tenant 5 and an ephemeral
+            // reference owned by tenant 5.
+            let w_other = Writer::open(bucket.clone(), other_base, 12, 1).await.unwrap();
+            let other_at = {
+                let batch = SegmentBuilder::from(Commit {
+                    tag: 1,
+                    extents: vec![(ExtentId::new(other_base.id, 1), b"other-data".to_vec())],
+                    ..Commit::default()
+                });
+                let cut = layout::NewVersion { id: 0xbb, keep_last: None };
+                let seg = w_other
+                    .add_segment(
+                        batch.cut(cut, &mut w_other.chain()).frame(w_other.keys().encrypting()),
+                    )
+                    .unwrap();
+                w_other.upload(seg).await.unwrap();
+                w_other.acknowledge().await.unwrap();
+                seg
+            };
+            let other_origin = Origin { parent: other_base, at: other_at, epoch: w_other.epoch() };
+            let ev_key = crate::evidence::write(
+                &*bucket,
+                crate::evidence::Of { origin: other_origin, tenant: 5 },
+                &[crate::evidence::Unit {
+                    extent: ExtentId::new(other_base.id, 1),
+                    mib: 0,
+                    first: 0,
+                }],
+                w_other.keys().encrypting(),
+            )
+            .await
+            .unwrap();
+            let eph_child = CellId { tenant: 5, id: (1 << 48) | 99 };
+            lifecycle::refer_ephemeral(&*bucket, other_origin, 0x77, eph_child).await.unwrap();
+
+            // Shred tenant 5: tombstone KEK and publish TenantShredded to events.
+            crate::bucket_kms::destroy(&*bucket, 5).await.unwrap();
+            crate::events::publish(&*bucket, crate::events::Publish::TenantShredded(5))
+                .await
+                .unwrap();
+
+            // Run collector: should end tenant 5's cells, remove unshared cell whole, delete
+            // tenant 5's evidence under other_base, retire tenant 5's ephemeral ref, keep
+            // cross_fork readable, and preserve both `tenants/<5>/kek` and `events`.
+            let mut collector = Collector::new();
+            let report = collector.collect(&*bucket, 1).await.unwrap();
+            assert!(report.deleted > 0, "{report:?}");
+            assert!(report.removed >= 1, "unshared cell removed: {report:?}");
+            assert!(report.retired >= 1, "ephemeral ref retired: {report:?}");
+
+            let all_keys = keys(&*bucket).await;
+            assert!(all_keys.contains(&layout::kek(5)), "tombstone must remain");
+            assert!(all_keys.contains(&layout::EVENTS.to_owned()), "events must remain");
+            assert!(!all_keys.contains(&ev_key), "shredded tenant evidence deleted");
+            assert!(
+                !all_keys.iter().any(|k| k.starts_with(&unshared.prefix())),
+                "unshared cell completely removed"
+            );
+            assert!(
+                !all_keys
+                    .contains(&layout::ephemeral_reference(other_base, other_at, 0x77, eph_child)),
+                "shredded tenant ephemeral ref deleted"
+            );
+
+            // Tenant 5's shared cell head is ended, yet tenant 6's cross-tenant fork still
+            // recovers and reads its inherited extent cleanly!
+            let shared_head = crate::head::get(&*bucket, shared).await.unwrap().unwrap();
+            assert!(shared_head.deleted());
+            let state = crate::recovery::recover(&*bucket, cross_fork, Some(shared_origin))
+                .await
+                .unwrap()
+                .state;
+            assert!(state.extents.contains_key(&ExtentId::new(shared.id, 1)));
+        });
     }
 }

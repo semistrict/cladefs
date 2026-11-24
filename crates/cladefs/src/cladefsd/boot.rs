@@ -94,6 +94,9 @@ pub(super) async fn boot_daemon(
     } else if peers.is_some() {
         anyhow::bail!("CLADEFSD_PEERS is set, but CLADEFSD_PEER_ADDRESS names no address");
     }
+    // cladefs: background poller of the root bucket's global control-plane `events` object
+    // (shredded tenants/cells, decommissioned hosts, peer list updates).
+    super::events::start_on(daemon)?;
     // cladefs: what its uploads may hold at once (TASK-317).
     if let Some(bytes) = set_os("CLADEFSD_UPLOAD_MEMORY") {
         // Not UTF-8, or not a number: the error below says what it must be.

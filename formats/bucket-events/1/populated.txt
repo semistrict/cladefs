@@ -1,0 +1,72 @@
+EventLog {
+    latest_seq: 4,
+    oldest_seq: 1,
+    events: [
+        Event {
+            seq: 1,
+            unix_ms: 1700000000000,
+            kind: Some(
+                TenantShredded(
+                    TenantShredded {
+                        tenant: 7,
+                    },
+                ),
+            ),
+        },
+        Event {
+            seq: 2,
+            unix_ms: 1700000001000,
+            kind: Some(
+                CellShredded(
+                    CellShredded {
+                        tenant: 9,
+                        cell: 281474976710698,
+                    },
+                ),
+            ),
+        },
+        Event {
+            seq: 3,
+            unix_ms: 1700000002000,
+            kind: Some(
+                HostDecommissioned(
+                    HostDecommissioned {
+                        incarnation: 85,
+                    },
+                ),
+            ),
+        },
+        Event {
+            seq: 4,
+            unix_ms: 1700000003000,
+            kind: Some(
+                PeersUpdated(
+                    PeersUpdated {
+                        bucket: 1,
+                        generation: 2,
+                        addresses: [
+                            "10.0.0.1:9000",
+                            "10.0.0.2:9000",
+                        ],
+                    },
+                ),
+            ),
+        },
+    ],
+    shredded_tenants: [
+        7,
+    ],
+    decommissioned_hosts: [
+        85,
+    ],
+    bucket_peers: [
+        BucketPeers {
+            bucket: 1,
+            generation: 2,
+            addresses: [
+                "10.0.0.1:9000",
+                "10.0.0.2:9000",
+            ],
+        },
+    ],
+}

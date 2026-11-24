@@ -321,6 +321,144 @@ pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Result<Destroyed, buc
     }
 }
 
+/// cladefs: whether `tenant`'s KEK object in `bucket` is a tombstone (shredded under the bucket
+/// KMS). Needs no master key.
+pub async fn is_tombstoned(bucket: &impl Bucket, tenant: u64) -> Result<bool, bucket::Refused> {
+    if tenant == layout::DEFAULT_TENANT {
+        return Ok(false);
+    }
+    let Some(object) = bucket::get(bucket, &layout::kek(tenant)).await? else {
+        return Ok(false);
+    };
+    Ok(matches!(KekObject::decode(tenant, &object.bytes), Ok(KekObject::Tombstone { .. })))
+}
+
+/// cladefs: shreds `tenant` across `home` and every other bucket recorded in its registry (and the
+/// root bucket's registry), needing **no master key**: replaces `tenants/<tenant>/kek` with a
+/// tombstone in every bucket under a bucket KMS, records any bucket under a named external KMS in
+/// [`Shredded::named`] without opening it, and records any unreachable/failing bucket in
+/// [`Shredded::failed`]. Once at least one bucket is tombstoned, publishes
+/// [`crate::events::Publish::TenantShredded`] to the root bucket's `events` object so every extent
+/// daemon halts open cells and `cladefs-gc` reaps the tenant's cells without host fan-out.
+pub async fn shred_buckets(
+    home: &RoutedBucket,
+    vars: &Vars,
+    tenant: u64,
+    wait: Duration,
+) -> Shredded {
+    shred_buckets_inner(home, None, vars, tenant, wait).await
+}
+
+/// Shared keyless multi-bucket shredding core used by both [`shred_buckets`] and
+/// [`ByBucket::shred`]. When `own_override` is `Some`, it overrides the home bucket's KMS kind
+/// (used by [`ByBucket::shred`] so its constructed `HostKms` matches tests without env vars).
+async fn shred_buckets_inner(
+    home: &RoutedBucket,
+    own_override: Option<Option<&str>>,
+    vars: &Vars,
+    tenant: u64,
+    wait: Duration,
+) -> Shredded {
+    let mut shredded = Shredded::default();
+    let own = match identity::get(&*home.own()).await {
+        Ok(id) => id.map(|id| id.number),
+        Err(why) => {
+            shredded.failed.push((NAMED, format!("the host's bucket's identity: {why}")));
+            None
+        }
+    };
+    let mut registries = Vec::new();
+    match identity::registry_once(&*home.own()).await {
+        Ok(reg) => registries.push(reg),
+        Err(err) => shredded.failed.push((identity::ROOT, format!("the registry: {err}"))),
+    }
+    if own.is_some_and(|n| n != identity::ROOT) {
+        match home.numbered(identity::ROOT).await {
+            Ok(root) => match identity::registry_once(&*root).await {
+                Ok(reg) => registries.push(reg),
+                Err(err) => shredded.failed.push((identity::ROOT, format!("the registry: {err}"))),
+            },
+            Err(err) => shredded.failed.push((identity::ROOT, err.to_string())),
+        }
+    }
+
+    let entry_of = |number: u16| -> Option<identity::Entry> {
+        registries.iter().rev().flatten().find_map(|reg| reg.bucket(number).cloned())
+    };
+
+    // Determine whether the home bucket is under a named external KMS or a bucket KMS.
+    let own_num = own.unwrap_or(NAMED);
+    let own_named: Option<String> = match own_override {
+        Some(named) => named.map(str::to_owned),
+        None => own
+            .and_then(&entry_of)
+            .and_then(|e| e.details.kms)
+            .or_else(|| vars.get(KMS_VAR).map(str::to_owned)),
+    };
+    match own_named {
+        Some(url) => shredded.named.push((own_num, url)),
+        None => shredded.destroying(own_num, destroy(&*home.own(), tenant).await),
+    }
+
+    let mut numbers = BTreeSet::new();
+    for reg in registries.iter().flatten() {
+        numbers.extend(reg.buckets.iter().map(|e| e.number));
+    }
+    let others = numbers.into_iter().filter(|&number| Some(number) != own);
+    let shredding = others.map(|number| {
+        let entry = entry_of(number);
+        async move {
+            let bucket_vars = vars.numbered(number);
+            let recorded_kms = entry
+                .as_ref()
+                .and_then(|e| e.details.kms.as_deref())
+                .or_else(|| bucket_vars.get(KMS_VAR));
+            if let Some(url) = recorded_kms {
+                return (number, Ok(Shred::Named(url.to_owned())));
+            }
+            let work = async {
+                let member =
+                    home.numbered(number).await.map_err(|err| format!("the bucket: {err}"))?;
+                Ok(Shred::Destroyed(destroy(&*member, tenant).await))
+            };
+            let within = tokio::time::timeout(wait, work).await;
+            let out_of_reach = || format!("no answer within {wait:?}");
+            (number, within.unwrap_or_else(|_| Err(out_of_reach())))
+        }
+    });
+    for (number, shred) in futures::future::join_all(shredding).await {
+        match shred {
+            Err(why) => shredded.failed.push((number, why)),
+            Ok(Shred::Destroyed(destroyed)) => shredded.destroying(number, destroyed),
+            Ok(Shred::Named(url)) => shredded.named.push((number, url)),
+        }
+    }
+
+    // Publish TenantShredded to the root bucket's `events` object once at least one bucket was
+    // tombstoned so every extent daemon halts open cells and `cladefs-gc` reaps the tenant.
+    if !shredded.destroyed.is_empty() {
+        let publish = async {
+            let auth = crate::events::authority(home)
+                .await
+                .map_err(|err| format!("events authority: {err}"))?;
+            crate::events::publish(&*auth, crate::events::Publish::TenantShredded(tenant))
+                .await
+                .map_err(|err| format!("publishing events: {err}"))?;
+            Ok::<(), String>(())
+        };
+        match tokio::time::timeout(wait, publish).await {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => shredded.failed.push((identity::ROOT, why)),
+            // Timeout Elapsed error: recorded in `shredded.failed` so the caller knows to retry.
+            Err(_elapsed) => {
+                shredded.failed.push((identity::ROOT, format!("events: no answer within {wait:?}")))
+            }
+        }
+    }
+
+    shredded
+}
+
 /// What [`rotate`] did, tenant by tenant.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Rotated {
@@ -620,63 +758,22 @@ impl ByBucket {
     /// a bucket out of reach, opened before or not, is said failed, and the others shredded
     /// all the same (board 5528).
     pub async fn shred(&self, tenant: u64) -> Shredded {
-        let mut shredded = Shredded::default();
-        let own = match self.own_number().await {
-            Ok(own) => own,
-            Err(why) => {
-                shredded.failed.push((NAMED, format!("the host's bucket's identity: {why}")));
-                None
-            }
+        let own_override = match &self.own {
+            HostKms::Bucket(_) => Some(None),
+            HostKms::Named(url, _) => Some(Some(url.as_str())),
         };
-        match &self.own {
-            HostKms::Bucket(kms) => {
-                shredded.destroying(own.unwrap_or(NAMED), kms.destroy(tenant).await)
-            }
-            HostKms::Named(url, _) => shredded.named.push((own.unwrap_or(NAMED), url.clone())),
+        let shredded =
+            shred_buckets_inner(&self.home, own_override, &self.vars, tenant, self.shred_within)
+                .await;
+        if let HostKms::Bucket(kms) = &self.own {
+            kms.forget(tenant);
         }
-        let mut numbers = BTreeSet::new();
-        let mut registries = vec![identity::registry_once(&*self.home).await];
-        if own.is_some_and(|own| own != identity::ROOT) {
-            match self.home.numbered(identity::ROOT).await {
-                Ok(root) => registries.push(identity::registry_once(&*root).await),
-                Err(err) => shredded.failed.push((identity::ROOT, err.to_string())),
-            }
-        }
-        for registry in registries {
-            match registry {
-                Ok(registry) => numbers.extend(
-                    (registry.iter())
-                        .flat_map(|registry| registry.buckets.iter().map(|e| e.number)),
-                ),
-                Err(err) => shredded.failed.push((identity::ROOT, format!("the registry: {err}"))),
-            }
-        }
-        let others = numbers.into_iter().filter(|&number| Some(number) != own);
-        let wait = self.shred_within;
-        let shredding = others.map(|number| async move {
-            let within = tokio::time::timeout(wait, self.shredding(number, tenant)).await;
-            let out_of_reach = || format!("no answer within {wait:?}");
-            (number, within.unwrap_or_else(|_| Err(out_of_reach())))
-        });
-        for (number, shred) in futures::future::join_all(shredding).await {
-            match shred {
-                Err(why) => shredded.failed.push((number, why)),
-                Ok(Shred::Destroyed(destroyed)) => shredded.destroying(number, destroyed),
-                Ok(Shred::Named(url)) => shredded.named.push((number, url)),
-            }
+        let cached: Vec<Arc<BucketKms<ObjectBucket>>> =
+            self.buckets.lock().unwrap().values().cloned().collect();
+        for kms in cached {
+            kms.forget(tenant);
         }
         shredded
-    }
-
-    /// Shreds `tenant` in the bucket numbered `number`, another than the host's: its KMS chosen,
-    /// its bucket KMS's KEK object destroyed, or the KMS it is under named.
-    async fn shredding(&self, number: u16, tenant: u64) -> Result<Shred, String> {
-        let (key, _) = self.of(number).await?;
-        let kms = self.buckets.lock().unwrap().get(&number).cloned();
-        Ok(match kms {
-            Some(kms) => Shred::Destroyed(kms.destroy(tenant).await),
-            None => Shred::Named(key.0.to_string()),
-        })
     }
 
     /// The home bucket's number, cached once it has an identity (board 6400): `None` is never

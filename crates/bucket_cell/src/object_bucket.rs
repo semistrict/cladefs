@@ -1245,6 +1245,40 @@ impl ObjectBucket {
         get
     }
 
+    fn object_get_if_changed(
+        &self,
+        key: &str,
+        if_none_match: &Version,
+    ) -> impl Future<Output = Result<Option<Object>, Error>> + Send {
+        let (backend, path, version) =
+            (self.backend.clone(), self.path(key), if_none_match.clone());
+        async move {
+            let timed = self.counts.request(Request::Get, Some(&path));
+            let options =
+                GetOptions { if_none_match: version.e_tag.clone(), ..GetOptions::default() };
+            let got = async {
+                let result = match backend.get_opts(&path, options).await {
+                    Err(object_store::Error::NotModified { .. }) => return Ok(None),
+                    // A local/dev backend that does not implement conditional GET: fall back to a
+                    // plain GET and compare versions locally, as object_get_range does for Azure
+                    // suffix reads.
+                    Err(object_store::Error::NotSupported { .. }) => {
+                        backend.get_opts(&path, GetOptions::default()).await?
+                    }
+                    result => result?,
+                };
+                let meta = self.meta(result.meta.clone());
+                if meta.version == version {
+                    return Ok(None);
+                }
+                let bytes = result.bytes().await?;
+                self.counts.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                Ok(Some(Object { bytes: bytes.to_vec(), meta }))
+            };
+            timed.answered(got.await, |object| object.as_ref().map_or(0, |o| o.bytes.len()))
+        }
+    }
+
     fn object_get_range(
         &self,
         key: &str,
@@ -1556,6 +1590,14 @@ impl Bucket for ObjectBucket {
 
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
         self.object_get(key)
+    }
+
+    fn get_if_changed(
+        &self,
+        key: &str,
+        if_none_match: &Version,
+    ) -> impl Future<Output = Result<Option<Object>, Error>> + Send {
+        self.object_get_if_changed(key, if_none_match)
     }
 
     fn get_range(

@@ -63,6 +63,7 @@ pub mod client;
 pub mod clock;
 pub mod collector;
 pub mod direct;
+pub mod events;
 pub mod evidence;
 pub mod faults;
 pub mod fetch;

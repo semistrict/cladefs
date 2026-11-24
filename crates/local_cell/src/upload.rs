@@ -570,6 +570,11 @@ pub async fn open_ephemeral<D: Dir>(
             .map_err(|err| Failure::msg(format!("an ephemeral cell's keys: {err:#}")))?;
     let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
     let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
+    // cladefs: use a fresh non-zero taking `(epoch, holder)` on every ephemeral reopen so
+    // `CachingKms::kek` unwraps afresh instead of reusing a cached `(0, 0)` unwrap from an
+    // earlier open (board 5410).
+    head.epoch = 1;
+    head.holder = rand::random();
     head.keks.extend(kek);
     (head.deks, head.inherited) = (deks, inherited);
     let cell_keys = CellKeys::of(cell, &head, runtime.keys.kms.clone());

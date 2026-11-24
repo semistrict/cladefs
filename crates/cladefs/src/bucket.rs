@@ -356,9 +356,41 @@ fn one(kms: extent_keys::kms::Shared) -> Arc<dyn keys::Kmses> {
 }
 
 /// cladefs: the host's over `kmses`: its pools of new cell KEKs refilled in batches on `runtime`,
-/// the uploaders', off the paths of forks, which take from them (TASK-411.4).
+/// the uploaders', off the paths of forks, which take from them (TASK-411.4). Installs a
+/// revocation callback so any KMS refusal immediately halts open cells on this host.
 fn host_kms(kmses: Arc<dyn keys::Kmses>, runtime: tokio::runtime::Handle) -> Arc<keys::CachingKms> {
-    keys::CachingKms::over(kmses, Some(keys::Pooling::on(runtime)))
+    let kms = keys::CachingKms::over(kmses, Some(keys::Pooling::on(runtime)));
+    kms.set_on_revoked(Arc::new(|tenant, buckets, why| {
+        on_kms_revoked(tenant, buckets, why);
+    }));
+    kms
+}
+
+/// cladefs: invoked by [`keys::CachingKms`] whenever a KMS reports that `tenant`'s KEK is
+/// revoked, destroyed, or missing: immediately halts open cells of `tenant` in the affected
+/// buckets and evicts their extent-cache pages without waiting for external fan-out, preserving
+/// multi-bucket per-KMS isolation (TASK-633.6).
+fn on_kms_revoked(tenant: u64, buckets: &std::collections::BTreeSet<u16>, why: &str) {
+    let all_buckets = buckets.is_empty() || buckets.contains(&bucket_cell::identity::NAMED);
+    let matches = |cell: crate::CellId| {
+        cell.tenant == tenant
+            && (all_buckets || buckets.contains(&bucket_cell::objectid::bucket_of(cell.id)))
+    };
+    let halted = format!("as tenant {tenant}'s keys were revoked by its KMS: {why}");
+    let stores = crate::halt::halt_cells(matches, Errno::EACCES, &halted);
+    let (bytes, extents) = crate::cache::forget(matches);
+    let (rings, kept) = if all_buckets {
+        let scope = keys::Scope::Tenant(tenant);
+        (MEMORY.get().keys().forget(scope), MEMORY.get().forget_kept(scope))
+    } else {
+        (0, 0)
+    };
+    if stores > 0 || bytes > 0 || rings > 0 || kept > 0 {
+        log::warn!(
+            "cladefs: tenant {tenant}'s KMS revoked keys ({why}): halted {stores} stores, \
+             evicted {extents} extents ({bytes} bytes), dropped {rings} rings / {kept} kept"
+        );
+    }
 }
 
 /// cladefs: has the host use `kms` as its KMS, before any open cell opens: tests' (TASK-411.3).
@@ -465,20 +497,49 @@ pub async fn shred_cell(
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
+/// cladefs: why [`shred_tenant`] refused or failed, distinguishing invalid input (`EINVAL`),
+/// non-bucket KMS (`ENOTSUP`), and unreachable/failing buckets (`EIO`, board 5394).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ShredError {
+    /// The tenant ID is not valid for shredding (e.g., the default tenant 0).
+    #[error("{0}")]
+    InvalidTenant(String),
+    /// The host or one of its buckets uses an external named KMS rather than the bucket KMS.
+    #[error("{0}")]
+    Unsupported(String),
+    /// One or more buckets were unreachable or failed while shredding.
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::keys::shred`]), publishes
+/// [`bucket_cell::events::Publish::CellShredded`] to the root bucket's `events` object so other
+/// hosts forget its keys without fan-out, and has this host forget its keys immediately.
+pub async fn shred_cell_and_publish(
+    bucket: &RoutedBucket,
+    cell: crate::CellId,
+) -> Result<(usize, Forgotten), bucket_cell::Error> {
+    let removed = bucket_cell::keys::shred(bucket, cell).await?;
+    let auth = bucket_cell::events::authority(bucket).await?;
+    bucket_cell::events::publish(&*auth, bucket_cell::events::Publish::CellShredded(cell)).await?;
+    let why = bucket_cell::keys::shredded(cell).to_string();
+    Ok((removed, forget(keys::Scope::Cell(cell), &why)))
+}
+
 /// cladefs: shreds `tenant` under the bucket KMS of every bucket the host reaches (doc-16, The
 /// bucket KMS; TASK-411.27, TASK-633.6): its KEK object in each replaced by a tombstone, so that no
 /// key its KEK wrapped unwraps anywhere and none is made it again
-/// ([`bucket_cell::bucket_kms::ByBucket::shred`]); then has this host forget its keys
-/// ([`forget`]). Shredded already, it finds it so, and the host forgets them all the same: what
-/// each host told does. Refused, changing nothing, if no bucket is under a bucket KMS: another
-/// KMS's tenant is shredded by destroying its KEK there, then `ForgetTenantKeys`. Refused after
-/// shredding where it could, naming them, if a bucket is under another KMS, or out of reach:
-/// shredding again finishes those. Only as strong as the buckets keep no older version of the KEK
-/// objects.
+/// ([`bucket_cell::bucket_kms::ByBucket::shred`]), and publishes `TenantShredded` to the root
+/// bucket's `events` object; then has this host forget its keys ([`forget`]) once at least one
+/// bucket was tombstoned (board 5552). Refuses the default tenant 0 (`EINVAL`), non-bucket KMS
+/// (`ENOTSUP`), and unreachable/failing buckets (`EIO`, board 5394).
 pub async fn shred_tenant(
     tenant: u64,
-) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), String> {
+) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), ShredError> {
     use bucket_cell::bucket_kms::{Destroyed, Shredded};
+    if tenant == bucket_cell::layout::DEFAULT_TENANT {
+        return Err(ShredError::InvalidTenant("cannot shred the default tenant (0)".to_owned()));
+    }
     // None had: the process refused to start (require_kms); nothing to shred under.
     let keys = host_keys().as_ref().ok();
     let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms()) {
@@ -491,10 +552,19 @@ pub async fn shred_tenant(
         (None, None) => Shredded::default(),
     };
     if shredded.destroyed.is_empty() && shredded.failed.is_empty() {
-        return Err(format!(
+        return Err(ShredError::Unsupported(format!(
             "tenant {tenant}: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no \
              CLADEFS_KMS): destroy the tenant's KEK in its KMS, then have every host forget its keys"
-        ));
+        )));
+    }
+    // Only forget local keys when at least one bucket was actually tombstoned (board 5552).
+    if shredded.destroyed.is_empty() {
+        let failed: Vec<String> =
+            shredded.failed.iter().map(|(number, why)| format!("bucket {number}: {why}")).collect();
+        return Err(ShredError::Failed(format!(
+            "tenant {tenant}: shredded in no bucket: {}",
+            failed.join("; ")
+        )));
     }
     let now = shredded.destroyed.iter().any(|(_, destroyed)| *destroyed == Destroyed::Now);
     let destroyed = if now { Destroyed::Now } else { Destroyed::Already };
@@ -507,14 +577,111 @@ pub async fn shred_tenant(
         .collect();
     if !left.is_empty() {
         let done: Vec<String> = shredded.destroyed.iter().map(|(n, _)| n.to_string()).collect();
-        return Err(format!(
+        let message = format!(
             "tenant {tenant}: shredded in buckets [{}] alone: {}; then have every host forget its \
              keys",
             done.join(", "),
             left.join("; ")
-        ));
+        );
+        return Err(if !shredded.failed.is_empty() {
+            ShredError::Failed(message)
+        } else {
+            ShredError::Unsupported(message)
+        });
     }
     Ok((destroyed, forgotten))
+}
+
+/// cladefs: standalone, keyless tenant shred directly against the bucket at `url` (and every
+/// bucket in its registry), needing neither a running extent daemon nor `CLADEFS_MASTER_KEY`.
+/// Tombstones `tenants/<tenant>/kek` in every bucket-KMS bucket and publishes `TenantShredded` to
+/// the root bucket's `events` object so all extent daemons halt open cells and `cladefs-gc` reaps
+/// the tenant's cells.
+pub fn shred_tenant_bucket(
+    url: &str,
+    tenant: u64,
+) -> Result<bucket_cell::bucket_kms::Destroyed, crate::Error> {
+    use bucket_cell::bucket_kms::{Destroyed, SHRED_WITHIN, shred_buckets};
+    if tenant == bucket_cell::layout::DEFAULT_TENANT {
+        return Err(crate::Error::new(
+            anyhow::anyhow!("cannot shred the default tenant (0)").context(Errno::EINVAL),
+        ));
+    }
+    let vars = extent_keys::kms::Vars::from_env()
+        .map_err(|why| crate::Error::new(anyhow::anyhow!("{why}").context(Errno::EINVAL)))?;
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    let shredded =
+        local_cell::upload::block_on(shred_buckets(&bucket, &vars, tenant, SHRED_WITHIN))?;
+    if shredded.destroyed.is_empty() && shredded.failed.is_empty() {
+        return Err(crate::Error::new(
+            anyhow::anyhow!(
+                "tenant {tenant}: {url} is not under the bucket KMS: destroy its KEK in its KMS \
+                 and run `cladefs-gc {url} --delete-tenant {}`",
+                base32_id::Short(tenant)
+            )
+            .context(Errno::ENOTSUP),
+        ));
+    }
+    let left: Vec<String> = (shredded.named.iter())
+        .map(|(number, url)| format!("bucket {number}'s KMS {url} keeps its KEK: destroy it there"))
+        .chain(shredded.failed.iter().map(|(number, why)| format!("bucket {number}: {why}")))
+        .collect();
+    if !left.is_empty() {
+        let done: Vec<String> = shredded.destroyed.iter().map(|(n, _)| n.to_string()).collect();
+        let errno = if !shredded.failed.is_empty() { Errno::EIO } else { Errno::ENOTSUP };
+        return Err(crate::Error::new(
+            anyhow::anyhow!(
+                "tenant {tenant}: shredded in buckets [{}] alone: {}",
+                done.join(", "),
+                left.join("; ")
+            )
+            .context(errno),
+        ));
+    }
+    let now = shredded.destroyed.iter().any(|(_, d)| *d == Destroyed::Now);
+    Ok(if now { Destroyed::Now } else { Destroyed::Already })
+}
+
+/// cladefs: standalone cell shred directly against the bucket at `url`, needing no running extent
+/// daemon: strips wrapped KEKs from `cell`'s head and publishes `CellShredded` to `events`.
+pub fn shred_cell_bucket(url: &str, cell: crate::CellId) -> Result<usize, crate::Error> {
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    on_buckets(async move {
+        let removed = bucket_cell::keys::shred(&*bucket, cell).await?;
+        let auth = bucket_cell::events::authority(&bucket).await?;
+        bucket_cell::events::publish(&*auth, bucket_cell::events::Publish::CellShredded(cell))
+            .await?;
+        Ok(removed)
+    })
+}
+
+/// cladefs: publishes a bucket-wide peer list update for the bucket at `url` to the root bucket's
+/// `events` object so every extent daemon on that bucket converges without host fan-out. Returns
+/// the new peer generation.
+pub fn set_peers_bucket(url: &str, addresses: Vec<String>) -> Result<u64, crate::Error> {
+    for address in &addresses {
+        if !address.contains(':')
+            || address
+                .rsplit_once(':')
+                .is_none_or(|(h, p)| h.is_empty() || p.parse::<u16>().is_err())
+        {
+            return Err(crate::Error::new(
+                anyhow::anyhow!("peer address {address:?} must be HOST:PORT")
+                    .context(Errno::EINVAL),
+            ));
+        }
+    }
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    on_buckets(async move {
+        let number = bucket_cell::events::bucket_number(&bucket).await?;
+        let auth = bucket_cell::events::authority(&bucket).await?;
+        let log = bucket_cell::events::publish(
+            &*auth,
+            bucket_cell::events::Publish::PeersUpdated { bucket: number, addresses },
+        )
+        .await?;
+        Ok(log.peers_for(number).map_or(0, |p| p.generation))
+    })
 }
 
 /// cladefs: reloads what of the host's KMS configuration reloads live (board 8487; doc-16, What
@@ -3844,8 +4011,11 @@ mod tests {
         let refused = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap_err();
         assert_eq!(
             refused,
-            "tenant 1: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no CLADEFS_KMS): \
-             destroy the tenant's KEK in its KMS, then have every host forget its keys"
+            crate::bucket::ShredError::Unsupported(
+                "tenant 1: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no CLADEFS_KMS): \
+                 destroy the tenant's KEK in its KMS, then have every host forget its keys"
+                    .to_owned()
+            )
         );
     }
 

@@ -145,6 +145,7 @@ fn usage() -> String {
      cladefs-gc URL [--cell TENANT/CELL] --dry-run | \
      cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] | \
      cladefs-gc URL --delete-cell TENANT/CELL [--force-missing] | \
+     cladefs-gc URL --delete-tenant TENANT | \
      cladefs-gc URL --usage [--tenant TENANT] | \
      cladefs-gc URL --rotate-master-key (every cell, or the one --cell names; SECONDS from a \
      millisecond to a year; --dry-run writes nothing)"
@@ -167,6 +168,8 @@ enum Command {
     Cells { held: Option<PathBuf>, cell: Option<CellId> },
     /// Deletes a cell: one of no head only if `missing` says so (board 8511).
     DeleteCell { cell: CellId, missing: bool },
+    /// Marks a tenant shredded in `events` and deletes all its live cells in this bucket.
+    DeleteTenant { tenant: u64 },
     /// Says what each cell takes, and each tenant, every tenant's or one's, as recorded (TASK-394,
     /// TASK-395.8).
     Usage { tenant: Option<u64> },
@@ -243,6 +246,13 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         }
         ["--delete-cell", cell, "--force-missing"] => {
             Command::DeleteCell { cell: cell.parse().map_err(|_| usage())?, missing: true }
+        }
+        ["--delete-tenant", tenant] => {
+            let tenant = base32_id::parse(tenant).ok_or_else(usage)?;
+            if tenant == layout::DEFAULT_TENANT {
+                return Err("--delete-tenant: cannot delete the default tenant (0)".into());
+            }
+            Command::DeleteTenant { tenant }
         }
         ["--usage"] => Command::Usage { tenant: None },
         ["--rotate-master-key"] => Command::RotateMasterKey,
@@ -501,8 +511,9 @@ async fn collect(
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
         Mode::DryRun => {
+            let shredded = shredded_tenants(bucket).await?;
             let mut out = std::io::stdout().lock();
-            return dry_run_cells(&**bucket, named, &mut out).await;
+            return dry_run_cells(&**bucket, named, shredded, &mut out).await;
         }
     };
     let sweep = Sweep {
@@ -513,17 +524,19 @@ async fn collect(
         // Each pass on the runtime's threads (TASK-395.15).
         spawned: true,
     };
-    let limits = Limits {
-        deleted_objects: run.max_deleted_objects,
-        deleted_bytes: run.max_deleted_bytes,
-        requests_per_second: run.requests_per_second,
-        refused_in_a_row: Some(run.refused_in_a_row),
-        stop: Some(stop.clone()),
-    };
     // cladefs: copies of other buckets' cells' versions here, by its own bucket (TASK-633.8).
     let own = bucket.own();
     let mut sweeps = 0;
     loop {
+        let shredded = shredded_tenants(bucket).await?;
+        let limits = Limits {
+            deleted_objects: run.max_deleted_objects,
+            deleted_bytes: run.max_deleted_bytes,
+            requests_per_second: run.requests_per_second,
+            refused_in_a_row: Some(run.refused_in_a_row),
+            stop: Some(stop.clone()),
+            shredded: Some(shredded),
+        };
         let mut passes = Histogram::default();
         let observe = |ran: &Ran| {
             passes.observe(ran);
@@ -682,6 +695,45 @@ async fn rotate_master_key(bucket: &RoutedBucket) -> Result<(), String> {
     }
 }
 
+/// Reads the shredded tenant set from the root bucket's `events` object.
+async fn shredded_tenants(bucket: &RoutedBucket) -> Result<Arc<BTreeSet<u64>>, String> {
+    let auth = bucket_cell::events::authority(bucket)
+        .await
+        .map_err(|err| format!("events authority: {err}"))?;
+    let log =
+        bucket_cell::events::get(&*auth).await.map_err(|err| format!("reading events: {err}"))?;
+    Ok(Arc::new(log.map(|l| l.shredded_set()).unwrap_or_default()))
+}
+
+/// Publishes `TenantShredded` to the root bucket's `events` object and ends every live cell head
+/// of `tenant` in `bucket` (without creating heads for missing cells).
+async fn delete_tenant(bucket: &RoutedBucket, tenant: u64) -> Result<(), String> {
+    let auth = bucket_cell::events::authority(bucket)
+        .await
+        .map_err(|err| format!("--delete-tenant: events authority: {err}"))?;
+    bucket_cell::events::publish(&*auth, bucket_cell::events::Publish::TenantShredded(tenant))
+        .await
+        .map_err(|err| format!("--delete-tenant: publishing events: {err}"))?;
+    let holder = rand::random();
+    let mut deleted = 0u64;
+    let mut listed = std::pin::pin!(cell::of_tenant(bucket, tenant));
+    while let Some(cell) = listed.next().await {
+        let cell =
+            cell.map_err(|err| format!("--delete-tenant: listing tenant {tenant}: {err}"))?;
+        if lifecycle::delete_existing(bucket, cell, holder, u64::MAX)
+            .await
+            .map_err(|err| format!("--delete-tenant: deleting cell {cell}: {err}"))?
+        {
+            deleted += 1;
+        }
+    }
+    eprintln!(
+        "cladefs-gc: tenant {}: recorded shredded in events, deleted {deleted} live cells",
+        Short(tenant)
+    );
+    Ok(())
+}
+
 /// Deletes `cell` of `bucket`, whichever placement took it last, as an operator does.
 async fn delete_cell(bucket: &impl Bucket, cell: layout::CellId) -> Result<(), String> {
     // Whichever placement took it last: u64::MAX is no lower than any's token.
@@ -710,9 +762,10 @@ async fn refuse_missing(bucket: &impl Bucket, cell: CellId) -> Result<(), String
 async fn dry_run_cells(
     bucket: &impl Bucket,
     named: Option<CellId>,
+    shredded: Arc<BTreeSet<u64>>,
     out: &mut impl std::io::Write,
 ) -> Result<(), String> {
-    let collector = Collector::new();
+    let collector = Collector::new().shredded(shredded);
     let mut sum = DrySum::default();
     let mut cells = std::pin::pin!(cells(bucket, named));
     while let Some(cell) = cells.next().await {
@@ -1116,6 +1169,7 @@ fn main() -> Result<(), String> {
                 say_cells(&*bucket, cell, &held, &mut std::io::stdout().lock()).await
             }
             Command::DeleteCell { cell, .. } => delete_cell(&*bucket, cell).await,
+            Command::DeleteTenant { tenant } => delete_tenant(&bucket, tenant).await,
             Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
                 say_usage(&*bucket, tenant, &mut std::io::stdout().lock()).await

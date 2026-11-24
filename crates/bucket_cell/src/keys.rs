@@ -582,6 +582,10 @@ impl Kmses for OneKms {
     }
 }
 
+/// Callback invoked when a KMS reports a tenant's KEK as revoked, destroyed, or missing
+/// ([`CachingKms::revoked_at`]): receives `(tenant, affected_buckets, why)`.
+pub type OnRevoked = Arc<dyn Fn(u64, &BTreeSet<u16>, &str) + Send + Sync>;
+
 /// A host's KMSes, and what it keeps of what it asked them: each cell's KEKs, by the taking of the
 /// cell its object names, unwrapped once for all of it ([`CellKeys`]); a pool of new cell KEKs a
 /// tenant of each KMS, wrapped by their tenants' KEKs ahead of the cells made with them; and the
@@ -600,6 +604,8 @@ pub struct CachingKms {
     pooling: Option<Pooling>,
     /// The cells it was told are shredded, whose KEKs it unwraps no more ([`Kms::forget`]).
     shredded: Mutex<BTreeSet<CellId>>,
+    /// Optional host callback invoked whenever a KMS reports a tenant revoked/destroyed.
+    on_revoked: Mutex<Option<OnRevoked>>,
 }
 
 /// cladefs: what a host keeps of its KMSes' answers, under one lock (TASK-633.6's review): so that
@@ -722,7 +728,15 @@ impl CachingKms {
             ledger: Mutex::default(),
             pooling,
             shredded: Mutex::default(),
+            on_revoked: Mutex::default(),
         })
+    }
+
+    /// Installs a callback invoked whenever a KMS answers that a tenant's KEK is revoked,
+    /// destroyed, or missing, so the host can halt open cells and evict cached plaintext
+    /// immediately without waiting for external fan-out.
+    pub fn set_on_revoked(&self, callback: OnRevoked) {
+        *self.on_revoked.lock().unwrap() = Some(callback);
     }
 
     /// The KMSes it asks.
@@ -812,7 +826,7 @@ impl CachingKms {
         // dropped, what a made cell's keeping checks under their lock first (TASK-633.6's review).
         {
             let mut ledger = self.ledger.lock().unwrap();
-            ledger.refused.by.insert((key.clone(), tenant), why);
+            ledger.refused.by.insert((key.clone(), tenant), why.clone());
             *ledger.refused.by_epochs.entry((key.clone(), tenant)).or_default() += 1;
             let tenancy = (key.clone(), tenant);
             ledger.pools.pools.remove(&tenancy);
@@ -828,6 +842,10 @@ impl CachingKms {
         self.takings.lock().unwrap().retain(|(cell, _), _| {
             cell.tenant != tenant || !buckets.contains(&crate::objectid::bucket_of(cell.id))
         });
+        let callback = self.on_revoked.lock().unwrap().clone();
+        if let Some(callback) = callback {
+            callback(tenant, &buckets, &why);
+        }
     }
 
     /// `tenant`'s KEK is revoked or destroyed, or none, as `why` says, in every KMS: the control

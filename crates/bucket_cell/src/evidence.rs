@@ -209,14 +209,16 @@ impl Prediction {
 }
 
 /// The evidence the pass over `cell` deletes, as of `now` by the bucket's time, of `listed`, its
-/// listing: all but each tenant's newest [`KEPT`] of each version, and all older than
-/// [`KEPT_FOR`]; and, if the pass read `named`, the versions the cell's head names by the segments
-/// they are at, read after the listing, all of those of every other version, dropped, as all of a
-/// dead cell's, which names none. Evidence needs no lease: nothing relies on it.
+/// listing: all but each tenant's newest [`KEPT`] of each version, all older than [`KEPT_FOR`],
+/// all evidence written by tenants in `shredded` (board 2940), and, if the pass read `named`, the
+/// versions the cell's head names by the segments they are at, read after the listing, all of
+/// those of every other version, dropped, as all of a dead cell's, which names none. Evidence
+/// needs no lease: nothing relies on it.
 pub(crate) fn doomed<'a>(
     cell: CellId,
     listed: impl IntoIterator<Item = &'a Meta>,
     named: Option<&BTreeSet<u64>>,
+    shredded: &BTreeSet<u64>,
     now: u64,
 ) -> Vec<&'a Meta> {
     let mut by: BTreeMap<(u64, u64), Vec<&Meta>> = BTreeMap::new();
@@ -225,9 +227,10 @@ pub(crate) fn doomed<'a>(
         if let layout::Kind::Evidence { parent, at, tenant } = layout::kind(&meta.key)
             && parent == cell
         {
-            match meta.modified.saturating_add(KEPT_FOR) > now {
-                true => by.entry((at, tenant)).or_default().push(meta),
-                false => doomed.push(meta),
+            if shredded.contains(&tenant) || meta.modified.saturating_add(KEPT_FOR) <= now {
+                doomed.push(meta);
+            } else {
+                by.entry((at, tenant)).or_default().push(meta);
             }
         }
     }
@@ -340,19 +343,26 @@ mod tests {
         listed.push(meta(7, 6, 1, 0));
         listed.push(meta(9, 5, 1, 0));
         let keys = |doomed: Vec<&Meta>| doomed.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
+        let none = BTreeSet::new();
         let oldest = vec![meta(7, 5, 0, 0).key, meta(7, 5, 1, 1).key];
-        assert_eq!(keys(doomed(cell, &listed, None, 0)), oldest);
+        assert_eq!(keys(doomed(cell, &listed, None, &none, 0)), oldest);
         let named = BTreeSet::from([7]);
         let mut dropped = oldest.clone();
         dropped.push(meta(9, 5, 1, 0).key);
-        assert_eq!(keys(doomed(cell, &listed, Some(&named), 0)), dropped);
+        assert_eq!(keys(doomed(cell, &listed, Some(&named), &none, 0)), dropped);
         let all: Vec<String> = listed.iter().map(|m| m.key.clone()).collect();
         let mut all_sorted = all.clone();
         all_sorted.sort();
-        assert_eq!(keys(doomed(cell, &listed, Some(&BTreeSet::new()), 0)), all_sorted);
-        assert!(doomed(test_cell(4), &listed, None, 0).is_empty());
+        assert_eq!(keys(doomed(cell, &listed, Some(&BTreeSet::new()), &none, 0)), all_sorted);
+        assert!(doomed(test_cell(4), &listed, None, &none, 0).is_empty());
         // A week on, what was written at 0 goes, tenant 6's one recording among it.
         let aged = vec![meta(7, 6, 1, 0).key, meta(9, 5, 1, 0).key];
-        assert_eq!(keys(doomed(cell, &listed[KEPT..], None, KEPT_FOR)), aged);
+        assert_eq!(keys(doomed(cell, &listed[KEPT..], None, &none, KEPT_FOR)), aged);
+        // Shredded tenant's evidence goes immediately regardless of age (board 2940).
+        let shredded = BTreeSet::from([6]);
+        let mut with_shredded = oldest.clone();
+        with_shredded.push(meta(7, 6, 1, 0).key);
+        with_shredded.sort();
+        assert_eq!(keys(doomed(cell, &listed, None, &shredded, 0)), with_shredded);
     }
 }

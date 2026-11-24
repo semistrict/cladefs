@@ -1049,6 +1049,7 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             // cladefs: as its mirror's copy says ([`uncollected_copies`]).
             Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
+            Kind::Unknown => key == layout::EVENTS,
             _ => false,
         };
         if !kept && !needed.contains(key) {

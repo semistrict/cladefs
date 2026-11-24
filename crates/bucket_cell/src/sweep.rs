@@ -41,6 +41,7 @@ use crate::layout::CellId;
 use crate::object_bucket::Request;
 use crate::{Error, Left};
 use futures::{FutureExt as _, StreamExt as _};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -92,6 +93,9 @@ pub struct Limits {
     pub refused_in_a_row: Option<usize>,
     /// What asks it to start no more passes ([`Stopped::Asked`]).
     pub stop: Option<Arc<Stop>>,
+    /// cladefs: tenants known to be shredded (populated by `cladefs-gc` from the root bucket's
+    /// `events` object).
+    pub shredded: Option<Arc<BTreeSet<u64>>>,
 }
 
 /// cladefs: what asks a process's sweeps to stop (board 8513), as SIGTERM and SIGINT have
@@ -371,9 +375,12 @@ impl Sweep {
         observe: impl FnMut(&Ran),
     ) -> Swept {
         let bounds = Bounds::of(limits);
+        let shredded = limits.shredded.clone().unwrap_or_default();
         if let Some(cell) = named {
             let cells = futures::stream::iter([Ok(cell)]);
-            return self.over(bucket, None::<(Arc<B>, u16)>, cells, &bounds, observe).await;
+            return self
+                .over(bucket, None::<(Arc<B>, u16)>, shredded, cells, &bounds, observe)
+                .await;
         }
         let copies = match own {
             None => None,
@@ -393,7 +400,7 @@ impl Sweep {
         };
         let listing = Counted::new(bucket.clone(), bounds.pacer.clone());
         let cells = crate::cell::listed(&listing);
-        let mut swept = self.over(bucket, copies, cells, &bounds, observe).await;
+        let mut swept = self.over(bucket, copies, shredded, cells, &bounds, observe).await;
         swept.requests += listing.requests();
         swept
     }
@@ -428,6 +435,7 @@ impl Sweep {
         &self,
         bucket: &Arc<B>,
         copies: Option<(Arc<O>, u16)>,
+        shredded: Arc<BTreeSet<u64>>,
         cells: impl futures::Stream<Item = Result<CellId, Refused>>,
         bounds: &Bounds<'_>,
         mut observe: impl FnMut(&Ran),
@@ -467,10 +475,11 @@ impl Sweep {
         let passes = cells.map(|cell| {
             let (sweep, bucket) = (self.clone(), bucket.clone());
             let copies = copies.clone();
+            let shredded = shredded.clone();
             let (budget, pacer) = (bounds.budget.clone(), bounds.pacer.clone());
             let pass = async move {
                 let bounded = (budget, pacer);
-                sweep.pass(&bucket, copies, cell, since, bounded).await
+                sweep.pass(&bucket, copies, shredded, cell, since, bounded).await
             };
             match self.spawned {
                 false => pass.boxed(),
@@ -521,6 +530,7 @@ impl Sweep {
         &self,
         bucket: &Arc<B>,
         copies: Option<(Arc<O>, u16)>,
+        shredded: Arc<BTreeSet<u64>>,
         cell: CellId,
         since: u64,
         (budget, pacer): (Option<Arc<Budget>>, Option<Arc<Pacer>>),
@@ -531,7 +541,7 @@ impl Sweep {
             && crate::layout::routed_to(&cell.prefix()).is_some_and(|of| of != number)
         {
             let started = Instant::now();
-            let collector = Collector::new().budget(budget);
+            let collector = Collector::new().budget(budget).shredded(shredded);
             // Its requests of its own bucket, counted and paced as those of this one.
             let own = Counted::new(own, pacer);
             let outcome = match self.mode {
@@ -545,7 +555,7 @@ impl Sweep {
             return Ran { cell, outcome, requests, took: started.elapsed() };
         }
         let holding = Holding { lease: self.lease, since: Some(since) };
-        let collector = Collector::new().holding(holding).budget(budget);
+        let collector = Collector::new().holding(holding).budget(budget).shredded(shredded);
         let holder = rand::random();
         let started = Instant::now();
         let outcome = match self.mode {

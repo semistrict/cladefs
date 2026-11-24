@@ -694,6 +694,28 @@ pub async fn delete(
     delete_if(bucket, cell, (holder, token), holder, |_| true).await.map(drop)
 }
 
+/// cladefs: ends `cell`'s head if it currently exists and is live, returning `true` if this call
+/// transitioned it to deleted (`Head::FINAL`). Never creates a head for a missing cell (board
+/// 8511), making it safe for collector-driven tenant reaping and `--delete-tenant`.
+pub async fn delete_existing(
+    bucket: &impl Bucket,
+    cell: CellId,
+    holder: u64,
+    token: u64,
+) -> Result<bool, Error> {
+    let deleted = change(bucket, cell, Start::Read, |found| match found {
+        None => Ok(Step::Stop(false)),
+        Some(found) if found.deleted() => Ok(Step::Stop(false)),
+        Some(found) if rules().delete_tokens && found.token > token => Err(Error::Stale),
+        Some(found) => Ok(Step::Write(ended(found, holder), true)),
+    })
+    .await?;
+    if deleted {
+        failpoint!("lifecycle::head_ended");
+    }
+    Ok(deleted)
+}
+
 /// Deletes `cell` as [`delete`] does, if `ours` says its head is one to delete, one with none
 /// getting a head of `owner`'s: returns whether it is deleted, now or before, whoever's; `false`
 /// for a head left as it is.
