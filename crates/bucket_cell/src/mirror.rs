@@ -390,20 +390,15 @@ pub async fn mirror(
     at: u64,
 ) -> Result<Mirrored, Error> {
     // A backend that refuses conditional deletes (Azure through object_store) cannot safely
-    // release a pin or hold. Check both buckets before either reference is written. Nothing
-    // creates the probe's key, which routes as the hold does. GCS requires a nonzero generation
-    // on deletes.
-    let nonce = base32_id::Padded(rand::random());
-    let probe = format!("{}probe/mirror-cleanup-{nonce}", parent.prefix());
-    let unmatched =
-        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("1".to_owned()) };
-    bucket::delete_if(own, &probe, &unmatched).await?;
-    bucket::delete_if(bucket, &probe, &unmatched).await?;
+    // release a pin or hold. Check both buckets before either reference is written (board 10567).
+    let (pin_key, hold) = (layout::pin(parent, at), layout::hold(parent, at, number));
+    bucket::require_conditional_delete(own, &pin_key).await?;
+    bucket::require_conditional_delete(bucket, &hold).await?;
     let Some(mut pin) = Pin::take(own, parent, at).await? else {
         return Ok(Mirrored::UnderWay);
     };
     failpoint!("mirror::pinned");
-    let (marker, hold) = (layout::mirror(parent, at), layout::hold(parent, at, number));
+    let marker = layout::mirror(parent, at);
     let copied = match bucket::get(own, &marker).await? {
         // Marked already, by a mirror begun before: its copy whole, and the hold that mirror wrote
         // standing until B's collector deletes it, with the marker (`mirrorHoldsUnmarked`). One

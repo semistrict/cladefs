@@ -1611,6 +1611,13 @@ impl Bucket for ObjectBucket {
         self.object_delete_if(key, version)
     }
 
+    fn supports_conditional_delete(
+        &self,
+        _key: &str,
+    ) -> impl Future<Output = Result<bool, Error>> + Send {
+        std::future::ready(Ok(!matches!(self.deletes, Deletes::Refused)))
+    }
+
     fn now(&self) -> u64 {
         self.clock.now()
     }
@@ -2035,6 +2042,10 @@ pub(crate) mod tests {
             self.deleted.lock().unwrap().push(key.to_owned());
             self.taken(key).await?;
             self.own.delete_if(key, version).await
+        }
+
+        async fn supports_conditional_delete(&self, key: &str) -> Result<bool, Error> {
+            self.own.supports_conditional_delete(key).await
         }
 
         fn now(&self) -> u64 {

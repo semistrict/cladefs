@@ -383,6 +383,13 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         }
     }
 
+    async fn supports_conditional_delete(&self, key: &str) -> Result<bool, Error> {
+        match self.member(key).await? {
+            Some(member) => member.supports_conditional_delete(key).await,
+            None => self.home.supports_conditional_delete(key).await,
+        }
+    }
+
     async fn delete_batch(&self, keys: &[&str]) -> Result<(), Error> {
         if self.route.is_none() {
             return self.home.delete_batch(keys).await;
