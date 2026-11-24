@@ -1403,79 +1403,83 @@ mod tests {
     }
 
     #[cfg(feature = "shuttle")]
-    #[test]
-    fn a_cold_read_or_partial_write_rechecks_a_page_written_during_its_read() {
-        use shuttle::sync::mpsc::{Receiver, Sender, channel};
+    mod shuttle_tests {
+        use super::*;
 
-        struct PausedRead<F> {
-            file: F,
-            pause: Mutex<Option<(Sender<()>, Receiver<()>)>>,
-        }
+        #[test]
+        fn a_cold_read_or_partial_write_rechecks_a_page_written_during_its_read() {
+            use shuttle::sync::mpsc::{Receiver, Sender, channel};
 
-        impl<F: File> File for PausedRead<F> {
-            fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-                self.file.read_at(buf, offset)?;
-                let pause = self.pause.lock().unwrap().take();
-                if let Some((started, resume)) = pause {
-                    started.send(()).unwrap();
-                    resume.recv().unwrap();
-                }
-                Ok(())
+            struct PausedRead<F> {
+                file: F,
+                pause: Mutex<Option<(Sender<()>, Receiver<()>)>>,
             }
 
-            fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-                self.file.write_at(buf, offset)
-            }
-
-            fn size(&self) -> io::Result<u64> {
-                self.file.size()
-            }
-
-            fn sync(&self) -> io::Result<()> {
-                self.file.sync()
-            }
-        }
-
-        for partial in [false, true] {
-            shuttle::check_random(
-                move || {
-                    let dir = MemDisk::new();
-                    let raw = dir.create("f", true).unwrap();
-                    raw.write_at(&[1; PAGE as usize], 0).unwrap();
-                    let (started, entered) = channel();
-                    let (resume, resumed) = channel();
-                    let backing =
-                        PausedRead { file: raw, pause: Mutex::new(Some((started, resumed))) };
-                    let file =
-                        Cached::new(backing, &PageCache::without_flusher(Options::default()))
-                            .unwrap();
-
-                    let cold = file.clone();
-                    let reader = shuttle::thread::spawn(move || {
-                        if partial {
-                            cold.write_at(&[3; 10], 100).unwrap();
-                        } else {
-                            let mut read = [0; PAGE as usize];
-                            cold.read_at(&mut read, 0).unwrap();
-                            assert_eq!(read, [2; PAGE as usize]);
-                        }
-                    });
-                    entered.recv().unwrap();
-                    file.write_at(&[2; PAGE as usize], 0).unwrap();
-                    resume.send(()).unwrap();
-                    reader.join().unwrap();
-
-                    file.sync().unwrap();
-                    let mut expected = [2; PAGE as usize];
-                    if partial {
-                        expected[100..110].fill(3);
+            impl<F: File> File for PausedRead<F> {
+                fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+                    self.file.read_at(buf, offset)?;
+                    let pause = self.pause.lock().unwrap().take();
+                    if let Some((started, resume)) = pause {
+                        started.send(()).unwrap();
+                        resume.recv().unwrap();
                     }
-                    let mut backed = [0; PAGE as usize];
-                    file.file().read_at(&mut backed, 0).unwrap();
-                    assert_eq!(backed, expected);
-                },
-                10,
-            );
+                    Ok(())
+                }
+
+                fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+                    self.file.write_at(buf, offset)
+                }
+
+                fn size(&self) -> io::Result<u64> {
+                    self.file.size()
+                }
+
+                fn sync(&self) -> io::Result<()> {
+                    self.file.sync()
+                }
+            }
+
+            for partial in [false, true] {
+                shuttle::check_random(
+                    move || {
+                        let dir = MemDisk::new();
+                        let raw = dir.create("f", true).unwrap();
+                        raw.write_at(&[1; PAGE as usize], 0).unwrap();
+                        let (started, entered) = channel();
+                        let (resume, resumed) = channel();
+                        let backing =
+                            PausedRead { file: raw, pause: Mutex::new(Some((started, resumed))) };
+                        let file =
+                            Cached::new(backing, &PageCache::without_flusher(Options::default()))
+                                .unwrap();
+
+                        let cold = file.clone();
+                        let reader = shuttle::thread::spawn(move || {
+                            if partial {
+                                cold.write_at(&[3; 10], 100).unwrap();
+                            } else {
+                                let mut read = [0; PAGE as usize];
+                                cold.read_at(&mut read, 0).unwrap();
+                                assert_eq!(read, [2; PAGE as usize]);
+                            }
+                        });
+                        entered.recv().unwrap();
+                        file.write_at(&[2; PAGE as usize], 0).unwrap();
+                        resume.send(()).unwrap();
+                        reader.join().unwrap();
+
+                        file.sync().unwrap();
+                        let mut expected = [2; PAGE as usize];
+                        if partial {
+                            expected[100..110].fill(3);
+                        }
+                        let mut backed = [0; PAGE as usize];
+                        file.file().read_at(&mut backed, 0).unwrap();
+                        assert_eq!(backed, expected);
+                    },
+                    10,
+                );
+            }
         }
     }
 
