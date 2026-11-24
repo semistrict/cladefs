@@ -49,16 +49,47 @@ use storage_device::NoExtent;
 /// The process's cache of sealed extents (see the module docs): its pager's threads, which read
 /// their pages from the cells, and the extents, by arena and ID.
 struct ExtentCache {
-    /// The threads the pager reads extents' parts on: under Shuttle, none, as the test's run's
-    /// tasks are (`spawn_page_in`).
+    /// Dedicated pager runtime (`"cladefs pager"`, [`PAGER_THREADS`] workers), kept separate from
+    /// `cladefsd::Daemon`'s consolidated runtime for DAX page-in latency isolation (board 10774):
+    /// page-ins execute synchronous disk reads, zstd decompression, and `slab.write` directly on
+    /// pager workers and size `buffers` to `PAGER_THREADS`. Lazily initialized on first page-in;
+    /// under Shuttle, never initialized (`spawn_page_in` uses Shuttle's tasks).
     #[cfg_attr(feature = "shuttle", allow(dead_code))]
-    pager: tokio::runtime::Runtime,
+    pager: OnceLock<tokio::runtime::Runtime>,
     /// By the arena their pages are of (TASK-43), and their IDs. Every tenant's, which a panic
     /// holding aborts the daemon (`local_cell::shared`, TASK-149.24); as do the others here.
     extents: SharedLock<Mutex<HashMap<(ArenaId, ExtentId), Cached>>>,
     /// The arenas but the default that extents were cached of, to look for an extent's copy in,
     /// taken after `extents` (TASK-234).
     arenas: SharedLock<Mutex<HashSet<ArenaId>>>,
+    /// The cache's clock, which counts the extents asked for.
+    clock: AtomicU64,
+    /// The number of extents past which the cache next lets go of those over its bound: the bound,
+    /// or, if its last pass couldn't get below it, as the windows' mappings hold the extents they
+    /// map, an eighth of the bound more than it left (TASK-109.2). Each lookup past the bound
+    /// sorted every extent cached, under the cache's lock, and let go of none: an 8 GiB window,
+    /// mapping more than the bound, never full, so never reclaiming, made each MAP 3-6 ms.
+    trim_at: AtomicUsize,
+    /// cladefs: whether the cap on every arena's memory together is the memory governor's, the
+    /// host's memory, not a limit the control API set: what a page-in finding no page waits out
+    /// rather than fails (board 5662). Set as the cap is (`cladefsd::memory`); a daemon not
+    /// governed has none.
+    total_is_the_hosts: std::sync::atomic::AtomicBool,
+}
+
+impl ExtentCache {
+    #[cfg(not(feature = "shuttle"))]
+    fn pager(&self) -> &tokio::runtime::Runtime {
+        self.pager.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(PAGER_THREADS)
+                .thread_name("cladefs pager")
+                // cladefs: for page-ins waiting for memory (`CachedExtent::read_pages`, board 5662).
+                .enable_all()
+                .build()
+                .expect("the extent cache's pager")
+        })
+    }
 }
 
 /// A sealed extent cached.
@@ -153,11 +184,6 @@ impl Holders {
 }
 
 node_local::node_local! {
-    /// The cache's clock, which counts the extents asked for.
-    static CACHE_CLOCK: AtomicU64 = AtomicU64::new(0);
-}
-
-node_local::node_local! {
     /// The most extents the cache keeps (TASK-104): each its table of pages, and the cells it reads
     /// through, which an extent nothing maps and whose pages were evicted keeps still. Under
     /// pgbench, small extents by the hundred thousand, the tables of extents never asked for again
@@ -165,15 +191,6 @@ node_local::node_local! {
     /// else holds (no window maps them) go, down to seven eighths of it; one asked for again is
     /// read anew from its cell. Tests lower it.
     pub(crate) static MOST_CACHED: AtomicUsize = AtomicUsize::new(1 << 16);
-}
-
-node_local::node_local! {
-    /// The number of extents past which the cache next lets go of those over its bound: the bound,
-    /// or, if its last pass couldn't get below it, as the windows' mappings hold the extents they
-    /// map, an eighth of the bound more than it left (TASK-109.2). Each lookup past the bound
-    /// sorted every extent cached, under the cache's lock, and let go of none: an 8 GiB window,
-    /// mapping more than the bound, never full, so never reclaiming, made each MAP 3-6 ms.
-    static TRIM_AT: AtomicUsize = AtomicUsize::new(0);
 }
 
 /// How many threads the cache's pager reads extents' pages on: a read of the cell, and the
@@ -194,19 +211,13 @@ node_local::node_local! {
 }
 
 fn extent_cache() -> &'static ExtentCache {
-    EXTENT_CACHE.get().get_or_init(|| {
-        let pager = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(PAGER_THREADS)
-            .thread_name("cladefs pager")
-            // cladefs: for page-ins waiting for memory (`CachedExtent::read_pages`, board 5662).
-            .enable_all()
-            .build()
-            .expect("the extent cache's pager");
-        ExtentCache {
-            pager,
-            extents: SharedLock::new("extent cache", Mutex::default()),
-            arenas: SharedLock::new("extent cache arenas", Mutex::default()),
-        }
+    EXTENT_CACHE.get().get_or_init(|| ExtentCache {
+        pager: OnceLock::new(),
+        extents: SharedLock::new("extent cache", Mutex::default()),
+        arenas: SharedLock::new("extent cache arenas", Mutex::default()),
+        clock: AtomicU64::new(0),
+        trim_at: AtomicUsize::new(0),
+        total_is_the_hosts: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -400,10 +411,10 @@ fn cache_now(
     cached.holders.add(local, fetcher.as_ref());
     let found = cached.extent.clone();
     let most = MOST_CACHED.get().load(Ordering::Relaxed);
-    let gone = (extents.len() > most.max(TRIM_AT.get().load(Ordering::Relaxed))).then(|| {
+    let gone = (extents.len() > most.max(cache.trim_at.load(Ordering::Relaxed))).then(|| {
         let started = std::time::Instant::now();
         let gone = let_go_least_used(&mut extents, most);
-        TRIM_AT.get().store(extents.len() + most / 8, Ordering::Relaxed);
+        cache.trim_at.store(extents.len() + most / 8, Ordering::Relaxed);
         stats::count_since(Counter::CacheTrims, Counter::CacheTrimNs, started);
         gone
     });
@@ -537,23 +548,14 @@ async fn allocate(arena: ArenaId, pages: u64) -> Result<PartSlab, slabs::NoMemor
     return slabs::alloc(arena, pages, slabs::Wait::Yes);
 }
 
-node_local::node_local! {
-    /// cladefs: whether the cap on every arena's memory together is the memory governor's, the
-    /// host's memory, not a limit the control API set: what a page-in finding no page waits out
-    /// rather than fails (board 5662). Set as the cap is (`cladefsd::memory`); a daemon not
-    /// governed has none. Each daemon's, a simulated host's among them, as its arenas are.
-    static TOTAL_IS_THE_HOSTS: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-}
-
 /// cladefs: says whether the cap on every arena's memory together is the host's
-/// ([`TOTAL_IS_THE_HOSTS`]).
+/// (`ExtentCache::total_is_the_hosts`).
 #[cfg_attr(
     not(target_os = "linux"),
     allow(dead_code, reason = "the daemon, Linux's alone, sets it")
 )]
 pub(crate) fn set_total_is_the_hosts(is: bool) {
-    TOTAL_IS_THE_HOSTS.get().store(is, Ordering::Relaxed);
+    extent_cache().total_is_the_hosts.store(is, Ordering::Relaxed);
 }
 
 /// cladefs: how many times page-ins waited for memory ([`waiting_for_memory`]).
@@ -600,7 +602,7 @@ fn spawn_page_in(page_in: impl std::future::Future<Output = ()> + Send + 'static
     #[cfg(feature = "shuttle")]
     drop(shuttle::future::spawn(page_in));
     #[cfg(not(feature = "shuttle"))]
-    drop(extent_cache().pager.spawn(page_in));
+    drop(extent_cache().pager().spawn(page_in));
 }
 
 /// What a cached extent's parts are read from: its contents.
@@ -1003,8 +1005,8 @@ pub(crate) struct CachedExtent {
     parts: SharedLock<Mutex<Parts>>,
     /// How many of its parts are in memory, which relief asks of every extent cached (TASK-92.33).
     present: AtomicUsize,
-    /// When it was last asked for or faulted on, by [`CACHE_CLOCK`]: those longest ago are evicted
-    /// first (TASK-50.3, TASK-92.32).
+    /// When it was last asked for or faulted on, by `ExtentCache::clock`: those longest ago are
+    /// evicted first (TASK-50.3, TASK-92.32).
     used: AtomicU64,
     /// Notified as parts come in, fail to, or go.
     changed: event_listener::Event,
@@ -1039,7 +1041,8 @@ impl CachedExtent {
     /// Notes that it is in use now: asked for, or faulted on, as a guest keeping its mapping asks
     /// for it only once (TASK-92.32).
     fn used(&self) {
-        self.used.store(CACHE_CLOCK.get().fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+        self.used
+            .store(extent_cache().clock.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
     }
 
     /// When relief evicts it, those first that sort first: whether a window maps it, as what
@@ -1362,7 +1365,7 @@ impl CachedExtent {
                 Ok(slab) => break slab,
                 Err(slabs::NoMemory)
                     if slabs::room_may_come(self.arena)
-                        && TOTAL_IS_THE_HOSTS.get().load(Ordering::Relaxed) =>
+                        && extent_cache().total_is_the_hosts.load(Ordering::Relaxed) =>
                 {
                     waiting_for_memory();
                     tokio::time::sleep(pause).await;
