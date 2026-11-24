@@ -1169,11 +1169,17 @@ impl AsyncSender {
     }
 
     /// cladefs: how long, as of `now`, its socket has taken none of what is queued: none with
-    /// nothing queued (board 8459). A VM process past [`STALL`] the daemon lets go.
+    /// nothing queued (board 8459). A VM process past [`STALL`] the daemon lets go. None, too,
+    /// with nothing queued but messages saying the latest of what their kinds say, none begun
+    /// ([`AsyncSender::send_latest`]): one of each kind at most, a header, replaced in place, they
+    /// hold none of a tenant's bytes in flight, and a follower that stopped reading, frozen, is
+    /// told of its writer's latest commit once it reads again (TASK-79.9, board 10323).
     pub fn stalled(&self, now: std::time::Instant) -> std::time::Duration {
         let queue = self.queue.lock().unwrap();
-        match (queue.messages.is_empty(), queue.moved) {
-            (false, Some(moved)) => now.saturating_duration_since(moved),
+        let holding =
+            (queue.messages.iter()).any(|(queued, _)| queued.latest.is_none() || queued.sent > 0);
+        match (holding, queue.moved) {
+            (true, Some(moved)) => now.saturating_duration_since(moved),
             _ => std::time::Duration::ZERO,
         }
     }

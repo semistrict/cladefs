@@ -4471,7 +4471,8 @@ fn restores_wait_for_a_version_however_long_its_opening_takes() {
 /// TASK-79.9: a follower's VM process that stops reading, frozen as SIGSTOP freezes it, holds as
 /// much of the daemon's memory as a message telling it of its writer's commits, whatever the
 /// writer commits meanwhile: told of the latest once it reads again, rather than of each, which the
-/// daemon kept for it without end, as it sends without waiting (TASK-79.9).
+/// daemon kept for it without end, as it sends without waiting (TASK-79.9); however long it was
+/// frozen, as the notice holds none of its tenant's bytes in flight (board 10323).
 #[test]
 fn followers_that_stop_reading_are_told_of_the_latest_commit() {
     use super::wire::*;
@@ -4508,6 +4509,11 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
         let queued = super::server::most_queued();
         assert!(queued <= size_of::<Header>() as u64, "{queued} bytes queued for VM processes");
     }
+    // Its socket full, the latest commit's notice queued, it stays frozen past what a VM process
+    // reading nothing of what holds its tenant's bytes in flight is let go after, and the
+    // watchdog's look after it (board 8459): a notice of the latest holds none (board 10323).
+    assert_eq!(super::server::most_queued(), size_of::<Header>() as u64, "its socket took all");
+    std::thread::sleep(STALL + std::time::Duration::from_secs(2));
     let key = super::cells::cell_dir_key(&path);
     let holder = super::cells::table().writer(&key).unwrap();
     let latest = holder.cell().unwrap().committed().unwrap();
