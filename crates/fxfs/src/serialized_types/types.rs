@@ -21,8 +21,9 @@
 // fsverity and blobs (cladefs encrypts below Fxfs): no keys, encrypted children, encrypted symlinks,
 // verified attributes or encrypted mutations; an extent names no key (ExtentValueV65); a store's
 // information no mutations key, and its object IDs are sequential alone, its last a plain u64
-// (StoreInfoV65). The object, mutation, journal and super-block
-// records that hold them are V65.
+// (StoreInfoV65). Version 66 drops casefold directories (board 10598), overwrite/preallocation
+// extents (board 10600), project quotas (board 10602), and volume byte limits (board 10604):
+// ObjectKey, ObjectValue, Mutation, JournalRecord and SuperBlockRecord are V66.
 
 use crate::lsm_tree::{
     PersistentLayerHeader, PersistentLayerHeaderV39, PersistentLayerInfo, PersistentLayerInfoV39,
@@ -32,11 +33,11 @@ use crate::object_store::allocator::{
     AllocatorValueV32,
 };
 use crate::object_store::journal::super_block::{
-    SuperBlockHeader, SuperBlockHeaderV64, SuperBlockRecord, SuperBlockRecordV65,
+    SuperBlockHeader, SuperBlockHeaderV64, SuperBlockRecord, SuperBlockRecordV66,
 };
-use crate::object_store::journal::{JournalRecord, JournalRecordV65};
-use crate::object_store::object_record::{ObjectKey, ObjectKeyV65, ObjectValue, ObjectValueV65};
-use crate::object_store::transaction::{Mutation, MutationV65};
+use crate::object_store::journal::{JournalRecord, JournalRecordV66};
+use crate::object_store::object_record::{ObjectKey, ObjectKeyV66, ObjectValue, ObjectValueV66};
+use crate::object_store::transaction::{Mutation, MutationV66};
 use crate::object_store::{StoreInfo, StoreInfoV65};
 use crate::serialized_types::{Version, Versioned, VersionedLatest, versioned_type};
 use std::collections::BTreeMap;
@@ -50,7 +51,7 @@ use std::collections::BTreeMap;
 ///
 /// IMPORTANT: When changing this (major or minor), update the list of possible versions at
 /// https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/cobalt_config/fuchsia/local_storage/versions.txt.
-pub const LATEST_VERSION: Version = Version { major: 65, minor: 0 };
+pub const LATEST_VERSION: Version = Version { major: 66, minor: 0 };
 
 /// The last version of the filesystem where keys in layer files used the old serialization format
 /// (prior to SerializeKey and delta encoding).
@@ -126,16 +127,16 @@ versioned_types! {
         32.. => AllocatorValueV32,
     }
     JournalRecord {
-        65.. => JournalRecordV65,
+        66.. => JournalRecordV66,
     }
     Mutation {
-        65.. => MutationV65,
+        66.. => MutationV66,
     }
     ObjectKey {
-        65.. => ObjectKeyV65,
+        66.. => ObjectKeyV66,
     }
     ObjectValue {
-        65.. => ObjectValueV65,
+        66.. => ObjectValueV66,
     }
     PersistentLayerHeader {
         39.. => PersistentLayerHeaderV39,
@@ -150,6 +151,6 @@ versioned_types! {
         64.. => SuperBlockHeaderV64,
     }
     SuperBlockRecord {
-        65.. => SuperBlockRecordV65,
+        66.. => SuperBlockRecordV66,
     }
 }

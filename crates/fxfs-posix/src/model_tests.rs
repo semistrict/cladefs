@@ -592,12 +592,6 @@ enum Op {
         cursor: usize,
         count: usize,
     },
-    /// The `dir`th directory made to fold case, or not to, if it has no names, as `chattr +F` may
-    /// make an ext4 directory: Fxfs keeps the flag in its record.
-    Casefold {
-        dir: usize,
-        folds: bool,
-    },
     /// Names that can't be Fxfs's, which are UTF-8, asked of the `dir`th directory: `BAD_NAMES`'s
     /// `name`th. Nothing changes.
     BadName {
@@ -949,7 +943,6 @@ fn short_op() -> impl Strategy<Value = Op> {
         2 => (node(), change()).prop_map(|(node, change)| Op::SetAttr { node, change }),
         1 => (file(), 0u64..(64 << 10), 1u64..(16 * PAGE))
             .prop_map(|(file, at, len)| Op::Allocate { file, at, len }),
-        1 => (0usize..DIRS, any::<bool>()).prop_map(|(dir, folds)| Op::Casefold { dir, folds }),
         2 => Just(Op::Sync),
         2 => Just(Op::Fsync),
         3 => Just(Op::Compact),
@@ -1010,7 +1003,6 @@ fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(file, at, len)| Op::Allocate { file, at, len }),
         1 => (0usize..DIRS, 0usize..8).prop_map(|(dir, count)| Op::ReadSome { dir, count }),
         2 => (0usize..CURSORS, 0usize..8).prop_map(|(cursor, count)| Op::ReadOn { cursor, count }),
-        1 => (0usize..DIRS, any::<bool>()).prop_map(|(dir, folds)| Op::Casefold { dir, folds }),
         1 => (0usize..DIRS, 0..BAD_NAMES.len()).prop_map(|(dir, name)| Op::BadName { dir, name }),
         1 => Just(Op::Statfs),
         1 => Just(Op::Snapshot),
@@ -1034,8 +1026,6 @@ struct Queued {
 struct Model {
     /// The directories there are, the root first.
     dirs: Vec<u64>,
-    /// Of those, the ones that fold case.
-    casefold: BTreeSet<u64>,
     /// What each directory's names link, by `SPELLINGS`.
     names: BTreeMap<(u64, usize), Entry>,
     files: BTreeMap<u64, Data>,
@@ -1069,7 +1059,6 @@ impl Model {
     fn new(root: u64, made: u64) -> Self {
         Self {
             dirs: vec![root],
-            casefold: BTreeSet::new(),
             names: BTreeMap::new(),
             files: BTreeMap::new(),
             nodes: BTreeMap::from([(root, Node::new(DIR, 0, 0, 0, made))]),
@@ -1122,22 +1111,11 @@ impl Model {
         self.nodes[&ino].kind()
     }
 
-    /// Which directory `name` is in, and which of its names it is (`SPELLINGS`): its spelling, or
-    /// in a directory that folds case, one it has that folds as it does.
+    /// Which directory `name` is in, and which of its names it is (`SPELLINGS`).
     fn place(&self, name: usize) -> (u64, usize) {
         let dir = self.dirs[name / NAMES % DIRS % self.dirs.len()];
         let at = name / (NAMES * DIRS) % ALPHABETS * NAMES + name % NAMES;
-        (dir, self.spelled(dir, at))
-    }
-
-    /// The name `dir` has that `at` names: `at`, or in a directory that folds case, one it has
-    /// that folds as `at` does.
-    fn spelled(&self, dir: u64, at: usize) -> usize {
-        if !self.casefold.contains(&dir) {
-            return at;
-        }
-        let mut names = self.names_in(dir).map(|(name, _)| name);
-        names.find(|name| FOLDED[*name] == FOLDED[at]).unwrap_or(at)
+        (dir, at)
     }
 
     fn entry(&self, name: usize) -> Option<Entry> {
@@ -1267,7 +1245,6 @@ impl Model {
         self.files.retain(|ino, _| linked.contains(ino));
         let root = self.dirs[0];
         self.nodes.retain(|ino, _| linked.contains(ino) || *ino == root);
-        self.casefold.retain(|dir| self.dirs.contains(dir));
         self.open.clear();
         self.linkable.clear();
         self.queued.clear();
@@ -1606,16 +1583,11 @@ impl<P: Platform> View<'_, P> {
     /// types, each by lookup too, as any spelling of it, and every other spelling found not to be
     /// there, its links, attributes, extended attributes, and what a symlink says.
     async fn holds_names(&self, model: &Model, dir: u64) -> Result<(), String> {
-        let folds = Directory::open(&self.0.volume, dir).await;
-        let folds = folds.map_err(|e| format!("opening {dir}: {e:#}"))?.dir_type().is_casefold();
-        if folds != model.casefold.contains(&dir) {
-            return Err(format!("{dir} folds case: {folds}"));
-        }
         // A lookup finds no name queued to go, though its record is there until the readdir below
         // applies what is queued in the directory: a lookup applies only what its name's inode
         // waits for (TASK-92.26).
         for at in 0..SPELLINGS.len() {
-            let expected = model.names.get(&(dir, model.spelled(dir, at))).map(|entry| entry.ino());
+            let expected = model.names.get(&(dir, at)).map(|entry| entry.ino());
             let found = match self.0.lookup(dir, &name_of(at)).await {
                 Ok(attr) => Some(attr.ino),
                 Err(error) if errno(&error) == Errno::ENOENT => None,
@@ -1832,14 +1804,6 @@ static SPELLINGS: LazyLock<Vec<String>> = LazyLock::new(|| {
     names
 });
 
-/// Of each of `SPELLINGS`, the first that folds as it does: what a directory that folds case
-/// takes for one name.
-static FOLDED: LazyLock<Vec<usize>> = LazyLock::new(|| {
-    let folds = |a: &str, b: &str| fxfs_unicode::casefold_cmp(a, b) == std::cmp::Ordering::Equal;
-    let first = |name: &String| SPELLINGS.iter().position(|other| folds(name, other));
-    SPELLINGS.iter().map(|name| first(name).expect("itself")).collect()
-});
-
 fn name_of(at: usize) -> Vec<u8> {
     SPELLINGS[at].as_bytes().to_vec()
 }
@@ -1990,7 +1954,6 @@ impl<const KEEPS: bool> World<KEEPS> {
         let ino = entry.ino();
         if let Entry::Dir(_) = entry {
             self.model.dirs.retain(|dir| *dir != ino);
-            self.model.casefold.remove(&ino);
             let times = SetAttr { valid: SET_MTIME, mtime_ns: 1, ..SetAttr::default() };
             let now = clock();
             let written = self.fs.setattr(ino, &times).await;
@@ -2810,23 +2773,6 @@ impl<const KEEPS: bool> World<KEEPS> {
                     self.cursors.insert(at, cursor);
                 }
             }
-            Op::Casefold { dir, folds } => {
-                let dir = self.model.dirs[dir % self.model.dirs.len()];
-                if self.model.names_in(dir).next().is_some() {
-                    return Ok(());
-                }
-                // Its names queued to go, gone.
-                self.fs.drain_all().await.map_err(|e| format!("draining: {e:#}"))?;
-                let directory = self.fs.directory(dir).await.map_err(|e| format!("{e:#}"))?;
-                let set = directory.set_casefold(folds).await;
-                if self.unless_full(set, "casefold")?.is_some() {
-                    match folds {
-                        true => drop(self.model.casefold.insert(dir)),
-                        false => drop(self.model.casefold.remove(&dir)),
-                    }
-                }
-                self.view().holds_names(&self.model, dir).await?;
-            }
             Op::BadName { dir, name } => {
                 let dir = self.model.dirs[dir % self.model.dirs.len()];
                 self.refuses_bad_name(dir, BAD_NAMES[name % BAD_NAMES.len()]).await?;
@@ -2873,10 +2819,6 @@ impl<const KEEPS: bool> World<KEEPS> {
             Entry::File(ino) => drop(self.model.files.insert(ino, Data::default())),
             Entry::Dir(ino) => {
                 self.model.dirs.push(ino);
-                // A directory folds case as the one it's made in does.
-                if self.model.casefold.contains(&dir) {
-                    self.model.casefold.insert(ino);
-                }
             }
             Entry::Symlink(_) | Entry::Special(_) => {}
         }
@@ -3000,9 +2942,6 @@ impl<const KEEPS: bool> World<KEEPS> {
                     Entry::File(_) => drop(model.files.insert(ino, Data::default())),
                     Entry::Dir(_) => {
                         model.dirs.push(ino);
-                        if model.casefold.contains(&dir) {
-                            model.casefold.insert(ino);
-                        }
                     }
                     Entry::Symlink(_) | Entry::Special(_) => {}
                 }
@@ -3082,13 +3021,6 @@ impl<const KEEPS: bool> World<KEEPS> {
             Op::SetAttr { node, change } => {
                 let node = model.nodes.get_mut(&model.node(node))?;
                 node.set(&change.set_attr(node.kind()), 0);
-            }
-            Op::Casefold { dir, folds } => {
-                let dir = model.dirs[dir % model.dirs.len()];
-                match folds {
-                    true => drop(model.casefold.insert(dir)),
-                    false => drop(model.casefold.remove(&dir)),
-                }
             }
             _ => return None,
         }
@@ -4521,12 +4453,11 @@ fn the_roots_attributes_change_as_any_nodes() {
 }
 
 /// Names of every spelling (`SPELLINGS`), as long as a name may be and of many bytes a character,
-/// in a directory that folds case, where names in another case are one, and readdirs going on
-/// while names come and go.
+/// and readdirs going on while names come and go.
 #[test]
-fn names_of_every_spelling_fold_and_list() {
+fn names_of_every_spelling_and_list() {
     let in_a = |at: usize| (at / NAMES) * NAMES * DIRS + NAMES + at % NAMES;
-    let mut ops = vec![Op::Mkdir(0), Op::Casefold { dir: 1, folds: true }];
+    let mut ops = vec![Op::Mkdir(0)];
     ops.extend((0..2 * NAMES).map(|at| Op::Create(in_a(at))));
     ops.extend([
         Op::ReadSome { dir: 1, count: 2 },
@@ -4560,15 +4491,13 @@ fn an_allocation_over_written_pages_changes_nothing() {
     Setting::awkward(0, ROOMY).with_graveyard_of_seed().holds(ops);
 }
 
-/// A name's unlink queued in a directory that folds case leaves the directory's times to the VFS,
-/// as one in any other directory does: applied after a setattr of the directory's mtime, it timed
-/// the directory as it applied, over what was set. Found by a hunt (TASK-149.36), its seed kept.
+/// A name's unlink queued in a directory leaves the directory's times to the VFS: applied after a
+/// setattr of the directory's mtime, it must not overwrite what was set (TASK-149.36).
 #[test]
-fn an_unlink_queued_in_a_casefolded_directory_leaves_its_times() {
+fn an_unlink_queued_leaves_its_times() {
     let mtime = Op::SetAttr { node: 0, change: Change { valid: SET_MTIME, mtime: 0, ..CHANGE } };
     let ops = vec![
-        Op::Casefold { dir: 0, folds: true },
-        Op::Create(18),
+        Op::Create(0),
         Op::UnlinkLater(0),
         mtime,
         Op::SetAttr { node: 0, change: Change { valid: 0, ..CHANGE } },
@@ -4732,7 +4661,6 @@ fn orphans_a_cut_replay_found_are_freed_across_writers_ranges() {
             make: Make { kind: 2, permissions: 132088, uid: 0, gid: 1899, rdev: 1988163531 },
         },
         Op::NodeXattr { node: 19, name: 4, change: XattrChange::Remove },
-        Op::Casefold { dir: 0, folds: true },
         Op::SetXattr { file: 11, name: 11, len: 3242, byte: 84 },
     ];
     Setting::awkward(15527335009487930946, 32768).with_graveyard_of_seed().holds(ops);
@@ -4850,7 +4778,6 @@ fn orphans_named_by_a_discard_between_two_ranges_stay_unsought() {
         Op::Link(14, 0),
         Op::Fill { file: 4, page: 54, pages: 47, stride: 1, byte: 12 },
         Op::ReadOn { cursor: 2, count: 0 },
-        Op::Casefold { dir: 1, folds: false },
         Op::Rename(17, 9),
         Op::Write { file: 13, at: 2096241, len: 6564, byte: 235 },
         Op::FillWhileCompacting { file: 2, page: 6, pages: 29, byte: 161, flushing: true },

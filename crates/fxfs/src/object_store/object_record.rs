@@ -26,7 +26,6 @@ use crate::object_store::extent_record::{ExtentValue, ExtentValueV65};
 use crate::serialized_types::Versioned;
 use fprint::TypeFingerprint;
 use fxfs_macros::SerializeKey;
-use fxfs_unicode::CasefoldString;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::default::Default;
@@ -138,7 +137,7 @@ pub enum ProjectPropertyV32 {
     Usage,
 }
 
-pub type ObjectKeyData = ObjectKeyDataV65;
+pub type ObjectKeyData = ObjectKeyDataV66;
 
 #[derive(
     Clone,
@@ -154,7 +153,7 @@ pub type ObjectKeyData = ObjectKeyDataV65;
     SerializeKey,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectKeyDataV65 {
+pub enum ObjectKeyDataV66 {
     /// A generic, untyped object.  This must come first and sort before all other keys for a given
     /// object because it's also used as a tombstone and it needs to merge with all following keys.
     Object,
@@ -176,11 +175,6 @@ pub enum ObjectKeyDataV65 {
     },
     /// A graveyard entry for an attribute.
     GraveyardAttributeEntry { object_id: u64, attribute_id: AttributeId },
-    /// Case-insensitive child (legacy).
-    LegacyCasefoldChild(CasefoldString),
-    /// A child of a directory that uses the casefold feature.
-    /// (i.e. case insensitive, case preserving names)
-    CasefoldChild { hash_code: u32, name: String },
 }
 
 pub type AttributeKey = AttributeKeyV32;
@@ -206,7 +200,7 @@ pub enum AttributeKeyV32 {
 }
 
 /// ObjectKey is a key in the object store.
-pub type ObjectKey = ObjectKeyV65;
+pub type ObjectKey = ObjectKeyV66;
 
 #[derive(
     Clone,
@@ -223,11 +217,11 @@ pub type ObjectKey = ObjectKeyV65;
     Versioned,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct ObjectKeyV65 {
+pub struct ObjectKeyV66 {
     /// The ID of the object referred to.
     pub object_id: u64,
     /// The type and data of the key.
-    pub data: ObjectKeyDataV65,
+    pub data: ObjectKeyDataV66,
 }
 
 impl SortByU64 for ObjectKey {
@@ -264,23 +258,8 @@ impl ObjectKey {
     }
 
     /// Creates an ObjectKey for a child.
-    pub fn child(object_id: u64, name: &str, dir_type: DirType) -> Self {
-        match dir_type {
-            DirType::Casefold => {
-                let cf = fxfs_unicode::CasefoldStr::new(name);
-                let casefolded = cf.casefold_normalized_chars().flat_map(fxfs_unicode::utf8_bytes);
-                let hash_code = crate::tea_hash::tea_hash_filename(casefolded);
-                Self {
-                    object_id,
-                    data: ObjectKeyData::CasefoldChild { hash_code, name: name.into() },
-                }
-            }
-            DirType::LegacyCasefold => Self {
-                object_id,
-                data: ObjectKeyData::LegacyCasefoldChild(CasefoldString::new(name.into())),
-            },
-            DirType::Normal => Self { object_id, data: ObjectKeyData::Child { name: name.into() } },
-        }
+    pub fn child(object_id: u64, name: &str) -> Self {
+        Self { object_id, data: ObjectKeyData::Child { name: name.into() } }
     }
 
     /// Creates a graveyard entry for an object.
@@ -367,8 +346,6 @@ impl LayerKey for ObjectKey {
             ObjectKeyData::Object
             | ObjectKeyData::Attribute(..)
             | ObjectKeyData::Child { .. }
-            | ObjectKeyData::CasefoldChild { .. }
-            | ObjectKeyData::LegacyCasefoldChild(_)
             | ObjectKeyData::GraveyardEntry { .. }
             | ObjectKeyData::GraveyardAttributeEntry { .. }
             | ObjectKeyData::Project { property: ProjectProperty::Limit, .. }
@@ -570,31 +547,11 @@ impl From<Timestamp> for std::time::Duration {
     }
 }
 
-pub type ObjectKind = ObjectKindV65;
-
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TypeFingerprint)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum DirType {
-    #[default]
-    Normal,
-    /// Legacy casefolded mode.
-    LegacyCasefold,
-    Casefold,
-}
-
-impl DirType {
-    pub fn is_casefold(&self) -> bool {
-        matches!(self, DirType::LegacyCasefold | DirType::Casefold)
-    }
-
-    pub fn with_casefold(self, val: bool) -> Self {
-        if val { DirType::Casefold } else { DirType::Normal }
-    }
-}
+pub type ObjectKind = ObjectKindV66;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectKindV65 {
+pub enum ObjectKindV66 {
     File {
         /// The number of references to this file.
         refs: u64,
@@ -602,8 +559,6 @@ pub enum ObjectKindV65 {
     Directory {
         /// The number of sub-directories in this directory.
         sub_dirs: u64,
-        /// The type of directory (casefolding).
-        dir_type: DirType,
     },
     Graveyard,
     Symlink {
@@ -686,14 +641,14 @@ pub struct ChildValueV63 {
 /// ObjectValue is the value of an item in the object store.
 /// Note that the tree stores deltas on objects, so these values describe deltas. Unless specified
 /// otherwise, a value indicates an insert/replace mutation.
-pub type ObjectValue = ObjectValueV65;
+pub type ObjectValue = ObjectValueV66;
 impl Value for ObjectValue {
     const DELETED_MARKER: Self = Self::None;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectValueV65 {
+pub enum ObjectValueV66 {
     /// Some keys have no value (this often indicates a tombstone of some sort).  Records with this
     /// value are always filtered when a major compaction is performed, so the meaning must be the
     /// same as if the item was not present.
@@ -702,7 +657,7 @@ pub enum ObjectValueV65 {
     /// (None) i.e. their value is really a boolean: None => false, Some => true.
     Some,
     /// The value for an ObjectKey::Object record.
-    Object { kind: ObjectKindV65, attributes: ObjectAttributesV49 },
+    Object { kind: ObjectKindV66, attributes: ObjectAttributesV49 },
     /// An attribute associated with a file object. |size| is the size of the attribute in bytes.
     Attribute { size: u64, has_overwrite_extents: bool },
     /// An extent associated with an object.
@@ -857,9 +812,9 @@ impl ObjectValue {
     }
 }
 
-pub type ObjectItem = ObjectItemV65;
+pub type ObjectItem = ObjectItemV66;
 
-pub type ObjectItemV65 = Item<ObjectKeyV65, ObjectValueV65>;
+pub type ObjectItemV66 = Item<ObjectKeyV66, ObjectValueV66>;
 
 impl ObjectItem {
     pub fn is_tombstone(&self) -> bool {
@@ -967,7 +922,7 @@ impl std::fmt::Display for AttributeId {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttributeId, ObjectKey, ObjectKeyV65, TimestampV49};
+    use super::{AttributeId, ObjectKey, ObjectKeyV66, TimestampV49};
     use crate::lsm_tree::types::{FuzzyHash as _, LayerKey};
     use crate::object_store::extent::MIN_BLOCK_SIZE;
     use std::ops::Add;
@@ -979,15 +934,15 @@ mod tests {
     // https://fxbug.dev/419133532).
     #[test]
     fn test_hash_stability() {
-        // Target a specific version of ObjectKey.  If you want to delete ObjectKeyV65, simply
+        // Target a specific version of ObjectKey.  If you want to delete ObjectKeyV66, simply
         // update this test with a later key version, which will also require re-generating the
         // hashes.
         assert_eq!(
-            &ObjectKeyV65::object(100).fuzzy_hash().collect::<Vec<_>>()[..],
+            &ObjectKeyV66::object(100).fuzzy_hash().collect::<Vec<_>>()[..],
             &[11885326717398844384]
         );
         assert_eq!(
-            &ObjectKeyV65::extent(1, AttributeId::DATA, 0..2 * 1024 * 1024)
+            &ObjectKeyV66::extent(1, AttributeId::DATA, 0..2 * 1024 * 1024)
                 .fuzzy_hash()
                 .collect::<Vec<_>>()[..],
             &[240613681451893062, 14933272422807517849]

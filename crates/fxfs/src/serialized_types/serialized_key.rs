@@ -80,7 +80,7 @@ pub struct KeySerializer<'a, B: Buffer> {
 
 /// Proof token returned when key serialization has finalized its length headers.
 ///
-/// Variable-length trailing types (`String`, `CasefoldString`, `Vec<u8>`) and terminal enums
+/// Variable-length trailing types (`String`, `Vec<u8>`) and terminal enums
 /// consume `KeySerializer` and return `KeySerializerFinalized`, making it a compile-time error to
 /// serialize any subsequent fields after a variable-length trailing field.
 #[derive(Debug)]
@@ -415,21 +415,6 @@ impl SerializeKey for String {
     }
 }
 
-impl SerializeKey for fxfs_unicode::CasefoldString {
-    type Output<'a, B: Buffer + 'a> = KeySerializerFinalized;
-
-    fn serialize_key_to<'a, B: Buffer>(
-        &self,
-        serializer: KeySerializer<'a, B>,
-    ) -> Self::Output<'a, B> {
-        let s: &str = self.as_str();
-        serializer.write_last(s.as_bytes())
-    }
-    fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
-        Ok(Self::new(String::deserialize_key_from(deserializer)?))
-    }
-}
-
 impl SerializeKey for Vec<u8> {
     type Output<'a, B: Buffer + 'a> = KeySerializerFinalized;
 
@@ -725,21 +710,6 @@ mod tests {
         assert_eq!(length, buf.len());
         deser.read_varint().unwrap(); // Reads val1 (delta)
         deser.read_u64().unwrap(); // Tries to read val2 as u64.
-    }
-
-    #[test]
-    fn test_casefold_string_serialization_preserves_case() {
-        use fxfs_unicode::CasefoldString;
-        let s = CasefoldString::new("Hello World".to_string());
-
-        let mut buf = Vec::new();
-        s.serialize_key_into(&mut buf);
-
-        let (mut deser, len) = KeyDeserializer::new(&buf, None).unwrap();
-        assert_eq!(len, buf.len());
-        let deserialized = CasefoldString::deserialize_key_from(&mut deser).unwrap();
-        assert_eq!(deserialized.as_str(), "Hello World");
-        assert_eq!(deserialized, s);
     }
 
     #[test]

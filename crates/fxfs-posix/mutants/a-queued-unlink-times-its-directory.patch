@@ -1,20 +1,25 @@
 diff --git a/crates/fxfs-posix/src/lib.rs b/crates/fxfs-posix/src/lib.rs
 --- a/crates/fxfs-posix/src/lib.rs
 +++ b/crates/fxfs-posix/src/lib.rs
-@@ -1590,7 +1590,15 @@
-                     // What the kernel says a name links, which it needn't look up where the name
-                     // is its key, leaving the times of the inode and the directory, which the
-                     // kernel writes back with them.
+@@ -1566,7 +1566,8 @@
+                 }
+             }
+             // The inodes unlinked. Names removed by key change no directory.
+-            let inos = &unlinked;
++            let mut inos = unlinked.clone();
++            inos.extend(dirs.keys().copied());
+             // Removing a name is what lets a full filesystem free space. The queue's own, which no
+             // VFS asks for: no operation of the table's, as it is what they wait for.
+             let options = Room::Borrowed.options();
+@@ -1589,7 +1590,10 @@
+                     let directory = &dirs[dir];
+                     // What the kernel says a name links, which it needn't look up, leaving the
+                     // times of the inode and the directory, which the kernel writes back with them.
 -                    if directory.txn_remove_known_child(&mut transaction, name, *ino).await? {
-+                    let last_name = if directory.names_are_keys() {
-+                        directory.txn_remove_known_child(&mut transaction, name, *ino).await?
-+                    } else {
-+                        let replaced =
-+                            replace_child(&mut transaction, None, (directory, name)).await?;
-+                        check_replaced(&replaced, Some(*ino))?;
-+                        matches!(replaced, ReplacedChild::Object(_))
-+                    };
-+                    if last_name {
++                    let replaced =
++                        replace_child(&mut transaction, None, (directory, name)).await?;
++                    check_replaced(&replaced, Some(*ino))?;
++                    if matches!(replaced, ReplacedChild::Object(_)) {
                          last_names.push(*ino);
                      }
                  }

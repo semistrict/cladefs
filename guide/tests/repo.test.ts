@@ -12,7 +12,7 @@ describe("where code comes from", () => {
   const crates = crateOrigins();
 
   test("the stand-ins are docs/code.md's table's", () => {
-    expect([...standIns()].sort()).toEqual(["fxfs-unicode-gen"]);
+    expect([...standIns()].sort()).toEqual([]);
   });
 
   test.each([
@@ -20,7 +20,6 @@ describe("where code comes from", () => {
     ["crates/fxfs/src/object_store/volume/snapshot.rs", "cladefs"],
     ["crates/storage_device/src/extent.rs", "cladefs"],
     ["crates/fxfs/src/round.rs", "fuchsia"],
-    ["crates/fxfs-unicode-gen/src/lib.rs", "stand-in"],
     ["crates/cladefs/src/open_cell.rs", "cladefs"],
     ["crates/bucket_cell/src/writer.rs", "cladefs"],
     ["guest/linux/fs/cladefs/dax.c", "cladefs"],

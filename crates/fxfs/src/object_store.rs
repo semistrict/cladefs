@@ -45,7 +45,7 @@ pub use data_object_handle::{
 };
 pub use directory::Directory;
 pub use object_record::{
-    ChildValue, DirType, ObjectDescriptor, PosixAttributes, SpecialFile, Timestamp,
+    ChildValue, ObjectDescriptor, PosixAttributes, SpecialFile, Timestamp,
 };
 pub use store_object_handle::{
     MAX_INLINE_XATTR_SIZE, MAX_XATTR_NAME_SIZE, MAX_XATTR_VALUE_SIZE, SetExtendedAttributeMode,

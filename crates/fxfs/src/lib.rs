@@ -36,7 +36,6 @@ pub mod range;
 pub mod round;
 pub mod serialized_types;
 mod stable_hash;
-mod tea_hash;
 #[cfg(any(test, fuzz))]
 pub mod testing;
 pub mod zerocopy_serialization;

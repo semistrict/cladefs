@@ -17,7 +17,6 @@ log.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
-fxfs-unicode.workspace = true
 proptest.workspace = true
 rand.workspace = true
 storage_device.workspace = true

@@ -25,7 +25,7 @@ use crate::object_handle::{
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
-    AttributeKey, DirType, ObjectAttributes, ObjectItem, ObjectKey, ObjectKeyData, ObjectKind,
+    AttributeKey, ObjectAttributes, ObjectItem, ObjectKey, ObjectKeyData, ObjectKind,
     ObjectValue, Timestamp,
 };
 use crate::object_store::store_object_handle::{MaybeChecksums, NeedsTrim};
@@ -1303,7 +1303,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 change_time,
                 sub_dirs: 0,
                 posix_attributes,
-                dir_type: DirType::Normal,
             }),
             _ => bail!(FxfsError::NotFile),
         }
@@ -1642,7 +1641,7 @@ mod tests {
     use crate::object_store::transaction::{Mutation, Options, TRANSACTION_ROOM, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
-        AttributeId, AttributeKey, DataObjectHandle, DirType, Directory, Extent, ExtentMode,
+        AttributeId, AttributeKey, DataObjectHandle, Directory, Extent, ExtentMode,
         ExtentValue, HandleOptions, LockKey, MutableNodeAttributes, NewChildStoreOptions,
         ObjectKeyData, ObjectStore, PosixAttributes,
     };
@@ -3019,7 +3018,7 @@ mod tests {
             transaction.add(
                 store.store_object_id(),
                 Mutation::replace_or_insert_object(
-                    ObjectKey::child(root_directory.object_id(), TEST_OBJECT_NAME, DirType::Normal),
+                    ObjectKey::child(root_directory.object_id(), TEST_OBJECT_NAME),
                     ObjectValue::None,
                 ),
             );

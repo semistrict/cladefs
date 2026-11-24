@@ -380,8 +380,8 @@ name = "fuchsia-sync"
 version = "0.1.0"
 dependencies = [
  "lock_api",
+ "parking_lot",
  "parking_lot_core",
- "shuttle-parking_lot",
 ]
 
 [[package]]
@@ -502,9 +502,7 @@ dependencies = [
  "fuchsia-async",
  "fuchsia-sync",
  "futures",
- "fxfs-unicode",
  "fxfs_macros",
- "fxfs_trace",
  "getrandom 0.4.3",
  "linked-hash-map",
  "log",
@@ -516,7 +514,6 @@ dependencies = [
  "serde",
  "static_assertions",
  "storage_device",
- "storage_ptr_slice",
  "storage_units",
  "thiserror",
  "uuid",
@@ -532,47 +529,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxfs-unicode"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "fprint",
- "fxfs-unicode-gen",
- "fxfs-unicode-types",
- "serde",
- "smallvec",
-]
-
-[[package]]
-name = "fxfs-unicode-gen"
-version = "0.1.0"
-dependencies = [
- "fxfs-unicode-types",
-]
-
-[[package]]
-name = "fxfs-unicode-types"
-version = "0.1.0"
-
-[[package]]
 name = "fxfs_macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "fxfs_trace"
-version = "0.1.0"
-dependencies = [
- "fxfs_trace_macros",
- "storage_trace",
-]
-
-[[package]]
-name = "fxfs_trace_macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -1119,16 +1076,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "shuttle-parking_lot"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e19861a540ea53c42c73b8c81d09c9e83cc6894a720e7a16fb490c5a5297b4"
-dependencies = [
- "cfg-if",
- "parking_lot",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1187,25 +1134,12 @@ dependencies = [
  "fprint",
  "fuchsia-sync",
  "futures",
- "libc",
  "log",
  "num",
  "rand 0.10.3",
  "serde",
- "storage_ptr_slice",
  "thiserror",
 ]
-
-[[package]]
-name = "storage_ptr_slice"
-version = "0.1.0"
-dependencies = [
- "zerocopy",
-]
-
-[[package]]
-name = "storage_trace"
-version = "0.1.0"
 
 [[package]]
 name = "storage_units"

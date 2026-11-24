@@ -238,21 +238,6 @@ async fn a_lookup_leaves_the_unlinks_of_other_names_queued() {
     fs.stop_delayed().await.unwrap();
 }
 
-/// Nor one another case of it names, in a casefolding directory, which looks the name up as it is
-/// in neither.
-#[fuchsia_async::run_singlethreaded(test)]
-async fn a_lookup_finds_no_name_queued_to_go_in_another_case() {
-    let (fs, root) = volume().await;
-    let dir = fs.new_dir(root, b"folded").await;
-    fs.directory(dir).await.unwrap().set_casefold(true).await.unwrap();
-    let ino = fs.new_file(dir, b"Name").await;
-    assert_eq!(fs.lookup(dir, b"name").await.unwrap().ino, ino);
-    fs.queue_unlink(dir, "Name", ino);
-    let found = fs.lookup(dir, b"name").await.expect_err("a name queued to go, found");
-    assert_eq!(errno(&found), Errno::ENOENT);
-    fs.stop_delayed().await.unwrap();
-}
-
 /// A drain of what is queued, an fsync's or a sync's, applies what was queued before it began,
 /// not what is queued while it goes on: another's bulk delete held an fsync for as long as it went
 /// on (TASK-92.27).

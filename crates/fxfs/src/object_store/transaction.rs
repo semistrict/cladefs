@@ -18,7 +18,7 @@ use crate::object_store::allocator::{AllocatorItem, Reservation};
 use crate::object_store::journal::{checksums_record_bytes, mutation_record_bytes};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
-    BytesAndNodes, ObjectItem, ObjectItemV65, ObjectKey, ObjectKeyData, ObjectValue,
+    BytesAndNodes, ObjectItem, ObjectItemV66, ObjectKey, ObjectKeyData, ObjectValue,
     ProjectProperty,
 };
 use crate::object_store::{AttributeId, AttributeKey, ProjectId};
@@ -90,14 +90,14 @@ pub struct TransactionLocks<'a>(pub WriteGuard<'a>);
 /// transaction, these are stored as a set which allows some mutations to be deduplicated and found
 /// (and we require custom comparison functions below).  For example, we need to be able to find
 /// object size changes.
-pub type Mutation = MutationV65;
+pub type Mutation = MutationV66;
 
 #[derive(
     Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, TypeFingerprint, Versioned,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum MutationV65 {
-    ObjectStore(ObjectStoreMutationV65),
+pub enum MutationV66 {
+    ObjectStore(ObjectStoreMutationV66),
     Allocator(AllocatorMutationV60),
     /// Indicates the beginning of a flush. This would typically involve sealing a tree.
     BeginFlush,
@@ -148,12 +148,12 @@ impl Mutation {
 // We have custom comparison functions for mutations that just use the key, rather than the key and
 // value that would be used by default so that we can deduplicate and find mutations (see
 // get_object_mutation below).
-pub type ObjectStoreMutation = ObjectStoreMutationV65;
+pub type ObjectStoreMutation = ObjectStoreMutationV66;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct ObjectStoreMutationV65 {
-    pub item: ObjectItemV65,
+pub struct ObjectStoreMutationV66 {
+    pub item: ObjectItemV66,
     pub op: Operation,
 }
 
@@ -895,9 +895,7 @@ impl<'a> Transaction<'a> {
                     ObjectKeyData::Attribute(..) => {
                         // TODO(https://fxbug.dev/42073914): Check lock requirements.
                     }
-                    ObjectKeyData::Child { .. }
-                    | ObjectKeyData::CasefoldChild { .. }
-                    | ObjectKeyData::LegacyCasefoldChild(_) => {
+                    ObjectKeyData::Child { .. } => {
                         let id = key.object_id;
                         if !self.txn_locks.contains(&LockKey::object(*store_object_id, id))
                             && !self.new_objects.contains(&(*store_object_id, id))
@@ -1704,7 +1702,7 @@ mod tests {
         ObjectMutationIterator, Options, TxnMutation,
     };
     use crate::filesystem::FxFilesystem;
-    use crate::object_store::{BytesAndNodes, DirType, ObjectKey, ObjectValue};
+    use crate::object_store::{BytesAndNodes, ObjectKey, ObjectValue};
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::channel::oneshot::channel;
@@ -2291,7 +2289,7 @@ mod tests {
         t.add(
             store_id,
             Mutation::replace_or_insert_object(
-                ObjectKey::child(dir, "name", DirType::Normal),
+                ObjectKey::child(dir, "name"),
                 ObjectValue::None,
             ),
         );
@@ -2313,7 +2311,7 @@ mod tests {
         t.add(
             store_id,
             Mutation::replace_or_insert_object(
-                ObjectKey::child(dir, "name", DirType::Normal),
+                ObjectKey::child(dir, "name"),
                 ObjectValue::None,
             ),
         );

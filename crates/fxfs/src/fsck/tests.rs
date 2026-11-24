@@ -20,7 +20,7 @@ use crate::object_store::directory::{self, Directory, MutableAttributesInternal}
 use crate::object_store::transaction::{self, LockKey, Options, lock_keys};
 use crate::object_store::volume::root_volume;
 use crate::object_store::{
-    AttributeId, AttributeKey, BytesAndNodes, ChildValue, DataObjectHandle, DirType, ExtentValue,
+    AttributeId, AttributeKey, BytesAndNodes, ChildValue, DataObjectHandle, ExtentValue,
     HandleOptions, MutableNodeAttributes, Mutation, NewChildStoreOptions, ObjectAttributes,
     ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectId,
     SpecialFile, StoreInfo, Timestamp,
@@ -1065,7 +1065,7 @@ async fn test_children_on_file() {
             &fs,
             store.as_ref(),
             vec![Item::new(
-                ObjectKey::child(object_id, "foo", DirType::Normal),
+                ObjectKey::child(object_id, "foo"),
                 ObjectValue::Child(ChildValue {
                     object_id,
                     object_descriptor: ObjectDescriptor::File,
@@ -1431,7 +1431,7 @@ async fn test_tombstoned_attribute_does_not_exist() {
                 Item::new(
                     ObjectKey::object(10),
                     ObjectValue::Object {
-                        kind: ObjectKind::Directory { sub_dirs: 0, dir_type: DirType::Normal },
+                        kind: ObjectKind::Directory { sub_dirs: 0 },
                         attributes: ObjectAttributes { ..Default::default() },
                     },
                 ),
@@ -2457,138 +2457,6 @@ async fn test_delete_volume() {
 }
 
 #[fuchsia_async::run_singlethreaded(test)]
-async fn test_casefold() {
-    let mut test = FsckTest::new().await;
-
-    for dir_is_casefold in [false, true] {
-        let fs = test.filesystem();
-        let store = fs.root_store();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let dirname = if dir_is_casefold { "casefolded" } else { "regular" };
-
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let child_dir = root_directory
-            .create_child_dir(&mut transaction, dirname)
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit transaction failed");
-
-        child_dir.set_casefold(dir_is_casefold).await.expect("enable casefold");
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), child_dir.object_id()),],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        // Manually add a child entry so we can add the wrong ObjectKeyData child type.
-        let handle = Directory::create_with_options(&mut transaction, &store, DirType::Casefold)
-            .await
-            .expect("create_directory");
-        transaction.add(
-            child_dir.store().store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::child(
-                    child_dir.object_id(),
-                    "b",
-                    if !dir_is_casefold { DirType::Casefold } else { DirType::Normal },
-                ),
-                ObjectValue::child(handle.object_id(), ObjectDescriptor::Directory),
-            ),
-        );
-        let now = Timestamp::now();
-        child_dir
-            .update_dir_attributes_internal(
-                &mut transaction,
-                child_dir.object_id(),
-                MutableAttributesInternal::new(1, Some(now), Some(now.as_nanos()), None),
-            )
-            .await
-            .expect("update attributes");
-        transaction.commit().await.expect("commit transaction failed");
-    }
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    assert_matches!(
-        test.errors()[..],
-        [FsckIssue::Error(FsckError::CasefoldInconsistency(..)), ..]
-    );
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
-async fn test_legacy_casefold_inconsistency() {
-    let mut test = FsckTest::new().await;
-
-    let (store_id, parent_oid, child_oid) = {
-        let fs = test.filesystem();
-        let store = fs.root_store();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let child_dir = root_directory
-            .create_child_dir(&mut transaction, "dir")
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit transaction failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), child_dir.object_id()),],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        // Manually add a child entry so we can add the wrong ObjectKeyData child type.
-        let handle = Directory::create_with_options(&mut transaction, &store, DirType::Normal)
-            .await
-            .expect("create_directory");
-        transaction.add(
-            child_dir.store().store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::child(
-                    child_dir.object_id(),
-                    "b",
-                    DirType::LegacyCasefold, // Wrong type!
-                ),
-                ObjectValue::child(handle.object_id(), ObjectDescriptor::Directory),
-            ),
-        );
-
-        transaction.commit().await.expect("commit transaction failed");
-
-        (store.store_object_id(), child_dir.object_id(), handle.object_id())
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    // Verify that the first reported error is a CasefoldInconsistency for the expected IDs.
-    assert_matches!(
-        test.errors()[..],
-        [FsckIssue::Error(FsckError::CasefoldInconsistency(s, p, c)), ..]
-        if s == store_id && p == parent_oid && c == child_oid
-    );
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
 async fn test_missing_overwrite_extents() {
     let mut test = FsckTest::new().await;
 
@@ -2873,93 +2741,6 @@ async fn test_invalid_bloom_filter_for_volume() {
         .await
         .expect_err("Fsck should fail");
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::InvalidBloomFilter(..))]);
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
-async fn test_bad_casefold_hash() {
-    let mut test = FsckTest::new().await;
-    let store_id = {
-        let fs = test.filesystem();
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume
-            .new_volume("vol", NewChildStoreOptions { ..NewChildStoreOptions::default() })
-            .await
-            .unwrap();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-
-        let dir = root_directory
-            .create_child_dir(&mut transaction, "casefold_dir")
-            .await
-            .expect("create_child_dir failed");
-        transaction.commit().await.expect("commit failed");
-
-        // Verify object exists in tree
-        assert!(
-            store.tree().exists(&ObjectKey::object(dir.object_id())).await.expect("find failed")
-        );
-        let dir = Directory::open(&store, dir.object_id()).await.expect("open dir failed");
-
-        dir.set_casefold(true).await.expect("set_casefold failed");
-
-        // Create a child file "foo" so we have a valid child, and another, "bar", manually with a
-        // wrong hash.
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let _file =
-            dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
-        let bad_file =
-            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default())
-                .await
-                .expect("create_object failed");
-        let mut key = ObjectKey::child(dir.object_id(), "bar", DirType::Casefold);
-        let ObjectKeyData::CasefoldChild { hash_code, .. } = &mut key.data else {
-            panic!("{key:?}");
-        };
-        *hash_code = hash_code.wrapping_add(1);
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                key,
-                ObjectValue::child(bad_file.object_id(), ObjectDescriptor::File),
-            ),
-        );
-        dir.update_dir_attributes_internal(
-            &mut transaction,
-            dir.object_id(),
-            MutableAttributesInternal::new(
-                0,
-                Some(Timestamp::now()),
-                Some(Timestamp::now().as_nanos()),
-                None,
-            ),
-        )
-        .await
-        .expect("update attr failed");
-
-        transaction.commit().await.expect("commit failed");
-        store.store_object_id()
-    };
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
-        .await
-        .expect_err("Fsck should fail");
-    assert_matches!(test.errors()[..], [FsckIssue::Error(FsckError::BadCasefoldHash(..)), ..]);
 }
 
 #[fuchsia_async::run_singlethreaded(test)]

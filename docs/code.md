@@ -35,7 +35,9 @@ their leading comment:
   Fuchsia's component framework. Tests run on `fuchsia-async`'s own test
   macros.
 - Fxfs encrypts nothing (no Fxfs keys, fscrypt or encrypted stores: cladefs
-  encrypts below it, in its extents and buckets), and has no fsverity or blobs.
+  encrypts below it, in its extents and buckets), has no fsverity or blobs, and
+  has no casefold directories, overwrite/preallocation extents, project quotas,
+  image-builder mode, or per-volume byte limits.
 - `storage_device` has no `FileBackedDevice`: cladefs has its own image device
   (see `crates/cladefs`).
 - Fxfs can snapshot a volume (`RootVolume::snapshot_volume`), which upstream
@@ -43,10 +45,8 @@ their leading comment:
   and its data extents. The allocator records a store's allocations under a
   data owner that a snapshot changes; the source's owner at the snapshot is
   frozen, its extents never deallocated one by one while any store shares
-  them, and freed once none does. Blocks written in place (preallocated
-  files) are written to new blocks where a snapshot shares them. fsck checks
-  shared extents, and the on-disk format is version 65, the only one a mount
-  reads: no format is migrated.
+  them, and freed once none does. fsck checks shared extents, and the on-disk
+  format is version 66, the only one a mount reads: no format is migrated.
 
 ## `crates/cladefs/src/slabs.rs`: physical memory
 
@@ -72,12 +72,8 @@ guest's, Fxfs in the kernel, the host's, images being built.
 
 ## `crates/`: stand-ins for Fuchsia-only pieces
 
-Some crates only exist inside Fuchsia's build, or only work on Fuchsia. Each
-of these stands in with the items the code copied from Fuchsia uses:
-
-| Crate | Stands in for | How |
-|---|---|---|
-| `fxfs-unicode-gen` | build-time generated tables | Tables generated once from UCD 12.1.0 by Fxfs's own generator (`scripts/generate-unicode-tables.sh`). |
+None remain (the last, `fxfs-unicode-gen`, went with casefold directories in
+board 10598).
 
 ## `crates/cladefs`: cladefs's own code
 

@@ -31,7 +31,7 @@ use crate::object_store::journal::bootstrap_handle::{
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, Journal, JournalCheckpoint, JournalCheckpointV32};
-use crate::object_store::object_record::ObjectItemV65;
+use crate::object_store::object_record::ObjectItemV66;
 use crate::object_store::transaction::AssocObj;
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{Mutation, ObjectKey, ObjectStore, ObjectValue};
@@ -335,15 +335,15 @@ impl<'de> Deserialize<'de> for UuidWrapper {
     }
 }
 
-pub type SuperBlockRecord = SuperBlockRecordV65;
+pub type SuperBlockRecord = SuperBlockRecordV66;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum SuperBlockRecordV65 {
+pub enum SuperBlockRecordV66 {
     // Following the super-block header are ObjectItem records that are to be replayed into the root
     // parent object store.
-    ObjectItem(ObjectItemV65),
+    ObjectItem(ObjectItemV66),
 
     // Marks the end of the full super-block.
     End,

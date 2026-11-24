@@ -44,8 +44,9 @@ export function standIns(repo = REPO): Set<string> {
   const doc = readFileSync(join(repo, "docs", "code.md"), "utf8");
   const section = doc.split("## `crates/`: stand-ins for Fuchsia-only pieces")[1];
   if (section === undefined) throw new Error("docs/code.md has no stand-ins section");
-  const table = section.split("\n\n").find((part) => part.trimStart().startsWith("|"));
-  if (table === undefined) throw new Error("docs/code.md's stand-ins section has no table");
+  const body = section.split("\n## ")[0] ?? section;
+  const table = body.split("\n\n").find((part) => part.trimStart().startsWith("|"));
+  if (table === undefined) return new Set();
   const names = new Set<string>();
   for (const row of table.split("\n").slice(2)) {
     const cell = row.split("|")[1] ?? "";

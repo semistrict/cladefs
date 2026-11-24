@@ -21,7 +21,6 @@ fuchsia-async.workspace = true
 fuchsia-sync.workspace = true
 futures.workspace = true
 fxfs_macros.workspace = true
-fxfs-unicode.workspace = true
 getrandom.workspace = true
 linked-hash-map.workspace = true
 log.workspace = true

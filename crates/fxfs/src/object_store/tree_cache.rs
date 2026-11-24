@@ -335,7 +335,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
 #[cfg(test)]
 mod tests {
     use super::super::object_record::{
-        AttributeId, AttributeKey, DirType, ObjectDescriptor, ObjectKey, ObjectValue, Timestamp,
+        AttributeId, AttributeKey, ObjectDescriptor, ObjectKey, ObjectValue, Timestamp,
     };
     use super::{ITEM_LIMIT, TreeCache};
     use crate::lsm_tree::cache::{ObjectCache, ObjectCacheResult};
@@ -583,13 +583,12 @@ mod tests {
         };
     }
 
-    /// cladefs: a name in a directory that isn't case-insensitive is cached as it is
-    /// written, not as a lookup misses it, and forgotten once removed; others aren't, which
-    /// lookups don't find exactly.
+    /// cladefs: a name in a directory is cached as it is written, not as a lookup misses it, and
+    /// forgotten once removed.
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_children_are_cached() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
-        let key = ObjectKey::child(1, "name", DirType::Normal);
+        let key = ObjectKey::child(1, "name");
         let value = ObjectValue::child(2, ObjectDescriptor::File);
 
         assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::NoCache);
@@ -605,8 +604,6 @@ mod tests {
             ObjectCacheResult::Value(result) => assert_eq!(&*result, &ObjectValue::None),
             _ => panic!("Expected to find the deleted marker."),
         };
-
-        assert!(!cache.is_cacheable(&ObjectKey::child(1, "name", DirType::Casefold)));
     }
 
     /// cladefs: that there is no item is cached too, until one is inserted.

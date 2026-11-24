@@ -15,9 +15,6 @@
 # workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
 # nextest profile unit leaves out (.config/nextest.toml).
 #
-# Unicode tests compare against the Unicode Character Database, which is
-# downloaded and checksummed on first use.
-#
 # Every cargo call is --locked: a lock file that is not as Cargo resolves its manifests fails the
 # part, rather than being rewritten under it (board 8601).
 set -euo pipefail
@@ -41,16 +38,6 @@ if [[ ${listed[*]} != scripts ]]; then
     measurement_refuses "scripts/test.sh's parts ${listed[*]}"
 fi
 
-VERSION=12.1.0
-SHA256=25ba51a0d4c6fa41047b7a5e5733068d4a734588f055f61e85f450097834a0a6
-zip="$root/target/UCD-$VERSION.zip"
-
-if [ ! -f "$zip" ]; then
-    mkdir -p "$root/target"
-    curl -fsSL -o "$zip" "https://www.unicode.org/Public/$VERSION/ucd/UCD.zip"
-fi
-echo "$SHA256  $zip" | shasum -a 256 -c - >/dev/null
-
 # Clippy's rules the code keeps (clippy.toml): no blocking call in async code unless allowed, with
 # why (TASK-44.20); and the compiler's warnings, as errors, the Shuttle builds' too (below), whose
 # code no other build compiles: one went unread in a run's output, a drop of a usize (TASK-287).
@@ -60,7 +47,7 @@ echo "$SHA256  $zip" | shasum -a 256 -c - >/dev/null
 if part clippy; then
     # In $root: `cargo fmt --manifest-path` finds no targets in a virtual manifest.
     (cd "$root" && cargo fmt --check)
-    UCD_ZIP="$zip" cargo clippy --locked --manifest-path "$root/Cargo.toml" --workspace --tests -- \
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
     # cladefs's own crates (copied Fuchsia crates stay under `-A clippy::all` above): deny
     # clippy's correctness and suspicious lints too (board 8607), across tests and examples,
@@ -77,7 +64,7 @@ if part clippy; then
         -A clippy::all -D clippy::correctness -D clippy::suspicious
         -D clippy::disallowed_methods -D warnings
     )
-    UCD_ZIP="$zip" cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
         "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"
     cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
         "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"
@@ -99,11 +86,11 @@ fi
 # CI's workspace job out of time (TASK-188).
 sim='package(local_cell) & test(/^sim::/)'
 if part workspace; then
-    UCD_ZIP="$zip" cargo nextest run --locked --manifest-path "$root/Cargo.toml" --workspace \
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" --workspace \
         -E "not ($sim)" "$@"
 fi
 if part unit; then
-    UCD_ZIP="$zip" cargo nextest run --locked --manifest-path "$root/Cargo.toml" --workspace \
+    cargo nextest run --locked --manifest-path "$root/Cargo.toml" --workspace \
         --profile unit "$@"
 fi
 if part sim; then

@@ -89,12 +89,8 @@ class Guard(unittest.TestCase):
                             "makes them)\n"))
 
     def test_the_suite_builds_nothing_inside_a_measurement(self):
-        # In a tree of its own, whose Unicode data no download fills: let start, it fails there,
-        # running no part.
         tree = self.directory / "tree"
         (tree / "scripts" / "lib").mkdir(parents=True)
-        (tree / "target").mkdir()
-        (tree / "target" / "UCD-12.1.0.zip").write_text("")
         (tree / "scripts" / "test.sh").symlink_to(SCRIPTS / "test.sh")
         (tree / "scripts" / "lib" / "measurement.sh").symlink_to(SCRIPTS / "lib" / "measurement.sh")
         self.assertEqual(

@@ -1565,19 +1565,13 @@ impl<P: Platform> Fxfs<P> {
                     dirs.insert(*dir, self.directory(*dir).await?);
                 }
             }
-            // The inodes unlinked, and the directories `replace_child` changes, which other
-            // batches' unlinks from them wait for. Names removed by key change no directory.
-            let mut inos = unlinked.clone();
-            inos.extend(
-                dirs.iter()
-                    .filter(|(_, directory)| !directory.names_are_keys())
-                    .map(|(dir, _)| *dir),
-            );
+            // The inodes unlinked. Names removed by key change no directory.
+            let inos = &unlinked;
             // Removing a name is what lets a full filesystem free space. The queue's own, which no
             // VFS asks for: no operation of the table's, as it is what they wait for.
             let options = Room::Borrowed.options();
             let mut keys = LockKeys::with_capacity(inos.len() + evicted.len());
-            for &ino in &inos {
+            for &ino in inos {
                 keys.push(LockKey::object(store, ino));
             }
             for &ino in &evicted {
@@ -1593,9 +1587,8 @@ impl<P: Platform> Fxfs<P> {
             for op in ops {
                 if let DelayedOp::Unlink { dir, name, ino } = op {
                     let directory = &dirs[dir];
-                    // What the kernel says a name links, which it needn't look up where the name
-                    // is its key, leaving the times of the inode and the directory, which the
-                    // kernel writes back with them.
+                    // What the kernel says a name links, which it needn't look up, leaving the
+                    // times of the inode and the directory, which the kernel writes back with them.
                     if directory.txn_remove_known_child(&mut transaction, name, *ino).await? {
                         last_names.push(*ino);
                     }

@@ -55,7 +55,7 @@ use crate::object_store::journal::super_block::{
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::transaction::{
-    AllocatorMutation, Mutation, MutationV65, ObjectMutationIterator, ObjectStoreMutation, Options,
+    AllocatorMutation, Mutation, MutationV66, ObjectMutationIterator, ObjectStoreMutation, Options,
     TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
 use crate::object_store::{
@@ -138,16 +138,16 @@ pub struct JournalCheckpointV32 {
     pub version: Version,
 }
 
-pub type JournalRecord = JournalRecordV65;
+pub type JournalRecord = JournalRecordV66;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum JournalRecordV65 {
+pub enum JournalRecordV66 {
     EndBlock,
     Mutation {
         object_id: u64,
-        mutation: MutationV65,
+        mutation: MutationV66,
     },
     /// Commits records in the transaction.
     Commit,
@@ -2380,12 +2380,12 @@ mod tests {
         };
         use crate::checksum::Checksums;
         use crate::object_store::transaction::Mutation;
-        use crate::object_store::{DirType, ObjectDescriptor, ObjectKey, ObjectValue};
+        use crate::object_store::{ObjectDescriptor, ObjectKey, ObjectValue};
         use crate::serialized_types::Versioned;
 
         let mutations = [
             Mutation::replace_or_insert_object(
-                ObjectKey::child(7, "name", DirType::Normal),
+                ObjectKey::child(7, "name"),
                 ObjectValue::child(9, ObjectDescriptor::File),
             ),
             Mutation::merge_object(ObjectKey::object(9), ObjectValue::None),

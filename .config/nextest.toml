@@ -10,7 +10,7 @@ fail-fast = false
 # fork or restore failing, corrupt images) and the others that take 5 s or more on a Mac, or, of
 # those that run on Linux alone, 10 s or more on ubu1 (four at a time): 2,690 of the Mac's 2,770
 # tests, and 1/8 of their time (`cargo nextest run --workspace --profile unit`, or
-# `CLADEFS_TEST_PARTS=unit scripts/test.sh`, which sets UCD_ZIP). The workspace part runs them all,
+# `CLADEFS_TEST_PARTS=unit scripts/test.sh`). The workspace part runs them all,
 # these included. A unit test that takes over a minute is ended and fails: it belongs in the list.
 [profile.unit]
 slow-timeout = { period = "15s", terminate-after = 4 }

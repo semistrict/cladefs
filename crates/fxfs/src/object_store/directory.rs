@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/directory.rs`. cladefs: no directory is encrypted
-// (fscrypt), as Fxfs encrypts nothing: names are children's keys as they are, or casefolded.
+// (fscrypt) or casefolded (board 10598): names are children's keys as they are.
 
 use crate::errors::FxfsError;
 use crate::filesystem::TruncateGuard;
@@ -12,24 +12,18 @@ use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties};
 use crate::object_store::object_record::{
-    BytesAndNodes, ChildValue, DirType, ObjectAttributes, ObjectDescriptor, ObjectKey,
-    ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
+    BytesAndNodes, ChildValue, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData,
+    ObjectKind, ObjectValue, Timestamp,
 };
-use crate::object_store::transaction::{
-    LockKey, LockKeys, Mutation, Options, Transaction, lock_keys,
-};
+use crate::object_store::transaction::{LockKey, LockKeys, Mutation, Options, Transaction};
 use crate::object_store::{
     DataObjectHandle, HandleOptions, HandleOwner, MutableNodeAttributes, ObjectStore, ProjectId,
     SetExtendedAttributeMode, StoreObjectHandle,
 };
 use anyhow::{Error, anyhow, bail, ensure};
-use fuchsia_sync::Mutex;
 use std::fmt;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-type BoxPredicate<'a> = Box<dyn Fn(&ObjectKey) -> ControlFlow<bool> + Send + 'a>;
 
 /// This contains the transaction with the appropriate locks to replace src with dst, and also the
 /// ID and type of the src and dst.
@@ -53,8 +47,6 @@ pub struct Directory<S: HandleOwner> {
     handle: StoreObjectHandle<S>,
     /// True if the directory has been deleted and is no longer accessible.
     is_deleted: AtomicBool,
-    /// The type of directory (casefolding)
-    dir_type: Mutex<DirType>,
 }
 
 /// cladefs: the longest target a symlink's record holds, as upstream limits targets to.
@@ -97,22 +89,10 @@ impl MutableAttributesInternal {
 }
 
 impl<S: HandleOwner> Directory<S> {
-    fn new(owner: Arc<S>, object_id: u64, dir_type: DirType) -> Self {
+    fn new(owner: Arc<S>, object_id: u64) -> Self {
         Directory {
             handle: StoreObjectHandle::new(owner, object_id, HandleOptions::default()),
             is_deleted: AtomicBool::new(false),
-            dir_type: Mutex::new(dir_type),
-        }
-    }
-
-    /// Returns `Some(name)` for a given child's key of the directory: its name as it was given,
-    /// whatever its case. `None` if the key is no child's.
-    pub fn get_case_preserved_name(&self, key: ObjectKey) -> Option<String> {
-        match key.data {
-            ObjectKeyData::Child { name } => Some(name),
-            ObjectKeyData::CasefoldChild { name, .. } => Some(name),
-            ObjectKeyData::LegacyCasefoldChild(name) => Some(name.to_string()),
-            _ => None,
         }
     }
 
@@ -140,52 +120,9 @@ impl<S: HandleOwner> Directory<S> {
         self.is_deleted.store(true, Ordering::Relaxed);
     }
 
-    /// Mode of directory (legacy, casefold, normal)
-    pub fn dir_type(&self) -> DirType {
-        *self.dir_type.lock()
-    }
-
-    /// Enables/disables casefolding. This can only be done on an empty directory.
-    pub async fn set_casefold(&self, val: bool) -> Result<(), Error> {
-        let dir_type = self.dir_type().with_casefold(val);
-        // Nb: We lock the directory to ensure it doesn't change during our check for children.
-        let mut transaction = self
-            .store()
-            .new_transaction(
-                lock_keys![LockKey::object(self.store().store_object_id(), self.object_id())],
-                Options::default(),
-            )
-            .await?;
-        ensure!(!self.has_children().await?, FxfsError::NotEmpty);
-        let mut mutation =
-            self.store().txn_get_object_mutation(&transaction, self.object_id()).await?;
-        if let ObjectValue::Object {
-            kind: ObjectKind::Directory { dir_type: dest_dir_type, .. },
-            ..
-        } = &mut mutation.item.value
-        {
-            *dest_dir_type = dir_type;
-        } else {
-            return Err(
-                anyhow!(FxfsError::Inconsistent).context("casefold only applies to directories")
-            );
-        }
-        transaction.add(self.store().store_object_id(), Mutation::ObjectStore(mutation));
-        transaction.commit_with_callback(|_| *self.dir_type.lock() = dir_type).await?;
-        Ok(())
-    }
-
     pub async fn create(
         transaction: &mut Transaction<'_>,
         owner: &Arc<S>,
-    ) -> Result<Directory<S>, Error> {
-        Self::create_with_options(transaction, owner, DirType::Normal).await
-    }
-
-    pub async fn create_with_options(
-        transaction: &mut Transaction<'_>,
-        owner: &Arc<S>,
-        dir_type: DirType,
     ) -> Result<Directory<S>, Error> {
         let store = owner.as_ref().as_ref();
         let object_id = store.get_next_object_id()?;
@@ -195,7 +132,7 @@ impl<S: HandleOwner> Directory<S> {
             Mutation::insert_object(
                 ObjectKey::object(object_id),
                 ObjectValue::Object {
-                    kind: ObjectKind::Directory { sub_dirs: 0, dir_type },
+                    kind: ObjectKind::Directory { sub_dirs: 0 },
                     attributes: ObjectAttributes {
                         creation_time: now.clone(),
                         modification_time: now.clone(),
@@ -208,28 +145,26 @@ impl<S: HandleOwner> Directory<S> {
                 },
             ),
         );
-        Ok(Directory::new(owner.clone(), object_id, dir_type))
+        Ok(Directory::new(owner.clone(), object_id))
     }
 
     pub async fn open(owner: &Arc<S>, object_id: u64) -> Result<Directory<S>, Error> {
         let store = owner.as_ref().as_ref();
-        let dir_type = store
+        store
             .tree
             .find_map(&ObjectKey::object(object_id), |item| match item.value {
-                ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. } => {
-                    Ok(*dir_type)
-                }
+                ObjectValue::Object { kind: ObjectKind::Directory { .. }, .. } => Ok(()),
                 _ => bail!(FxfsError::NotDir),
             })
             .await?
             .ok_or(FxfsError::NotFound)??;
-        Ok(Directory::new(owner.clone(), object_id, dir_type))
+        Ok(Directory::new(owner.clone(), object_id))
     }
 
     /// Opens a directory. The caller is responsible for ensuring that the object exists and is a
     /// directory.
-    pub fn open_unchecked(owner: Arc<S>, object_id: u64, dir_type: DirType) -> Self {
-        Self::new(owner, object_id, dir_type)
+    pub fn open_unchecked(owner: Arc<S>, object_id: u64) -> Self {
+        Self::new(owner, object_id)
     }
 
     /// Acquires the transaction with the appropriate locks to replace |dst| with |src.0|/|src.1|.
@@ -307,11 +242,7 @@ impl<S: HandleOwner> Directory<S> {
                                 src_object_id = Some(entry.object_id);
                             }
                             src_id_and_descriptor = Some((entry.object_id, entry.descriptor));
-                            src_name_out = Some(
-                                src_dir
-                                    .get_case_preserved_name(entry.key)
-                                    .unwrap_or_else(|| src_name.to_string()),
-                            );
+                            src_name_out = Some(src_name.to_string());
                         }
                         _ => bail!(FxfsError::Inconsistent),
                     },
@@ -332,10 +263,7 @@ impl<S: HandleOwner> Directory<S> {
                             have_required_locks = false;
                             child_object_id = entry.object_id
                         }
-                        dst_name_out = Some(
-                            self.get_case_preserved_name(entry.key)
-                                .unwrap_or_else(|| dst.to_string()),
-                        );
+                        dst_name_out = Some(dst.to_string());
                         Some((entry.object_id, entry.descriptor.clone()))
                     }
                     _ => bail!(FxfsError::Inconsistent),
@@ -380,68 +308,22 @@ impl<S: HandleOwner> Directory<S> {
         if self.is_deleted() {
             return Ok(None);
         }
-        // In some cases, we need to iterate over directory entries to find a match.  The code below
-        // finds a starting key and an optional predicate that is used to find a matching entry.
-        // If there is no predicate, we can look for an exact match.
-        let (key, predicate): (_, Option<BoxPredicate<'_>>) = match self.dir_type() {
-            DirType::Casefold => {
-                let target_key = ObjectKey::child(self.object_id(), name, DirType::Casefold);
-                let target_hash_code = match &target_key.data {
-                    ObjectKeyData::CasefoldChild { hash_code, .. } => *hash_code,
-                    _ => unreachable!(),
-                };
-                (
-                    ObjectKey {
-                        object_id: self.object_id(),
-                        data: ObjectKeyData::CasefoldChild {
-                            hash_code: target_hash_code,
-                            name: "".to_string(),
-                        },
-                    },
-                    Some(Box::new(casefold_predicate(self.object_id(), target_hash_code, name))),
-                )
-            }
-            DirType::LegacyCasefold | DirType::Normal => {
-                (ObjectKey::child(self.object_id(), name, self.dir_type()), None)
-            }
-        };
-
-        if let Some(predicate) = predicate {
-            let layer_set = self.store().tree().layer_set();
-            let mut merger = layer_set.merger();
-            let mut iter = merger.query(Query::FullRange(&key)).await?;
-            if !self.advance_until(&mut iter, predicate).await? {
-                return Ok(None);
-            }
-            let item = iter.get().unwrap();
-            match item.value {
+        let key = ObjectKey::child(self.object_id(), name);
+        self.store()
+            .tree()
+            .find_map(&key, |item| match item.value {
                 ObjectValue::Child(ChildValue { object_id, object_descriptor }) => {
-                    Ok(Some(LookupEntry {
+                    Ok(LookupEntry {
                         object_id: *object_id,
-                        descriptor: object_descriptor.clone(),
+                        descriptor: *object_descriptor,
                         key: item.key.clone(),
-                    }))
+                    })
                 }
                 _ => Err(anyhow!(FxfsError::Inconsistent)
-                    .context(format!("Unexpected item in lookup: {item:?}"))),
-            }
-        } else {
-            self.store()
-                .tree()
-                .find_map(&key, |item| match item.value {
-                    ObjectValue::Child(ChildValue { object_id, object_descriptor }) => {
-                        Ok(LookupEntry {
-                            object_id: *object_id,
-                            descriptor: *object_descriptor,
-                            key: item.key.clone(),
-                        })
-                    }
-                    _ => Err(anyhow!(FxfsError::Inconsistent)
-                        .context(format!("Unexpected item in lookup: {item:?}",))),
-                })
-                .await?
-                .transpose()
-        }
+                    .context(format!("Unexpected item in lookup: {item:?}",))),
+            })
+            .await?
+            .transpose()
     }
 
     pub async fn create_child_dir(
@@ -451,12 +333,11 @@ impl<S: HandleOwner> Directory<S> {
     ) -> Result<Directory<S>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
 
-        let handle =
-            Directory::create_with_options(transaction, self.owner(), self.dir_type()).await?;
+        let handle = Directory::create(transaction, self.owner()).await?;
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectKey::child(self.object_id(), &name),
                 ObjectValue::child(handle.object_id(), ObjectDescriptor::Directory),
             ),
         );
@@ -500,7 +381,7 @@ impl<S: HandleOwner> Directory<S> {
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectKey::child(self.object_id(), &name),
                 ObjectValue::child(handle.object_id(), descriptor),
             ),
         );
@@ -715,7 +596,7 @@ impl<S: HandleOwner> Directory<S> {
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectKey::child(self.object_id(), &name),
                 ObjectValue::child(symlink_id, ObjectDescriptor::Symlink),
             ),
         );
@@ -744,7 +625,7 @@ impl<S: HandleOwner> Directory<S> {
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::child(self.object_id(), volume_name, self.dir_type()),
+                ObjectKey::child(self.object_id(), volume_name),
                 ObjectValue::child(store_object_id, ObjectDescriptor::Volume),
             ),
         );
@@ -771,7 +652,7 @@ impl<S: HandleOwner> Directory<S> {
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::child(self.object_id(), volume_name, self.dir_type()),
+                ObjectKey::child(self.object_id(), volume_name),
                 ObjectValue::None,
             ),
         );
@@ -798,7 +679,7 @@ impl<S: HandleOwner> Directory<S> {
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(
-                ObjectKey::child(self.object_id(), &name, self.dir_type()),
+                ObjectKey::child(self.object_id(), &name),
                 ObjectValue::child(object_id, descriptor),
             ),
         );
@@ -816,40 +697,22 @@ impl<S: HandleOwner> Directory<S> {
         .await
     }
 
-    /// cladefs: whether a child's record is keyed by its name as given, which removing it then
-    /// needn't look up (`txn_remove_known_child`): not in a directory whose names are casefolded.
-    pub fn names_are_keys(&self) -> bool {
-        self.dir_type() == DirType::Normal
-    }
-
     /// cladefs: removes `name`, which the caller knows links `object_id`, a file, symlink or special
-    /// file, as `replace_child` unlinks it, without looking the name up where `names_are_keys`:
-    /// and returns whether it was the object's last name, which puts the object in the graveyard
+    /// file, as `replace_child` unlinks it, without looking the name up: and returns whether it was
+    /// the object's last name, which puts the object in the graveyard
     /// (`ObjectStore::txn_tombstone_unlinked` may take it out again). The times of the directory
     /// and of the object are left be, which the caller keeps, as the guest kernel writes them
-    /// back: in a directory whose names fold case too, whose unlinks went through
-    /// `replace_child`, which timed them as they applied, after what the kernel wrote back since
-    /// (TASK-149.36).
+    /// back (TASK-149.36).
     ///
-    /// Requires transaction locks on `object_id`, and on |self|, or on its names where they are
-    /// its keys (`Transaction::change_names_unlocked`).
+    /// Requires transaction locks on `object_id`, and on |self|, or on its names
+    /// (`Transaction::change_names_unlocked`).
     pub async fn txn_remove_known_child(
         &self,
         transaction: &mut Transaction<'_>,
         name: &str,
         object_id: u64,
     ) -> Result<bool, Error> {
-        let key = if self.names_are_keys() {
-            ObjectKey::child(self.object_id(), name, self.dir_type())
-        } else {
-            let entry = self.lookup_ext(name).await?.ok_or(FxfsError::NotFound)?;
-            ensure!(
-                entry.object_id == object_id,
-                anyhow!(FxfsError::Inconsistent)
-                    .context(format!("{name} links {}, not {object_id}", entry.object_id))
-            );
-            entry.key
-        };
+        let key = ObjectKey::child(self.object_id(), name);
         transaction.add(
             self.store().store_object_id(),
             Mutation::replace_or_insert_object(key, ObjectValue::None),
@@ -858,7 +721,6 @@ impl<S: HandleOwner> Directory<S> {
     }
 
     /// Updates attributes for the directory.
-    /// Nb: The `casefold` attribute is ignored here. It should be set/cleared via `set_casefold()`.
     pub async fn update_attributes<'a>(
         &self,
         mut transaction: Transaction<'a>,
@@ -944,7 +806,6 @@ impl<S: HandleOwner> Directory<S> {
                 change_time: Timestamp::zero(),
                 sub_dirs: 0,
                 posix_attributes: None,
-                dir_type: DirType::Normal,
             });
         }
 
@@ -956,7 +817,7 @@ impl<S: HandleOwner> Directory<S> {
             .ok_or(FxfsError::NotFound)?;
         match value {
             ObjectValue::Object {
-                kind: ObjectKind::Directory { sub_dirs, dir_type },
+                kind: ObjectKind::Directory { sub_dirs },
                 attributes:
                     ObjectAttributes {
                         creation_time,
@@ -976,7 +837,6 @@ impl<S: HandleOwner> Directory<S> {
                 change_time,
                 sub_dirs,
                 posix_attributes,
-                dir_type,
             }),
             _ => {
                 bail!(
@@ -1023,7 +883,7 @@ impl<S: HandleOwner> Directory<S> {
         &self,
         merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
     ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), "", self.dir_type())).await
+        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), "")).await
     }
 
     /// Like `iter`, but seeks from a specific key.
@@ -1050,54 +910,7 @@ impl<S: HandleOwner> Directory<S> {
         merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
         from: &str,
     ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), from, self.dir_type())).await
-    }
-
-    /// Skips over directory entries for this directory until `predicate` returns a match.  Returns
-    /// `false` if there is no match.
-    async fn advance_until(
-        &self,
-        iter: &mut MergerIterator<'_, '_, ObjectKey, ObjectValue>,
-        predicate: impl Fn(&ObjectKey) -> ControlFlow<bool>,
-    ) -> Result<bool, Error> {
-        while let Some(item) = iter.get()
-            && matches!(
-                item,
-                ItemRef { key: ObjectKey { object_id, .. }, .. }
-                    if *object_id == self.object_id()
-            )
-        {
-            match item {
-                // Skip deleted items.
-                ItemRef { value: ObjectValue::None, .. } => {}
-                ItemRef { key, .. } => match predicate(key) {
-                    ControlFlow::Continue(()) => {}
-                    ControlFlow::Break(result) => return Ok(result),
-                },
-            }
-            iter.advance().await?
-        }
-        Ok(false)
-    }
-}
-
-fn casefold_predicate(
-    object_id: u64,
-    target_hash_code: u32,
-    name: &str,
-) -> impl Fn(&ObjectKey) -> ControlFlow<bool> + '_ {
-    move |key| match key {
-        ObjectKey {
-            object_id: oid,
-            data: ObjectKeyData::CasefoldChild { hash_code, name: actual_name },
-        } if *oid == object_id && *hash_code == target_hash_code => {
-            if fxfs_unicode::casefold_cmp(name, actual_name) == std::cmp::Ordering::Equal {
-                ControlFlow::Break(true)
-            } else {
-                ControlFlow::Continue(())
-            }
-        }
-        _ => ControlFlow::Break(false),
+        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), from)).await
     }
 }
 
@@ -1132,20 +945,6 @@ impl<'a, 'b> DirectoryIterator<'a, 'b> {
                 value: ObjectValue::Child(ChildValue { object_id, object_descriptor }),
                 ..
             }) if *oid == self.object_id => Some((&name, *object_id, object_descriptor)),
-            Some(ItemRef {
-                key:
-                    ObjectKey {
-                        object_id: oid,
-                        data: ObjectKeyData::CasefoldChild { hash_code: _, name },
-                    },
-                value: ObjectValue::Child(ChildValue { object_id, object_descriptor }),
-                ..
-            }) if *oid == self.object_id => Some((&name, *object_id, object_descriptor)),
-            Some(ItemRef {
-                key: ObjectKey { object_id: oid, data: ObjectKeyData::LegacyCasefoldChild(name) },
-                value: ObjectValue::Child(ChildValue { object_id, object_descriptor }),
-                ..
-            }) if *oid == self.object_id => Some((name.as_str(), *object_id, object_descriptor)),
             _ => None,
         }
     }
@@ -1210,14 +1009,6 @@ pub async fn replace_child_with_purge<'a, S: HandleOwner>(
     let mut sub_dirs_delta: i64 = 0;
     let now = Timestamp::now();
 
-    let is_same_dir_casefold_rename = if let Some((src_dir, src_name)) = src {
-        src_dir.object_id() == dst.0.object_id()
-            && src_dir.dir_type().is_casefold()
-            && fxfs_unicode::casefold_cmp(src_name, dst.1) == std::cmp::Ordering::Equal
-    } else {
-        false
-    };
-
     let src = if let Some((src_dir, src_name)) = src {
         let store_id = dst.0.store().store_object_id();
         assert_eq!(store_id, src_dir.store().store_object_id());
@@ -1247,16 +1038,7 @@ pub async fn replace_child_with_purge<'a, S: HandleOwner>(
     } else {
         None
     };
-    replace_child_with_object_impl(
-        transaction,
-        src,
-        dst,
-        sub_dirs_delta,
-        is_same_dir_casefold_rename,
-        now,
-        can_purge,
-    )
-    .await
+    replace_child_with_object_impl(transaction, src, dst, sub_dirs_delta, now, can_purge).await
 }
 
 /// Replaces dst.0/dst.1 with the given object, or unlinks if `src` is None.
@@ -1273,19 +1055,9 @@ pub async fn replace_child_with_object<'a, S: HandleOwner>(
     src: Option<(u64, ObjectDescriptor)>,
     dst: (&'a Directory<S>, &str),
     sub_dirs_delta: i64,
-    is_same_dir_casefold_rename: bool,
     timestamp: Timestamp,
 ) -> Result<ReplacedChild, Error> {
-    replace_child_with_object_impl(
-        transaction,
-        src,
-        dst,
-        sub_dirs_delta,
-        is_same_dir_casefold_rename,
-        timestamp,
-        false,
-    )
-    .await
+    replace_child_with_object_impl(transaction, src, dst, sub_dirs_delta, timestamp, false).await
 }
 
 async fn replace_child_with_object_impl<'a, S: HandleOwner>(
@@ -1293,12 +1065,10 @@ async fn replace_child_with_object_impl<'a, S: HandleOwner>(
     src: Option<(u64, ObjectDescriptor)>,
     dst: (&'a Directory<S>, &str),
     mut sub_dirs_delta: i64,
-    is_same_dir_casefold_rename: bool,
     timestamp: Timestamp,
     can_purge: bool,
 ) -> Result<ReplacedChild, Error> {
-    let deleted_info =
-        if is_same_dir_casefold_rename { None } else { dst.0.lookup_ext(dst.1).await? };
+    let deleted_info = dst.0.lookup_ext(dst.1).await?;
 
     let (deleted_id_and_descriptor, dst_key) = match deleted_info {
         Some(entry) => (Some((entry.object_id, entry.descriptor.clone())), Some(entry.key)),
@@ -1361,7 +1131,7 @@ async fn replace_child_with_object_impl<'a, S: HandleOwner>(
     let new_key = if matches!(new_value, ObjectValue::None) {
         None
     } else {
-        Some(ObjectKey::child(dst.0.object_id(), dst.1, dst.0.dir_type()))
+        Some(ObjectKey::child(dst.0.object_id(), dst.1))
     };
 
     if let Some(dst_key) = dst_key
@@ -1406,45 +1176,11 @@ mod tests {
         AttributeId, HandleOptions, LockKey, MutableNodeAttributes, NewChildStoreOptions,
         ObjectDescriptor, ObjectStore, SetExtendedAttributeMode, SpecialFile, StoreObjectHandle,
     };
-    use anyhow::Error;
     use assert_matches::assert_matches;
     use std::future::poll_fn;
     use std::task::Poll;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-
-    #[test]
-    fn test_casefold_equality_implies_hash_equality() {
-        use fxfs_unicode::CasefoldString;
-
-        let test_cases = vec![
-            ("Hello", "hello"),
-            ("straße", "STRASSE"),
-            ("e\u{0301}", "\u{00c9}"), // e + acute accent vs E with acute accent
-            ("hello\u{00ad}", "hello"), // soft hyphen (ignorable)
-            ("foo\u{200b}bar", "FOOBAR"), // zero width space (ignorable)
-        ];
-
-        for (a, b) in test_cases {
-            let cf_a = CasefoldString::new(a.to_string());
-            let cf_b = CasefoldString::new(b.to_string());
-            assert_eq!(cf_a, cf_b, "Strings {:?} and {:?} should be equal under casefolding", a, b);
-
-            let bytes_a: Vec<u8> =
-                cf_a.casefold_normalized_chars().collect::<String>().into_bytes();
-            let bytes_b: Vec<u8> =
-                cf_b.casefold_normalized_chars().collect::<String>().into_bytes();
-            assert_eq!(
-                bytes_a, bytes_b,
-                "Normalized bytes for {:?} and {:?} should be identical",
-                a, b
-            );
-
-            let hash_a = crate::tea_hash::tea_hash_filename(bytes_a);
-            let hash_b = crate::tea_hash::tea_hash_filename(bytes_b);
-            assert_eq!(hash_a, hash_b, "Hashes for {:?} and {:?} should be identical", a, b);
-        }
-    }
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
 
@@ -2012,21 +1748,19 @@ mod tests {
     /// cladefs: a name the caller knows the object of removed, by its key, unlooked-up, or in a
     /// directory whose names aren't their keys, looked up, in any case it folds to: the object's
     /// other names stay, its last puts it in the graveyard, and the times are left be. A name
-    /// linking another object is refused (TASK-149.36).
+    /// cladefs: `txn_remove_known_child` unlinks a name by key, leaving the directory's times
+    /// alone and putting the object in the graveyard on its last name (TASK-149.36).
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_txn_remove_known_child() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let store = fs.root_store();
         let store_id = store.store_object_id();
-        let dir;
-        let casefold;
         let mut transaction = store
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        dir = Directory::create(&mut transaction, &store).await.expect("create failed");
-        casefold = Directory::create(&mut transaction, &store).await.expect("create failed");
+        let dir = Directory::create(&mut transaction, &store).await.expect("create failed");
         let file =
             dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
         let file_oid = file.object_id();
@@ -2035,72 +1769,33 @@ mod tests {
             .expect("insert_child failed");
         store.adjust_refs(&mut transaction, file_oid, 1).await.expect("adjust_refs failed");
         transaction.commit().await.expect("commit failed");
-        casefold.set_casefold(true).await.expect("set_casefold failed");
-        let keys = lock_keys![
-            LockKey::object(store_id, casefold.object_id()),
-            LockKey::object(store_id, file_oid)
-        ];
-        let mut transaction =
-            store.new_transaction(keys, Options::default()).await.expect("new_transaction failed");
-        casefold
-            .insert_child(&mut transaction, "Foo", file_oid, ObjectDescriptor::File)
-            .await
-            .expect("insert_child failed");
-        store.adjust_refs(&mut transaction, file_oid, 1).await.expect("adjust_refs failed");
-        transaction.commit().await.expect("commit failed");
-        assert!(dir.names_are_keys());
-        assert!(!casefold.names_are_keys());
-        let before = [
-            dir.get_properties().await.expect("get_properties failed"),
-            casefold.get_properties().await.expect("get_properties failed"),
-        ];
+        let before = dir.get_properties().await.expect("get_properties failed");
 
-        let error = {
+        for (name, last) in [("foo", false), ("bar", true)] {
             let keys = lock_keys![
-                LockKey::object(store_id, casefold.object_id()),
+                LockKey::object(store_id, file_oid),
                 LockKey::object(store_id, dir.object_id())
             ];
             let mut transaction = store
                 .new_transaction(keys, Options::default())
                 .await
                 .expect("new_transaction failed");
-            casefold
-                .txn_remove_known_child(&mut transaction, "foo", dir.object_id())
-                .await
-                .expect_err("removed a name linking another object")
-        };
-        assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
-        for (directory, name, last) in
-            [(&dir, "foo", false), (&dir, "bar", false), (&casefold, "foo", true)]
-        {
-            let keys = lock_keys![
-                LockKey::object(store_id, file_oid),
-                LockKey::object(store_id, directory.object_id())
-            ];
-            let mut transaction = store
-                .new_transaction(keys, Options::default())
-                .await
-                .expect("new_transaction failed");
             assert_eq!(
-                directory
-                    .txn_remove_known_child(&mut transaction, name, file_oid)
+                dir.txn_remove_known_child(&mut transaction, name, file_oid)
                     .await
                     .expect("txn_remove_known_child failed"),
                 last
             );
             transaction.commit().await.expect("commit failed");
-            assert_eq!(directory.lookup(name).await.expect("lookup failed"), None);
+            assert_eq!(dir.lookup(name).await.expect("lookup failed"), None);
         }
-        assert_eq!(casefold.lookup("FOO").await.expect("lookup failed"), None);
         assert_eq!(store.graveyard_count(), 1);
         let graveyard_entry =
             ObjectKey::graveyard_entry(store.graveyard_directory_object_id(), file_oid);
         assert!(store.tree().find(&graveyard_entry).await.expect("find failed").is_some());
-        for (directory, before) in [&dir, &casefold].into_iter().zip(before) {
-            let after = directory.get_properties().await.expect("get_properties failed");
-            assert_eq!(after.modification_time, before.modification_time);
-            assert_eq!(after.change_time, before.change_time);
-        }
+        let after = dir.get_properties().await.expect("get_properties failed");
+        assert_eq!(after.modification_time, before.modification_time);
+        assert_eq!(after.change_time, before.change_time);
 
         std::mem::drop(file);
         store.tombstone_object(file_oid, Options::default(), None).await.expect("tombstone failed");
@@ -3313,126 +3008,6 @@ mod tests {
     }
 
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_create_casefold_directory() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let object_id = {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(lock_keys![], Options::default())
-                .await
-                .expect("new_transaction failed");
-            let dir =
-                Directory::create(&mut transaction, &fs.root_store()).await.expect("create failed");
-
-            let child_dir = dir
-                .create_child_dir(&mut transaction, "foo")
-                .await
-                .expect("create_child_dir failed");
-            let _child_dir_file = child_dir
-                .create_child_file(&mut transaction, "bAr")
-                .await
-                .expect("create_child_file failed");
-            transaction.commit().await.expect("commit failed");
-            dir.object_id()
-        };
-        fs.close().await.expect("Close failed");
-        let device = fs.take_device().await;
-
-        // We now have foo/bAr which should be case sensitive (casefold not enabled).
-
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        {
-            let dir = Directory::open(&fs.root_store(), object_id).await.expect("open failed");
-            let (object_id, object_descriptor) =
-                dir.lookup("foo").await.expect("lookup failed").expect("not found");
-            assert_eq!(object_descriptor, ObjectDescriptor::Directory);
-            let child_dir =
-                Directory::open(&fs.root_store(), object_id).await.expect("open failed");
-            assert!(!child_dir.dir_type().is_casefold());
-            assert!(child_dir.lookup("BAR").await.expect("lookup failed").is_none());
-            let (object_id, descriptor) =
-                child_dir.lookup("bAr").await.expect("lookup failed").unwrap();
-            assert_eq!(descriptor, ObjectDescriptor::File);
-
-            // We can't set casefold now because the directory isn't empty.
-            child_dir.set_casefold(true).await.expect_err("not empty");
-
-            // Delete the file and subdir and try again.
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![
-                        LockKey::object(fs.root_store().store_object_id(), child_dir.object_id()),
-                        LockKey::object(fs.root_store().store_object_id(), object_id),
-                    ],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            assert_matches!(
-                replace_child(&mut transaction, None, (&child_dir, "bAr"))
-                    .await
-                    .expect("replace_child failed"),
-                ReplacedChild::Object(..)
-            );
-            transaction.commit().await.expect("commit failed");
-
-            // This time enabling casefold should succeed.
-            child_dir.set_casefold(true).await.expect("set casefold");
-
-            assert!(child_dir.dir_type().is_casefold());
-
-            // Create the file again now that casefold is enabled.
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        fs.root_store().store_object_id(),
-                        child_dir.object_id()
-                    ),],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let _child_dir_file = child_dir
-                .create_child_file(&mut transaction, "bAr")
-                .await
-                .expect("create_child_file failed");
-            transaction.commit().await.expect("commit failed");
-
-            // Check that we can lookup via a case insensitive name.
-            assert!(child_dir.lookup("BAR").await.expect("lookup failed").is_some());
-            assert!(child_dir.lookup("bAr").await.expect("lookup failed").is_some());
-
-            // Enabling casefold should fail again as the dir is not empty.
-            child_dir.set_casefold(true).await.expect_err("set casefold");
-            assert!(child_dir.dir_type().is_casefold());
-
-            // Confirm that casefold will affect created subdirectories.
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        fs.root_store().store_object_id(),
-                        child_dir.object_id()
-                    ),],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let sub_dir = child_dir
-                .create_child_dir(&mut transaction, "sub")
-                .await
-                .expect("create_sub_dir failed");
-            transaction.commit().await.expect("commit failed");
-            assert!(sub_dir.dir_type().is_casefold());
-        };
-        fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_replace_directory_and_tombstone_on_remount() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -3487,7 +3062,6 @@ mod tests {
                 Some((oid, ObjectDescriptor::Directory)),
                 (&root_directory, "foo"),
                 0,
-                false,
                 Timestamp::now(),
             )
             .await
@@ -3513,180 +3087,5 @@ mod tests {
         yield_to_executor().await;
 
         fs.close().await.expect("close failed");
-    }
-
-    /// Verifies that renaming a file to a casefold-equivalent casing variant within
-    /// the same directory works.
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_casefold_same_dir_rename() -> Result<(), Error> {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume.new_volume("vol", NewChildStoreOptions::default()).await.unwrap();
-
-        let dir = {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(lock_keys![], Options::default())
-                .await
-                .expect("new_transaction failed");
-            let dir = Directory::create(&mut transaction, &store).await.expect("create failed");
-            transaction.commit().await.expect("commit");
-            dir
-        };
-
-        // 1. Enable casefolding on the directory
-        dir.set_casefold(true).await.expect("set casefold");
-
-        // 2. Create a child file "FOO" (casing: uppercase)
-        let file_id = {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let file =
-                dir.create_child_file(&mut transaction, "FOO").await.expect("create file failed");
-            transaction.commit().await.expect("commit failed");
-            file.object_id()
-        };
-
-        // 3. Confirm target can be looked up under both "FOO" and "foo" (due to case-insensitivity)
-        let (lookup_id_foo, _) = dir.lookup("foo").await.unwrap().unwrap();
-        assert_eq!(lookup_id_foo, file_id);
-        let (lookup_id_foo_upper, _) = dir.lookup("FOO").await.unwrap().unwrap();
-        assert_eq!(lookup_id_foo_upper, file_id);
-
-        // 4. Execute the same-directory casefolded rename "FOO" -> "foo" (lowercase)
-        {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![
-                        LockKey::object(store.store_object_id(), dir.object_id()),
-                        LockKey::object(store.store_object_id(), file_id),
-                    ],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-
-            replace_child(&mut transaction, Some((&dir, "FOO")), (&dir, "foo"))
-                .await
-                .expect("same-dir casefold rename failed");
-
-            transaction.commit().await.expect("commit failed");
-        }
-
-        // 5. Assert the file was NOT purged (lookup still succeeds!)
-        let (final_id_foo, _) = dir.lookup("foo").await.unwrap().unwrap();
-        assert_eq!(final_id_foo, file_id);
-
-        // Verify survival of the underlying node handle (ObjectStore::open_object)
-        let file_handle = ObjectStore::open_object(&dir.owner(), file_id, HandleOptions::default())
-            .await
-            .expect("Underlying file object was prematurely tombstoned / graveyarded!");
-
-        // Assert reference count is exactly 1.
-        let properties = file_handle.get_properties().await.unwrap();
-        assert_eq!(properties.refs, 1);
-
-        // Assert the graveyard is completely empty (proves NO graveyard tombstone leak occurred!)
-        assert_eq!(dir.store().graveyard_count(), 0);
-
-        // 6. Verify the internal casing entry was updated to "foo"
-        let mut count = 0;
-        let mut found_casing = String::new();
-        let layer_set = dir.store().tree().layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = dir.iter(&mut merger).await.expect("iter");
-        while let Some(entry) = iter.get() {
-            count += 1;
-            found_casing = entry.0.to_string();
-            iter.advance().await.expect("advance");
-        }
-        assert_eq!(count, 1);
-        assert_eq!(found_casing, "foo"); // mapping has successfully changed from "FOO" to "foo".
-
-        fs.close().await.expect("Close failed");
-        Ok(())
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_casefold_rename_mismatched_casing() -> Result<(), Error> {
-        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-
-        let root_volume = root_volume(fs.clone()).await.unwrap();
-        let store = root_volume.new_volume("vol", NewChildStoreOptions::default()).await.unwrap();
-
-        let dir = {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(lock_keys![], Options::default())
-                .await
-                .expect("new_transaction failed");
-            let dir = Directory::create(&mut transaction, &store).await.expect("create failed");
-            transaction.commit().await.expect("commit");
-            dir
-        };
-
-        dir.set_casefold(true).await.expect("set casefold");
-
-        // Create "foo" (lowercase)
-        let file_id = {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(store.store_object_id(), dir.object_id())],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let file =
-                dir.create_child_file(&mut transaction, "foo").await.expect("create file failed");
-            transaction.commit().await.expect("commit failed");
-            file.object_id()
-        };
-
-        // Rename "FOO" (uppercase) to "bar"
-        {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![
-                        LockKey::object(store.store_object_id(), dir.object_id()),
-                        LockKey::object(store.store_object_id(), file_id),
-                    ],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-
-            replace_child(&mut transaction, Some((&dir, "FOO")), (&dir, "bar"))
-                .await
-                .expect("rename failed");
-
-            transaction.commit().await.expect("commit failed");
-        }
-
-        // Check if "foo" (or "FOO") is gone.
-        let lookup_foo = dir.lookup("foo").await.unwrap();
-        assert!(
-            lookup_foo.is_none(),
-            "Old name 'foo' still exists! Lookup returned: {:?}",
-            lookup_foo
-        );
-
-        // Check if "bar" exists.
-        let (lookup_id_bar, _) = dir.lookup("bar").await.unwrap().expect("bar not found");
-        assert_eq!(lookup_id_bar, file_id);
-
-        fs.close().await.expect("Close failed");
-        Ok(())
     }
 }

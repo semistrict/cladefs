@@ -506,7 +506,6 @@ dependencies = [
  "fuchsia-async",
  "fuchsia-sync",
  "futures",
- "fxfs-unicode",
  "fxfs_macros",
  "getrandom 0.4.3",
  "linked-hash-map",
@@ -537,29 +536,6 @@ dependencies = [
  "log",
  "rustc-hash",
 ]
-
-[[package]]
-name = "fxfs-unicode"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "fprint",
- "fxfs-unicode-gen",
- "fxfs-unicode-types",
- "serde",
- "smallvec",
-]
-
-[[package]]
-name = "fxfs-unicode-gen"
-version = "0.1.0"
-dependencies = [
- "fxfs-unicode-types",
-]
-
-[[package]]
-name = "fxfs-unicode-types"
-version = "0.1.0"
 
 [[package]]
 name = "fxfs_macros"

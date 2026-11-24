@@ -538,12 +538,12 @@ mod tests {
         use crate::object_store::journal::JournalRecord;
         use crate::object_store::object_record::{ObjectKey, ObjectValue};
         use crate::object_store::transaction::Mutation;
-        use crate::object_store::{DirType, ObjectDescriptor};
+        use crate::object_store::ObjectDescriptor;
         use crate::serialized_types::{DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Versioned as _};
 
         // A name as long as it takes.
         let long = (0..4096).find_map(|len| {
-            let key = ObjectKey::child(7, &"n".repeat(len), DirType::Normal);
+            let key = ObjectKey::child(7, &"n".repeat(len));
             let value = ObjectValue::child(9, ObjectDescriptor::File);
             let mutation = Mutation::replace_or_insert_object(key, value);
             let mut bytes = Vec::new();
@@ -610,7 +610,7 @@ mod tests {
         use crate::object_store::journal::JournalRecord;
         use crate::object_store::object_record::{ObjectKey, ObjectValue};
         use crate::object_store::transaction::Mutation;
-        use crate::object_store::{DirType, ObjectDescriptor};
+        use crate::object_store::ObjectDescriptor;
         use crate::serialized_types::Versioned as _;
 
         let bs = BLOCK_SIZE.get() as usize;
@@ -618,7 +618,7 @@ mod tests {
         // From a block's last byte to the end of the next.
         let len = 1 + contents;
         let record = (0..bs).find_map(|name| {
-            let key = ObjectKey::child(7, &"n".repeat(name), DirType::Normal);
+            let key = ObjectKey::child(7, &"n".repeat(name));
             let value = ObjectValue::child(9, ObjectDescriptor::File);
             let mutation = Mutation::replace_or_insert_object(key, value);
             let mut bytes = Vec::new();

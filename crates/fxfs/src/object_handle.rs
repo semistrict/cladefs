@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::object_store::{DirType, PosixAttributes, Timestamp};
+use crate::object_store::{PosixAttributes, Timestamp};
 use anyhow::Error;
 use async_trait::async_trait;
 use std::future::Future;
@@ -50,8 +50,6 @@ pub struct ObjectProperties {
     pub sub_dirs: u64,
     /// POSIX attributes: mode, uid, gid, rdev
     pub posix_attributes: Option<PosixAttributes>,
-    /// The type of directory: casefolded or not.
-    pub dir_type: DirType,
 }
 
 #[async_trait]

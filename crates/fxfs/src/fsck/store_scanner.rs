@@ -14,12 +14,12 @@ use crate::lsm_tree::types::{Item, ItemRef, LayerIterator};
 use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::graveyard::Graveyard;
 use crate::object_store::{
-    AttributeId, AttributeKey, ChildValue, DirType, ExtendedAttributeValue, ExtentMode,
-    ExtentValue, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind,
-    ObjectStore, ObjectValue, ProjectId, ProjectProperty,
+    AttributeId, AttributeKey, ChildValue, ExtendedAttributeValue, ExtentMode, ExtentValue,
+    ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore,
+    ObjectValue, ProjectId, ProjectProperty,
 };
 use crate::range::RangeExt;
-use anyhow::{Error, bail};
+use anyhow::Error;
 use rustc_hash::FxHashSet as HashSet;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
@@ -97,8 +97,6 @@ struct ScannedDir {
     visited: UnsafeCell<bool>,
     // Attributes for this directory.
     attributes: ScannedAttributes,
-    // The type of directory (casefolding, etc.)
-    dir_type: DirType,
 }
 
 unsafe impl Sync for ScannedDir {}
@@ -221,7 +219,7 @@ impl<'a> ScannedStore<'a> {
                         );
                     }
                     ObjectValue::Object {
-                        kind: ObjectKind::Directory { sub_dirs, dir_type },
+                        kind: ObjectKind::Directory { sub_dirs },
                         attributes: ObjectAttributes { project_id, allocated_size, .. },
                     } => {
                         if let Some(project_id) = project_id {
@@ -252,7 +250,6 @@ impl<'a> ScannedStore<'a> {
                                     in_graveyard: false,
                                     extended_attributes: Vec::new(),
                                 },
-                                dir_type: *dir_type,
                             }),
                         );
                     }
@@ -362,10 +359,7 @@ impl<'a> ScannedStore<'a> {
                     }
                 }
             }
-            // TODO(b/365631616): Check that the child type matches the directory metadata.
-            ObjectKeyData::Child { .. }
-            | ObjectKeyData::CasefoldChild { .. }
-            | ObjectKeyData::LegacyCasefoldChild(_) => match value {
+            ObjectKeyData::Child { .. } => match value {
                 ObjectValue::None => {}
                 ObjectValue::Child(ChildValue { object_id: child_id, object_descriptor }) => {
                     if *child_id == INVALID_OBJECT_ID {
@@ -494,58 +488,7 @@ impl<'a> ScannedStore<'a> {
         parent_id: u64,
         child_id: u64,
         object_descriptor: &ObjectDescriptor,
-        object_key_data: &ObjectKeyData,
     ) -> Result<(), Error> {
-        if let Some(ScannedObject::Directory(dir)) = self.objects.get(&parent_id) {
-            match object_key_data {
-                ObjectKeyData::Child { .. } => {
-                    if dir.dir_type != DirType::Normal {
-                        self.fsck.error(FsckError::CasefoldInconsistency(
-                            self.store_id,
-                            parent_id,
-                            child_id,
-                        ))?;
-                    }
-                }
-                ObjectKeyData::CasefoldChild { hash_code, name } => {
-                    if dir.dir_type != DirType::Casefold {
-                        self.fsck.error(FsckError::CasefoldInconsistency(
-                            self.store_id,
-                            parent_id,
-                            child_id,
-                        ))?;
-                    }
-                    let cf = fxfs_unicode::CasefoldStr::new(name);
-                    let casefolded =
-                        cf.casefold_normalized_chars().flat_map(fxfs_unicode::utf8_bytes);
-                    let expected_hash = crate::tea_hash::tea_hash_filename(casefolded);
-                    if *hash_code != expected_hash {
-                        self.fsck.error(FsckError::BadCasefoldHash(
-                            self.store_id,
-                            parent_id,
-                            child_id,
-                            expected_hash,
-                            *hash_code,
-                        ))?;
-                    }
-                }
-                ObjectKeyData::LegacyCasefoldChild(_) => {
-                    if dir.dir_type != DirType::LegacyCasefold {
-                        self.fsck.error(FsckError::CasefoldInconsistency(
-                            self.store_id,
-                            parent_id,
-                            child_id,
-                        ))?;
-                    }
-                }
-                _ => {
-                    bail!(
-                        "Unexpected object_key_data type in process_child: {:?}",
-                        object_key_data
-                    );
-                }
-            };
-        }
         match (self.objects.get_mut(&child_id), object_descriptor) {
             (Some(ScannedObject::File(ScannedFile { parents, descriptor, .. })), linked)
                 if linked == descriptor || linked == &ObjectDescriptor::Volume =>
@@ -820,19 +763,10 @@ async fn scan_extents_and_directory_children<'a>(
                 };
             }
             ItemRef {
-                key:
-                    ObjectKey {
-                        object_id,
-                        data:
-                            object_key_data @ (ObjectKeyData::Child { .. }
-                            | ObjectKeyData::CasefoldChild { .. }
-                            | ObjectKeyData::LegacyCasefoldChild(_)),
-                    },
+                key: ObjectKey { object_id, data: ObjectKeyData::Child { .. } },
                 value: ObjectValue::Child(ChildValue { object_id: child_id, object_descriptor }),
                 ..
-            } => {
-                scanned.process_child(*object_id, *child_id, object_descriptor, object_key_data)?
-            }
+            } => scanned.process_child(*object_id, *child_id, object_descriptor)?,
             _ => {}
         }
         iter.advance().await?;

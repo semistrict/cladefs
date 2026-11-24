@@ -304,8 +304,6 @@ before, such as `docs/measurements` and tasks closed before it, keep the old nam
 - **`guest/linux`:** GPL-2.0 or BSD-3-Clause, built into the guest's Linux
   kernel (GPL-2.0), which `scripts/build-guest-kernel.sh` downloads; its
   patches to the kernel are GPL-2.0, as the kernel is.
-- **The Unicode tables (`fxfs-unicode-gen`):** generated from the Unicode
-  Character Database, under the Unicode license (`LICENSE-UNICODE`).
 - **Firecracker (`vendor/firecracker`):** Apache-2.0.
 - **The guest tests' harness (`guest/tests`):** libkrun's test framework,
   Apache-2.0 (`guest/tests/LICENSE.libkrun`), its files keeping libkrun's
