@@ -663,8 +663,9 @@ fn cpu_seconds() -> f64 {
 fn govern() {
     use cladefs::cladefsd::{governor, memory};
     let host = governor::host_memory().expect("reading the host's memory");
-    let headroom = governor::headroom(host.total).expect("the daemon's headroom");
-    let floor = governor::floor(governor::limit(host.total)).expect("the daemon's floor");
+    let limit = governor::limit(host.total);
+    let headroom = governor::headroom(limit).expect("the daemon's headroom");
+    let floor = governor::floor(limit).expect("the daemon's floor");
     // The bench's outermost entry, before its runtime: what the governor's turn awaits, here.
     let allowance = governor::allowance(memory::governed_bytes(), host, headroom, floor, false);
     futures::executor::block_on(memory::govern(allowance.bytes));

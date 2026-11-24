@@ -47,14 +47,25 @@ use std::time::Duration;
 pub const INTERVAL: Duration = Duration::from_millis(100);
 
 /// What the governor leaves free of the memory available to the daemon:
-/// `CLADEFSD_HEADROOM` bytes, or a sixteenth of the host's memory, 1 GiB at least: room for
-/// VMs' memory to grow into between looks, and for the host's own.
-pub fn headroom(total: u64) -> Result<u64, String> {
-    match node_local::env::var("CLADEFSD_HEADROOM") {
-        Ok(bytes) if !bytes.is_empty() => {
+/// `CLADEFSD_HEADROOM` bytes, or a sixteenth of the memory the daemon may have, `limit`
+/// ([`limit`]), 1 GiB at least and half of `limit` at most: room for VMs' memory to grow into
+/// between looks, and for the host's own (board 8357).
+pub fn headroom_of(limit: u64, set: Option<&str>) -> Result<u64, String> {
+    match set {
+        Some(bytes) if !bytes.is_empty() => {
             bytes.parse().map_err(|_| format!("CLADEFSD_HEADROOM is bytes, not {bytes:?}"))
         }
-        _ => Ok((total / 16).max(1 << 30)),
+        _ => Ok((limit / 16).max(1 << 30).min(limit / 2)),
+    }
+}
+
+/// What the governor leaves free of the memory available to the daemon, reading
+/// `CLADEFSD_HEADROOM` ([`headroom_of`]).
+pub fn headroom(limit: u64) -> Result<u64, String> {
+    match node_local::env::var("CLADEFSD_HEADROOM") {
+        Ok(bytes) => headroom_of(limit, Some(&bytes)),
+        // Unset or non-UTF8: use the default headroom for `limit`.
+        Err(_) => headroom_of(limit, None),
     }
 }
 
@@ -64,14 +75,24 @@ pub fn headroom(total: u64) -> Result<u64, String> {
 /// VMs' windows use, their guests' DAX faults' pages (board 5662; 176 small VMs on one base used
 /// about 40 MiB of it). Of the cgroup's limit, not the host's, where that is less: a floor past
 /// what the cgroup holds would have its OOM killer end what relief would have shrunk.
-pub fn floor(limit: u64) -> Result<u64, String> {
-    let bytes = match node_local::env::var("CLADEFSD_MEMORY_FLOOR") {
-        Ok(bytes) if !bytes.is_empty() => {
+pub fn floor_of(limit: u64, set: Option<&str>) -> Result<u64, String> {
+    let bytes = match set {
+        Some(bytes) if !bytes.is_empty() => {
             bytes.parse().map_err(|_| format!("CLADEFSD_MEMORY_FLOOR is bytes, not {bytes:?}"))?
         }
         _ => (limit / 64).max(256 << 20).min(limit / 8),
     };
     Ok((bytes / SLAB * SLAB).max(SLAB))
+}
+
+/// cladefs: the least the governor leaves the daemon's memory, reading `CLADEFSD_MEMORY_FLOOR`
+/// ([`floor_of`]).
+pub fn floor(limit: u64) -> Result<u64, String> {
+    match node_local::env::var("CLADEFSD_MEMORY_FLOOR") {
+        Ok(bytes) => floor_of(limit, Some(&bytes)),
+        // Unset or non-UTF8: use the default floor for `limit`.
+        Err(_) => floor_of(limit, None),
+    }
 }
 
 /// cladefs: the memory the daemon may have: the host's, `total`, or, if less, the least limit of
@@ -319,7 +340,8 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
 /// holding no thread (board 2946).
 pub(super) fn start_on(daemon: &Arc<Daemon>) -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
-    let (headroom, floor) = (headroom(host.total)?, floor(limit(host.total))?);
+    let limit = limit(host.total);
+    let (headroom, floor) = (headroom(limit)?, floor(limit)?);
     daemon.governor.floor.store(floor, Ordering::Relaxed);
     let governing = Arc::clone(daemon);
     super::run::service(daemon, "memory governor", move || govern_every(governing, headroom, floor))
@@ -497,5 +519,50 @@ mod tests {
         let tenants = [(0xa, 3), (0xb, 1), (0xc, 0)];
         assert_eq!(shares(400, &tenants), [(0xa, 300), (0xb, 100), (0xc, 0)]);
         assert_eq!(shares(400, &[(0xf, 0)]), [(0xf, 0)]);
+    }
+
+    /// board 8357: an idle daemon in a limited cgroup on a large host sizes its default headroom
+    /// to its cgroup limit (capped at half the limit), not the host's total RAM, so it admits
+    /// cells while idle and refuses them only when the cgroup or host is genuinely full.
+    #[test]
+    fn headroom_in_a_limited_cgroup_sizes_to_the_cgroup_not_the_host() {
+        const GIB: u64 = 1 << 30;
+        const MIB: u64 = 1 << 20;
+        let host_total = 256 * GIB;
+
+        // 8 GiB cgroup on a 256 GiB host: before the fix, headroom was 256/16 = 16 GiB, so
+        // `room = (0 + 8 GiB).saturating_sub(16 GiB) = 0 < floor` refused every cell while idle.
+        let cgroup_limit = 8 * GIB;
+        let headroom = headroom_of(cgroup_limit, None).unwrap();
+        let floor = floor_of(cgroup_limit, None).unwrap();
+        assert_eq!(headroom, GIB);
+        assert_eq!(floor, 256 * MIB);
+
+        // Idle cgroup: available is nearly the full 8 GiB cgroup limit -> admits cells.
+        let idle = HostMemory { total: host_total, available: cgroup_limit - 64 * MIB };
+        let allowed = allowance(0, idle, headroom, floor, false);
+        assert!(!allowed.full, "idle 8 GiB cgroup must not be full: {allowed:?}");
+        assert!(allowed.bytes > floor, "{allowed:?}");
+
+        // Full cgroup: available drops below headroom + floor -> refuses new cells.
+        let full_cgroup = HostMemory { total: host_total, available: headroom + floor - 64 * MIB };
+        assert!(allowance(0, full_cgroup, headroom, floor, false).full);
+
+        // Full host: MemAvailable < cgroup room -> refuses new cells.
+        let full_host = HostMemory { total: host_total, available: 512 * MIB };
+        assert!(allowance(0, full_host, headroom, floor, false).full);
+
+        // Small cgroup (1 GiB): default headroom caps at limit / 2 (512 MiB), not 1 GiB.
+        let small_limit = GIB;
+        let small_headroom = headroom_of(small_limit, None).unwrap();
+        let small_floor = floor_of(small_limit, None).unwrap();
+        assert_eq!(small_headroom, 512 * MIB);
+        assert_eq!(small_floor, 128 * MIB);
+        let small_idle = HostMemory { total: host_total, available: small_limit - 64 * MIB };
+        assert!(!allowance(0, small_idle, small_headroom, small_floor, false).full);
+
+        // Explicit override still takes precedence and rejects non-numeric values.
+        assert_eq!(headroom_of(cgroup_limit, Some("4096")), Ok(4096));
+        assert!(headroom_of(cgroup_limit, Some("not-a-number")).is_err());
     }
 }
