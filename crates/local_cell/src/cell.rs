@@ -669,11 +669,11 @@ impl<D: Dir> Framer<D> {
         number: SegmentId,
         part: u64,
     ) -> Locked<'a, D::File> {
-        let Some((raw, look)) = Self::to_see(&state, number) else { return state };
+        let Some((raw, look, raw_only)) = Self::to_see(&state, number) else { return state };
         state.framing.looking = true;
         drop(state);
         fail::fail_point!("cell::looking_ahead");
-        let seen = self.look(&*raw, part, look);
+        let seen = self.look(&*raw, part, look, raw_only);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
         state.framing.looking = false;
@@ -686,15 +686,19 @@ impl<D: Dir> Framer<D> {
     /// packed, which this has it do if the segment looks as if it will be framed in a copy; unless
     /// its framing took its parts' looks already, or the cell failed, or closed (TASK-400).
     fn see_here(&self, state: &mut State<D::File>, number: SegmentId, part: u64) {
-        if let Some((raw, look)) = Self::to_see(state, number) {
-            let seen = self.look(&*raw, part, look);
+        if let Some((raw, look, raw_only)) = Self::to_see(state, number) {
+            let seen = self.look(&*raw, part, look, raw_only);
             Self::saw(state, (number, part), seen);
         }
     }
 
     /// cladefs: segment `number`'s raw file, if a look ahead at a part of it is for anything
-    /// ([`Framer::see_here`]), and the look at its parts seen so far.
-    fn to_see(state: &State<D::File>, number: SegmentId) -> Option<(Arc<RawFile<D::File>>, Look)> {
+    /// ([`Framer::see_here`]), the look at its parts seen so far, and whether the cell is
+    /// ephemeral (raw-only look-ahead, board 11365).
+    fn to_see(
+        state: &State<D::File>,
+        number: SegmentId,
+    ) -> Option<(Arc<RawFile<D::File>>, Look, bool)> {
         let open = state.standing.whole().is_ok() && !state.standing.is_closed();
         open.then(|| state.segments.see(number)).flatten()
     }
@@ -706,13 +710,18 @@ impl<D: Dir> Framer<D> {
     /// callers' alone, as the cell's tests' are, and in the Shuttle tests, whose schedule no thread
     /// of the cell's runs outside of. cladefs: of an encrypted raw file too, its part seen as
     /// stored and packed, and held, in the clear, in memory, until its framing encrypts it
-    /// (TASK-411.23, TASK-421).
+    /// (TASK-411.23, TASK-421). Ephemeral segments (`raw_only`) skip decryption and compression
+    /// sampling (board 11365).
     fn look(
         &self,
         raw: &RawFile<D::File>,
         part: u64,
         look: Look,
+        raw_only: bool,
     ) -> io::Result<(Seen, Option<Hold>)> {
+        if raw_only {
+            return Ok((framing::see_raw(raw, part)?, None));
+        }
         if !self.dir.concurrent() || cfg!(feature = "shuttle") {
             let (seen, packed) = framing::see(raw, part, look)?;
             return Ok((seen, packed.map(|packed| self.held.hold(packed))));

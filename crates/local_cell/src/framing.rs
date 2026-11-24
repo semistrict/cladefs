@@ -249,6 +249,18 @@ fn read_seen<F: File>(
     Ok((data, Seen { part: stored, look }))
 }
 
+/// cladefs: part `part` of an ephemeral segment's data, of `len` bytes, read as stored for its
+/// in-place `RawPart` CRC/tag alone: ephemeral segments always frame in place as
+/// `Encryption::Sectors` (board 6905), so neither decryption nor compression sampling is needed
+/// (board 11365).
+fn read_seen_raw<F: File>(raw: &RawFile<F>, (part, len): (u64, u64)) -> io::Result<(Buffer, Seen)> {
+    let mut data = Buffer::of(len as usize);
+    let at = part * PART;
+    raw.file().read_at(&mut data, at)?;
+    let stored = RawPart::of(part, &data, raw.sectors());
+    Ok((data, Seen { part: stored, look: Look::default() }))
+}
+
 /// cladefs: what a look ahead at a part of a segment's data took of it, as the segment filled
 /// ([`see`], TASK-400): what it saw, and the part packed, held, if its segment looked as if it
 /// would be framed in a copy then.
@@ -282,6 +294,49 @@ impl Stored {
         let part = PartPacker::new().compress(0, &[]);
         Self { part, raw: Some(Buffer(vec![0; bytes])) }
     }
+}
+
+/// cladefs: a look ahead at part `part` of an ephemeral segment's data, whole, in its raw file
+/// `raw` (board 11365): computes its `RawPart` CRC/tag while the part is still hot in the cell's
+/// page cache, without decrypting, sampling, or holding packed buffers, so closing the segment
+/// frames in place with zero read-back of completed parts.
+pub(crate) fn see_raw<F: File>(raw: &RawFile<F>, part: u64) -> io::Result<Seen> {
+    let (_, seen) = read_seen_raw(raw, (part, PART))?;
+    SEEN_AHEAD.fetch_add(PART, Ordering::Relaxed);
+    Ok(seen)
+}
+
+/// cladefs: what a raw-only look at part `part` sees, for audit checks of [`read_raw`].
+#[cfg(any(test, feature = "audit"))]
+fn seen_again_raw<F: File>(raw: &RawFile<F>, part: u64) -> io::Result<Seen> {
+    Ok(read_seen_raw(raw, (part, PART))?.1)
+}
+
+/// cladefs: the parts of an ephemeral segment framed in place (`board 6905`, `board 11365`): uses
+/// each part's `RawPart` from `ahead` without reading it from disk, and reads only un-seen parts
+/// (e.g. a trailing partial part) as raw stored bytes.
+pub(crate) fn read_raw<F: File>(
+    raw: &RawFile<F>,
+    len: u64,
+    ahead: Vec<Option<Looked>>,
+) -> io::Result<Vec<Read>> {
+    let mut ahead = ahead.into_iter();
+    (0..len.div_ceil(PART))
+        .map(|part| {
+            let part_len = (len - part * PART).min(PART);
+            if let Some(Looked { seen, held }) = ahead.next().flatten() {
+                #[cfg(any(test, feature = "audit"))]
+                assert_eq!(
+                    seen_again_raw(raw, part)?,
+                    seen,
+                    "ephemeral part {part}, seen ahead, changed since"
+                );
+                return Ok(Read { data: None, packed: None, held, seen, len: part_len });
+            }
+            let (data, seen) = read_seen_raw(raw, (part, part_len))?;
+            Ok(Read { data: Some(data), packed: None, held: None, seen, len: part_len })
+        })
+        .collect()
 }
 
 /// cladefs: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the

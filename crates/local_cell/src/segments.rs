@@ -151,11 +151,11 @@ impl<F> Segment<F> {
         }
     }
 
-    /// cladefs: a new segment, open, holding nothing yet: looked at ahead for its framing unless
-    /// its cell is `ephemeral`, whose segments are never framed (TASK-698.2).
-    fn new_in(phase: Phase<F>, ephemeral: bool) -> Self {
-        let segment = Self::new(phase, 0);
-        Self { ahead: segment.ahead.filter(|_| !ephemeral), ..segment }
+    /// cladefs: a new segment, open, holding nothing yet: looked at ahead for its framing, for
+    /// ephemeral cells too since board 6905 frames ephemeral segments in place (`framing::see_raw`,
+    /// board 11365).
+    fn new_in(phase: Phase<F>, _ephemeral: bool) -> Self {
+        Self::new(phase, 0)
     }
 
     /// A write of `len` bytes at `at` in it is done, `live` of them holding extents' data: returns
@@ -545,14 +545,15 @@ impl<F: File> Segments<F> {
     }
 
     /// cladefs: segment `number`'s raw file, to look at a part of ahead of its framing, if its
-    /// framing is yet to take its parts' looks (TASK-400); and the look at its parts seen so far,
-    /// which says whether to pack the next ahead too ([`framing::see`]).
-    pub fn see(&self, number: SegmentId) -> Option<(Arc<RawFile<F>>, Look)> {
+    /// framing is yet to take its parts' looks (TASK-400); the look at its parts seen so far,
+    /// which says whether to pack the next ahead too ([`framing::see`]); and whether the cell is
+    /// ephemeral, whose look-ahead is raw-only ([`framing::see_raw`], board 11365).
+    pub fn see(&self, number: SegmentId) -> Option<(Arc<RawFile<F>>, Look, bool)> {
         let segment = self.tracked.get(&number)?;
         let look = segment.ahead.as_ref()?.look;
         match &segment.phase {
             Phase::Open { raw, .. } | Phase::Full { raw, .. } | Phase::Framing { raw, .. } => {
-                Some((raw.clone(), look))
+                Some((raw.clone(), look, self.ephemeral))
             }
             Phase::Failed { .. } | Phase::Closed => None,
         }
@@ -1705,7 +1706,7 @@ fn frame_segment<D: Dir>(
         // in-flight writer would race with hard-linking `raw` (board 6905).
         let in_place = quiet && len > 0 && len.is_multiple_of(SECTOR);
         if in_place {
-            let parts = framing::read(&**raw, len, true, ahead)?;
+            let parts = framing::read_raw(&**raw, len, ahead)?;
             let read: u64 =
                 parts.iter().filter(|part| part.data.is_some()).map(|part| part.len).sum();
             FRAMING_READ.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
@@ -2351,9 +2352,14 @@ mod tests {
         seeing: Vec<(SegmentId, u64)>,
     ) {
         for (number, part) in seeing {
-            let (raw, look) = segments.see(number).expect("a part to look at");
-            let (seen, packed) = framing::see(&*raw, part, look).unwrap();
-            segments.saw(number, part, seen, packed.map(|packed| held.hold(packed)));
+            let (raw, look, raw_only) = segments.see(number).expect("a part to look at");
+            if raw_only {
+                let seen = framing::see_raw(&*raw, part).unwrap();
+                segments.saw(number, part, seen, None);
+            } else {
+                let (seen, packed) = framing::see(&*raw, part, look).unwrap();
+                segments.saw(number, part, seen, packed.map(|packed| held.hold(packed)));
+            }
         }
     }
 
@@ -2529,8 +2535,63 @@ mod tests {
         assert_eq!(segments_framed_in_place() - before.1, 1, "framed in place");
         make_durable(&dir, CELL.id, (&[(segment(0), framed.clone())], false), Instant::now())
             .unwrap();
-        segments.framed(segment(0), framed);
-        assert_eq!(data(&mut segments, &dir, segment(0)), raw_data, "framed as it was written");
+        segments.framed(segment(0), framed.clone());
+        let decoded = extent_frame::data(
+            &read_whole(&*framed.file).unwrap(),
+            &bucket_cell::testing::ring([CELL]).of(CELL.id),
+        )
+        .unwrap();
+        assert_eq!(decoded, raw_data, "framed as it was written");
+    }
+
+    /// cladefs: board 11365: ephemeral segments always frame in place (board 6905), so their
+    /// completed parts are hashed raw-only ahead of close without holding packed buffers and
+    /// closing reads only the un-seen trailing partial part back from disk.
+    #[test]
+    fn ephemeral_framings_read_only_the_parts_not_seen_ahead() {
+        let dir = MemDir::new();
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let chain = Chain::new(CELL, 0, 0, 0);
+        let mut segments = Segments::open(
+            &dir,
+            (CELL.id, BTreeMap::new()),
+            (0, 0, chain),
+            (64, bucket_cell::testing::ring([CELL])),
+            true,
+        )
+        .unwrap();
+        // Compressible bytes: proves ephemeral look-ahead never packs or holds compressed buffers.
+        for fill in [b'a', b'b', b'c'] {
+            let (number, file, at) = segments.reserve(PART).unwrap();
+            file.write_at(&vec![fill; PART as usize], at).unwrap();
+            segments.held(number, (at, PART));
+        }
+        let (number, file, at) = segments.reserve(BLOCK).unwrap();
+        file.write_at(&[b'z'; BLOCK as usize], at).unwrap();
+        segments.held(number, (at, BLOCK));
+
+        let seeing = segments.take_seeing();
+        assert_eq!(seeing, [(segment(0), 0), (segment(0), 1), (segment(0), 2)]);
+        let held = HeldParts::new();
+        look_ahead(&mut segments, &held, seeing);
+        assert_eq!(held.bytes(), 0, "ephemeral look-ahead never holds packed parts");
+
+        let unframed = segments.close(&dir, 1, 0).unwrap();
+        let raw_data = data(&mut segments, &dir, segment(0));
+        let seen = segments.take_seen(segment(0));
+        assert_eq!(seen.iter().map(Option::is_some).collect::<Vec<_>>(), [true; 3]);
+        let before = framing_reads().0;
+        let framed = unframed.frame(&dir, seen).unwrap();
+        assert_eq!(framing_reads().0 - before, BLOCK, "only the trailing partial part read");
+        make_durable(&dir, CELL.id, (&[(segment(0), framed.clone())], false), Instant::now())
+            .unwrap();
+        segments.framed(segment(0), framed.clone());
+        let decoded = extent_frame::data(
+            &read_whole(&*framed.file).unwrap(),
+            &bucket_cell::testing::ring([CELL]).of(CELL.id),
+        )
+        .unwrap();
+        assert_eq!(decoded, raw_data, "framed as it was written");
     }
 
     /// The segments of an encrypted cell, under `dek`, with none closed, and its keys.
