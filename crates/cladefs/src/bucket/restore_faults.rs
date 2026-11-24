@@ -472,7 +472,6 @@ impl Hosts {
                 // bucket's identity (TASK-633.9), a reference's mark, retired or taken back
                 // (TASK-395.13), and a tenant's KEK object (TASK-411.27).
                 Kind::CollectorLease { .. }
-                | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Identity
                 | Kind::Buckets

@@ -22,10 +22,7 @@
 //! decides by is under the cell's prefix, and an object there written, rewritten or deleted since
 //! changes the listing, or it was recorded with no digest ([`Passed::listing`]). It deletes nothing
 //! (doc-7 has why that is as safe as a pass in full). Who recorded it, of what process, is of no
-//! matter: the lease's holders and times are in the lease, outside the digest. cladefs: the marks
-//! of mark-only passes (`<C>gc/marks/`) are in it (board 8515): they keep a dead cell from being
-//! removed whole, and a pass skipping by a digest without them never removed one whose marks an
-//! operator cleared.
+//! matter: the lease's holders and times are in the lease, outside the digest.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::collector::Holding;
@@ -232,8 +229,6 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Result<Listed, b
 /// of every object but the collector's lease (`<C>gc/lease`), which every pass writes, and the read
 /// evidence of the cell's versions (`<C>reads/`, TASK-702.2), which forks' hosts write as often as
 /// they open them, and every pass trims, skipping the cell or not ([`crate::evidence::doomed`]).
-/// cladefs: mark-only passes' marks in it, as passes decide by them: they keep a dead cell
-/// (`collector::Pass::removal`, board 8515).
 pub(crate) fn digest<'a>(cell: CellId, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
     let (lease, evidence) = (layout::collector_lease(cell), layout::evidence_of_cell(cell));
     let mut digest = Sha256::new();

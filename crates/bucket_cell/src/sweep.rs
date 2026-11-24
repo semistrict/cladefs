@@ -36,7 +36,7 @@
 
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
 use crate::bucket::{PutMode, Refused, Version};
-use crate::collector::{Budget, Collector, Holding, Marking, Report};
+use crate::collector::{Budget, Collector, Holding, Report};
 use crate::layout::CellId;
 use crate::object_bucket::Request;
 use crate::{Error, Left};
@@ -49,10 +49,9 @@ use std::time::{Duration, Instant};
 /// What a sweep's passes do with what no live cell needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Delete it ([`Collector::collect_cell`]).
+    /// Delete it ([`Collector::collect_cell`]): what every sweep does, since the mark-only passes
+    /// went (board 10545). A dry run is no sweep's, writing nothing ([`Collector::dry_run_cell`]).
     Delete,
-    /// Mark it, deleting nothing ([`Collector::mark_cell`], TASK-264).
-    MarkOnly,
 }
 
 /// A sweep over every cell of a bucket. See the module docs.
@@ -265,8 +264,6 @@ impl std::ops::AddAssign for Requests {
 pub enum Outcome {
     /// It went through, deleting: what it did.
     Collected(Report),
-    /// It went through, marking.
-    Marked(Marking),
     /// It left its cell to another pass, writing nothing.
     Left(Left),
     /// It failed: nothing it could not read it deleted, and the next sweep tries again.
@@ -304,13 +301,8 @@ pub struct Swept {
     /// cladefs: why it stopped before it went over every cell, if it did (boards 8509, 8529,
     /// 8513).
     pub stopped: Option<Stopped>,
-    /// What the passes that went through did: mark-only passes deleted nothing.
+    /// What the passes that went through did.
     pub report: Report,
-    /// What mark-only passes marked, and its bytes, as listed; and what they found resurrected,
-    /// each a bug, warned of ([`Marking::resurrected`]).
-    pub marked: usize,
-    pub marked_bytes: u64,
-    pub resurrected: usize,
     /// The requests its passes made, and those listing the cells.
     pub requests: Requests,
     /// Its slowest passes, of those it ran, slowest first: [`Sweep::slowest`] of them at most.
@@ -333,16 +325,6 @@ impl Swept {
             Outcome::Collected(report) => {
                 self.passed += usize::from(report.skipped == 0);
                 self.report += report;
-                true
-            }
-            Outcome::Marked(marking) => {
-                self.passed += 1;
-                self.report += marking.report;
-                if let Some(marks) = &marking.marks {
-                    self.marked += marks.marked.len();
-                    self.marked_bytes += marks.marked.iter().map(|marked| marked.size).sum::<u64>();
-                }
-                self.resurrected += marking.resurrected.len();
                 true
             }
             Outcome::Left(Left::Held) => {
@@ -557,8 +539,6 @@ impl Sweep {
                     Ok(report) => Outcome::Collected(report),
                     Err(error) => Outcome::failed(error),
                 },
-                // A mark-only pass marks nothing of a copy.
-                Mode::MarkOnly => Outcome::Collected(Report::default()),
             };
             let mut requests = counted.requests();
             requests += own.requests();
@@ -571,10 +551,6 @@ impl Sweep {
         let outcome = match self.mode {
             Mode::Delete => match collector.collect_cell(&counted, cell, holder).await {
                 Ok(report) => Outcome::Collected(report),
-                Err(error) => Outcome::failed(error),
-            },
-            Mode::MarkOnly => match collector.mark_cell(&counted, cell, holder).await {
-                Ok(marking) => Outcome::Marked(marking),
                 Err(error) => Outcome::failed(error),
             },
         };

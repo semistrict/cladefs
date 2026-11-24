@@ -40,8 +40,8 @@ pub struct Child {
 /// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a version's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
-/// prefix: its objects' moves, its collector's lease and marks ([`collector_lease`],
-/// [`marks`]), and the references of forks of its cells ([`reference`]), so that a pass of the
+/// prefix: its objects' moves, its collector's lease and marks ([`collector_lease`];
+/// marks went, board 10545), and the references of forks of its cells ([`reference`]), so that a pass of the
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
 /// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
 /// a KMS, and a record its cell's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
@@ -94,11 +94,10 @@ pub const FORMAT: u32 = 30;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
-/// cladefs: under a cell's prefix, the collector's own: its lease, its marks, and what else its
-/// passes over the cell keep there; never a pass's candidate (TASK-395.2).
+/// cladefs: under a cell's prefix, the collector's own: its lease, and what else its passes over
+/// the cell keep there; never a pass's candidate (TASK-395.2).
 const GC: &str = "gc/";
 const GC_LEASE: &str = "gc/lease";
-const GC_MARKS: &str = "gc/marks/";
 /// Under a cell's prefix, in formats before 29, the moves of its objects ([`Kind::Former`]).
 const MOVES: &str = "moves/";
 /// Under a cell's prefix, in formats before 29, the slots of its head ([`Kind::Former`]).
@@ -129,10 +128,6 @@ pub const IDENTITY: &str = "identity";
 /// cladefs: the record of every bucket, the root bucket's own or a copy of it ([`crate::identity`],
 /// TASK-633.9). No cell's, and no candidate of any pass.
 pub const BUCKETS: &str = "buckets";
-/// cladefs: there while a mark-only pass marks the bucket, which it writes and an operator removes
-/// with the marks: the one thing readers read to know whether to watch any cell's marks
-/// ([`crate::marks`], TASK-395.4's review). No cell's, and no candidate of any pass.
-pub const MARKING: &str = "gc/marking";
 
 pub fn segments(cell: CellId) -> String {
     format!("{}segments/", cell.prefix())
@@ -251,18 +246,6 @@ pub const MAX_KEY: usize = 1024;
 /// cells run beside them, unfenced.
 pub fn collector_lease(cell: CellId) -> String {
     format!("{}{GC_LEASE}", cell.prefix())
-}
-
-/// cladefs: the prefix of the marks of the mark-only passes over `cell` ([`marks`]).
-pub fn marks_of(cell: CellId) -> String {
-    format!("{}{GC_MARKS}", cell.prefix())
-}
-
-/// cladefs: what the mark-only pass over `cell` of the collector that took the cell's lease at
-/// `epoch` found no live cell needs, and would have deleted ([`Marks`]; doc-7, Garbage
-/// collection; TASK-264): keyed by the epoch, so that the newest lists last.
-pub fn marks(cell: CellId, epoch: u64) -> String {
-    format!("{}{}", marks_of(cell), Padded(epoch))
 }
 
 /// cladefs: the prefix of the references of forks of `cell` ([`reference`]): listed by delimiter,
@@ -498,14 +481,6 @@ pub enum Kind {
     CollectorLease {
         cell: CellId,
     },
-    /// cladefs: a mark-only pass's word that it marks the bucket ([`MARKING`]).
-    Marking,
-    /// cladefs: a mark-only pass's marks over a cell ([`marks`]): the collector's own, never a
-    /// candidate.
-    Marks {
-        cell: CellId,
-        epoch: u64,
-    },
     /// cladefs: a key of the cell's of a format before this one that nothing of this one makes or
     /// reads (doc-27): the collector's moves of an object (27's), and the slots of a head kept in
     /// many objects (28's), of `format`, the newest that wrote such a key. Refused
@@ -589,8 +564,6 @@ impl Kind {
             Self::Buckets => "buckets",
             Self::Kek { .. } => "kek",
             Self::CollectorLease { .. } => "gc-lease",
-            Self::Marks { .. } => "marks",
-            Self::Marking => "marking",
             Self::Former { .. } => "former",
             Self::Reference { .. } => "reference",
             Self::Retired { .. } => "retired",
@@ -607,7 +580,7 @@ impl Kind {
 }
 
 /// cladefs: the cell whose object `key` is, if a cell's: every kind under its prefix, the moves of
-/// its objects and of their moves, its collector's lease and marks, and the references of forks of
+/// its objects and of their moves, its collector's lease, and the references of forks of
 /// its cells, under the parent's cell (`cladefs-gc --usage`, TASK-394, TASK-395.2).
 pub fn owner(key: &str) -> Option<CellId> {
     match kind(key) {
@@ -622,7 +595,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Ephemeral { parent: cell, .. }
         | Kind::Evidence { parent: cell, .. }
         | Kind::Mirror { cell, .. } => Some(cell),
-        Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
+        Kind::CollectorLease { cell } => Some(cell),
         Kind::Former { cell, .. } => Some(cell),
         Kind::ObjectIds { .. }
         | Kind::EphemeralIndex { .. }
@@ -630,7 +603,6 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Identity
         | Kind::Buckets
         | Kind::Kek { .. }
-        | Kind::Marking
         | Kind::Unknown => None,
     }
 }
@@ -642,9 +614,6 @@ fn number(text: &str) -> Option<u64> {
 
 pub fn kind(key: &str) -> Kind {
     let parsed = || -> Option<Kind> {
-        if key == MARKING {
-            return Some(Kind::Marking);
-        }
         if key == IDENTITY {
             return Some(Kind::Identity);
         }
@@ -676,8 +645,8 @@ pub fn kind(key: &str) -> Kind {
             if rest == GC_LEASE.strip_prefix(GC)? {
                 return Some(Kind::CollectorLease { cell });
             }
-            let epoch = rest.strip_prefix(GC_MARKS.strip_prefix(GC)?)?;
-            return Some(Kind::Marks { cell, epoch: number(epoch)? });
+            // cladefs: no other: the marks of mark-only passes went (board 10545).
+            return None;
         }
         // A reference's key, or its mark's, the rest after their prefixes alike.
         let fork = |rest: &str| -> Option<(CellId, u64, CellId)> {
@@ -1057,17 +1026,6 @@ impl Head {
     }
 }
 
-/// cladefs: a mark-only pass's marks object ([`marks`]): what it would have deleted, each object as
-/// its listing found it, which readers warn of reaching, and the next such pass compares what it
-/// finds doomed with (TASK-264).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Marks {
-    /// The epoch of the collector's lease the pass took.
-    pub epoch: u64,
-    /// The objects marked, in the order of their keys.
-    pub marked: Vec<Marked>,
-}
-
 /// cladefs: a reference's bytes ([`reference`]): the format of the bucket's objects, first, as a
 /// record's, and the fork's owner, its child's ([`Child::owner`], a clone's its restore's): unique
 /// to the fork, so that every writer of it writes the same, a writable fork's host, its parent's
@@ -1106,39 +1064,6 @@ pub struct Retired {
 
 impl Retired {
     pub const NOW: Self = Self { format: FORMAT };
-}
-
-/// An object a mark-only pass found doomed, as the listing it went by found it: an object at its
-/// key of another version is another object.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Marked {
-    pub key: String,
-    pub size: u64,
-    pub e_tag: Option<String>,
-    pub version: Option<String>,
-    /// When it was written, by the backend's clock.
-    pub modified: u64,
-}
-
-impl Marked {
-    /// The object `meta` lists.
-    pub fn of(meta: &crate::bucket::Meta) -> Self {
-        Self {
-            key: meta.key.clone(),
-            size: meta.size,
-            e_tag: meta.version.e_tag.clone(),
-            version: meta.version.version.clone(),
-            modified: meta.modified,
-        }
-    }
-
-    /// Whether `meta` lists it: the object at its key, of its version.
-    pub fn is(&self, meta: &crate::bucket::Meta) -> bool {
-        self.key == meta.key
-            && self.e_tag == meta.version.e_tag
-            && self.version == meta.version.version
-            && self.size == meta.size
-    }
 }
 
 pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
@@ -1236,8 +1161,8 @@ mod tests {
         assert_eq!(kind(&format!("{}kek", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}encrypted", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&collector_lease(cell)), Kind::CollectorLease { cell });
-        assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
-        assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
+        // cladefs: what mark-only passes marked, which went (board 10545): of no kind now.
+        assert_eq!(kind(&format!("{}gc/marks/000000000001a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
         // cladefs: the collector's moves and a head's slots, of formats before 29 (doc-27):
         // refused where found.
@@ -1341,7 +1266,7 @@ mod tests {
     }
 
     /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, the moves and head slots
-    /// of formats before 29 too, its collector's lease and marks, and the references under it, of forks of its
+    /// of formats before 29 too, its collector's lease, and the references under it, of forks of its
     /// cells to other cells; object-ID blocks and keys of no kind are no cell's.
     #[test]
     fn owners() {
@@ -1355,7 +1280,6 @@ mod tests {
             format!("{}head/0000000000003", cell.prefix()),
             format!("{}moves/segments/0000000000002.0000000000007/0000000000001", cell.prefix()),
             collector_lease(cell),
-            marks(cell, 1),
             reference(cell, 7, child),
             retired(cell, 7, child),
         ];

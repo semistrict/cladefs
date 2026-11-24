@@ -84,19 +84,15 @@
 //! cladefs: a cell holding the moves the collector made in formats before 28 is refused
 //! ([`Error::Format`], [`Kind::Former`]): nothing of this format reads them.
 //!
-//! cladefs: two passes delete nothing (TASK-264). A mark-only pass ([`Collector::mark_cell`]) is a
-//! pass in every respect but that: it takes the cell's lease, and writes what it would delete to a
-//! marks object of the cell's (`<C>gc/marks/<epoch>`, [`layout::Marks`]), which every reader of the
-//! cell warns of reaching ([`crate::marks`]), and which the next such pass compares what it finds
-//! doomed with: an object doomed before and kept now, the same object still, is a bug, as no
-//! correct fork or recovery reaches what no live cell reached. Nothing marked goes, so the bucket
-//! grows by what it would have reclaimed, nor does it retire references. A dry run
-//! ([`Collector::dry_run_cell`]) writes nothing at all, the lease neither: it says what a pass
-//! would delete, and what references it would retire.
+//! cladefs: a dry run deletes nothing (TASK-264): it ([`Collector::dry_run_cell`]) writes nothing
+//! at all, the lease neither, and says what a pass would delete, and what references it would
+//! retire. The mark-only passes that wrote what they would delete to the bucket, which every
+//! reader of a cell watched, went pre-production (board 10545): a dry run's logs say as much,
+//! touching neither the bucket nor its readers' path.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::layout::Head;
-use crate::layout::{self, CellId, Kind, Location, Marked, Marks, Origin};
+use crate::layout::{self, CellId, Kind, Location, Origin};
 use crate::passed::{self, CollectorLease, LeaseTaking, Listed, Passed, Usage};
 use crate::record::Made;
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
@@ -208,19 +204,6 @@ impl Budget {
     pub fn refused(&self) -> usize {
         self.left.lock().unwrap().refused
     }
-}
-
-/// cladefs: what a mark-only pass over a cell did ([`Collector::mark_cell`]).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Marking {
-    /// What it did: it deleted nothing, and retired nothing.
-    pub report: Report,
-    /// The marks it wrote, at [`layout::marks`] of the cell and their epoch: none if a later pass
-    /// took the cell's lease from it, which stopped it as it stops a pass before deleting.
-    pub marks: Option<Marks>,
-    /// The objects the newest marks of the cell before named that it found kept, the same objects
-    /// still: a bug, each warned of.
-    pub resurrected: Vec<String>,
 }
 
 /// cladefs: what a dry run over a cell found ([`Collector::dry_run_cell`]).
@@ -749,71 +732,6 @@ impl Collector {
         passed::change(bucket, cell, taken, release).await.map(drop)
     }
 
-    /// cladefs: one mark-only pass over `cell`, as `holder`, which must differ from every other
-    /// pass's over the cell: a pass but for deleting, which writes what it would delete to its
-    /// marks instead (TASK-264), and retires no reference. It never skips its cell, nor records
-    /// what it found: what it would delete it writes to its marks.
-    ///
-    /// It takes the cell's collector lease, as a pass that deletes does (doc-7, Garbage collection,
-    /// step 1). Its marks are ordered by it, each pass's epoch its own and later than every pass's
-    /// over the cell before, so that readers, and the next mark-only pass, find the newest by their
-    /// keys, and no two passes' marks share a key. A pass that deletes, which it then fences,
-    /// deletes nothing, and the next deletes what it would have: a pass fenced is late, never
-    /// wrong. And it stops, as a pass that deletes does (TASK-180), where it finds lost what a live
-    /// cell needs once a pass that deletes took the lease from it, deleting since what it read
-    /// live; a pass not holding the lease could not tell that from a bug. Fenced, it writes no
-    /// marks, as a pass fenced deletes nothing: what it read may be older than what a later pass
-    /// did.
-    pub async fn mark_cell(
-        &self,
-        bucket: &impl Bucket,
-        cell: CellId,
-        holder: u64,
-    ) -> Result<Marking, Error> {
-        let found = passed::found(bucket, cell).await?;
-        let Some(taken) = self.take(bucket, cell, holder, found).await? else {
-            return Ok(Marking::default());
-        };
-        let marked = self.mark_held(bucket, cell, &taken).await;
-        let ended = if marked.is_ok() { PassEnd::Through(None) } else { PassEnd::Failed };
-        self.release(bucket, cell, &taken, ended).await?;
-        marked
-    }
-
-    /// cladefs: a mark-only pass over `cell`, which holds its lease as `taken` says.
-    async fn mark_held(
-        &self,
-        bucket: &impl Bucket,
-        cell: CellId,
-        taken: &LeaseTaking,
-    ) -> Result<Marking, Error> {
-        let epoch = taken.epoch;
-        let listed = first_listing(bucket, cell).await?;
-        let mut remembered = Remembered::default();
-        let Some(pass) = remembered.survey(bucket, cell, epoch, Writes::Some, listed).await? else {
-            return Ok(Marking::default());
-        };
-        if !self.renew(bucket, cell, taken).await? {
-            return Ok(Marking::default());
-        }
-        let doomed = pass.doomed(bucket)?;
-        if !self.holds(bucket, cell, taken).await? {
-            return Ok(Marking::default());
-        }
-        let resurrected = resurrected(bucket, cell, epoch, &pass.objects, &doomed).await?;
-        let marked = doomed.into_iter().map(Marked::of).collect();
-        let marks = Marks { epoch, marked };
-        // Readers watch the cells' marks only while the bucket says it is marked: first.
-        mark_bucket(bucket).await?;
-        // The epoch is this pass's taking of the lease alone: nothing else is at its key.
-        bucket::create(bucket, &layout::marks(cell, epoch), layout::encode(&marks)).await?;
-        // cladefs: and after, should an operator's clearing of the marks have deleted it
-        // meanwhile, which looks for marks again once it did (board 8515): marks are never left
-        // unwatched, whichever of the two goes first.
-        mark_bucket(bucket).await?;
-        Ok(Marking { report: Report::default(), marks: Some(marks), resurrected })
-    }
-
     /// cladefs: what a pass over `cell` would delete, writing nothing (TASK-264): not taking the
     /// cell's collector lease, which would fence a pass that deletes, running meanwhile, out of its
     /// deletes; and what references it would retire ([`DryRun::retired`]). It goes by the lease's
@@ -833,46 +751,6 @@ impl Collector {
         retired.extend(pass.recording.stale.iter().cloned());
         Ok(DryRun { doomed, retired, fenced: fenced(bucket, cell, epoch).await? })
     }
-}
-
-/// cladefs: deletes the marks mark-only passes wrote of `cell` (`<C>gc/marks/`, board 8515), which
-/// keep a dead cell from being removed ([`Pass::removal`]) and its readers watching it, as an
-/// operator does once done with them (`cladefs-gc --clear-marks`): what it deleted, and their bytes,
-/// as listed. Beside a mark-only pass over the cell, it leaves the marks that pass writes after its
-/// listing, which a later clearing deletes.
-pub async fn clear_marks(bucket: &impl Bucket, cell: CellId) -> Result<(usize, u64), Error> {
-    let listed = bucket::list(bucket, &layout::marks_of(cell)).await?;
-    let marks: Vec<&Meta> = (listed.iter())
-        .filter(|meta| matches!(layout::kind(&meta.key), Kind::Marks { .. }))
-        .collect();
-    let keys: Vec<&str> = marks.iter().map(|meta| meta.key.as_str()).collect();
-    bucket::delete_all(bucket, &keys).await?;
-    Ok((keys.len(), marks.iter().map(|meta| meta.size).sum()))
-}
-
-/// cladefs: whether `cell` has marks of mark-only passes (board 8515): what a clearing of every
-/// cell's looks for again once it deleted [`layout::MARKING`].
-pub async fn has_marks(bucket: &impl Bucket, cell: CellId) -> Result<bool, Error> {
-    let listed = bucket::list(bucket, &layout::marks_of(cell)).await?;
-    Ok(listed.iter().any(|meta| matches!(layout::kind(&meta.key), Kind::Marks { .. })))
-}
-
-/// cladefs: writes the bucket's word that mark-only passes mark it ([`layout::MARKING`]), if it is
-/// not there: before readers are to watch marks, and again by a clearing that found marks written
-/// as it ran (board 8515).
-pub async fn mark_bucket(bucket: &impl Bucket) -> Result<(), Error> {
-    bucket::create(bucket, layout::MARKING, b"marking".to_vec()).await?;
-    Ok(())
-}
-
-/// cladefs: deletes the bucket's word that mark-only passes mark it ([`layout::MARKING`], board
-/// 8515), after every cell's marks ([`clear_marks`]), so that readers watch marks for as long as
-/// any are there: they watch none after it. A mark-only pass marking a cell writes it again, after
-/// its marks too ([`Collector::mark_cell`]); and the clearing looks for marks again after it
-/// ([`has_marks`]), writing it again if it finds any, so that whichever comes first, a pass's
-/// marks or the clearing's delete, no marks are left unwatched.
-pub async fn clear_marking(bucket: &impl Bucket) -> Result<(), Error> {
-    Ok(bucket::delete(bucket, layout::MARKING).await?)
 }
 
 /// cladefs: what a look at a cell found, before its pass took the lease ([`Collector::look`]).
@@ -919,9 +797,10 @@ impl Remembered {
         // cell's checkpoints, that the pass makes (TASK-395.16).
         let objects = listed.as_ref().map(|listed| &listed.objects);
         let checkpoints = Checkpoints::new(bucket, CHECKPOINTS_KEPT).listed(objects);
-        let mut records = self.records(bucket, cell, objects).await?;
+        let mut record = self.record(bucket, cell, objects).await?;
         let mut live = Live::default();
-        let read = match self.read(bucket, &checkpoints, &mut records, &mut live, writes).await {
+        let read = self.read(bucket, &checkpoints, cell, &mut record, &mut live, writes);
+        let read = match read.await {
             Ok(()) => {
                 let referenced = match listed_first {
                     Some(listed) => listed,
@@ -948,7 +827,7 @@ impl Remembered {
         // What a pass listing the cell as it did decides as it did, unless it went by more than the
         // cell: a version of another cell's record, or a version's cell's head, read for a clone
         // being made.
-        let forking_elsewhere = (records.iter()).any(|(_, record)| {
+        let forking_elsewhere = record.as_ref().is_some_and(|record| {
             !record.deleted() && forked_from(record).is_some_and(|from| from != cell)
         });
         let settled = early && !live.unsettled && !forking_elsewhere;
@@ -958,36 +837,38 @@ impl Remembered {
         };
         let Listed { objects, digest, usage, stale, references } = listed;
         let recording = Recording { digest: settled.then_some(digest), usage, stale, references };
-        let found = (objects, records, live, referenced, recording);
+        let found = (objects, record, live, referenced, recording);
         Ok(Some(Pass::new(cell, found)))
     }
 
-    /// Reads the state of the cell, live, into `live`, and those of its versions. A pass fenced as
-    /// it found what a live cell needs lost stops, where its caller sees it.
+    /// Reads the state of `cell`, its head `record`, live, into `live`, and those of its versions.
+    /// A pass fenced as it found what a live cell needs lost stops, where its caller sees it.
     async fn read(
         &mut self,
         bucket: &impl Bucket,
         checkpoints: &Checkpoints<'_, impl Bucket>,
-        records: &mut BTreeMap<CellId, Head>,
+        cell: CellId,
+        record: &mut Option<Head>,
         live: &mut Live,
         writes: Writes,
     ) -> Result<(), Error> {
         if rules().collector_abandons {
-            abandon(bucket, records, writes).await?;
+            abandon(bucket, cell, record, writes).await?;
         }
-        let origins = recover_live(bucket, checkpoints, records, live, writes).await?;
+        let origins =
+            recover_live(bucket, checkpoints, cell, record.as_ref(), live, writes).await?;
         keep_origins(bucket, checkpoints, live, &origins, KeptBy::Version).await
     }
 
     /// `cell`'s record, if it has one, read: as the pass's listing of the whole cell, `listed`,
     /// has it, if it has one, taken before it read anything (TASK-395.16), a read less where it
     /// lists the version read before; or read now.
-    async fn records(
+    async fn record(
         &mut self,
         bucket: &impl Bucket,
         cell: CellId,
         listed: Option<&BTreeMap<String, Meta>>,
-    ) -> Result<BTreeMap<CellId, Head>, Error> {
+    ) -> Result<Option<Head>, Error> {
         // cladefs: its head, as listed, read unless it is the version read before.
         let read = match listed {
             Some(objects) => {
@@ -1013,7 +894,7 @@ impl Remembered {
             }
             None => crate::head::get(bucket, cell).await?,
         };
-        Ok(read.into_iter().map(|record| (cell, record)).collect())
+        Ok(read)
     }
 }
 
@@ -1081,83 +962,31 @@ enum Writes {
     None,
 }
 
-/// cladefs: the objects the newest marks of `cell` before those of `epoch` named, that `objects`,
-/// listed by the mark-only pass of `epoch`, holds still, the same objects, and that `doomed`, what
-/// it found no live cell needs, does not: each warned of, loudly. No correct fork or recovery
-/// reaches what no live cell reached, so each is a bug in the collector, which a pass deleting
-/// would have lost. Marks it can't read, it warns of.
-async fn resurrected(
-    bucket: &impl Bucket,
-    cell: CellId,
-    epoch: u64,
-    objects: &BTreeMap<String, Meta>,
-    doomed: &[&Meta],
-) -> Result<Vec<String>, Error> {
-    let listed = bucket::list(bucket, &layout::marks_of(cell)).await?;
-    let before = listed.iter().rev().find(
-        |meta| matches!(layout::kind(&meta.key), Kind::Marks { epoch: marked, .. } if marked < epoch),
-    );
-    let Some(object) = (match before {
-        Some(before) => bucket::get(bucket, &before.key).await?,
-        None => None,
-    }) else {
-        return Ok(Vec::new());
-    };
-    let marks: Marks = match layout::decode(&object.bytes) {
-        Ok(marks) => marks,
-        Err(error) => {
-            let key = &object.meta.key;
-            log::warn!(key, error:%; "cladefs-gc: {key}, the marks before, unread: {error}");
-            return Ok(Vec::new());
-        }
-    };
-    let doomed: BTreeSet<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
-    let mut resurrected = Vec::new();
-    for marked in &marks.marked {
-        let key = marked.key.as_str();
-        if doomed.contains(key) || !objects.get(key).is_some_and(|meta| marked.is(meta)) {
-            continue;
-        }
-        let (kind, before) = (layout::kind(key), marks.epoch);
-        log::warn!(
-            key, kind:?, marks = before, epoch;
-            "cladefs-gc: RESURRECTED {key}: the mark-only pass {before} found no live cell needs \
-             it, and the pass {epoch} finds one does: a bug in the collector, which deleting \
-             would have lost it to", before = base32_id::Short(before), epoch = base32_id::Short(epoch)
-        );
-        resurrected.push(marked.key.clone());
-    }
-    Ok(resurrected)
-}
-
 /// Whether a later pass over `cell` took the cell's collector lease from the pass that took it at
 /// `epoch`.
 async fn fenced(bucket: &impl Bucket, cell: CellId, epoch: u64) -> Result<bool, Error> {
     Ok(passed::epoch(bucket, cell).await? != epoch)
 }
 
-/// Gives up on the forks being made of versions that are gone, as their cells' heads say, which it
-/// says are deleted then, or made, if that came first ([`lifecycle::abandon`]); without `writes`,
-/// takes them as deleted, writing nothing (TASK-476).
+/// Gives up on `cell`, its head `record`, if it is a fork being made of a version that is gone,
+/// which it says is deleted then, or made, if that came first ([`lifecycle::abandon`]); without
+/// `writes`, takes it as deleted, writing nothing (TASK-476).
 async fn abandon(
     bucket: &impl Bucket,
-    records: &mut BTreeMap<CellId, Head>,
+    cell: CellId,
+    record: &mut Option<Head>,
     writes: Writes,
 ) -> Result<(), Error> {
-    let forking: Vec<(CellId, Origin, u64)> = (records.iter())
-        .filter(|(_, record)| !record.deleted())
-        .filter_map(|(&child, record)| Some((child, record.origin()?, record.forking()?)))
-        .collect();
-    for (child, origin, id) in forking {
-        if !version_gone(bucket, origin, id).await? {
-            continue;
-        }
-        let record = match writes {
-            Writes::Some => lifecycle::abandon(bucket, child).await?,
-            Writes::None => Head { epoch: Head::FINAL, ..records[&child].clone() },
-        };
-        records.insert(child, record);
+    let Some(head) = record.as_ref().filter(|head| !head.deleted()) else { return Ok(()) };
+    let (Some(origin), Some(id)) = (head.origin(), head.forking()) else { return Ok(()) };
+    if !version_gone(bucket, origin, id).await? {
+        return Ok(());
     }
+    let abandoned = match writes {
+        Writes::Some => lifecycle::abandon(bucket, cell).await?,
+        Writes::None => Head { epoch: Head::FINAL, ..head.clone() },
+    };
+    *record = Some(abandoned);
     Ok(())
 }
 
@@ -1316,7 +1145,7 @@ async fn needing(
     Ok(None)
 }
 
-/// Recovers the cell whose record `records` holds, live, if `live` has it not yet, folding it into
+/// Recovers `cell`, its head `record`, live, if `live` has it not yet, folding it into
 /// it ([`Layers`]). Returns the origins of its versions, whose states the pass keeps (rule
 /// `versions_kept`, TASK-476). A
 /// fork of a version still being made, its version deleted, whose recovery finds what it names
@@ -1325,39 +1154,33 @@ async fn needing(
 async fn recover_live(
     bucket: &impl Bucket,
     checkpoints: &Checkpoints<'_, impl Bucket>,
-    records: &BTreeMap<CellId, Head>,
+    cell: CellId,
+    record: Option<&Head>,
     live: &mut Live,
     writes: Writes,
 ) -> Result<BTreeSet<(CellId, u64)>, Error> {
     let mut origins = BTreeSet::new();
-    for (&cell, record) in records.iter().filter(|(_, record)| !record.deleted()) {
-        let origin = record.origin();
-        if !live.take(cell) {
-            continue;
-        }
-        // Recovered from its head, read after the listing: what its writer may name ([`behind`]),
-        // and what it may yet name ([`Ended::ahead`]).
-        let recovered = match recovery::recover_layers(checkpoints, cell, origin).await {
-            Ok(recovered) => recovered,
-            Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, record, writes).await? {
-                // Decided by what it read again, a version's record in another cell among it.
-                true => {
-                    live.unsettled = true;
-                    continue;
-                }
-                false => return Err(Error::Lost(lost)),
-            },
-            Err(error) => return Err(error),
-        };
-        if rules().versions_kept
-            && let Some(head) = &recovered.head
-        {
-            origins.extend(head.versions.iter().map(|version| (cell, version.at)));
-        }
-        let mut inherited = InheritedStates::default();
-        live.add(recovered, &mut inherited);
-        live.inherit(inherited);
+    let Some(record) = record.filter(|record| !record.deleted()) else { return Ok(origins) };
+    // Recovered from its head, read after the listing: what its writer may name ([`behind`]), and
+    // what it may yet name ([`Ended::ahead`]).
+    let recovered = match recovery::recover_layers(checkpoints, cell, record.origin()).await {
+        Ok(recovered) => recovered,
+        Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, record, writes).await? {
+            // Decided by what it read again, a version's record in another cell among it.
+            true => {
+                live.unsettled = true;
+                return Ok(origins);
+            }
+            false => return Err(Error::Lost(lost)),
+        },
+        Err(error) => return Err(error),
+    };
+    if rules().versions_kept
+        && let Some(head) = &recovered.head
+    {
+        origins.extend(head.versions.iter().map(|version| (cell, version.at)));
     }
+    live.add(recovered);
     Ok(origins)
 }
 
@@ -1410,8 +1233,6 @@ async fn lost_is_ok(
 /// What a pass needs of the live cells' states, folded in as they are recovered.
 #[derive(Default)]
 struct Live {
-    /// Those recovered, or being: each once.
-    taken: BTreeSet<CellId>,
     /// Where each recovery of each ended.
     cells: BTreeMap<CellId, Vec<Ended>>,
     /// What recovering them read.
@@ -1458,23 +1279,10 @@ impl Ended {
     }
 }
 
-/// The states forks inherited, as their recoveries read them, each with the extents of it every
-/// fork inheriting it holds no longer where it inherited it: what no fork of a round recovered
-/// needs of it.
-#[derive(Default)]
-struct InheritedStates {
-    states: Vec<(Arc<State>, BTreeSet<ExtentId>)>,
-}
-
 impl Live {
-    /// Takes the recovery of `cell`, unless it was taken: returns whether it was not.
-    fn take(&mut self, cell: CellId) -> bool {
-        self.taken.insert(cell)
-    }
-
-    /// Folds in `recovered`, a live cell's: its own layer, and what it inherited into
-    /// `inherited`, its round's, which [`Live::inherit`] folds in once for all its forks.
-    fn add(&mut self, recovered: Recovered<Layers>, inherited: &mut InheritedStates) {
+    /// Folds in `recovered`, a live cell's: its own layer, and what it inherited but the extents
+    /// it holds no longer where it inherited them.
+    fn add(&mut self, recovered: Recovered<Layers>) {
         let ended = Ended {
             end: recovered.end(),
             epoch: recovered.epoch(),
@@ -1482,30 +1290,17 @@ impl Live {
         };
         let Recovered { state, touched, .. } = recovered;
         let State { cell, extents, .. } = state;
-        let Layered { inherited: from, own, shadowed } = extents;
+        let Layered { inherited, own, shadowed } = extents;
         self.touched.extend(touched);
         for location in own.values() {
             self.name(location);
         }
-        if let Some(from) = from {
-            match inherited.states.iter_mut().find(|(state, _)| Arc::ptr_eq(state, &from)) {
-                Some((_, unheld)) => unheld.retain(|extent| shadowed.contains(extent)),
-                None => inherited.states.push((from, shadowed)),
+        for (extent, location) in inherited.iter().flat_map(|state| &state.extents) {
+            if !shadowed.contains(extent) {
+                self.name(location);
             }
         }
         self.cells.entry(cell).or_default().push(ended);
-    }
-
-    /// Folds in what forks inherited, `inherited`: each state once, but the extents of it none of
-    /// them holds where they inherited them.
-    fn inherit(&mut self, inherited: InheritedStates) {
-        for (state, unheld) in inherited.states {
-            for (extent, location) in &state.extents {
-                if !unheld.contains(extent) {
-                    self.name(location);
-                }
-            }
-        }
     }
 
     /// cladefs: keeps `state`, an origin's, whole, for the forks of it to other cells, which
@@ -1569,7 +1364,9 @@ impl Fate {
 struct Pass {
     cell: CellId,
     objects: BTreeMap<String, Meta>,
-    records: BTreeMap<CellId, Head>,
+    /// cladefs: the cell's head, if it has one (doc-20: a cell is one vdisk, its head its one
+    /// record).
+    record: Option<Head>,
     /// Where each recovery of each live cell ended.
     cells: BTreeMap<CellId, Vec<Ended>>,
     /// What recovering the live cells and the origins read.
@@ -1596,21 +1393,15 @@ struct Recording {
 }
 
 impl Pass {
-    /// The pass over `cell`, which listed `objects`, and found `records`, what the live cells and
+    /// The pass over `cell`, which listed `objects`, and found its head `record`, what the live cells and
     /// the origins need (`live`), the origins `referenced`, and what it records as it ends.
     fn new(
         cell: CellId,
-        found: (
-            BTreeMap<String, Meta>,
-            BTreeMap<CellId, Head>,
-            Live,
-            BTreeSet<(CellId, u64)>,
-            Recording,
-        ),
+        found: (BTreeMap<String, Meta>, Option<Head>, Live, BTreeSet<(CellId, u64)>, Recording),
     ) -> Self {
-        let (objects, records, live, referenced, recording) = found;
+        let (objects, record, live, referenced, recording) = found;
         let Live { cells, touched, named, .. } = live;
-        Self { cell, objects, records, cells, touched, named, referenced, recording }
+        Self { cell, objects, record, cells, touched, named, referenced, recording }
     }
 
     /// cladefs: whether the object of `kind`, which no live state names, a live cell's head may yet
@@ -1646,7 +1437,7 @@ impl Pass {
         let goes = Fate::of;
         // cladefs: the read evidence that goes (TASK-702.2): of versions the head names no more,
         // all of a dead cell's, and all but each tenant's newest of each.
-        let named: BTreeSet<u64> = (self.records.get(&self.cell).filter(|head| !head.deleted()))
+        let named: BTreeSet<u64> = (self.record.as_ref().filter(|head| !head.deleted()))
             .map(|head| head.versions.iter().map(|version| version.at).collect())
             .unwrap_or_default();
         let evidence = bucket::under(&self.objects, &layout::evidence_of_cell(self.cell));
@@ -1671,16 +1462,12 @@ impl Pass {
                 Kind::Former { cell, format } => return Err(Error::Format { cell, format }),
                 // A head stays, a deleted cell's too, final, fencing its writers, which no swap of
                 // theirs passes (TASK-174); but with a dead cell that goes whole
-                // ([`Pass::removal`], TASK-455). The collector's own: its lease, and its marks,
-                // which a mark-only pass never deletes, and an operator removes (TASK-264); and
-                // references, which the passes of their children's cells retire (TASK-395.4), and
+                // ([`Pass::removal`], TASK-455). The collector's own: its lease; and references, which the passes of their children's cells retire (TASK-395.4), and
                 // their marks, kept for good (TASK-395.13). cladefs: a block of object IDs taken
                 // for good (TASK-364), and the bucket's identity (TASK-633.9); a tenant's KEK
                 // object, no cell's, which no pass lists, for good too (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::CollectorLease { .. }
-                | Kind::Marks { .. }
-                | Kind::Marking
                 | Kind::Reference { .. }
                 | Kind::Retired { .. }
                 // cladefs: a mirror's pin and marker, under another bucket's cell's prefix, which a
@@ -1709,8 +1496,8 @@ impl Pass {
     }
 
     /// cladefs: the references the pass retires, under other cells (doc-7, References; TASK-395.4):
-    /// once its cell holds no live cell and no reference of its own, those of its deleted
-    /// children of origins in other cells, each at the key its record's origin gives, never listed.
+    /// once its cell holds no live cell and no reference of its own, its own, its head deleted, of
+    /// an origin in another cell, at the key its head's origin gives, never listed.
     /// Nothing anywhere then inherits from them: a fork of one of them in the cell would have a
     /// record there, and one in another cell a reference there. Without the rule that the cell's
     /// references hold them, as a test shows it needed, once each child is deleted. cladefs: each
@@ -1720,19 +1507,19 @@ impl Pass {
         if rules().references_held && !self.dead() {
             return Vec::new();
         }
-        (self.records.iter())
-            .filter(|(_, record)| record.deleted())
-            .filter_map(|(&child, record)| {
-                let origin = record.origin().filter(|origin| origin.parent != self.cell)?;
-                let marked = !record.retires_unmarked();
-                Some((layout::reference(origin.parent, origin.at, child), marked))
-            })
-            .collect()
+        let Some(record) = self.record.as_ref().filter(|record| record.deleted()) else {
+            return Vec::new();
+        };
+        let Some(origin) = record.origin().filter(|origin| origin.parent != self.cell) else {
+            return Vec::new();
+        };
+        let marked = !record.retires_unmarked();
+        vec![(layout::reference(origin.parent, origin.at, self.cell), marked)]
     }
 
     /// cladefs: whether its cell holds no live cell and no reference of its own.
     fn dead(&self) -> bool {
-        self.records.values().all(|record| record.deleted())
+        self.record.as_ref().is_none_or(|record| record.deleted())
             && self.cells.is_empty()
             && self.referenced.is_empty()
     }
@@ -1746,8 +1533,7 @@ impl Pass {
     /// all stale, and every object it listed that `doomed` leaves one of a cell
     /// nothing will need again: its head, [`Head::removable`] (a root's or a clone's made,
     /// deleted, of an ID an allocator gave), and its lease. A mark under it (of a reference
-    /// retired, which a writer may write again; or a mark-only pass's, an operator's to remove,
-    /// [`clear_marks`]), and anything else keep it. A cell of no head loses its lease alone, once
+    /// retired, which a writer may write again), and anything else keep it. A cell of no head loses its lease alone, once
     /// nothing but its lease is left: one whose removal stopped before its end.
     fn removal<'a>(&'a self, doomed: &[&Meta]) -> Option<Removal<'a>> {
         if !self.dead() || !self.references_all_stale() {
@@ -1761,7 +1547,8 @@ impl Pass {
             }
             match layout::kind(key) {
                 Kind::Head { cell } => {
-                    self.records.get(&cell).filter(|record| record.removable())?;
+                    let own = |record: &&Head| cell == self.cell && record.removable();
+                    self.record.as_ref().filter(own)?;
                     removal.head = Some(meta);
                 }
                 Kind::CollectorLease { .. } => removal.lease = Some(meta),
@@ -1775,7 +1562,7 @@ impl Pass {
     /// leaves once its deletes land, if its cell is dead, as a pass in full over that finds nothing
     /// more to do (TASK-455): so that a dead cell it does not remove is not passed over in full
     /// twice, the second for the first's deletes, retiring its references again. What it leaves
-    /// must be what a dead cell keeps, its records, heads, object, lease and marks. Else of its
+    /// must be what a dead cell keeps, its head, lease and marks of retired references. Else of its
     /// listing.
     fn recorded_listing(&self, doomed: &[&Meta]) -> Option<[u8; 32]> {
         let digest = self.recording.digest?;
@@ -1788,10 +1575,7 @@ impl Pass {
         let kept = left.iter().all(|meta| {
             matches!(
                 layout::kind(&meta.key),
-                Kind::Head { .. }
-                    | Kind::CollectorLease { .. }
-                    | Kind::Marks { .. }
-                    | Kind::Retired { .. }
+                Kind::Head { .. } | Kind::CollectorLease { .. } | Kind::Retired { .. }
             )
         });
         Some(if kept { passed::digest(self.cell, left) } else { digest })
@@ -2463,83 +2247,6 @@ mod tests {
             let dry = Collector::new().dry_run_cell(&during, layout::TEST_CELL).await.unwrap();
             assert_eq!(dry, DryRun { fenced: true, ..DryRun::default() });
         });
-    }
-
-    /// TASK-264: a pass wrong, deleting what no head names yet (rule `collector_epochs`, TASK-407),
-    /// marks an extent uploaded ahead of the segment that names it. The segment
-    /// landing, a reader starting after the pass, which reads the marks first, warns as it reads
-    /// the extent, each read of it; and the next mark-only pass, right, warns that it finds needed
-    /// what was marked, the same object still.
-    #[test]
-    fn readers_and_mark_only_passes_warn_of_what_a_wrong_pass_marked() {
-        let log = crate::marks::captured();
-        let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-        let (late, key) = block_on(async {
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let first = writer.chain().next_sequence();
-            let (late, early) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-            let extents = vec![(early, b"early".to_vec())];
-            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-            // The writer's next segment, which names `late`, its object uploaded first.
-            let own = vec![(late.sequence, b"late".to_vec())];
-            let objects = SegmentBuilder::from(Commit { tag: 2, own, ..Commit::default() })
-                .close(&mut writer.chain())
-                .frame(writer.keys().encrypting());
-            let [(key, bytes)] = &objects.own[..] else { panic!("{}", objects.own.len()) };
-            let created = bucket::create(&*bucket, key, bytes.read().unwrap()).await.unwrap();
-            assert!(matches!(created, Created::Created(_)));
-
-            // A wrong pass, deleting what no head names yet (rule `collector_epochs`).
-            crate::set_rules(crate::Rules { collector_epochs: false, ..crate::Rules::ALL });
-            let marking = Collector::new().mark_cell(&*bucket, layout::TEST_CELL, 1).await;
-            crate::set_rules(crate::Rules::ALL);
-            let marked: Vec<String> =
-                marking.unwrap().marks.unwrap().marked.into_iter().map(|m| m.key).collect();
-            assert_eq!(marked, [key.as_str()]);
-            let key = key.clone();
-            let segment = writer.add_segment(objects).unwrap();
-            writer.upload(segment).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            (late, key)
-        });
-        let warnings = || -> Vec<String> {
-            let lines = log.lock().unwrap();
-            lines.iter().filter(|line| line.starts_with("WARN")).cloned().collect()
-        };
-        assert_eq!(warnings(), Vec::<String>::new());
-
-        let reader = Arc::new(ObjectBucket::new(memory.clone(), ""));
-        let read = block_on(async {
-            let recovered = recovery::recover(&*reader, test_cell(1), None).await.unwrap();
-            crate::testing::read(&reader, late, &recovered.state.extents[&late]).await
-        });
-        assert_eq!(read, Ok(b"late".to_vec()));
-        let kind = layout::kind(&key);
-        let saying = "a reader reached what the collector's newest mark-only pass found no live \
-                      cell needs, and would have deleted";
-        let marks = layout::marks(layout::TEST_CELL, 1);
-        let reached = |request: &str| {
-            format!(
-                "WARN bucket_cell: {request} {key}: {saying} ({marks}) key={key} kind={kind:?} \
-                 request={request} marks=1"
-            )
-        };
-        // Its tail, then its data.
-        let read_twice = [reached("get-range"), reached("get-range")];
-        assert_eq!(warnings(), read_twice);
-
-        let next = block_on(Collector::new().mark_cell(&*bucket, layout::TEST_CELL, 2)).unwrap();
-        assert_eq!(next.resurrected, [key.as_str()]);
-        assert_eq!(next.marks.unwrap().marked, Vec::<Marked>::new());
-        let resurrected = format!(
-            "WARN cladefs-gc: RESURRECTED {key}: the mark-only pass 1 found no live cell needs it, \
-             and the pass 2 finds one does: a bug in the collector, which deleting would have lost \
-             it to key={key} kind={kind:?} marks=1 epoch=2"
-        );
-        let [tail, data] = read_twice;
-        assert_eq!(warnings(), [tail, data, resurrected]);
     }
 
     // cladefs: the collector per cell, and fork references (TASK-395.2, .3, .4).
@@ -3321,9 +3028,9 @@ mod tests {
     }
 
     /// TASK-395.4: a dry run over a dead cell says what reference a pass would retire, deleting it
-    /// not; a mark-only pass retires none either; a pass does.
+    /// not; a pass does.
     #[test]
-    fn dry_runs_and_mark_only_passes_retire_nothing() {
+    fn dry_runs_retire_nothing() {
         let bucket = memory_bucket();
         let (parent, child) = (test_cell(1), test_cell(2));
         let at = block_on(async {
@@ -3337,8 +3044,6 @@ mod tests {
         let collector = Collector::new();
         let dry = block_on(collector.dry_run_cell(&*bucket, child)).unwrap();
         assert_eq!(dry.retired, std::slice::from_ref(&reference));
-        let marking = block_on(collector.mark_cell(&*bucket, child, 1)).unwrap();
-        assert_eq!(marking.report.retired, 0);
         assert!(block_on(keys(&*bucket)).contains(&reference));
         let report = block_on(collector.collect_cell(&*bucket, child, 2)).unwrap();
         assert_eq!(report.retired, 1);
@@ -3625,7 +3330,7 @@ mod tests {
     /// that skip the cell after ask its lease and listing alone (TASK-395.14): the reference
     /// written again, by a writer whose read came before, the pass over the parent's cell deletes,
     /// by its mark. Another collector, which remembers nothing, skips it too, by what the cell's
-    /// lease recorded; and a pass that only marks goes over the cell in full.
+    /// lease recorded.
     #[test]
     fn passes_skip_only_what_the_cell_alone_decides() {
         use crate::layout::Origin;
@@ -3690,8 +3395,5 @@ mod tests {
         let other = Collector::new();
         let (report, asked) = bucket.served(other.collect_cell(&*bucket, clone, 7));
         assert_eq!((report.unwrap(), asked), (skipped, idle(clone)));
-        let (marking, asked) = bucket.served(collector.mark_cell(&*bucket, clone, 8));
-        marking.unwrap();
-        assert!(asked.len() > idle(clone).len(), "{asked:#?}");
     }
 }

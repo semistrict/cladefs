@@ -75,7 +75,6 @@ pub mod layout;
 pub mod lifecycle;
 pub mod local;
 pub mod lru;
-pub mod marks;
 pub mod mirror;
 pub mod object;
 pub mod object_bucket;

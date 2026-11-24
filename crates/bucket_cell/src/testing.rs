@@ -888,7 +888,7 @@ pub const SWEEPS: u64 = 32;
 /// another cell holding no live cell and no reference; one whose child has no record is garbage
 /// at once, but a live cell's fork's, whose writers record it yet: no pass would ever retire it
 /// (TASK-395.10); so is one whose child's record names another origin, or none, and one marked
-/// retired, which its parent's cell's pass deletes (TASK-395.13); the collector's leases and marks
+/// retired, which its parent's cell's pass deletes (TASK-395.13); the collector's leases
 /// stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose head is a
 /// root's or a clone's made, deleted, of an ID an allocator gave, which goes whole, head and lease
 /// (TASK-455); and the lease of a cell of no head once nothing else is left.
@@ -924,7 +924,6 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
     let marked_under = |cell: layout::CellId| {
         keys.iter().any(|key| match layout::kind(key) {
             Kind::Retired { parent, .. } => parent == cell,
-            Kind::Marks { cell: of, .. } => of == cell,
             _ => false,
         })
     };
@@ -1026,8 +1025,6 @@ pub async fn uncollected(bucket: &impl Bucket) -> Vec<String> {
             | Kind::Identity
             | Kind::Buckets
             | Kind::Kek { .. }
-            | Kind::Marks { .. }
-            | Kind::Marking
             | Kind::Retired { .. } => true,
             // cladefs: a host's tombstone, for good (board 8519).
             Kind::Decommissioned { .. } => true,
@@ -1498,4 +1495,54 @@ mod tests {
             block_on(self.get_range(key, range.clone()))
         }
     }
+}
+
+/// What the tests' log took, each record a line: its level, its message, then its key-values,
+/// ` key=value` each. Logs from the first call on, at `info` and graver, once a process, as a log
+/// is (nextest runs each test in a process of its own).
+#[cfg(test)]
+pub(crate) fn captured() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    struct Captured(Arc<Mutex<Vec<String>>>);
+
+    struct Pairs<'a>(&'a mut String);
+
+    impl<'kvs> log::kv::VisitSource<'kvs> for Pairs<'_> {
+        fn visit_pair(
+            &mut self,
+            key: log::kv::Key<'kvs>,
+            value: log::kv::Value<'kvs>,
+        ) -> Result<(), log::kv::Error> {
+            self.0.push_str(&format!(" {key}={value}"));
+            Ok(())
+        }
+    }
+
+    impl log::Log for Captured {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Info
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                let mut line = format!("{} {}", record.level(), record.args());
+                record.key_values().visit(&mut Pairs(&mut line)).unwrap();
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LINES: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
+    LINES
+        .get_or_init(|| {
+            let lines = Arc::default();
+            log::set_boxed_logger(Box::new(Captured(Arc::clone(&lines))))
+                .expect("the test's process has no log yet");
+            log::set_max_level(log::LevelFilter::Info);
+            lines
+        })
+        .clone()
 }

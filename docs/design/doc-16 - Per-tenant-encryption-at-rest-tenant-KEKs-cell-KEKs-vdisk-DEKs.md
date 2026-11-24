@@ -74,7 +74,7 @@ say of the clear:
   `cladefs::remote::require_kms` (`the host's KMS: ...`) is asked as cladefsd starts (after its
   host's environment is read), as cladefsctl acts on cells itself (`locally`), and as `cladefs-mount`
   mounts; the guest tests' runner asks it before any case (`test_cases::sealed::require_kms`).
-  `cladefs-gc` needs a KMS to collect (`--delete`, `--mark-only`) and for `--delete-branch`,
+  `cladefs-gc` needs a KMS to collect (`--delete`) and for `--delete-branch`,
   refusing without one; its dry runs, `--branches`, `--usage` and `--rotate-master-key` need none.
   `cladefs-gc-fill` chooses its KMS from the environment, else a `LocalKms` of its own.
 - **Collectors.** A collector given no KMS (`Collector::kms(None)`) marks and deletes but compacts

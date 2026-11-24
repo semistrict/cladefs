@@ -28,11 +28,6 @@
 //! never the whole level (TASK-395.5): a tenant's millions of cells are listed a page at a time.
 //! Files and memory list a level whole, which their pages are cut out of: a directory is read whole
 //! by any listing of it, and memory has nothing cheaper.
-//!
-//! cladefs: every reader of a bucket reads it through an `ObjectBucket`, which warns of reading
-//! what the collector's newest mark-only pass marked ([`crate::marks`], TASK-264): on wherever a
-//! marks object is, as a bucket reads the newest every [`crate::marks::REFRESH`] alongside a read
-//! of its own.
 
 use crate::bucket::{
     Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Refusal, Version,
@@ -63,9 +58,6 @@ pub struct ObjectBucket {
     honoured: std::sync::atomic::AtomicBool,
     /// cladefs: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
     decoded: crate::recovery::Decoded,
-    /// cladefs: what the collector's newest mark-only pass marked, which its reads warn of reaching
-    /// (TASK-264).
-    marks: crate::marks::Watch,
     /// cladefs: what gives this process's new cells their IDs, out of blocks of the bucket's
     /// (TASK-364).
     objectids: crate::objectid::Allocator,
@@ -743,7 +735,7 @@ impl ObjectBucket {
     ) -> Self {
         let prefix = prefix.trim_matches('/').to_owned();
         let (counts, honoured, decoded) = Default::default();
-        let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
+        let objectids = crate::objectid::Allocator::new();
         let rewrites = Default::default();
         let deletes = Deletes::InProcess(in_process(&backend));
         Self {
@@ -753,7 +745,6 @@ impl ObjectBucket {
             counts,
             honoured,
             decoded,
-            marks,
             objectids,
             rewrites,
             clock: Clock::Host,
@@ -813,76 +804,6 @@ impl ObjectBucket {
             downloaded: load(&self.counts.downloaded),
             failures: self.counts.failures.each_ref().map(load),
         }
-    }
-
-    /// cladefs: reads the newest marks object of the collector's mark-only passes over `cell`, if
-    /// it is another than the one it holds (TASK-264, TASK-395.2): a listing of the cell's
-    /// `gc/marks/`, then a read of the newest. A bucket does every [`crate::marks::REFRESH`] for
-    /// each cell it reads, alongside a read of it; its requests go uncounted
-    /// ([`ObjectBucket::stats`]), being no reader's. A request failed, it keeps what it held, until
-    /// the next; marks it can't decode, it warns of, holding none.
-    pub async fn refresh_marks(&self, cell: layout::CellId) {
-        let prefix = self.path(layout::marks_of(cell).trim_end_matches('/'));
-        let listed = match self.backend.list(Some(&prefix)).try_collect::<Vec<_>>().await {
-            Ok(listed) => listed,
-            Err(error) => {
-                log::debug!(error:%; "object storage: listing the collector's marks: {error}");
-                return;
-            }
-        };
-        let newest = (listed.into_iter().map(|meta| self.meta(meta)))
-            .filter(|meta| matches!(layout::kind(&meta.key), Kind::Marks { .. }))
-            .max_by(|a, b| a.key.cmp(&b.key));
-        let Some(newest) = newest else { return self.marks.hold(cell, None) };
-        if self.marks.holds(cell, &newest) {
-            return;
-        }
-        let path = self.path(&newest.key);
-        let read =
-            async { self.backend.get_opts(&path, GetOptions::default()).await?.bytes().await };
-        match read.await.map(|bytes| layout::decode::<layout::Marks>(&bytes)) {
-            Ok(Ok(marks)) => self.marks.hold(cell, Some((&newest, marks))),
-            Ok(Err(error)) => {
-                log::warn!(key = newest.key, error:%; "bucket_cell: the collector's marks: {error}");
-                self.marks.hold(cell, None);
-            }
-            Err(error) => log::debug!(error:%; "object storage: reading {path}: {error}"),
-        }
-    }
-
-    /// cladefs: reads whether a mark-only pass marks the bucket ([`layout::MARKING`]), a HEAD,
-    /// which says whether readers watch the cells' marks at all (TASK-395.4's review). A request
-    /// failed, it keeps what it held, until the next.
-    pub async fn refresh_marking(&self) {
-        let head = GetOptions { head: true, ..GetOptions::default() };
-        match self.backend.get_opts(&self.path(layout::MARKING), head).await {
-            Ok(_) => self.marks.hold_marking(true),
-            Err(object_store::Error::NotFound { .. }) => self.marks.hold_marking(false),
-            Err(error) => {
-                log::debug!(error:%; "object storage: reading whether the bucket is marked: {error}")
-            }
-        }
-    }
-
-    /// The reading of whether the bucket is marked again, if it is due, and of the marks of the
-    /// cell `key` is under, a key or a prefix, if the bucket is marked and they are due
-    /// ([`ObjectBucket::refresh_marks`]), which a read goes alongside: nothing, if neither is.
-    fn marks_due(
-        &self,
-        key: &str,
-    ) -> futures::future::OptionFuture<impl Future<Output = ()> + Send + '_> {
-        let marking = self.marks.take_marking_refresh();
-        let cell = layout::cell_of(key).filter(|&cell| self.marks.take_refresh(cell));
-        (marking || cell.is_some())
-            .then(|| async move {
-                if marking {
-                    self.refresh_marking().await;
-                }
-                if let Some(cell) = cell {
-                    self.refresh_marks(cell).await;
-                }
-            })
-            .into()
     }
 
     /// The bucket at `url`: `s3://bucket/prefix`, `gs://bucket/prefix`, `az://container/prefix`
@@ -1309,8 +1230,6 @@ fn http_status(error: &(dyn std::error::Error + 'static)) -> Option<u16> {
 /// bucket's ([`ObjectBucket::routed`]).
 impl ObjectBucket {
     fn object_get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
-        self.marks.reached(Request::Get, key);
-        let refresh = self.marks_due(key);
         let (backend, path) = (self.backend.clone(), self.path(key));
         let get = async move {
             let timed = self.counts.request(Request::Get, Some(&path));
@@ -1323,7 +1242,7 @@ impl ObjectBucket {
             };
             timed.answered(got.await, |object| object.bytes.len())
         };
-        async move { futures::join!(get, refresh).0 }
+        get
     }
 
     fn object_get_range(
@@ -1331,8 +1250,6 @@ impl ObjectBucket {
         key: &str,
         range: ByteRange,
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
-        self.marks.reached(Request::GetRange, key);
-        let refresh = self.marks_due(key);
         let (backend, path) = (self.backend.clone(), self.path(key));
         let range = match range {
             ByteRange::Bounded(range) => GetRange::Bounded(range),
@@ -1365,12 +1282,10 @@ impl ObjectBucket {
             };
             timed.answered(got.await, Vec::len)
         };
-        async move { futures::join!(get, refresh).0 }
+        get
     }
 
     fn object_head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
-        self.marks.reached(Request::Head, key);
-        let refresh = self.marks_due(key);
         let (backend, path) = (self.backend.clone(), self.path(key));
         let head = async move {
             let timed = self.counts.request(Request::Head, Some(&path));
@@ -1378,14 +1293,12 @@ impl ObjectBucket {
             let result = backend.get_opts(&path, options).await;
             timed.answered(result.map(|result| self.meta(result.meta)), |_| 0)
         };
-        async move { futures::join!(head, refresh).0 }
+        head
     }
 
     fn object_list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
         let backend = self.backend.clone();
         let path = self.prefix_path(prefix);
-        let refresh = self.marks_due(prefix);
-        let prefix = prefix.to_owned();
         let list = async move {
             // A listing of many objects takes a request for each page of them (1,000 on S3 and
             // GCS), which `object_store` does not say: counted as its pages (TASK-455).
@@ -1399,13 +1312,7 @@ impl ObjectBucket {
             metas.sort_by(|a, b| a.key.cmp(&b.key));
             Ok(metas)
         };
-        async move {
-            let listed = futures::join!(list, refresh).0;
-            if let Ok(metas) = &listed {
-                self.marks.listed(&prefix, metas);
-            }
-            listed
-        }
+        list
     }
 
     /// cladefs: a page a request where the backend pages ([`ObjectBucket::paged`]); else the level
@@ -1418,8 +1325,6 @@ impl ObjectBucket {
         assert!((1..=LIST_PAGE).contains(&page.max), "a page of 1 to {LIST_PAGE}: {}", page.max);
         let (backend, pages) = (self.backend.clone(), self.pages.clone());
         let path = self.prefix_path(prefix);
-        let refresh = self.marks_due(prefix);
-        let prefix = prefix.to_owned();
         let (after, max) = (page.after.map(str::to_owned), page.max);
         let list = async move {
             let timed = self.counts.request(Request::ListDelimited, path.as_ref());
@@ -1456,13 +1361,7 @@ impl ObjectBucket {
             timed.span.set_count(crate::trace::PREFIXES, listing.prefixes.len() as u64);
             Ok(listing)
         };
-        async move {
-            let listed = futures::join!(list, refresh).0;
-            if let Ok(listing) = &listed {
-                self.marks.listed(&prefix, &listing.objects);
-            }
-            listed
-        }
+        list
     }
 
     fn object_put(
@@ -2625,8 +2524,8 @@ pub(crate) mod tests {
     }
 
     /// TASK-633.8: a collector's sweep of this bucket, given its own bucket, passes over the copy
-    /// of another bucket's cell's versions as a copy: a mark-only one marks nothing of it; one
-    /// deleting deletes it, nothing needing it, as a collector's pass over every cell does.
+    /// of another bucket's cell's versions as a copy, deleting it, nothing needing it, as a
+    /// collector's pass over every cell does.
     #[test]
     fn sweeps_pass_over_copies_as_copies() {
         use crate::collector::Collector;
@@ -2652,13 +2551,11 @@ pub(crate) mod tests {
             let left = || async { home.object_list(&parent.prefix()).await.unwrap().len() };
             copy().await;
             let sweep =
-                |mode| Sweep { mode, at_once: 1, lease: 60_000, slowest: 1, spawned: false };
-            let marking = sweep(Mode::MarkOnly).run_with_own(&routed, Some(&own), |_| {}).await;
-            assert_eq!((marking.report.deleted, left().await), (0, 2), "marked");
+                Sweep { mode: Mode::Delete, at_once: 1, lease: 60_000, slowest: 1, spawned: false };
             let there = other.object_list(&parent.prefix()).await.unwrap();
             let there: Vec<String> = there.into_iter().map(|meta| meta.key).collect();
-            assert_eq!(there, vec![layout::head(parent)], "marked there");
-            let swept = sweep(Mode::Delete).run_with_own(&routed, Some(&own), |_| {}).await;
+            assert_eq!(there, vec![layout::head(parent)], "there");
+            let swept = sweep.run_with_own(&routed, Some(&own), |_| {}).await;
             // Its copy and its marker.
             assert_eq!((swept.report.deleted, left().await), (2, 0), "swept");
             copy().await;
@@ -2907,7 +2804,7 @@ pub(crate) mod tests {
     /// answer meanwhile, which ends no run of the creates'.
     #[tokio::test(start_paused = true)]
     async fn writes_failing_say_why_until_they_land() {
-        let log = crate::marks::captured();
+        let log = crate::testing::captured();
         use crate::faults::{Failing, Fault, Faults, Faulty};
         let faults = Faults::new(std::time::Duration::ZERO, None);
         let objects = Arc::new(object_store::memory::InMemory::new());
@@ -2982,90 +2879,6 @@ pub(crate) mod tests {
 
     fn memory() -> Arc<ObjectBucket> {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cladefs/test"))
-    }
-
-    /// TASK-264: a bucket reads the collector's newest marks with requests it doesn't count, at its
-    /// first read, alongside it, and warns as it gets or heads a key they name, of no other key;
-    /// nor of one listed, which a caller may pass over. With no marks, it warns of nothing.
-    /// TASK-395.2: a cell's marks, under its prefix, of each cell it reads, read at its first read
-    /// of the cell.
-    #[test]
-    fn buckets_warn_of_reading_what_the_newest_marks_name() {
-        use crate::layout::{CellId, Marked, Marks, TEST_CELL};
-        let log = crate::marks::captured();
-        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let (old, marked) =
-            (layout::checkpoint(test_cell(1), 3, 1), layout::checkpoint(test_cell(1), 4, 1));
-        let other = CellId { tenant: 1, id: 2 };
-        let theirs = layout::checkpoint(CellId { tenant: other.tenant, id: 2 }, 1, 1);
-        let warned = || -> Vec<String> { log.lock().unwrap().clone() };
-        futures::executor::block_on(async {
-            let writer = ObjectBucket::new(objects.clone(), "p");
-            for key in [&old, &marked, &layout::checkpoint(test_cell(1), 5, 1), &theirs] {
-                writer.put(key, vec![1, 2].into(), PutMode::Create).await.unwrap();
-            }
-            let unmarked = ObjectBucket::new(objects.clone(), "p");
-            unmarked.get(&marked).await.unwrap();
-            unmarked.get(&marked).await.unwrap();
-            assert_eq!(warned(), Vec::<String>::new());
-
-            let at = |key: &String| Marked {
-                key: key.clone(),
-                size: 2,
-                e_tag: None,
-                version: None,
-                modified: 0,
-            };
-            let (older, newest) = (Marks { epoch: 6, marked: vec![at(&old)] }, 7);
-            let marks = Marks { epoch: newest, marked: vec![at(&marked)] };
-            let put = |marks: &Marks| layout::encode(marks);
-            let theirs_marks = Marks { epoch: 3, marked: vec![at(&theirs)] };
-            for (cell, epoch, marks) in
-                [(TEST_CELL, 6, &older), (TEST_CELL, newest, &marks), (other, 3, &theirs_marks)]
-            {
-                let key = layout::marks(cell, epoch);
-                writer.put(&key, put(marks).into(), PutMode::Create).await.unwrap();
-            }
-            // The marks there, but the bucket not said marked: a reader watches no cell's
-            // (TASK-395.4's review).
-            let blind = ObjectBucket::new(objects.clone(), "p");
-            blind.get(&marked).await.unwrap();
-            blind.get(&marked).await.unwrap();
-            assert!(!blind.marks.marking() && blind.marks.cells_watched() == 0);
-            assert_eq!(warned(), Vec::<String>::new());
-            writer.put(layout::MARKING, vec![1].into(), PutMode::Create).await.unwrap();
-
-            let reader = ObjectBucket::new(objects.clone(), "p");
-            // Its first read reads the marks, alongside: what it reads after, it warns of.
-            reader.head(&layout::checkpoint(test_cell(1), 5, 1)).await.unwrap();
-            assert_eq!(reader.stats().requests(Request::List), 0);
-            assert_eq!(reader.stats().requests(Request::Head), 1);
-            reader.get(&old).await.unwrap();
-            reader.list(&layout::checkpoints(test_cell(1))).await.unwrap();
-            assert_eq!(warned(), Vec::<String>::new());
-            reader.head(&marked).await.unwrap();
-            let range = ByteRange::Bounded(0..1);
-            reader.get_range(&marked, range).await.unwrap();
-            reader.get(&marked).await.unwrap();
-            // The other cell's, at its first read of it, which it warns of.
-            reader.get(&theirs).await.unwrap();
-            reader.get(&theirs).await.unwrap();
-            assert_eq!(reader.stats().requests(Request::List), 1, "its own listing alone");
-        });
-        let saying = "a reader reached what the collector's newest mark-only pass found no live \
-                      cell needs, and would have deleted";
-        let reached = |request: &str, key: &str, marks: String, kind: &str, epoch| {
-            format!(
-                "WARN bucket_cell: {request} {key}: {saying} ({marks}) key={key} kind={kind} \
-                 request={request} marks={epoch}"
-            )
-        };
-        let ours = "Checkpoint { cell: CellId { tenant: 1, id: 1 }, segment: 4, epoch: 1 }";
-        let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
-        let other = "Checkpoint { cell: CellId { tenant: 1, id: 2 }, segment: 1, epoch: 1 }";
-        let theirs =
-            reached("get", &theirs, layout::marks(CellId { tenant: 1, id: 2 }, 3), other, 3);
-        assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
 
     /// A bucket that fails its writes as one out of reach does, `Unavailable`, as `fails` says of
@@ -3564,9 +3377,8 @@ pub(crate) mod tests {
         server.answering(Some(400));
         let deleted = serving.block_on(crate::bucket::delete(&*bucket, fits));
         assert_eq!(deleted, refused(fits, Refusal::Request));
-        // None retried: the get's two, its own and its read of the collector's marking, the
-        // bucket's first get; the listing's one; the delete's one.
-        let answered = [("too-long", 1), ("put", 1), ("answered", 4)];
+        // None retried: the get's one; the listing's one; the delete's one.
+        let answered = [("too-long", 1), ("put", 1), ("answered", 3)];
         assert_eq!(server.requests(), std::collections::BTreeMap::from(answered));
     }
 
@@ -3652,7 +3464,7 @@ pub(crate) mod tests {
             let own = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             assert!(own.block_on(get()).unwrap().is_none());
         };
-        // The first, which looks at the collector's marking too, at once.
+        // The first, at once.
         own();
         let connects = |request: &dyn Fn()| {
             let before = server.connections();

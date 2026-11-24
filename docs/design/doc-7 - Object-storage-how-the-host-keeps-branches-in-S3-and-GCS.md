@@ -175,7 +175,6 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, or made, and whether another than its host resumed it, whether a failed fork's claim | create; updated with a condition |
 | `<C>head` | the cell's head, one object (doc-27; Head slots, TASK-691, retired): its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407); its versions, each its ID, the segment it is at and its cell's cut (Versions, TASK-476) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
 | `<C>gc/lease` | the collector's epoch over the cell, which its passes take, and what the last pass over the cell to end recorded: its listing's digest, what it deferred, what the cell takes (Garbage collection, Passes that skip; TASK-395.2, TASK-395.6, TASK-395.8) | likewise |
-| `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted, each object's key, size, version and time as listed (Garbage collection) | create-only, by the collector; removed by an operator |
 | `<C>moves/<rest>/<pass>` | the live extents of the object at `<C><rest>`, compacted by the cell's pass of epoch `pass`, and where in it each is; `<C>moves/moves/<rest>/<pass>/<pass>` those moves' (Garbage collection, TASK-407.1) | create-only, by the collector |
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a point's fork's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good, as is its cell; none for a point's fork's made by its host alone, of an ID an allocator gave (Dead cells removed whole) |
@@ -183,10 +182,9 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `identity` | cladefs: the bucket's identity: its format, its **bucket number** and a random ID (`bucket_cell::identity`, TASK-633.9, doc-23) | create-only, by the bucket's formatting (`cladefsctl format-bucket`, or an allocator's before its first block) or its addition (`cladefsctl add-bucket`); kept for good |
 | `buckets` | cladefs: the record of every bucket: its version, and each bucket's number, identity ID, provider, cloud region, URL, endpoint, KMS and master key's ID; the root bucket's (number 1) is the authority, every other's a copy (doc-23) | the root's: created by its formatting, then updated with a condition by each addition, which serializes them; a copy: created, or updated with a condition, never by an older version; kept for good |
 | `tenants/<tenant>/kek` | cladefs: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`cladefs-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
-| `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks, `cladefs-gc --clear-marks` (board 8515) |
 
-*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease,
-`gc/marking` and a tenant's KEK object (TASK-411.27) is **written once**: created once, never written again, nor created again once
+*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease
+and a tenant's KEK object (TASK-411.27) is **written once**: created once, never written again, nor created again once
 deleted, so that a key names one object for as long as anyone reads it, and readers and caches go by
 the key alone (specs/bucket's `KeysWrittenOnce`; Reading). Keys of a writer's objects name its
 epoch, first, so that a checkpoint's table front-codes them; moves', their pass's.
@@ -995,7 +993,7 @@ and is the design of record for TASK-395.2-.8. The code runs it since TASK-395.2
 cells found by delimiter listings of `tenants/` and each tenant's `cells/`, a page of 1,000 at a
 time, listing none of their objects (`cell::listed`), `--at-once` passes at once (16 by default;
 `extent_bucket::sweep`, TASK-395.5), or passes over the one `--cell TENANT/CELL` names;
-`--dry-run`, `--mark-only` and `--branches` go per cell the same way. Any number of processes
+`--dry-run` and `--branches` go per cell the same way. Any number of processes
 sweep one bucket at once, each cell's collector lease keeping two passes off one cell (Sweeps,
 below), and a cell unchanged since its last pass, whichever process made it, costs a pass its lease
 and one
@@ -1022,7 +1020,6 @@ else, and deletes nothing else but the references it retires; it reads other cel
 | Key | What | Written |
 |---|---|---|
 | `<C>gc/lease` | the cell's collector lease (`passed::CollectorLease`): the format; its epoch and holder; until when its pass holds the cell, and when the last pass over it that went through ended (TASK-395.5); and what the last pass over the cell to end recorded, carried by each taking to the next (Passes that skip, TASK-395.6, TASK-395.8); replaces `gc/lease` | created, then updated with a condition, by passes over the cell |
-| `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted | create-only, by the collector |
 | `<C>moves/<rest>/<pass>` | the moves of the object at `<C><rest>` by the cell's pass of epoch `pass`, and `<C>moves/moves/<rest>/<pass>/<pass>` those moves' moves: a reader that finds `<C><rest>` gone lists `<C>moves/<rest>/` and follows the latest pass's moves that name the extent, then those moves' (TASK-407.1: a pass slow to create its moves, after later passes made and deleted theirs, creates its own, never again a key once read; `moves_by_pass`, `NoMovesByPass`) | create-only, by the cell's passes |
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference: the fork of the cell's branch `parent` at its segment `at` to `child` of cell `<cell>` of `<tenant>`, each ID 13 base-32 digits; its bytes the format and the fork's owner (a writable fork's, from its footer; a point's fork's, its own), unique to the fork, so that every writer of it writes the same | create-only (an object of identical bytes there is success), before the child's record; deleted by the passes of the child's cell |
 
@@ -1197,8 +1194,7 @@ delimiter before it takes the lease (`passable`); a fork's in the cell read from
 checkpoints lists them, the cell's listing serving each branch's first listing alone; a fork
 point's state the pass keeps lists them only to start over, the cell's listing serving each one's
 first (TASK-395.19: a branch forked at a hundred points listed them a hundred times more); a recovery finding what it inherited lost lists its checkpoints (`newestCheckpoint`,
-TASK-177); a fork point found lost lists its references (`needing`); a mark-only pass lists
-`<C>gc/marks/`. *Not done:* one listing of `<C>` after the states serving the records' relisting
+TASK-177); a fork point found lost lists its references (`needing`). *Not done:* one listing of `<C>` after the states serving the records' relisting
 and every branch's check: it would list every segment and reference of the cell again, a request a
 1,000 keys, where those prefixes hold a few, and move the check out of the recovery it ends. The
 cell's listing holds every reference too (a million for a base forked a million times), as the
@@ -1449,42 +1445,12 @@ operator to see what the collector would do before trusting it with a bucket:
   delete, then each it would compact by its listed size, `KEY KIND SIZE delete|compact`, and their
   counts and bytes. It **undercounts**: what a pass compacts it deletes a grace period after, which
   a dry run never finds doomed. With `--compact-below 0`, a pass deletes exactly what it lists.
-- `cladefs-gc URL --mark-only [--every S] [--grace S] [--compact-below F]` is a pass in every respect
-  but deleting: it compacts as one does, encrypted cells under their keys through the KMS
-  (TASK-411.6) (the compacted originals are the keys most worth watching,
-  TASK-175), and instead of deleting writes `<C>gc/marks/<epoch>`, the doomed objects of its cell as
-  listed. *Decided:* it **takes `<C>gc/lease`** (step 1). Its marks are ordered by the epoch, each
-  pass's its own and later than every pass's before, so readers and the next mark-only pass find the
-  newest by key; a pass that deletes, fenced by it, is late, never wrong; and where it finds lost
-  what a live branch needs, it can tell a pass that deleted since (it was fenced, and stops,
-  TASK-180) from a bug, which a pass not holding the lease could not. Fenced, it writes no marks, as
-  a fenced pass deletes nothing. Nothing marked goes, so **storage grows**: originals and their
-  moves both, and every marks object, until an operator collects for real or removes them. The
-  collector never takes `<C>gc/` for a candidate, nor for a branch's.
-  - **Readers warn.** Every reader of a bucket reads it through `object_bucket::ObjectBucket`
-    (cladefsd's cells, writers recovering, cladefsctl, the collector). A mark-only pass writes `gc/marking`
-    first, which a reader reads every 60 s, a HEAD, alongside one of its reads; only while it is
-    there does the reader hold the newest marks' keys of each cell it reads, read again every 60 s
-    by a listing of the cell's `gc/marks/` (and a read once it changed) alongside one of its reads
-    of the cell, a cell not read for two minutes forgotten; all uncounted in its stats, never a
-    round trip a read. Unmarked, a bucket costs a reader a HEAD a minute (TASK-395.4's review: a
-    listing a minute for every cell each host reads was thousands a second at a million VMs). An
-    operator removes `gc/marking` with the marks: `cladefs-gc URL --clear-marks` deletes every
-    cell's `<C>gc/marks/`, then `gc/marking`, so that readers watch marks for as long as any are
-    there; `--clear-marks --cell C` deletes C's alone, leaving `gc/marking` (board 8515). A dead
-    cell's marks keep it from being removed whole until they go. A GET, ranged GET or HEAD of a marked key logs a `warn`
-    with the key, its kind (naming its branch), the request, the marks' epoch and the current span's
-    trace and span IDs; in cladefsd the log names the guest request too (`request_id`). A read costs
-    one load with no marks, one set lookup with some. Listings are logged at `debug` only: they name
-    what callers pass over (older checkpoints, segments a checkpoint covers) as well as what they go
-    by, which they read, and which is warned of. A warning is a bug in the collector, unless the
-    reader is one the protocol lets find the object gone and start again (a recovery a newer
-    checkpoint restarts, a reader within the grace period).
-  - **Resurrection.** Each mark-only pass compares what it finds doomed with the newest marks
-    before its own: an object marked then, listed now at the same version, size and key, and not
-    doomed, is warned of loudly, as no correct fork or recovery reaches what no live branch
-    reached. Marks of a shorter grace period than the pass's are not compared: a compacted object
-    takes longer to be doomed under a longer one.
+- *Gone (board 10545):* `cladefs-gc --mark-only`, a pass that wrote what it would delete to
+  `<C>gc/marks/<epoch>` instead, with `gc/marking` for every reader of the bucket to watch (a HEAD
+  a minute, and a listing of each cell's marks while marked), and `--clear-marks`. Pre-production,
+  no bucket held marks worth keeping, and a dry run's output, specs/bucket and the simulation
+  validate the collector without writing to the bucket or hooking its readers' path. Keys under
+  `<C>gc/marks/` and `gc/marking` are of no kind now (`Kind::Unknown`).
 
 **Not yet:** merging small objects. Compaction writes each object's live extents to its own moves;
 merging several into one needs the moves of each to name it, and a moves object can be deleted only
@@ -1523,8 +1489,7 @@ And a pass in full over a dead cell it does not remove, deferring nothing, recor
 what its listing leaves once its deletes land, so that the next skips it rather than go over it in
 full for those deletes, retiring its references again.)* Before: an idle cell, dead or not, costs a pass three requests: the lease's
 GET and PUT, and one LIST; holding it for a time (`--lease`, Sweeps), the letting go of the lease,
-a GET and a PUT, more. Mark-only passes and dry runs
-never skip, and record nothing.
+a GET and a PUT, more. Dry runs never skip, and record nothing.
 
 **Whoever passed meanwhile.** The record is the cell's, not a process's: any collector process
 reads it with the lease, and a pass that skips by one another process wrote decides as that one
@@ -1610,7 +1575,7 @@ tenant's sum, IDs in base 32, each with when it was measured: a cell as of its l
 full, which nothing under its prefix changed since if passes since skipped it; a cell no pass ended
 on, nulls. It holds a page of tenants, a page of cells and the leases in flight, whatever the
 bucket holds. TASK-394's sum by a listing of the whole bucket is gone, with what it said of what is
-no cell's (object-ID blocks, `gc/marking`).
+no cell's (object-ID blocks).
 
 ### Dead cells removed whole (TASK-455, format 12; 13 since its review)
 
@@ -1619,7 +1584,7 @@ cell's object, its records, its heads and its collector lease, and a point's for
 cell, for good: 5 requests a dead cell every sweep, and a base's pass listing a mark a fork ever
 retired (docs/measurements/macos-gc-dead-cells-2026-11-15). Now a pass in full over a cell that is
 dead (no live branch, no reference), with no mark under it (of a reference retired, which a stale
-writer may write again; or a mark-only pass's), deferring nothing, removes it whole when **every
+writer may write again), deferring nothing, removes it whole when **every
 record of it is a deleted root's or a deleted point's fork's made** (`record::Kind::Clone`, what
 `Forking` becomes as its fork is made; format 12), **of an ID an allocator gave** (`objectid::given`:
 its block's object there, never block 0): after retiring its references, it deletes its heads and

@@ -116,19 +116,17 @@ fn collects_a_bucket_once() {
 }
 
 /// doc-27 step 3 (board 6218's AC #2): with no KMS, neither `CLADEFS_KMS` nor a master key given,
-/// it collects, marks, dry runs, lists, says usage and deletes cells: nothing it does reads data,
+/// it collects, dry runs, lists, says usage and deletes cells: nothing it does reads data,
 /// every cell's metadata authenticated, not encrypted (doc-16). The tests below collect encrypted
 /// cells so.
 #[test]
 fn collects_without_a_kms() {
     for args in [
         &["memory:///"][..],
-        &["memory:///", "--mark-only"],
         &["memory:///", "--dry-run"],
         &["memory:///", "--cells"],
         &["memory:///", "--usage"],
         &["memory:///", "--delete-cell", "1/1", "--force-missing"],
-        &["memory:///", "--clear-marks"],
     ] {
         assert!(gc(args).status.success(), "{args:?}");
     }
@@ -265,10 +263,10 @@ fn collects_a_file_bucket() {
 }
 
 /// TASK-264: a dry run over a bucket on the host's filesystem lists what a pass would delete,
-/// writing nothing, the collector's lease neither, nor the probe of its conditional writes; a
-/// mark-only pass marks it, deleting nothing; a pass after deletes it, leaving the marks.
+/// writing nothing, the collector's lease neither, nor the probe of its conditional writes; a pass
+/// after deletes it.
 #[test]
-fn dry_runs_and_mark_only_passes_delete_nothing() {
+fn dry_runs_delete_nothing() {
     use bucket_cell::lifecycle;
     use bucket_cell::object_bucket::ObjectBucket;
 
@@ -317,25 +315,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     assert!(out.status.success());
     assert_eq!(files(), before);
 
-    let out = gc(&[&url, "--mark-only"]);
     let at = "tenants/0000000000001/cells/0000000000001";
-    let marks = format!("{at}/gc/marks/0000000000001");
-    assert_eq!(
-        said(&out),
-        format!(
-            "cladefs-gc: cell 1/1: marked 2 ({bytes} bytes) in {marks}, deleted 0, resurrected 0, \
-             in T s; requests: R\n\
-             cladefs-gc: marked 2 ({bytes} bytes), resurrected 0, over 1 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 failed; \
-             requests: R\n\
-             cladefs-gc: took T s; slowest: 1/1 T s\n"
-        )
-    );
-    let names: Vec<String> = files().into_iter().map(|(name, _)| name).collect();
-    for key in [&holding, &freeing] {
-        assert!(names.contains(key), "{key} marked, deleted");
-    }
-    assert!(names.contains(&marks), "{names:?}");
-
     let out = gc(&[&url]);
     assert_eq!(
         said(&out),
@@ -353,11 +333,8 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         .collect();
     let cell = bucket_cell::layout::CellId { tenant: 1, id: 1 };
     let kept: Vec<String> = vec![
-        // The word that the bucket is marked, which an operator removes with the marks.
-        bucket_cell::layout::MARKING.to_owned(),
         format!("{at}/checkpoints/0000000000001.0000000000001"),
         format!("{at}/gc/lease"),
-        marks,
         bucket_cell::layout::head(cell),
         "tenants/0000000000001/kek".to_owned(),
     ];
@@ -615,16 +592,13 @@ fn rotates_master_keys_rewrapping_every_tenants_kek() {
 #[test]
 fn without_a_bucket_prints_its_usage() {
     let out = gc(&[]);
-    let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
-                 [--at-once PASSES] [--lease SECONDS] [--metrics FILE] [--max-delete-objects N] \
-                 [--max-delete-bytes N] [--max-requests-per-second N] [--max-refused-passes N] | \
-                 cladefs-gc URL [--cell TENANT/CELL] --dry-run | cladefs-gc URL --cells [--cell \
-                 TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell TENANT/CELL \
-                 [--force-missing] | cladefs-gc URL --clear-marks [--cell TENANT/CELL] | cladefs-gc \
-                 URL --usage [--tenant TENANT] | cladefs-gc URL --rotate-master-key (every cell, or \
-                 the one --cell names; SECONDS from a millisecond to a year; --mark-only deletes \
-                 nothing, writing each cell's gc/marks/EPOCH: the bucket grows; --dry-run writes \
-                 nothing)";
+    let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--every SECONDS] [--at-once PASSES] \
+                 [--lease SECONDS] [--metrics FILE] [--max-delete-objects N] [--max-delete-bytes N] \
+                 [--max-requests-per-second N] [--max-refused-passes N] | cladefs-gc URL [--cell \
+                 TENANT/CELL] --dry-run | cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] \
+                 | cladefs-gc URL --delete-cell TENANT/CELL [--force-missing] | cladefs-gc URL \
+                 --usage [--tenant TENANT] | cladefs-gc URL --rotate-master-key (every cell, or the \
+                 one --cell names; SECONDS from a millisecond to a year; --dry-run writes nothing)";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {usage:?}\n"));
     assert_eq!(out.status.code(), Some(1));
 }
@@ -701,75 +675,6 @@ fn sweeps_past_their_bounds_delete_nothing_and_fail_the_run() {
     let out = gc(&[&url]);
     assert!(out.status.success());
     assert_eq!(cells_objects(&url).len(), before.len() - 2);
-}
-
-/// board 8515's AC #1 and #2: a dead cell a mark-only pass marked, its marks keep from going whole;
-/// `--clear-marks --cell` deletes that cell's marks alone, leaving `gc/marking`; `--clear-marks`
-/// every cell's, then `gc/marking`; and the next pass removes the dead cell whole.
-#[test]
-fn cleared_marks_let_dead_cells_go_whole() {
-    use bucket_cell::layout::{self, CellId};
-    use bucket_cell::lifecycle;
-    use bucket_cell::object_bucket::ObjectBucket;
-    let dir = tempfile::tempdir().unwrap();
-    let url = file_bucket(&dir);
-    let bucket = ObjectBucket::from_url(&url).unwrap();
-    let ids = bucket_cell::objectid::Allocator::new();
-    let (dead, live) = futures::executor::block_on(async {
-        let mut cells = Vec::new();
-        for _ in 0..2 {
-            let cell = CellId { tenant: 1, id: ids.next(&bucket).await.unwrap() };
-            lifecycle::create(&bucket, cell, 0).await.unwrap();
-            cells.push(cell);
-        }
-        lifecycle::delete(&bucket, cells[0], 11, 1).await.unwrap();
-        (cells[0], cells[1])
-    });
-    let out = gc(&[&url, "--mark-only"]);
-    assert!(out.status.success(), "{}", said(&out));
-    let marks = |cell: CellId| -> Vec<(String, usize)> {
-        let objects = objects(&url);
-        let of = objects.into_iter().filter(|(key, _)| key.starts_with(&layout::marks_of(cell)));
-        of.map(|(key, bytes)| (key, bytes.len())).collect()
-    };
-    let marking = || objects(&url).contains_key(layout::MARKING);
-    let (dead_marks, live_marks) = (marks(dead), marks(live));
-    let ([(_, dead_bytes)], [(_, live_bytes)]) = (&dead_marks[..], &live_marks[..]) else {
-        panic!("{dead_marks:?} {live_marks:?}")
-    };
-    let (dead_bytes, live_bytes) = (*dead_bytes, *live_bytes);
-    assert!(marking());
-    let of_dead =
-        || objects(&url).into_keys().filter(|key| key.starts_with(&dead.prefix())).count();
-    let out = gc(&[&url]);
-    assert!(out.status.success(), "{}", said(&out));
-    assert!(of_dead() > 0, "kept by its marks");
-
-    let out = gc(&[&url, "--clear-marks", "--cell", &live.to_string()]);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        format!(
-            "cladefs-gc: cell {live}: deleted 1 marks ({live_bytes} bytes)\ncladefs-gc: deleted 1 \
-             marks ({live_bytes} bytes) of 1 cells, leaving gc/marking, which other cells' marks \
-             may need\n"
-        )
-    );
-    assert!(out.status.success());
-    assert_eq!((marks(dead).len(), marks(live).len(), marking()), (1, 0, true));
-    let out = gc(&[&url, "--clear-marks"]);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        format!(
-            "cladefs-gc: cell {dead}: deleted 1 marks ({dead_bytes} bytes)\ncladefs-gc: deleted 1 \
-             marks ({dead_bytes} bytes) of 1 cells, then gc/marking\n"
-        )
-    );
-    assert!(out.status.success());
-    assert_eq!((marks(dead).len(), marks(live).len(), marking()), (0, 0, false));
-
-    let out = gc(&[&url]);
-    assert!(said(&out).contains(", removed 1 dead cells"), "{}", said(&out));
-    assert_eq!(of_dead(), 0);
 }
 
 /// board 8513's AC #1: SIGTERM has a process sweeping every so long end between its sweeps, at

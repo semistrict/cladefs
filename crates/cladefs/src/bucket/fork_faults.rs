@@ -474,8 +474,6 @@ impl World {
                 // References' marks stay, retired or taken back (TASK-395.13), and a tenant's KEK
                 // object, for good (TASK-411.27).
                 Kind::CollectorLease { .. }
-                | Kind::Marks { .. }
-                | Kind::Marking
                 | Kind::Retired { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Identity

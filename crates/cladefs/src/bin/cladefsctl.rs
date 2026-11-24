@@ -124,9 +124,7 @@
 //! is done, as its extents. `--version` prints the commit it was built of (`cladefs::BUILD_COMMIT`,
 //! TASK-111.7).
 //!
-//! cladefs: on Linux, it logs on standard error what is as grave as a warning: as a read of an
-//! object the collector's newest mark-only pass marked, a bug in the collector
-//! (`bucket_cell::marks`, TASK-264).
+//! cladefs: on Linux, it logs on standard error what is as grave as a warning.
 //!
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
