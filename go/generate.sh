@@ -10,21 +10,20 @@
 #   go/generate.sh [--check]
 #
 # buf compiles the .proto, in Go, as protox does for the Rust side: no protoc, whose version
-# would be in every generated file. Its version is pinned here; the generators' by go.mod.
+# would be in every generated file. Its version is pinned by go/buf.sh; the generators' by go.mod.
 set -euo pipefail
 
-BUF=github.com/bufbuild/buf/cmd/buf@v1.75.0
 dir=$(cd "$(dirname "$0")" && pwd)
 cd "$dir"
 
 case ${1:-} in
 "")
-    go run "$BUF" generate
+    "$dir/buf.sh" generate
     ;;
 --check)
     scratch=$(mktemp -d)
     trap 'rm -r "$scratch"' EXIT
-    go run "$BUF" generate --output "$scratch"
+    "$dir/buf.sh" generate --output "$scratch"
     # Every generated file checked in as generated, and none checked in that nothing generates.
     status=0
     for generated in $(cd "$scratch" && find . -name '*.pb.go'); do

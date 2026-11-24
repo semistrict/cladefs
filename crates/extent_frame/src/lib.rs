@@ -12,7 +12,7 @@
 //! cell keeps in object storage: a reader reads and decompresses only the parts it needs, each
 //! checked against its CRC before it is decompressed.
 //!
-//! cladefs: FORMAT 2 (TASK-411.2, doc-16, What is encrypted). Every object is encrypted, or,
+//! cladefs: version 3, frozen ([`FORMAT`], doc-28); since 2 (TASK-411.2, doc-16, What is encrypted). Every object is encrypted, or,
 //! metadata, authenticated, under its cell's DEK, as its trailer says: none is in the clear
 //! (TASK-411.28), a trailer saying so corrupt. Encrypted, each of its parts is compressed first,
 //! then encrypted with AES-256-GCM under a subkey of the object's own: its cell's DEK's, of the
@@ -113,12 +113,15 @@ mod at {
     pub const MAC: usize = FOOTER_MAC + MAC_LEN;
     /// The CRC of the table and the trailer before it.
     pub const TABLE_CRC: usize = MAC + MAC_LEN;
-    pub const MAGIC: usize = TABLE_CRC + 4;
+    /// The frame's version, [`super::FORMAT`]'s: the last but the magic, where every version has it.
+    pub const VERSION: usize = TABLE_CRC + 4;
+    pub const MAGIC: usize = VERSION + 4;
 }
 
 /// The bytes after an object's table: the lengths of its data, its parts stored and its footer; the
 /// CRC32C of its footer; its [`Encryption`]; the MACs of its footer and of its table and trailer
-/// before that MAC; the CRC32C of its table and trailer before it; and [`MAGIC`].
+/// before that MAC, and its version; the CRC32C of its table and trailer before it; its version;
+/// and [`MAGIC`].
 pub const TRAILER: u64 = (at::MAGIC + MAGIC.len()) as u64;
 
 /// cladefs: the trailer of a frame's `bytes`, if they end as a frame does ([`MAGIC`]): what tells
@@ -130,25 +133,36 @@ pub fn trailer_of(bytes: &[u8]) -> Option<&[u8]> {
     bytes.ends_with(&MAGIC).then(|| &bytes[at..])
 }
 
-/// The format of the frames this crate writes and reads, the last byte of [`MAGIC`], as a digit:
-/// a frame says its format, and a reader of another names it rather than call it corrupt (doc-11,
-/// rule 1; TASK-141.2). cladefs: 2 since objects may be encrypted (TASK-411.2); a reader of 2 reads
-/// no frame of 1, nothing having been kept that needs it (the user's decision of 2026-11-14).
-pub const FORMAT: u8 = 2;
+/// cladefs: the refusal of the frame whose last bytes are `suffix`, if they end as a frame of a
+/// version this build doesn't read does: one of 3 on, its version before its magic, or of before 3,
+/// its version its magic's last digit. None if they end as no frame does, or as one read. What
+/// tells a frame of another build from one a crash left torn, which a cell's recovery deletes
+/// (hotbed review 85).
+pub fn refused(suffix: &[u8]) -> Option<formats::Refused> {
+    let magic = &suffix[suffix.len().checked_sub(MAGIC.len())?..];
+    let version = if magic == MAGIC {
+        u32_at(suffix, suffix.len().checked_sub(TRAILER as usize)? + at::VERSION)
+    } else {
+        let (of, digit) = magic.split_at(MAGIC_OF.len());
+        (of == MAGIC_OF).then_some(())?;
+        digit[0].checked_sub(b'0').filter(|digit| *digit <= 9)?.into()
+    };
+    FORMAT.check(version).err()
+}
 
-/// An object's last bytes: the frame's [`FORMAT`] after them.
+/// The frames this crate writes and reads, frozen at 3 (doc-28, board 10040): a frame says its
+/// version, a number before its [`MAGIC`], and a reader of another names it rather than call it
+/// corrupt. 2, objects encrypted (TASK-411.2), and 1 before, said theirs as the magic's last byte,
+/// a digit, which read frames of 10 on as corrupt; neither is read, nothing having been kept that
+/// needs them.
+pub const FORMAT: formats::Format = formats::Format::new("extent frame", 3, 3);
+
+/// What a frame of before 3 ends with, its format after it, a digit.
 const MAGIC_OF: [u8; 7] = *b"cladefs";
 
-/// An object's last bytes.
-const MAGIC: [u8; 8] = {
-    let mut magic = [b'0' + FORMAT; 8];
-    let mut at = 0;
-    while at < MAGIC_OF.len() {
-        magic[at] = MAGIC_OF[at];
-        at += 1;
-    }
-    magic
-};
+/// An object's last bytes, the same in every version from 3 on: a frame of 3 as a reader of 2
+/// named one, which names a frame of 3 or later as of 3, newer than its own.
+const MAGIC: [u8; 8] = *b"cladefs3";
 
 /// The zstd level parts are compressed at, unless `CLADEFS_ZSTD_LEVEL` says another, to measure it
 /// against (TASK-29.4): the fastest, as sealing and closing segments wait for it. At 0, parts are
@@ -1137,11 +1151,14 @@ fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKe
     encryption[13..].copy_from_slice(&key.salt.0);
     bytes.extend_from_slice(&encryption);
     bytes.extend_from_slice(&key.mac.mac(footer));
-    // The table's MAC covers the trailer before it: the footer's MAC, the encryption, the lengths.
-    let mac = key.mac.mac(&bytes[start..]);
+    // The table's MAC covers the trailer before it, the footer's MAC, the encryption, the lengths,
+    // and the version, which is after it: so that no version is read as another.
+    let version = FORMAT.current.to_le_bytes();
+    let mac = key.mac.mac_of(&[&bytes[start..], &version]);
     bytes.extend_from_slice(&mac);
     // And its CRC, the MAC too.
     bytes.extend_from_slice(&crc(&bytes[start..]).to_le_bytes());
+    bytes.extend_from_slice(&version);
     bytes.extend_from_slice(&MAGIC);
     bytes
 }
@@ -1199,18 +1216,13 @@ pub struct Frame {
 impl Frame {
     /// The frame an object's last bytes, its [`TRAILER`] at their end, give.
     pub fn of_trailer(bytes: &[u8]) -> Result<Self, Corrupt> {
-        // Its magic first: a frame of another format, its trailer of another length, is named.
-        let magic = bytes.len().checked_sub(MAGIC.len()).ok_or_else(|| corrupt("trailer"))?;
-        let magic = &bytes[magic..];
-        if magic != MAGIC {
-            let (of, format) = magic.split_at(MAGIC_OF.len());
-            return Err(match (of == MAGIC_OF, format[0].checked_sub(b'0')) {
-                (true, Some(format @ 0..=9)) => corrupt(format_args!(
-                    "trailer: a frame of format {format}, which a reader of format {FORMAT} \
-                     doesn't read"
-                )),
-                _ => corrupt("trailer, by its magic"),
-            });
+        // Its version first: a frame of another version, its trailer perhaps of another length,
+        // is named.
+        if let Some(refused) = refused(bytes) {
+            return Err(corrupt(format_args!("trailer: {refused}")));
+        }
+        if !bytes.ends_with(&MAGIC) {
+            return Err(corrupt("trailer, by its magic"));
         }
         let at = bytes.len().checked_sub(TRAILER as usize).ok_or_else(|| corrupt("trailer"))?;
         let trailer = &bytes[at..];
@@ -1408,8 +1420,10 @@ impl Parts {
         let opening = Opening::of(frame.encryption, keys)?;
         if let Some(key) = opening.key() {
             let trailer = suffix.len() - TRAILER as usize;
-            let authenticated = &suffix[table..trailer + at::MAC];
-            key.mac.verify(authenticated, &frame.mac).map_err(|_| corrupt("table, by its MAC"))?;
+            let authenticated =
+                [&suffix[table..trailer + at::MAC], &suffix[trailer + at::VERSION..][..4]];
+            let verified = key.mac.verify_of(&authenticated, &frame.mac);
+            verified.map_err(|_| corrupt("table, by its MAC"))?;
         }
         Ok(Self { frame, stored, tags, opening })
     }
@@ -2352,26 +2366,35 @@ mod tests {
         assert_eq!(parts.frame.stored_len, data.len() as u64);
         assert_eq!(bytes.len() as u64, data.len() as u64 + 6 + 3 * ENTRY + TRAILER);
         assert_eq!(super::data(&bytes, &holding(dek())).unwrap(), data);
-        assert_eq!((ENTRY, TRAILER), (33, 149));
+        assert_eq!((ENTRY, TRAILER), (33, 153));
     }
 
-    /// A frame says its format, last: one of another format than the reader's is refused, naming
-    /// it, rather than called corrupt (TASK-141.2); cladefs: a frame of format 1, the last before
-    /// objects were encrypted, among them, of any length, the shortest as long as its trailer was,
-    /// shorter than a trailer is now (TASK-411.2).
+    /// A frame says its version, last but its magic: one of a version the reader doesn't read is
+    /// refused, naming it, rather than called corrupt (TASK-141.2, doc-28); cladefs: frames of 1
+    /// and 2, which said theirs as the magic's last digit, among them, of any length, the shortest
+    /// as long as 1's trailer was, shorter than a trailer is now (TASK-411.2).
     #[test]
-    fn frames_of_other_formats_are_named() {
+    fn frames_of_other_versions_are_named() {
         let bytes = framed(b"data", b"footer", (&dek(), ID));
-        assert_eq!(&bytes[bytes.len() - 8..], b"cladefs2");
-        let mut newer = bytes.clone();
-        *newer.last_mut().unwrap() = b'0' + FORMAT + 1;
-        let refused =
-            "an object's trailer: a frame of format 3, which a reader of format 2 doesn't read";
-        assert_eq!(corrupt_of(Parts::of(&newer, &NoKeys)), Err(Corrupt(refused.into())));
-        assert_eq!(check(&newer), Err(Corrupt(refused.into())));
-        *newer.last_mut().unwrap() = b'x';
+        assert_eq!(&bytes[bytes.len() - 12..], b"\x03\0\0\0cladefs3");
+        let refused = |version: u32| {
+            let said = format!(
+                "an object's trailer: extent frame version {version}: this build reads version 3 \
+                 alone"
+            );
+            Corrupt(said)
+        };
+        for version in [0, 2, 4, 10, u32::MAX] {
+            let mut other = bytes.clone();
+            let at = other.len() - TRAILER as usize + at::VERSION;
+            other[at..at + 4].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(corrupt_of(Parts::of(&other, &NoKeys)), Err(refused(version)));
+            assert_eq!(check(&other), Err(refused(version)));
+        }
+        let mut other = bytes.clone();
+        *other.last_mut().unwrap() = b'x';
         assert_eq!(
-            corrupt_of(Parts::of(&newer, &NoKeys)),
+            corrupt_of(Parts::of(&other, &NoKeys)),
             Err(Corrupt("an object's trailer, by its magic".into()))
         );
 
@@ -2394,10 +2417,14 @@ mod tests {
             bytes.extend_from_slice(b"cladefs1");
             bytes
         };
-        let refused =
-            "an object's trailer: a frame of format 1, which a reader of format 2 doesn't read";
-        let refused = Corrupt(refused.into());
-        for old in [format_1(&random(4096), b"footer"), format_1(&[], b"")] {
+        // Format 2's: as 3's, but the version, its magic's last digit.
+        let mut format_2 = bytes.clone();
+        format_2.drain(bytes.len() - 12..bytes.len() - 8);
+        *format_2.last_mut().unwrap() = b'2';
+        for (old, version) in
+            [(format_1(&random(4096), b"footer"), 1), (format_1(&[], b""), 1), (format_2, 2)]
+        {
+            let refused = refused(version);
             assert_eq!(
                 corrupt_of(Parts::of(&old, &NoKeys)),
                 Err(refused.clone()),
@@ -2410,6 +2437,27 @@ mod tests {
             assert_eq!(corrupt_of(footer(&old, &NoKeys)), Err(refused.clone()));
         }
         assert_eq!(format_1(&[], b"").len(), 40);
+    }
+
+    /// The table's MAC covers the frame's version, which follows it: a frame of one version
+    /// relabelled another is unauthentic to a reader holding its key, were both read, and so is
+    /// never read as the other (doc-28). The version is checked by its MAC alone here: a reader
+    /// reading 3 alone refuses any other before it.
+    #[test]
+    fn a_frames_version_is_authenticated() {
+        let bytes = framed(&random(4096), b"footer", (&dek(), ID));
+        let parts = Parts::of(&bytes, &holding(dek())).unwrap();
+        let trailer = bytes.len() - TRAILER as usize;
+        let table = parts.frame.table().start as usize;
+        let key = ObjectKey::new(&dek(), ID, parts.frame.encryption.keyed().1, Keyed::Encrypted);
+        let mac: [u8; MAC_LEN] = bytes[trailer + at::MAC..][..MAC_LEN].try_into().unwrap();
+        let signed = |version: u32| {
+            let version = version.to_le_bytes();
+            key.mac.verify_of(&[&bytes[table..trailer + at::MAC], &version], &mac)
+        };
+        assert_eq!(signed(3), Ok(()));
+        assert!(signed(4).is_err());
+        assert!(key.mac.verify(&bytes[table..trailer + at::MAC], &mac).is_err());
     }
 
     /// TASK-411.2: a trailer's encryption is encrypted, authenticated or a raw file's sectors, as
@@ -2565,5 +2613,81 @@ mod tests {
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(4097, 100)]), place);
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(0, 100)]), place);
         assert_eq!(stored_in(vec![zstd(0, 40), zstd(8192, 8192 - 1)]), place);
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<Frames>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    /// Frames of each encryption and encoding, under [`dek`], each of a salt of its own.
+    struct Frames;
+
+    /// What a frame decodes into: its trailer, its table, its footer, and its data, by its length
+    /// and CRC.
+    #[derive(Debug)]
+    #[allow(dead_code, reason = "read by its Debug alone")]
+    struct Decoded {
+        frame: Frame,
+        stored: Vec<Stored>,
+        footer: String,
+        data: String,
+    }
+
+    impl formats::golden::Family for Frames {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let keyed = |salt: u8, keyed: Keyed, data: &[u8]| {
+                let salt = Salt([salt; SALT_LEN]);
+                let mut packer = Packer::with(Arc::new(ObjectKey::new(&dek(), ID, salt, keyed)));
+                let mut bytes = packer.push(data);
+                bytes.extend(packer.finish(b"footer"));
+                bytes
+            };
+            // Zeros compress, as zstd's RLE blocks: what a zstd of another release writes alike.
+            let zeros = vec![0; 8192];
+            let sectors = sectors_of(
+                &random(2 * SECTOR as u64),
+                b"footer",
+                &raw_file_key(Salt([5; SALT_LEN])),
+            );
+            vec![
+                ("encrypted-zstd", keyed(1, Keyed::Encrypted, &zeros)),
+                ("encrypted-raw", keyed(2, Keyed::Encrypted, &random(512))),
+                ("encrypted-empty", keyed(3, Keyed::Encrypted, &[])),
+                ("authenticated", keyed(4, Keyed::Authenticated, &zeros)),
+                ("sectors", sectors),
+            ]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
+            // Version 3's decoder is this build's.
+            if version != 3 {
+                return Err(format!("no decoder of version {version}"));
+            }
+            Self::decoded(case, bytes).map(|decoded| format!("{decoded:#?}"))
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
+            Self::decoded(case, bytes).map(drop)
+        }
+    }
+
+    impl Frames {
+        /// `bytes` read by this build's reader holding [`dek`], and checked by one holding none.
+        fn decoded(_: &str, bytes: &[u8]) -> Result<Decoded, String> {
+            let keys = holding(dek());
+            let parts = Parts::of(bytes, &keys).map_err(|err| err.to_string())?;
+            let footer = super::footer(bytes, &keys).map_err(|err| err.to_string())?;
+            let data = super::data(bytes, &keys).map_err(|err| err.to_string())?;
+            check(bytes).map_err(|err| err.to_string())?;
+            Ok(Decoded {
+                frame: parts.frame,
+                stored: parts.stored,
+                footer: footer.escape_ascii().to_string(),
+                data: format!("{} bytes, CRC32C {:#010x}", data.len(), crc(&data)),
+            })
+        }
     }
 }

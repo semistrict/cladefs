@@ -133,11 +133,11 @@ mod tests {
         // data (doc-27, board 6214); and 26's, whose ephemeral cells' index entries name no
         // bucket (board 8517); and 27's, whose cells hold the collector's moves (doc-27, board
         // 6216); and 28's, whose heads are in slots, and whose buckets have settings (doc-27,
-        // board 6220).
-        assert_eq!(FORMAT, 29);
+        // board 6220); and 29's, whose objects are frames of version 2 (board 10040).
+        assert_eq!(FORMAT, 30);
         for format in [
             1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-            27, 28,
+            27, 28, 29,
         ] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());

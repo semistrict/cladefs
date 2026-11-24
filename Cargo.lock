@@ -854,6 +854,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "block_device",
+ "formats",
  "futures",
  "log",
  "rand 0.10.3",
@@ -1530,6 +1531,7 @@ dependencies = [
  "bincode",
  "crc-fast",
  "extent_keys",
+ "formats",
  "serde",
  "storage_device",
  "thiserror",

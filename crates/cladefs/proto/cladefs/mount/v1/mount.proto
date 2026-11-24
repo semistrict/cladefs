@@ -28,8 +28,8 @@
 // the kernel lets the cells go. A caller bounds them with deadlines; one that gives up does not
 // stop the work, which completes, or fails, on its own.
 //
-// Compatibility: cells changed v1 outright (TASK-364: formats break, no caller is kept), and again
-// as a cell has one kind (doc-20: a new Fxfs cell made by Attach).
+// Compatibility: v1 only grows, as cladefsd.proto's (doc-28), checked against the last build's by
+// go/compat.sh (board 10056). It changed outright before (TASK-364, doc-20).
 
 syntax = "proto3";
 

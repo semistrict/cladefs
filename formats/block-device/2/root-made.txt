@@ -1,0 +1,13 @@
+Some(
+    Root {
+        minted: 1,
+        dying: [],
+        dying_list: None,
+        tree: TreeRoot {
+            size: 0,
+            height: 0,
+            top: None,
+            sparse: [],
+        },
+    },
+)

@@ -793,6 +793,7 @@ name = "block_device"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "formats",
  "futures",
  "log",
  "storage_device",
@@ -1363,6 +1364,7 @@ dependencies = [
  "bincode",
  "crc-fast",
  "extent_keys",
+ "formats",
  "serde",
  "storage_device",
  "thiserror",

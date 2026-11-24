@@ -156,9 +156,11 @@ pub fn evict_hot_to(target: u64) -> u64 {
     }
 }
 
-/// Seed for `own_frame` rapidhash integrity checks: its last digits the frames' format, which the
-/// replica directory's format names (`replica::magic`, board 8457).
-pub(crate) const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0002;
+/// Seed for `own_frame` rapidhash integrity checks: its last digits the version of the extent
+/// frames its files are, which the replica directory's format names (`replica::magic`, board 8457).
+pub(crate) const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0003;
+
+const _: () = assert!(OWN_FRAME_SEED & 0xffff == extent_frame::FORMAT.current as u64);
 
 /// Header bytes of an `own_frame`: sequence (u64), len (u64), hash (u64).
 pub(crate) const OWN_FRAME_HEADER: u64 = 24;

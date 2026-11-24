@@ -1,0 +1,54 @@
+Some(
+    Root {
+        minted: 8589934592,
+        dying: [
+            ExtentId {
+                cell: 47,
+                sequence: 2,
+            },
+            ExtentId {
+                cell: 47,
+                sequence: 5,
+            },
+        ],
+        dying_list: Some(
+            (
+                ExtentId {
+                    cell: 47,
+                    sequence: 9,
+                },
+                300,
+            ),
+        ),
+        tree: TreeRoot {
+            size: 1073741824,
+            height: 2,
+            top: Some(
+                Ref {
+                    extent: ExtentId {
+                        cell: 47,
+                        sequence: 7,
+                    },
+                    block: 2,
+                    blocks: 9,
+                },
+            ),
+            sparse: [
+                (
+                    ExtentId {
+                        cell: 30,
+                        sequence: 4,
+                    },
+                    12,
+                ),
+                (
+                    ExtentId {
+                        cell: 47,
+                        sequence: 6,
+                    },
+                    1,
+                ),
+            ],
+        },
+    },
+)

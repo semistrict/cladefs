@@ -31,9 +31,10 @@ use storage_device::ExtentId;
 /// were in hexadecimal (`base32_id`, TASK-504); 15's description names its cell's kind alone, as a
 /// cell has one kind, of no cell's name (doc-20, TASK-508.1); 16's logs carry a keyless header
 /// hash (`FXLOG\0\0\x04`, board 6902) and ephemeral cells store closed segments in `segments/`
-/// with an authenticated `extent_frame::table` `local-checkpoint` (board 6905). A cell of another
+/// with an authenticated `extent_frame::table` `local-checkpoint` (board 6905); 17's framed files
+/// are extent frames of version 3, their version a number (board 10040). A cell of another
 /// format is refused ([`Format`]): nothing reads, converts or upgrades it.
-pub const FORMAT: &str = "cladefs extent store 16";
+pub const FORMAT: &str = "cladefs extent store 17";
 
 /// cladefs: the error of a cell whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
@@ -633,6 +634,7 @@ mod tests {
             "cladefs extent store 13",
             "cladefs extent store 14",
             "cladefs extent store 15",
+            "cladefs extent store 16",
         ] {
             let refused = CellFile::parse(&format!("{older}\nblock_size 4096\ncell 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;

@@ -47,7 +47,7 @@ What isn't frozen keeps the old rule: refused unless it is this build's.
 | Only copy, on a host's disk | cell directories (`store`, segment logs, `wal`, local checkpoints, ephemeral keys, migration markers, attached bases and ancestry); replica directories; ephemeral host directories; block devices' roots and nodes | Yes |
 | Only copy, inside a cell | Fxfs (`LATEST_VERSION`), block devices | Yes |
 | Long-lived files | Firecracker snapshots' extent device state (zygotes outlive builds) | Yes |
-| Wire across builds | the peer service (a rolling upgrade's hosts), the control and mount APIs (a VM manager upgraded apart), the virtio device (a guest restored onto a newer VMM) | Grows only, checked (`buf breaking`, versioned state) |
+| Wire across builds | the peer service (a rolling upgrade's hosts), the control and mount APIs (a VM manager upgraded apart), the virtio device (a guest restored onto a newer VMM) | Grows only, checked (`buf breaking` in CI, `go/compat.sh`; versioned state) |
 | Wire within a build | VM process and daemon (`wire::VERSION`): installed together, and a daemon's restart ends its VMs | No: exact, as now |
 | Caches and diagnostics | the part cache, read traces, stats | No: refused and rebuilt |
 
@@ -103,9 +103,11 @@ incompatible change, where it lacks the means to grow (board 10033's subtasks):
 
 - **Every object says its version.** Checkpoints, segment and moves footers, marks, objectid
   blocks, the `wal` start, local checkpoints, ephemeral keys, migration markers and the cell
-  directory's records say none today, relying on the head's or the directory's.
+  directory's records say none today, relying on the head's or the directory's. A block device's
+  nodes and owners' lists said none, relying on its root's, which a commit leaves them under when
+  it rewrites the root alone (board 10052).
 - **Extent frames name their version as a number**, not one ASCII digit, which reads frames of 10
-  on as corrupt.
+  on as corrupt; the table's MAC covers it (board 10040).
 - **Unknown fields are refused, not ignored**: the `store` file's unknown keys, a migration
   marker's unknown fields. Bincode reads of frozen types refuse trailing bytes.
 - **The peer service says each family's version**, not one opaque string compared whole, so that

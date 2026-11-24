@@ -132,7 +132,7 @@ pub(crate) const PROTOCOL: u32 = 2;
 /// build's format is taken, as nothing migrates (AGENTS.md, "No migrations").
 pub(crate) fn formats() -> String {
     let named = |cell: &str| {
-        let (frames, layout) = (extent_frame::FORMAT, bucket_cell::layout::FORMAT);
+        let (frames, layout) = (extent_frame::FORMAT.current, bucket_cell::layout::FORMAT);
         format!(
             "cell directories {cell:?}, extent frames {frames}, bucket layout {layout}, peers {PROTOCOL}"
         )

@@ -55,12 +55,13 @@
 // 4 MiB, which the Rust client (cladefs::cladefsd::control) and the Go client (go/cladefsd/v1)
 // raise to it, failed GetStats at some hundreds of VMs. Requests are 4 MiB at most.
 //
-// Compatibility (TASK-50.5): v1 only grows. Calls and fields are added; none is removed,
-// renamed, renumbered or given another meaning or type, and no field number is used twice (a
-// field that goes is `reserved`). A field a daemon doesn't know of is zero, empty or false, which
-// each says it means; a caller ignores fields it doesn't know of. A call an older daemon lacks
-// fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
-// beside v1 until callers move.
+// Compatibility (TASK-50.5, doc-28): v1 only grows, checked against the last build's by
+// go/compat.sh (board 10056). Calls and fields are added; none is removed, renamed, renumbered or
+// given another meaning or type, and no field number is used twice (a field that goes is
+// `reserved`). A field a daemon doesn't know of is zero, empty or false, which each says it means;
+// a caller ignores fields it doesn't know of. A call an older daemon lacks fails with
+// UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served beside v1
+// until callers move.
 //
 // Cells (TASK-364, doc-20): a tenant's cell has one kind, kept under the cell's prefix in the
 // bucket, and a host takes a cell whole, its head with it. A cell is named by its tenant and its

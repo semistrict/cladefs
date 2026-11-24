@@ -1,0 +1,40 @@
+[
+    Some(
+        Ref {
+            extent: ExtentId {
+                cell: 3,
+                sequence: 1,
+            },
+            block: 0,
+            blocks: 9,
+        },
+    ),
+    None,
+    Some(
+        Ref {
+            extent: ExtentId {
+                cell: 3,
+                sequence: 1099511627776,
+            },
+            block: 8,
+            blocks: 9,
+        },
+    ),
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+]
