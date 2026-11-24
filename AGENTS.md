@@ -150,7 +150,7 @@ it, says more.
 
 ## Don't wait on the user: decide, and record both decisions and questions in hotbed
 
-Never ask the user anything directly: not in a reply, not with a question tool, not as a choice at the end of a message. The user doesn't read through output for questions.
+Never ask the user anything directly: not in a reply, not with a question tool, not as a choice at the end of a message. The user doesn't read through output for questions. **Exception: on-disk format changes** (see **Frozen formats**, below) always require explicit user approval directly in conversation — never decide them on your own and never use a hotbed question for them.
 
 A decision doesn't wait for the user. Make your best guess, act on it, and record it in hotbed as a question already answered: `hotbed question add --answered` (AskUserQuestion JSON on stdin or `--file`, under project `cladefs`). Its question is the choice; its options are what you decided, marked `"implemented": true`, and what else was possible; its `body` says why, what you measured, and what undoing it would take. The user reads them at leisure, reopens what they disagree with and answers it again, which reaches `hotbed question outbox` like any answer. Code and docs cite a decision as `hotbed question N`. There is no OPEN_QUESTIONS.md: git history keeps the file as it was before its decisions moved to hotbed (board 7033).
 
@@ -158,28 +158,33 @@ Only what you can't do yourself is an open question: an action only the user can
 
 ## Frozen formats: every later build reads every frozen version
 
-The user's rule (2026-11-23, doc-28, board 10033), as cladefs goes into production: no backwards
-incompatible format change. A family of formats (a bucket's objects, a cell directory's files, an
-ephemeral host's, Fxfs, ...) is frozen once its golden corpus is under `formats/<family>/`, and
-from then on:
+The user's rule (2026-11-23, updated 2026-11-24; doc-28, board 10033): **the on-disk format is now
+frozen.** Every persistent on-disk and bucket format family (bucket layout, cell directories, cell
+records, replica directories, ephemeral hosts, extent frames, block devices, Fxfs, all KMS
+backends, and Firecracker snapshot extent state) is frozen with its golden corpus under
+`formats/<family>/`. From now on:
 
-- **Every later build reads every version from the family's frozen one on**, `oldest..=current`
-  of its `formats::Format`, through `Format::check`, and refuses any other by name.
-- **A change is a new version, never an edit of an old one.** The old version's decoder and types
-  stay as they are; the reader converts what it reads into the current types (Fxfs's
+- **Any change needs explicit user approval directly — not a hotbed question.** Do not change any
+  frozen format on your own (not even an additive new version or extension-point change), do not
+  record it as an answered decision with `hotbed question add --answered`, and do not ask for
+  approval via `hotbed question add`. Stop and get explicit approval from the user directly before
+  making any format change.
+- **Backwards compatibility with all stored data is required.** Every later build must read every
+  version from each family's frozen `oldest` through `current` (`oldest..=current` of its
+  `formats::Format`, through `Format::check`) and refuse any other by name. No backwards
+  incompatible changes: stored data from every frozen version must remain readable indefinitely.
+- **An approved change is a new version, never an edit of an old one.** The old version's decoder
+  and types stay as they are; the reader converts what it reads into the current types (Fxfs's
   `versioned_type!` model: `From<V27> for V28`). Or the change goes through an extension point the
-  format has (a key kind the collector keeps, a protobuf field). Nothing is rewritten in place to
-  convert it; writers write the current version.
-- **The corpus is append-only.** A change adds the new version's cases (`CLADEFS_FORMATS_WRITE=1`
-  on the family's corpus test writes the missing ones) and never edits, deletes or moves one, nor
-  raises `oldest`. `scripts/format-freeze.py` refuses that in the commit-msg hook and in CI. Only
-  the user agrees to a break, in a hotbed question the commit names in a `Breaks-format:` line.
+  format already has (a key kind the collector keeps, a protobuf field). Nothing is rewritten in
+  place to convert it; writers write the current version.
+- **The corpus is append-only.** An approved change adds the new version's cases
+  (`CLADEFS_FORMATS_WRITE=1` on the family's corpus test writes the missing ones) and never edits,
+  deletes or moves one, nor raises `oldest`. `scripts/format-freeze.py` refuses corpus edits,
+  deletions, and raised `oldest` bounds in the commit-msg hook and in CI.
 
-A family not frozen yet keeps the rule before (2026-11-05): its reader refuses every version but
-its own (`Error::Format` and its kind), and its format changes outright, with no migration code,
-no shim and no dual-format reader. Each takes its last incompatible change in its board 10033
-subtask, then freezes. What doc-28 leaves unfrozen (the VM process and daemon's wire, caches,
-diagnostics) keeps it for good.
+Only what doc-28 explicitly leaves unfrozen (the VM process and daemon's intra-build wire,
+rebuildable caches, and diagnostics) stays unfrozen and exact (refused unless it is this build's).
 
 ## Trust boundaries: check untrusted input once, where it enters
 
