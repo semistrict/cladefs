@@ -365,24 +365,25 @@ fn control<T>(call: impl std::future::Future<Output = T>) -> T {
 
 /// Resizes the cell at `path`, as the control API does (`ResizeCell`).
 fn resize(path: &Path, capacity: u64) -> Result<(), Errno> {
-    control(super::cells::resize(path.to_owned(), capacity))
+    control(super::cells::resize(super::Daemon::process(), path.to_owned(), capacity))
 }
 
 /// Forks the cell at `from` to a new cell at `to`, as the control API does (`ForkCell`), and
 /// returns the cell.
 fn fork_cell(from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
-    let forked = control(super::cells::fork(from.to_owned(), to.to_owned(), None));
+    let forked =
+        control(super::cells::fork(super::Daemon::process(), from.to_owned(), to.to_owned(), None));
     forked.map_err(crate::Error::from)
 }
 
 /// Deletes the cell at `path`, as the control API does (`DeleteCell`).
 fn delete_cell(path: &Path) -> Result<(), crate::Error> {
-    Ok(control(super::cells::delete(path.to_owned()))?)
+    Ok(control(super::cells::delete(super::Daemon::process(), path.to_owned()))?)
 }
 
 /// Waits for the cell at `path` to be uploaded, as the control API does (`SyncCell`).
 fn wait_uploaded(path: &Path) -> Result<(), crate::Error> {
-    Ok(control(super::cells::sync(path.to_owned()))?)
+    Ok(control(super::cells::sync(super::Daemon::process(), path.to_owned()))?)
 }
 
 /// A shrink whose caller drops its `ResizeCell` stops waiting for the guest (TASK-43.6): the
@@ -972,7 +973,7 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     };
     let dir = tempfile::tempdir().unwrap();
     let (client, served) = connect(&dir.path().join("store"), 1 << 24);
-    let vms = super::stats::vms();
+    let vms = super::stats::vms_on(super::Daemon::process());
     assert_eq!(vms.len(), 1);
     let writer = &vms[0];
     // No window yet.
@@ -1010,7 +1011,7 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
 
     drop(client);
     served.join().unwrap();
-    assert_eq!(super::stats::vms(), []);
+    assert_eq!(super::stats::vms_on(super::Daemon::process()), []);
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
 }
@@ -2611,10 +2612,12 @@ fn vm_processes_drop_the_versions_they_made_alone() {
     let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     write(&client, ExtentId { cell: client.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
     client.commit(None).unwrap();
-    let managers = control(super::cells::make_version(path.clone(), None)).unwrap();
+    let managers =
+        control(super::cells::make_version(super::Daemon::process(), path.clone(), None)).unwrap();
     let made = client.make_version().unwrap().version;
     let versions = || -> std::collections::BTreeSet<u64> {
-        let versions = control(super::cells::versions(path.clone())).unwrap();
+        let versions =
+            control(super::cells::versions(super::Daemon::process(), path.clone())).unwrap();
         versions.into_iter().map(|version| version.id).collect()
     };
     assert_eq!(versions(), [managers, made].into());
@@ -2641,15 +2644,20 @@ async fn control_takes_cells_at_the_placements_given() {
     let path = |name: &str| dir.path().join(name);
     // Host 1's copy, of a new cell the bucket names, placed at 5, its commit synced.
     let new = crate::CellId { tenant: 0, id: 0 };
-    let made =
-        super::cells::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs, None, false));
+    let made = super::cells::create(
+        super::Daemon::process(),
+        path("first"),
+        1 << 24,
+        new,
+        (Some(5), Kind::Fxfs, None, false),
+    );
     let cell = control(made).unwrap();
     let extent = ExtentId { cell: cell.id, sequence: 1 };
     let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
     write(&first, extent, 0, &pattern(7, BLOCK)).unwrap();
     first.commit(Some(b"placed at 5")).unwrap();
     drop(first);
-    assert_eq!(control(super::cells::sync(path("first"))), Ok(()));
+    assert_eq!(control(super::cells::sync(super::Daemon::process(), path("first"))), Ok(()));
     // A copy beside the daemon, as cladefsctl's without it, placed at 6.
     crate::open_cell::Opening::here()
         .unwrap()
@@ -2657,8 +2665,13 @@ async fn control_takes_cells_at_the_placements_given() {
         .await
         .unwrap();
     // One through the daemon, placed at 7.
-    let taken =
-        super::cells::create(path("third"), 1 << 24, cell, (Some(7), Kind::Fxfs, None, false));
+    let taken = super::cells::create(
+        super::Daemon::process(),
+        path("third"),
+        1 << 24,
+        cell,
+        (Some(7), Kind::Fxfs, None, false),
+    );
     assert_eq!(control(taken), Ok(cell));
     let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();
     assert_eq!(third.root().unwrap(), b"placed at 5");
@@ -3781,7 +3794,13 @@ fn cells_worked_on_here_fetch_nothing_ahead() {
     let path = dir.path().join("fork");
     // Forked by the daemon, not by a VM's connection, which no VM has open, nor had.
     let cell = crate::CellId { tenant: version.tenant, id: version.cell };
-    control(super::cells::fork_version((cell, version.version), 1 << 24, (&path, None))).unwrap();
+    control(super::cells::fork_version(
+        super::Daemon::process(),
+        (cell, version.version),
+        1 << 24,
+        (&path, None),
+    ))
+    .unwrap();
 
     crate::evidence::forget();
     let before = crate::stats::stats();
@@ -4555,7 +4574,9 @@ async fn control_forks_failing_fork_again() {
     fork_cell(&base, &fork).unwrap();
 
     let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
-    let cell = control(super::cells::fork(base.clone(), again.clone(), None)).unwrap();
+    let cell =
+        control(super::cells::fork(super::Daemon::process(), base.clone(), again.clone(), None))
+            .unwrap();
     drop(failing);
     assert_eq!(OpenCell::open(&again).await.map(|client| client.cell()).map_err(drop), Ok(cell));
     let (forked, served) = connect(&again, 1 << 24);
@@ -4587,6 +4608,7 @@ fn forks_of_a_version_right_after_its_writer_went_sync_the_cell_still_closing() 
     assert!(lingering.is_some(), "the cell is not open");
     drop(made);
     let forked = control(super::cells::fork_of_version(
+        super::Daemon::process(),
         version_cell(version),
         version.version,
         restored.clone(),
@@ -4679,6 +4701,7 @@ fn forks_of_a_version_wait_for_the_close_of_the_cell_that_made_it() {
         let restored = restored.clone();
         move || {
             let forking = super::cells::fork_of_version(
+                super::Daemon::process(),
                 version_cell(version),
                 version.version,
                 restored,
@@ -4719,9 +4742,15 @@ fn versions_shared_right_after_their_writer_went_use_the_cell_still_closing() {
     let lingering = super::cells::table().instance(&key);
     assert!(lingering.is_some(), "the cell is not open");
     drop(made);
-    let shared = control(super::cells::share_version(cell_dir.clone(), version.version, true));
+    let shared = control(super::cells::share_version(
+        super::Daemon::process(),
+        cell_dir.clone(),
+        version.version,
+        true,
+    ));
     assert_eq!(shared, Ok(()));
-    let versions = control(super::cells::versions(cell_dir.clone())).unwrap();
+    let versions =
+        control(super::cells::versions(super::Daemon::process(), cell_dir.clone())).unwrap();
     drop(lingering);
     assert_eq!(
         versions.iter().map(|each| (each.id, each.shared)).collect::<Vec<_>>(),
@@ -4751,6 +4780,7 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     let left = ["fork::made", "lifecycle::head_ended"];
     let failing = left.map(|step| fail::FailGuard::new(step, "1*return").unwrap());
     let forked = control(super::cells::fork_of_version(
+        super::Daemon::process(),
         version_cell(version),
         version.version,
         restored.clone(),
@@ -6802,7 +6832,8 @@ fn tenants_sockets_are_of_their_mode_from_the_first() {
     // SAFETY: Plain system calls. Nothing else of this test's process, its own, makes a file
     // meanwhile.
     let umask = unsafe { libc::umask(0) };
-    let granted = super::grants::Grants::new(sockets.clone()).grant(1, &cells, (None, None));
+    let granted = super::grants::Grants::new(super::Daemon::process().clone(), sockets.clone())
+        .grant(1, &cells, (None, None));
     // SAFETY: As above.
     unsafe { libc::umask(umask) };
     fail::remove("cladefsd::bound");
@@ -6866,7 +6897,10 @@ async fn drains_close_every_connection_and_take_no_more() {
         let refused = UnixStream::connect(socket).err().map(|err| err.kind());
         assert_eq!(refused, Some(std::io::ErrorKind::ConnectionRefused), "{}", socket.display());
     }
-    assert!(super::control::CALLS.begin().is_none(), "a control call began, drained");
+    assert!(
+        super::Daemon::process().calls_work.begin(super::Daemon::process()).is_none(),
+        "a control call began, drained"
+    );
     drop((client, tenants));
     // Closed, durable, as of its last commit, though only ordered.
     let closed = OpenCell::open(&path).await.unwrap();
@@ -6878,7 +6912,8 @@ async fn drains_close_every_connection_and_take_no_more() {
 #[tokio::test(flavor = "multi_thread")]
 async fn drains_give_up_past_their_bound() {
     host();
-    let connection = super::server::CONNECTIONS.begin().unwrap();
+    let daemon = super::Daemon::process();
+    let connection = daemon.connections_work.begin(daemon).unwrap();
     let left = super::drain::drain(std::time::Duration::from_millis(100)).await;
     let left = left.err().expect("a drain gave up");
     let expected = super::drain::Left { connections: 1, ..Default::default() };
@@ -6922,7 +6957,15 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     let ranged = || bucket.stats().requests(Request::GetRange);
     let before = ranged();
     let path = dir.path().join("store");
-    control(super::cells::import(path.clone(), 256 << 20, image, None, 0)).unwrap();
+    control(super::cells::import(
+        super::Daemon::process(),
+        path.clone(),
+        256 << 20,
+        image,
+        None,
+        0,
+    ))
+    .unwrap();
     // Before TASK-407, three: a footer as the cell's writer took its cell, made, its fence's;
     // two as the daemon opened it after, its recovery's and its writer's, past the checkpoint.
     assert_eq!(ranged() - before, 0, "ranged GETs of the bucket as the import ran");
@@ -7126,7 +7169,8 @@ fn failed_writeback_preserves_disk_admission() {
 fn measure_unmatched_grant_lookups() {
     host();
     let root = tempfile::tempdir().unwrap();
-    let grants = super::grants::Grants::new(root.path().to_owned());
+    let grants =
+        super::grants::Grants::new(super::Daemon::process().clone(), root.path().to_owned());
     let first = root.path().join("missing-a");
     let second = root.path().join("missing-b");
     let mut last = 0;
@@ -7239,7 +7283,10 @@ fn a_racing_revoke_preserves_the_regranted_socket() {
     use std::time::Duration;
     host();
     let root = tempfile::tempdir().unwrap();
-    let grants = Arc::new(super::grants::Grants::new(root.path().to_owned()));
+    let grants = Arc::new(super::grants::Grants::new(
+        super::Daemon::process().clone(),
+        root.path().to_owned(),
+    ));
     let dir = root.path().join("tenant");
     std::fs::create_dir(&dir).unwrap();
     grants.grant(1, &dir, (None, None)).unwrap();
@@ -7319,6 +7366,7 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     let fork = |name: &str| {
         let at = dir.path().join(name);
         control(super::cells::fork_ephemeral_of_version(
+            super::Daemon::process(),
             version_cell(version),
             version.version,
             at,
@@ -7397,7 +7445,13 @@ fn hosts_are_decommissioned_through_the_control_api() {
     let fork = |name: &str| {
         let at = dir.path().join(name);
         let cell = version_cell(version);
-        control(super::cells::fork_ephemeral_of_version(cell, version.version, at, None))
+        control(super::cells::fork_ephemeral_of_version(
+            super::Daemon::process(),
+            cell,
+            version.version,
+            at,
+            None,
+        ))
     };
     let bucket = super::cells::daemon_bucket().unwrap();
     let buckets = control(bucket.ephemeral_buckets()).unwrap();
@@ -7512,20 +7566,21 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         control(listing).unwrap().into_iter().map(|(_, child)| child).collect::<Vec<_>>()
     };
 
-    let (incarnation, token) = control(target::prepare(prepare(0x11, 2))).unwrap();
+    let daemon = super::Daemon::process();
+    let (incarnation, token) = control(target::prepare(daemon, prepare(0x11, 2))).unwrap();
     assert_eq!(incarnation, ephemeral.incarnation());
     assert!(staged(0x11).is_dir());
     assert_eq!(references(), vec![child]);
-    assert_eq!(control(target::prepare(prepare(0x11, 2))).unwrap(), (incarnation, token));
-    let late = control(target::prepare(prepare(0x13, 1))).unwrap_err();
+    assert_eq!(control(target::prepare(daemon, prepare(0x11, 2))).unwrap(), (incarnation, token));
+    let late = control(target::prepare(daemon, prepare(0x13, 1))).unwrap_err();
     assert_eq!(late.code(), Code::Aborted, "{late}");
     assert!(staged(0x11).is_dir() && !staged(0x13).exists());
-    let (_, newer) = control(target::prepare(prepare(0x15, 3))).unwrap();
+    let (_, newer) = control(target::prepare(daemon, prepare(0x15, 3))).unwrap();
     assert_ne!(newer, token);
     assert!(!staged(0x11).exists() && staged(0x15).is_dir());
     assert_eq!(references(), vec![child], "the reference kept, the newer migration's alike");
-    target::renew(0x15).unwrap();
-    assert_eq!(target::renew(0x11).unwrap_err().code(), Code::NotFound);
+    target::renew(daemon, 0x15).unwrap();
+    assert_eq!(target::renew(daemon, 0x11).unwrap_err().code(), Code::NotFound);
 
     let hand_over = |incarnation, token| MigrateHandOverRequest {
         migration: 0x15,
@@ -7533,23 +7588,24 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         token,
         files: vec![FileDigest { path: "description".into(), len: 1, crc: None }],
     };
-    let unknown = control(target::hand_over(hand_over(incarnation ^ 2, newer))).unwrap_err();
+    let unknown =
+        control(target::hand_over(daemon, hand_over(incarnation ^ 2, newer))).unwrap_err();
     assert_eq!(unknown.code(), Code::FailedPrecondition, "{unknown}");
     assert!(staged(0x15).is_dir(), "neither yes nor no: nothing dropped");
-    assert!(!control(target::hand_over(hand_over(incarnation, newer ^ 2))).unwrap());
+    assert!(!control(target::hand_over(daemon, hand_over(incarnation, newer ^ 2))).unwrap());
     assert!(!staged(0x15).exists(), "refused, what it took dropped");
     assert_eq!(ephemeral.entries().unwrap(), vec![]);
     assert_eq!(references(), vec![]);
     assert!(
-        !control(target::hand_over(hand_over(incarnation, newer))).unwrap(),
+        !control(target::hand_over(daemon, hand_over(incarnation, newer))).unwrap(),
         "refused for good"
     );
 
     // Released, an acceptance whose cell's noting failed has it noted taken first.
-    let (_, token) = control(target::prepare(prepare(0x19, 4))).unwrap();
+    let (_, token) = control(target::prepare(daemon, prepare(0x19, 4))).unwrap();
     ephemeral.accept(0x19, child).unwrap();
     assert_eq!(ephemeral.entry(child).unwrap().unwrap().receiving(), Some((0x19, token)));
-    control(target::release(0x19)).unwrap();
+    control(target::release(daemon, 0x19)).unwrap();
     assert!(!ephemeral.accepted(0x19));
     assert_eq!(
         ephemeral.entry(child).unwrap().unwrap().migrating,
@@ -7580,6 +7636,7 @@ fn forgetting_keys_halts_open_ephemeral_cells() {
     let open = |name: &str, byte: u8| {
         let at = dir.path().join(name);
         let forked = super::cells::fork_ephemeral_of_version(
+            super::Daemon::process(),
             version_cell(version),
             version.version,
             at.clone(),

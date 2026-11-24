@@ -137,6 +137,7 @@
 //!   `cladefsd_otel_spans_failed_total`: the spans exported over OTLP, dropped (the exporter's
 //!   queue full) and whose export failed (`super::otel::batch`).
 
+use super::Daemon;
 use super::wire::*;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
@@ -327,13 +328,19 @@ impl Laps {
     }
 }
 
-/// The metrics as of now, in Prometheus' text format.
-pub fn render() -> String {
+/// The metrics of `daemon` as of now, in Prometheus' text format.
+pub(super) fn render_on(daemon: &Daemon) -> String {
     let mut out = String::new();
     let mut laps = Laps::new();
     render_requests(&mut out);
     laps.lap("requests");
-    render_rest(out, laps)
+    render_rest(daemon, out, laps)
+}
+
+/// The metrics of the process's default daemon as of now, in Prometheus' text format.
+#[cfg(not(madsim))]
+pub fn render() -> String {
+    render_on(Daemon::process())
 }
 
 /// The VM processes' requests' metrics, appended to `out`: each kind's, its histogram's buckets,
@@ -365,7 +372,7 @@ fn family(out: &mut String, name: &str, kind: &str, help: &str) {
 }
 
 /// The metrics but the requests', appended to `out`, each part lapped: `out`.
-fn render_rest(mut out: String, mut laps: Laps) -> String {
+fn render_rest(daemon: &Daemon, mut out: String, mut laps: Laps) -> String {
     let name = "cladefsd_build_info";
     let _ = writeln!(out, "# HELP {name} The daemon's build, by the commit it was built of.");
     let _ = writeln!(out, "# TYPE {name} gauge");
@@ -377,14 +384,14 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
          built of, as they said."
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
-    for ((cell, commit), count) in super::stats::vm_builds() {
+    for ((cell, commit), count) in super::stats::vm_builds_on(daemon) {
         // cladefs: the commit as its VM process said it, which it may have said with anything.
         let commit = label_value(&commit);
         let _ = writeln!(out, "{name}{{cell=\"{cell}\",commit=\"{commit}\"}} {count}");
     }
 
     laps.lap("builds");
-    for (name, help, value) in gauges() {
+    for (name, help, value) in gauges_on(daemon) {
         let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
         let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
         let _ = writeln!(out, "cladefsd_{name} {value}");
@@ -397,7 +404,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     let _ = writeln!(out, "{name} {}", crate::open_cell::open_maps_refused());
 
     // cladefs: each cell's VM process's (TASK-111.5, board 8563).
-    let vms = super::stats::vms();
+    let vms = super::stats::vms_on(daemon);
     let series: [(&str, &str, Gauge); 6] = [
         ("vm_window_mappings", "Ranges a VM's DAX window maps.", |vm| Some(vm.window?.mappings)),
         ("vm_window_mapped_bytes", "Bytes those ranges span.", |vm| Some(vm.window?.mapped_bytes)),
@@ -430,7 +437,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     }
 
     laps.lap("each VM's");
-    let tenants = super::memory::tenants();
+    let tenants = super::memory::tenants_on(daemon);
     let name = "cladefsd_tenant_memory_bytes";
     let _ = writeln!(out, "# HELP {name} Memory a tenant's extents' pages hold, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
@@ -452,7 +459,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
         }
     }
     // cladefs: their disks' (TASK-94).
-    let tenants = super::disk::tenants();
+    let tenants = super::disk::tenants_on(daemon);
     let name = "cladefsd_tenant_disk_bytes";
     let _ = writeln!(
         out,
@@ -549,7 +556,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
 
     // cladefs: what the part cache keeps, and its budget (TASK-406.1): 0 until a cell opens it, or
     // if there is none, so that its series are there from the start (board 8561).
-    let cache = super::cells::opened_cache();
+    let cache = super::storage::opened_cache(daemon);
     let (bytes, capacity) = cache.map_or((0, 0), |cache| (cache.bytes(), cache.capacity()));
     for (name, help, value) in [
         ("cladefsd_part_cache_bytes", "Bytes of objects the host's part cache keeps.", bytes),
@@ -585,7 +592,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     // cladefs: what the process holds and spent, against its budget (TASK-330.2), sampled now: the
     // stats' thread samples it only once a cell opened the bucket, and until then it would read 0,
     // an idle daemon's, to whoever alerts on it (board 8561, hotbed question 504).
-    let process = super::process::sample();
+    let process = super::process::sample_on(daemon);
     let series: [(&str, &str, &str, String); 6] = [
         (
             "cladefsd_process_cpu_seconds_total",
@@ -631,7 +638,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     }
 
     laps.lap("stats, uploads' memory, the part cache, peers and the process");
-    let uploads = super::cells::upload_statuses();
+    let uploads = super::cells::upload_statuses(daemon);
     let series: [(&str, &str, &str, fn(&local_cell::upload::UploadStatus) -> String); 3] = [
         (
             "upload_pending_bytes",
@@ -693,7 +700,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     // cladefs: 0 until a cell opens the bucket, so that its series are there from the start
     // (board 8561).
     {
-        let stats = super::cells::bucket_stats().unwrap_or_default();
+        let stats = super::storage::bucket_stats(daemon).unwrap_or_default();
         use bucket_cell::object_bucket::{Request, Upload};
         let name = "cladefsd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
@@ -734,7 +741,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
         let _ = writeln!(out, "{name} {}", stats.downloaded);
         // cladefs: by bucket, the daemon's own and those of other buckets' cells (TASK-633.4):
         // what crosses to another cloud region shows here.
-        let by_bucket = super::cells::bucket_stats_by_bucket();
+        let by_bucket = super::storage::bucket_stats_by_bucket(daemon);
         let name = "cladefsd_object_storage_bucket_gets_total";
         let _ = writeln!(out, "# HELP {name} GETs of each bucket, by its number.");
         let _ = writeln!(out, "# TYPE {name} counter");
@@ -752,7 +759,7 @@ fn render_rest(mut out: String, mut laps: Laps) -> String {
     laps.lap("replication");
     render_grpc(&mut out);
     laps.lap("gRPC calls");
-    render_subsystems(&mut out);
+    render_subsystems(daemon, &mut out);
     laps.said("migrations, the mount, the page cache, the governor and spans");
     out
 }
@@ -804,9 +811,9 @@ fn single(out: &mut String, name: &str, kind: &str, help: &str, value: impl std:
 /// cladefs: the metrics of the daemon's live migrations, its FUSE mount of cells, its page cache,
 /// its memory governor's state and its spans exported, appended to `out` (board 8565): each there
 /// from the daemon's start, 0 until it has any.
-fn render_subsystems(out: &mut String) {
+fn render_subsystems(daemon: &Daemon, out: &mut String) {
     use std::sync::atomic::Ordering::Relaxed;
-    let (preparing, moving, taking) = super::migration::under_way();
+    let (preparing, moving, taking) = super::migration::under_way_on(daemon);
     let name = "cladefsd_migrations";
     let help = "Migrations under way: from this host, being prepared, or moving (its rounds, then \
                 its hand-over); to it, being taken.";
@@ -855,7 +862,7 @@ fn render_subsystems(out: &mut String) {
         single(out, name, "counter", help, value);
     }
 
-    let (attached, detaching, mount) = super::mount::counts();
+    let (attached, detaching, mount) = super::mount::counts_on(daemon);
     let name = "cladefsd_mount_cells";
     family(out, name, "gauge", "Cells the FUSE mount of cells holds, attached or detaching.");
     for (state, count) in [("attached", attached), ("detaching", detaching)] {
@@ -934,7 +941,7 @@ fn render_subsystems(out: &mut String) {
         usage.stalled_ns as f64 / 1e9,
     );
 
-    let governed = super::governor::governed();
+    let governed = super::governor::governed_on(daemon);
     single(
         out,
         "cladefsd_memory_full",
@@ -1003,17 +1010,15 @@ fn by_cell(
     summed
 }
 
-/// The daemon's gauges, as of now, each with its name, without `cladefsd_`, and what it is:
-/// what its metrics and stats report (TASK-111.4). The memory's limit only if it has one, and
-/// the disk's.
-pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
+/// The gauges of `daemon` as of now.
+pub(super) fn gauges_on(daemon: &Daemon) -> Vec<(&'static str, &'static str, u64)> {
     let (entries, live) = (crate::cache::entries(), crate::dax::live());
     let mut gauges = vec![
-        ("connections", "VM processes connected.", super::server::connections() as u64),
+        ("connections", "VM processes connected.", super::server::connections_on(daemon) as u64),
         (
             "stores_open",
             "Cells VM processes' connections write.",
-            super::cells::open_count() as u64,
+            super::cells::open_count(daemon) as u64,
         ),
         (
             "extent_cache_pinned_entries",
@@ -1036,7 +1041,7 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
             "window_private_pages",
             "Private copies of pages the guests wrote, as their VM processes last said.",
             // cladefs: as VM processes said, which may say anything: saturated, not wrapped.
-            (super::stats::vms().iter())
+            (super::stats::vms_on(daemon).iter())
                 .filter(|vm| vm.window.is_some())
                 .fold(0, |sum, vm| sum.saturating_add(vm.stage.private)),
         ),
@@ -1075,7 +1080,7 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         (
             "vm_processes_wedged",
             "VM processes the daemon killed that have not exited, as in uninterruptible sleep.",
-            super::server::wedged(),
+            super::server::wedged_on(daemon),
         ),
         (
             "memory_wedged_bytes",
@@ -1086,12 +1091,12 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         (
             "in_flight_bytes",
             "What every tenant's VM processes' requests have the daemon hold: stream data, replies.",
-            super::memory::in_flight_held(),
+            super::memory::in_flight_held_on(daemon),
         ),
         (
             "in_flight_limit_bytes",
             "The most of that the daemon holds before requests wait for it.",
-            super::memory::total_in_flight().budget(),
+            super::memory::total_in_flight_on(daemon).budget(),
         ),
     ];
     if let Some(limit) = crate::slabs::total_cap() {
@@ -1100,7 +1105,7 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
     // cladefs: TASK-94.
     let disk = super::disk::total();
     gauges.push(("disk_bytes", "The host's disk every tenant's cells take.", disk));
-    let reserved = super::disk::count(None).map_or(0, |counted| counted.reserved);
+    let reserved = super::disk::count_on(daemon, None).map_or(0, |counted| counted.reserved);
     gauges.push((
         "disk_reserved_bytes",
         "What every tenant's cells hold past what they take against the limit.",
@@ -1110,6 +1115,13 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         gauges.push(("disk_limit_bytes", "The limit of every tenant's disk together.", limit));
     }
     gauges
+}
+
+/// The gauges of the process's default daemon (tests).
+#[cfg(not(madsim))]
+#[cfg(test)]
+pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
+    gauges_on(Daemon::process())
 }
 
 /// `value` as a label's value in Prometheus' text format: its backslashes, double quotes and

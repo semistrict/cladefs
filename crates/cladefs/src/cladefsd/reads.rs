@@ -22,11 +22,12 @@
 //! hexadecimal, and the kind `read` (a `READ`), `map` (a `MAP`) or `fault` (a fault, a read's, or
 //! a write's its VM process copies the page for, doc-26). `scripts/read_prediction.py` reads them.
 
+use super::Daemon;
 use crate::ExtentId;
 use base32_id::Short;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 /// How long after its cell's opening a VM's reads are recorded.
@@ -38,25 +39,25 @@ const MOST: usize = 1 << 20;
 /// The first line of a trace.
 pub(super) const HEADER: &str = "cladefs read trace 1";
 
-node_local::node_local! {
-    /// The directory traces are written to, as the environment named it at the daemon's start
-    /// ([`configure`]), if it named one.
-    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-}
-
 /// cladefs: where the environment says traces go, `CLADEFSD_READ_TRACES`, if it names a directory
-/// (empty, it names none): kept for the daemon's connections, or why it can't be.
-pub(super) fn configure() -> Result<(), String> {
+/// (empty, it names none): kept for `daemon`'s connections, or why it can't be.
+pub(super) fn configure_on(daemon: &Daemon) -> Result<(), String> {
     let dir = node_local::env::var_os("CLADEFSD_READ_TRACES").filter(|dir| !dir.is_empty());
     if let Some(dir) = &dir
         && !Path::new(dir).is_dir()
     {
         return Err(format!("CLADEFSD_READ_TRACES names no directory: {dir:?}"));
     }
-    // Set by this node's first start: a restart under the simulation keeps it, of the same
-    // environment.
-    let _ = DIR.get().set(dir.map(PathBuf::from));
+    // Set once per daemon: a second call keeps the first configuration.
+    let _ = daemon.read_traces.set(dir.map(PathBuf::from));
     Ok(())
+}
+
+/// cladefs: [`configure_on`] for the process's default daemon (tests).
+#[cfg(not(madsim))]
+#[cfg(test)]
+pub(super) fn configure() -> Result<(), String> {
+    configure_on(Daemon::process())
 }
 
 /// What a guest's read was.
@@ -106,9 +107,9 @@ pub(super) struct Trace {
 }
 
 impl Trace {
-    /// A trace of the reads of a VM whose cell of `cell` opened now, if the daemon writes traces.
-    pub(super) fn opened(cell: u64) -> Option<Self> {
-        let dir = DIR.get().get()?.as_ref()?;
+    /// A trace of the reads of a VM whose cell of `cell` opened now, if `daemon` writes traces.
+    pub(super) fn opened(daemon: &Daemon, cell: u64) -> Option<Self> {
+        let dir = daemon.read_traces.get()?.as_ref()?;
         Some(Self::in_dir(dir, cell))
     }
 

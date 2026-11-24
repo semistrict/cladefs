@@ -168,8 +168,10 @@ fn main() -> anyhow::Result<()> {
     cladefs::faults::from_seed().map_err(anyhow::Error::msg)?;
     // cladefs: before any thread is started, which SIGQUIT would end otherwise (TASK-44.13).
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
+    let daemon = cladefs::cladefsd::Daemon::new();
     let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
-    drain_on_signals(drain).context("handling SIGTERM, SIGINT and SIGHUP")?;
+    drain_on_signals(std::sync::Arc::clone(&daemon), drain)
+        .context("handling SIGTERM, SIGINT and SIGHUP")?;
     // cladefs: its spans, recorded for /z/tracez (TASK-672.1), and over OTLP too, or not made at
     // all, as CLADEFSD_TRACES says (TASK-258, TASK-707): its exporter's threads made after the
     // signals that drain it are blocked, as every thread but the drain's.
@@ -184,8 +186,9 @@ fn main() -> anyhow::Result<()> {
     let socket = args.next().context("usage: cladefsd SOCKET [MEMORY_BYTES]")?;
     let memory = args.next().map(|memory| memory.parse::<u64>());
     let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
-    // cladefs: its boot awaited at its outermost entry, the one place it blocks (doc-24).
-    local_cell::upload::wait_on(cladefs::cladefsd::boot(std::path::Path::new(&socket), memory))?;
+    // cladefs: its boot awaited on the daemon's consolidated runtime at its outermost entry
+    // (doc-24, board 10774).
+    daemon.block_on(daemon.boot(std::path::Path::new(&socket), memory))?;
     // Serving stops only as the daemon drains, whose thread exits the process once it has
     // (`drain_on_signals`): not here, its cells still closing.
     loop {
@@ -193,14 +196,17 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Drains the daemon on SIGTERM, as an orchestrator stops it, within `bound`, and exits
+/// Drains `daemon` on SIGTERM, as an orchestrator stops it, within `bound`, and exits
 /// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound; cladefs: its last
 /// spans exported within the bound too, as much as it leaves (board 8569). cladefs: on
 /// SIGINT and SIGHUP too, whose default action ended it at once, a crash for every cell (board
 /// 8567). They are blocked in every thread but one, made here first, which waits for them
 /// (`cladefs::signals`), and, once draining, for none again.
 #[cfg(target_os = "linux")]
-fn drain_on_signals(bound: std::time::Duration) -> std::io::Result<()> {
+fn drain_on_signals(
+    daemon: std::sync::Arc<cladefs::cladefsd::Daemon>,
+    bound: std::time::Duration,
+) -> std::io::Result<()> {
     let signals = cladefs::signals::Signals::block(&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP])?;
     cladefs::signals::spawn_taking_no_signals("cladefsd signal", move || {
         // cladefs: its panic, as its drain's, aborts the daemon, which could drain no more
@@ -220,7 +226,7 @@ fn drain_on_signals(bound: std::time::Duration) -> std::io::Result<()> {
         };
         log::info!("cladefsd: draining, on {name}, within {}s", bound.as_secs());
         let began = std::time::Instant::now();
-        let drained = local_cell::upload::wait_on(cladefs::cladefsd::drain::drain(bound));
+        let drained = daemon.block_on(daemon.drain(bound));
         // cladefs: the last spans exported within what is left of the bound, never past it,
         // whatever the collector (board 8569).
         cladefs::cladefsd::otel::shutdown(bound.saturating_sub(began.elapsed()));

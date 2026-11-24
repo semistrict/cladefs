@@ -40,15 +40,17 @@ pub struct CellSource {
 }
 
 /// The Mount service of `server`, a server of many cells, which attaches cells as `cells` says:
-/// what the daemon serves on its control socket, beside its other services, if it mounts cells
+/// what `daemon` serves on its control socket, beside its other services, if it mounts cells
 /// (`crate::cladefsd::mount`, TASK-475.2).
 #[cfg(not(madsim))]
-pub(crate) fn service(
+pub(crate) fn service_on(
+    daemon: Arc<crate::cladefsd::Daemon>,
     server: &Arc<Server>,
     source: CellSource,
 ) -> mount_server::MountServer<impl mount_server::Mount + use<>> {
     let (server, source) = (Arc::downgrade(server), Arc::new(source));
     mount_server::MountServer::new(Control {
+        daemon,
         server,
         source,
         cells: Arc::default(),
@@ -82,6 +84,7 @@ enum Attaching {
 /// reference would keep open, their uploaders running, past the drain (TASK-475.2). Gone, calls
 /// fail with `UNAVAILABLE`.
 struct Control {
+    daemon: Arc<crate::cladefsd::Daemon>,
     server: Weak<Server>,
     source: Arc<CellSource>,
     cells: Cells,
@@ -97,11 +100,12 @@ type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::cells::MountHold>>>;
 /// Opens the cell directory at `path` as `open`, [`mount_cell`]'s, does, held for the mount first
 /// ([`Holds`]), the hold awaited, holding no thread (board 2946), and kept in `holds` if it opens.
 async fn held_open(
+    daemon: Arc<crate::cladefsd::Daemon>,
     holds: Holds,
     path: PathBuf,
     open: impl Future<Output = Result<Filesystem, Error>>,
 ) -> Result<Filesystem, Error> {
-    let hold = crate::cladefsd::cells::hold_mounted(&path).await.map_err(|errno| {
+    let hold = crate::cladefsd::cells::hold_mounted(&daemon, &path).await.map_err(|errno| {
         Error::new(
             anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
         )
@@ -187,7 +191,7 @@ impl Control {
         let shown = cell_path(cell);
         let path = self.source.dir.join(&shown);
         let mounting = mount_cell(&path, &self.source.bucket, of, token);
-        let open = held_open(self.holds.clone(), path.clone(), mounting);
+        let open = held_open(Arc::clone(&self.daemon), self.holds.clone(), path.clone(), mounting);
         if let Err(err) = server.attach(&shown, open).await {
             self.holds.lock().unwrap().remove(&path);
             return Err(err);
@@ -224,6 +228,7 @@ impl proto::mount_server::Mount for Control {
         })
         .map_err(|errno| failed(errno.into()))?;
         let control = Control {
+            daemon: Arc::clone(&self.daemon),
             server: self.server.clone(),
             source: self.source.clone(),
             cells: self.cells.clone(),

@@ -14,6 +14,7 @@
 //! answer took. Separate reads of `/metrics`, the guests' `/proc/fs/cladefs` and the VM processes'
 //! threads, which the sandbox team diffed, were taken at moments apart, and said no build.
 
+use super::Daemon;
 use super::codec::{StageCounts, Told};
 use super::wire::AsyncSender;
 use crate::Errno;
@@ -155,16 +156,16 @@ impl GuestStats {
 // Numbers the process gives out: unique among simulated hosts too, all it asks.
 static ASKS: AtomicU64 = AtomicU64::new(0);
 
-/// What the daemon and its VM processes counted, as of now: the VM processes asked first, and
+/// What `daemon` and its VM processes counted, as of now: the VM processes asked first, and
 /// waited for, for `wait` at most ([`MOST_WAIT`] at most); or, unless `vms`, the daemon alone, no
 /// VM process asked (board 8581).
-pub(crate) async fn take(wait: Duration, vms: bool) -> HostStats {
+pub(crate) async fn take_on(daemon: &Daemon, wait: Duration, vms: bool) -> HostStats {
     if !vms {
-        return of_daemon(Vec::new());
+        return of_daemon(daemon, Vec::new());
     }
     let ask = ASKS.fetch_add(1, Ordering::Relaxed) + 1;
     let deadline = tokio::time::Instant::now() + wait.min(MOST_WAIT);
-    let asked: Vec<_> = (reports().into_iter())
+    let asked: Vec<_> = (reports(daemon).into_iter())
         .filter_map(|report| {
             let answer = report.ask(ask, Instant::now())?;
             Some((report, answer))
@@ -184,16 +185,24 @@ pub(crate) async fn take(wait: Duration, vms: bool) -> HostStats {
         };
         vms.extend(vm);
     }
-    of_daemon(vms)
+    of_daemon(daemon, vms)
+}
+
+/// [`take_on`] for the process's default daemon (tests).
+#[cfg(not(madsim))]
+#[cfg(test)]
+pub(crate) async fn take(wait: Duration, vms: bool) -> HostStats {
+    take_on(Daemon::process(), wait, vms).await
 }
 
 /// The daemon's counters and gauges, as of now, and `vms`.
-fn of_daemon(vms: Vec<Vm>) -> HostStats {
+fn of_daemon(daemon: &Daemon, vms: Vec<Vm>) -> HostStats {
     let counters = (crate::stats::stats().named().into_iter())
         .map(|(name, value)| (name.replace('-', "_"), value))
         .chain([("window_open_maps_refused".to_owned(), crate::open_cell::open_maps_refused())])
         .collect();
-    let gauges = super::metrics::gauges().into_iter().map(|(name, _, value)| (name, value));
+    let gauges =
+        super::metrics::gauges_on(daemon).into_iter().map(|(name, _, value)| (name, value));
     HostStats {
         taken: SystemTime::now(),
         build: crate::BUILD_COMMIT,
@@ -203,18 +212,17 @@ fn of_daemon(vms: Vec<Vm>) -> HostStats {
     }
 }
 
-/// The VM processes connected that opened a cell, as the daemon has them now, in the order they
-/// connected (`metrics`, TASK-111.5).
-pub(super) fn vms() -> Vec<Vm> {
-    reports().iter().filter_map(|report| report.vm()).collect()
+/// The VM processes connected to `daemon` that opened a cell, as the daemon has them now, in the
+/// order they connected (`metrics`, TASK-111.5).
+pub(super) fn vms_on(daemon: &Daemon) -> Vec<Vm> {
+    reports(daemon).iter().filter_map(|report| report.vm()).collect()
 }
 
-/// The builds the VM processes connected said, by their cells, each with how many said
-/// it (`metrics`, TASK-111.7). In order of cell and
-/// commit.
-pub(super) fn vm_builds() -> Vec<((crate::CellId, String), usize)> {
+/// The builds the VM processes connected to `daemon` said, by their cells, each with how many said
+/// it (`metrics`, TASK-111.7). In order of cell and commit.
+pub(super) fn vm_builds_on(daemon: &Daemon) -> Vec<((crate::CellId, String), usize)> {
     let mut counted = BTreeMap::new();
-    for vm in vms() {
+    for vm in vms_on(daemon) {
         if let Some(build) = vm.build {
             *counted.entry((vm.cell, build)).or_insert(0) += 1;
         }
@@ -265,32 +273,28 @@ struct Asked {
     answered: tokio::sync::oneshot::Sender<Vm>,
 }
 
-node_local::node_local! {
-    /// The connections' reports, as they are made, each as long as its connection, or a taking of
-    /// stats, holds it.
-    static REPORTS: Mutex<Vec<Weak<Report>>> = Mutex::new(Vec::new());
-}
-
 /// The connections' numbers, given in turn ([`Report::id`]).
 // Numbers the process gives out: unique among simulated hosts too, all it asks.
 static IDS: AtomicU64 = AtomicU64::new(0);
 
 /// How many asks each connection's VM process has yet to answer, in the order they were made.
+#[cfg(not(madsim))]
 #[cfg(test)]
 pub(super) fn asks_waiting() -> Vec<usize> {
-    reports().iter().map(|report| report.asked.lock().unwrap().len()).collect()
+    reports(Daemon::process()).iter().map(|report| report.asked.lock().unwrap().len()).collect()
 }
 
-/// The reports there are now, in the order their connections were made.
-fn reports() -> Vec<Arc<Report>> {
-    let mut reports = REPORTS.get().lock().unwrap();
+/// The reports there are now on `daemon`, in the order their connections were made.
+fn reports(daemon: &Daemon) -> Vec<Arc<Report>> {
+    let mut reports = daemon.stats_reports.lock().unwrap();
     reports.retain(|report| report.strong_count() > 0);
     reports.iter().filter_map(Weak::upgrade).collect()
 }
 
 impl Report {
-    /// The report of a new connection, which tells its VM process through `sender`, numbered next.
-    pub fn new(sender: &Arc<AsyncSender>) -> Arc<Self> {
+    /// The report of a new connection on `daemon`, which tells its VM process through `sender`,
+    /// numbered next.
+    pub fn new(daemon: &Daemon, sender: &Arc<AsyncSender>) -> Arc<Self> {
         let report = Arc::new(Self {
             id: IDS.fetch_add(1, Ordering::Relaxed) + 1,
             sender: Arc::downgrade(sender),
@@ -303,7 +307,7 @@ impl Report {
             window: OnceLock::new(),
             asked: Mutex::new(Vec::new()),
         });
-        REPORTS.get().lock().unwrap().push(Arc::downgrade(&report));
+        daemon.stats_reports.lock().unwrap().push(Arc::downgrade(&report));
         report
     }
 

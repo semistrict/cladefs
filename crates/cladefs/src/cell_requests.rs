@@ -238,11 +238,11 @@ pub(crate) async fn resize_held(
 /// path is let go only once it is (TASK-79.34): growing it, and not shrinking it (`EBUSY`), its
 /// guest not here to agree. `EBUSY` while a connection whose VM process is gone holds it, or the
 /// daemon.
-pub(crate) async fn resize<'a, C, I, P, S, F>(
-    table: &'a CellTable<C, I, P>,
+pub(crate) async fn resize<C, I, P, S, F>(
+    table: &CellTable<C, I, P>,
     key: &Path,
     capacity: u64,
-    open: impl FnOnce(Option<Hold<'a, C, I, P>>) -> F,
+    open: impl FnOnce(Option<Hold<C, I, P>>) -> F,
 ) -> Result<(), Errno>
 where
     C: Resizes,
@@ -273,12 +273,12 @@ where
 /// as `open` opens it here, given the daemon's hold of it meanwhile, which the cell keeps until
 /// it is closed, so that no connection opens it until then; once one going lets it go, waiting
 /// `wait` at most (`EBUSY`).
-pub(crate) async fn forking<'a, C, I, P, S, F>(
-    table: &'a CellTable<C, I, P>,
+pub(crate) async fn forking<C, I, P, S, F>(
+    table: &CellTable<C, I, P>,
     key: &Path,
     live: impl FnOnce(&C) -> Option<S>,
     wait: Duration,
-    open: impl FnOnce(Option<Hold<'a, C, I, P>>) -> F,
+    open: impl FnOnce(Option<Hold<C, I, P>>) -> F,
 ) -> Result<S, Errno>
 where
     C: Writer,
@@ -367,23 +367,23 @@ mod shuttle_tests {
 
     /// A cell as a request sees it: a connection's, as it holds it, or opened here, as its files
     /// hold it, as of its last durable commit, with what holds it meanwhile, if anything does.
-    enum View<'a> {
+    enum View {
         Live(Arc<Model>),
-        Here(Arc<Model>, Option<ModelHold<'a>>),
+        Here(Arc<Model>, Option<ModelHold>),
     }
 
     /// The table of the cell, which holds no cell open for connections, nor versions.
     type Table = CellTable<Conn, (), ()>;
-    type ModelHold<'a> = Hold<'a, Conn, (), ()>;
+    type ModelHold = Hold<Conn, (), ()>;
 
     /// Holds the cell directory at `KEY` for `conn` to write it, as a connection does as it opens
     /// it.
-    fn write<'a>(table: &'a Table, conn: &Arc<Conn>) -> ModelHold<'a> {
+    fn write(table: &Table, conn: &Arc<Conn>) -> ModelHold {
         let held = table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX);
         block_on(held).unwrap().0
     }
 
-    impl View<'_> {
+    impl View {
         fn model(&self) -> &Model {
             match self {
                 View::Live(model) | View::Here(model, _) => model,
@@ -399,7 +399,7 @@ mod shuttle_tests {
         }
     }
 
-    impl Close for View<'_> {
+    impl Close for View {
         async fn close(self) {
             if let View::Here(model, held) = self {
                 model.close();
@@ -408,7 +408,7 @@ mod shuttle_tests {
         }
     }
 
-    impl Capacity for View<'_> {
+    impl Capacity for View {
         fn capacity(&self) -> Result<(u64, u64), Errno> {
             Ok((self.model().capacity.load(Ordering::SeqCst), 1))
         }
@@ -485,9 +485,9 @@ mod shuttle_tests {
     }
 
     /// Opens the cell here, as its files hold it, keeping what holds it until it is closed.
-    fn here<'a>(
+    fn here(
         model: &Arc<Model>,
-    ) -> impl FnOnce(Option<ModelHold<'a>>) -> std::future::Ready<Result<View<'a>, Errno>> {
+    ) -> impl FnOnce(Option<ModelHold>) -> std::future::Ready<Result<View, Errno>> {
         let model = model.clone();
         move |held| {
             model.open();
@@ -599,7 +599,7 @@ mod shuttle_tests {
     /// A cell opened here whose closing, its call cancelled, is left to a thread of its own, as
     /// `cladefsd::cells::Here`'s is to a blocking thread, with what holds it, which it lets go once
     /// the cell is closed.
-    struct ClosedBehind(Option<(Arc<Model>, Option<ModelHold<'static>>)>);
+    struct ClosedBehind(Option<(Arc<Model>, Option<ModelHold>)>);
 
     impl Close for ClosedBehind {
         async fn close(mut self) {

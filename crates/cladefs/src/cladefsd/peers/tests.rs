@@ -29,6 +29,7 @@ fn serving_in(bucket: &Arc<RoutedBucket>, dir: &std::path::Path, region: Option<
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket.clone(), cache).unwrap();
     let server = Server {
+        daemon: Daemon::process().clone(),
         bucket: URL.to_owned(),
         region,
         serving,
@@ -54,7 +55,7 @@ fn ask_as(
     asked: Asked,
 ) -> Result<Option<Vec<u8>>, Refusal> {
     let runtime = crate::bucket::bucket_runtime().unwrap();
-    runtime.block_on(link(&runtime, address, (url, region)).get(asked))
+    runtime.block_on(link(Daemon::process(), &runtime, address, (url, region)).get(asked))
 }
 
 /// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
@@ -206,6 +207,7 @@ fn counted_member_in(dir: &std::path::Path, with: bool, bucket: Arc<RoutedBucket
     let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
     let appending = Arc::<AtomicUsize>::default();
     let server = Server {
+        daemon: Daemon::process().clone(),
         bucket: URL.to_owned(),
         region: None,
         serving,
@@ -730,7 +732,7 @@ fn writers_append_to_members_through_their_links() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        channels: Channels::new(runtime.clone()),
+        channels: Channels::new(Daemon::process().clone(), runtime.clone()),
     };
     let cell = crate::CellId { tenant: 3, id: 9 };
     let configuration =
@@ -857,7 +859,7 @@ fn takes_refuse_members_answering_more_logs_than_a_member_holds() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        channels: Channels::new(runtime.clone()),
+        channels: Channels::new(Daemon::process().clone(), runtime.clone()),
     };
     let cell = crate::CellId { tenant: 3, id: 9 };
     runtime.block_on(heading(&*served.bucket, cell, 5, 0, Some(Key { number: 1, epoch: 4 })));
@@ -918,6 +920,7 @@ fn peers_are_served_after_accepts_fail() {
         let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
         let replicas = Some(super::replicas(&dir.path().join("replicas")).unwrap());
         let server = Server {
+            daemon: Daemon::process().clone(),
             bucket: URL.to_owned(),
             region: None,
             serving,
@@ -1048,7 +1051,7 @@ fn members_are_reached_on_one_connection_whatever_the_cells() {
         bucket: URL.to_owned(),
         me: "127.0.0.1:1".to_owned(),
         incarnation: 1,
-        channels: Channels::new(runtime.clone()),
+        channels: Channels::new(Daemon::process().clone(), runtime.clone()),
     };
     let configuration =
         bucket_cell::layout::Configuration { number: 1, epoch: 4, f: 1, members: Vec::new() };
@@ -1454,7 +1457,7 @@ fn a_parts_bucket_requests_for_a_peer_are_on_its_trace() {
     let asking = bucket_cell::trace::Span::start("a fetcher's read");
     let trace = asking.context().unwrap().span().span_context().trace_id();
     let runtime = crate::bucket::bucket_runtime().unwrap();
-    let link = link(&runtime, &address, (URL, None));
+    let link = link(Daemon::process(), &runtime, &address, (URL, None));
     assert_eq!(runtime.block_on(asking.around(link.get(asked))), Ok(Some(bytes)));
     drop(asking);
     let deadline = Instant::now() + Duration::from_secs(30);

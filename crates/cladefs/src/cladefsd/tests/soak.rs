@@ -266,7 +266,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     let began = Instant::now();
     // Whether a commit made before `since`, a time of the wall's, waits for its upload still.
     let behind = |since: SystemTime| {
-        let statuses = cells::upload_statuses();
+        let statuses = cells::upload_statuses(super::super::Daemon::process());
         let behind = statuses
             .iter()
             .any(|(_, status)| status.oldest_pending.is_some_and(|oldest| oldest < since));
@@ -339,7 +339,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
                 );
             }
         }
-        let statuses = cells::upload_statuses();
+        let statuses = cells::upload_statuses(super::super::Daemon::process());
         let pending: u64 = statuses.iter().map(|(_, status)| status.pending_bytes).sum();
         let sample = process::last();
         eprintln!(

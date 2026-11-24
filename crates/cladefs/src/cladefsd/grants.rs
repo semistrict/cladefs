@@ -7,7 +7,8 @@
 //! manager to bind-mount into the tenant's jails. A connection's tenant is the socket it came in
 //! on. Grants live as long as the daemon: after a restart, the VM manager grants again.
 
-use super::server::{Tenant, key_in_dir, serve_tenant};
+use super::Daemon;
+use super::server::{Tenant, key_in_dir, serve_tenant_on};
 use crate::Errno;
 use std::collections::HashMap;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -17,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 /// The tenants granted, by ID, and the directory their sockets are in.
 pub(super) struct Grants {
+    daemon: Arc<Daemon>,
     sockets: PathBuf,
     granted: Mutex<HashMap<u64, Granted>>,
 }
@@ -31,8 +33,8 @@ struct Granted {
 
 impl Grants {
     /// No tenants yet, whose sockets go in the directory `sockets`.
-    pub fn new(sockets: PathBuf) -> Self {
-        Self { sockets, granted: Mutex::new(HashMap::new()) }
+    pub fn new(daemon: Arc<Daemon>, sockets: PathBuf) -> Self {
+        Self { daemon, sockets, granted: Mutex::new(HashMap::new()) }
     }
 
     /// Grants the tenant of the ID `id` in the bucket (TASK-364), not the default tenant's
@@ -59,19 +61,22 @@ impl Grants {
             give(&grant.socket, uid, gid)?;
             return Ok(grant.socket.clone());
         }
-        let tenant = match super::memory::alive(id, &dir) {
+        let tenant = match super::memory::alive_on(&self.daemon, id, &dir) {
             Some(tenant) => tenant,
-            None => Tenant::new(id, &dir).map_err(errno)?,
+            None => Tenant::new_on(&self.daemon, id, &dir).map_err(errno)?,
         };
         let socket = self.sockets.join(socket_name(id));
         remove_stale(&socket)?;
         // Its mode and owner from the moment it is there, not the umask's until given (TASK-159).
         let listener = super::bind_given(&socket, MODE, Some(uid), Some(gid)).map_err(errno)?;
         let served = listener.try_clone().map_err(errno).and_then(|accepting| {
+            let daemon = Arc::clone(&self.daemon);
             let serving = tenant.clone();
             // cladefs: outside the simulation: a tenant's VM socket (doc-24).
-            super::run::thread("cladefsd tenant", move || serve_tenant(accepting, serving))
-                .map_err(errno)
+            super::run::thread("cladefsd tenant", move || {
+                serve_tenant_on(&daemon, accepting, serving)
+            })
+            .map_err(errno)
         });
         if let Err(errno) = served {
             // Failing already: what is left of the socket, gone if it can go; the error is the

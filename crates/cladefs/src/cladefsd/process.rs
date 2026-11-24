@@ -18,6 +18,7 @@
 //! [`over-budget`](Sample::over_budget) counting those past it; a soak's or a test's assertion that
 //! none were is what holds the daemon to its design.
 
+use super::Daemon;
 use std::sync::Mutex;
 
 /// What the daemon holds and spent as of its last sample, and the most of it.
@@ -135,26 +136,8 @@ pub const PAGE_INS: u64 = 2 * crate::cache::PAGER_THREADS as u64 * crate::slabs:
 /// its tables need passes.
 pub const OWN: u64 = 64 << 20;
 
-node_local::node_local! {
-    /// The budget's parts and the samples, under one lock, as the stats' thread takes them.
-    static STATE: Mutex<State> = Mutex::new(State {
-        sample: Sample {
-        cpu_ns: 0,
-        anon: 0,
-        max_anon: 0,
-        shmem: 0,
-        max_shmem: 0,
-        anon_budget: 0,
-        over_budget: 0,
-        max_over_budget: 0,
-        },
-        writers: 0,
-        in_flight: 0,
-        extents: 0,
-        });
-}
-
-struct State {
+/// The daemon's process budget and sample state, owned by [`Daemon`].
+pub(super) struct State {
     sample: Sample,
     /// The most cells written at once so far, the most the tenants' connections held in flight
     /// at once, and the most the cells' maps of their extents held at once.
@@ -163,22 +146,35 @@ struct State {
     extents: u64,
 }
 
-/// The budget of the daemon's anonymous memory as of now, its parts' most so far: so that what the
-/// allocator keeps of what was freed, which it uses again, is within it as it was when held.
-pub fn anon_budget() -> AnonBudget {
-    budget(&mut STATE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+impl State {
+    pub(super) fn new() -> Mutex<Self> {
+        Mutex::new(Self { sample: Sample::default(), writers: 0, in_flight: 0, extents: 0 })
+    }
 }
 
-fn budget(state: &mut State) -> AnonBudget {
-    state.writers = state.writers.max(super::cells::open_count() as u64);
-    state.in_flight = state.in_flight.max(super::memory::in_flight_held());
+/// The budget of `daemon`'s anonymous memory as of now, its parts' most so far: so that what the
+/// allocator keeps of what was freed, which it uses again, is within it as it was when held.
+#[cfg(not(madsim))]
+pub(super) fn anon_budget_on(daemon: &Daemon) -> AnonBudget {
+    budget(daemon, &mut daemon.process.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// The budget of the process's default daemon's anonymous memory as of now.
+#[cfg(not(madsim))]
+pub fn anon_budget() -> AnonBudget {
+    anon_budget_on(Daemon::process())
+}
+
+fn budget(daemon: &Daemon, state: &mut State) -> AnonBudget {
+    state.writers = state.writers.max(super::cells::open_count(daemon) as u64);
+    state.in_flight = state.in_flight.max(super::memory::in_flight_held_on(daemon));
     state.extents = state.extents.max(extents_held());
     AnonBudget {
         uploads: crate::bucket::upload_memory().budget,
         framings: state.writers * FRAMING,
         fetches: FETCHES,
         in_flight: state.in_flight,
-        held: super::memory::held_parts().counts().peak,
+        held: super::memory::held_parts_on(daemon).counts().peak,
         pages: local_cell::pages::shared().usage().peak,
         extents: state.extents,
         page_ins: PAGE_INS,
@@ -192,11 +188,11 @@ pub fn extents_held() -> u64 {
     local_cell::own_held().bytes() + crate::host_cell::decoded_held().bytes()
 }
 
-/// Samples what the daemon holds and spent now, against its budget now; and returns the sample.
-pub fn sample() -> Sample {
+/// Samples what `daemon` holds and spent now, against its budget now; and returns the sample.
+pub(super) fn sample_on(daemon: &Daemon) -> Sample {
     let (anon, shmem) = resident();
-    let mut state = STATE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let parts = budget(&mut state);
+    let mut state = daemon.process.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let parts = budget(daemon, &mut state);
     let budget = parts.total();
     let last = state.sample;
     let over = anon.saturating_sub(budget);
@@ -221,16 +217,28 @@ pub fn sample() -> Sample {
     state.sample
 }
 
-/// The last sample.
-pub fn last() -> Sample {
-    STATE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner).sample
+/// Samples what the process's default daemon holds and spent now.
+#[cfg(not(madsim))]
+pub fn sample() -> Sample {
+    sample_on(Daemon::process())
 }
 
-/// The last sample as a line of `NAME=COUNT` after `process:`, which the daemon's stats file
-/// keeps (`super::cells`): CPU time, then anonymous and shared memory in bytes, now and at most,
-/// the anonymous memory's budget, and the samples past it and by how much at most.
-pub fn line() -> String {
-    let sample = last();
+/// The last sample of `daemon`.
+pub(super) fn last_on(daemon: &Daemon) -> Sample {
+    daemon.process.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sample
+}
+
+/// The last sample of the process's default daemon.
+#[cfg(not(madsim))]
+pub fn last() -> Sample {
+    last_on(Daemon::process())
+}
+
+/// The last sample of `daemon` as a line of `NAME=COUNT` after `process:`, which the daemon's
+/// stats file keeps (`super::telemetry`): CPU time, then anonymous and shared memory in bytes,
+/// now and at most, the anonymous memory's budget, and the samples past it and by how much at most.
+pub(super) fn line_on(daemon: &Daemon) -> String {
+    let sample = last_on(daemon);
     format!(
         "process: cpu-ns={} anon={} max-anon={} shmem={} max-shmem={} anon-budget={} \
          over-budget={} max-over-budget={}",
@@ -243,6 +251,12 @@ pub fn line() -> String {
         sample.over_budget,
         sample.max_over_budget,
     )
+}
+
+/// The last sample of the process's default daemon as a stats line.
+#[cfg(not(madsim))]
+pub fn line() -> String {
+    line_on(Daemon::process())
 }
 
 /// The process's anonymous and shared memory resident, in bytes, as /proc/self/status says them

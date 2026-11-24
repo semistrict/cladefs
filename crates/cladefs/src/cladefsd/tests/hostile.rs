@@ -1966,8 +1966,13 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let given_version = given.make_version().unwrap();
     drop(given);
     let shared = (given_version.version, true);
-    control(super::super::cells::share_version(dir.path().join("given"), shared.0, shared.1))
-        .unwrap();
+    control(super::super::cells::share_version(
+        super::super::Daemon::process(),
+        dir.path().join("given"),
+        shared.0,
+        shared.1,
+    ))
+    .unwrap();
 
     // Alice, on a thread of her own, her guest's, doing what each case asks of her.
     let (asking, asked) = std::sync::mpsc::channel::<Vec<AliceOp>>();
@@ -3055,7 +3060,7 @@ fn tenants_together_are_bounded_and_leave_another_room() {
     let tenants: Vec<_> = (names.iter().enumerate())
         .map(|(n, name)| served_tenant(dir.path(), name, 10 + n as u64))
         .collect();
-    let total = super::super::memory::total_in_flight();
+    let total = super::super::memory::total_in_flight_on(super::super::Daemon::process());
     super::super::memory::set_total_in_flight(Some(2 * MAX_PAYLOAD)).unwrap();
     for n in 0..3 {
         super::super::memory::set_in_flight(Some(10 + n), Some(MAX_PAYLOAD)).unwrap();

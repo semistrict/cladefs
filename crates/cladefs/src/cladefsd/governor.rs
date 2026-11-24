@@ -37,8 +37,10 @@
 //! urged, and past it their guests' writes refused. The policy is here, its look at the disks in
 //! `super::disk`.
 
-use super::memory;
+use super::{Daemon, memory};
 use crate::slabs::SLAB;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// How often the governor looks at the host's memory.
@@ -101,14 +103,25 @@ pub fn limit(total: u64) -> u64 {
     total
 }
 
-/// cladefs: whether the host is full: the room the governor last found for the daemon's memory was
-/// under its floor ([`allowance`]), so that the daemon makes no cell more (board 5662).
-pub fn full() -> bool {
-    FULL.get().load(std::sync::atomic::Ordering::Relaxed)
+/// cladefs: the memory governor's state, owned by [`Daemon`].
+#[derive(Default)]
+pub(super) struct State {
+    full: AtomicBool,
+    pressured: AtomicBool,
+    fulls: AtomicU64,
+    floor: AtomicU64,
 }
 
-node_local::node_local! {
-    static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// cladefs: whether `daemon`'s host is full: the room the governor last found for the daemon's
+/// memory was under its floor ([`allowance`]), so that the daemon makes no cell more (board 5662).
+pub(super) fn full_on(daemon: &Daemon) -> bool {
+    daemon.governor.full.load(Ordering::Relaxed)
+}
+
+/// cladefs: whether the process's default daemon's host is full.
+#[cfg(not(madsim))]
+pub fn full() -> bool {
+    full_on(Daemon::process())
 }
 
 /// cladefs: what the governor last found and did, for the daemon's metrics (board 8565): whether
@@ -127,36 +140,27 @@ pub struct Governed {
     pub floor: u64,
 }
 
-node_local::node_local! {
-    /// cladefs: [`Governed::pressured`].
-    static PRESSURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-}
-
-node_local::node_local! {
-    /// cladefs: [`Governed::fulls`].
-    static FULLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-}
-
-node_local::node_local! {
-    /// cladefs: [`Governed::floor`].
-    static FLOOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-}
-
-/// cladefs: what the governor last found and did ([`Governed`]).
-pub fn governed() -> Governed {
-    use std::sync::atomic::Ordering::Relaxed;
+/// cladefs: what `daemon`'s governor last found and did ([`Governed`]).
+pub(super) fn governed_on(daemon: &Daemon) -> Governed {
     Governed {
-        full: full(),
-        pressured: PRESSURED.get().load(Relaxed),
-        fulls: FULLS.get().load(Relaxed),
-        floor: FLOOR.get().load(Relaxed),
+        full: full_on(daemon),
+        pressured: daemon.governor.pressured.load(Ordering::Relaxed),
+        fulls: daemon.governor.fulls.load(Ordering::Relaxed),
+        floor: daemon.governor.floor.load(Ordering::Relaxed),
     }
 }
 
-/// cladefs: says the host is full, or not, as the governor would: for tests of what refuses then.
+/// cladefs: what the process's default daemon's governor last found and did ([`Governed`]).
+#[cfg(not(madsim))]
+pub fn governed() -> Governed {
+    governed_on(Daemon::process())
+}
+
+/// cladefs: says the host is full, or not, on `daemon`, as the governor would: for tests of what
+/// refuses then.
 #[cfg(test)]
-pub(crate) fn set_full(full: bool) {
-    FULL.get().store(full, std::sync::atomic::Ordering::Relaxed);
+pub(crate) fn set_full_on(daemon: &Daemon, full: bool) {
+    daemon.governor.full.store(full, Ordering::Relaxed);
 }
 
 /// The host's memory, as the daemon may use it.
@@ -308,32 +312,38 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// Starts the governor, on a thread of its own, for the rest of the daemon's life. Fails if the
-/// host's memory can't be read, or the headroom is malformed: a daemon that can't see the host's
-/// memory doesn't start rather than run without its cache. cladefs: a service of its own
-/// ([`super::run::service`]), one worker's runtime on its thread, as its shrinks wait for the pages
-/// they evict holding no thread (board 2946).
-pub fn start() -> Result<(), String> {
+/// Starts `daemon`'s memory governor on its runtime for the rest of the daemon's life. Fails if
+/// the host's memory can't be read, or the headroom is malformed: a daemon that can't see the
+/// host's memory doesn't start rather than run without its cache. cladefs: a supervised service on
+/// the daemon's runtime ([`super::run::service`]), as its shrinks wait for the pages they evict
+/// holding no thread (board 2946).
+pub(super) fn start_on(daemon: &Arc<Daemon>) -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
     let (headroom, floor) = (headroom(host.total)?, floor(limit(host.total))?);
-    FLOOR.get().store(floor, std::sync::atomic::Ordering::Relaxed);
-    super::run::service("memory governor", 1, move || govern_every(headroom, floor))
+    daemon.governor.floor.store(floor, Ordering::Relaxed);
+    let governing = Arc::clone(daemon);
+    super::run::service(daemon, "memory governor", move || govern_every(governing, headroom, floor))
         .map_err(|err| format!("starting the memory governor: {err}"))
 }
 
-/// cladefs: governs the daemon's memory now and every [`INTERVAL`] after, leaving `headroom` free
-/// and keeping `floor` ([`start`]), for as long as the daemon runs.
-async fn govern_every(headroom: u64, floor: u64) {
-    use std::sync::atomic::Ordering;
+/// Starts the process's default daemon's memory governor.
+#[cfg(not(madsim))]
+pub fn start() -> Result<(), String> {
+    start_on(Daemon::process())
+}
+
+/// cladefs: governs `daemon`'s memory now and every [`INTERVAL`] after, leaving `headroom` free
+/// and keeping `floor` ([`start_on`]), for as long as the daemon runs.
+async fn govern_every(daemon: Arc<Daemon>, headroom: u64, floor: u64) {
     loop {
         match host_memory() {
             Ok(host) => {
-                let was = FULL.get().load(Ordering::Relaxed);
-                let held = memory::governed_bytes();
+                let was = daemon.governor.full.load(Ordering::Relaxed);
+                let held = memory::governed_bytes_on(&daemon);
                 let allowed = allowance(held, host, headroom, floor, was);
-                PRESSURED.get().store(held > allowed.bytes, Ordering::Relaxed);
+                daemon.governor.pressured.store(held > allowed.bytes, Ordering::Relaxed);
                 if allowed.full && !was {
-                    FULLS.get().fetch_add(1, Ordering::Relaxed);
+                    daemon.governor.fulls.fetch_add(1, Ordering::Relaxed);
                 }
                 if allowed.full != was {
                     log::warn!(
@@ -342,8 +352,8 @@ async fn govern_every(headroom: u64, floor: u64) {
                         host.available
                     );
                 }
-                FULL.get().store(allowed.full, Ordering::Relaxed);
-                memory::govern(allowed.bytes).await
+                daemon.governor.full.store(allowed.full, Ordering::Relaxed);
+                memory::govern_on(&daemon, allowed.bytes).await
             }
             Err(err) => log::error!("cladefsd: reading the host's memory: {err}"),
         }

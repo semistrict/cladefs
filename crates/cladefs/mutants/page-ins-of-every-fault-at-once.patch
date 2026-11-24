@@ -4,10 +4,10 @@
 # Killer: cladefsd::tests::hostile::page_ins_in_flight_are_bounded
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -486,7 +486,7 @@
+@@ -595,7 +595,7 @@
          requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
          drained: Arc::new(event_listener::Event::new()),
-         report: stats::Report::new(&peer.sender),
+         report: stats::Report::new(&daemon, &peer.sender),
 -        page_ins: tokio::sync::Semaphore::new(PAGE_INS),
 +        page_ins: tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS),
          named: OnceLock::new(),

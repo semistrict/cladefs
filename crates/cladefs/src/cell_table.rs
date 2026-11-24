@@ -135,7 +135,13 @@ pub(crate) trait Writer: Send + Sync {
 
 /// The cells, by their keys: an entry each, while anything holds a cell or has it open.
 pub(crate) struct CellTable<C, S, P> {
-    inner: Mutex<Inner<C, S, P>>,
+    inner: Arc<Mutex<Inner<C, S, P>>>,
+}
+
+impl<C, S, P> Clone for CellTable<C, S, P> {
+    fn clone(&self) -> Self {
+        Self { inner: Arc::clone(&self.inner) }
+    }
 }
 
 struct Inner<C, S, P> {
@@ -218,19 +224,19 @@ enum Refused<C> {
 /// open of the cell stays ([`Rules::open_outlives_holders`]): the cell its connection had open,
 /// if others have it still.
 #[must_use = "a cell held is let go as its hold is dropped"]
-pub(crate) struct Hold<'t, C, S, P> {
-    table: &'t CellTable<C, S, P>,
+pub(crate) struct Hold<C, S, P> {
+    table: CellTable<C, S, P>,
     key: PathBuf,
 }
 
 /// A cell held, with the cell kept open of it that the claim took out, to close, if one was:
 /// what a writer's claim, and the mount's, get.
-pub(crate) type HeldTaking<'t, C, S, P> = (Hold<'t, C, S, P>, Option<P>);
+pub(crate) type HeldTaking<C, S, P> = (Hold<C, S, P>, Option<P>);
 
 /// A cell a connection writes, or held by the daemon ([`CellTable::writer_or_hold`]).
-pub(crate) enum Holding<'t, C, S, P> {
+pub(crate) enum Holding<C, S, P> {
     Writer(Arc<C>),
-    Held(Hold<'t, C, S, P>),
+    Held(Hold<C, S, P>),
 }
 
 impl<S, P> Open<S, P> {
@@ -368,7 +374,9 @@ impl<C: Writer, S, P> Inner<C, S, P> {
 
 impl<C, S, P> CellTable<C, S, P> {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(Inner { entries: HashMap::new(), waiting: HashMap::new() }) }
+        Self {
+            inner: Arc::new(Mutex::new(Inner { entries: HashMap::new(), waiting: HashMap::new() })),
+        }
     }
 
     /// The connection writing the cell `key` names, if one does, going or not.
@@ -467,7 +475,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     /// It blocks: the table's tests', whose threads the models schedule; the daemon holds no thread
     /// as it waits ([`CellTable::hold_async`], doc-24).
     #[cfg(test)]
-    pub fn hold(&self, key: &Path, wait: Option<Duration>) -> Result<Hold<'_, C, S, P>, Errno> {
+    pub fn hold(&self, key: &Path, wait: Option<Duration>) -> Result<Hold<C, S, P>, Errno> {
         let deadline = wait.map(|wait| Instant::now() + wait);
         match self.claim_blocking(key, &Claim::Daemon, deadline)? {
             Claimed::Held { .. } => Ok(self.held(key)),
@@ -477,7 +485,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
 
     /// Holds the cell `key` names, for the daemon, as [`CellTable::hold`] does, waiting at most
     /// `wait`: a future, which holds no thread while it waits (TASK-43.6).
-    pub async fn hold_async(&self, key: &Path, wait: Duration) -> Result<Hold<'_, C, S, P>, Errno> {
+    pub async fn hold_async(&self, key: &Path, wait: Duration) -> Result<Hold<C, S, P>, Errno> {
         match self.claim_async(key, Claim::Daemon, wait).await? {
             Claimed::Held { .. } => Ok(self.held(key)),
             Claimed::Writer(_) => unreachable!("the daemon's claim got a writer"),
@@ -492,7 +500,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         key: &Path,
         connection: Weak<C>,
         wait: Duration,
-    ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
+    ) -> Result<HeldTaking<C, S, P>, Errno> {
         match self.claim_async(key, Claim::Writer(connection), wait).await? {
             Claimed::Held { kept, .. } => Ok((self.held(key), kept)),
             Claimed::Writer(_) => unreachable!("a writer's claim got a writer"),
@@ -502,7 +510,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     /// The connection writing the cell `key` names, if one does that isn't going; or, if none
     /// does, the cell held for the daemon. `EBUSY` if a connection going holds it, or the
     /// daemon: one going would carry out no request of its guest's, which is gone (TASK-79.34).
-    pub fn writer_or_hold(&self, key: &Path) -> Result<Holding<'_, C, S, P>, Errno> {
+    pub fn writer_or_hold(&self, key: &Path) -> Result<Holding<C, S, P>, Errno> {
         match self.try_claim(key, &Claim::DaemonOrWriter, Some(Instant::now()))? {
             Ok(claimed) => Ok(self.holding(key, claimed)),
             Err(_) => Err(Errno::EBUSY),
@@ -516,7 +524,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         &self,
         key: &Path,
         wait: Duration,
-    ) -> Result<Holding<'_, C, S, P>, Errno> {
+    ) -> Result<Holding<C, S, P>, Errno> {
         let claimed = self.claim_async(key, Claim::DaemonOrWriter, wait).await?;
         Ok(self.holding(key, claimed))
     }
@@ -531,18 +539,18 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         &self,
         key: &Path,
         wait: Duration,
-    ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
+    ) -> Result<HeldTaking<C, S, P>, Errno> {
         match self.claim_async(key, Claim::Mount, wait).await? {
             Claimed::Held { kept, .. } => Ok((self.held(key), kept)),
             Claimed::Writer(_) => unreachable!("the mount's claim got a writer"),
         }
     }
 
-    fn held(&self, key: &Path) -> Hold<'_, C, S, P> {
-        Hold { table: self, key: key.to_owned() }
+    fn held(&self, key: &Path) -> Hold<C, S, P> {
+        Hold { table: self.clone(), key: key.to_owned() }
     }
 
-    fn holding(&self, key: &Path, claimed: Claimed<C, P>) -> Holding<'_, C, S, P> {
+    fn holding(&self, key: &Path, claimed: Claimed<C, P>) -> Holding<C, S, P> {
         match claimed {
             Claimed::Held { .. } => Holding::Held(self.held(key)),
             Claimed::Writer(writer) => Holding::Writer(writer),
@@ -624,7 +632,7 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     }
 }
 
-impl<C, S, P> Hold<'_, C, S, P> {
+impl<C, S, P> Hold<C, S, P> {
     /// The key of the cell it holds.
     pub fn key(&self) -> &Path {
         &self.key
@@ -702,7 +710,7 @@ impl<C, S, P> Hold<'_, C, S, P> {
     }
 }
 
-impl<C, S, P> Drop for Hold<'_, C, S, P> {
+impl<C, S, P> Drop for Hold<C, S, P> {
     fn drop(&mut self) {
         // Those waiting to hold it may.
         self.table.release(&self.key);
@@ -756,7 +764,7 @@ mod shuttle_tests {
             let Some(Writing { cell, hold }) = writing.take() else { return };
             // Closing, as its connection's is (`OpenCell::keep_until_closed`): those waiting for
             // it told once its last reference goes, a base's that shares it perhaps.
-            let table = hold.hold().table;
+            let table = hold.hold().table.clone();
             *cell.on_close.lock().unwrap() = Some(Box::new(move || table.closed(Path::new(KEY))));
             drop(cell);
             // Gone, its hold not let go yet: what claims the cell meets a writer whose
@@ -861,20 +869,20 @@ mod shuttle_tests {
     }
 
     /// A hold counted among the cell's holders, which none other may be, until dropped.
-    struct Counted<'t> {
+    struct Counted {
         counts: Arc<Counts>,
-        _hold: Hold<'t, Conn, ModelCell, Kept>,
+        _hold: Hold<Conn, ModelCell, Kept>,
     }
 
-    impl<'t> Counted<'t> {
-        fn new(counts: &Arc<Counts>, hold: Hold<'t, Conn, ModelCell, Kept>) -> Self {
+    impl Counted {
+        fn new(counts: &Arc<Counts>, hold: Hold<Conn, ModelCell, Kept>) -> Self {
             if counts.holders.fetch_add(1, Ordering::SeqCst) > 0 {
                 counts.two_holders.store(true, Ordering::SeqCst);
             }
             Self { counts: counts.clone(), _hold: hold }
         }
 
-        fn hold(&self) -> &Hold<'t, Conn, ModelCell, Kept> {
+        fn hold(&self) -> &Hold<Conn, ModelCell, Kept> {
             &self._hold
         }
 
@@ -892,7 +900,7 @@ mod shuttle_tests {
         }
     }
 
-    impl Drop for Counted<'_> {
+    impl Drop for Counted {
         fn drop(&mut self) {
             self.counts.holders.fetch_sub(1, Ordering::SeqCst);
         }
@@ -902,7 +910,7 @@ mod shuttle_tests {
     /// ([`Conn`]).
     struct Writing {
         cell: Arc<ModelCell>,
-        hold: Counted<'static>,
+        hold: Counted,
     }
 
     /// Opens the cell for `conn` to write, as a connection does (`cladefsd::server`): holding it,
@@ -1156,11 +1164,11 @@ mod tests {
     type Table = CellTable<Connection, &'static str, &'static str>;
 
     /// Holds `key` for `connection` to write it, at once.
-    fn write<'t>(
-        table: &'t Table,
+    fn write(
+        table: &Table,
         key: &Path,
         connection: &Arc<Connection>,
-    ) -> Result<HeldTaking<'t, Connection, &'static str, &'static str>, Errno> {
+    ) -> Result<HeldTaking<Connection, &'static str, &'static str>, Errno> {
         block_on(table.hold_to_write(key, Arc::downgrade(connection), Duration::ZERO))
     }
 

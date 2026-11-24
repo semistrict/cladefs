@@ -9,6 +9,7 @@
 //! level, FREE, versions. No window: nothing is mapped, no stage operation made. The daemon's asks
 //! of it, its stats and a shrink, it answers as a VM process without a guest of its own would.
 
+use super::Daemon;
 use super::codec::{Data, Forked, Opened, Opening, ReadInto, Request, Told};
 use super::wire::{AsyncReceiver, AsyncSender, Header, Message, REPLY};
 use crate::{Commit, Errno, ExtentId, WriteBarriers};
@@ -29,10 +30,9 @@ pub struct Guest {
 }
 
 impl Guest {
-    /// A guest of the daemon of this simulated host, of its default tenant, its connection served
-    /// as a VM process's is.
-    pub fn connect() -> Result<Self, Errno> {
-        let tenant = super::server::default_tenant()?;
+    /// A guest of `daemon`, of its default tenant, its connection served as a VM process's is.
+    pub fn connect(daemon: &Arc<Daemon>) -> Result<Self, Errno> {
+        let tenant = super::server::default_tenant_on(daemon)?;
         let stream = super::server::connect_in_memory(tenant);
         let failed = |err: std::io::Error| {
             log::error!("a simulated guest's connection: {err}");

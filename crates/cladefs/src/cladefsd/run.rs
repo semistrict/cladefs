@@ -4,45 +4,40 @@
 
 //! cladefs: where the daemon's work runs, the one seam between its threads and the simulation's one
 //! (doc-24 steps 11 and 12, TASK-685.3). The daemon's code is the same in both: what differs is
-//! the executor. In production, its services run on threads of their own, each driving a runtime
-//! of its own, so that one's calls keep to its threads; its periodic work on threads that sleep
-//! between turns; and work that blocks on the host's disk on a runtime's blocking threads. Under
-//! madsim, which runs one thread, each is a task of the simulated host's, on the simulation's
-//! clock, and the disk's work runs inline: a simulated host's disk is memory.
+//! the executor. In production, its async services share the daemon's consolidated Tokio runtime
+//! (`Daemon::runtime`), each supervised so a panic aborts the daemon (`Awaited`); its periodic
+//! blocking work runs on threads that sleep between turns; and work that blocks on the host's disk
+//! runs on the runtime's blocking threads. Under madsim, which runs one thread, each is a task of
+//! the simulated host's, on the simulation's clock, and the disk's work runs inline: a simulated
+//! host's disk is memory.
 
+use super::Daemon;
 use std::future::Future;
 use std::time::Duration;
 
-/// Runs `service`, which runs as long as the daemon does, named `name`: on a thread of its own
-/// ([`thread`]), driving a runtime of its own of `threads` workers; under madsim, a task of the
-/// node's. A runtime that can't be made, as with no threads to be had, stops the daemon: it would
-/// serve without the service.
+/// Runs `service`, which runs as long as `daemon` does, named `name`: as a supervised task on
+/// `daemon`'s shared runtime (outside madsim) or on the simulated node's runtime (under madsim).
+/// A panic in `service` aborts the daemon naming `name` (`local_cell::shared::Awaited`, board
+/// 8501), as a thread-based service's [`supervised`] does.
 pub(super) fn service<F>(
+    daemon: &Daemon,
     name: &'static str,
-    threads: usize,
     service: impl FnOnce() -> F + Send + 'static,
 ) -> std::io::Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
     #[cfg(not(madsim))]
-    thread(name, move || {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(threads)
-            .thread_name(name)
-            .enable_all()
-            .build();
-        match runtime {
-            Ok(runtime) => runtime.block_on(service()),
-            Err(err) => {
-                log::error!("cladefsd: {name}'s runtime: {err}");
-                std::process::exit(1);
-            }
-        }
-    })?;
+    {
+        drop(daemon.spawn(async move {
+            let _supervised = local_cell::shared::Awaited::new(name);
+            fail::fail_point!(&format!("cladefsd::service::{name}"));
+            service().await;
+        }));
+    }
     #[cfg(madsim)]
     {
-        let _ = (name, threads);
+        let _ = (daemon, name);
         drop(tokio::spawn(service()));
     }
     Ok(())

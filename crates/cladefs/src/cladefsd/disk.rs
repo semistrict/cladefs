@@ -37,22 +37,31 @@
 //! takes any of it. And it is the host's setup, a filesystem's that has them, which the daemon
 //! can't set as tenants are granted.
 
+use super::Daemon;
 use super::governor::DiskHeadroom;
 use crate::Errno;
 use bucket_cell::host_disk::{self, HostDisk};
 use local_cell::footprint::{self, Allotment};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// What a cell a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
 pub const STORE_MADE: u64 = footprint::STORE_MADE;
 
-node_local::node_local! {
-    /// The tenants' disks alive, and their limits, under one lock, so that a tenant made as its
-    /// limit is set is limited as it was set.
-    static REGISTRY: Mutex<Registry> =
-        Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None });
+/// Per-daemon disk registry and governor startup state, owned by [`Daemon`].
+pub(super) struct State {
+    registry: Mutex<Registry>,
+    started: OnceLock<()>,
+}
+
+impl State {
+    pub(super) fn new() -> Self {
+        Self {
+            registry: Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None }),
+            started: OnceLock::new(),
+        }
+    }
 }
 
 struct Registry {
@@ -89,17 +98,23 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// The disk of the tenant of the ID `tenant`, whose directory is `dir`: its cells counted,
-    /// those this process hasn't counted yet by one listing each, limited as its ID is.
-    pub(super) fn new(tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
+    /// The disk of the tenant of the ID `tenant` on `daemon`, whose directory is `dir`: its cells
+    /// counted, those this process hasn't counted yet by one listing each, limited as its ID is.
+    pub(super) fn new_on(daemon: &Daemon, tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
         let allotment = footprint::allotment(dir)?;
-        let mut registry = REGISTRY.get().lock().unwrap();
+        let mut registry = daemon.disk.registry.lock().unwrap();
         allotment.set_limit(registry.limit(tenant));
         allotment.set_weight(registry.weight(tenant));
         let disk = Arc::new(Self { tenant, allotment });
         registry.disks.retain(|alive| alive.strong_count() > 0);
         registry.disks.push(Arc::downgrade(&disk));
         Ok(disk)
+    }
+
+    #[cfg(not(madsim))]
+    #[cfg(test)]
+    pub(super) fn new(tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
+        Self::new_on(Daemon::process(), tenant, dir)
     }
 
     /// What it takes, in bytes: what its cells' files take, counted as they write.
@@ -118,17 +133,19 @@ impl Disk {
     }
 }
 
-/// Limits the disk of the tenant `tenant` to `bytes`, or every tenant's together, without one; or
-/// lifts the limit, without `bytes`. A tenant's limit holds for it alive now, and granted later,
-/// until it is set again: one alive twice, revoked and granted again with another directory, has
-/// it for each.
-pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+/// Limits the disk of the tenant `tenant` on `daemon` to `bytes`, or every tenant's together,
+/// without one; or lifts the limit, without `bytes`.
+pub(super) fn set_limit_on(
+    daemon: &Daemon,
+    tenant: Option<u64>,
+    bytes: Option<u64>,
+) -> Result<(), Errno> {
     let Some(id) = tenant else {
         footprint::set_total_limit(bytes);
         return Ok(());
     };
     super::grants::check_tenant(id)?;
-    let mut registry = REGISTRY.get().lock().unwrap();
+    let mut registry = daemon.disk.registry.lock().unwrap();
     let limits = registry.limits.get_or_insert_with(HashMap::new);
     match bytes {
         Some(bytes) => limits.insert(id, bytes),
@@ -140,18 +157,28 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
     Ok(())
 }
 
-/// cladefs: weighs the disk of the tenant `tenant`, alive now or granted later, against the
-/// others' as their disks come under pressure (doc-22, TASK-539.10): each tenant's writes are
-/// refused past its share by weight of what the disk governor leaves the tenants, a tenant within
-/// its share writing on. Every tenant's weight is [`footprint::DEFAULT_WEIGHT`] until set.
-pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
+/// Limits the disk of the tenant `tenant` on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+    set_limit_on(Daemon::process(), tenant, bytes)
+}
+
+/// cladefs: weighs the disk of the tenant `tenant` on `daemon`, alive now or granted later, against
+/// the others' as their disks come under pressure (doc-22, TASK-539.10).
+pub(super) fn set_weight_on(daemon: &Daemon, tenant: u64, weight: u64) -> Result<(), Errno> {
     super::grants::check_tenant(tenant)?;
-    let mut registry = REGISTRY.get().lock().unwrap();
+    let mut registry = daemon.disk.registry.lock().unwrap();
     registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
     for disk in registry.alive().filter(|disk| disk.tenant == tenant) {
         disk.allotment.set_weight(weight);
     }
     Ok(())
+}
+
+/// Weighs the disk of the tenant `tenant` on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
+    set_weight_on(Daemon::process(), tenant, weight)
 }
 
 /// The limit of every tenant's disk together, if it has one.
@@ -176,15 +203,15 @@ pub struct Counted {
     pub reserved: u64,
 }
 
-/// What the disk of the tenant `tenant` takes, or every tenant's together, without one, and its
-/// limit, if it has one: `ENOENT` if no tenant `tenant` is alive. Read, not counted anew.
-pub fn count(tenant: Option<u64>) -> Result<Counted, Errno> {
+/// What the disk of the tenant `tenant` on `daemon` takes, or every tenant's together, without one,
+/// and its limit, if it has one: `ENOENT` if no tenant `tenant` is alive. Read, not counted anew.
+pub(super) fn count_on(daemon: &Daemon, tenant: Option<u64>) -> Result<Counted, Errno> {
     let Some(id) = tenant else {
         let all = footprint::total();
         let reserved = all.reserved() + all.pledged();
         return Ok(Counted { bytes: all.bytes(), limit: total_limit(), reserved });
     };
-    let registry = REGISTRY.get().lock().unwrap();
+    let registry = daemon.disk.registry.lock().unwrap();
     let disks: Vec<_> = registry.alive().filter(|disk| disk.tenant == id).collect();
     if disks.is_empty() {
         return Err(Errno::ENOENT);
@@ -195,6 +222,12 @@ pub fn count(tenant: Option<u64>) -> Result<Counted, Errno> {
         limit: registry.limit(id),
         reserved: allotments.iter().map(|allotment| allotment.reserved()).sum(),
     })
+}
+
+/// What the disk of the tenant `tenant` on the process's default daemon takes.
+#[cfg(not(madsim))]
+pub fn count(tenant: Option<u64>) -> Result<Counted, Errno> {
+    count_on(Daemon::process(), tenant)
 }
 
 /// The allotments of `disks`, a tenant's, each once, as one tenant granted again with its
@@ -222,10 +255,10 @@ pub struct TenantDisk {
     pub share: Option<u64>,
 }
 
-/// The disk of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
-/// another directory, is counted once, with both its directories'.
-pub fn tenants() -> Vec<TenantDisk> {
-    let registry = REGISTRY.get().lock().unwrap();
+/// The disk of each tenant alive on `daemon`, by ID: a tenant alive twice, revoked and granted
+/// again with another directory, is counted once, with both its directories'.
+pub(super) fn tenants_on(daemon: &Daemon) -> Vec<TenantDisk> {
+    let registry = daemon.disk.registry.lock().unwrap();
     let mut by_tenant: HashMap<u64, Vec<Arc<Disk>>> = HashMap::new();
     for disk in registry.alive() {
         by_tenant.entry(disk.tenant).or_default().push(disk);
@@ -248,6 +281,12 @@ pub fn tenants() -> Vec<TenantDisk> {
         .collect();
     disks.sort_by_key(|disk| disk.tenant);
     disks
+}
+
+/// The disk of each tenant alive on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn tenants() -> Vec<TenantDisk> {
+    tenants_on(Daemon::process())
 }
 
 /// cladefs: how the disk governor governs (doc-22, TASK-539.9): the headroom it leaves of each
@@ -281,20 +320,19 @@ impl DiskConfig {
     }
 }
 
-/// cladefs: starts, once, the daemon's disk governor, on a thread of its own, looking at its disks
+/// cladefs: starts, once, `daemon`'s disk governor, on a thread of its own, looking at its disks
 /// every [`super::governor::INTERVAL`], and at once when a write is refused or the part cache
 /// passes what its cells leave it (`bucket_cell::host_disk::wake_governor`). Later starts change
 /// nothing.
-pub fn start(config: DiskConfig) -> Result<(), String> {
-    node_local::node_local! {
-        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    }
-    if STARTED.get().set(()).is_err() {
+pub(super) fn start_on(daemon: &Arc<Daemon>, config: DiskConfig) -> Result<(), String> {
+    if daemon.disk.started.set(()).is_err() {
         return Ok(());
     }
+    let daemon = Arc::downgrade(daemon);
     let mut errors = std::collections::HashSet::new();
     let governing = move || {
-        govern_once(config, &mut errors);
+        let Some(daemon) = daemon.upgrade() else { return false };
+        govern_once_on(&daemon, config, &mut errors);
         true
     };
     let (every, woken) = (super::governor::INTERVAL, host_disk::wait_for_governor);
@@ -303,22 +341,35 @@ pub fn start(config: DiskConfig) -> Result<(), String> {
         .map_err(|err| format!("starting the disk governor: {err}"))
 }
 
-/// cladefs: the disk governor's look at the host's disks, as `config` says (doc-22, TASK-539.9):
-/// each one's allowance, what its cells and part cache may keep on it, the headroom it leaves, and
-/// whether it is under pressure, published on it; the part cache on it sized to what its cells
-/// leave, evicting at once; its cells' uploaders urged as pressure begins. A disk whose space can't
-/// be read keeps what it was allowed, logged once until it is read again (`errors`).
-pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u64>) {
+/// Starts the process's default daemon's disk governor.
+#[cfg(not(madsim))]
+pub fn start(config: DiskConfig) -> Result<(), String> {
+    start_on(Daemon::process(), config)
+}
+
+/// cladefs: `daemon`'s disk governor's look at the host's disks, as `config` says.
+pub(super) fn govern_once_on(
+    daemon: &Daemon,
+    config: DiskConfig,
+    errors: &mut std::collections::HashSet<u64>,
+) {
     let disks = HostDisk::all();
-    govern_disks(&disks, config, errors);
+    govern_disks(daemon, &disks, config, errors);
+}
+
+/// The process's default daemon's disk governor's look at the host's disks.
+#[cfg(not(madsim))]
+pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u64>) {
+    govern_once_on(Daemon::process(), config, errors);
 }
 
 fn govern_disks(
+    daemon: &Daemon,
     disks: &[Arc<HostDisk>],
     config: DiskConfig,
     errors: &mut std::collections::HashSet<u64>,
 ) {
-    let cache = super::cells::opened_cache();
+    let cache = super::storage::opened_cache(daemon);
     for disk in disks {
         let dev = disk.dev().unwrap_or_default();
         let sample = match disk.sample() {
@@ -492,6 +543,7 @@ fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
 #[cfg(test)]
 mod tests {
     use super::{Disk, set_limit};
+    use crate::cladefsd::Daemon;
     use local_cell::{Dir as _, File as _, HostDir};
     use std::sync::Arc;
 
@@ -578,7 +630,7 @@ mod tests {
         // the environment yet.
         unsafe { std::env::set_var("CLADEFSD_PART_CACHE", dir.path().join("cache")) };
         std::fs::create_dir(dir.path().join("cache")).unwrap();
-        let cache = super::super::cells::part_cache().unwrap().unwrap();
+        let cache = super::super::storage::part_cache(Daemon::process()).unwrap().unwrap();
         let disk = cache.disk().clone();
         let cell_dir = dir.path().join("store");
         std::fs::create_dir(&cell_dir).unwrap();
@@ -706,7 +758,7 @@ mod tests {
         let config =
             super::DiskConfig { headroom: Some(super::DiskHeadroom::Bytes(headroom)), fixed: None };
         let mut errors = std::collections::HashSet::new();
-        super::govern_disks(&[disk_a.clone(), disk_b.clone()], config, &mut errors);
+        super::govern_disks(&Daemon::new(), &[disk_a.clone(), disk_b.clone()], config, &mut errors);
 
         // Disk B has 0 held, 20 MiB free, 0 dirty, 10 MiB headroom => allowance = 10 MiB,
         // spare = 10 MiB, not under pressure (spare == headroom).

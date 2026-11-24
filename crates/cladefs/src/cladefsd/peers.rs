@@ -17,6 +17,7 @@
 //! asked it (board 8445, `local_cell::replica::admit`), read for the call; and a refusal says
 //! nothing of this host's bucket.
 
+use super::Daemon;
 use super::grpc::Served;
 use crate::bucket::peers::{Asked, Link, Peers, Refusal, Region, admits};
 use bucket_cell::object_bucket::RoutedBucket;
@@ -50,9 +51,6 @@ const CONNECT: Duration = Duration::from_secs(1);
 /// How long a host waits for a part a peer serves: one the peer fetches from the bucket itself,
 /// behind others in its budget, takes the bucket's latency and more.
 const DEADLINE: Duration = Duration::from_secs(5);
-
-/// How many threads serve the peers' requests, whose fetches run on the bucket runtime.
-const THREADS: usize = 2;
 
 /// cladefs: how often a member's stream to or from a peer pings it, unanswered past [`CONNECT`]
 /// a stream to a peer down (doc-21): a writer's appends have no deadline, a stream's life being
@@ -381,11 +379,12 @@ static SERVED: AtomicU64 = AtomicU64::new(0);
 // The process's count, every simulated host's together, as a process's metrics are.
 static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
 
-/// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
+/// Has `daemon` serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
 /// on `listening`, bound there (or, under madsim, its address on the simulated network), and its
 /// cells' fetchers ask them, `peers` at first (`CLADEFSD_PEERS`), for the parts they own: before
 /// any cell opens. It needs the host's part cache, which keeps what it serves.
-pub async fn start(
+pub(super) async fn start_on(
+    daemon: &Arc<Daemon>,
     address: &str,
     listening: Listening,
     peers: impl IntoIterator<Item = impl AsRef<str>>,
@@ -398,9 +397,10 @@ pub async fn start(
     let failed = |what: &str| format!("serving peers: {what}");
     // cladefs: the peers' credentials, which every connection's both sides authenticate with: none
     // given, or none that parse, the daemon refuses to start (board 8437).
-    credentials().map_err(|err| failed(&err))?;
-    let bucket = super::cells::daemon_bucket().map_err(|err| failed(&format!("{err:?}")))?;
-    let cache = super::cells::part_cache().map_err(|err| failed(&format!("{err:?}")))?;
+    credentials_on(daemon).map_err(|err| failed(&err))?;
+    let bucket =
+        super::storage::daemon_bucket_on(daemon).map_err(|err| failed(&format!("{err:?}")))?;
+    let cache = super::storage::part_cache(daemon).map_err(|err| failed(&format!("{err:?}")))?;
     let cache = cache.ok_or_else(|| {
         "CLADEFSD_PEER_ADDRESS is set, but CLADEFSD_PART_CACHE names no directory for the \
          part cache, which keeps what the daemon serves its peers"
@@ -412,7 +412,9 @@ pub async fn start(
     let linked = url.clone();
     let runtime = crate::bucket::bucket_runtime().map_err(|err| failed(&err.to_string()))?;
     let linking = runtime.clone();
-    let asking = Peers::new(address, move |peer| link(&linking, peer, (&linked, region)));
+    let linking_daemon = Arc::clone(daemon);
+    let asking =
+        Peers::new(address, move |peer| link(&linking_daemon, &linking, peer, (&linked, region)));
     asking.set(peers);
     crate::bucket::ask_peers(bucket.clone(), asking)?;
     let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS") {
@@ -425,20 +427,28 @@ pub async fn start(
             bucket: url.clone(),
             me: address.to_owned(),
             incarnation: replicas.incarnation(),
-            channels: Channels::new(runtime.clone()),
+            channels: Channels::new(Arc::clone(daemon), runtime.clone()),
         };
         crate::bucket::replicate_with(Arc::new(members))?;
     }
     let heads = bucket.clone();
     let serving = crate::bucket::serving_peers(bucket, cache);
     let serving = serving.map_err(|err| failed(&err.to_string()))?;
-    let server =
-        Server { bucket: url, region, serving, replicas, heads, appending: Arc::default() };
+    let server = Server {
+        daemon: Arc::clone(daemon),
+        bucket: url,
+        region,
+        serving,
+        replicas,
+        heads,
+        appending: Arc::default(),
+    };
     #[cfg(not(madsim))]
     listening.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
-    // cladefs: on threads of its own, or under madsim a task (`super::run`, doc-24 step 12).
-    // An accept that fails for good, the listener's, stops the daemon, saying so (board 8573).
-    let serving = super::run::service("cladefsd peers", THREADS, move || async move {
+    // cladefs: on `daemon`'s consolidated runtime, or under madsim a task (`super::run`, doc-24
+    // step 12). An accept that fails for good, the listener's, stops the daemon, saying so (board
+    // 8573).
+    let serving = super::run::service(daemon, "cladefsd peers", move || async move {
         if let Err(err) = serve(listening, server).await {
             log::error!("cladefsd: serving peers: {err}");
             std::process::exit(1);
@@ -448,9 +458,19 @@ pub async fn start(
     // cladefs: the migrations to it their sources abandoned, given up (board 5734).
     if crate::ephemeral_host::host().is_ok() {
         let idle = super::migration::idle().map_err(|err| failed(&err))?;
-        runtime.spawn(super::migration::target::reap(idle));
+        runtime.spawn(super::migration::target::reap(Arc::clone(daemon), idle));
     }
     Ok(())
+}
+
+/// Has the process's default daemon serve the hosts sharing its bucket ([`start_on`]).
+#[cfg(not(madsim))]
+pub async fn start(
+    address: &str,
+    listening: Listening,
+    peers: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<(), String> {
+    start_on(Daemon::process(), address, listening, peers).await
 }
 
 /// cladefs: what the daemon serves its peers on: a TCP listener, bound; under madsim, its address
@@ -533,7 +553,7 @@ async fn serve(listening: Listening, server: Server) -> std::io::Result<()> {
 /// needs ([`Limited`]).
 #[cfg(not(madsim))]
 fn router(server: Server) -> std::io::Result<tonic::transport::server::Router> {
-    let credentials = credentials().map_err(std::io::Error::other)?;
+    let credentials = credentials_on(&server.daemon).map_err(std::io::Error::other)?;
     let mut builder = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(KEEPALIVE))
         .http2_keepalive_timeout(Some(CONNECT))
@@ -548,7 +568,7 @@ fn router(server: Server) -> std::io::Result<tonic::transport::server::Router> {
 /// tonic's transport (doc-24's boundary): the credentials read as a host's are.
 #[cfg(madsim)]
 fn router(server: Server) -> std::io::Result<tonic::transport::server::Router> {
-    credentials().map_err(std::io::Error::other)?;
+    credentials_on(&server.daemon).map_err(std::io::Error::other)?;
     let service = PeerServer::new(server)
         .max_decoding_message_size(MESSAGE_MOST)
         .max_encoding_message_size(MESSAGE_MOST);
@@ -678,15 +698,10 @@ impl Credentials {
     }
 }
 
-node_local::node_local! {
-    /// cladefs: the daemon's peer credentials, read once ([`credentials`]).
-    static CREDENTIALS: Mutex<Option<Credentials>> = Mutex::new(None);
-}
-
-/// cladefs: the daemon's peer credentials, from the directory `CLADEFSD_PEER_TLS` names, read the
+/// cladefs: `daemon`'s peer credentials, from the directory `CLADEFSD_PEER_TLS` names, read the
 /// first time they are asked for: why not, if it names none, or what it holds is no credentials.
-pub(crate) fn credentials() -> Result<Credentials, String> {
-    let mut read = CREDENTIALS.get().lock().unwrap();
+pub(crate) fn credentials_on(daemon: &Daemon) -> Result<Credentials, String> {
+    let mut read = daemon.peer_credentials.lock().unwrap();
     if let Some(credentials) = &*read {
         return Ok(credentials.clone());
     }
@@ -704,10 +719,10 @@ pub(crate) fn credentials() -> Result<Credentials, String> {
 }
 
 /// cladefs: an endpoint of the peer at `address`, authenticating it, and authenticated by it, with
-/// the daemon's credentials ([`Credentials`]): under madsim, whose network has no TLS, in the
+/// `daemon`'s credentials ([`Credentials`]): under madsim, whose network has no TLS, in the
 /// clear.
-fn endpoint(address: &str) -> Result<Endpoint, String> {
-    let credentials = credentials()?;
+fn endpoint_on(daemon: &Daemon, address: &str) -> Result<Endpoint, String> {
+    let credentials = credentials_on(daemon)?;
     #[cfg(not(madsim))]
     {
         let endpoint = Endpoint::from_shared(format!("https://{address}"))
@@ -722,6 +737,11 @@ fn endpoint(address: &str) -> Result<Endpoint, String> {
         Endpoint::from_shared(format!("http://{address}"))
             .map_err(|err| format!("peer {address:?}: {err}"))
     }
+}
+
+#[cfg(all(test, not(madsim)))]
+fn endpoint(address: &str) -> Result<Endpoint, String> {
+    endpoint_on(Daemon::process(), address)
 }
 
 /// cladefs: the connections the peer service holds, by their peers' addresses (board 8437).
@@ -1010,6 +1030,7 @@ pub(super) async fn sweep(
 /// What serves the daemon's peers, of its region alone: the parts `serving` reads, of any bucket;
 /// and, if it has a replica directory, the logs of the cells it is a member of (doc-21).
 struct Server {
+    daemon: Arc<Daemon>,
     bucket: String,
     region: Option<Region>,
     serving: crate::bucket::Serving,
@@ -1344,7 +1365,8 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigratePrepareRequest>,
     ) -> Result<Response<proto::MigratePrepareResponse>, Status> {
-        let (incarnation, token) = super::migration::target::prepare(request.into_inner()).await?;
+        let (incarnation, token) =
+            super::migration::target::prepare(&self.daemon, request.into_inner()).await?;
         Ok(Response::new(proto::MigratePrepareResponse { incarnation, token }))
     }
 
@@ -1352,7 +1374,7 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigrateFileRequest>,
     ) -> Result<Response<proto::MigrateFileResponse>, Status> {
-        super::migration::target::file(request.into_inner()).await?;
+        super::migration::target::file(&self.daemon, request.into_inner()).await?;
         Ok(Response::new(proto::MigrateFileResponse {}))
     }
 
@@ -1360,7 +1382,8 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigrateHandOverRequest>,
     ) -> Result<Response<proto::MigrateHandOverResponse>, Status> {
-        let accepted = super::migration::target::hand_over(request.into_inner()).await?;
+        let accepted =
+            super::migration::target::hand_over(&self.daemon, request.into_inner()).await?;
         Ok(Response::new(proto::MigrateHandOverResponse { accepted }))
     }
 
@@ -1368,7 +1391,7 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigrateAbortRequest>,
     ) -> Result<Response<proto::MigrateAbortResponse>, Status> {
-        super::migration::target::abort(request.into_inner()).await?;
+        super::migration::target::abort(&self.daemon, request.into_inner()).await?;
         Ok(Response::new(proto::MigrateAbortResponse {}))
     }
 
@@ -1376,7 +1399,7 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigrateRenewRequest>,
     ) -> Result<Response<proto::MigrateRenewResponse>, Status> {
-        super::migration::target::renew(request.into_inner().migration)?;
+        super::migration::target::renew(&self.daemon, request.into_inner().migration)?;
         Ok(Response::new(proto::MigrateRenewResponse {}))
     }
 
@@ -1384,7 +1407,7 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigrateReleaseRequest>,
     ) -> Result<Response<proto::MigrateReleaseResponse>, Status> {
-        super::migration::target::release(request.into_inner().migration).await?;
+        super::migration::target::release(&self.daemon, request.into_inner().migration).await?;
         Ok(Response::new(proto::MigrateReleaseResponse {}))
     }
 
@@ -1464,13 +1487,15 @@ impl proto::peer_server::Peer for Server {
 /// whose bucket is at `bucket`, of `region`, connected when first asked, on `runtime`, the bucket
 /// runtime.
 fn link(
+    daemon: &Daemon,
     runtime: &tokio::runtime::Handle,
     address: &str,
     (bucket, region): (&str, Option<Region>),
 ) -> Arc<dyn Link> {
     let _entered = runtime.enter();
     // Its address checked, and the credentials as the daemon started.
-    let endpoint = endpoint(address).expect("a peer's address checked, the credentials read");
+    let endpoint =
+        endpoint_on(daemon, address).expect("a peer's address checked, the credentials read");
     let endpoint = endpoint.connect_timeout(CONNECT).timeout(DEADLINE).tcp_nodelay(true);
     let client = made(endpoint.connect_lazy());
     Arc::new(Grpc { client, bucket: bucket.to_owned(), region })
@@ -1478,18 +1503,31 @@ fn link(
 
 /// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime, on a
 /// channel of its own ([`channel`]).
+pub(crate) fn member_on(
+    daemon: &Daemon,
+    runtime: &tokio::runtime::Handle,
+    address: &str,
+) -> Result<Client, String> {
+    Ok(client(&channel(daemon, runtime, address)?))
+}
+
+#[cfg(all(test, not(madsim)))]
 pub(crate) fn member(runtime: &tokio::runtime::Handle, address: &str) -> Result<Client, String> {
-    Ok(client(&channel(runtime, address)?))
+    member_on(Daemon::process(), runtime, address)
 }
 
 /// cladefs: a channel to the member at `address` (doc-21), on `runtime`, the bucket runtime,
 /// connected when first used: with no deadline on a request, as a writer's stream of appends lasts
 /// as long as its configuration, but pinging it, so that a member down ends its stream within
 /// [`KEEPALIVE`] and [`CONNECT`].
-fn channel(runtime: &tokio::runtime::Handle, address: &str) -> Result<Channel, String> {
+fn channel(
+    daemon: &Daemon,
+    runtime: &tokio::runtime::Handle,
+    address: &str,
+) -> Result<Channel, String> {
     check_address(address)?;
     let _entered = runtime.enter();
-    let endpoint = endpoint(address)?
+    let endpoint = endpoint_on(daemon, address)?
         .connect_timeout(CONNECT)
         .http2_keep_alive_interval(KEEPALIVE)
         .keep_alive_timeout(CONNECT)
@@ -1527,13 +1565,14 @@ fn made(channel: Channel) -> Client {
 /// its connection with it, once its address is no peer's and nothing holds it (a link of a
 /// configuration's, [`GrpcMember`], or a call): the next asks make another.
 struct Channels {
+    daemon: Arc<Daemon>,
     runtime: tokio::runtime::Handle,
     open: Mutex<HashMap<String, Arc<Channel>>>,
 }
 
 impl Channels {
-    fn new(runtime: tokio::runtime::Handle) -> Self {
-        Self { runtime, open: Mutex::default() }
+    fn new(daemon: Arc<Daemon>, runtime: tokio::runtime::Handle) -> Self {
+        Self { daemon, runtime, open: Mutex::default() }
     }
 
     /// The channel to the member at `address`, made if there is none.
@@ -1545,7 +1584,7 @@ impl Channels {
         if let Some(channel) = open.get(address) {
             return Ok(channel.clone());
         }
-        let channel = Arc::new(channel(&self.runtime, address)?);
+        let channel = Arc::new(channel(&self.daemon, &self.runtime, address)?);
         open.insert(address.to_owned(), channel.clone());
         Ok(channel)
     }

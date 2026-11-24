@@ -10,11 +10,10 @@
 //! for the work every cell's flushes do behind it (`server::flush_behind`, TASK-92.49), as many
 //! threads as do it at once, up to a bound, not one each.
 
-use std::sync::OnceLock;
 #[cfg(not(madsim))]
 use {
     std::collections::VecDeque,
-    std::sync::{Condvar, Mutex},
+    std::sync::{Arc, Condvar, Mutex},
     std::time::Duration,
 };
 
@@ -30,7 +29,7 @@ pub(super) struct Pool {
     /// Its threads. cladefs: none under madsim, whose one thread runs its jobs as tasks of the
     /// simulated host's (doc-24 step 11).
     #[cfg(not(madsim))]
-    threads: Threads,
+    threads: Arc<Threads>,
 }
 
 /// A pool's threads, and the jobs waiting for them.
@@ -58,7 +57,7 @@ impl Pool {
     pub(super) fn new(name: &'static str, max: usize) -> Self {
         #[cfg(not(madsim))]
         return Self {
-            threads: Threads { state: Mutex::default(), work: Condvar::new(), max, name },
+            threads: Arc::new(Threads { state: Mutex::default(), work: Condvar::new(), max, name }),
         };
         #[cfg(madsim)]
         {
@@ -67,20 +66,15 @@ impl Pool {
         }
     }
 
-    /// The process's, which requests run on, of up to 16 threads a processor, and 64 at least.
-    pub(super) fn get() -> &'static Pool {
-        node_local::node_local! {
-            static POOL: OnceLock<Pool> = OnceLock::new();
-        }
-        POOL.get().get_or_init(|| {
-            let cpus = std::thread::available_parallelism().map_or(4, |cpus| cpus.get());
-            Pool::new("cladefsd reqs", (16 * cpus).max(64))
-        })
+    /// A daemon's request pool, of up to 16 threads a processor, and 64 at least.
+    pub(super) fn requests() -> Self {
+        let cpus = std::thread::available_parallelism().map_or(4, |cpus| cpus.get());
+        Pool::new("cladefsd reqs", (16 * cpus).max(64))
     }
 
     /// Runs `job` on a thread of the pool: an idle one, or a new one, unless it runs as many as it
     /// may already, when the job waits for one. Returns false if no worker could take it.
-    pub(super) fn run(&'static self, job: Job) -> bool {
+    pub(super) fn run(&self, job: Job) -> bool {
         // cladefs: under madsim, a task of the simulated host's: its jobs block on nothing but the
         // simulated disk, which is memory (doc-24 step 11).
         #[cfg(madsim)]
@@ -97,7 +91,7 @@ impl Pool {
     /// start. The tests' way to see what a job did (board 744, 2406).
     #[cfg(test)]
     pub(super) async fn call<T: Send + 'static>(
-        &'static self,
+        &self,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Option<T> {
         let (done, returned) = tokio::sync::oneshot::channel();
@@ -118,11 +112,13 @@ impl Pool {
 #[cfg(not(madsim))]
 impl Threads {
     /// Runs `job` as [`Pool::run`] does, on one of them.
-    fn run(&'static self, job: Job) -> bool {
+    fn run(self: &Arc<Self>, job: Job) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.idle <= state.jobs.len() && state.threads < self.max {
+            let worker = Arc::clone(self);
             // cladefs: the daemon's seam: a pool's threads, its jobs tasks under madsim (doc-24).
-            match std::thread::Builder::new().name(self.name.into()).spawn(move || self.work_on()) {
+            match std::thread::Builder::new().name(self.name.into()).spawn(move || worker.work_on())
+            {
                 Ok(_) => state.threads += 1,
                 Err(err) => {
                     log::error!("cladefsd: starting a thread, {}: {err}", self.name);

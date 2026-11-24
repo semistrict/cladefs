@@ -114,13 +114,44 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
         vars.push(("CLADEFSD_EPHEMERAL_CELLS", root.display().to_string()));
     }
     node_local::env::set_vars(vars);
-    cladefs::cladefsd::use_bucket(bucket);
-    if let Err(err) = cladefs::cladefsd::boot(&root.join("vms.sock"), Some(256 << 20)).await {
+    let daemon = cladefs::cladefsd::Daemon::new();
+    set_daemon(daemon.clone());
+    daemon.use_bucket(bucket);
+    if let Err(err) = daemon.boot(&root.join("vms.sock"), Some(256 << 20)).await {
         // As its supervisor starts a daemon whose boot failed again: its node, started anew.
         panic!("{BOOT_FAILED}: {err:#}");
     }
     // As cladefsd's main parks once it booted: a node whose init returns exits, its tasks with it.
     std::future::pending::<()>().await;
+}
+
+/// Per-simulated-node `Arc<Daemon>` registry for the test harness (replaces `cladefsd`'s old
+/// `node_local!` statics; each `boot` installs a fresh `Daemon` for its node).
+fn daemons() -> &'static std::sync::Mutex<
+    std::collections::HashMap<
+        (std::thread::ThreadId, madsim::task::NodeId),
+        Arc<cladefs::cladefsd::Daemon>,
+    >,
+> {
+    static DAEMONS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                (std::thread::ThreadId, madsim::task::NodeId),
+                Arc<cladefs::cladefsd::Daemon>,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    DAEMONS.get_or_init(Default::default)
+}
+
+fn set_daemon(daemon: Arc<cladefs::cladefsd::Daemon>) {
+    let key = (std::thread::current().id(), madsim::plugin::node());
+    daemons().lock().unwrap().insert(key, daemon);
+}
+
+fn current_daemon() -> Option<Arc<cladefs::cladefsd::Daemon>> {
+    let key = (std::thread::current().id(), madsim::plugin::node());
+    daemons().lock().unwrap().get(&key).cloned()
 }
 
 /// What a host's daemon whose boot failed says as it exits, which has its node started again, as a
@@ -219,10 +250,13 @@ fn hosts_keeping(
 
 /// A guest of this host's daemon, once it serves.
 async fn guest() -> cladefs::cladefsd::guest::Guest {
-    while !cladefs::cladefsd::serving() {
+    let daemon = loop {
+        if let Some(daemon) = current_daemon().filter(|d| d.serving()) {
+            break daemon;
+        }
         madsim::time::sleep(Duration::from_millis(100)).await;
-    }
-    cladefs::cladefsd::guest::Guest::connect().unwrap()
+    };
+    cladefs::cladefsd::guest::Guest::connect(&daemon).unwrap()
 }
 
 /// The VM manager's node, which calls the hosts' control APIs.
@@ -407,10 +441,13 @@ async fn a_hosts_drain_waits_for_its_own_work_alone() {
     });
     open.await.unwrap();
     let drained = nodes[0].spawn(async {
-        while !cladefs::cladefsd::serving() {
+        let daemon = loop {
+            if let Some(daemon) = current_daemon().filter(|d| d.serving()) {
+                break daemon;
+            }
             madsim::time::sleep(Duration::from_millis(100)).await;
-        }
-        cladefs::cladefsd::drain::drain(Duration::from_secs(5)).await
+        };
+        daemon.drain(Duration::from_secs(5)).await
     });
     assert_eq!(drained.await.unwrap(), Ok(()), "host 1's drain waited for host 2's guest");
     held.abort();
@@ -1219,7 +1256,8 @@ fn collector(bucket: &Arc<RoutedBucket>) -> madsim::runtime::NodeHandle {
             // A host's token the daemon's bucket asks for, which no placement of the hosts' is.
             let vars = [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1000")];
             node_local::env::set_vars(vars);
-            cladefs::cladefsd::use_bucket(bucket);
+            let daemon = cladefs::cladefsd::Daemon::new();
+            daemon.use_bucket(bucket);
             std::future::pending::<()>().await;
         }
     })
@@ -1476,7 +1514,12 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                 } else if madsim::rand::thread_rng().gen_bool(0.5) {
                     if drains && madsim::rand::thread_rng().gen_bool(0.5) {
                         let within = Duration::from_secs(10);
-                        let drained = node(host).spawn(cladefs::cladefsd::drain::drain(within));
+                        let drained = node(host).spawn(async move {
+                            match current_daemon() {
+                                Some(daemon) => daemon.drain(within).await,
+                                None => Ok(()),
+                            }
+                        });
                         log::info!("host {}: drained: {:?}", host + 1, drained.await);
                     }
                     node_local::kill(nodes[host].id()).await;

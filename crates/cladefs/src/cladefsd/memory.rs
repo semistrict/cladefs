@@ -14,6 +14,7 @@
 //! memory, not the daemon's, and count against none of this (backlog doc-13, TASK-501). Its
 //! metrics name tenants by their IDs.
 
+use super::Daemon;
 use super::server::{Parking, Tenant};
 use crate::Errno;
 use crate::slabs::SLAB;
@@ -21,22 +22,40 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-node_local::node_local! {
+/// Per-daemon memory governance, tenant registry, held-parts cache, and in-flight byte budgets,
+/// owned by [`Daemon`].
+pub(super) struct State {
     /// The tenants alive, and their limits, under one lock, so that a tenant made as its limit is
     /// set is limited as it was set.
-    static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
-        tenants: Vec::new(),
-        limits: None,
-        in_flight: None,
-        weights: None,
-        total: None,
-        });
-}
-
-node_local::node_local! {
+    registry: Mutex<Registry>,
     /// cladefs: what the governor allows every tenant's memory together, as the host's free memory
     /// goes ([`super::governor`], TASK-358): unlimited for a daemon not governed.
-    static GOVERNED: AtomicU64 = AtomicU64::new(u64::MAX);
+    governed: AtomicU64,
+    /// cladefs: the parts of segments the daemon's cells pack as they fill, held until their
+    /// framings (`local_cell::HeldParts`, TASK-400).
+    held_parts: Arc<local_cell::HeldParts>,
+    /// cladefs: the bytes in flight of every tenant whose own aren't set ([`set_in_flight`]).
+    tenant_in_flight: Arc<AtomicU64>,
+    /// cladefs: what every tenant's connections have the daemon hold together (board 8465).
+    total_in_flight: Arc<InFlight>,
+}
+
+impl State {
+    pub(super) fn new() -> Self {
+        Self {
+            registry: Mutex::new(Registry {
+                tenants: Vec::new(),
+                limits: None,
+                in_flight: None,
+                weights: None,
+                total: None,
+            }),
+            governed: AtomicU64::new(u64::MAX),
+            held_parts: local_cell::HeldParts::new(),
+            tenant_in_flight: Arc::new(AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT)),
+            total_in_flight: Arc::new(InFlight::total()),
+        }
+    }
 }
 
 /// cladefs: a tenant's weight unless it is set: each tenant alike.
@@ -77,8 +96,7 @@ impl Registry {
 
     /// Limits every tenant's memory together to the least of the control API's limit and the
     /// governor's allowance.
-    fn apply_total(&self) {
-        let governed = GOVERNED.get().load(Ordering::Relaxed);
+    fn apply_total(&self, governed: u64) {
         let cap = self.total.unwrap_or(u64::MAX).min(governed);
         crate::slabs::set_total_cap((cap != u64::MAX).then_some(cap));
         // cladefs: whose the cap is: the governor's, the host's memory, which page-ins finding no
@@ -89,16 +107,16 @@ impl Registry {
     }
 }
 
-/// The tenant of the ID `id`, whose cells are in `dir`, alive, if one is: one revoked whose VM
-/// processes live on, which a grant of it again goes on with (TASK-79.36).
-pub(super) fn alive(id: u64, dir: &std::path::Path) -> Option<Arc<Tenant>> {
-    let registry = REGISTRY.get().lock().unwrap();
+/// The tenant of the ID `id` on `daemon`, whose cells are in `dir`, alive, if one is: one revoked
+/// whose VM processes live on, which a grant of it again goes on with (TASK-79.36).
+pub(super) fn alive_on(daemon: &Daemon, id: u64, dir: &std::path::Path) -> Option<Arc<Tenant>> {
+    let registry = daemon.memory.registry.lock().unwrap();
     registry.alive().find(|tenant| tenant.id() == id && tenant.dir() == Some(dir))
 }
 
-/// Counts `tenant`, new, among those alive, limited as its ID is.
-pub(super) fn register(tenant: &Arc<Tenant>) {
-    let mut registry = REGISTRY.get().lock().unwrap();
+/// Counts `tenant`, new, among those alive on `daemon`, limited as its ID is.
+pub(super) fn register_on(daemon: &Daemon, tenant: &Arc<Tenant>) {
+    let mut registry = daemon.memory.registry.lock().unwrap();
     if let Some(bytes) = registry.limit(tenant.id()) {
         crate::slabs::set_arena_cap(tenant.arena(), Some(bytes));
     }
@@ -108,22 +126,24 @@ pub(super) fn register(tenant: &Arc<Tenant>) {
     registry.tenants.push(Arc::downgrade(tenant));
 }
 
-/// Limits the memory of the tenant `tenant` to `bytes`, rounded down to pages, or every tenant's
-/// together, without one; or lifts the limit, without `bytes`. A tenant's limit holds for it alive
-/// now, and granted later, until it is set again. `EINVAL` for a limit under a slab (1 MiB), which
-/// would refuse every whole part.
-pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+/// Limits the memory of the tenant `tenant` on `daemon` to `bytes`, rounded down to pages, or
+/// every tenant's together, without one; or lifts the limit, without `bytes`.
+pub(super) fn set_limit_on(
+    daemon: &Daemon,
+    tenant: Option<u64>,
+    bytes: Option<u64>,
+) -> Result<(), Errno> {
     if bytes.is_some_and(|bytes| bytes < SLAB) {
         return Err(Errno::EINVAL);
     }
     let Some(id) = tenant else {
-        let mut registry = REGISTRY.get().lock().unwrap();
+        let mut registry = daemon.memory.registry.lock().unwrap();
         registry.total = bytes;
-        registry.apply_total();
+        registry.apply_total(daemon.memory.governed.load(Ordering::Relaxed));
         return Ok(());
     };
     super::grants::check_tenant(id)?;
-    let mut registry = REGISTRY.get().lock().unwrap();
+    let mut registry = daemon.memory.registry.lock().unwrap();
     let limits = registry.limits.get_or_insert_with(HashMap::new);
     match bytes {
         Some(bytes) => limits.insert(id, bytes),
@@ -135,35 +155,44 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
     Ok(())
 }
 
-/// cladefs: weighs the tenant `tenant`'s memory, alive now or granted later, against the others' as
-/// the host's memory runs low (TASK-358): the governor evicts each tenant first down to its share
-/// of what it allows by weight, a tenant within its share kept, then any tenant's, least recently
-/// used first. Every tenant's weight is [`DEFAULT_WEIGHT`] until set, such as to the memory its VMs
-/// are given.
-pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
+/// Limits the memory of `tenant` on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+    set_limit_on(Daemon::process(), tenant, bytes)
+}
+
+/// cladefs: weighs the tenant `tenant`'s memory on `daemon`, alive now or granted later, against
+/// the others' as the host's memory runs low (TASK-358).
+pub(super) fn set_weight_on(daemon: &Daemon, tenant: u64, weight: u64) -> Result<(), Errno> {
     super::grants::check_tenant(tenant)?;
-    let mut registry = REGISTRY.get().lock().unwrap();
+    let mut registry = daemon.memory.registry.lock().unwrap();
     registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
     Ok(())
 }
 
-/// cladefs: the parts of segments the daemon's cells pack as they fill, held until their framings,
-/// which they share (`local_cell::HeldParts`, TASK-400): memory the daemon holds, which the
-/// governor lets go of before any tenant's ([`govern`]).
-pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
-    node_local::node_local! {
-        static HELD: Arc<local_cell::HeldParts> = local_cell::HeldParts::new();
-    }
-    HELD.get()
+/// Weighs the tenant `tenant`'s memory on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
+    set_weight_on(Daemon::process(), tenant, weight)
 }
 
-/// cladefs: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena
-/// holds, held parts, hot replication buffers (board 6902), unified recent/unpacked parts, bucket
-/// object tails, cell page cache, and pooled framing buffers (board 6026).
-pub fn governed_bytes() -> u64 {
+/// cladefs: the parts of segments `daemon`'s cells pack as they fill, held until their framings,
+/// which they share (`local_cell::HeldParts`, TASK-400).
+pub(super) fn held_parts_on(daemon: &Daemon) -> &Arc<local_cell::HeldParts> {
+    &daemon.memory.held_parts
+}
+
+/// cladefs: the parts held on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
+    &Daemon::process().memory.held_parts
+}
+
+/// cladefs: the memory `daemon`'s governor governs ([`govern_on`]), in bytes.
+pub(super) fn governed_bytes_on(daemon: &Daemon) -> u64 {
     let fetch_mem = crate::bucket::memory();
     crate::slabs::arenas_bytes()
-        + held_parts().bytes()
+        + held_parts_on(daemon).bytes()
         + local_cell::replicate::hot_bytes()
         + fetch_mem.recent_bytes()
         + fetch_mem.tails_bytes()
@@ -171,25 +200,20 @@ pub fn governed_bytes() -> u64 {
         + local_cell::framing_buffers_bytes()
 }
 
-/// cladefs: the governor's look at the host's memory (TASK-358): every tenant's memory together,
-/// and the parts held ([`held_parts`]), limited to `allowance` bytes, and held past it, evicted at
-/// once: parts held first, newest first, down to what the tenants leave of it, as they are derived
-/// from what the cells hold on disk, whose framings read and pack them again (TASK-400); then each
-/// tenant past its share by weight down to it ([`super::governor::shares`]), then any tenant's,
-/// least recently used first. The tenants are limited to `allowance`: the parts held take no room
-/// from them, but what the headroom leaves between looks. cladefs: the cells' page cache
-/// (`local_cell::pages`, TASK-433) as the parts held are, its clean pages evicted, its dirty ones
-/// written back to be: what it holds counted as the process's, where the host's page cache was
-/// counted free; and sized to what is left it ([`local_cell::pages::PageCache::size_to`]), as Linux
-/// sizes its page cache to the memory free. cladefs: its shrinks wait for the pages they evict
-/// holding no thread ([`shrink`], board 2946).
-pub async fn govern(allowance: u64) {
-    GOVERNED.get().store(allowance, Ordering::Relaxed);
+/// cladefs: the memory the process's default daemon's governor governs.
+#[cfg(not(madsim))]
+pub fn governed_bytes() -> u64 {
+    governed_bytes_on(Daemon::process())
+}
+
+/// cladefs: `daemon`'s governor's look at the host's memory (TASK-358).
+pub(super) async fn govern_on(daemon: &Daemon, allowance: u64) {
+    daemon.memory.governed.store(allowance, Ordering::Relaxed);
     // cladefs: every tenant's bytes in flight within a share of what it allows (board 8465).
-    total_in_flight().govern(allowance / GOVERNED_IN_FLIGHT_SHARE);
+    total_in_flight_on(daemon).govern(allowance / GOVERNED_IN_FLIGHT_SHARE);
     // cladefs: its shrinks wait for what they evict this long at most, together (board 8535).
     let deadline = std::time::Instant::now() + PARKED_WAIT;
-    let parts = held_parts();
+    let parts = held_parts_on(daemon);
     let room = allowance.saturating_sub(crate::slabs::arenas_bytes());
     if parts.bytes() > room {
         parts.evict_to(room);
@@ -224,8 +248,8 @@ pub async fn govern(allowance: u64) {
         local_cell::evict_framing_buffers_to(room);
     }
     let weighted: Vec<(u64, u64)> = {
-        let registry = REGISTRY.get().lock().unwrap();
-        registry.apply_total();
+        let registry = daemon.memory.registry.lock().unwrap();
+        registry.apply_total(allowance);
         if crate::slabs::arenas_bytes() <= allowance {
             return;
         }
@@ -235,18 +259,24 @@ pub async fn govern(allowance: u64) {
         ids.into_iter().map(|id| (id, registry.weight(id))).collect()
     };
     for (id, share) in super::governor::shares(allowance, &weighted) {
-        if held_by(id) > share
-            && let Err(err) = shrink_by(Some(id), share, deadline).await
+        if held_by(daemon, id) > share
+            && let Err(err) = shrink_by(daemon, Some(id), share, deadline).await
             && err != Errno::ENOENT
         {
             log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
         }
     }
     if crate::slabs::arenas_bytes() > allowance
-        && let Err(err) = shrink_by(None, allowance, deadline).await
+        && let Err(err) = shrink_by(daemon, None, allowance, deadline).await
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
     }
+}
+
+/// The process's default daemon's governor's look at the host's memory.
+#[cfg(not(madsim))]
+pub async fn govern(allowance: u64) {
+    govern_on(Daemon::process(), allowance).await
 }
 
 /// cladefs: how long a shrink waits at most for the pages it evicted that are quarantined, a
@@ -258,9 +288,9 @@ pub async fn govern(allowance: u64) {
 /// memory ungoverned until the daemon restarted (hotbed question 484).
 pub(super) const PARKED_WAIT: std::time::Duration = super::server::UNRESPONSIVE.saturating_mul(2);
 
-/// What the tenants alive of the ID `id` hold.
-fn held_by(id: u64) -> u64 {
-    let registry = REGISTRY.get().lock().unwrap();
+/// What the tenants alive of the ID `id` on `daemon` hold.
+fn held_by(daemon: &Daemon, id: u64) -> u64 {
+    let registry = daemon.memory.registry.lock().unwrap();
     registry
         .alive()
         .filter(|tenant| tenant.id() == id)
@@ -268,20 +298,24 @@ fn held_by(id: u64) -> u64 {
         .sum()
 }
 
-/// Evicts clean pages, those asked for longest ago first, of the tenant `tenant`'s, or of any,
-/// until it, or the daemon, holds at most `target` bytes, or nothing is left to evict; and returns
-/// what it holds then. `ENOENT` if no tenant `tenant` is alive. Memory goes back a run at a time,
-/// punched as it is freed, but for whole slabs kept as spares, which a shrink gives back first. cladefs: a page a VM process's window maps,
-/// evicted, is free once the VM process has unmapped it, or the daemon let it go (TASK-79.9): each
-/// extent's pages free before what is held is looked at again ([`Parking`]), so that it evicts no
-/// more than it must, and returns what is held once they are, not before; waiting for them holding
-/// no thread (board 2946). cladefs: for [`PARKED_WAIT`] at most (board 8535).
-pub async fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
-    shrink_by(tenant, target, std::time::Instant::now() + PARKED_WAIT).await
+/// Evicts clean pages on `daemon` until `tenant` (or the daemon) holds at most `target` bytes.
+pub(super) async fn shrink_on(
+    daemon: &Daemon,
+    tenant: Option<u64>,
+    target: u64,
+) -> Result<u64, Errno> {
+    shrink_by(daemon, tenant, target, std::time::Instant::now() + PARKED_WAIT).await
 }
 
-/// cladefs: [`shrink`], waiting for the pages it evicts until `deadline` at most (board 8535).
+/// Evicts clean pages on the process's default daemon.
+#[cfg(not(madsim))]
+pub async fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
+    shrink_on(Daemon::process(), tenant, target).await
+}
+
+/// cladefs: [`shrink_on`], waiting for the pages it evicts until `deadline` at most (board 8535).
 async fn shrink_by(
+    daemon: &Daemon,
     tenant: Option<u64>,
     target: u64,
     deadline: std::time::Instant,
@@ -292,7 +326,7 @@ async fn shrink_by(
         crate::slabs::release_spares(None);
         return Ok(crate::slabs::arenas_bytes());
     };
-    let arenas: Vec<_> = (REGISTRY.get().lock().unwrap().alive())
+    let arenas: Vec<_> = (daemon.memory.registry.lock().unwrap().alive())
         .filter(|tenant| tenant.id() == id)
         .map(|tenant| tenant.arena())
         .collect();
@@ -346,10 +380,9 @@ pub struct TenantMemory {
     pub limit: Option<u64>,
 }
 
-/// The memory of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
-/// another directory, is counted once, with both its arenas'.
-pub fn tenants() -> Vec<TenantMemory> {
-    let registry = REGISTRY.get().lock().unwrap();
+/// The memory of each tenant alive on `daemon`, by ID.
+pub(super) fn tenants_on(daemon: &Daemon) -> Vec<TenantMemory> {
+    let registry = daemon.memory.registry.lock().unwrap();
     let mut memory: HashMap<u64, TenantMemory> = HashMap::new();
     for tenant in registry.alive() {
         let entry = memory.entry(tenant.id()).or_insert_with(|| TenantMemory {
@@ -364,19 +397,23 @@ pub fn tenants() -> Vec<TenantMemory> {
     memory
 }
 
-/// cladefs: what every tenant's connections have the daemon hold of their VM processes' requests
-/// now, together ([`InFlight`]): the default tenant's, if made, and each granted one's alive,
-/// within every tenant's bytes in flight ([`total_in_flight`], board 8465).
-pub(super) fn in_flight_held() -> u64 {
-    total_in_flight().held()
+/// The memory of each tenant alive on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn tenants() -> Vec<TenantMemory> {
+    tenants_on(Daemon::process())
 }
 
-/// cladefs: of `reserved` connections each tenant alive keeps, whatever the others have, those its
-/// VM processes don't have, every tenant's together: the default tenant's, if made, and each
-/// granted one's (`server::Counted`, board 8465).
-pub(super) fn reserved_connections_left(reserved: usize) -> usize {
-    let registry = REGISTRY.get().lock().unwrap();
-    let default = super::server::default_tenant_made();
+/// cladefs: what every tenant's connections on `daemon` have the daemon hold of their VM
+/// processes' requests now, together ([`InFlight`]).
+pub(super) fn in_flight_held_on(daemon: &Daemon) -> u64 {
+    total_in_flight_on(daemon).held()
+}
+
+/// cladefs: of `reserved` connections each tenant alive on `daemon` keeps, those its VM processes
+/// don't have, every tenant's together (`server::Counted`, board 8465).
+pub(super) fn reserved_connections_left_on(daemon: &Daemon, reserved: usize) -> usize {
+    let registry = daemon.memory.registry.lock().unwrap();
+    let default = super::server::default_tenant_made(daemon);
     (registry.alive().chain(default))
         .map(|tenant| reserved.saturating_sub(tenant.connections()))
         .sum()
@@ -417,67 +454,61 @@ pub fn return_large_allocations() {
 /// host's density case, 300 forks reading their base, held 16 MiB of the tenant's at most.
 pub const DEFAULT_TENANT_IN_FLIGHT: u64 = 8 << 30;
 
-node_local::node_local! {
-    /// cladefs: the bytes in flight of every tenant whose own aren't set ([`set_in_flight`]).
-    static TENANT_IN_FLIGHT: AtomicU64 = AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT);
-}
-
 /// cladefs: the bytes in flight every tenant's connections share together, unless set otherwise
 /// ([`set_total_in_flight`]), and the governor allows fewer (board 8465): two tenants' at their
-/// default's most (hotbed question 482). Each tenant's room is its own ([`DEFAULT_TENANT_IN_FLIGHT`]), and a host has as
-/// many tenants as it was granted: each at its room held their sum, past a host's memory, uncounted
-/// by the governor, which evicted the cache for it in vain.
+/// default's most (hotbed question 482).
 pub const DEFAULT_TOTAL_IN_FLIGHT: u64 = 2 * DEFAULT_TENANT_IN_FLIGHT;
 
 /// cladefs: what of the memory the governor allows the daemon every tenant's bytes in flight may
-/// hold together, in parts of it (board 8465): a quarter, the rest the cache's. The buffers its
-/// VM processes' requests are held in, which the host's memory falling as they fill has the
-/// governor allow the cache less of.
+/// hold together, in parts of it (board 8465): a quarter, the rest the cache's.
 const GOVERNED_IN_FLIGHT_SHARE: u64 = 4;
 
-/// cladefs: what every tenant's connections have the daemon hold together (board 8465), which each
-/// tenant's holds within ([`InFlight::of_a_tenant`]).
-pub(super) fn total_in_flight() -> &'static InFlight {
-    node_local::node_local! {
-        /// cladefs: its bytes, as [`DEFAULT_TOTAL_IN_FLIGHT`], [`set_total_in_flight`] and the
-        /// governor say.
-        static TOTAL: InFlight = InFlight::total();
-    }
-    TOTAL.get()
+/// cladefs: what every tenant's connections on `daemon` have the daemon hold together (board 8465),
+/// which each tenant's holds within ([`InFlight::of_a_tenant`]).
+pub(super) fn total_in_flight_on(daemon: &Daemon) -> &Arc<InFlight> {
+    &daemon.memory.total_in_flight
 }
 
-/// cladefs: sets the bytes in flight every tenant's connections share together to `bytes`, or,
-/// without, [`DEFAULT_TOTAL_IN_FLIGHT`] (board 8465): fewer if the governor allows fewer. `EINVAL`
-/// for fewer than a payload's most, which a request couldn't be held in.
-pub fn set_total_in_flight(bytes: Option<u64>) -> Result<(), Errno> {
+/// cladefs: sets the bytes in flight every tenant's connections on `daemon` share together.
+#[cfg(not(madsim))]
+pub(super) fn set_total_in_flight_on(daemon: &Daemon, bytes: Option<u64>) -> Result<(), Errno> {
     if bytes.is_some_and(|bytes| bytes < super::wire::MAX_PAYLOAD) {
         return Err(Errno::EINVAL);
     }
-    total_in_flight().set_budget(bytes);
+    total_in_flight_on(daemon).set_budget(bytes);
     Ok(())
 }
 
-/// cladefs: sets the bytes in flight the connections of the tenant `tenant` share to `bytes`, or,
-/// without `bytes`, to every tenant's; or, without `tenant`, every tenant's whose own aren't set,
-/// the default without `bytes` (TASK-149.35). A tenant's hold for it alive now, and granted later,
-/// until they are set again. `EINVAL` for fewer than a payload's most, which a request of it
-/// couldn't be held in, and for the default tenant, which is every tenant's with them.
-pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+/// cladefs: sets the bytes in flight on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn set_total_in_flight(bytes: Option<u64>) -> Result<(), Errno> {
+    set_total_in_flight_on(Daemon::process(), bytes)
+}
+
+/// cladefs: sets the bytes in flight the connections of the tenant `tenant` on `daemon` share.
+pub(super) fn set_in_flight_on(
+    daemon: &Arc<Daemon>,
+    tenant: Option<u64>,
+    bytes: Option<u64>,
+) -> Result<(), Errno> {
     if bytes.is_some_and(|bytes| bytes < super::wire::MAX_PAYLOAD) {
         return Err(Errno::EINVAL);
     }
     let Some(id) = tenant else {
-        TENANT_IN_FLIGHT.get().store(bytes.unwrap_or(DEFAULT_TENANT_IN_FLIGHT), Ordering::Relaxed);
+        daemon
+            .memory
+            .tenant_in_flight
+            .store(bytes.unwrap_or(DEFAULT_TENANT_IN_FLIGHT), Ordering::Relaxed);
         // Larger, it lets those waiting go on.
-        let registry = REGISTRY.get().lock().unwrap();
+        let registry = daemon.memory.registry.lock().unwrap();
         registry.alive().for_each(|tenant| tenant.in_flight().changed());
-        if let Ok(tenant) = super::server::default_tenant() {
+        if let Ok(tenant) = super::server::default_tenant_on(daemon) {
             tenant.in_flight().changed();
         }
         return Ok(());
     };
     super::grants::check_tenant(id)?;
-    let mut registry = REGISTRY.get().lock().unwrap();
+    let mut registry = daemon.memory.registry.lock().unwrap();
     let in_flight = registry.in_flight.get_or_insert_with(HashMap::new);
     match bytes {
         Some(bytes) => in_flight.insert(id, bytes),
@@ -489,33 +520,48 @@ pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errn
     Ok(())
 }
 
+/// cladefs: sets the bytes in flight on the process's default daemon.
+#[cfg(not(madsim))]
+pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+    set_in_flight_on(Daemon::process(), tenant, bytes)
+}
+
+/// Where an [`InFlight`]'s default budget comes from when no per-tenant budget is set.
+enum DefaultBudget {
+    Fixed(u64),
+    Shared(Arc<AtomicU64>),
+}
+
+impl DefaultBudget {
+    fn get(&self) -> u64 {
+        match self {
+            Self::Fixed(bytes) => *bytes,
+            Self::Shared(shared) => shared.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// cladefs: what a tenant's connections have the daemon hold of its VM processes' requests together
-/// (TASK-149.35): what each counts against its own room, its requests' stream data and what it
-/// queued for its VM process, within the bytes in flight they share, its budget, the tenant's own
-/// or every tenant's ([`DEFAULT_TENANT_IN_FLIGHT`]). A request past it waits, before its payload
-/// is read, until what is held leaves it enough; or, with nothing held, goes on, so that one as
-/// large as the budget is served. Not let go, as a connection past its own room is: it keeps
-/// within its own, and the tenant's other VM processes, a healthy tenant's busy ones, take theirs.
+/// (TASK-149.35).
 pub struct InFlight {
     held: AtomicU64,
     /// Its budget, or 0, its default's ([`InFlight::default`]).
     budget: AtomicU64,
-    /// cladefs: the most the governor allows it, every tenant's ([`total_in_flight`]), or
+    /// cladefs: the most the governor allows it, every tenant's ([`total_in_flight_on`]), or
     /// `u64::MAX`.
     governed: AtomicU64,
     /// The most it held, which the tests measure.
     peak: AtomicU64,
     /// What says it held less, or its budget grew.
     less: event_listener::Event,
-    /// cladefs: its budget unless set: a tenant's, every tenant's whose own aren't set
-    /// ([`TENANT_IN_FLIGHT`]); every tenant's together, [`DEFAULT_TOTAL_IN_FLIGHT`].
-    default: fn() -> u64,
-    /// cladefs: a tenant's, what every tenant's together hold within too ([`total_in_flight`]).
-    within: Option<&'static InFlight>,
+    /// cladefs: its budget unless set.
+    default: DefaultBudget,
+    /// cladefs: a tenant's, what every tenant's together hold within too ([`total_in_flight_on`]).
+    within: Option<Arc<InFlight>>,
 }
 
 impl InFlight {
-    fn made(default: fn() -> u64, within: Option<&'static InFlight>) -> Self {
+    fn made(default: DefaultBudget, within: Option<Arc<InFlight>>) -> Self {
         Self {
             held: AtomicU64::new(0),
             budget: AtomicU64::new(0),
@@ -527,14 +573,17 @@ impl InFlight {
         }
     }
 
-    /// cladefs: a tenant's, within every tenant's together (board 8465).
-    pub(super) fn of_a_tenant() -> Self {
-        Self::made(|| TENANT_IN_FLIGHT.get().load(Ordering::Relaxed), Some(total_in_flight()))
+    /// cladefs: a tenant's on `daemon`, within every tenant's together (board 8465).
+    pub(super) fn of_a_tenant(daemon: &Daemon) -> Self {
+        Self::made(
+            DefaultBudget::Shared(Arc::clone(&daemon.memory.tenant_in_flight)),
+            Some(Arc::clone(&daemon.memory.total_in_flight)),
+        )
     }
 
-    /// cladefs: every tenant's together ([`total_in_flight`]).
+    /// cladefs: every tenant's together ([`total_in_flight_on`]).
     fn total() -> Self {
-        Self::made(|| DEFAULT_TOTAL_IN_FLIGHT, None)
+        Self::made(DefaultBudget::Fixed(DEFAULT_TOTAL_IN_FLIGHT), None)
     }
 
     /// cladefs: the governor allows it `bytes` at most, a payload's at least (board 8465).
@@ -559,7 +608,7 @@ impl InFlight {
     /// Its budget: its own, or its default; no more than the governor allows.
     pub fn budget(&self) -> u64 {
         let budget = match self.budget.load(Ordering::Relaxed) {
-            0 => (self.default)(),
+            0 => self.default.get(),
             budget => budget,
         };
         budget.min(self.governed.load(Ordering::Relaxed))
@@ -580,7 +629,7 @@ impl InFlight {
     pub fn add(&self, bytes: u64) {
         let held = self.held.fetch_add(bytes, Ordering::Relaxed) + bytes;
         self.peak.fetch_max(held, Ordering::Relaxed);
-        if let Some(within) = self.within {
+        if let Some(within) = &self.within {
             within.add(bytes);
         }
     }
@@ -590,7 +639,7 @@ impl InFlight {
         if bytes > 0 {
             self.held.fetch_sub(bytes, Ordering::Relaxed);
             self.changed();
-            if let Some(within) = self.within {
+            if let Some(within) = &self.within {
                 within.sub(bytes);
             }
         }
@@ -613,7 +662,7 @@ impl InFlight {
     /// 8465): what it took of its own given back if it is dropped waiting for that.
     pub async fn take(&self, bytes: u64) {
         self.take_own(bytes).await;
-        let Some(within) = self.within else { return };
+        let Some(within) = &self.within else { return };
         /// What a tenant took of its own, given back unless every tenant's is taken too.
         struct Taken<'a>(&'a InFlight, u64);
         impl Drop for Taken<'_> {

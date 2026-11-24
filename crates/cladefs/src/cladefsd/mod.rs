@@ -33,15 +33,16 @@
 //! cells one daemon serves, so nothing a connection costs grows with the base it is a fork of,
 //! nor threads with connections:
 //!
-//! - **Threads.** One small runtime receives every connection's messages, and works behind their
-//!   cells: commits made durable within 50 ms, on threads every cell's flushes share, 32 at
-//!   most (TASK-92.49). Requests run on a pool of threads every
-//!   connection shares, as many as run at once, up to 16 a processor (`pool`), a connection's 8
-//!   at most, the rest waiting their turn; a fault waiting for the pager holds neither a thread
-//!   nor one of the 8 (TASK-92.20), nor does an opening waiting for a cell, or for a restore's
-//!   version, which the daemon keeps open for the restores of its snapshot (TASK-92.5). Every
-//!   cell's uploader and fetches run on one runtime more (`crate::bucket`), its disk work in
-//!   `block_in_place`.
+//! - **Threads and runtimes.** One `Arc<Daemon>` ([`Daemon`]) owns the daemon's registries and
+//!   one consolidated Tokio runtime (`cladefsd`, 4 worker threads, 32 blocking threads) shared by
+//!   VM socket I/O, control gRPC, peer gRPC, the memory governor, and background cell flushes
+//!   (commits made durable within 50 ms, 32 at most; TASK-92.49, board 10774). Blocking VM
+//!   requests run on the daemon's thread pool (`pool`), a connection's 8 at most, the rest waiting
+//!   their turn; a fault waiting for the pager holds neither a thread nor one of the 8 (TASK-92.20),
+//!   nor does an opening waiting for a cell or a restore's version (TASK-92.5). Two specialized
+//!   runtimes remain intentionally separate for latency isolation: `crate::cache`'s `cladefs pager`
+//!   (dedicated to synchronous decompression/disk page-ins so control/peer RPCs cannot delay DAX
+//!   faults) and `crate::bucket`'s bucket runtime (object storage uploads and fetches).
 //! - **Files.** A cell keeps its own segments' and extents' files open, the most
 //!   `local_cell::Options::open_files` of each (64) but for those reads use: a fork, which writes
 //!   little, few; and its open segment's, and its commit log. The files of the segments a fork
@@ -93,6 +94,7 @@ pub(crate) mod cells;
 pub(crate) mod client;
 mod codec;
 pub mod control;
+mod daemon;
 #[cfg(target_os = "linux")]
 mod device;
 pub mod disk;
@@ -117,80 +119,63 @@ mod reads;
 mod run;
 pub(crate) mod server;
 mod stats;
+mod storage;
+mod telemetry;
 pub(crate) mod wire;
 pub mod zpages;
 
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::sync::Arc;
 
-#[cfg(any(target_os = "linux", madsim))]
+#[cfg(all(target_os = "linux", not(madsim)))]
 pub use boot::boot;
-
-/// cladefs: has the daemon of this simulated host keep its cells in `bucket`, which the
-/// simulation's hosts share, an object store in the process (doc-24): before it boots, its
-/// `CLADEFSD_BUCKET` naming it.
-#[cfg(madsim)]
-pub fn use_bucket(bucket: std::sync::Arc<bucket_cell::object_bucket::RoutedBucket>) {
-    cells::use_bucket(bucket);
-}
-pub use cells::{cache_config, replace_after};
+pub use cells::replace_after;
 #[cfg(target_os = "linux")]
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
+#[cfg(not(madsim))]
 pub use control::serve_control;
+pub use daemon::Daemon;
 #[cfg(target_os = "linux")]
 pub use device::DaemonDevice;
-pub use http::{Pages, serve_http};
+pub use http::Pages;
+#[cfg(not(madsim))]
+pub use http::serve_http;
 pub use run::supervised;
-pub use server::{Tenant, serve, serve_tenant};
+pub use server::Tenant;
+#[cfg(not(madsim))]
+pub use server::{serve, serve_tenant};
+pub use storage::cache_config;
 
-node_local::node_local! {
-    /// Whether the daemon accepts VM processes' connections ([`serve`]): what the control API's
-    /// health service reports (TASK-48). Not as it starts, nor once it is told to stop
-    /// ([`stop_serving`]).
-    static SERVING: tokio::sync::watch::Sender<bool> = tokio::sync::watch::channel(false).0;
-}
-
-node_local::node_local! {
-    /// Whether the control API's health service reports the daemon serving: as [`SERVING`] says,
-    /// once it has said so to its callers.
-    static REPORTED: tokio::sync::watch::Sender<bool> = tokio::sync::watch::channel(false).0;
-}
-
-/// cladefs: whether the daemon serves VM processes: booted, and not draining. A simulated guest
-/// connects once its host's does (doc-24).
+/// cladefs: whether the process's default daemon serves VM processes: booted, and not draining.
+#[cfg(not(madsim))]
 pub fn serving() -> bool {
-    *SERVING.get().borrow()
+    Daemon::process().serving()
 }
 
-/// cladefs: the daemon serving VM processes at its own socket ([`serve`]), as [`SERVING`] says,
-/// until this drops, however serving ends: its listener shut down, or a panic unwinding (board
-/// 8501), which left the health service saying SERVING, no VM process served.
-pub(crate) struct Serving(());
+/// cladefs: `daemon` serving VM processes at its own socket (`serve_on`), until this drops,
+/// however serving ends: its listener shut down, or a panic unwinding (board 8501), which left the
+/// health service saying SERVING, no VM process served.
+pub(crate) struct Serving(Arc<Daemon>);
 
 impl Serving {
-    pub(crate) fn begin() -> Self {
-        SERVING.get().send_replace(true);
-        Self(())
+    pub(crate) fn begin(daemon: &Arc<Daemon>) -> Self {
+        daemon.serving.send_replace(true);
+        Self(Arc::clone(daemon))
     }
 }
 
 impl Drop for Serving {
     fn drop(&mut self) {
-        SERVING.get().send_replace(false);
+        self.0.serving.send_replace(false);
     }
 }
 
-/// Says the daemon stops serving, as it is about to exit: once the control API's health service, if
-/// it serves, reports so to its callers. cladefs: the first of a drain's steps ([`drain::drain`]),
-/// awaited, holding no thread (doc-24 step 12), within a bound of its own there: its health
-/// reporter gone, which says SERVING no more, it would wait for ever (board 8503).
+/// Says the process's default daemon stops serving, as it is about to exit: once the control API's
+/// health service, if it serves, reports so to its callers.
+#[cfg(not(madsim))]
 pub async fn stop_serving() {
-    SERVING.get().send_replace(false);
-    if control::is_serving() {
-        let mut reported = REPORTED.get().subscribe();
-        // The sender lives as long as the process: this ends once the reporter reports.
-        let _ = reported.wait_for(|serving| !*serving).await;
-    }
+    Daemon::process().stop_serving().await;
 }
 
 /// cladefs: shuts `listener`, a listening socket's descriptor, down, which takes no more

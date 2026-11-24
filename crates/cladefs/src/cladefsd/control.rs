@@ -10,11 +10,13 @@
 //! the runtime's blocking threads, so that many calls waiting, syncs while object storage is slow,
 //! keep no other call waiting.
 
+use super::Daemon;
 use super::cells;
 use super::disk;
 use super::grants::Grants;
 use super::grpc::Served;
 use super::memory;
+use super::storage;
 use crate::Errno;
 use bucket_cell::cell::Kind;
 use proto::cladefsd_client::CladefsdClient;
@@ -41,11 +43,6 @@ use tonic::transport::NamedService;
 /// number.
 pub const ERRNO: &str = "cladefs-errno";
 
-/// How many threads serve the API's calls, and their waits, which hold none (TASK-43.6). cladefs:
-/// under madsim, the simulated host's one, its runtime's.
-#[cfg(not(madsim))]
-const THREADS: usize = 2;
-
 /// How many threads the calls' cells' I/O runs on at most: what waits holds none of them, so that
 /// many calls waiting, for uploads or guests, leave them to the others' I/O.
 pub const BLOCKING_THREADS: usize = 32;
@@ -59,95 +56,119 @@ pub const BLOCKING_THREADS: usize = 32;
 /// answer whole, once.
 pub const MAX_MESSAGE_BYTES: usize = 64 << 20;
 
-/// Serves the control API to the callers that connect to `listener`, until accepting fails; the
-/// sockets of the tenants it grants go in the directory `tenants`. cladefs: and the Mount service
-/// of the daemon's FUSE mount of cells, if it has one ([`super::mount`], TASK-475.2): its calls,
-/// counted and refused as the daemon drains as the API's are; without a mount, they fail
-/// `UNIMPLEMENTED`.
+/// Serves the control API for the process's default daemon ([`serve_control_on`]).
 #[cfg(not(madsim))]
 pub fn serve_control(
     listener: std::os::unix::net::UnixListener,
     tenants: impl Into<PathBuf>,
 ) -> std::io::Result<()> {
-    let control = Control { grants: Arc::new(Grants::new(tenants.into())) };
-    let (reporter, health) = tonic_health::server::health_reporter();
-    listener.set_nonblocking(true)?;
-    // cladefs: outside the simulation: the control API on its Unix socket, on its thread's own
-    // runtime; under madsim the async serve_control below, a task (doc-24).
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(THREADS)
-        .max_blocking_threads(BLOCKING_THREADS)
-        .thread_name("cladefsd ctl")
-        .enable_all()
-        .build()?;
-    // cladefs: outside the simulation, as above.
-    runtime.block_on(async {
-        let incoming = tokio_stream::wrappers::UnixListenerStream::new(
-            tokio::net::UnixListener::from_std(listener)?,
-        );
-        // Its first status reported before it serves: the reporter starts with the server's, "",
-        // SERVING, which a check served before a task of its own reported otherwise saw.
-        let mut serving = super::SERVING.get().subscribe();
-        let mut now = *serving.borrow_and_update();
-        report_health(&reporter, now).await;
-        tokio::spawn(async move {
-            // cladefs: its panic aborts the daemon, as a service thread's does (board 8501): the
-            // health service would say what it last said for ever, the drain waiting for it.
-            let _supervised = local_cell::shared::Awaited::new(HEALTH_REPORTER);
-            loop {
-                // cladefs: a test's reporter gone once it reported SERVING, as no panic but its
-                // runtime's going leaves it, which a drain bounds (board 8503). Guarding outside
-                // the macro reads `now` even when `failpoints` is off (boards 10218, 10489).
-                if now {
-                    fail::fail_point!("cladefsd::health_reporter_gone", |_| ());
-                }
-                // The sender lives as long as the process.
-                if serving.changed().await.is_err() {
-                    return;
-                }
-                now = *serving.borrow_and_update();
-                report_health(&reporter, now).await;
-            }
-        });
-        CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
-        tonic::transport::Server::builder()
-            .add_service(health)
-            // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
-            // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's. Its
-            // calls counted and traced, refusals as the daemon drains among them (board 8565,
-            // board 8569).
-            .add_service(Served::new(Drained(
-                CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
-            )))
-            // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
-            .add_optional_service(super::mount::service().map(|mount| Served::new(Drained(mount))))
-            .serve_with_incoming(incoming)
-            .await
-            .map_err(std::io::Error::other)
-    })
+    serve_control_on(Daemon::process(), listener, tenants)
 }
 
-/// cladefs: serves the control API, as [`serve_control`] does, on the simulated network at
+/// Serves the control API for `daemon` on `listener` synchronously, blocking on `daemon`'s
+/// consolidated runtime.
+#[cfg(not(madsim))]
+pub(super) fn serve_control_on(
+    daemon: &Arc<Daemon>,
+    listener: std::os::unix::net::UnixListener,
+    tenants: impl Into<PathBuf>,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(true)?;
+    // cladefs: outside the simulation: blocking entry point for synchronous callers and tests.
+    daemon.block_on(serve_control_async(Arc::clone(daemon), listener, tenants.into()))
+}
+
+/// Serves the control API for `daemon` to the callers that connect to `listener`, until accepting
+/// fails; the sockets of the tenants it grants go in the directory `tenants`. Runs on `daemon`'s
+/// consolidated runtime (no separate Tokio runtime; Wave 4C.5, board 10774).
+/// cladefs: and the Mount service of the daemon's FUSE mount of cells, if it has one
+/// ([`super::mount`], TASK-475.2): its calls, counted and refused as the daemon drains as the
+/// API's are; without a mount, they fail `UNIMPLEMENTED`.
+#[cfg(not(madsim))]
+pub(super) async fn serve_control_async(
+    daemon: Arc<Daemon>,
+    listener: std::os::unix::net::UnixListener,
+    tenants: PathBuf,
+) -> std::io::Result<()> {
+    let control = Control {
+        daemon: Arc::clone(&daemon),
+        grants: Arc::new(Grants::new(Arc::clone(&daemon), tenants)),
+    };
+    let (reporter, health) = tonic_health::server::health_reporter();
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(
+        tokio::net::UnixListener::from_std(listener)?,
+    );
+    // Its first status reported before it serves: the reporter starts with the server's, "",
+    // SERVING, which a check served before a task of its own reported otherwise saw.
+    let mut serving = daemon.serving.subscribe();
+    let mut now = *serving.borrow_and_update();
+    report_health(&daemon, &reporter, now).await;
+    let reporting = Arc::clone(&daemon);
+    tokio::spawn(async move {
+        // cladefs: its panic aborts the daemon, as a service thread's does (board 8501): the
+        // health service would say what it last said for ever, the drain waiting for it.
+        let _supervised = local_cell::shared::Awaited::new(HEALTH_REPORTER);
+        loop {
+            // cladefs: a test's reporter gone once it reported SERVING, as no panic but its
+            // runtime's going leaves it, which a drain bounds (board 8503). Guarding outside
+            // the macro reads `now` even when `failpoints` is off (boards 10218, 10489).
+            if now {
+                fail::fail_point!("cladefsd::health_reporter_gone", |_| ());
+            }
+            if serving.changed().await.is_err() {
+                return;
+            }
+            now = *serving.borrow_and_update();
+            report_health(&reporting, &reporter, now).await;
+        }
+    });
+    daemon.control_serving.store(true, std::sync::atomic::Ordering::Release);
+    let mount =
+        super::mount::service_on(&daemon).map(|mount| Served::new(Drained::new(&daemon, mount)));
+    tonic::transport::Server::builder()
+        .add_service(health)
+        // cladefs: no answer encoded past MAX_MESSAGE_BYTES (board 8581): what grows refuses
+        // first, saying what to leave out (`bounded`); any other, OUT_OF_RANGE, tonic's. Its
+        // calls counted and traced, refusals as the daemon drains among them (board 8565,
+        // board 8569).
+        .add_service(Served::new(Drained::new(
+            &daemon,
+            CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
+        )))
+        // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
+        .add_optional_service(mount)
+        .serve_with_incoming(incoming)
+        .await
+        .map_err(std::io::Error::other)
+}
+
+/// cladefs: serves `daemon`'s control API, as [`serve_control`] does, on the simulated network at
 /// `address`, under madsim, which has no Unix sockets: the socket is a deployment detail (doc-24's
 /// boundary, TASK-685.13). The health service, tonic's, which madsim's tonic doesn't serve, isn't;
 /// its status is reported all the same, as the daemon's drain waits for it. No FUSE mount's
 /// service: FUSE is outside the simulation.
 #[cfg(madsim)]
-pub async fn serve_control(
+pub(super) async fn serve_control_on(
+    daemon: Arc<Daemon>,
     address: std::net::SocketAddr,
     tenants: impl Into<PathBuf>,
 ) -> std::io::Result<()> {
-    let control = Control { grants: Arc::new(Grants::new(tenants.into())) };
-    let mut serving = super::SERVING.get().subscribe();
-    super::REPORTED.get().send_replace(*serving.borrow_and_update());
+    let control = Control {
+        daemon: Arc::clone(&daemon),
+        grants: Arc::new(Grants::new(Arc::clone(&daemon), tenants.into())),
+    };
+    let mut serving = daemon.serving.subscribe();
+    daemon.reported.send_replace(*serving.borrow_and_update());
+    let reporting = Arc::clone(&daemon);
     tokio::spawn(async move {
         while serving.changed().await.is_ok() {
-            super::REPORTED.get().send_replace(*serving.borrow_and_update());
+            reporting.reported.send_replace(*serving.borrow_and_update());
         }
     });
-    CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
+    daemon.control_serving.store(true, std::sync::atomic::Ordering::Release);
     tonic::transport::Server::builder()
-        .add_service(Served::new(Drained(
+        .add_service(Served::new(Drained::new(
+            &daemon,
             CladefsdServer::new(control).max_encoding_message_size(MAX_MESSAGE_BYTES),
         )))
         .serve(address)
@@ -231,17 +252,22 @@ fn stats_response(
     }
 }
 
-/// cladefs: the API's calls in flight, which a drain waits for, refusing more (TASK-141.4).
-// Per node: drain::Work keeps a node_local count.
-pub(super) static CALLS: super::drain::Work = super::drain::Work::new();
-
-/// cladefs: the API's service, `S`, its calls counted in [`CALLS`] until they end, and refused
-/// (`UNAVAILABLE`) as the daemon drains (TASK-141.4): each runs to its end in a task of its own,
-/// whether or not its caller waits for its answer, as the API promises (board 5599,
+/// cladefs: the API's service, `S`, its calls counted in `daemon.calls_work` until they end, and
+/// refused (`UNAVAILABLE`) as `daemon` drains (TASK-141.4): each runs to its end in a task of its
+/// own, whether or not its caller waits for its answer, as the API promises (board 5599,
 /// [`crate::caller`]), so that what a call does is done once it ends, as none streams. The health
 /// service's calls are not, as its watches never end.
 #[derive(Clone)]
-struct Drained<S>(S);
+struct Drained<S> {
+    daemon: Arc<Daemon>,
+    inner: S,
+}
+
+impl<S> Drained<S> {
+    fn new(daemon: &Arc<Daemon>, inner: S) -> Self {
+        Self { daemon: Arc::clone(daemon), inner }
+    }
+}
 
 impl<S: NamedService> NamedService for Drained<S> {
     const NAME: &'static str = S::NAME;
@@ -280,11 +306,11 @@ where
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.0.poll_ready(cx)
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, request: Call) -> Self::Future {
-        let Some(call) = CALLS.begin() else {
+        let Some(call) = self.daemon.calls_work.begin(&self.daemon) else {
             let refused = Status::unavailable("the extent daemon drains, as it is about to exit");
             return Box::pin(std::future::ready(Refusal::refused(refused)));
         };
@@ -293,7 +319,7 @@ where
         // drops what awaits it, which stops at whatever await it was in otherwise. Its span, the
         // one current as it is called (`grpc::Served`), current as the task runs, the parent of
         // what the call does (board 8569).
-        let answered = bucket_cell::trace::Parent::current().around(self.0.call(request));
+        let answered = bucket_cell::trace::Parent::current().around(self.inner.call(request));
         let detached = crate::caller::detached(async move {
             let answered = answered.await;
             drop(call);
@@ -314,26 +340,21 @@ where
 #[cfg(not(madsim))]
 const HEALTH_REPORTER: &str = "health reporter";
 
-node_local::node_local! {
-    /// Whether this process serves the control API ([`serve_control`]).
-    static CONTROL_SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-}
-
-pub(super) fn is_serving() -> bool {
-    CONTROL_SERVING.get().load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// Reports, through the standard gRPC health service (grpc.health.v1.Health), whether the daemon
+/// Reports, through the standard gRPC health service (grpc.health.v1.Health), whether `daemon`
 /// serves (TASK-48), `serving`: SERVING while it accepts VM processes' connections, NOT_SERVING
 /// as it starts and once it stops; the whole server's status, named "", and the control API's,
-/// alike. Its callers have it reported once it returns ([`super::stop_serving`] waits for that).
+/// alike. Its callers have it reported once it returns (`Daemon::stop_serving` waits for that).
 #[cfg(not(madsim))]
-async fn report_health(reporter: &tonic_health::server::HealthReporter, serving: bool) {
+async fn report_health(
+    daemon: &Daemon,
+    reporter: &tonic_health::server::HealthReporter,
+    serving: bool,
+) {
     use tonic_health::ServingStatus;
     let status = if serving { ServingStatus::Serving } else { ServingStatus::NotServing };
     reporter.set_service_status("", status).await;
     reporter.set_service_status(<CladefsdServer<Control> as NamedService>::NAME, status).await;
-    super::REPORTED.get().send_replace(serving);
+    daemon.reported.send_replace(serving);
 }
 
 /// A channel to the control API of the daemon listening at `socket`: for its clients, the API's
@@ -408,11 +429,11 @@ pub fn errno(status: &Status) -> Option<Errno> {
     errno.parse().ok().map(Errno::from_raw)
 }
 
-/// cladefs: refuses to make a cell while the host's memory is full (`super::governor::full`, board
-/// 5662): RESOURCE_EXHAUSTED (ENOMEM), so that the VM manager places its VM on another host, rather
-/// than this host's VMs lose to it the pages their windows use. A cell made already opens.
-fn room_for_a_cell() -> Result<(), Status> {
-    match super::governor::full() {
+/// cladefs: refuses to make a cell while the host's memory is full (`super::governor::full_on`,
+/// board 5662): RESOURCE_EXHAUSTED (ENOMEM), so that the VM manager places its VM on another host,
+/// rather than this host's VMs lose to it the pages their windows use. A cell made already opens.
+fn room_for_a_cell(daemon: &Daemon) -> Result<(), Status> {
+    match super::governor::full_on(daemon) {
         true => Err(saying(
             Errno::ENOMEM,
             "the host's memory is full: the daemon makes no cell more".to_owned(),
@@ -550,8 +571,9 @@ fn path(path: String) -> Result<PathBuf, Status> {
     Ok(PathBuf::from(path))
 }
 
-/// The API's calls, served from the daemon's cells, and its grants.
+/// The API's calls, served from `daemon`'s cells, and its grants.
 struct Control {
+    daemon: Arc<Daemon>,
     grants: Arc<Grants>,
 }
 
@@ -590,7 +612,7 @@ impl Cladefsd for Control {
             force,
         } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        room_for_a_cell()?;
+        room_for_a_cell(&self.daemon)?;
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
         // directories (doc-21): without them, refused before anything is made.
@@ -613,7 +635,14 @@ impl Cladefsd for Control {
             _ => tenant,
         };
         let cell = crate::CellId { tenant, id: cell };
-        let made = cells::create(cell_dir, capacity, cell, (token, kind, replication, force)).await;
+        let made = cells::create(
+            &self.daemon,
+            cell_dir,
+            capacity,
+            cell,
+            (token, kind, replication, force),
+        )
+        .await;
         reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -626,7 +655,7 @@ impl Cladefsd for Control {
         let (cell_dir, image) = (path(cell_dir)?, path(image)?);
         let reference = Some(reference).filter(|reference| !reference.is_empty());
         let tenant = self.new_cell_at(&cell_dir, tenant)?;
-        let made = cells::import(cell_dir, capacity, image, reference, tenant).await;
+        let made = cells::import(&self.daemon, cell_dir, capacity, image, reference, tenant).await;
         reply(made.map(|made| ImportImageResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -637,16 +666,18 @@ impl Cladefsd for Control {
         let ForkCellRequest { from, to, version, tenant: of, cell, ephemeral } =
             request.into_inner();
         let to = path(to)?;
-        room_for_a_cell()?;
+        room_for_a_cell(&self.daemon)?;
         let tenant = self.grants.tenant_at(&to);
         let of = crate::CellId { tenant: of, id: cell };
         let forked = match version {
             // cladefs: ephemeral cells are forked from versions alone (doc-25, TASK-698.3).
             0 if ephemeral => Err(Errno::EINVAL),
-            0 => cells::fork(path(from)?, to, tenant).await,
+            0 => cells::fork(&self.daemon, path(from)?, to, tenant).await,
             _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
-            _ if ephemeral => cells::fork_ephemeral_of_version(of, version, to, tenant).await,
-            _ => cells::fork_of_version(of, version, to, tenant).await,
+            _ if ephemeral => {
+                cells::fork_ephemeral_of_version(&self.daemon, of, version, to, tenant).await
+            }
+            _ => cells::fork_of_version(&self.daemon, of, version, to, tenant).await,
         };
         reply(forked.map(|forked| ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
     }
@@ -657,7 +688,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<MigrateCellResponse>, Status> {
         let MigrateCellRequest { path: cell_dir, peer, to } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        let migrating = super::migration::migrate(cell_dir, peer, to).await;
+        let migrating = super::migration::migrate_on(&self.daemon, cell_dir, peer, to).await;
         reply(migrating.map(|migration| MigrateCellResponse { migration }))
     }
 
@@ -666,7 +697,11 @@ impl Cladefsd for Control {
         request: Request<HandOverCellRequest>,
     ) -> Result<Response<HandOverCellResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(super::migration::hand_over(cell_dir).await.map(|()| HandOverCellResponse {}))
+        reply(
+            super::migration::hand_over_on(&self.daemon, cell_dir)
+                .await
+                .map(|()| HandOverCellResponse {}),
+        )
     }
 
     async fn abort_migration(
@@ -674,7 +709,11 @@ impl Cladefsd for Control {
         request: Request<AbortMigrationRequest>,
     ) -> Result<Response<AbortMigrationResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(super::migration::abort(cell_dir).await.map(|()| AbortMigrationResponse {}))
+        reply(
+            super::migration::abort_on(&self.daemon, cell_dir)
+                .await
+                .map(|()| AbortMigrationResponse {}),
+        )
     }
 
     async fn decommission_host(
@@ -700,7 +739,7 @@ impl Cladefsd for Control {
                 );
                 return Err(Errno::EINVAL);
             }
-            let bucket = cells::daemon_bucket()?;
+            let bucket = storage::daemon_bucket_on(&self.daemon)?;
             let what = format!("decommissioning host {said}");
             let buckets =
                 bucket.ephemeral_buckets().await.map_err(|err| bucket_errno(&what, err))?;
@@ -724,7 +763,7 @@ impl Cladefsd for Control {
         _: Request<ListEphemeralHostsRequest>,
     ) -> Result<Response<ListEphemeralHostsResponse>, Status> {
         let listed = async {
-            let bucket = cells::daemon_bucket()?;
+            let bucket = storage::daemon_bucket_on(&self.daemon)?;
             let what = "listing the ephemeral cells' hosts";
             let buckets =
                 bucket.ephemeral_buckets().await.map_err(|err| bucket_errno(what, err))?;
@@ -746,7 +785,7 @@ impl Cladefsd for Control {
         request: Request<DeleteCellRequest>,
     ) -> Result<Response<DeleteCellResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(cells::delete(cell_dir).await.map(|()| DeleteCellResponse {}))
+        reply(cells::delete(&self.daemon, cell_dir).await.map(|()| DeleteCellResponse {}))
     }
 
     async fn drop_cell(
@@ -754,7 +793,7 @@ impl Cladefsd for Control {
         request: Request<DropCellRequest>,
     ) -> Result<Response<DropCellResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(cells::drop_here(cell_dir).await.map(|()| DropCellResponse {}))
+        reply(cells::drop_here(&self.daemon, cell_dir).await.map(|()| DropCellResponse {}))
     }
 
     async fn resize_cell(
@@ -763,7 +802,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<ResizeCellResponse>, Status> {
         let ResizeCellRequest { path: cell_dir, capacity } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        reply(cells::resize(cell_dir, capacity).await.map(|()| ResizeCellResponse {}))
+        reply(cells::resize(&self.daemon, cell_dir, capacity).await.map(|()| ResizeCellResponse {}))
     }
 
     async fn place_cell(
@@ -772,7 +811,9 @@ impl Cladefsd for Control {
     ) -> Result<Response<PlaceCellResponse>, Status> {
         let PlaceCellRequest { path: cell_dir, token, force } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        reply(cells::place(cell_dir, token, force).await.map(|()| PlaceCellResponse {}))
+        reply(
+            cells::place(&self.daemon, cell_dir, token, force).await.map(|()| PlaceCellResponse {}),
+        )
     }
 
     async fn make_public(
@@ -781,7 +822,11 @@ impl Cladefsd for Control {
     ) -> Result<Response<MakePublicResponse>, Status> {
         let MakePublicRequest { path: cell_dir, attach_only } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        reply(cells::make_public(cell_dir, attach_only).await.map(|()| MakePublicResponse {}))
+        reply(
+            cells::make_public(&self.daemon, cell_dir, attach_only)
+                .await
+                .map(|()| MakePublicResponse {}),
+        )
     }
 
     async fn make_version(
@@ -791,7 +836,7 @@ impl Cladefsd for Control {
         let MakeVersionRequest { path: cell_dir, keep_last } = request.into_inner();
         let cell_dir = path(cell_dir)?;
         let keep_last = Some(keep_last).filter(|&keep| keep > 0);
-        let made = cells::make_version(cell_dir, keep_last).await;
+        let made = cells::make_version(&self.daemon, cell_dir, keep_last).await;
         reply(made.map(|version| MakeVersionResponse { version }))
     }
 
@@ -800,7 +845,7 @@ impl Cladefsd for Control {
         request: Request<ListVersionsRequest>,
     ) -> Result<Response<ListVersionsResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        let versions = cells::versions(cell_dir).await.map_err(status)?;
+        let versions = cells::versions(&self.daemon, cell_dir).await.map_err(status)?;
         let listed = ListVersionsResponse {
             versions: (versions.into_iter())
                 .map(|crate::VersionInfo { id, uploaded, shared }| Version { id, uploaded, shared })
@@ -815,7 +860,8 @@ impl Cladefsd for Control {
     ) -> Result<Response<DropVersionsResponse>, Status> {
         let DropVersionsRequest { path: cell_dir, versions } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        let dropped = cells::drop_versions(cell_dir, versions.into_iter().collect()).await;
+        let dropped =
+            cells::drop_versions(&self.daemon, cell_dir, versions.into_iter().collect()).await;
         reply(dropped.map(|()| DropVersionsResponse {}))
     }
 
@@ -825,7 +871,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<ShareVersionResponse>, Status> {
         let ShareVersionRequest { path: cell_dir, version, shared } = request.into_inner();
         let cell_dir = path(cell_dir)?;
-        let shared = cells::share_version(cell_dir, version, shared).await;
+        let shared = cells::share_version(&self.daemon, cell_dir, version, shared).await;
         reply(shared.map(|()| ShareVersionResponse {}))
     }
 
@@ -837,7 +883,11 @@ impl Cladefsd for Control {
         let (cell_dir, base) = (path(cell_dir)?, path(base)?);
         let grants = self.grants.clone();
         let allowed = move |cell_dir: &Path, base: &Path| grants.same_tenant(cell_dir, base);
-        reply(cells::attach(cell_dir, base, allowed).await.map(|()| AttachBaseResponse {}))
+        reply(
+            cells::attach(&self.daemon, cell_dir, base, allowed)
+                .await
+                .map(|()| AttachBaseResponse {}),
+        )
     }
 
     async fn sync_cell(
@@ -845,7 +895,7 @@ impl Cladefsd for Control {
         request: Request<SyncCellRequest>,
     ) -> Result<Response<SyncCellResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(cells::sync(cell_dir).await.map(|()| SyncCellResponse {}))
+        reply(cells::sync(&self.daemon, cell_dir).await.map(|()| SyncCellResponse {}))
     }
 
     async fn stat_cell(
@@ -853,16 +903,18 @@ impl Cladefsd for Control {
         request: Request<StatCellRequest>,
     ) -> Result<Response<StatCellResponse>, Status> {
         let cell_dir = path(request.into_inner().path)?;
-        reply(cells::stat(cell_dir).await.map(stat_response))
+        reply(cells::stat(&self.daemon, cell_dir).await.map(stat_response))
     }
 
     async fn list_cells(
         &self,
         _request: Request<ListCellsRequest>,
     ) -> Result<Response<ListCellsResponse>, Status> {
-        let cells = cells::list().map_err(status)?.into_iter().map(|(path, state)| ListedCell {
-            path: path.to_string_lossy().into_owned(),
-            stat: Some(stat_response(state)),
+        let cells = cells::list(&self.daemon).map_err(status)?.into_iter().map(|(path, state)| {
+            ListedCell {
+                path: path.to_string_lossy().into_owned(),
+                stat: Some(stat_response(state)),
+            }
         });
         let listed = ListCellsResponse { stores: cells.collect() };
         bounded("ListCells", listed, "StatCell each cell instead")
@@ -925,7 +977,7 @@ impl Cladefsd for Control {
             prefetch_page_ins: _,
         } = crate::stats::stats();
         use bucket_cell::object_bucket::{Request, Upload};
-        let bucket = cells::daemon_bucket().map_err(status)?.stats();
+        let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?.stats();
         let object_storage = Some(ObjectStorageStats {
             requests: (Request::ALL.into_iter())
                 .map(|request| (request.name().to_owned(), bucket.requests(request)))
@@ -971,7 +1023,7 @@ impl Cladefsd for Control {
             0 => super::stats::WAIT,
             ms => std::time::Duration::from_millis(ms.into()),
         };
-        let stats = super::stats::take(wait, !leave_out_vms).await;
+        let stats = super::stats::take_on(&self.daemon, wait, !leave_out_vms).await;
         let answer = stats_response(stats, (leave_out_histograms, leave_out_guests));
         let smaller = match (leave_out_histograms, leave_out_guests, leave_out_vms) {
             (false, false, _) => "leave out the guests' histograms (leave_out_histograms)",
@@ -1010,7 +1062,7 @@ impl Cladefsd for Control {
         request: Request<SetMemoryLimitRequest>,
     ) -> Result<Response<SetMemoryLimitResponse>, Status> {
         let SetMemoryLimitRequest { tenant, bytes } = request.into_inner();
-        reply(memory::set_limit(tenant, bytes).map(|()| SetMemoryLimitResponse {}))
+        reply(memory::set_limit_on(&self.daemon, tenant, bytes).map(|()| SetMemoryLimitResponse {}))
     }
 
     async fn set_memory_weight(
@@ -1018,7 +1070,10 @@ impl Cladefsd for Control {
         request: Request<SetMemoryWeightRequest>,
     ) -> Result<Response<SetMemoryWeightResponse>, Status> {
         let SetMemoryWeightRequest { tenant, weight } = request.into_inner();
-        reply(memory::set_weight(tenant, weight).map(|()| SetMemoryWeightResponse {}))
+        reply(
+            memory::set_weight_on(&self.daemon, tenant, weight)
+                .map(|()| SetMemoryWeightResponse {}),
+        )
     }
 
     async fn set_tenant_in_flight(
@@ -1026,7 +1081,10 @@ impl Cladefsd for Control {
         request: Request<SetTenantInFlightRequest>,
     ) -> Result<Response<SetTenantInFlightResponse>, Status> {
         let SetTenantInFlightRequest { tenant, bytes } = request.into_inner();
-        reply(memory::set_in_flight(tenant, bytes).map(|()| SetTenantInFlightResponse {}))
+        reply(
+            memory::set_in_flight_on(&self.daemon, tenant, bytes)
+                .map(|()| SetTenantInFlightResponse {}),
+        )
     }
 
     async fn shrink_memory(
@@ -1036,7 +1094,7 @@ impl Cladefsd for Control {
         let ShrinkMemoryRequest { tenant, target_bytes } = request.into_inner();
         // cladefs: on the call's task: its evictions' passes are synchronous, and it waits for the
         // pages they evict holding no thread (board 2946).
-        let shrunk = memory::shrink(tenant, target_bytes).await;
+        let shrunk = memory::shrink_on(&self.daemon, tenant, target_bytes).await;
         reply(shrunk.map(|bytes| ShrinkMemoryResponse { bytes }))
     }
 
@@ -1045,7 +1103,7 @@ impl Cladefsd for Control {
         request: Request<SetDiskLimitRequest>,
     ) -> Result<Response<SetDiskLimitResponse>, Status> {
         let SetDiskLimitRequest { tenant, bytes } = request.into_inner();
-        reply(disk::set_limit(tenant, bytes).map(|()| SetDiskLimitResponse {}))
+        reply(disk::set_limit_on(&self.daemon, tenant, bytes).map(|()| SetDiskLimitResponse {}))
     }
 
     async fn get_tenant_disk(
@@ -1058,7 +1116,7 @@ impl Cladefsd for Control {
             limit_bytes: limit,
             reserved_bytes: reserved,
         };
-        reply(disk::count(tenant).map(response))
+        reply(disk::count_on(&self.daemon, tenant).map(response))
     }
 
     async fn set_disk_weight(
@@ -1066,7 +1124,7 @@ impl Cladefsd for Control {
         request: Request<SetDiskWeightRequest>,
     ) -> Result<Response<SetDiskWeightResponse>, Status> {
         let SetDiskWeightRequest { tenant, weight } = request.into_inner();
-        reply(disk::set_weight(tenant, weight).map(|()| SetDiskWeightResponse {}))
+        reply(disk::set_weight_on(&self.daemon, tenant, weight).map(|()| SetDiskWeightResponse {}))
     }
 
     async fn set_peers(
@@ -1083,7 +1141,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<ShredCellResponse>, Status> {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::CellId { tenant, id: cell };
-        let bucket = cells::daemon_bucket().map_err(status)?;
+        let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?;
         let shredded = crate::bucket::shred_cell(&*bucket, cell).await.map_err(|err| {
             let failure = local_cell::upload::Failure::Bucket(err);
             let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
@@ -1815,13 +1873,14 @@ mod tests {
     /// with ENOMEM, which the client reads back; once it isn't, made.
     #[test]
     fn cells_are_refused_while_the_hosts_memory_is_full() {
-        super::super::governor::set_full(true);
-        let refused = room_for_a_cell().unwrap_err();
+        let daemon = Daemon::new();
+        super::super::governor::set_full_on(&daemon, true);
+        let refused = room_for_a_cell(&daemon).unwrap_err();
         assert_eq!(refused.code(), Code::ResourceExhausted);
         assert_eq!(errno(&refused), Some(Errno::ENOMEM));
         assert_eq!(refused.message(), "the host's memory is full: the daemon makes no cell more");
-        super::super::governor::set_full(false);
-        assert!(room_for_a_cell().is_ok());
+        super::super::governor::set_full_on(&daemon, false);
+        assert!(room_for_a_cell(&daemon).is_ok());
     }
 
     /// A call of the API whose caller gives up, dropping what awaits its answer, runs to its end,
@@ -1829,25 +1888,26 @@ mod tests {
     /// it began half done (board 5382, board 5384).
     #[tokio::test]
     async fn calls_given_up_on_run_to_their_end() {
+        let daemon = Daemon::new();
         let (go, going) = oneshot::channel();
         let (ended, end) = oneshot::channel();
-        let mut service = Drained(OneCall(Some((going, ended))));
+        let mut service = Drained::new(&daemon, OneCall(Some((going, ended))));
         let answer = tower::Service::call(&mut service, ());
-        assert_eq!(CALLS.count(), 1);
+        assert_eq!(daemon.calls_work.count(), 1);
         drop(answer);
-        assert_eq!(CALLS.count(), 1, "a call given up on stopped");
+        assert_eq!(daemon.calls_work.count(), 1, "a call given up on stopped");
         go.send(()).unwrap();
         assert_eq!(end.await, Ok("its caller gone"));
-        CALLS.done().await;
+        daemon.calls_work.done().await;
 
         // One whose caller waits is answered, its caller never heard gone.
         let (go, going) = oneshot::channel();
         let (ended, end) = oneshot::channel();
-        let mut service = Drained(OneCall(Some((going, ended))));
+        let mut service = Drained::new(&daemon, OneCall(Some((going, ended))));
         let answer = tower::Service::call(&mut service, ());
         go.send(()).unwrap();
         assert!(answer.await.is_ok());
         assert_eq!(end.await, Ok("its caller waiting"));
-        assert_eq!(CALLS.count(), 0);
+        assert_eq!(daemon.calls_work.count(), 0);
     }
 }

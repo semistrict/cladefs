@@ -14,6 +14,7 @@
 //! daemon's CPU and change what it logs, which whoever scrapes its metrics need not
 //! (hotbed question 501).
 
+use super::Daemon;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -87,11 +88,11 @@ enum Zpages {
     At(String),
 }
 
-/// cladefs: binds and serves the daemon's HTTP servers as its environment says, each on a thread
+/// cladefs: binds and serves `daemon`'s HTTP servers as its environment says, each on a thread
 /// of its own (`CLADEFSD_METRICS`, `CLADEFSD_ZPAGES`): none, if it names no address; an address
 /// it can't bind to, an error, the daemon refusing to start.
 #[cfg(not(madsim))]
-pub(super) fn start() -> anyhow::Result<()> {
+pub(super) fn start_on(daemon: &Arc<Daemon>) -> anyhow::Result<()> {
     use anyhow::Context;
     let address = |name: &str| -> anyhow::Result<Option<String>> {
         let value = node_local::env::var_os(name).filter(|value| !value.is_empty());
@@ -106,9 +107,10 @@ pub(super) fn start() -> anyhow::Result<()> {
     let serve = |address: &str, pages: Pages| -> anyhow::Result<()> {
         let listener =
             TcpListener::bind(address).with_context(|| format!("serving HTTP at {address}"))?;
+        let daemon = Arc::clone(daemon);
         // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
         super::run::thread("cladefsd http", move || {
-            if let Err(err) = serve_http(listener, pages) {
+            if let Err(err) = serve_http_on(&daemon, listener, pages) {
                 log::error!("cladefsd: serving HTTP: {err}");
             }
         })?;
@@ -129,12 +131,13 @@ pub(super) fn start() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serves `pages` to whoever connects to `listener` and asks for them over HTTP, until it listens
-/// no more (`EINVAL`): each client on a thread of its own, [`AT_ONCE`] at most, within
-/// [`EXCHANGE`]. An accept that fails otherwise, as with as many files open as the daemon may, is
-/// tried again after a while (`server::ACCEPT_AGAIN`), as the daemon's VM sockets' are: given up
-/// on, the daemon's metrics would be served no more, the daemon serving on (TASK-79.35).
-pub fn serve_http(listener: TcpListener, pages: Pages) -> std::io::Result<()> {
+/// Serves `pages` of `daemon` to whoever connects to `listener` and asks for them over HTTP, until
+/// it listens no more (`EINVAL`).
+pub(super) fn serve_http_on(
+    daemon: &Arc<Daemon>,
+    listener: TcpListener,
+    pages: Pages,
+) -> std::io::Result<()> {
     let slots = Arc::new(Slots::default());
     let mut failing = false;
     loop {
@@ -154,12 +157,13 @@ pub fn serve_http(listener: TcpListener, pages: Pages) -> std::io::Result<()> {
             }
         };
         failing = false;
+        let daemon = Arc::clone(daemon);
         // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
         let spawned = std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
             // Given back as the thread ends, however it does: a page's panic unwinding through it
             // too, which held its slot for good before (board 8559).
             let _slot = slot;
-            if let Err(err) = answer(stream, pages) {
+            if let Err(err) = answer(&daemon, stream, pages) {
                 log::warn!("cladefsd: serving HTTP: {err}");
             }
         });
@@ -168,6 +172,12 @@ pub fn serve_http(listener: TcpListener, pages: Pages) -> std::io::Result<()> {
             log::warn!("cladefsd: serving HTTP: {err}");
         }
     }
+}
+
+/// Serves `pages` of the process's default daemon over HTTP.
+#[cfg(not(madsim))]
+pub fn serve_http(listener: TcpListener, pages: Pages) -> std::io::Result<()> {
+    serve_http_on(Daemon::process(), listener, pages)
 }
 
 /// cladefs: the clients being served, [`AT_ONCE`] at most, each holding a [`Slot`] (board 8559).
@@ -251,14 +261,20 @@ const HUNG_UP_READ: usize = 64 << 10;
 
 /// What `method` asks of `target`, a path and its query, of `pages`: the metrics, at `/metrics`;
 /// the z-pages, under `/z/`. None, if `client` hung up before it was made.
-fn route(method: &str, target: &str, pages: Pages, client: &Client<'_>) -> Option<Response> {
+fn route(
+    daemon: &Daemon,
+    method: &str,
+    target: &str,
+    pages: Pages,
+    client: &Client<'_>,
+) -> Option<Response> {
     // cladefs: a page's panic, which the server's tests inject (board 8559).
     fail::fail_point!("cladefsd::http::route");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let zpage = path.strip_prefix("/z").filter(|_| pages != Pages::Metrics);
     match (method, path, zpage) {
         ("GET", "/metrics", _) if pages != Pages::Zpages => {
-            Some(Response::ok(METRICS, super::metrics::render()))
+            Some(Response::ok(METRICS, super::metrics::render_on(daemon)))
         }
         (method, _, Some(page)) => super::zpages::serve(method, page, query, client),
         _ => Some(Response::not_found()),
@@ -303,7 +319,7 @@ impl Write for Deadlined<'_> {
 /// [`EXCHANGE`] and what it asked for sent within another; `431`, for a request whose line and
 /// headers are more than [`HEAD_MAX`] bytes; nothing, to a client that hung up before what it asked
 /// for was made.
-fn answer(stream: TcpStream, pages: Pages) -> std::io::Result<()> {
+fn answer(daemon: &Daemon, stream: TcpStream, pages: Pages) -> std::io::Result<()> {
     let deadline = Instant::now() + EXCHANGE;
     let mut reader = BufReader::new(Deadlined { stream: &stream, deadline }.take(HEAD_MAX));
     let mut request = String::new();
@@ -322,7 +338,9 @@ fn answer(stream: TcpStream, pages: Pages) -> std::io::Result<()> {
         _ if too_large => {
             Some(Response::plain("431 Request Header Fields Too Large", "request too large"))
         }
-        (Some(method), Some(target)) => route(method, target, pages, &Client(Some(&stream))),
+        (Some(method), Some(target)) => {
+            route(daemon, method, target, pages, &Client(Some(&stream)))
+        }
         _ => Some(Response::plain("400 Bad Request", "no request line")),
     };
     let Some(Response { status, content_type, body }) = response else {

@@ -32,23 +32,20 @@
 //! left of the bound once the drain is done, or not at all (`super::otel::shutdown`, board 8569):
 //! a collector that never answers holds its exit no longer.
 
+use super::Daemon;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-node_local::node_local! {
-    /// Whether the daemon drains: from [`drain`] on, for good.
-    static DRAINING: watch::Sender<bool> = watch::channel(false).0;
+/// Whether `daemon` drains.
+pub(super) fn draining(daemon: &Daemon) -> bool {
+    *daemon.draining.borrow()
 }
 
-/// Whether the daemon drains.
-pub(super) fn draining() -> bool {
-    *DRAINING.get().borrow()
-}
-
-/// Returns once the daemon drains: at once if it does.
-pub(super) async fn started() {
-    let mut draining = DRAINING.get().subscribe();
-    // The sender lives as long as the process.
+/// Returns once `daemon` drains: at once if it does.
+pub(super) async fn started(daemon: &Daemon) {
+    let mut draining = daemon.draining.subscribe();
+    // The sender lives as long as `daemon`.
     let _ = draining.wait_for(|draining| *draining).await;
 }
 
@@ -110,13 +107,13 @@ impl std::fmt::Display for Left {
     }
 }
 
-/// Drains the daemon, as the module says, within `within`: `Err` with what is left past it, or
+/// Drains `daemon`, as the module says, within `within`: `Err` with what is left past it, or
 /// if the health service never said it stopped serving.
 /// cladefs: a future, awaited where the daemon is told to drain, its signal's thread blocking on it
 /// there, its outermost entry (doc-24 step 12).
-pub async fn drain(within: Duration) -> Result<(), Left> {
+pub async fn drain_daemon(daemon: &Arc<Daemon>, within: Duration) -> Result<(), Left> {
     let began = tokio::time::Instant::now();
-    let reported = tokio::time::timeout(REPORTING.min(within), super::stop_serving()).await;
+    let reported = tokio::time::timeout(REPORTING.min(within), daemon.stop_serving()).await;
     let health = reported.is_err();
     if health {
         log::error!(
@@ -124,17 +121,17 @@ pub async fn drain(within: Duration) -> Result<(), Left> {
              {REPORTING:?}: draining all the same"
         );
     }
-    DRAINING.get().send_replace(true);
-    super::server::stop_accepting();
+    daemon.draining.send_replace(true);
+    super::server::stop_accepting(daemon);
     let drained = async {
         tokio::time::timeout(within.saturating_sub(began.elapsed()), async {
-            super::server::CONNECTIONS.done().await;
-            super::control::CALLS.done().await;
-            let mount = super::mount::close().await;
+            daemon.connections_work.done().await;
+            daemon.calls_work.done().await;
+            let mount = super::mount::close_on(daemon).await;
             if let Err(err) = &mount {
                 log::error!("cladefsd: draining: {err:#}");
             }
-            super::cells::close_all_kept().await;
+            super::cells::close_all_kept(daemon).await;
             let mut uploaders = crate::bucket::uploaders();
             let uploaded = uploaders.wait_for(|uploading| *uploading == 0).await.is_ok();
             mount.is_ok() && uploaded
@@ -145,51 +142,55 @@ pub async fn drain(within: Duration) -> Result<(), Left> {
         Ok(true) if !health => Ok(()),
         _ => Err(Left {
             health,
-            connections: super::server::CONNECTIONS.count(),
-            calls: super::control::CALLS.count(),
+            connections: daemon.connections_work.count(),
+            calls: daemon.calls_work.count(),
             uploaders: *crate::bucket::uploaders().borrow(),
-            mount: super::mount::left(),
+            mount: super::mount::left_on(daemon),
         }),
     }
 }
 
+/// Drains the process's default daemon within `within`.
+#[cfg(not(madsim))]
+pub async fn drain(within: Duration) -> Result<(), Left> {
+    drain_daemon(Daemon::process(), within).await
+}
+
 /// cladefs: work of a kind that a drain waits for, counted as it begins and ends ([`Work::begin`]):
-/// VM processes' connections, the control API's calls. Its count is the daemon's: node-local, so
-/// that each simulated host counts its own, and no simulation's tasks wait on another's (board
-/// 5806).
-pub(super) struct Work(node_local::NodeLocal<watch::Sender<usize>>);
+/// VM processes' connections, the control API's calls. Owned by [`Daemon`], so each daemon counts
+/// its own (board 5806).
+pub(super) struct Work(Arc<watch::Sender<usize>>);
 
 impl Work {
-    pub const fn new() -> Self {
-        Self(node_local::NodeLocal::new(|| watch::channel(0).0))
+    pub fn new() -> Self {
+        Self(Arc::new(watch::channel(0).0))
     }
 
-    /// Begins work of the kind, until what it returns is dropped; or none, `None`, once the daemon
-    /// drains: counted first, and given up if then the daemon drains, so that a drain that
-    /// finds none counted finds none begun after, whatever their order.
-    pub fn begin(&'static self) -> Option<Doing> {
-        let count = self.0.get();
-        count.send_modify(|count| *count += 1);
-        let doing = Doing(count);
-        (!draining()).then_some(doing)
+    /// Begins work of the kind on `daemon`, until what it returns is dropped; or none, `None`,
+    /// once `daemon` drains: counted first, and given up if then the daemon drains, so that a
+    /// drain that finds none counted finds none begun after, whatever their order.
+    pub fn begin(&self, daemon: &Daemon) -> Option<Doing> {
+        self.0.send_modify(|count| *count += 1);
+        let doing = Doing(Arc::clone(&self.0));
+        (!draining(daemon)).then_some(doing)
     }
 
     /// How much of it is under way.
-    pub fn count(&'static self) -> usize {
-        *self.0.get().borrow()
+    pub fn count(&self) -> usize {
+        *self.0.borrow()
     }
 
     /// Returns once none of it is under way.
-    pub(super) async fn done(&'static self) {
-        let mut count = self.0.get().subscribe();
-        // The sender lives as long as the process.
+    pub(super) async fn done(&self) {
+        let mut count = self.0.subscribe();
+        // The sender lives while `Work` does.
         let _ = count.wait_for(|count| *count == 0).await;
     }
 }
 
 /// Work under way ([`Work::begin`]), until dropped: of the count it began in, wherever it is
 /// dropped.
-pub(super) struct Doing(&'static watch::Sender<usize>);
+pub(super) struct Doing(Arc<watch::Sender<usize>>);
 
 impl Drop for Doing {
     fn drop(&mut self) {
