@@ -172,13 +172,11 @@ fn main() -> anyhow::Result<()> {
     let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
     drain_on_signals(std::sync::Arc::clone(&daemon), drain)
         .context("handling SIGTERM, SIGINT and SIGHUP")?;
-    // cladefs: its spans, recorded for /z/tracez (TASK-672.1), and over OTLP too, or not made at
-    // all, as CLADEFSD_TRACES says (TASK-258, TASK-707): its exporter's threads made after the
+    // Start OTLP tracing if configured (TASK-258, TASK-707). Its exporter threads start after the
     // signals that drain it are blocked, as every thread but the drain's.
     use cladefs::cladefsd::otel::Tracing;
     match cladefs::cladefsd::otel::from_env().map_err(anyhow::Error::msg)? {
-        Tracing::Off => log::info!("cladefsd: spans off (CLADEFSD_TRACES=off)"),
-        Tracing::Recorded => {}
+        Tracing::Off => {}
         Tracing::Exported => log::info!("cladefsd: exporting spans over OTLP"),
     }
     cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;

@@ -9,6 +9,8 @@
 
 mod common;
 
+use cladefs::cladefsd::control::proto::{ForkCellRequest, StatCellRequest, SyncCellRequest};
+use cladefs::testing::control_path;
 use futures::executor::block_on;
 use rusqlite::{Connection, OpenFlags, params};
 use sqlite_cladefs::{Database, Options, Registration, daemon, register};
@@ -189,11 +191,22 @@ fn a_fork_of_a_cell_and_the_cell_go_their_own_ways() {
     let tenants = sockets.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
     std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
-    let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
+    let control = cladefs::testing::Control::connect(&control_socket).unwrap();
     let (path, forked) = (dir.path().join("store"), dir.path().join("fork"));
     let parent = Mounted::new(&socket, &path, "cladefs-daemon-parent");
     let mut parent_rows = common::fill(&parent.connection);
-    control.fork_cell(&path, &forked).unwrap();
+    control
+        .call(async |client| {
+            client
+                .fork_cell(ForkCellRequest {
+                    from: control_path(&path),
+                    to: control_path(&forked),
+                    ..Default::default()
+                })
+                .await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .unwrap();
     let fork = Mounted::new(&socket, &forked, "cladefs-daemon-fork");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.connection, &fork_rows);
@@ -228,7 +241,7 @@ fn a_database_is_fenced_with_its_cell() {
     let tenants = sockets.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
     std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
-    let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
+    let control = cladefs::testing::Control::connect(&control_socket).unwrap();
 
     let cell_dir = dir.path().join("store");
     let database = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
@@ -238,8 +251,18 @@ fn a_database_is_fenced_with_its_cell() {
             .unwrap();
     connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v TEXT)").unwrap();
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
-    control.sync_cell(&cell_dir).unwrap();
-    let ours = control.cell(&cell_dir).unwrap();
+    control
+        .call(async |client| {
+            client.sync_cell(SyncCellRequest { path: control_path(&cell_dir) }).await
+        })
+        .map(drop)
+        .unwrap();
+    let ours = control
+        .call(async |client| {
+            client.stat_cell(StatCellRequest { path: control_path(&cell_dir) }).await
+        })
+        .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })
+        .unwrap();
     let objects = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(bucket_cell::head::get(&objects, ours)).unwrap().unwrap();
@@ -256,7 +279,12 @@ fn a_database_is_fenced_with_its_cell() {
         drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();
-    let fenced = control.sync_cell(&cell_dir).unwrap_err();
+    let fenced = control
+        .call(async |client| {
+            client.sync_cell(SyncCellRequest { path: control_path(&cell_dir) }).await
+        })
+        .map(drop)
+        .unwrap_err();
     assert_eq!(fenced.errno(), Some(cladefs::Errno::EROFS), "{fenced:#}");
     let refused = connection.execute("INSERT INTO t VALUES (3, 'refused')", []).unwrap_err();
     assert_eq!(

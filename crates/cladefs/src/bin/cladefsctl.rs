@@ -657,17 +657,31 @@ impl Mount {
     /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
     /// it answers: `attach` and `create`, the cell; `list`, each cell, `TENANT CELL`, `detaching`
     /// after one being detached. IDs padded, as the mount's paths have them.
-    fn through(self, socket: &Path) -> anyhow::Result<()> {
-        let failed = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
-        let mount = cladefs::fuse::control::Client::connect(socket).map_err(failed)?;
+    async fn through(
+        self,
+        socket: &Path,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<()> {
+        use cladefs::fuse::control::proto::{
+            AttachRequest, DetachRequest, ListRequest, mount_client::MountClient,
+        };
+        let channel =
+            connect_within(timeout, socket, cladefs::cladefsd::control::channel(socket)).await?;
+        let mut mount = MountClient::new(channel);
         match self {
             Self::Attach { cell, capacity, token } => {
-                let cell = mount.attach(cell, capacity, token).map_err(failed)?;
-                println!("{}", base32_id::Padded(cell.id));
+                let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token, capacity };
+                let attached =
+                    rpc(timeout, format!("attaching cell {cell}"), mount.attach(request)).await?;
+                println!("{}", base32_id::Padded(attached.cell));
             }
-            Self::Detach { cell, force } => mount.detach(cell, force).map_err(failed)?,
+            Self::Detach { cell, force } => {
+                let request = DetachRequest { tenant: cell.tenant, cell: cell.id, force };
+                rpc(timeout, format!("detaching cell {cell}"), mount.detach(request)).await?;
+            }
             Self::List => {
-                for cell in mount.list().map_err(failed)? {
+                let listed = rpc(timeout, "listing the cells", mount.list(ListRequest {})).await?;
+                for cell in listed.cells {
                     let detaching = if cell.detaching { " detaching" } else { "" };
                     let (tenant, id) =
                         (base32_id::Padded(cell.tenant), base32_id::Padded(cell.cell));
@@ -677,6 +691,56 @@ impl Mount {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn connect_within<T>(
+    timeout: Option<std::time::Duration>,
+    socket: &Path,
+    call: impl std::future::Future<Output = Result<T, tonic::transport::Error>>,
+) -> anyhow::Result<T> {
+    let what = format!("connecting to the extent daemon's control socket at {}", socket.display());
+    within(timeout, &what, call).await?.context(what)
+}
+
+#[cfg(target_os = "linux")]
+async fn within<T>(
+    timeout: Option<std::time::Duration>,
+    what: &str,
+    call: impl std::future::Future<Output = T>,
+) -> anyhow::Result<T> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, call).await.map_err(|_| {
+            let said = format!(
+                "no answer within {timeout:?}: the extent daemon may still complete the call, as it \
+                 completes every call whether or not its caller waits"
+            );
+            anyhow::Error::new(cladefs::Errno::ETIMEDOUT).context(said).context(what.to_owned())
+        }),
+        None => Ok(call.await),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn rpc<T>(
+    timeout: Option<std::time::Duration>,
+    what: impl Into<String>,
+    call: impl std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> anyhow::Result<T> {
+    let what = what.into();
+    // Keep the daemon's errno and the explanation it sent.
+    let answered = within(timeout, &what, call).await?;
+    Ok(answered.map_err(|status| cladefs::cladefsd::control::failed(what, status))?.into_inner())
+}
+
+#[cfg(target_os = "linux")]
+fn name(path: &Path) -> Result<String, cladefs::Error> {
+    path.to_str().map(str::to_owned).ok_or_else(|| cladefs::Errno::EINVAL.into())
+}
+
+#[cfg(target_os = "linux")]
+fn whom(tenant: Option<u64>, none: &str) -> String {
+    tenant.map_or_else(|| none.to_owned(), |tenant| format!("tenant {}", base32_id::Short(tenant)))
 }
 
 impl Command {
@@ -831,41 +895,179 @@ impl Command {
     /// Does it through the control API of the daemon whose control socket is at `socket`, within
     /// `timeout` if given (board 8585).
     #[cfg(target_os = "linux")]
-    fn through(self, socket: &Path, timeout: Option<std::time::Duration>) -> anyhow::Result<()> {
-        if self.is_on_buckets() {
-            return self.on_buckets();
-        }
+    async fn through(
+        self,
+        socket: &Path,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<()> {
+        use cladefs::cladefsd::control::{self, proto::*};
+
         if let Self::Mount(mount) = self {
-            return mount.through(socket);
+            return mount.through(socket, timeout).await;
         }
-        let daemon = cladefs::cladefsd::control::Client::connect_within(socket, timeout)?;
+        let mut daemon = connect_within(timeout, socket, control::connect(socket)).await?;
+        macro_rules! call {
+            ($what:expr, $method:ident, $request:expr) => {
+                rpc(timeout, $what, daemon.$method($request)).await?
+            };
+        }
         match self {
             Self::Create { dir, capacity } => {
-                let new = cladefs::CellId { tenant: 0, id: 0 };
-                println!("{}", daemon.create_cell(&dir, capacity, new, (None, false))?);
+                let request = CreateCellRequest {
+                    path: name(&dir)?,
+                    capacity,
+                    kind: CellKind::Fxfs.into(),
+                    ..Default::default()
+                };
+                let made =
+                    call!(format!("making the cell at {}", dir.display()), create_cell, request);
+                println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
             }
             Self::Take { dir, capacity, cell, token, force } => {
-                daemon.create_cell(&dir, capacity, cell, (token, force))?;
+                let request = CreateCellRequest {
+                    path: name(&dir)?,
+                    capacity,
+                    tenant: cell.tenant,
+                    cell: cell.id,
+                    token,
+                    force,
+                    kind: CellKind::Fxfs.into(),
+                    ..Default::default()
+                };
+                call!(format!("making the cell at {}", dir.display()), create_cell, request);
             }
-            Self::Place { dir, token, force } => daemon.place_cell(&dir, token, force)?,
-            Self::Sync { dir } => daemon.sync_cell(&dir)?,
+            Self::Place { dir, token, force } => {
+                let request = PlaceCellRequest { path: name(&dir)?, token, force };
+                call!(format!("placing the cell at {}", dir.display()), place_cell, request);
+            }
+            Self::Sync { dir } => {
+                let request = SyncCellRequest { path: name(&dir)? };
+                call!(
+                    format!("waiting for the cell at {} to be uploaded", dir.display()),
+                    sync_cell,
+                    request
+                );
+            }
             Self::Import { dir, capacity, image, reference } => {
-                daemon.import_image(&dir, capacity, &image, reference.as_deref())?;
+                let request = ImportImageRequest {
+                    path: name(&dir)?,
+                    capacity,
+                    image: name(&image)?,
+                    reference: reference.unwrap_or_default(),
+                    tenant: bucket_cell::layout::DEFAULT_TENANT,
+                };
+                call!(format!("importing {}", image.display()), import_image, request);
             }
-            Self::Fork { src, dst } => println!("{}", daemon.fork_cell(&src, &dst)?),
-            Self::Version { dir } => println!("{:x}", daemon.make_version(&dir, None)?),
-            Self::Versions { dir } => print_versions(&daemon.list_versions(&dir)?),
-            Self::DropVersions { dir, versions } => daemon.drop_versions(&dir, &versions)?,
-            Self::Share { dir, version, shared } => daemon.share_version(&dir, version, shared)?,
-            Self::ForkVersion { from, dst } => println!("{}", daemon.fork_version(from, &dst)?),
-            Self::Delete { dir } => daemon.delete_cell(&dir)?,
-            Self::Drop { dir } => daemon.drop_cell(&dir)?,
-            Self::Resize { dir, capacity } => daemon.resize_cell(&dir, capacity)?,
-            Self::Public { dir } => daemon.make_public(&dir)?,
-            Self::PublicAttachOnly { dir } => daemon.make_public_attach_only(&dir)?,
-            Self::Attach { dir, base } => daemon.attach_base(&dir, &base)?,
+            Self::Fork { src, dst } => {
+                let request =
+                    ForkCellRequest { from: name(&src)?, to: name(&dst)?, ..Default::default() };
+                let made = call!(
+                    format!("forking the cell at {} to {}", src.display(), dst.display()),
+                    fork_cell,
+                    request
+                );
+                println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
+            }
+            Self::Version { dir } => {
+                let request = MakeVersionRequest { path: name(&dir)?, keep_last: 0 };
+                let made = call!(
+                    format!("making a version of the cell at {}", dir.display()),
+                    make_version,
+                    request
+                );
+                println!("{:x}", made.version);
+            }
+            Self::Versions { dir } => {
+                let request = ListVersionsRequest { path: name(&dir)? };
+                let listed = call!(
+                    format!("listing the versions of the cell at {}", dir.display()),
+                    list_versions,
+                    request
+                );
+                let versions: Vec<_> = listed
+                    .versions
+                    .into_iter()
+                    .map(|Version { id, uploaded, shared }| cladefs::VersionInfo {
+                        id,
+                        uploaded,
+                        shared,
+                    })
+                    .collect();
+                print_versions(&versions);
+            }
+            Self::DropVersions { dir, versions } => {
+                let request = DropVersionsRequest { path: name(&dir)?, versions };
+                call!(
+                    format!("dropping versions of the cell at {}", dir.display()),
+                    drop_versions,
+                    request
+                );
+            }
+            Self::Share { dir, version, shared } => {
+                let request = ShareVersionRequest { path: name(&dir)?, version, shared };
+                call!(
+                    format!("sharing version {version} of the cell at {}", dir.display()),
+                    share_version,
+                    request
+                );
+            }
+            Self::ForkVersion { from, dst } => {
+                let cladefs::CellVersion { tenant, cell, version } = from;
+                let request = ForkCellRequest {
+                    to: name(&dst)?,
+                    version,
+                    tenant,
+                    cell,
+                    ..Default::default()
+                };
+                let made = call!(
+                    format!("forking version {version} of cell {cell} to {}", dst.display()),
+                    fork_cell,
+                    request
+                );
+                println!("{}", cladefs::CellId { tenant: made.tenant, id: made.cell });
+            }
+            Self::Delete { dir } => {
+                let request = DeleteCellRequest { path: name(&dir)? };
+                call!(format!("deleting the cell at {}", dir.display()), delete_cell, request);
+            }
+            Self::Drop { dir } => {
+                let request = DropCellRequest { path: name(&dir)? };
+                call!(format!("dropping the cell at {}", dir.display()), drop_cell, request);
+            }
+            Self::Resize { dir, capacity } => {
+                let request = ResizeCellRequest { path: name(&dir)?, capacity };
+                call!(
+                    format!("resizing the cell at {} to {capacity} bytes", dir.display()),
+                    resize_cell,
+                    request
+                );
+            }
+            Self::Public { ref dir } | Self::PublicAttachOnly { ref dir } => {
+                let attach_only = matches!(self, Self::PublicAttachOnly { .. });
+                let request = MakePublicRequest { path: name(dir)?, attach_only };
+                let purpose = if attach_only { " public to attach" } else { " public" };
+                call!(
+                    format!("making the cell at {}{purpose}", dir.display()),
+                    make_public,
+                    request
+                );
+            }
+            Self::Attach { dir, base } => {
+                let request = AttachBaseRequest { path: name(&dir)?, base: name(&base)? };
+                call!(
+                    format!("attaching {} to {}", base.display(), dir.display()),
+                    attach_base,
+                    request
+                );
+            }
             Self::Stat { dir } => {
-                let stat = daemon.stat_cell(&dir)?;
+                let request = StatCellRequest { path: name(&dir)? };
+                let stat = call!(
+                    format!("asking what the cell at {} holds", dir.display()),
+                    stat_cell,
+                    request
+                );
                 let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
                 let whose = |own, inherited| cladefs::Whose { own, inherited };
                 print!(
@@ -885,7 +1087,6 @@ impl Command {
                 );
             }
             Self::Stats { json, wait, leave_out } => {
-                use cladefs::cladefsd::control::proto::GetStatsRequest;
                 // At least a millisecond: 0 asks for the daemon's default (hotbed review 67).
                 let wait_ms = wait.map_or(Ok(0), |wait| u32::try_from(wait.as_millis().max(1)));
                 let [leave_out_histograms, leave_out_guests, leave_out_vms] = leave_out;
@@ -895,10 +1096,12 @@ impl Command {
                     leave_out_guests,
                     leave_out_vms,
                 };
-                print_value(&stats_json(&daemon.get_stats(request)?), json)?;
+                let stats = call!("asking the extent daemon for its stats", get_stats, request);
+                print_value(&stats_json(&stats), json)?;
             }
             Self::Cells { json } => {
-                let mut cells = daemon.list_cells()?;
+                let mut cells =
+                    call!("listing the daemon's cells", list_cells, ListCellsRequest {}).stores;
                 cells.sort_by(|one, other| one.path.cmp(&other.path));
                 let cells = cells.iter().map(|cell| {
                     let mut listed = serde_json::json!({ "path": cell.path });
@@ -909,25 +1112,88 @@ impl Command {
                 });
                 print_value(&serde_json::json!({ "cells": cells.collect::<Vec<_>>() }), json)?;
             }
-            Self::Counters { json } => print_value(&counters_json(&daemon.get_counters()?), json)?,
+            Self::Counters { json } => {
+                let counters = call!(
+                    "asking the extent daemon for its counters",
+                    get_counters,
+                    GetCountersRequest {}
+                );
+                print_value(&counters_json(&counters), json)?;
+            }
             Self::SetPeers { addresses } => {
-                daemon.set_peers(&addresses.iter().map(String::as_str).collect::<Vec<_>>())?;
+                call!("setting the daemon's peers", set_peers, SetPeersRequest { addresses });
             }
             Self::Migrate { dir, peer, to } => {
-                println!("migration {}", daemon.migrate_cell(&dir, &peer, &to)?);
+                let what = format!("migrating the cell at {} to {peer}", dir.display());
+                let request = MigrateCellRequest { path: name(&dir)?, peer, to: name(&to)? };
+                println!("migration {}", call!(what, migrate_cell, request).migration);
             }
-            Self::HandOver { dir } => daemon.hand_over_cell(&dir)?,
-            Self::AbortMigration { dir } => daemon.abort_migration(&dir)?,
-            Self::MemoryLimit { tenant, bytes } => daemon.set_memory_limit(tenant, bytes)?,
-            Self::MemoryWeight { tenant, weight } => daemon.set_memory_weight(tenant, weight)?,
-            Self::InFlight { tenant, bytes } => daemon.set_tenant_in_flight(tenant, bytes)?,
+            Self::HandOver { dir } => {
+                let request = HandOverCellRequest { path: name(&dir)? };
+                call!(
+                    format!("handing the cell at {} over", dir.display()),
+                    hand_over_cell,
+                    request
+                );
+            }
+            Self::AbortMigration { dir } => {
+                let request = AbortMigrationRequest { path: name(&dir)? };
+                call!(
+                    format!("aborting the migration of the cell at {}", dir.display()),
+                    abort_migration,
+                    request
+                );
+            }
+            Self::MemoryLimit { tenant, bytes } => {
+                call!(
+                    format!("limiting the memory of {}", whom(tenant, "every tenant")),
+                    set_memory_limit,
+                    SetMemoryLimitRequest { tenant, bytes }
+                );
+            }
+            Self::MemoryWeight { tenant, weight } => {
+                call!(
+                    format!("weighing the memory of {}", whom(Some(tenant), "")),
+                    set_memory_weight,
+                    SetMemoryWeightRequest { tenant, weight }
+                );
+            }
+            Self::InFlight { tenant, bytes } => {
+                call!(
+                    format!("setting the bytes in flight of {}", whom(tenant, "every tenant")),
+                    set_tenant_in_flight,
+                    SetTenantInFlightRequest { tenant, bytes }
+                );
+            }
             Self::ShrinkMemory { tenant, target } => {
-                println!("bytes {}", daemon.shrink_memory(tenant, target)?);
+                let request = ShrinkMemoryRequest { tenant, target_bytes: target };
+                let shrunk = call!(
+                    format!("shrinking the memory of {}", whom(tenant, "the daemon")),
+                    shrink_memory,
+                    request
+                );
+                println!("bytes {}", shrunk.bytes);
             }
-            Self::DiskLimit { tenant, bytes } => daemon.set_disk_limit(tenant, bytes)?,
-            Self::DiskWeight { tenant, weight } => daemon.set_disk_weight(tenant, weight)?,
+            Self::DiskLimit { tenant, bytes } => {
+                call!(
+                    format!("limiting the disk of {}", whom(tenant, "every tenant")),
+                    set_disk_limit,
+                    SetDiskLimitRequest { tenant, bytes }
+                );
+            }
+            Self::DiskWeight { tenant, weight } => {
+                call!(
+                    format!("weighing the disk of {}", whom(Some(tenant), "")),
+                    set_disk_weight,
+                    SetDiskWeightRequest { tenant, weight }
+                );
+            }
             Self::TenantDisk { tenant, json } => {
-                let disk = daemon.get_tenant_disk(tenant)?;
+                let disk = call!(
+                    format!("counting the disk of {}", whom(tenant, "every tenant")),
+                    get_tenant_disk,
+                    GetTenantDiskRequest { tenant }
+                );
                 let disk = serde_json::json!({
                     "bytes": disk.bytes,
                     "limit_bytes": disk.limit_bytes,
@@ -936,29 +1202,60 @@ impl Command {
                 print_value(&disk, json)?;
             }
             Self::Grant { tenant, dir, uid, gid } => {
-                println!("{}", daemon.grant(tenant, &dir, uid, gid)?.display());
+                let request = GrantRequest { tenant, dir: name(&dir)?, uid, gid };
+                let grant = call!(format!("granting {}", whom(Some(tenant), "")), grant, request);
+                println!("{}", grant.socket);
             }
-            Self::Revoke { tenant } => daemon.revoke(tenant)?,
+            Self::Revoke { tenant } => {
+                call!(
+                    format!("revoking {}", whom(Some(tenant), "")),
+                    revoke,
+                    RevokeRequest { tenant }
+                );
+            }
             Self::ShredCell { cell } => {
-                let (removed, forgotten) = daemon.shred_cell(cell)?;
+                let request = ShredCellRequest { tenant: cell.tenant, cell: cell.id };
+                let answer = call!(format!("shredding cell {cell}"), shred_cell, request);
+                let removed = answer.keks_removed;
+                let forgotten = answer.forgotten.unwrap_or_default();
                 print!("keks_removed {removed}\n{}", forgotten_lines(&forgotten));
             }
             Self::ForgetTenantKeys { tenant } => {
                 let why =
                     format!("tenant {tenant}: its KEK is revoked or destroyed, cladefsctl says");
-                print!("{}", forgotten_lines(&daemon.forget_tenant_keys(tenant, &why)?));
+                let request = ForgetTenantKeysRequest { tenant, why };
+                let answer = call!(
+                    format!("having the daemon forget tenant {tenant}'s keys"),
+                    forget_tenant_keys,
+                    request
+                );
+                print!("{}", forgotten_lines(&answer.forgotten.unwrap_or_default()));
             }
             Self::ShredTenant { tenant } => {
-                let (now, forgotten) = daemon.shred_tenant(tenant)?;
+                let answer = call!(
+                    format!("shredding tenant {tenant}"),
+                    shred_tenant,
+                    ShredTenantRequest { tenant }
+                );
+                let now = answer.shredded_now;
+                let forgotten = answer.forgotten.unwrap_or_default();
                 print!("shredded_now {}\n{}", u8::from(now), forgotten_lines(&forgotten));
             }
-            Self::KmsReload => print!("{}", reloaded_lines(&daemon.reload_kms()?)),
+            Self::KmsReload => {
+                let reloaded = call!("reloading the daemon's KMS", reload_kms, ReloadKmsRequest {});
+                print!("{}", reloaded_lines(&reloaded));
+            }
             Self::DecommissionHost { incarnation, none_ok } => {
                 // Called again while the daemon left some, each call retiring its most (board
                 // 8523); one that retired none, of a listing it says is not empty, would never end.
                 let mut retired = 0;
                 loop {
-                    let done = daemon.decommission_host(incarnation, 0)?;
+                    let request = DecommissionHostRequest { incarnation, most: 0 };
+                    let done = call!(
+                        format!("decommissioning incarnation {}", base32_id::Short(incarnation)),
+                        decommission_host,
+                        request
+                    );
                     retired += done.retired;
                     if done.left == 0 || done.retired == 0 {
                         break;
@@ -979,7 +1276,14 @@ impl Command {
                     retired => println!("retired {retired}"),
                 }
             }
-            Self::EphemeralHosts => print!("{}", ephemeral_hosts_lines(&daemon.ephemeral_hosts()?)),
+            Self::EphemeralHosts => {
+                let listed = call!(
+                    "listing the ephemeral cells' hosts",
+                    list_ephemeral_hosts,
+                    ListEphemeralHostsRequest {}
+                );
+                print!("{}", ephemeral_hosts_lines(&listed.hosts));
+            }
             Self::Mount(_)
             | Self::FormatBucket { .. }
             | Self::AddBucket { .. }
@@ -990,9 +1294,6 @@ impl Command {
 
     #[cfg(not(target_os = "linux"))]
     fn through(self, _socket: &Path, _timeout: Option<std::time::Duration>) -> anyhow::Result<()> {
-        if self.is_on_buckets() {
-            return self.on_buckets();
-        }
         bail!("the extent daemon runs on Linux only")
     }
 
@@ -1564,6 +1865,13 @@ fn main() -> anyhow::Result<()> {
     };
     let command = Command::parse(args)?;
     match std::env::var_os("CLADEFSD_GRPC").filter(|socket| !socket.is_empty()) {
+        Some(_) if command.is_on_buckets() => command.on_buckets(),
+        #[cfg(target_os = "linux")]
+        Some(socket) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(command.through(socket.as_ref(), timeout)),
+        #[cfg(not(target_os = "linux"))]
         Some(socket) => command.through(socket.as_ref(), timeout),
         None => command.locally(),
     }

@@ -12,12 +12,11 @@
 //! a cell is attached or detached whole, or not at all.
 
 use super::server::Server;
-use crate::cladefsd::control::{errno, saying};
+use crate::cladefsd::control::saying;
 use crate::error::{Errno, Error};
 use crate::{CellId, CellOf, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use bucket_cell::cell::Kind;
-use proto::mount_client::MountClient;
 use proto::*;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -355,76 +354,4 @@ fn failed(err: Error) -> Status {
         log::error!("fuse: {err:#}");
     }
     saying(errno, format!("{err:#}"))
-}
-
-/// A client of the control API of a FUSE mount of many cells that blocks, for callers without a
-/// runtime of their own: `cladefsctl mount`'s commands, and tests. Its errors carry the errno a
-/// call failed with, if it did ([`crate::Error::errno`]).
-pub struct Client {
-    runtime: tokio::runtime::Runtime,
-    client: MountClient<tonic::transport::Channel>,
-}
-
-impl Client {
-    /// A client of the mount of the daemon whose control socket is at `socket`.
-    pub fn connect(socket: impl AsRef<Path>) -> Result<Self, Error> {
-        let socket = socket.as_ref();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(Error::new)?;
-        let channel =
-            runtime.block_on(crate::cladefsd::control::channel_socket(socket)).map_err(|err| {
-                Error::new(anyhow::Error::new(err).context(format!(
-                    "connecting to the daemon's control socket at {}",
-                    socket.display()
-                )))
-            })?;
-        Ok(Self { runtime, client: MountClient::new(channel) })
-    }
-
-    /// Attaches `cell`, or a new cell of its tenant if its ID is 0, its filesystem a new Fxfs one
-    /// of `capacity` bytes, its lease taken at `token`'s placement if given, and returns it and the
-    /// (`Attach`).
-    pub fn attach(&self, cell: CellId, capacity: u64, token: Option<u64>) -> Result<CellId, Error> {
-        let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token, capacity };
-        let response = self.call(format!("attaching cell {cell}"), |mut client| async move {
-            client.attach(request).await
-        })?;
-        Ok(CellId { id: response.cell, ..cell })
-    }
-
-    /// Detaches `cell`, at once if `force` (`Detach`).
-    pub fn detach(&self, cell: CellId, force: bool) -> Result<(), Error> {
-        let request = DetachRequest { tenant: cell.tenant, cell: cell.id, force };
-        self.call(format!("detaching cell {cell}"), |mut client| async move {
-            client.detach(request).await
-        })?;
-        Ok(())
-    }
-
-    /// The cells attached (`List`).
-    pub fn list(&self) -> Result<Vec<proto::AttachedCell>, Error> {
-        let response = self.call("listing the cells".to_owned(), |mut client| async move {
-            client.list(ListRequest {}).await
-        })?;
-        Ok(response.cells)
-    }
-
-    fn call<T, F>(
-        &self,
-        what: String,
-        call: impl FnOnce(MountClient<tonic::transport::Channel>) -> F,
-    ) -> Result<T, Error>
-    where
-        F: Future<Output = Result<Response<T>, Status>>,
-    {
-        match self.runtime.block_on(call(self.client.clone())) {
-            Ok(response) => Ok(response.into_inner()),
-            Err(status) => Err(Error::new(match errno(&status) {
-                Some(errno) => anyhow::Error::new(status).context(errno).context(what),
-                None => anyhow::Error::new(status).context(what),
-            })),
-        }
-    }
 }

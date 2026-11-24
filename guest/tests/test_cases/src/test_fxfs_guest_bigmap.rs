@@ -37,6 +37,8 @@ mod host {
     use crate::measure::{HostMemory, LAST, Requests};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
+    use cladefs::cladefsd::control::proto::ForkCellRequest;
+    use cladefs::testing::control_path;
     use std::ffi::{CString, OsStr};
     use std::path::Path;
 
@@ -121,7 +123,17 @@ mod host {
             let base = dir.join("base");
             wait(boot(test_setup, &root, "base", machine("base", &base, &socket, capacity, 0)?)?)?;
             let fork = dir.join("fork");
-            crate::common::control(&socket)?.fork_cell(&base, &fork)?;
+            crate::common::control(&socket)?
+                .call(async |client| {
+                    client
+                        .fork_cell(ForkCellRequest {
+                            from: control_path(&base),
+                            to: control_path(&fork),
+                            ..Default::default()
+                        })
+                        .await
+                })
+                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             // Room for the file twice over, which window reclaim then needn't take back.
             let window = if self.dax { 2 * bytes } else { 0 };
             let mut machine = machine("map", &fork, &socket, capacity, window)?;

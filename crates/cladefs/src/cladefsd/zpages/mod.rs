@@ -6,9 +6,6 @@
 //! (`super::http`), as Census's were at Google: pages of what a running daemon does, for whoever
 //! looks into it (TASK-672). `/z/` lists them:
 //!
-//! - `/z/tracez`: the daemon's spans by latency, kept in its memory whatever OTLP does, with
-//!   samples of each, whole traces, a page-in's saying where its data came from and, if from the
-//!   bucket, the stack that waited for it ([`tracez`]).
 //! - `/z/pprof/profile?seconds=N` and `/z/pprof/flamegraph?seconds=N`: the daemon's CPU, sampled
 //!   for N seconds, as pprof's protobuf or an SVG flamegraph ([`pprof`]).
 //! - cladefs: `/z/log`: what the daemon logs, as `CLADEFS_LOG_LEVEL` says it (`super::logging`);
@@ -20,7 +17,6 @@
 //! board 8559).
 
 pub mod pprof;
-pub mod tracez;
 
 use super::http::{Client, Response};
 
@@ -28,12 +24,7 @@ use super::http::{Client, Response};
 const HTML: &str = "text/html; charset=utf-8";
 
 /// The z-pages: each one's path under `/z/` and what it shows.
-const PAGES: [(&str, &str); 4] = [
-    (
-        "tracez",
-        "Spans by latency, wall clock, with samples of each: whole traces, their attributes, and \
-         the stacks that waited for the bucket.",
-    ),
+const PAGES: [(&str, &str); 3] = [
     (
         "pprof/profile?seconds=30",
         "The daemon's CPU, sampled for 30 seconds, as pprof's protobuf: go tool pprof URL.",
@@ -56,7 +47,6 @@ pub(super) fn serve(
 ) -> Option<Response> {
     Some(match (method, page) {
         ("GET", "" | "/") => Response::ok(HTML, index()),
-        ("GET", "/tracez") => tracez::page(query),
         ("GET", page) if let Some(page) = page.strip_prefix("/pprof") => {
             return pprof::serve(page, query, client);
         }
@@ -117,19 +107,8 @@ fn head(title: &str) -> String {
 }
 
 /// The pages' style.
-const STYLE: &str = ":root{color-scheme:light dark;--line:#8885;--mark:#fd06;--error:#d33}
+const STYLE: &str = ":root{color-scheme:light dark}
 body{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;margin:16px;max-width:100%}
-table{border-collapse:collapse;display:block;overflow-x:auto}
-th,td{padding:2px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
-th:first-child,td:first-child{text-align:left}
-td.zero{opacity:.35}
-.sample{border-top:1px solid var(--line);margin-top:12px}
-.tree{overflow-x:auto}
-.span{white-space:nowrap}
-.sampled{background:var(--mark)}
-.took{font-weight:bold}
-.error{color:var(--error)}
-pre{margin:2px 0 8px;opacity:.85}
 ";
 
 /// `text`, safe in HTML's text and its attributes' quoted values.

@@ -10,6 +10,11 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 
+#[cfg(all(target_os = "linux", not(madsim)))]
+mod control;
+#[cfg(all(target_os = "linux", not(madsim)))]
+pub use control::{Control, control_path};
+
 /// The paths of the files under `dir`, at every depth, that hold any of `pieces`, all of one
 /// length. What keeps files there must be still meanwhile: its cells closed, or their work
 /// behind their callers waited for (`Cell::wait_idle`, and their uploaders' `wait_uploaded`). A

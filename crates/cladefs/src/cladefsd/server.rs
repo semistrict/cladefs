@@ -1019,8 +1019,7 @@ impl Answer {
         }
         // Counted before its reply, which its VM process may then count on.
         super::metrics::served(header.kind, self.started.elapsed(), reply.status != 0);
-        // cladefs: and its span ended, its trace recorded once nothing of it runs, which whoever
-        // waits for the reply may then look for on /z/tracez (TASK-672.1).
+        // End the span before replying so it is ready to export.
         drop(std::mem::replace(&mut self.span, trace::Span::none()));
         // cladefs: and its tenant's, which its reply's bytes are counted in as they're queued.
         drop(self.charge.take());

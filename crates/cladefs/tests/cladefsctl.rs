@@ -341,6 +341,10 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
     for bucket in [&root, &east, &west] {
         assert_eq!(run(&["buckets", bucket]), Ok(expected.clone()), "{bucket}");
     }
+    // Bucket commands still use their own synchronous entry point with a control socket set.
+    let socket = dir.path().join("unused-control.sock");
+    let with_socket = Cladefsctl::with_env(&[("CLADEFSD_GRPC", socket.to_str().unwrap())]);
+    assert_eq!(with_socket.run(&[Path::new("buckets"), Path::new(&root)]), Ok(expected));
     let made = run(&["create", dir.path().join("store").to_str().unwrap(), "16777216"]);
     let cell: cladefs::CellId = made.unwrap().trim().parse().unwrap();
     assert_eq!(cell.id >> 48, 2, "{cell}");
@@ -949,6 +953,77 @@ fn calls_end_at_their_timeouts() {
     let (refused, _) = timed(&cladefsctl, &["--timeout", "soon", "stats"]);
     assert!(refused.contains("--timeout must be a positive number of seconds"), "{refused}");
     drop(vm);
+}
+
+/// Mount calls use the same deadline options as the rest of the control API.
+#[cfg(target_os = "linux")]
+#[test]
+fn mount_calls_end_at_their_timeouts() {
+    use cladefs::fuse::control::proto::{
+        AttachRequest, AttachResponse, DetachRequest, DetachResponse, ListRequest, ListResponse,
+        mount_server::{Mount, MountServer},
+    };
+    use tonic::{Request, Response, Status};
+
+    struct SlowMount;
+
+    #[tonic::async_trait]
+    impl Mount for SlowMount {
+        async fn attach(
+            &self,
+            _: Request<AttachRequest>,
+        ) -> Result<Response<AttachResponse>, Status> {
+            unreachable!("the test only lists mounts")
+        }
+
+        async fn detach(
+            &self,
+            _: Request<DetachRequest>,
+        ) -> Result<Response<DetachResponse>, Status> {
+            unreachable!("the test only lists mounts")
+        }
+
+        async fn list(&self, _: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            Ok(Response::new(ListResponse { cells: Vec::new() }))
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let server = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+            tonic::transport::Server::builder()
+                .add_service(MountServer::new(SlowMount))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::UnixListenerStream::new(listener),
+                    async {
+                        stopped.await.unwrap();
+                    },
+                )
+                .await
+                .unwrap();
+        });
+    });
+    let mut cladefsctl = Cladefsctl::with_env(&[
+        ("CLADEFSD_GRPC", socket.to_str().unwrap()),
+        ("CLADEFSCTL_TIMEOUT", ""),
+    ]);
+    let flag = cladefsctl.run(&["--timeout", "1", "mount", "list"].map(Path::new));
+    cladefsctl.env.push(("CLADEFSCTL_TIMEOUT", "1".to_owned()));
+    let env = cladefsctl.run(&["mount", "list"].map(Path::new));
+    shutdown.send(()).unwrap();
+    server.join().unwrap();
+    for result in [flag, env] {
+        let refused = result.unwrap_err();
+        assert!(refused.contains("listing the cells"), "{refused}");
+        assert!(refused.contains("ETIMEDOUT"), "{refused}");
+    }
 }
 
 /// board 8585: the control API's calls cladefsctl makes are the daemon's: without one, refused,

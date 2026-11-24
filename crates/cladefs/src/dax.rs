@@ -1352,9 +1352,8 @@ impl WindowChangeKind {
 }
 
 impl WindowChanges {
-    /// cladefs: enough that a refused access's page's history reaches back past the many MAPs of a
-    /// busy guest (TASK-121).
-    const MOST: usize = 1 << 16;
+    /// Recent changes kept for DAX refusal diagnostics (board 10549).
+    const MOST: usize = 256;
 
     /// The most refused pages awaiting a change ([`WindowChanges::refused`]): the oldest go first.
     const MOST_REFUSED: usize = 1024;

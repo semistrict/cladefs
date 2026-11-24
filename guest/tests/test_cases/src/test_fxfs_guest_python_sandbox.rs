@@ -114,6 +114,10 @@ const OK: &str = "OK python-sandbox";
 #[host]
 mod host {
     use super::*;
+    use cladefs::cladefsd::control::proto::{
+        ForkCellRequest, ImportImageRequest, MakeVersionRequest, StatCellRequest, SyncCellRequest,
+    };
+    use cladefs::testing::control_path;
 
     use crate::common::{Measured, cladefs_guest_should_run, control, setup_rootfs};
     use crate::faulty_s3::FaultyS3;
@@ -486,12 +490,38 @@ RUN find / -xdev -name '*.pyc' -delete
     ) -> anyhow::Result<cladefs::CellVersion> {
         let control = control(&host.socket)?;
         let began = Instant::now();
-        control.import_image(base, ROOT_CAPACITY, layout, None)?;
+        control
+            .call(async |client| {
+                client
+                    .import_image(ImportImageRequest {
+                        path: control_path(base),
+                        capacity: ROOT_CAPACITY,
+                        image: control_path(layout),
+                        reference: String::new(),
+                        tenant: 0,
+                    })
+                    .await
+            })
+            .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
         let imported = began.elapsed().as_secs_f64();
         let began = Instant::now();
-        let version = control.make_version(base, None)?;
-        let cell = control.cell(base)?;
-        control.sync_cell(base)?;
+        let version = control
+            .call(async |client| {
+                client
+                    .make_version(MakeVersionRequest { path: control_path(base), keep_last: 0 })
+                    .await
+            })
+            .map(|response| response.version)?;
+        let cell = control
+            .call(async |client| {
+                client.stat_cell(StatCellRequest { path: control_path(base) }).await
+            })
+            .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
+        control
+            .call(async |client| {
+                client.sync_cell(SyncCellRequest { path: control_path(base) }).await
+            })
+            .map(drop)?;
         let synced = began.elapsed().as_secs_f64();
         eprintln!(
             "pysandbox: {} imported the base in {imported:.1} s, versioned and synced it in \
@@ -545,7 +575,23 @@ RUN find / -xdev -name '*.pyc' -delete
             Disk::Fork(host) => {
                 let fork_path = test_setup.tmp_dir.join(format!("{name}.root"));
                 let began = Instant::now();
-                control(&host.socket)?.fork_version(version, &fork_path)?;
+                control(&host.socket)?
+                    .call(async |client| {
+                        let cladefs::CellVersion { tenant, cell, version } = version;
+                        client
+                            .fork_cell(ForkCellRequest {
+                                to: control_path(&fork_path),
+                                tenant,
+                                cell,
+                                version,
+                                ..Default::default()
+                            })
+                            .await
+                    })
+                    .map(|response| cladefs::CellId {
+                        tenant: response.tenant,
+                        id: response.cell,
+                    })?;
                 let fork = ms_since(began);
                 machine.cell_served("root", &fork_path, ROOT_CAPACITY, WINDOW, &host.socket);
                 machine.fxfs_root("root");

@@ -11,6 +11,8 @@
 
 #![cfg(target_os = "linux")]
 
+use cladefs::cladefsd::control::proto::GrantRequest;
+use cladefs::testing::control_path;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -142,10 +144,23 @@ fn a_panic_on_any_service_aborts_the_daemon_naming_it() {
         |dir: &Path| {
             let tenant = dir.join("acme");
             std::fs::create_dir(&tenant).unwrap();
-            let client = cladefs::cladefsd::control::Client::connect(dir.join("control.sock"));
+            let client = cladefs::testing::Control::connect(dir.join("control.sock"));
             // The daemon aborting as the tenant's thread starts, the grant fails, which is what is
             // looked for.
-            drop(client.map(|client| client.grant(1, &tenant, None, None)));
+            drop(client.map(|client| {
+                client
+                    .call(async |client| {
+                        client
+                            .grant(GrantRequest {
+                                tenant: 1,
+                                dir: control_path(&tenant),
+                                uid: None,
+                                gid: None,
+                            })
+                            .await
+                    })
+                    .map(|response| std::path::PathBuf::from(response.socket))
+            }));
         },
     ));
     services.push(Service {

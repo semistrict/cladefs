@@ -321,7 +321,7 @@ against the service itself (tests run against a fake of the vault).
 ## Observing the daemon
 
 `CLADEFSD_METRICS=HOST:PORT` serves `/metrics` (Prometheus) and, unless told otherwise, the
-z-pages under `/z/`: spans by latency (`/z/tracez`), CPU profiles (`/z/pprof/profile?seconds=N`,
+z-pages under `/z/`: CPU profiles (`/z/pprof/profile?seconds=N`,
 `/z/pprof/flamegraph?seconds=N`) and what the daemon logs (`/z/log`). Whoever reaches the z-pages
 may profile the daemon's CPU and change its log; whoever scrapes need not (board 8559):
 
@@ -424,7 +424,7 @@ cargo build --release --locked -p cladefs --bins
 - No `RUSTFLAGS`: it replaces `.cargo/config.toml`'s `-Cforce-frame-pointers=yes`, which perf and
   `/z/pprof` unwind the daemon's stacks by, and the build refuses a release without them
   (`crates/cladefs/build/stamp.rs`, board 8597). A build that needs flags of its own adds that one.
-- The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof` and `/z/tracez`
+- The release profile (root `Cargo.toml`) keeps line tables, so that `/z/pprof`
   name each frame's file and line (the binary 281 MB, 41 MB stripped), unwinds panics, as a
   cell's halt needs, and checks arithmetic for overflow, as every test's build does.
 

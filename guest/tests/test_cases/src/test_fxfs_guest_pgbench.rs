@@ -152,6 +152,8 @@ mod host {
     use crate::vm::{DiskCache, Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
+    use cladefs::cladefsd::control::proto::{ForkCellRequest, StatCellRequest};
+    use cladefs::testing::control_path;
     use std::ffi::{CString, OsStr};
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -339,7 +341,9 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let started = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_secs(2));
-                let stat = control.stat_cell(&cell_dir)?;
+                let stat = control.call(async |client| {
+                    client.stat_cell(StatCellRequest { path: control_path(&cell_dir) }).await
+                })?;
                 writeln!(
                     out,
                     "t={} pending_upload_bytes={} oldest_pending_ms={}",
@@ -713,7 +717,17 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         ) -> anyhow::Result<Running> {
             let dir = &served.test_setup.tmp_dir;
             let fork = dir.join(nth("fork", vm));
-            crate::common::control(&served.socket)?.fork_cell(&served.base, &fork)?;
+            crate::common::control(&served.socket)?
+                .call(async |client| {
+                    client
+                        .fork_cell(ForkCellRequest {
+                            from: control_path(&served.base),
+                            to: control_path(&fork),
+                            ..Default::default()
+                        })
+                        .await
+                })
+                .map(|response| cladefs::CellId { tenant: response.tenant, id: response.cell })?;
             let device =
                 Device::Cell { cell_dir: &fork, cladefsd: &served.socket, window: served.window };
             let mut machine = machine(role, device, memory)?;

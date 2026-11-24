@@ -50,6 +50,8 @@ const KEPT: u64 = 16;
 #[host]
 mod host {
     use super::*;
+    use cladefs::cladefsd::control::proto::SyncCellRequest;
+    use cladefs::testing::control_path;
 
     use crate::common::{Measured, ProcessCosts, cladefs_guest_should_run, setup_rootfs};
     use crate::faulty_s3::FaultyS3;
@@ -223,7 +225,15 @@ mod host {
                     for cell_dir in &cell_dirs {
                         let (socket, cell_dir) = (socket.clone(), cell_dir.clone());
                         syncs.push(std::thread::spawn(move || {
-                            let synced = crate::common::control(&socket)?.sync_cell(&cell_dir);
+                            let synced = crate::common::control(&socket)?
+                                .call(async |client| {
+                                    client
+                                        .sync_cell(SyncCellRequest {
+                                            path: control_path(&cell_dir),
+                                        })
+                                        .await
+                                })
+                                .map(drop);
                             synced.with_context(|| format!("syncing {}", cell_dir.display()))?;
                             anyhow::Ok(since.elapsed())
                         }));

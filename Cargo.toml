@@ -128,7 +128,7 @@ fxfs-posix = { path = "crates/fxfs-posix" }
 # cladefs: what a release cladefsd is built with, each choice made, not Cargo's default (board
 # 8597). docs/operating-a-host.md says how a host's daemon is built.
 [profile.release]
-# Line tables, not full debug info: enough for /z/pprof's and /z/tracez's stacks, which walk frame
+# Line tables, not full debug info: enough for /z/pprof's stacks, which walk frame
 # pointers (.cargo/config.toml) and resolve them in the process (pprof, the backtrace crate), to
 # name each frame's file and line, not its function alone.
 debug = "line-tables-only"

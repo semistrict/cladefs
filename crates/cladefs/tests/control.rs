@@ -890,7 +890,7 @@ fn full_guest() -> String {
 }
 
 /// board 8581: GetStats of VM processes past gRPC's default limit of a message, 4 MiB, which the
-/// clients failed with OUT_OF_RANGE as a host was busiest, is taken through `control::Client`, each
+/// clients failed with OUT_OF_RANGE as a host was busiest, is taken through the tonic client, each
 /// VM process's size measured: one of today's guest's some 2 KiB (1,960 bytes), one near the most
 /// a guest says some 40 KiB (40,568), as the .proto says. Past the most the daemon sends, here lowered to 2 MiB, it is
 /// refused, RESOURCE_EXHAUSTED (EMSGSIZE), saying what to leave out, until enough is.
@@ -921,11 +921,11 @@ fn stats_of_many_vms_are_taken_and_bounded() {
             vm
         })
         .collect();
-    let client = cladefs::cladefsd::control::Client::connect(dir.path().join("control.sock"));
+    let client = cladefs::testing::Control::connect(dir.path().join("control.sock"));
     let client = client.unwrap();
     let asking = GetStatsRequest { wait_ms: 30_000, ..GetStatsRequest::default() };
 
-    let stats = client.get_stats(asking.clone()).unwrap();
+    let stats = client.call(async |client| client.get_stats(asking.clone()).await).unwrap();
     assert_eq!(stats.vms.len(), VMS + 1);
     assert!(stats.vms.iter().all(|vm| vm.answered), "a VM process not answering");
     let bytes = prost::Message::encoded_len(&stats);
@@ -937,7 +937,8 @@ fn stats_of_many_vms_are_taken_and_bounded() {
     );
     assert!((1 << 10..3 << 10).contains(&todays), "today's guest's VM process: {todays} bytes");
     assert!((32 << 10..48 << 10).contains(&fullest), "a full guest's VM process: {fullest} bytes");
-    assert_eq!(client.list_cells().unwrap().len(), VMS + 1);
+    let listed = client.call(async |client| client.list_cells(ListCellsRequest {}).await).unwrap();
+    assert_eq!(listed.stores.len(), VMS + 1);
 
     fail::cfg("cladefsd::most_answer", "return(2097152)").unwrap();
     let mut asked = |leave_out: [bool; 3]| {

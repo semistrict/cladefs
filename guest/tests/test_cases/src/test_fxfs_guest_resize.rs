@@ -35,6 +35,8 @@ const PORT: u32 = 5050;
 #[host]
 mod host {
     use super::*;
+    use cladefs::cladefsd::control::proto::ResizeCellRequest;
+    use cladefs::testing::control_path;
 
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
@@ -56,8 +58,18 @@ mod host {
         for (step, capacity) in STEPS {
             let Some(line) = asked.next() else { return Ok(()) };
             assert_eq!(line?, step, "the steps in order");
-            let resized = crate::common::control(cladefsd)
-                .and_then(|daemon| daemon.resize_cell(cell_dir, capacity));
+            let resized = crate::common::control(cladefsd).and_then(|daemon| {
+                daemon
+                    .call(async |client| {
+                        client
+                            .resize_cell(ResizeCellRequest {
+                                path: control_path(cell_dir),
+                                capacity: capacity,
+                            })
+                            .await
+                    })
+                    .map(drop)
+            });
             let outcome = match resized {
                 Ok(()) => "ok".to_owned(),
                 Err(err) => {

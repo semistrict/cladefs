@@ -1397,8 +1397,7 @@ fn peer_calls_carry_their_trace_and_are_counted_on_both_sides() {
     // which the bucket's making, on futures' executor, may not.
     let exporter = InMemorySpanExporter::default();
     let processor = SimpleSpanProcessor::new(exporter.clone());
-    let export = super::super::zpages::tracez::Export::new(processor, Box::new(Sampler::AlwaysOn));
-    super::super::otel::install(Sampler::AlwaysOn, Some(export));
+    super::super::otel::install(Sampler::AlwaysOn, processor);
     let runtime = crate::bucket::bucket_runtime().unwrap();
     let mut client = super::member(&runtime, &address).unwrap();
     let asking_within = bucket_cell::trace::Span::start("a writer's work");
@@ -1469,8 +1468,7 @@ fn a_parts_bucket_requests_for_a_peer_are_on_its_trace() {
     // Once the bucket is made, on futures' executor, where the in-memory exporter may not export.
     let exporter = InMemorySpanExporter::default();
     let processor = SimpleSpanProcessor::new(exporter.clone());
-    let export = super::super::zpages::tracez::Export::new(processor, Box::new(Sampler::AlwaysOn));
-    super::super::otel::install(Sampler::AlwaysOn, Some(export));
+    super::super::otel::install(Sampler::AlwaysOn, processor);
     let asking = bucket_cell::trace::Span::start("a fetcher's read");
     let trace = asking.context().unwrap().span().span_context().trace_id();
     let runtime = crate::bucket::bucket_runtime().unwrap();
