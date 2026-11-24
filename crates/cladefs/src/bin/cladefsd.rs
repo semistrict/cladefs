@@ -156,7 +156,6 @@
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
-    cladefs::renamed::refuse_old_variables().map_err(anyhow::Error::msg)?;
     cladefs::cladefsd::logging::to_stderr()?;
     // cladefs: its large buffers given back as they are freed, before any thread is made
     // (TASK-317).

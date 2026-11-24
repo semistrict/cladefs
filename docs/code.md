@@ -260,9 +260,6 @@ virtio extent store. Its first pieces, from TASK-26.1's spike:
   elsewhere: `patches/` (`git am` them on the release), `libcladefs_linux.a`
   (copy it to `fs/cladefs/`) and `cladefs.config` (cladefs's options, over
   Firecracker's configuration).
-- `scripts/probe-guest-std.sh` builds Fxfs's third-party dependencies
-  (`guest/std-probe`) for the kernel's targets, against a sysroot whose `std`
-  is `guest/rust/std`, and lists those that do not build.
 
 **Guest Fxfs: what it does not do** (TASK-26.19). Beside the core inode, file
 and superblock operations, it has O_TMPFILE, fallocate (allocate, punch hole,

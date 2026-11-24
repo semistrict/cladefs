@@ -8,4 +8,3 @@ guide/src/generated/
 .agent-name
 # What a mutant runner stopped by SIGKILL left in the tree (scripts/lib/patches.sh).
 .mutant-in
-scripts/board/node_modules/

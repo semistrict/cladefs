@@ -42,7 +42,6 @@ fn main() -> anyhow::Result<()> {
     use anyhow::Context as _;
     use std::io::Write as _;
     use std::path::PathBuf;
-    cladefs::renamed::refuse_old_variables().map_err(anyhow::Error::msg)?;
     cladefs::cladefsd::logging::to_stderr()?;
     // Before any thread is started, which would take the signals otherwise.
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;

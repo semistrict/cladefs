@@ -1527,7 +1527,6 @@ fn flattened(value: &serde_json::Value) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    cladefs::renamed::refuse_old_variables().map_err(anyhow::Error::msg)?;
     // cladefs: its threads' stacks on SIGQUIT, as an import that hung needed (TASK-98, TASK-44.13).
     #[cfg(target_os = "linux")]
     cladefs::stacks::on_sigquit()?;

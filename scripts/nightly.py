@@ -14,8 +14,7 @@ main, and its head is tonight's baseline.
   plan
       `skip WHY` if the newest night that measured (outcome `measured`) measured main's code
       already, else `run BASE HEAD`. HEAD is the newest commit of origin's main that changed more
-      than what the nightly writes (docs/measurements; and backlog/, where tasks were until
-      2026-11-21, which measures the same), so that a night's own commit is no change to measure. BASE is the newest
+      than what the nightly writes (docs/measurements), so that a night's own commit is no change to measure. BASE is the newest
       measured night's head; with none, the first night's base; with no night at all, HEAD's
       first parent. A night that could not run, or whose rounds were all left out, measured
       nothing: the next night measures the same commits again, or main's newer head against the
@@ -103,7 +102,7 @@ def nights(measurements):
 
 
 # What the nightly writes, which is no change of main's code to measure.
-NOT_CODE = (":(exclude)docs/measurements", ":(exclude)backlog")
+NOT_CODE = (":(exclude)docs/measurements",)
 
 
 def plan(root, measurements):

@@ -4,8 +4,12 @@ title: >-
   libkrun changes live on semistrict/libkrun branch fxdax, vendored as a
   submodule
 date: '2026-09-28 02:49'
-status: accepted
+status: superseded
 ---
+> **Superseded.** cladefs left libkrun for its own Firecracker (`vendor/firecracker`, TASK-149):
+> there is no `vendor/libkrun` submodule and no libkrun branch to keep. Kept as the record of what
+> fxdax first decided (board 10610).
+
 ## Context
 
 fxdax needs changes to libkrun: a virtio-fs backend (`FsBackend`) with an adapter, and DAX fault routing on HVF and KVM (see doc-1).

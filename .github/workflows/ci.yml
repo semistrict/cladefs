@@ -11,9 +11,6 @@ name: CI
 on:
   push:
     branches: [main]
-    # cladefs: a push of backlog notes alone tests nothing new: what reaches main has passed its
-    # land-X branch's run first. Their runs queued ahead of land-X branches' for half an hour.
-    paths-ignore: ['backlog/**']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -131,8 +128,8 @@ jobs:
         if: matrix.parts == 'guest'
         working-directory: guest/tests
         run: cargo check -p test_cases --features guest --tests --target x86_64-unknown-linux-musl
-      # DAX's tests take faults through /dev/userfaultfd, root's alone on the runner, as
-      # scripts/lima-setup.sh gives it to the kvm group.
+      # DAX's tests take faults through /dev/userfaultfd, root's alone on the runner, as a test
+      # host gives it to the kvm group (docs/operating-a-host.md).
       - name: Let the tests use userfaultfd
         run: sudo setfacl -m "u:$USER:rw" /dev/userfaultfd
       # The tests' stores on the root disk, which has room: in /tmp, three cladefsd tests ran out of

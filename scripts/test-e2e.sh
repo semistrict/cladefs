@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Run cladefs's guest tests (guest/tests) on this host, Linux with KVM (on macOS, use
-# scripts/test-e2e-linux.sh, which runs this in Lima). Arguments select the test cases, by name or
+# Run cladefs's guest tests (guest/tests) on this host, Linux with KVM (elsewhere, use
+# scripts/test-host.sh, which runs them on a test host). Arguments select the test cases, by name or
 # by suite, `--tag SUITE` (the guest tests' runner's `list`, whose --help names the suites;
 # default: --tag e2e), which boot cladefs's Firecracker (vendor/firecracker,
 # with its cladefs feature), which this builds, and the guest kernel
@@ -101,7 +101,7 @@ else
 fi
 
 if [[ $(uname -s) != Linux ]]; then
-    echo "cladefs's guests run on Linux only: use scripts/test-e2e-linux.sh" >&2
+    echo "cladefs's guests run on Linux only: use scripts/test-host.sh" >&2
     exit 2
 fi
 if [[ -z ${LIBCLANG_PATH:-} ]] && command -v llvm-config > /dev/null; then

@@ -156,7 +156,6 @@ mod node;
 mod open_cell;
 pub mod pages;
 pub mod protocol;
-pub mod renamed;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod request;
 #[cfg(all(test, feature = "shuttle"))]

@@ -236,13 +236,6 @@ class Nights(unittest.TestCase):
         self.assertEqual(host1.log().splitlines()[-1].split(" ", 1)[1],
                          f"nothing to measure: main's code is {record['head'][:12]}'s, which the "
                          f"night of {record['date']} measured")
-        # Nor does a night after a commit of the backlog's alone.
-        host1.git(host1.pusher, "pull", "-q", "--rebase", "origin", "main")
-        host1.commit(host1.pusher, {"backlog/tasks/task-1 - x.md": "a task\n"})
-        host1.git(host1.pusher, "push", "-q", "origin", "HEAD:main")
-        before = host1.main()
-        status, _, err = host1.night(host1.rounds(1.0))
-        self.assertEqual((status, host1.main()), (0, before), err)
 
     def test_a_quiet_night_builds_as_work_measures_alone_and_files_nothing(self):
         host1 = NightlyHost()

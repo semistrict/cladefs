@@ -250,7 +250,7 @@ Boot guests, on Linux with KVM. This builds the guest kernel and Firecracker, st
 runs the guest tests, each of which boots VMs that mount Fxfs from an extent store device:
 
 ```sh
-scripts/test-guest-kernel.sh   # on macOS it runs in a Lima VM, which scripts/lima-setup.sh makes
+scripts/test-guest-kernel.sh   # this host, Linux with KVM; scripts/test-host.sh runs it on a test host
 ```
 
 [docs/testing.md](docs/testing.md) has the other suites, and [docs/operating-a-host.md](docs/operating-a-host.md)
@@ -290,8 +290,7 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 - [AGENTS.md](AGENTS.md): how work on cladefs is done.
 
 cladefs was fxdax (Fxfs plus DAX, the first prototype's name) until TASK-437. Records of what ran
-before, such as `docs/measurements` and tasks closed before it, keep the old name, and
-`scripts/rename-to-cladefs.sh` renames a branch begun before.
+before, such as `docs/measurements` and tasks closed before it, keep the old name.
 
 ## Licenses
 

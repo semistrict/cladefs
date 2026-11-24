@@ -9,8 +9,7 @@
 # at the versions pinned here (host_need), the guest kernel it builds
 # (host_kernel), and the record of the host it ran on (host_record). Sourcing it
 # defines them and does nothing else. The sourcing script sets repo, the source,
-# and results, the directory it writes to. The Lima VM's tree is a host_tree
-# too, in the VM's home (scripts/lib/lima.sh).
+# and results, the directory it writes to.
 #
 # A test host, provisioned already (by its own setup),
 # sets CLADEFS_TEST_HOST_PROVISIONED=1: host_setup checks it and installs nothing, the

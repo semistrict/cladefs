@@ -3,9 +3,7 @@
 # found in the LICENSE file.
 
 """Tests of scripts/lib/linux-host-setup.sh, the library of the scripts that run on a host, here
-with a temporary directory as the host's work directory; and of the tree the Lima VM's scripts
-run in, which scripts/lib/lima.sh syncs with it, here with a temporary directory as the VM's home,
-where a limactl in its place runs the VM's shell."""
+with a temporary directory as the host's work directory."""
 
 import contextlib
 import os
@@ -26,17 +24,6 @@ CHECKED_OUT = 978307200
 BUILT = 1420070400
 # What the tree built, which stays, and what the checkout's did, which is not copied.
 BUILDS = ["target/debug/x", "guest/tests/target/debug/x", "vendor/firecracker/build/x"]
-# The VM's shell: `limactl shell INSTANCE -- bash -lc SCRIPT` runs SCRIPT here, its home $FAKE_VM,
-# in an environment of its own, as Lima's.
-LIMACTL = """#!/bin/bash
-[[ $1 == shell && $3 == -- && $4 == bash ]] || { echo "limactl: no such call: $*" >&2; exit 2; }
-shift 4
-exec env -i HOME="$FAKE_VM" PATH=/usr/bin:/bin bash "$@"
-"""
-# A script the VM runs, which says what it was given.
-SAYS = '#!/bin/bash\necho "$0 $*, LIBCLANG_PATH=${LIBCLANG_PATH:-}"\n'
-# A script the VM runs, which says the cladefs settings it was given.
-SETTINGS = '#!/bin/bash\nenv | grep -E "^CLADEFSD?_" | sort\n'
 
 
 def write(path, text, mtime):
@@ -161,81 +148,6 @@ class InPlace(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual((done.returncode, done.stdout, done.stderr), (0, str(source), ""))
             self.assertFalse((Path(directory) / "work").exists())
-
-
-class Lima(Synced, unittest.TestCase):
-    """The Lima VM's tree, ~/cladefs-test, which scripts/lib/lima.sh syncs before it runs a script
-    there, from a checkout of its own."""
-
-    def lima(self, script, *args, settings=None, commit=False):
-        """Runs the checkout's scripts/`script` with `args` and the environment's `settings`, the
-        checkout and the VM's tree as built() has them, the tree synced by content before, and the
-        checkout a commit of Git's if `commit` (self.commit): its status, output and errors."""
-        self.vm, checkout = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
-        built(self.vm / "cladefs-test", checkout)
-        (self.vm / "cladefs-test" / ".by-content").touch()
-        for name in ["lib/lima.sh", "lib/linux-host-setup.sh", "lib/measurement.sh",
-                     "lib/host-packages.sh", "host-packages.txt", "test-linux.sh", "build-commit.sh"]:
-            (checkout / "scripts" / name).parent.mkdir(parents=True, exist_ok=True)
-            (checkout / "scripts" / name).symlink_to(SCRIPTS / name)
-        for name, text in [("bench.sh", SAYS), ("test.sh", SAYS), ("settings.sh", SETTINGS)]:
-            (checkout / "scripts" / name).write_text(text)
-            (checkout / "scripts" / name).chmod(0o755)
-        if commit:
-            git = ["git", "-C", checkout, "-c", "user.name=t", "-c", "user.email=t@t"]
-            subprocess.run([*git[:3], "init", "-q"], check=True)
-            subprocess.run([*git, "add", "-A"], check=True)
-            subprocess.run([*git, "commit", "-q", "-m", "c"], check=True)
-            self.commit = subprocess.run(
-                [*git[:3], "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-            ).stdout.strip()
-        bin_ = Path(tempfile.mkdtemp())
-        (bin_ / "limactl").write_text(LIMACTL)
-        (bin_ / "limactl").chmod(0o755)
-        self.start = int(time.time())
-        done = subprocess.run(
-            ["/bin/bash", checkout / "scripts" / script, *args],
-            env={
-                "PATH": f"{bin_}:/usr/bin:/bin",
-                "HOME": tempfile.mkdtemp(),
-                "FAKE_VM": str(self.vm),
-                "LIBCLANG_PATH": "/usr/lib/llvm 19/lib",
-                **(settings or {}),
-            },
-            capture_output=True,
-            text=True,
-        )
-        return done.returncode, done.stdout, done.stderr
-
-    def test_a_script_runs_in_the_vms_tree_synced_by_content(self):
-        ran = self.lima("lib/lima.sh", "bench.sh", "3", "a b")
-        script = self.vm / "cladefs-test" / "scripts" / "bench.sh"
-        self.assertEqual(ran, (0, f"{script} 3 a b, LIBCLANG_PATH=/usr/lib/llvm 19/lib\n", ""))
-        self.assertSynced(self.vm / "cladefs-test", self.start)
-
-    def test_the_tests_run_in_the_vms_tree_synced_by_content(self):
-        ran = self.lima("test-linux.sh", "-E", "test(x)")
-        script = self.vm / "cladefs-test" / "scripts" / "test.sh"
-        self.assertEqual(ran, (0, f"{script} -E test(x), LIBCLANG_PATH=/usr/lib/llvm 19/lib\n", ""))
-        self.assertSynced(self.vm / "cladefs-test", self.start)
-
-    def test_the_vms_script_takes_the_cladefs_settings_given(self):
-        # As test-e2e-linux.sh's guest kernel, a path in the VM, and its repeats.
-        settings = {"CLADEFS_GUEST_KERNEL": "/home/me/a kernel/Image", "CLADEFS_E2E_REPEATS": "3"}
-        ran = self.lima("lib/lima.sh", "settings.sh", settings=settings)
-        said = "CLADEFS_BUILD_COMMIT=unknown\nCLADEFS_E2E_REPEATS=3\n"
-        said += "CLADEFS_GUEST_KERNEL=/home/me/a kernel/Image\n"
-        self.assertEqual(ran, (0, said, ""))
-
-    def test_the_vms_builds_are_of_the_checkouts_commit(self):
-        # The VM's tree has no .git (host_tree), whose builds would say they are of no commit: the
-        # guest kernel's /proc/fs/cladefs/build, which fxfs-guest checks.
-        ran = self.lima("lib/lima.sh", "settings.sh", commit=True)
-        self.assertEqual(ran, (0, f"CLADEFS_BUILD_COMMIT={self.commit}\n", ""))
-
-    def test_a_build_commit_given_is_the_vms(self):
-        ran = self.lima("lib/lima.sh", "settings.sh", settings={"CLADEFS_BUILD_COMMIT": "abc"})
-        self.assertEqual(ran, (0, "CLADEFS_BUILD_COMMIT=abc\n", ""))
 
 
 class Apt(unittest.TestCase):

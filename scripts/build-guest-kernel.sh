@@ -12,8 +12,8 @@
 #
 #   build-guest-kernel.sh [arm64|x86_64]
 #
-# builds for this machine's architecture by default. It runs on Linux, natively; on macOS, run it in
-# Lima: scripts/lib/lima.sh build-guest-kernel.sh. The sources and the build live under
+# builds for this machine's architecture by default. It runs on Linux, natively (on a test host:
+# scripts/guest-kernel.sh). The sources and the build live under
 # $CLADEFS_GUEST_KERNEL_WORK (default: ~/cladefs-guest-kernel), and its out/<arch> gets the kernel
 # (Image for arm64, vmlinux for x86-64, as Firecracker loads them) and what builds it elsewhere, on
 # the same release: patches/, the series (git am); libcladefs_linux.a, the Rust, for fs/cladefs; and

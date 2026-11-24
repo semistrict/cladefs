@@ -2,12 +2,8 @@
 
 ```sh
 scripts/test.sh          # macOS or Linux
-scripts/test-linux.sh    # Linux, in a Lima VM
-scripts/test-host.sh     # x86-64 Linux with KVM, on the test host over ssh
+scripts/test-host.sh     # x86-64 Linux with KVM, in a hotbed workspace on a test host
 ```
-
-`scripts/lima-setup.sh` creates the Lima VM the Linux scripts use on macOS, and
-installs what they need in it; run again, it installs only what is missing.
 
 The guest tests (`guest/tests`) boot cladefs's guest kernel in cladefs's
 Firecracker, on Linux with KVM, and mount its Fxfs from an extent-store device,
@@ -20,7 +16,6 @@ and test cases) came from libkrun's tests, Apache-2.0 (`guest/tests/LICENSE.libk
 
 ```sh
 scripts/test-e2e.sh        # Linux (KVM): CLADEFS_GUEST_KERNEL names the kernel
-scripts/test-e2e-linux.sh  # Linux, in a Lima VM
 ```
 
 Each case is in suites, which the scripts run it by: `scripts/test-e2e.sh --tag kernel`, or cases
@@ -134,7 +129,7 @@ CLADEFS_TEST_HOST=<node> scripts/contamination-check.sh check-1   # four minutes
 ```
 
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
-the guest tests on it, in Lima on macOS.
+the guest tests on it, on this host (Linux with KVM).
 
 `scripts/test-host.sh` runs them too, in a hotbed workspace on a test host (`CLADEFS_TEST_HOST`
 names the node): this checkout synced there, the run a hotbed command, the results copied back and
@@ -158,8 +153,7 @@ make check-tla             # about two hours, each model in minutes, on Java; fe
 
 Every night at 02:00 a cron entry on the nightly host (a test host) runs
 `scripts/nightly-host.sh` from the nightly's own clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change
-since the last night that measured (its newest commit that changed more than `docs/measurements`, or
-`backlog/` before tasks moved to the board), it does nothing. Otherwise it measures main's head against the commit that night
+since the last night that measured (its newest commit that changed more than `docs/measurements`), it does nothing. Otherwise it measures main's head against the commit that night
 measured, as an A/B (`scripts/bench-ab-host.sh`, on the test host itself, `CLADEFS_TEST_HOST=local`): the
 head built as work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`),
 then three rounds of both sides interleaved alone in `hotbed run --bench`, each of the fs bench's cases
@@ -226,7 +220,6 @@ built with podman.
 ```sh
 scripts/bench-host.sh      # x86-64 Linux with KVM, on the test host
 scripts/bench.sh           # this host, Linux
-scripts/bench-linux.sh     # Linux, in a Lima VM
 ```
 
 `scripts/bench-host.sh` keeps its results in `docs/measurements`, with the test host

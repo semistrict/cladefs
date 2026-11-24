@@ -8,7 +8,7 @@
 //!
 //! A test run by root mounts with mount(2); any other user's, through `fusermount3`, which the
 //! hosts the tests run on have (libfuse 3's `fuse3`: .github/workflows/ci.yml,
-//! scripts/lib/linux-host-setup.sh, scripts/lima-setup.sh).
+//! scripts/lib/linux-host-setup.sh).
 //!
 //! Each test unmounts lazily, as the daemon and `cladefs-mount` do, and joins the mount, which
 //! waits until the kernel is done with it: other processes of the host may look into a new mount

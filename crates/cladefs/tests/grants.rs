@@ -305,7 +305,7 @@ const AS_ROOT_FOR: &str = "CLADEFS_TEST_AS_ROOT_FOR";
 /// daemon's own for each it does not, whether its tenant is granted already or not. Before, a
 /// Grant again left what it did not name as the grant before gave it: the group an earlier grant
 /// named connected still. As root, the daemon gives sockets away (in a user namespace of its own
-/// on a test host): needs `sudo -n`, as Lima's VMs have it.
+/// on a test host): needs `sudo -n`.
 #[test]
 fn grants_give_sockets_to_whom_they_name_alone() {
     use std::os::unix::fs::MetadataExt as _;
@@ -354,7 +354,7 @@ const JAIL_CELL_DIR: &str = "CLADEFS_TEST_JAIL_CELL_DIR";
 /// A tenant's socket, given to its jails' user and bind-mounted into a jail, as the host's VM
 /// manager does with Firecracker's jailer: in a mount namespace of its own, where the tenants'
 /// sockets' directory is hidden, a VM process of that user opens the tenant's cell through it.
-/// Needs `sudo -n`, as Lima's VMs have it.
+/// Needs `sudo -n`.
 #[test]
 fn tenant_sockets_work_bind_mounted_into_jails() {
     if let Some(socket) = std::env::var_os(JAIL_SOCKET) {
@@ -699,7 +699,7 @@ impl Drop for KillOnDrop {
 
 /// TASK-155: the real daemon's own socket, whatever its umask, even none, is its user's alone: a
 /// VM process of another user, with it bind-mounted into its mount namespace, is refused by the
-/// kernel, where a socket beside it connects. Needs `sudo -n`, as Lima's VMs have it.
+/// kernel, where a socket beside it connects. Needs `sudo -n`.
 #[test]
 fn the_default_socket_refuses_other_users() {
     refuses_other_users("the_default_socket_refuses_other_users", |sockets| sockets.vms);

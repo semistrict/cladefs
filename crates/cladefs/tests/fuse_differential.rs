@@ -20,7 +20,7 @@
 //! listed in [`ALLOWED`], each with why: the one place they are.
 //!
 //! Run by a user, the mount is made through `fusermount3` and every call is the user's own. Run by
-//! root (the test host's runs; `sudo` in Lima), the mount is made with mount(2), the reference is a
+//! root (`sudo`), the mount is made with mount(2), the reference is a
 //! tmpfs of the test's own, and the calls switch between root and two other users (the calling
 //! thread's `setfsuid`, `setfsgid` and supplementary groups): permissions, sticky directories,
 //! setgid directories' groups, chown's rules and setuid's killing, as Linux has them for each,

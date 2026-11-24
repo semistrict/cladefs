@@ -146,8 +146,7 @@ fn output_within(mut child: Child, bound: Duration) -> std::io::Result<Output> {
 mod tests {
     /// A process's stacks name the functions its threads wait in: here, a thread parked in one of
     /// this test's.
-    /// eu-stack is elfutils', which the hosts the tests run on have (scripts/lib/linux-host-setup.sh,
-    /// scripts/lima-setup.sh).
+    /// eu-stack is elfutils', which the hosts the tests run on have (scripts/lib/linux-host-setup.sh).
     #[test]
     fn stacks_name_where_threads_wait() {
         #[inline(never)]

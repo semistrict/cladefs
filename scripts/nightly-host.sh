@@ -14,8 +14,8 @@
 #   scripts/nightly-host.sh
 #
 # Then, unless main's code is what the newest night measured (nightly.py plan: its head is main's
-# newest commit that changed more than docs/measurements (and backlog/, where tasks were until
-# 2026-11-21), which the nightly's own commits change; then it does nothing more), it runs
+# newest commit that changed more than docs/measurements, which the nightly's own commits change;
+# then it does nothing more), it runs
 # scripts/bench-ab-host.sh in a session of its own, side `base` the commit the night before
 # measured, side `head` main's: each side built as ordinary work, with its exact counts
 # (scripts/counts.sh, CLADEFS_AB_COUNTS); then, alone under hotbed run --bench,

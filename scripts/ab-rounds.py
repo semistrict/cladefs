@@ -83,8 +83,7 @@ CONTROL = "ext4-guest-kernel"
 COUNTED = re.compile(r"(-requests|-bytes|-reads)$|^cladefsd-(?!.*-(ms|ns|us|secs)$)")
 ROUND = re.compile(r"-r([1-9][0-9]*)$")
 # The extent daemon's name in the metrics and files of a side from before TASK-503, which
-# LangSmith's pin and the nightly's night before may be for a while. Spelt so that
-# scripts/rename-to-cladefs-api.sh, run again, leaves it.
+# LangSmith's pin and the nightly's night before may be for a while.
 BEFORE_CLADEFSD = re.compile(r"\bextent[d](?=[-_.])")
 # The bounds of metrics named apart by default, (METRIC, FRACTION): Bounds.of puts the caller's
 # before them.
