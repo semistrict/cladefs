@@ -505,7 +505,7 @@ mod tests {
             .err()
             .expect("a base of an older version opened");
         assert!(FxfsError::InvalidVersion.matches(&error), "{error:?}");
-        let named = format!("Base layer of unsupported version {OLDER}");
+        let named = format!("Layer of unsupported version {OLDER}");
         assert!(format!("{error:#}").contains(&named), "{error:#}");
         std::mem::drop(root);
         filesystem.close().await.expect("Close failed");

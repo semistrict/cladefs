@@ -64,7 +64,7 @@ use crate::object_store::transaction::{
     AssocObj, AssociatedObject, LockKey, LockKeys, ObjectStoreMutation, Operation, Options,
     Transaction, lock_keys,
 };
-use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, Version, Versioned, VersionedLatest};
+use crate::serialized_types::{Version, Versioned, VersionedLatest};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use async_trait::async_trait;
 use fprint::TypeFingerprint;
@@ -1212,16 +1212,6 @@ impl ObjectStore {
             .collect::<Result<Vec<_>, _>>()?;
         let base_layers =
             layers_from_handles(handles).await.context("Failed to read base layers")?;
-        // A mount checks the versions of the filesystem's own layers (the super-block's
-        // `earliest_version`), not those of a base's, which another filesystem wrote.
-        for layer in &base_layers {
-            let version = layer.get_version();
-            ensure!(
-                version >= EARLIEST_SUPPORTED_VERSION,
-                anyhow!(FxfsError::InvalidVersion)
-                    .context(format!("Base layer of unsupported version {version}"))
-            );
-        }
         store.tree.append_open_layers(base_layers);
 
         fs.object_manager().update_reservation(

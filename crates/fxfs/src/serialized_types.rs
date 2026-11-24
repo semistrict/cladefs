@@ -74,7 +74,4 @@ mod tests;
 
 // Re-export all Fxfs types.
 mod types;
-pub use types::{
-    EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, OLD_KEY_SERIALIZATION_VERSION,
-    get_type_fingerprints,
-};
+pub use types::{EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, get_type_fingerprints};

@@ -70,7 +70,7 @@ use crate::object_store::extent::MIN_BLOCK_SIZE;
 use crate::object_store::{DataObjectHandle, HandleOptions, ObjectStore};
 use crate::serialized_types::serialized_key::{KeyDeserializer, compare_keys};
 use crate::serialized_types::{
-    LATEST_VERSION, OLD_KEY_SERIALIZATION_VERSION, Version, Versioned, VersionedLatest,
+    EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned, VersionedLatest,
 };
 use anyhow::{Context, Error, anyhow, ensure};
 use async_trait::async_trait;
@@ -238,9 +238,8 @@ const MAX_SEEK_TABLE_SIZE: usize = 64 * 1024 * 1024;
 const PER_DATA_BLOCK_HEADER_SIZE: usize = 2;
 const PER_DATA_BLOCK_SEEK_ENTRY_SIZE: usize = 2;
 
-enum KeyState<K> {
+enum KeyState {
     None,
-    Deserialized(K),
     InPlace,
 }
 
@@ -261,7 +260,7 @@ struct KeyOnlyIterator<'iter, K: Key, V: LayerValue, B> {
     item_count: u16,
 
     // The current key state.
-    key: KeyState<K>,
+    key: KeyState,
 
     // The base value used for decoding keys in the current block.
     current_block_base_u64: u64,
@@ -343,7 +342,6 @@ impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
                 self.buffer.pos += key_len;
                 key
             }
-            KeyState::Deserialized(key) => key,
         };
         let value = V::deserialize_from_version(self.buffer.by_ref(), self.layer.version)
             .map_err(|e| self.corruption_error(e))
@@ -388,14 +386,12 @@ impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
             oid = self.layer.object_id;
             ""
         );
-        if self.layer.version > OLD_KEY_SERIALIZATION_VERSION {
-            let block_index = (self.pos - self.layer.data_offset()) / self.layer.block_size;
-            self.current_block_base_u64 = *self
-                .layer
-                .seek_table
-                .get(block_index as usize)
-                .ok_or_else(|| self.corruption_error("Block index out of bounds"))?;
-        }
+        let block_index = (self.pos - self.layer.data_offset()) / self.layer.block_size;
+        self.current_block_base_u64 = *self
+            .layer
+            .seek_table
+            .get(block_index as usize)
+            .ok_or_else(|| self.corruption_error("Block index out of bounds"))?;
         self.pos += self.layer.block_size;
         self.item_index = 0;
         self.key = KeyState::None;
@@ -404,15 +400,7 @@ impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
 
     fn deserialize_current_key(&mut self) -> Result<(), Error> {
         self.seek_to_block_item(self.item_index)?;
-        self.key = if self.layer.version <= OLD_KEY_SERIALIZATION_VERSION {
-            KeyState::Deserialized(
-                K::deserialize_from_version(self.buffer.by_ref(), self.layer.version)
-                    .map_err(|e| self.corruption_error(e))
-                    .context("Corrupt layer (key)")?,
-            )
-        } else {
-            KeyState::InPlace
-        };
+        self.key = KeyState::InPlace;
         self.item_index += 1;
         Ok(())
     }
@@ -595,11 +583,8 @@ async fn load_seek_table(
     object_handle: &(impl ReadObjectHandle + 'static),
     seek_table_offset: u64,
     num_data_blocks: u64,
-    version: Version,
 ) -> Result<Vec<u64>, Error> {
-    if num_data_blocks == 0 || version <= OLD_KEY_SERIALIZATION_VERSION {
-        // Ignore the seek table on older versions because AllocatorKey::get_leading_u64()
-        // changed from bytes to blocks.
+    if num_data_blocks == 0 {
         return Ok(Vec::new());
     }
 
@@ -729,7 +714,6 @@ impl<'a, K: Key> SearchKey<'a, K> {
     ) -> Result<Option<Ordering>, Error> {
         match &iter.key {
             KeyState::None => Ok(None),
-            KeyState::Deserialized(k) => Ok(Some(k.cmp_upper_bound(self.key))),
             KeyState::InPlace => {
                 let base = iter.current_block_base_u64;
                 if self.cached_base != Some(base) {
@@ -756,7 +740,13 @@ impl<K: FuzzyHash> LayerData<K> {
         let mut reader = buffer.as_slice();
         let version = Version::deserialize_from(&mut reader)?;
 
-        ensure!(version <= LATEST_VERSION, FxfsError::InvalidVersion);
+        // cladefs: refuse every layer version outside `EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION`
+        // (board 10527); before freezing, `EARLIEST_SUPPORTED_VERSION == LATEST_VERSION`.
+        ensure!(
+            (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
+            anyhow!(FxfsError::InvalidVersion)
+                .context(format!("Layer of unsupported version {version}"))
+        );
         let header = LayerHeader::deserialize_from_version(&mut reader, version)
             .context("Failed to deserialize header")?;
         if &header.magic != PERSISTENT_LAYER_MAGIC {
@@ -803,19 +793,12 @@ impl<K: FuzzyHash> LayerData<K> {
         };
         std::mem::drop(buffer);
         let layout = LayerLayout::new(&layer_info, block_size, handle.get_size())?;
-        let bloom_filter = if version == LATEST_VERSION {
-            load_bloom_filter(handle, layout.bloom_filter_offset, &layer_info)
-                .await
-                .context("Failed to load bloom filter")?
-        } else {
-            // Ignore the bloom filter for layer files in outdated versions.  We don't know whether
-            // keys have changed formats or not (and therefore have different hash values), so we
-            // must ignore the bloom filter and always query the layer.
-            None
-        };
+        let bloom_filter = load_bloom_filter(handle, layout.bloom_filter_offset, &layer_info)
+            .await
+            .context("Failed to load bloom filter")?;
 
         let seek_table =
-            load_seek_table(handle, layout.seek_table_offset, layer_info.num_data_blocks, version)
+            load_seek_table(handle, layout.seek_table_offset, layer_info.num_data_blocks)
                 .await
                 .context("Failed to load seek table")?;
 
@@ -1276,7 +1259,6 @@ const_assert!(MAX_BLOCK_SIZE.size() <= u16::MAX as u64 + 1);
 
 pub struct PersistentLayerWriter<W: WriteBytes, K: Key, V: LayerValue> {
     writer: W,
-    version: Version,
     block_size: BlockSize,
     buf: Vec<u8>,
     buf_item_count: LayerWriterBufItemCount,
@@ -1323,7 +1305,6 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V>
         let seed: u64 = getrandom::u64().expect("getrandom failed");
         Ok(Self {
             writer,
-            version,
             block_size,
             buf: Vec::new(),
             buf_item_count: LayerWriterBufItemCount(0),
@@ -1371,11 +1352,7 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V>
     // Note that the writer will be positioned to exactly the end of the seek table, not to the end
     // of a block.
     async fn write_seek_table(&mut self) -> Result<usize, Error> {
-        let keys = if self.version <= OLD_KEY_SERIALIZATION_VERSION {
-            self.block_keys.get(1..).unwrap_or(&[])
-        } else {
-            &self.block_keys
-        };
+        let keys = &self.block_keys;
         if keys.len() == 0 {
             return Ok(0);
         }
@@ -1458,16 +1435,12 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V>
     }
 
     fn serialize_item(&mut self, item: ItemRef<'_, K, V>) -> Result<(), Error> {
-        if self.version <= OLD_KEY_SERIALIZATION_VERSION {
-            item.key.serialize_into(&mut self.buf)?;
-        } else {
-            // cladefs: what's written comes from layers, in order only if they were: a key below its
-            // block's base is what a compaction of a corrupt one meets.
-            let base = *self.block_keys.last().unwrap();
-            item.key
-                .serialize_key_with_base_into(&mut self.buf, base)
-                .map_err(|error| anyhow!(FxfsError::Inconsistent).context(error))?;
-        }
+        // cladefs: what's written comes from layers, in order only if they were: a key below its
+        // block's base is what a compaction of a corrupt one meets.
+        let base = *self.block_keys.last().unwrap();
+        item.key
+            .serialize_key_with_base_into(&mut self.buf, base)
+            .map_err(|error| anyhow!(FxfsError::Inconsistent).context(error))?;
         item.value.serialize_into(&mut self.buf)?;
         Ok(())
     }
@@ -1694,7 +1667,6 @@ mod tests {
     };
     use crate::filesystem::MAX_BLOCK_SIZE;
     use crate::lsm_tree::LayerIterator;
-    use crate::lsm_tree::persistent_layer::MINIMUM_DATA_BLOCKS_FOR_BLOOM_FILTER;
     use crate::lsm_tree::testing::TestKey;
     use crate::lsm_tree::types::{
         Existence, Item, ItemRef, Key, Layer, LayerValue, LayerWriter, MaybeContainsKey,
@@ -1707,7 +1679,9 @@ mod tests {
     use crate::object_store::extent::MIN_BLOCK_SIZE;
     use crate::object_store::object_record::ObjectKey;
     use crate::round::round_up;
-    use crate::serialized_types::{OLD_KEY_SERIALIZATION_VERSION, Versioned as _};
+    use crate::serialized_types::{
+        EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned as _,
+    };
     use crate::testing::fake_object::{FakeObject, FakeObjectHandle};
     use crate::testing::writer::Writer;
     use anyhow::Error;
@@ -2548,161 +2522,43 @@ mod tests {
         }
     }
 
+    /// cladefs: opening a layer file whose version is outside
+    /// `EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION` (older or newer) is refused with
+    /// `FxfsError::InvalidVersion` (board 10527).
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_ignore_bloom_filter_on_older_versions() {
-        const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
-        const ITEMS_PER_PHASE: u64 = 50;
-        // Add enough items to create enough blocks for a bloom filter to be necessary.
-        const ITEM_COUNT: u64 = (1 + MINIMUM_DATA_BLOCKS_FOR_BLOOM_FILTER as u64) * ITEMS_PER_PHASE;
+    async fn test_refuses_non_latest_version_layer() {
+        const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
 
-        let old_version_handle =
-            FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
-        let current_version_handle =
-            FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
-        // Make all values take up maximum space for varint encoding.
-        let initial_value = u32::MAX as u64 + 1;
-        {
-            let mut old_version_writer =
-                PersistentLayerWriter::<_, TestKey, u64>::new_with_version(
-                    Writer::new(&old_version_handle).await,
-                    ITEM_COUNT as usize,
+        for version in [
+            Version { major: 0, minor: 0 },
+            Version { major: 57, minor: 0 },
+            Version { major: EARLIEST_SUPPORTED_VERSION.major - 1, minor: 0 },
+            Version { major: LATEST_VERSION.major, minor: LATEST_VERSION.minor + 1 },
+            Version { major: LATEST_VERSION.major + 1, minor: 0 },
+        ] {
+            let handle =
+                FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
+            {
+                let mut writer = PersistentLayerWriter::<_, TestKey, u64>::new_with_version(
+                    Writer::new(&handle).await,
+                    1,
                     BLOCK_SIZE,
-                    OLD_KEY_SERIALIZATION_VERSION,
+                    version,
                 )
                 .await
                 .expect("writer new");
-            let mut current_version_writer = PersistentLayerWriter::<_, TestKey, u64>::new(
-                Writer::new(&current_version_handle).await,
-                ITEM_COUNT as usize,
-                BLOCK_SIZE,
-            )
-            .await
-            .expect("writer new");
-
-            for i in 0..ITEM_COUNT {
-                old_version_writer
-                    .write(
-                        Item::new(TestKey(initial_value + i..initial_value + i), initial_value)
-                            .as_item_ref(),
-                    )
-                    .await
-                    .expect("write failed");
-                current_version_writer
-                    .write(
-                        Item::new(TestKey(initial_value + i..initial_value + i), initial_value)
-                            .as_item_ref(),
-                    )
-                    .await
-                    .expect("write failed");
+                writer.write(Item::new(TestKey(0..1), 42).as_item_ref()).await.expect("write");
+                writer.complete().await.expect("complete");
             }
-
-            old_version_writer.complete().await.expect("flush failed");
-            current_version_writer.complete().await.expect("flush failed");
-        }
-
-        let old_layer =
-            PersistentLayer::<TestKey, u64>::open(old_version_handle).await.expect("open failed");
-        let current_layer = PersistentLayer::<TestKey, u64>::open(current_version_handle)
-            .await
-            .expect("open failed");
-        assert!(!old_layer.has_bloom_filter());
-        assert!(current_layer.has_bloom_filter());
-
-        // Verify seeking works in both layers (including before the first block's key).
-        let iter = old_layer.seek(Bound::Included(&TestKey(0..0))).await.expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key.0.start, initial_value);
-
-        let iter = current_layer.seek(Bound::Included(&TestKey(0..0))).await.expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key.0.start, initial_value);
-
-        let iter = old_layer.seek(Bound::Unbounded).await.expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key.0.start, initial_value);
-
-        let iter = current_layer.seek(Bound::Unbounded).await.expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key.0.start, initial_value);
-
-        let target_val = initial_value + ITEM_COUNT / 2;
-        let iter = old_layer
-            .seek(Bound::Included(&TestKey(target_val..target_val)))
-            .await
-            .expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key.0.start, target_val);
-
-        let iter = current_layer
-            .seek(Bound::Included(&TestKey(target_val..target_val)))
-            .await
-            .expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key.0.start, target_val);
-    }
-
-    /// cladefs: AllocatorKey, whose leading u64 changed in the older version, has no versions
-    /// before 60, so TestKey stands in, whose leading u64 is its end.
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_older_version_seek() {
-        const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
-        const ITEM_COUNT: u64 = 100;
-
-        let old_version_handle =
-            FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
-        let current_version_handle =
-            FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
-        let step = MIN_BLOCK_SIZE.get();
-        {
-            let mut old_version_writer =
-                PersistentLayerWriter::<_, TestKey, i64>::new_with_version(
-                    Writer::new(&old_version_handle).await,
-                    ITEM_COUNT as usize,
-                    BLOCK_SIZE,
-                    OLD_KEY_SERIALIZATION_VERSION,
-                )
+            let err = PersistentLayer::<TestKey, u64>::open(handle)
                 .await
-                .expect("writer new");
-            let mut current_version_writer = PersistentLayerWriter::<_, TestKey, i64>::new(
-                Writer::new(&current_version_handle).await,
-                ITEM_COUNT as usize,
-                BLOCK_SIZE,
-            )
-            .await
-            .expect("writer new");
-
-            for i in 0..ITEM_COUNT {
-                let key = TestKey(i * step..(i + 1) * step);
-                old_version_writer
-                    .write(Item::new(key.clone(), i as i64).as_item_ref())
-                    .await
-                    .expect("write failed");
-                current_version_writer
-                    .write(Item::new(key, i as i64).as_item_ref())
-                    .await
-                    .expect("write failed");
-            }
-
-            old_version_writer.complete().await.expect("flush failed");
-            current_version_writer.complete().await.expect("flush failed");
+                .err()
+                .expect("layer of unsupported version should be refused");
+            assert!(
+                FxfsError::InvalidVersion.matches(&err),
+                "version {version}: expected InvalidVersion, got {err:?}"
+            );
         }
-
-        let old_layer =
-            PersistentLayer::<TestKey, i64>::open(old_version_handle).await.expect("open failed");
-        let current_layer = PersistentLayer::<TestKey, i64>::open(current_version_handle)
-            .await
-            .expect("open failed");
-
-        let target_idx = ITEM_COUNT / 2;
-        let target_key = TestKey(target_idx * step..(target_idx + 1) * step);
-
-        let iter = old_layer.seek(Bound::Included(&target_key)).await.expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key, &target_key);
-
-        let iter = current_layer.seek(Bound::Included(&target_key)).await.expect("seek failed");
-        let item = iter.get().expect("missing item");
-        assert_eq!(item.key, &target_key);
     }
 
     #[fuchsia_async::run_singlethreaded(test)]
