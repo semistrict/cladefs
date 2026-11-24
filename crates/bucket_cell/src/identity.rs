@@ -23,6 +23,7 @@
 
 use crate::bucket::{self, Bucket, Created, Updated};
 use crate::{Error, layout};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 
 /// The number no bucket has, whose cells' IDs tests name, as no allocator gives them.
@@ -35,7 +36,7 @@ pub const NONE: u16 = u16::MAX;
 pub const ROOT: u16 = 1;
 
 /// What a bucket's identity object holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Identity {
     /// The format of the bucket's objects ([`layout::FORMAT`]), first, so that a reader of any
     /// format reads it.
@@ -48,7 +49,7 @@ pub struct Identity {
 
 /// What the registry says of a bucket, as its formatting or its addition was told: none of it a
 /// key or a credential, which each host keeps.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Details {
     /// Its provider: `s3`, `gcs`, `azure`, `file` or `memory`.
     pub provider: Option<String>,
@@ -80,7 +81,7 @@ impl Details {
 }
 
 /// A bucket, as the registry records it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Entry {
     pub number: u16,
     /// Its identity's random ID ([`Identity::id`]).
@@ -89,7 +90,7 @@ pub struct Entry {
 }
 
 /// The record of every bucket, the root's or a copy of it ([`layout::BUCKETS`]).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Registry {
     /// The format of the buckets' objects, first, as an identity's.
     pub format: u32,
@@ -133,17 +134,24 @@ pub fn number_for(registry: Option<&Registry>, url: &str) -> Result<u16, Error> 
     }
 }
 
-/// Decodes an identity or a registry, refusing another format than this one's.
+/// Decodes an identity or a registry, checking its version against [`layout::FORMAT`] and refusing
+/// trailing bytes (doc-28, board 10038).
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
-    if format != layout::FORMAT {
-        return Err(Error::BucketFormat(format));
+    let format = layout::FORMAT.check(format).map_err(|_| Error::BucketFormat(format))?;
+    match format {
+        31.. => layout::decode(bytes),
+        _ => unreachable!("FORMAT.check enforces oldest..=current"),
     }
-    layout::decode(bytes)
 }
 
-/// The identity an identity object's `bytes` hold, refused if of another format.
+/// The identity an identity object's `bytes` hold, refused if of an unsupported format.
 pub fn parse(bytes: &[u8]) -> Result<Identity, Error> {
+    decode(bytes)
+}
+
+/// The registry a buckets object's `bytes` hold, refused if of an unsupported format.
+pub fn parse_registry(bytes: &[u8]) -> Result<Registry, Error> {
     decode(bytes)
 }
 
@@ -204,7 +212,8 @@ pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity,
     let identity = match get(bucket).await? {
         Some(found) => found,
         None => {
-            let made = Identity { format: layout::FORMAT, number: ROOT, id: rand::random() };
+            let made =
+                Identity { format: layout::FORMAT.current, number: ROOT, id: rand::random() };
             match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
                 Created::Created(_) => made,
                 // Another formatting's, or addition's, first.
@@ -214,7 +223,8 @@ pub async fn format(bucket: &impl Bucket, details: &Details) -> Result<Identity,
     };
     if identity.number == ROOT && registry_versioned(bucket).await?.is_none() {
         let entry = Entry { number: ROOT, id: identity.id, details: details.clone() };
-        let registry = Registry { format: layout::FORMAT, version: 1, buckets: vec![entry] };
+        let registry =
+            Registry { format: layout::FORMAT.current, version: 1, buckets: vec![entry] };
         // Another formatting's, first, if it exists: of the same identity.
         bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await?;
     }
@@ -270,7 +280,7 @@ pub async fn add(
             Updated::Changed => {}
         }
     };
-    let identity = Identity { format: layout::FORMAT, number: entry.number, id: entry.id };
+    let identity = Identity { format: layout::FORMAT.current, number: entry.number, id: entry.id };
     match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await? {
         Created::Created(_) => Ok((identity, registry)),
         Created::Exists(object) => match decode::<Identity>(&object.bytes)? {
@@ -379,9 +389,10 @@ mod tests {
             assert_eq!(get(&bucket).await, Ok(None));
             let details = at("memory:///root", "here");
             let made = format(&bucket, &details).await.unwrap();
-            assert_eq!((made.format, made.number), (layout::FORMAT, ROOT));
+            assert_eq!((made.format, made.number), (layout::FORMAT.current, ROOT));
             let entry = Entry { number: ROOT, id: made.id, details: details.clone() };
-            let expected = Registry { format: layout::FORMAT, version: 1, buckets: vec![entry] };
+            let expected =
+                Registry { format: layout::FORMAT.current, version: 1, buckets: vec![entry] };
             assert_eq!(registry(&bucket).await, Ok(Some(expected.clone())));
             assert_eq!(format(&bucket, &at("memory:///other", "there")).await, Ok(made));
             assert_eq!(registry(&bucket).await, Ok(Some(expected)));
@@ -394,7 +405,7 @@ mod tests {
     fn formattings_stopped_short_of_the_registry_are_finished() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let left = Identity { format: layout::FORMAT, number: ROOT, id: 0x51 };
+            let left = Identity { format: layout::FORMAT.current, number: ROOT, id: 0x51 };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&left)).await.unwrap();
             assert_eq!(registry(&bucket).await, Ok(None));
             assert_eq!(format(&bucket, &Details::default()).await, Ok(left));
@@ -586,9 +597,9 @@ mod tests {
     fn a_bucket_of_another_format_is_refused() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let other = Identity { format: layout::FORMAT - 1, number: 3, id: 1 };
+            let other = Identity { format: layout::FORMAT.oldest - 1, number: 3, id: 1 };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
-            let refused = Error::BucketFormat(layout::FORMAT - 1);
+            let refused = Error::BucketFormat(layout::FORMAT.oldest - 1);
             assert_eq!(get(&bucket).await, Err(refused.clone()));
             assert_eq!(format(&bucket, &Details::default()).await, Err(refused));
         });

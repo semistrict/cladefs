@@ -795,6 +795,7 @@ impl Recovered {
             let path = segment_path(segment);
             remove(dir, &path)?;
             let file = dir.create(&path, true)?;
+            let encoded_footer = bucket_cell::layout::encode_segment_footer(&footer);
             if sectors {
                 let mut packer = extent_frame::Packer::in_place(encryption.sectors().clone());
                 let raw_parts =
@@ -802,7 +803,7 @@ impl Recovered {
                         extent_frame::RawPart::of(index as u64, chunk, encryption.sectors())
                     });
                 packer.push_raw_parts(raw_parts);
-                let tail = packer.finish(&footer.encode());
+                let tail = packer.finish(&encoded_footer);
                 if !data.is_empty() {
                     file.write_at(&data, 0)?;
                 }
@@ -810,7 +811,7 @@ impl Recovered {
                 crate::written::wrote(crate::written::Kind::Framed, data.len() + tail.len());
             } else {
                 encryption.decrypt(0, &mut data);
-                let framed = extent_frame::framed(&data, &footer.encode(), encrypting);
+                let framed = extent_frame::framed(&data, &encoded_footer, encrypting);
                 file.write_at(&framed, 0)?;
                 crate::written::wrote(crate::written::Kind::Framed, framed.len());
             }
@@ -1546,12 +1547,24 @@ mod tests {
         let path = segment_path(segment(0));
         let framed = read_whole(&dir.open(&path, true).unwrap()).unwrap();
         let keys = bucket_cell::testing::ring([CELL]);
-        let restamped = extent_frame::restamp(&framed, b"no footer", &keys.of(CELL.id)).unwrap();
+        let bad_body =
+            [&bucket_cell::layout::FORMAT.current.to_le_bytes()[..], b"no footer"].concat();
+        let restamped = extent_frame::restamp(&framed, &bad_body, &keys.of(CELL.id)).unwrap();
         dir.remove(&path).unwrap();
         dir.create(&path, true).unwrap().write_at(&restamped, 0).unwrap();
         let failed = recover(&dir, CELL, None).map(drop).map_err(|err| format!("{err:#}"));
         let footer = "a segment's footer: a footer: io error: unexpected end of file";
         assert_eq!(failed, Err(format!("{path}: {footer}")));
+        let newer = (bucket_cell::layout::FORMAT.current + 1).to_le_bytes();
+        let restamped = extent_frame::restamp(&framed, &newer, &keys.of(CELL.id)).unwrap();
+        dir.remove(&path).unwrap();
+        dir.create(&path, true).unwrap().write_at(&restamped, 0).unwrap();
+        let failed = recover(&dir, CELL, None).map(drop).map_err(|err| format!("{err:#}"));
+        let refused = formats::Refused {
+            format: bucket_cell::layout::FORMAT,
+            found: bucket_cell::layout::FORMAT.current + 1,
+        };
+        assert_eq!(failed, Err(format!("{path}: a segment's footer: {refused}")));
     }
 
     /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,

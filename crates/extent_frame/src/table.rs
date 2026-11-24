@@ -13,6 +13,8 @@
 //! no key (doc-16, What is encrypted).
 
 use crate::{Corrupt, Error, KeyId, Keyed, Keys, Secret, crc};
+use bincode::Options as _;
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use storage_device::ExtentId;
 
@@ -39,7 +41,7 @@ pub struct Entry {
 }
 
 /// What follows a table's blocks.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct TableFooter {
     /// The rest of the state, as its writer encoded it.
     pub rest: Vec<u8>,
@@ -57,7 +59,7 @@ pub struct TableFooter {
 /// writer keeps that a reader of the table whole reads, and one after a single extent never does,
 /// so that the footer that one reads stays as small as the entries' index (doc-27: a checkpoint's
 /// lengths of its segments' data).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Appendix {
     pub offset: u64,
     pub len: u64,
@@ -73,7 +75,7 @@ pub struct Decoded {
 }
 
 /// Where a block is, the first extent it holds, and its CRC32C.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Block {
     pub first: ExtentId,
     pub offset: u64,
@@ -81,15 +83,23 @@ pub struct Block {
     pub crc: u32,
 }
 
+/// Encodes `footer` prefixed with its bucket layout `version` (doc-28, board 10038).
+pub fn encode_footer(footer: &TableFooter, version: u32) -> Vec<u8> {
+    let mut bytes = version.to_le_bytes().to_vec();
+    bincode::serialize_into(&mut bytes, footer).expect("footers serialize");
+    bytes
+}
+
 /// The table of `entries`, which are in their IDs' order ([`ExtentId`]'s: by sequence number, then
 /// cell, the order [`TableFooter::block`] finds them by), `rest`, and cladefs: `appendix`
 /// ([`Appendix`]); authenticated under the DEK `key` gives, and which it is
-/// ([`crate::Packer::keyed`], TASK-411.3).
+/// ([`crate::Packer::keyed`], TASK-411.3), its footer stamped with `version` (doc-28, board 10038).
 pub fn encode<'a>(
     entries: impl IntoIterator<Item = (ExtentId, &'a str, u64, u64)>,
     rest: Vec<u8>,
     appendix: &[u8],
     (dek, id): (&Secret, KeyId),
+    version: u32,
 ) -> Vec<u8> {
     let mut keys = Vec::new();
     let mut indexes = std::collections::HashMap::new();
@@ -124,7 +134,7 @@ pub fn encode<'a>(
     data.extend_from_slice(appendix);
     let appendix = Appendix { offset: at, len: appendix.len() as u64, crc: crc(appendix) };
     let footer = TableFooter { rest, keys, blocks, appendix };
-    let footer = bincode::serialize(&footer).expect("footers serialize");
+    let footer = encode_footer(&footer, version);
     crate::framed_keyed(&data, &footer, (dek, id, Keyed::Authenticated))
 }
 
@@ -132,6 +142,10 @@ pub fn encode<'a>(
 /// the rest of it.
 mod front_coded {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn fingerprint<T>() -> String {
+        "front_coded<Vec<(u32,String)>>".to_owned()
+    }
 
     pub fn serialize<S: Serializer>(keys: &[String], serializer: S) -> Result<S::Ok, S::Error> {
         let mut before = "";
@@ -182,15 +196,21 @@ fn corrupt(what: &str) -> Corrupt {
 }
 
 impl TableFooter {
-    /// The footer whose bytes are `bytes`. cladefs: refused unless its blocks are as its encoder
-    /// lays them (board 8545): one after another from the data's start, none overlapping another,
-    /// none past [`TABLE_BLOCK`], their first extents ascending, its appendix right after them; so
-    /// that a table decodes each byte of its data at most once, and a forged footer can't have
-    /// many blocks name one, each entry of it decoded, its key cloned, as many times.
+    /// The footer whose bytes are `bytes`, checking its leading version against `format` and
+    /// refusing trailing bytes (doc-28, board 10038). cladefs: refused unless its blocks are as its
+    /// encoder lays them (board 8545): one after another from the data's start, none overlapping
+    /// another, none past [`TABLE_BLOCK`], their first extents ascending, its appendix right after
+    /// them; so that a table decodes each byte of its data at most once, and a forged footer can't
+    /// have many blocks name one, each entry of it decoded, its key cloned, as many times.
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-    pub fn decode(bytes: &[u8]) -> Result<Self, Corrupt> {
-        let footer: Self =
-            bincode::deserialize(bytes).map_err(|err| corrupt(&format!("footer: {err}")))?;
+    pub fn decode(bytes: &[u8], format: formats::Format) -> Result<Self, Error> {
+        let (version, rest) =
+            bytes.split_first_chunk::<4>().ok_or_else(|| corrupt("footer: no version"))?;
+        let version = format.check(u32::from_le_bytes(*version))?;
+        let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+        let footer: Self = match version {
+            _ => options.deserialize(rest).map_err(|err| corrupt(&format!("footer: {err}")))?,
+        };
         let mut end = 0u64;
         let mut first = None;
         for block in &footer.blocks {
@@ -198,13 +218,13 @@ impl TableFooter {
             let len = usize::try_from(block.len).ok();
             let sized = len.is_some_and(|len| len > 0 && len <= TABLE_BLOCK);
             if block.offset != end || !sized || first.is_some_and(|first| first >= block.first) {
-                return Err(corrupt("blocks, not one after another"));
+                return Err(corrupt("blocks, not one after another").into());
             }
             end = end.checked_add(u64::from(block.len)).ok_or_else(|| corrupt("blocks"))?;
             first = Some(block.first);
         }
         if footer.appendix.offset != end {
-            return Err(corrupt("appendix, not after its blocks"));
+            return Err(corrupt("appendix, not after its blocks").into());
         }
         Ok(footer)
     }
@@ -247,10 +267,10 @@ impl TableFooter {
 }
 
 /// The table whose bytes are `bytes` whole: its footer, its entries and its appendix, read by a
-/// reader holding `keys`.
+/// reader holding `keys`, checking its footer version against `format` (doc-28, board 10038).
 #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-pub fn decode(bytes: &[u8], keys: &dyn Keys) -> Result<Decoded, Error> {
-    let footer = TableFooter::decode(crate::footer(bytes, keys)?)?;
+pub fn decode(bytes: &[u8], keys: &dyn Keys, format: formats::Format) -> Result<Decoded, Error> {
+    let footer = TableFooter::decode(crate::footer(bytes, keys)?, format)?;
     let data = crate::data(bytes, keys)?;
     let mut entries = Vec::new();
     for index in &footer.blocks {
@@ -299,11 +319,21 @@ mod tests {
         encrypted(entries, (&dek(), ID))
     }
 
+    /// The format used by this module's tests (struct literal, not a frozen family).
+    const TEST_FORMAT: formats::Format =
+        formats::Format { name: "test table", oldest: 31, current: 31 };
+
     /// The table of `entries`, authenticated under `key`.
     fn encrypted(entries: &[Entry], key: (&Secret, KeyId)) -> Vec<u8> {
         let rows =
             entries.iter().map(|entry| (entry.id, entry.key.as_str(), entry.offset, entry.len));
-        encode(rows, b"rest".to_vec(), b"appendix", key)
+        encode(rows, b"rest".to_vec(), b"appendix", key, TEST_FORMAT.current)
+    }
+
+    fn versioned_raw<T: Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = TEST_FORMAT.current.to_le_bytes().to_vec();
+        bincode::serialize_into(&mut bytes, value).unwrap();
+        bytes
     }
 
     /// A reader holding `keys`, which holds its objects encrypted: a reader of a cell with a DEK.
@@ -331,11 +361,11 @@ mod tests {
         for (count, blocks) in [(0, 0), (1, 1), (1819, 1), (1820, 1), (1821, 2), (10_000, 6)] {
             let entries = entries(count);
             let bytes = encrypted(&entries, key);
-            let table = decode(&bytes, &keys).unwrap();
+            let table = decode(&bytes, &keys, TEST_FORMAT).unwrap();
             let footer = table.footer.clone();
             let read = (footer.rest.as_slice(), &table.entries, table.appendix.as_slice());
             assert_eq!(read, (&b"rest"[..], &entries, &b"appendix"[..]), "{count}");
-            assert_eq!(decode(&bytes, &crate::NoKeys), Ok(table));
+            assert_eq!(decode(&bytes, &crate::NoKeys, TEST_FORMAT), Ok(table));
             let firsts: Vec<ExtentId> = footer.blocks.iter().map(|block| block.first).collect();
             let expected: Vec<ExtentId> =
                 (0..blocks).map(|block| ExtentId::new(3, block * 1820)).collect();
@@ -343,7 +373,7 @@ mod tests {
         }
         let mut bytes = encrypted(&entries(3000), key);
         bytes[100] ^= 1;
-        assert!(decode(&bytes, &keys).is_err());
+        assert!(decode(&bytes, &keys, TEST_FORMAT).is_err());
         // Authenticated: its entries unencrypted, as stored; a part's tag changed, its table's CRC
         // made to match, read by a reader holding no key, refused by one holding it.
         let bytes = encrypted(&entries(10), key);
@@ -356,15 +386,18 @@ mod tests {
         let trailer = tampered.len() - crate::TRAILER as usize;
         let table_crc = crc(&tampered[frame.footer().end as usize..trailer + crate::at::TABLE_CRC]);
         tampered[trailer + crate::at::TABLE_CRC..][..4].copy_from_slice(&table_crc.to_le_bytes());
-        assert!(decode(&tampered, &crate::NoKeys).is_ok());
+        assert!(decode(&tampered, &crate::NoKeys, TEST_FORMAT).is_ok());
         assert_eq!(
-            decode(&tampered, &keys).map(|_| ()),
+            decode(&tampered, &keys, TEST_FORMAT).map(|_| ()),
             Err(Corrupt("an object's table, by its MAC".into()).into())
         );
         // A reader holding its objects encrypted reads it under the key, and refuses it without.
-        assert_eq!(decode(&bytes, &Holding(&keys)).map(|table| table.entries), Ok(entries(10)));
+        assert_eq!(
+            decode(&bytes, &Holding(&keys), TEST_FORMAT).map(|table| table.entries),
+            Ok(entries(10))
+        );
         let none = std::collections::HashMap::new();
-        assert_eq!(decode(&bytes, &Holding(&none)).map(|_| ()), Err(Error::NoKey(id)));
+        assert_eq!(decode(&bytes, &Holding(&none), TEST_FORMAT).map(|_| ()), Err(Error::NoKey(id)));
     }
 
     /// cladefs: a footer's keys read back as they were, whatever they share, a character split or
@@ -383,15 +416,27 @@ mod tests {
             blocks: Vec::new(),
             appendix: Appendix::default(),
         };
-        let bytes = bincode::serialize(&footer).unwrap();
-        assert_eq!(TableFooter::decode(&bytes), Ok(footer));
+        let bytes = encode_footer(&footer, TEST_FORMAT.current);
+        assert_eq!(TableFooter::decode(&bytes, TEST_FORMAT), Ok(footer));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(TableFooter::decode(&trailing, TEST_FORMAT), Err(Error::Corrupt(_))));
+        let mut newer = bytes.clone();
+        newer[..4].copy_from_slice(&(TEST_FORMAT.current + 1).to_le_bytes());
+        assert_eq!(
+            TableFooter::decode(&newer, TEST_FORMAT),
+            Err(Error::Format(formats::Refused {
+                format: TEST_FORMAT,
+                found: TEST_FORMAT.current + 1
+            }))
+        );
         let plain: usize = keys.iter().map(String::len).sum();
         assert!(bytes.len() < plain / 4, "{} bytes of {plain}", bytes.len());
         let lying = (Vec::<u8>::new(), vec![(0u32, "ab".to_owned()), (3, "c".to_owned())]);
         let lying = (lying.0, lying.1, Vec::<Block>::new(), Appendix::default());
-        let lying = bincode::serialize(&lying).unwrap();
+        let lying = versioned_raw(&lying);
         let refused = "a table's footer: a key sharing more than the one before it";
-        assert_eq!(TableFooter::decode(&lying), Err(Corrupt(refused.into())));
+        assert_eq!(TableFooter::decode(&lying, TEST_FORMAT), Err(Corrupt(refused.into()).into()));
     }
 
     /// One entry is found by the footer and its block alone.
@@ -399,7 +444,9 @@ mod tests {
     fn entries_are_found_by_their_blocks() {
         let entries = entries(100_000);
         let bytes = encoded(&entries);
-        let footer = TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap()).unwrap();
+        let footer =
+            TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap(), TEST_FORMAT)
+                .unwrap();
         let data = crate::data(&bytes, &crate::NoKeys).unwrap();
         for sequence in [0, 1, 50_000, 99_999] {
             let block = footer.block(ExtentId::new(3, sequence)).unwrap();
@@ -416,7 +463,9 @@ mod tests {
     #[test]
     fn blocks_unlike_their_index_fail() {
         let bytes = encoded(&entries(2));
-        let footer = TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap()).unwrap();
+        let footer =
+            TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap(), TEST_FORMAT)
+                .unwrap();
         let data = crate::data(&bytes, &crate::NoKeys).unwrap();
         let index = &footer.blocks[0];
         // cladefs: the appendix after it (`Appendix`).
@@ -440,24 +489,24 @@ mod tests {
     fn footers_keys_past_the_longest_are_refused() {
         let footer = |coded: Vec<(u32, String)>| {
             let footer = (Vec::<u8>::new(), coded, Vec::<Block>::new(), Appendix::default());
-            TableFooter::decode(&bincode::serialize(&footer).unwrap())
+            TableFooter::decode(&versioned_raw(&footer), TEST_FORMAT)
         };
         let long = "k".repeat(256 << 10);
         let mut amplifying = vec![(0, long)];
         amplifying.extend((0..20_000).map(|_| (256 << 10, String::new())));
         let past = format!("a table's footer: a key past {MAX_KEY} bytes");
-        assert_eq!(footer(amplifying), Err(Corrupt(past.clone())));
+        assert_eq!(footer(amplifying), Err(Corrupt(past.clone()).into()));
         let most = "k".repeat(MAX_KEY);
         let read = footer(vec![(0, most.clone()), (MAX_KEY as u32, String::new())]);
         assert_eq!(read.map(|footer| footer.keys), Ok(vec![most.clone(), most.clone()]));
         assert_eq!(
             footer(vec![(0, most.clone()), (MAX_KEY as u32, "k".into())]),
-            Err(Corrupt(past))
+            Err(Corrupt(past).into())
         );
         let sharing = "a table's footer: a key sharing more than the one before it";
         assert_eq!(
             footer(vec![(0, most), (u32::MAX, String::new())]),
-            Err(Corrupt(sharing.into()))
+            Err(Corrupt(sharing.into()).into())
         );
     }
 
@@ -469,7 +518,9 @@ mod tests {
     #[test]
     fn footers_whose_blocks_overlap_are_refused() {
         let bytes = encoded(&entries(3000));
-        let footer = TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap()).unwrap();
+        let footer =
+            TableFooter::decode(crate::footer(&bytes, &crate::NoKeys).unwrap(), TEST_FORMAT)
+                .unwrap();
         assert_eq!(footer.blocks.len(), 2);
         let (one, two) = (footer.blocks[0].clone(), footer.blocks[1].clone());
         let forged = |blocks: Vec<Block>, appendix: u64| {
@@ -478,11 +529,11 @@ mod tests {
                 appendix: Appendix { offset: appendix, ..footer.appendix.clone() },
                 ..footer.clone()
             };
-            TableFooter::decode(&bincode::serialize(&forged).unwrap())
+            TableFooter::decode(&encode_footer(&forged, TEST_FORMAT.current), TEST_FORMAT)
         };
         let end = u64::from(one.len) + u64::from(two.len);
         assert_eq!(forged(vec![one.clone(), two.clone()], end), Ok(footer.clone()));
-        let blocks = Err(Corrupt("a table's blocks, not one after another".into()));
+        let blocks = Err(Corrupt("a table's blocks, not one after another".into()).into());
         let many = vec![one.clone(); 20_000];
         assert_eq!(forged(many, u64::from(one.len)), blocks);
         assert_eq!(forged(vec![two.clone(), one.clone()], end), blocks);
@@ -496,7 +547,7 @@ mod tests {
             let sized = Block { len, ..one.clone() };
             assert_eq!(forged(vec![sized], u64::from(len)), blocks, "{len}");
         }
-        let appendix = Err(Corrupt("a table's appendix, not after its blocks".into()));
+        let appendix = Err(Corrupt("a table's appendix, not after its blocks".into()).into());
         for offset in [0, end - 1, end + 1, u64::MAX] {
             assert_eq!(forged(vec![one.clone(), two.clone()], offset), appendix, "{offset}");
         }

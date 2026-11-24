@@ -1520,7 +1520,7 @@ pub struct Relocating {
 /// so that one copied to another's key is refused (`bucket_cell::layout::own_extent`,
 /// TASK-411.3).
 fn own_footer(extent: ExtentId) -> Vec<u8> {
-    bucket_cell::layout::encode(&extent)
+    bucket_cell::layout::own_extent_footer(extent)
 }
 
 /// cladefs: the files at the paths of `leaving` leave a cell directory `dir`, the objects in the

@@ -309,38 +309,38 @@ fn formats_within_supported_range_are_accepted_and_outside_refused() {
         cell_records: formats::Format { name: "cell records", oldest: 1, current: 1 },
         replica_directory: formats::Format { name: "replica directory", oldest: 4, current: 4 },
         extent_frame: formats::Format { name: "extent frame", oldest: 3, current: 3 },
-        bucket_layout: 29,
+        bucket_layout: formats::Format { name: "bucket layout", oldest: 31, current: 31 },
     };
     let build_b_member = SupportedFormats {
         cell_directory: formats::Format { name: "cell directory", oldest: 18, current: 19 },
         cell_records: formats::Format { name: "cell records", oldest: 1, current: 2 },
         replica_directory: formats::Format { name: "replica directory", oldest: 4, current: 5 },
         extent_frame: formats::Format { name: "extent frame", oldest: 3, current: 4 },
-        bucket_layout: 29,
+        bucket_layout: formats::Format { name: "bucket layout", oldest: 31, current: 32 },
     };
     let build_a = proto::Formats {
         cell_directory: 18,
         cell_records: 1,
         replica_directory: 4,
         extent_frame: 3,
-        bucket_layout: 29,
+        bucket_layout: 31,
         cell_directory_oldest: 18,
         cell_records_oldest: 1,
         replica_directory_oldest: 4,
         extent_frame_oldest: 3,
-        bucket_layout_oldest: 29,
+        bucket_layout_oldest: 31,
     };
     let build_b = proto::Formats {
         cell_directory: 19,
         cell_records: 2,
         replica_directory: 5,
         extent_frame: 4,
-        bucket_layout: 29,
+        bucket_layout: 32,
         cell_directory_oldest: 18,
         cell_records_oldest: 1,
         replica_directory_oldest: 4,
         extent_frame_oldest: 3,
-        bucket_layout_oldest: 29,
+        bucket_layout_oldest: 31,
     };
 
     // Build A writer -> Build B member: accepted for Write, Drop, and Migration.
@@ -394,7 +394,8 @@ fn formats_within_supported_range_are_accepted_and_outside_refused() {
         proto::Formats { replica_directory: 6, replica_directory_oldest: 6, ..build_b },
         proto::Formats { extent_frame: 2, extent_frame_oldest: 2, ..build_a },
         proto::Formats { extent_frame: 5, extent_frame_oldest: 5, ..build_b },
-        proto::Formats { bucket_layout: 28, bucket_layout_oldest: 28, ..build_a },
+        proto::Formats { bucket_layout: 30, bucket_layout_oldest: 30, ..build_a },
+        proto::Formats { bucket_layout: 33, bucket_layout_oldest: 33, ..build_b },
     ] {
         for call in [ReplicationCall::Write, ReplicationCall::Read, ReplicationCall::Drop] {
             assert_eq!(
@@ -426,7 +427,7 @@ fn formats_within_supported_range_are_accepted_and_outside_refused() {
         proto::Formats { cell_records: 3, ..build_b },
         proto::Formats { extent_frame: 2, ..build_a },
         proto::Formats { extent_frame: 5, ..build_b },
-        proto::Formats { bucket_layout: 30, ..build_b },
+        proto::Formats { bucket_layout: 33, ..build_b },
     ] {
         assert_eq!(
             build_b_member.check_migration(0x7, Some(bad)).unwrap_err().code(),

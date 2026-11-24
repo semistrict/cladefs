@@ -1121,7 +1121,7 @@ mod tests {
             let mut footers = Vec::new();
             for meta in listed.unwrap() {
                 let object = bucket_cell::Bucket::get(bucket, &meta.key).await.unwrap();
-                footers.push(layout::footer(&object.bytes).unwrap());
+                footers.push(layout::Segment::footer(&object.bytes).unwrap());
             }
             footers
         })
@@ -1827,7 +1827,7 @@ mod tests {
     /// (TASK-165.8).
     #[tokio::test(flavor = "multi_thread")]
     async fn uploaded_segments_are_the_cells_files() {
-        use bucket_cell::layout::{self, Footer};
+        use bucket_cell::layout;
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), "").unrouted());
@@ -1875,7 +1875,7 @@ mod tests {
         // The cell's segments but its writer's fence, which holds no commit.
         let mut segments: Vec<_> = objects(layout::segments(cell))
             .into_iter()
-            .filter(|bytes| !layout::footer::<Footer>(bytes).unwrap().contents.commits.is_empty())
+            .filter(|bytes| !layout::Segment::footer(bytes).unwrap().contents.commits.is_empty())
             .collect();
         segments.sort();
         assert_eq!(segments.len(), 2);
@@ -2801,7 +2801,7 @@ mod tests {
         let framed = || -> Vec<u64> {
             let files = std::fs::read_dir(&segments).into_iter().flatten();
             let bytes = files.filter_map(|file| std::fs::read(file.unwrap().path()).ok());
-            let footers = bytes.filter_map(|bytes| layout::footer::<layout::Footer>(&bytes).ok());
+            let footers = bytes.filter_map(|bytes| layout::Segment::footer(&bytes).ok());
             footers.flat_map(|footer| footer.contents.commits).collect()
         };
         while !framed().iter().any(|&tag| bucket_cell::layout::epoch_of(tag) == last) {
@@ -4048,7 +4048,7 @@ mod tests {
         drop(first);
         // A later release's record, whose format says first what follows, which this one can't
         // read.
-        let mut newer = (bucket_cell::layout::FORMAT + 1).to_le_bytes().to_vec();
+        let mut newer = (bucket_cell::layout::FORMAT.current + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
         let (key, overwrite) = (bucket_cell::layout::head(cell), PutMode::Overwrite);
         futures::executor::block_on(bucket.put(&key, newer.into(), overwrite)).unwrap();
@@ -4061,11 +4061,8 @@ mod tests {
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).await;
         let refused = taken.err().unwrap();
         let format = bucket_cell::layout::FORMAT;
-        let named = format!(
-            "cell {cell} is of format {}, which this reader, of format {format}, doesn't \
-             read",
-            format + 1
-        );
+        let named =
+            format!("cell {cell}: {}", formats::Refused { format, found: format.current + 1 });
         assert!(format!("{refused:#}").contains(&named), "{refused:#}");
         assert_eq!(refused.errno(), Some(crate::Errno::ENOTSUP));
         assert_eq!(listed(), before, "a cell of a newer format was written to");

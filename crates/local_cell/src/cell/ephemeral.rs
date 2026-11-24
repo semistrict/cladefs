@@ -173,12 +173,18 @@ impl LocalCheckpoint {
         let entries = own.iter().map(|(id, at)| (*id, at.key.as_str(), at.offset, at.len));
         // Its rest says the cell directory's version (doc-28): the table around it is the bucket
         // layout's checkpoints', and its frame the extent frames'.
-        extent_frame::table::encode(entries, crate::layout::versioned(&rest), &[], encrypting)
+        extent_frame::table::encode(
+            entries,
+            crate::layout::versioned(&rest),
+            &[],
+            encrypting,
+            bucket_cell::layout::FORMAT.current,
+        )
     }
 
     fn decode(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Self, Error> {
         let extent_frame::table::Decoded { footer, entries, .. } =
-            extent_frame::table::decode(bytes, keys)
+            extent_frame::table::decode(bytes, keys, bucket_cell::layout::FORMAT)
                 .context("decoding an ephemeral cell's local checkpoint")?;
         let Rest {
             parent,

@@ -261,7 +261,7 @@ mod tests {
         let objects = SegmentBuilder::from(commit)
             .close(chain)
             .frame(crate::testing::encrypting(test_cell(1)));
-        layout::footer::<Footer>(&objects.segment.read().unwrap()).unwrap().contents.next_sequence
+        layout::Segment::footer(&objects.segment.read().unwrap()).unwrap().contents.next_sequence
     }
 
     /// The sequence numbers a writer mints from are past every extent its commits seal, in its
@@ -310,7 +310,7 @@ mod tests {
         assert!(!batch.is_empty());
         let objects = batch.close(&mut chain).frame(crate::testing::encrypting(test_cell(1)));
         let segment = objects.segment.read().unwrap();
-        let footer: Footer = layout::footer(&segment).unwrap();
+        let footer: Footer = layout::Segment::footer(&segment).unwrap();
         assert_eq!(footer, objects.footer);
         assert_eq!((footer.segment, footer.epoch), (0, 2));
         assert_eq!(footer.contents.commits, [7, 8, 9]);

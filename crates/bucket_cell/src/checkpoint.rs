@@ -42,16 +42,44 @@ pub fn encode_kept(state: &State, encrypting: layout::EncryptionKey<'_>) -> (Vec
             }
         })
         .collect();
-    let appendix = varint().serialize(&numbered).expect("objects serialize");
+    let appendix = encode_appendix(&numbered);
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter())
         .map(|(extent, location)| (*extent, location.key.as_str(), location.offset, location.len));
-    (table::encode(entries, layout::encode(&rest), &appendix, encrypting), lengths)
+    (
+        table::encode(
+            entries,
+            layout::encode_versioned(&rest),
+            &appendix,
+            encrypting,
+            layout::FORMAT.current,
+        ),
+        lengths,
+    )
 }
 
-/// How a checkpoint's lengths are encoded in its table's appendix: their numbers as varints.
+/// Encodes a checkpoint's appendix of segment lengths prefixed with the current bucket layout
+/// version (doc-28, board 10038).
+pub(crate) fn encode_appendix(numbered: &[(u64, u64, u64)]) -> Vec<u8> {
+    let mut bytes = layout::FORMAT.current.to_le_bytes().to_vec();
+    varint().serialize_into(&mut bytes, numbered).expect("objects serialize");
+    bytes
+}
+
+/// Decodes a checkpoint's versioned appendix, checking its version against [`layout::FORMAT`] and
+/// refusing trailing bytes (doc-28, board 10038).
+pub(crate) fn decode_appendix(bytes: &[u8]) -> Result<Vec<(u64, u64, u64)>, Error> {
+    let (version, rest) = layout::check_version(bytes)?;
+    match version {
+        31.. => varint().deserialize(rest).map_err(|err| Error::Corrupt(err.to_string())),
+        _ => unreachable!("FORMAT.check enforces oldest..=current"),
+    }
+}
+
+/// How a checkpoint's lengths are encoded in its table's appendix: their numbers as varints,
+/// refusing trailing bytes on decode (`DefaultOptions::new` rejects trailing bytes by default).
 fn varint() -> impl bincode::Options {
-    bincode::DefaultOptions::new()
+    bincode::DefaultOptions::new().reject_trailing_bytes()
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -69,11 +97,10 @@ pub fn decode(bytes: &[u8]) -> Result<State, Error> {
 /// and MACs if they hold its key, and refused if they hold its cell encrypted and not its key
 /// (TASK-411.3).
 pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
-    let table::Decoded { footer, entries, appendix } = table::decode(bytes, keys)?;
-    let mut state: State = layout::decode(&footer.rest)?;
+    let table::Decoded { footer, entries, appendix } = table::decode(bytes, keys, layout::FORMAT)?;
+    let mut state: State = layout::decode_versioned(&footer.rest)?;
     state.extents.extend(entries.into_iter().map(located));
-    let numbered: Vec<(u64, u64, u64)> =
-        varint().deserialize(&appendix).map_err(|err| Error::Corrupt(err.to_string()))?;
+    let numbered = decode_appendix(&appendix)?;
     state.lengths = (numbered.into_iter())
         .map(|(segment, epoch, len)| (layout::segment(state.cell, segment, epoch), len))
         .collect();
@@ -93,8 +120,8 @@ pub struct Table {
 impl Table {
     /// The table a checkpoint's footer, `footer`, says.
     pub(crate) fn decode(footer: &[u8]) -> Result<Self, Error> {
-        let footer = TableFooter::decode(footer)?;
-        let state = layout::decode(&footer.rest)?;
+        let footer = TableFooter::decode(footer, layout::FORMAT)?;
+        let state = layout::decode_versioned(&footer.rest)?;
         Ok(Self { footer, state })
     }
 

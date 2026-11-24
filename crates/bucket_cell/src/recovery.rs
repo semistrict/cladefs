@@ -28,6 +28,7 @@ use crate::keys::Ring;
 use crate::layout::{self, CellId, Contents, Footer, Head, Location, Origin};
 use crate::{Error, head, object};
 use extent_frame::spent::Spent;
+use fprint::TypeFingerprint;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use futures::{StreamExt as _, TryStreamExt as _};
 use serde::{Deserialize, Serialize};
@@ -75,10 +76,66 @@ pub type Lengths = imbl::OrdMap<String, u64>;
 /// cladefs: the runs a commit sealed in segments applied that a later segment ends
 /// (`extent_frame::segment::Continued`, TASK-92.41): sealed with it, where they are, once it does;
 /// or never, if the next segment applied neither goes on with it nor ends it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Begun {
     pub commit: u64,
     pub runs: Vec<(ExtentId, Location)>,
+}
+
+impl TypeFingerprint for State {
+    fn fingerprint() -> String {
+        // Exhaustive destructure so adding, removing, or renaming any field fails to compile.
+        let _fields = |s: &State| {
+            let State {
+                cell,
+                extents,
+                next_sequence,
+                root,
+                last_commit,
+                through,
+                spent,
+                capacity,
+                begun,
+                lengths,
+            } = s;
+            let _: (
+                &CellId,
+                &Extents,
+                &u64,
+                &Option<Vec<u8>>,
+                &Option<u64>,
+                &Option<u64>,
+                &Spent,
+                &Option<u64>,
+                &Option<Begun>,
+                &Lengths,
+            ) = (
+                cell,
+                extents,
+                next_sequence,
+                root,
+                last_commit,
+                through,
+                spent,
+                capacity,
+                begun,
+                lengths,
+            );
+        };
+        format!(
+            "struct {{cell:{},extents:OrdMap<{},{}>,next_sequence:{},root:{},last_commit:{},through:{},spent:{},capacity:{},begun:{}}}",
+            CellId::fingerprint(),
+            ExtentId::fingerprint(),
+            Location::fingerprint(),
+            u64::fingerprint(),
+            Option::<Vec<u8>>::fingerprint(),
+            Option::<u64>::fingerprint(),
+            Option::<u64>::fingerprint(),
+            Spent::fingerprint(),
+            Option::<u64>::fingerprint(),
+            Option::<Begun>::fingerprint(),
+        )
+    }
 }
 
 /// Where a cell's extents are in the bucket.
@@ -1096,7 +1153,7 @@ async fn segment_footer(
     if !keys.is_empty() {
         tail.open(&keys.of(cell.id))?;
     }
-    let footer = placed(&key, layout::decode(tail.footer())?, cell, segment, epoch)?;
+    let footer = placed(&key, layout::decode_segment_footer(tail.footer())?, cell, segment, epoch)?;
     Ok(Some((footer, tail.parts.frame.data_len)))
 }
 

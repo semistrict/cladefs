@@ -131,12 +131,12 @@ pub(crate) fn current_formats() -> proto::Formats {
         cell_records: crate::cell_dir::FORMAT.current,
         replica_directory: local_cell::replica::FORMAT.current,
         extent_frame: extent_frame::FORMAT.current,
-        bucket_layout: bucket_cell::layout::FORMAT,
+        bucket_layout: bucket_cell::layout::FORMAT.current,
         cell_directory_oldest: local_cell::FORMAT.oldest,
         cell_records_oldest: crate::cell_dir::FORMAT.oldest,
         replica_directory_oldest: local_cell::replica::FORMAT.oldest,
         extent_frame_oldest: extent_frame::FORMAT.oldest,
-        bucket_layout_oldest: bucket_cell::layout::FORMAT,
+        bucket_layout_oldest: bucket_cell::layout::FORMAT.oldest,
     };
     // A test's daemon of another build's cell directories: `peers::formats=return(15)`.
     if let Some(cell) = cell_directory_override() {
@@ -178,7 +178,7 @@ struct SupportedFormats {
     cell_records: formats::Format,
     replica_directory: formats::Format,
     extent_frame: formats::Format,
-    bucket_layout: u32,
+    bucket_layout: formats::Format,
 }
 
 impl SupportedFormats {
@@ -197,17 +197,6 @@ impl SupportedFormats {
             replica_directory: local_cell::replica::FORMAT,
             extent_frame: extent_frame::FORMAT,
             bucket_layout: bucket_cell::layout::FORMAT,
-        }
-    }
-
-    fn check_bucket_layout(&self, found: u32) -> Result<(), String> {
-        if found == self.bucket_layout {
-            Ok(())
-        } else {
-            Err(format!(
-                "bucket layout version {found}: this build reads version {} alone",
-                self.bucket_layout
-            ))
         }
     }
 
@@ -252,7 +241,7 @@ impl SupportedFormats {
             .check(theirs.replica_directory)
             .map_err(|e| reject(e.to_string()))?;
         self.extent_frame.check(theirs.extent_frame).map_err(|e| reject(e.to_string()))?;
-        self.check_bucket_layout(theirs.bucket_layout).map_err(reject)?;
+        self.bucket_layout.check(theirs.bucket_layout).map_err(|e| reject(e.to_string()))?;
         Ok(())
     }
 
@@ -288,13 +277,12 @@ impl SupportedFormats {
             theirs.extent_frame,
         )
         .map_err(reject)?;
-        let bucket = formats::Format {
-            name: "bucket layout",
-            oldest: self.bucket_layout,
-            current: self.bucket_layout,
-        };
-        Self::check_taker_covers(bucket, theirs.bucket_layout_oldest, theirs.bucket_layout)
-            .map_err(reject)?;
+        Self::check_taker_covers(
+            self.bucket_layout,
+            theirs.bucket_layout_oldest,
+            theirs.bucket_layout,
+        )
+        .map_err(reject)?;
         Ok(())
     }
 
@@ -343,7 +331,7 @@ impl SupportedFormats {
         self.cell_directory.check(theirs.cell_directory).map_err(|e| reject(e.to_string()))?;
         self.cell_records.check(theirs.cell_records).map_err(|e| reject(e.to_string()))?;
         self.extent_frame.check(theirs.extent_frame).map_err(|e| reject(e.to_string()))?;
-        self.check_bucket_layout(theirs.bucket_layout).map_err(reject)?;
+        self.bucket_layout.check(theirs.bucket_layout).map_err(|e| reject(e.to_string()))?;
         Ok(())
     }
 }

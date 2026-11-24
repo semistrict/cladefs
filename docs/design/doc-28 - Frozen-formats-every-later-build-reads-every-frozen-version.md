@@ -101,11 +101,15 @@ agreed to that break.
 A frozen format can grow only through what it can say. So each family first takes one last
 incompatible change, where it lacks the means to grow (board 10033's subtasks):
 
-- **Every object says its version.** Checkpoints, segment and moves footers, marks, objectid
-  blocks, the `wal` start, local checkpoints, ephemeral keys, migration markers and the cell
-  directory's records say none today, relying on the head's or the directory's. A block device's
-  nodes and owners' lists said none, relying on its root's, which a commit leaves them under when
-  it rewrites the root alone (board 10052).
+- **Every object says its version.** Checkpoints (`TableFooter`, `State`, appendix), segment
+  footers, own-extent footers, objectid blocks and read evidence are versioned under
+  `bucket_cell::layout::FORMAT` (frozen at version 31, board 10038; moves and marks went in
+  boards 6216 and 10545), alongside heads, collector leases, identity, registry, references,
+  retired marks and mirrors, with bucket numbers in keys in base 32 (`Padded`). The `wal` start,
+  local checkpoints, ephemeral keys, migration markers and the cell directory's records say theirs
+  (board 10044). A block device's nodes and owners' lists say theirs (board 10052). Every KMS
+  backend's KEK objects and wrapped keys are frozen under `extent_keys::kms::*::FORMAT` (board
+  10042).
 - **Extent frames name their version as a number**, not one ASCII digit, which reads frames of 10
   on as corrupt; the table's MAC covers it (board 10040).
 - **Unknown fields are refused, not ignored**: the `store` file's unknown keys, a migration

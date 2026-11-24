@@ -617,11 +617,18 @@ impl crate::mirror::Here for SimBucket {
         &self,
         parent: CellId,
         at: u64,
-    ) -> futures::future::BoxFuture<'_, Result<bool, crate::bucket::Refused>> {
+    ) -> futures::future::BoxFuture<'_, Result<bool, crate::Error>> {
         let own = self.own();
         let mine = self.region_of(&parent.prefix()) == self.home;
         Box::pin(async move {
-            Ok(!mine && crate::bucket::get(&*own, &layout::mirror(parent, at)).await?.is_some())
+            if mine {
+                return Ok(false);
+            }
+            let Some(object) = crate::bucket::get(&*own, &layout::mirror(parent, at)).await? else {
+                return Ok(false);
+            };
+            layout::Mirror::decode(&object.bytes)?;
+            Ok(true)
         })
     }
 
@@ -1185,7 +1192,7 @@ async fn copied_whole(
     }
     let marker = crate::bucket::get(own, &layout::mirror(cell, at)).await.unwrap();
     let marker = marker.ok_or("gone")?;
-    layout::decode::<layout::Mirror>(&marker.bytes).map_err(|err| err.to_string())?;
+    layout::Mirror::decode(&marker.bytes).map_err(|err| err.to_string())?;
     // The version, as its cell's bucket keeps it whole, its hold there.
     let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
     let (state, read) = crate::recovery::recover_at(&checkpoints, cell, at)

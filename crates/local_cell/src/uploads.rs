@@ -38,7 +38,12 @@ impl<F: File> Closed<F> {
             return Ok(object);
         }
         let keys = &self.keys.of(self.footer.cell.id);
-        extent_frame::restamp(&object, &self.footer.encode(), keys).map_err(io::Error::other)
+        extent_frame::restamp(
+            &object,
+            &bucket_cell::layout::encode_segment_footer(&self.footer),
+            keys,
+        )
+        .map_err(io::Error::other)
     }
 
     /// The bytes of the files of its extents stored on their own, by their keys, checked.

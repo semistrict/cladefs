@@ -899,6 +899,7 @@ dependencies = [
  "extent_frame",
  "extent_keys",
  "fail",
+ "formats",
  "fprint",
  "futures",
  "host_fs",

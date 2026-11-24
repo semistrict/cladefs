@@ -30,6 +30,7 @@
 
 use crate::bucket::{self, Bucket, Created};
 use crate::{Error, identity, layout};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -55,12 +56,29 @@ pub fn named() -> u64 {
     (rand::random::<u64>() >> (u64::BITS - BUCKET_SHIFT)).max(1)
 }
 
-/// What a block's object holds: its taker, a random number its allocator chose, so that the
-/// taking's create, landed though its answer was lost, is its own when tried again
-/// ([`bucket::create`]).
-#[derive(Serialize, Deserialize)]
-struct BlockTaker {
-    taker: u64,
+/// What a block's object holds: the bucket layout version first (doc-28, board 10038), then its
+/// taker, a random number its allocator chose, so that the taking's create, landed though its
+/// answer was lost, is its own when tried again ([`bucket::create`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+pub(crate) struct BlockTaker {
+    pub format: u32,
+    pub taker: u64,
+}
+
+impl BlockTaker {
+    pub(crate) fn of(taker: u64) -> Self {
+        Self { format: layout::FORMAT.current, taker }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
+        let format = layout::FORMAT.check(format).map_err(|_| Error::BucketFormat(format))?;
+        match format {
+            31.. => layout::decode(bytes),
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+        }
+    }
 }
 
 /// Gives object IDs out of blocks it takes in its bucket, each once. One a process has for each
@@ -127,7 +145,7 @@ impl Allocator {
 /// returns it.
 async fn take(bucket: &impl Bucket, number: u16) -> Result<u64, crate::bucket::Refused> {
     assert!(identity::given(number), "bucket number {number} is no bucket's");
-    let bytes = layout::encode(&BlockTaker { taker: rand::random() });
+    let bytes = layout::encode(&BlockTaker::of(rand::random()));
     loop {
         let block = u64::from(number) * BUCKET_BLOCKS + rand::random::<u64>() % BUCKET_BLOCKS;
         match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await? {
@@ -204,10 +222,10 @@ mod tests {
     fn a_bucket_of_another_format_gives_no_id() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let other = identity::Identity { format: layout::FORMAT - 1, number: 3, id: 1 };
+            let other = identity::Identity { format: layout::FORMAT.oldest - 1, number: 3, id: 1 };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
             let refused = Allocator::new().next(&bucket).await;
-            assert_eq!(refused, Err(Error::BucketFormat(layout::FORMAT - 1)));
+            assert_eq!(refused, Err(Error::BucketFormat(layout::FORMAT.oldest - 1)));
             assert_eq!(bucket::list(&bucket, "objectid/").await.unwrap().len(), 0);
         });
     }

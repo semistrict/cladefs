@@ -116,8 +116,9 @@ pub fn stale(own: &impl Bucket, meta: &Meta) -> bool {
 /// `forksLeaveA`).
 pub trait Here: Send + Sync {
     /// Whether the mirror of `parent`'s version at `at` is marked in this bucket, read there now:
-    /// never for a cell of this bucket's own.
-    fn marked(&self, parent: CellId, at: u64) -> BoxFuture<'_, Result<bool, Refused>>;
+    /// never for a cell of this bucket's own. Refuses a marker of an unsupported format
+    /// ([`Error::BucketFormat`]).
+    fn marked(&self, parent: CellId, at: u64) -> BoxFuture<'_, Result<bool, Error>>;
 
     /// Creates `bytes` at `key` in this bucket, whatever cell `key` is of ([`bucket::create`]).
     fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> BoxFuture<'a, Result<(), Refused>>;
@@ -398,7 +399,10 @@ pub async fn mirror(
         // standing until B's collector deletes it, with the marker (`mirrorHoldsUnmarked`). One
         // written again here, after that collector listed the copy before this pin and deleted
         // the holds, would stand for good.
-        Some(_) => 0,
+        Some(object) => {
+            layout::Mirror::decode(&object.bytes)?;
+            0
+        }
         // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
         None => match hold_then_copy(bucket, own, &mut pin, (parent, at), &hold).await {
             Ok(Copied::Whole { count })
@@ -609,6 +613,7 @@ async fn refer_here(
             continue;
         }
         let Some(object) = bucket::get(bucket, &meta.key).await? else { continue };
+        layout::Reference::decode(&object.bytes)?;
         bucket::create(own, &meta.key, object.bytes).await?;
         moved.push(meta.key);
     }
@@ -872,5 +877,37 @@ mod tests {
         sim.served(write_hold(&*bucket, &hold, &pin)).0.unwrap();
         assert_eq!(sim.served(pin.release_holding(&*own, &*bucket, &hold)).0, Ok(()));
         assert_eq!(sim.keys(), Vec::<String>::new());
+    }
+
+    /// doc-28, board 10038: a mirror marker or reference of an unsupported format is refused by
+    /// `Mirror::decode` / `Reference::decode` (`FORMAT.check`), never silently accepted.
+    #[test]
+    fn mirrors_refuse_markers_and_references_of_other_formats() {
+        let sim = SimBucket::new();
+        let (bucket, own) = (sim.at(1), sim.at(1).own());
+        let future = layout::FORMAT.current + 1;
+        let bad_marker = layout::encode(&layout::Mirror { format: future });
+        sim.served(bucket::create(&*own, &layout::mirror(PARENT, 3), bad_marker)).0.unwrap();
+        assert_eq!(
+            sim.served(bucket.marked(PARENT, 3)).0,
+            Err(Error::BucketFormat(future)),
+            "Here::marked must check Mirror::decode"
+        );
+        assert_eq!(
+            sim.served(mirror(&*bucket, &*own, 1, PARENT, 3)).0,
+            Err(Error::BucketFormat(future)),
+            "mirror::mirror must check Mirror::decode"
+        );
+        // A reference of an unsupported format in the parent's bucket is refused by refer_here.
+        let child = CellId { tenant: 1, id: (1 << 48) | 9 };
+        let bad_ref = layout::encode(&layout::Reference { format: future, owner: 1 });
+        sim.served(bucket::create(&*bucket, &layout::reference(PARENT, 4, child), bad_ref))
+            .0
+            .unwrap();
+        assert_eq!(
+            sim.served(refer_here(&*bucket, &*own, 1, PARENT, 4)).0,
+            Err(Error::BucketFormat(future)),
+            "refer_here must check Reference::decode"
+        );
     }
 }

@@ -429,7 +429,7 @@ impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
         &self,
         parent: layout::CellId,
         at: u64,
-    ) -> futures::future::BoxFuture<'_, Result<bool, crate::bucket::Refused>> {
+    ) -> futures::future::BoxFuture<'_, Result<bool, crate::Error>> {
         Box::pin(async move {
             let Some(route) = &self.route else { return Ok(false) };
             let Some(of) = layout::routed_to(&parent.prefix()) else { return Ok(false) };
@@ -437,9 +437,10 @@ impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
                 return Ok(false);
             }
             let marker = layout::mirror(parent, at);
-            if crate::bucket::get(&*self.home, &marker).await?.is_none() {
+            let Some(object) = crate::bucket::get(&*self.home, &marker).await? else {
                 return Ok(false);
-            }
+            };
+            layout::Mirror::decode(&object.bytes)?;
             self.mirrored.lock().unwrap().insert(parent, (true, Instant::now()));
             self.mirrors.marked(parent, at);
             Ok(true)

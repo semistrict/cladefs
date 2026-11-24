@@ -160,7 +160,7 @@ async fn a_hosts_cell_writes_what_its_design_says() {
         open_cell.write(extent, first.len() as u64, &[VolatileSlice::from(last)]).await.unwrap();
         write(&open_cell, extent, first).await;
         tails += framing_overhead(large_extent as u64)
-            + bucket_cell::layout::encode(&extent).len() as u64;
+            + bucket_cell::layout::own_extent_footer(extent).len() as u64;
     }
     open_cell.commit_local(None).await.unwrap();
     let own = delta(before, local_cell::written());

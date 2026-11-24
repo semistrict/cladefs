@@ -10,10 +10,11 @@
 
 use crate::Error;
 use crate::layout::{Head, Origin};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 
 /// What made a cell, and so what it is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub enum Made {
     /// A cell of no parent, which its first writer made ([`crate::head::take`]).
     Root,
@@ -103,41 +104,24 @@ mod tests {
     fn heads_of_other_formats_are_refused() {
         let head = Head::of(Made::Own, 7);
         let bytes = encode(&head);
-        assert_eq!(&bytes[..4], &FORMAT.to_le_bytes());
+        assert_eq!(&bytes[..4], &FORMAT.current.to_le_bytes());
         assert_eq!(Head::decode(test_cell(3), &bytes), Ok(head));
-        let mut newer = (FORMAT + 1).to_le_bytes().to_vec();
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(Head::decode(test_cell(3), &trailing), Err(Error::Corrupt(_))));
+        let mut newer = (FORMAT.current + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
         assert_eq!(
             Head::decode(test_cell(3), &newer),
-            Err(Error::Format { cell: test_cell(3), format: FORMAT + 1 })
+            Err(Error::Format { cell: test_cell(3), format: FORMAT.current + 1 })
         );
-        // Format 1's and 2's records, whose footers and checkpoints this format reads wrong; 7's,
-        // whose versions say nothing of being shared (TASK-395.7); 8's, whose collector's lease
-        // and moves are at the bucket's root, its cells' collection under their own prefixes
-        // reading neither (TASK-395.2); and 9's, whose records and cells keep no keys, their
-        // objects framed in FORMAT 1 of extent_frame (TASK-411.3); and
-        // 10's, whose keys name no epochs, and whose cells have leases, not heads (TASK-407);
-        // and 11's, whose clones made say they are forks a recorder may record (TASK-455); and
-        // 12's, whose forks of versions say nothing of being resumed (TASK-455's review); and 13's,
-        // whose heads name no versions, nor footers the versions cut at their ends (TASK-476); and
-        // 14's, whose keys' numbers are in hexadecimal (TASK-504); 15's, whose cells name maps
-        // of cells (TASK-508.1); 16's, whose records name versions (TASK-508.2); 17's, whose
-        // records are flags, of writable forks too (TASK-508.3); and 18's, whose cells have a
-        // record and an object beside their heads (TASK-515); 19's, whose buckets have no
-        // number, their cells' IDs unique in them alone (TASK-633.9); and 20's, whose heads say
-        // nothing of replication (TASK-537.3.1); and 21's, whose versions mirrored in other
-        // buckets have no pins nor markers there (TASK-633.8); and 22's, whose heads are one
-        // object (TASK-691); 23's, whose versions have no read evidence (TASK-702.2); and 24's,
-        // whose origins and versions carry no writer epoch and whose heads carry `resumed`
-        // (board 6017, board 6020); and 25's, whose checkpoints keep no lengths of their segments'
-        // data (doc-27, board 6214); and 26's, whose ephemeral cells' index entries name no
-        // bucket (board 8517); and 27's, whose cells hold the collector's moves (doc-27, board
-        // 6216); and 28's, whose heads are in slots, and whose buckets have settings (doc-27,
-        // board 6220); and 29's, whose objects are frames of version 2 (board 10040).
-        assert_eq!(FORMAT, 30);
+        // Versions before 31 are refused: 31 is where the bucket layout froze (doc-28, board
+        // 10038), with every object saying its version and bucket numbers in keys in base 32.
+        assert_eq!(FORMAT.oldest, 31);
+        assert_eq!(FORMAT.current, 31);
         for format in [
             1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-            27, 28, 29,
+            27, 28, 29, 30,
         ] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());

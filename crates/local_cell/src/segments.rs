@@ -1482,7 +1482,7 @@ impl<F: File> Unframed<F> {
         }
         own.sync(dir)?;
         timing.took(framing_phase::OWN);
-        let footer = self.footer.encode();
+        let footer = bucket_cell::layout::encode_segment_footer(&self.footer);
         let (path, raw_path) = (framing_path(self.number), open_segment_path(self.number));
         let raw = (raw_path.as_str(), &self.raw);
         let data = (self.len, self.quiet, self.ephemeral, ahead);
@@ -2227,7 +2227,7 @@ pub(crate) fn segment_footer(bytes: &[u8]) -> Result<Option<Footer>, Error> {
     if bytes.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Footer::decode(bytes).context("a segment's footer")?))
+    Ok(Some(Footer::decode(bytes, bucket_cell::layout::FORMAT).context("a segment's footer")?))
 }
 
 /// cladefs: the segments this process's cells closed, and the nanoseconds closing them took.

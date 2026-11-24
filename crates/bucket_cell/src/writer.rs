@@ -361,7 +361,7 @@ impl<B: Bucket> Writer<B> {
         }
         let key = layout::segment(self.cell, segment, self.epoch);
         let keys = self.keys.of(self.cell.id);
-        let read = |bytes: &[u8]| layout::footer_under::<Footer>(bytes, &keys);
+        let read = |bytes: &[u8]| layout::Segment::footer_under(bytes, &keys);
         let taken = |bytes: &[u8]| match read(bytes)? == footer {
             true => Ok(()),
             false => Err(Error::Corrupt(format!("{key} ends with another footer than taken"))),

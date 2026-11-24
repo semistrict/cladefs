@@ -109,7 +109,9 @@ fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     match Parts::of_suffix(suffix, keys) {
         Ok(parts) => Ok(Some(parts)),
         Err(extent_frame::Error::Corrupt(_)) => Ok(None),
-        Err(err @ extent_frame::Error::NoKey(_)) => Err(err.into()),
+        Err(err @ (extent_frame::Error::NoKey(_) | extent_frame::Error::Format(_))) => {
+            Err(err.into())
+        }
     }
 }
 

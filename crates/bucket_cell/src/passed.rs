@@ -28,6 +28,7 @@ use crate::bucket::{self, Bucket, Meta};
 use crate::collector::Holding;
 use crate::layout::{self, CellId, FORMAT};
 use crate::{Error, Left, lifecycle};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -43,7 +44,7 @@ use std::collections::BTreeMap;
 /// starving no other's sweeps nor holding its cells past their time. A pass taking a cell early,
 /// as one whose clock is ahead would, fences the pass holding it, which then deletes nothing:
 /// never wrong, only late.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct CollectorLease {
     pub format: u32,
     pub epoch: u64,
@@ -59,13 +60,14 @@ pub struct CollectorLease {
 }
 
 impl CollectorLease {
-    /// The lease of `cell` `bytes` encode: [`Error::Format`] if it is of another format.
+    /// The lease of `cell` `bytes` encode: [`Error::Format`] if it is of an unsupported format.
     pub fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
-        if format != FORMAT {
-            return Err(Error::Format { cell, format });
+        let format = FORMAT.check(format).map_err(|_| Error::Format { cell, format })?;
+        match format {
+            31.. => layout::decode(bytes),
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
         }
-        layout::decode(bytes)
     }
 
     /// Whether a pass of `holder`, holding its cell as `holding` says, leaves the cell to another,
@@ -99,7 +101,7 @@ impl CollectorLease {
 const GC_LEASE: &str = "gc-lease";
 
 /// What a pass over a cell that ran to its end recorded ([`CollectorLease::passed`]).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Passed {
     /// The digest of the listing of the cell it decided by, but the collector's lease
     /// ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
@@ -120,7 +122,7 @@ impl Passed {
 
 /// What a cell takes in the bucket, as a pass's listing found it ([`Passed::usage`],
 /// TASK-395.8).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Usage {
     /// When the listing it is of began, by the backend's clock: milliseconds since the Unix epoch
     /// on a real backend.
@@ -159,7 +161,7 @@ impl Usage {
 }
 
 /// Objects, and their bytes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Sum {
     pub objects: u64,
     pub bytes: u64,
@@ -307,8 +309,14 @@ pub(crate) async fn take(
             0 => 0,
             lease => now.saturating_add(lease),
         };
-        let lease =
-            CollectorLease { format: FORMAT, epoch, holder, until, ended, passed: passed.clone() };
+        let lease = CollectorLease {
+            format: FORMAT.current,
+            epoch,
+            holder,
+            until,
+            ended,
+            passed: passed.clone(),
+        };
         Ok(lifecycle::Step::Write(lease, LeaseTaking { epoch, holder, passed }))
     })
     .await
@@ -475,8 +483,14 @@ mod tests {
         let mut usage = Usage { measured: 3, ..Usage::default() };
         usage.add(&layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 }), 40);
         let passed = Some(Passed { listing: Some([7; 32]), usage });
-        let lease =
-            CollectorLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };
+        let lease = CollectorLease {
+            format: FORMAT.current,
+            epoch: 2,
+            holder: 3,
+            until: 4,
+            ended: 5,
+            passed,
+        };
         let lease = lease.counting_itself();
         let len = layout::encode(&lease).len() as u64;
         let usage = &lease.passed.as_ref().unwrap().usage;
@@ -488,7 +502,7 @@ mod tests {
     /// A lease of another format is refused by name, before the rest of it is read.
     #[test]
     fn leases_of_other_formats_are_refused() {
-        for format in [FORMAT + 1, 8] {
+        for format in [FORMAT.current + 1, FORMAT.oldest - 1, 8] {
             let lease =
                 CollectorLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
             let refused = Error::Format { cell: TEST_CELL, format };

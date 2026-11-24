@@ -66,6 +66,8 @@ pub mod direct;
 pub mod evidence;
 pub mod faults;
 pub mod fetch;
+#[cfg(test)]
+mod golden;
 pub mod head;
 #[cfg(test)]
 mod heap;
@@ -150,12 +152,9 @@ pub enum Error {
          encrypted, and its record holds not their keys"
     )]
     Inherited { cell: layout::CellId, from: layout::CellId },
-    /// The cell's record says its objects are of another format than this one's, newer or
-    /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
-    #[error(
-        "cell {cell} is of format {format}, which this reader, of format {ours}, doesn't read",
-        ours = layout::FORMAT
-    )]
+    /// The cell's record says its objects are of a format version this build doesn't read
+    /// (doc-28, board 10038).
+    #[error("cell {cell}: {}", formats::Refused { format: layout::FORMAT, found: *.format })]
     Format { cell: layout::CellId, format: u32 },
     /// What a writer was to upload, it could not read where it is kept: a cell's file.
     #[error("reading {0}")]
@@ -184,12 +183,9 @@ pub enum Error {
     /// start it again of a new incarnation.
     #[error("incarnation {} was decommissioned", base32_id::Short(*.0))]
     Decommissioned(u64),
-    /// cladefs: a version's read evidence of another format than this one's, newer or older
-    /// ([`evidence::FORMAT`], TASK-702.2): its reader skips it.
-    #[error(
-        "read evidence of format {0}, which this reader, of format {ours}, doesn't read",
-        ours = evidence::FORMAT
-    )]
+    /// cladefs: a version's read evidence of a format version this build doesn't read
+    /// ([`layout::FORMAT`], TASK-702.2, doc-28): its reader skips it.
+    #[error("read evidence: {}", formats::Refused { format: layout::FORMAT, found: *.0 })]
     EvidenceFormat(u32),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
@@ -199,12 +195,9 @@ pub enum Error {
     /// credentials not let in, or the request itself refused.
     #[error("the bucket refuses {0}")]
     Refused(bucket::Refused),
-    /// cladefs: the bucket's identity says another format than this one's, newer or older
-    /// ([`identity`], TASK-633.9; doc-11, rule 1).
-    #[error(
-        "the bucket is of format {0}, which this reader, of format {ours}, doesn't read",
-        ours = layout::FORMAT
-    )]
+    /// cladefs: an object in the bucket says a format version this build doesn't read
+    /// ([`layout::FORMAT`], TASK-633.9, doc-28).
+    #[error("the bucket: {}", formats::Refused { format: layout::FORMAT, found: *.0 })]
     BucketFormat(u32),
     /// cladefs: a bucket to add is a bucket already, of this number ([`identity::add`],
     /// TASK-633.9).
@@ -251,6 +244,7 @@ impl From<extent_frame::Error> for Error {
     fn from(error: extent_frame::Error) -> Self {
         match error {
             extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
+            extent_frame::Error::Format(refused) => Self::BucketFormat(refused.found),
             extent_frame::Error::NoKey(key) => Self::NoKey(key),
         }
     }

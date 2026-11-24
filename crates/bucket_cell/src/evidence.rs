@@ -32,13 +32,11 @@
 use crate::Error;
 use crate::bucket::{self, Bucket, Meta, PutMode};
 use crate::layout::{self, CellId, EncryptionKey, Origin};
+use fprint::TypeFingerprint;
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use storage_device::ExtentId;
-
-/// The format of a recording's object, first in its footer: a reader refuses every other.
-pub const FORMAT: u32 = 1;
 
 /// How many of a tenant's newest recordings of a version predict its next fork's reads, and are
 /// kept (TASK-702.1's window).
@@ -55,7 +53,7 @@ pub const UNIT: u64 = 1 << 20;
 
 /// A unit of a version a fork read: a MiB of one of its extents, and when the fork first read it,
 /// in milliseconds after it opened.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TypeFingerprint)]
 pub struct Unit {
     pub extent: ExtentId,
     /// Which MiB of the extent: its offset over [`UNIT`].
@@ -82,29 +80,36 @@ impl Of {
     }
 }
 
-/// A recording's footer: its format first, then the key it was written at.
-#[derive(Serialize, Deserialize)]
-struct Footer {
-    format: u32,
-    key: String,
+/// A recording's footer: its bucket layout version first ([`layout::FORMAT`], doc-28, board
+/// 10038), then the key it was written at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
+pub(crate) struct Footer {
+    pub(crate) format: u32,
+    pub(crate) key: String,
+}
+
+impl Footer {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
+        let format = layout::FORMAT.check(format).map_err(|_| Error::EvidenceFormat(format))?;
+        match format {
+            31.. => layout::decode(bytes),
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+        }
+    }
 }
 
 /// The object of the recording of `units` at `key`, encrypted as `encrypting` says.
 pub fn encode(key: &str, units: &[Unit], encrypting: EncryptionKey<'_>) -> Vec<u8> {
-    let footer = Footer { format: FORMAT, key: key.to_owned() };
+    let footer = Footer { format: layout::FORMAT.current, key: key.to_owned() };
     layout::with_footer(&layout::encode(&units), &footer, encrypting)
 }
 
 /// The units of the recording at `key` whose object is `bytes`, by a reader holding `keys`: refused
-/// if of another format ([`Error::EvidenceFormat`]), written at another key, or under a key it
-/// lacks.
+/// if of an unsupported format ([`Error::EvidenceFormat`]), written at another key, or under a key
+/// it lacks.
 pub fn decode(key: &str, bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<Unit>, Error> {
-    let footer = extent_frame::footer(bytes, keys)?;
-    let format: u32 = layout::decode(footer.get(..4).unwrap_or(footer))?;
-    if format != FORMAT {
-        return Err(Error::EvidenceFormat(format));
-    }
-    let footer: Footer = layout::decode(footer)?;
+    let footer = Footer::decode(extent_frame::footer(bytes, keys)?)?;
     if footer.key != key {
         return Err(Error::Corrupt(format!("{key}: read evidence written at {}", footer.key)));
     }
@@ -271,10 +276,13 @@ mod tests {
         assert!(matches!(copied, Err(Error::Corrupt(ref why)) if why.contains("written at")));
         let other = testing::ring([test_cell(4)]);
         assert!(decode(&key, &bytes, &other.of(cell.id)).is_err());
-        let footer = Footer { format: FORMAT + 1, key: key.clone() };
+        let footer = Footer { format: layout::FORMAT.current + 1, key: key.clone() };
         let newer =
             layout::with_footer(&layout::encode(&units(1)), &footer, testing::encrypting(cell));
-        assert_eq!(decode(&key, &newer, &ring.of(cell.id)), Err(Error::EvidenceFormat(FORMAT + 1)));
+        assert_eq!(
+            decode(&key, &newer, &ring.of(cell.id)),
+            Err(Error::EvidenceFormat(layout::FORMAT.current + 1))
+        );
     }
 
     /// A tenant reads its own evidence of a version alone, the newest [`KEPT`] of it, newest first.

@@ -11,11 +11,12 @@
 use crate::bucket;
 use crate::bucket::Bucket;
 use crate::layout::{self, CellId};
+use fprint::TypeFingerprint;
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
 
 /// What a cell holds, which says what opens it (doc-20).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub enum Kind {
     /// An Fxfs filesystem.
     Fxfs,

@@ -277,14 +277,14 @@ impl Tail {
         let (extents, table) = match layout::kind(key) {
             // cladefs: and those of the commit it goes on with, sealed in it too (TASK-92.41).
             Kind::Segment { .. } => (
-                (Footer::decode(footer)?.contents.runs())
+                (Footer::decode(footer, layout::FORMAT)?.contents.runs())
                     .map(|&(extent, offset, len)| (extent, (offset, len)))
                     .collect(),
                 None,
             ),
             Kind::Extent { cell, sequence, .. } => {
                 let extent = ExtentId::new(cell.id, sequence);
-                let named: ExtentId = layout::decode(footer)?;
+                let named = layout::decode_own_extent_footer(footer)?;
                 if named != extent {
                     return Err(Error::Corrupt(format!("{key} holds extent {named:?}")));
                 }

@@ -141,7 +141,7 @@ async fn refer(
     origin: Origin,
     child: CellId,
     owner: u64,
-) -> Result<Referred, bucket::Refused> {
+) -> Result<Referred, Error> {
     let key = layout::reference(origin.parent, origin.at, child);
     let bytes = layout::encode(&layout::Reference::of(owner));
     if let Some(here) = bucket.mirrors()

@@ -221,12 +221,14 @@ fn corrupt(what: impl std::fmt::Display) -> Corrupt {
     Corrupt(format!("an object's {what}"))
 }
 
-/// cladefs: why an object's data can't be read (TASK-411.2): it is corrupt, or encrypted under a
-/// key its reader doesn't hold.
+/// cladefs: why an object's data can't be read (TASK-411.2): it is corrupt, of an unsupported
+/// format version, or encrypted under a key its reader doesn't hold.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
     Corrupt(#[from] Corrupt),
+    #[error(transparent)]
+    Format(#[from] formats::Refused),
     #[error(
         "an object encrypted under cell {}'s key of generation {}, which its reader doesn't hold",
         base32_id::Short(.0.cell),
@@ -1482,6 +1484,7 @@ pub fn data(bytes: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
 pub fn check(bytes: &[u8]) -> Result<(), Corrupt> {
     let parts = Parts::of(bytes, &NoKeys).map_err(|err| match err {
         Error::Corrupt(corrupt) => corrupt,
+        Error::Format(refused) => Corrupt(refused.to_string()),
         Error::NoKey(_) => unreachable!("a reader holding no key refuses nothing"),
     })?;
     let footer = parts.frame.footer();

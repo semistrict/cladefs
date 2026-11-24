@@ -7,14 +7,17 @@
 //! of one writer's footers ([`Chain`]), which stamps every footer its segments close with, a
 //! cell's and a writer's alike, and admits those another closed for it.
 
-use crate::Corrupt;
+use crate::{Corrupt, Error};
 use base32_id::{Padded, Short};
+use bincode::Options as _;
 use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use storage_device::ExtentId;
 
 /// Where an extent's bytes are: a range of the data of an object.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TypeFingerprint,
+)]
 pub struct Location {
     pub key: String,
     pub offset: u64,
@@ -75,7 +78,7 @@ impl std::str::FromStr for CellId {
 /// What a segment holds after its data: its place in its writer's chain, and the commits it makes,
 /// its [`Contents`]. A segment with no data is a footer alone: commits that only free extents or
 /// set the root, or make versions.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Footer {
     pub cell: CellId,
     pub segment: u64,
@@ -87,12 +90,25 @@ pub struct Footer {
 }
 
 impl Footer {
-    pub fn encode(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("footers serialize")
+    /// Encodes the footer prefixed with its bucket layout `version` (doc-28, board 10038).
+    pub fn encode(&self, version: u32) -> Vec<u8> {
+        let mut bytes = version.to_le_bytes().to_vec();
+        bincode::serialize_into(&mut bytes, self).expect("footers serialize");
+        bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, Corrupt> {
-        bincode::deserialize(bytes).map_err(|err| Corrupt(format!("a footer: {err}")))
+    /// Decodes a version-prefixed footer, checking its version against `format` and refusing
+    /// trailing bytes (doc-28, board 10038).
+    pub fn decode(bytes: &[u8], format: formats::Format) -> Result<Self, Error> {
+        let (version, rest) =
+            bytes.split_first_chunk::<4>().ok_or_else(|| Corrupt("a footer: no version".into()))?;
+        let version = format.check(u32::from_le_bytes(*version))?;
+        let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+        match version {
+            _ => {
+                options.deserialize(rest).map_err(|err| Corrupt(format!("a footer: {err}")).into())
+            }
+        }
     }
 
     /// The extents its commits sealed that are stored on their own, the cell's, and where each
@@ -369,9 +385,22 @@ mod tests {
                 versions: vec![NewVersion { id: 0xbe, keep_last: Some(3) }],
             },
         };
-        let bytes = footer.encode();
-        assert_eq!(Footer::decode(&bytes).unwrap(), footer);
-        assert!(Footer::decode(&bytes[..bytes.len() - 1]).is_err());
+        let format = formats::Format { name: "test segment", oldest: 31, current: 31 };
+        let bytes = footer.encode(format.current);
+        assert_eq!(Footer::decode(&bytes, format).unwrap(), footer);
+        assert!(matches!(
+            Footer::decode(&bytes[..bytes.len() - 1], format),
+            Err(Error::Corrupt(_))
+        ));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(Footer::decode(&trailing, format), Err(Error::Corrupt(_))));
+        let mut newer = bytes.clone();
+        newer[..4].copy_from_slice(&(format.current + 1).to_le_bytes());
+        assert_eq!(
+            Footer::decode(&newer, format),
+            Err(Error::Format(formats::Refused { format, found: format.current + 1 }))
+        );
     }
 
     /// cladefs: a commit a segment goes on with is ended by a segment naming it, or a later commit

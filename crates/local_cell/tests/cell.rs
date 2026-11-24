@@ -1208,7 +1208,7 @@ async fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_aft
         let framed = local_cell::read_whole(&crashed.open(&path("segments"), true).unwrap());
         let footer =
             extent_frame::footer(&framed.unwrap(), &extent_frame::NoKeys).unwrap().to_vec();
-        let footer = Footer::decode(&footer).unwrap();
+        let footer = Footer::decode(&footer, bucket_cell::layout::FORMAT).unwrap();
         assert_eq!(footer.contents.commits, [tag(0, 2)], "seed {seed}");
     }
 }
@@ -1337,8 +1337,11 @@ async fn segments_close_for_the_writer_of_their_chain() {
     assert_eq!(first.footer.own().collect::<Vec<_>>(), [(extent(2), own.clone())]);
     // Its file is the object, footer and all; its extent of its own's, the extent's object.
     let bytes = first.bytes().unwrap();
-    let footer =
-        Footer::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
+    let footer = Footer::decode(
+        extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap(),
+        bucket_cell::layout::FORMAT,
+    )
+    .unwrap();
     assert_eq!(footer, first.footer);
     assert_eq!(
         extent_frame::data(&bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap()
@@ -1643,7 +1646,7 @@ async fn incompressible_large_extents_are_framed_in_place() {
     let before = local_cell::written();
     cell.commit(None).await.unwrap();
     // cladefs: its footer names it (TASK-411.3).
-    let footer = bucket_cell::layout::encode(&extent(1));
+    let footer = bucket_cell::layout::own_extent_footer(extent(1));
     let framed = extent_frame::framed(&data, &footer, bucket_cell::testing::encrypting(CELL));
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = Padded(1).to_string();
@@ -1962,7 +1965,7 @@ async fn compressible_large_extents_are_framed_in_copies() {
         cell.write(extent(sequence), 0, data).await.unwrap();
         let before = local_cell::written();
         cell.commit(None).await.unwrap();
-        let footer = bucket_cell::layout::encode(&extent(sequence));
+        let footer = bucket_cell::layout::own_extent_footer(extent(sequence));
         let framed = extent_frame::framed(data, &footer, bucket_cell::testing::encrypting(CELL));
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");

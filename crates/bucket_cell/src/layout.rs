@@ -8,6 +8,8 @@
 //! read from a bucket, by ranged reads, as [`crate::object`] reads them.
 
 use base32_id::Padded;
+use bincode::Options as _;
+use fprint::TypeFingerprint;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -19,7 +21,19 @@ pub use extent_frame::segment::{
 
 /// cladefs: a fork's child: its cell, and its owner, which every record of the child names,
 /// whoever writes it (TASK-79.82, TASK-153.9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    TypeFingerprint,
+)]
 pub struct Child {
     pub cell: CellId,
     pub owner: u64,
@@ -90,7 +104,13 @@ pub struct Child {
 /// nothing reads 28's. 30: its
 /// framed objects are extent frames of version 3, their version a number (board 10040); nothing
 /// reads 29's, whose frames were of 2.
-pub const FORMAT: u32 = 30;
+/// 31, frozen (doc-28, board 10038): every bucket object kind says its version (segment footers,
+/// own-extent footers, checkpoint tables/states/appendices, objectid blocks, read evidence, heads,
+/// collector leases, identity, registry, references, retired marks and mirrors), readers check by
+/// range ([`formats::Format::check`]) and refuse trailing bytes, and bucket numbers in keys
+/// ([`ephemeral_hosts`], [`hold`]) are fixed-width base 32 ([`Padded`]). Every later build reads
+/// every version from 31 on.
+pub const FORMAT: formats::Format = formats::Format::new("bucket layout", 31, 31);
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -288,7 +308,7 @@ pub fn ephemeral_bucket(parent: CellId) -> u16 {
 /// `bucket`, every incarnation's, and of its incarnations' tombstones ([`decommissioned`]):
 /// listed, every host's with ephemeral cells forked from cells of that bucket.
 pub fn ephemeral_hosts(bucket: u16) -> String {
-    format!("{EPHEMERAL}/{bucket:04x}/")
+    format!("{EPHEMERAL}/{}/", Padded(u64::from(bucket)))
 }
 
 /// cladefs: the prefix of the index of the ephemeral cells' references in the bucket numbered
@@ -326,13 +346,13 @@ pub fn decommissioned(bucket: u16, incarnation: u64) -> String {
 
 /// cladefs: of a key or a prefix under the ephemeral cells' index, the bucket it names and the
 /// rest after it: none for any other. The bucket's number written as [`ephemeral_hosts`] writes
-/// it, four hexadecimal digits, alone.
+/// it, fixed-width base 32 ([`Padded`]), alone.
 fn ephemeral_under(key: &str) -> Option<(u16, &str)> {
     let rest = key.strip_prefix(EPHEMERAL)?.strip_prefix('/')?;
     let (bucket, rest) = rest.split_once('/')?;
     // Not a bucket's number: no key of the index.
-    let number = u16::from_str_radix(bucket, 16).ok()?;
-    (format!("{number:04x}") == bucket).then_some((number, rest))
+    let number = u16::try_from(number(bucket)?).ok()?;
+    Some((number, rest))
 }
 
 /// cladefs: the parent, origin and child an ephemeral cell's index entry names, and its
@@ -372,7 +392,7 @@ pub fn pin(parent: CellId, at: u64) -> String {
 /// what the mirror copied, and in their cells what it did not. The mirror writes it before it reads
 /// the parent's head; the mirror's bucket's collector deletes it, the copy going.
 pub fn hold(parent: CellId, at: u64, bucket: u16) -> String {
-    format!("{}{PIN}.{bucket:04x}", origin(parent, at))
+    format!("{}{PIN}.{}", origin(parent, at), Padded(u64::from(bucket)))
 }
 
 /// cladefs: the marker of the mirror of `parent`'s version at the end of its segment `at` in
@@ -657,7 +677,7 @@ pub fn kind(key: &str) -> Kind {
                 && let Some(bucket) = held.strip_prefix(PIN).and_then(|held| held.strip_prefix('.'))
             {
                 // Not a bucket's number: no hold's key.
-                let bucket = u16::from_str_radix(bucket, 16).ok()?;
+                let bucket = u16::try_from(number(bucket)?).ok()?;
                 return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
             }
             if let Some((at, rest)) = rest.split_once('/')
@@ -736,7 +756,19 @@ pub const DEFAULT_TENANT: u64 = 0;
 /// Where a cell was forked from: ordered by its parent, then its segment, so that the forks made
 /// at one segment sort together. Carries the writer `epoch` of segment `at` so cross-cell recovery
 /// reads `checkpoint(parent, at, epoch)` directly without reading `parent`'s head (board 6017).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    TypeFingerprint,
+)]
 pub struct Origin {
     pub parent: CellId,
     pub at: u64,
@@ -754,7 +786,7 @@ pub struct Origin {
 /// 0 is a head made and never taken, a fork's child's until its fork is made; [`Head::FINAL`] a
 /// deleted cell's: no writer takes it again. Heads are never deleted, but with a dead cell
 /// ([`Head::removable`]).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Head {
     /// The format of the cell's objects ([`FORMAT`]), first, so that a reader of any format reads
     /// it before the rest, which it reads only if it is of its own ([`Head::decode`], TASK-141.2,
@@ -818,7 +850,7 @@ pub struct Head {
 /// cladefs: what a guest's fsync waits for in a cell (doc-12, doc-21): its commit's level. The
 /// sync family (sync, syncfs, unmount) waits for [`Fsync::Replicated`] in a replicated cell, and
 /// for its upload in any other.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub enum Fsync {
     /// In the daemon's memory, in order: survives what leaves the daemon alive.
     #[default]
@@ -834,7 +866,7 @@ pub const MAX_F: u8 = 3;
 
 /// cladefs: what a replicated cell asks for, as its taking gives it ([`Head::replication`]): its
 /// f, and what its guest's fsync waits for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Wish {
     pub f: u8,
     pub fsync: Fsync,
@@ -850,7 +882,7 @@ impl Wish {
 
 /// cladefs: a replicated cell's replication (doc-21): what it asks for, and the configuration
 /// its writer's commits are replicated in, once it has one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Replication {
     pub wish: Wish,
     /// The active configuration: none until a writer installs one.
@@ -861,7 +893,7 @@ pub struct Replication {
 /// write-once log of the commits the head does not name yet. Made by a taking, or by its writer
 /// replacing members, and active once the head names it. An f of 0, its writer alone, holds no
 /// quorum: a taker of a cell whose head names it reads the bucket alone.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Configuration {
     /// Its number, greater than every configuration's before it in the cell.
     pub number: u64,
@@ -874,7 +906,7 @@ pub struct Configuration {
 
 /// cladefs: a member of a configuration (doc-21): a host, by its peer address, in one incarnation
 /// of its replica directory, which a host that lost its disk, and the promises on it, is no more.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TypeFingerprint)]
 pub struct Member {
     /// `HOST:PORT`, as the hosts sharing the bucket name it (`CLADEFSD_PEERS`).
     pub address: String,
@@ -885,7 +917,7 @@ pub struct Member {
 /// of the segment making it named ([`NewVersion`]); the segment it is at and that segment's writer
 /// `epoch` (board 6017); and whether forks of it may be of other tenants' cells (doc-7, Shared
 /// versions).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Version {
     pub id: u64,
     pub at: u64,
@@ -903,21 +935,22 @@ impl Head {
 
     /// A head of `cell` made by `made`, of `owner`, of this format, never taken.
     pub fn of(made: crate::record::Made, owner: u64) -> Self {
-        Self { format: FORMAT, owner, made, ..Self::default() }
+        Self { format: FORMAT.current, owner, made, ..Self::default() }
     }
 
-    /// The head of `cell` that `bytes` encode, unless it is of another format than this one, newer
-    /// or older, which its first bytes say ([`crate::Error::Format`]). cladefs: refused as corrupt
+    /// The head of `cell` that `bytes` encode, unless it is of a format version this build doesn't
+    /// read, which its first bytes say ([`crate::Error::Format`]). cladefs: refused as corrupt
     /// unless its runs name every segment of `0..end` (board 8545): a bucket's object, untrusted
     /// until a MAC is checked, which the keyless collector checks none of; past here, the epoch of
     /// each segment it names is there ([`Head::segments`]).
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, crate::Error> {
         let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
-        if format != FORMAT {
-            return Err(crate::Error::Format { cell, format });
-        }
-        let head: Self = decode(bytes)?;
+        let format = FORMAT.check(format).map_err(|_| crate::Error::Format { cell, format })?;
+        let head: Self = match format {
+            31.. => decode(bytes)?,
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+        };
         // Runs name every segment: the first from 0, each after the one before, within 0..end.
         let from_zero = head.runs.first().is_none_or(|&(from, _)| from == 0);
         let ascending = head.runs.windows(2).all(|pair| matches!(pair, [(a, _), (b, _)] if a < b));
@@ -1025,7 +1058,7 @@ impl Head {
 /// to the fork, so that every writer of it writes the same, a writable fork's host, its parent's
 /// writers and its parent's deletion alike, and a create landed though its answer was lost is taken
 /// for its own (TASK-395.3). What the collector keeps by is the key alone; nothing reads them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Reference {
     pub format: u32,
     pub owner: u64,
@@ -1034,38 +1067,100 @@ pub struct Reference {
 impl Reference {
     /// The reference of the fork whose child's owner is `owner`.
     pub fn of(owner: u64) -> Self {
-        Self { format: FORMAT, owner }
+        Self { format: FORMAT.current, owner }
+    }
+
+    /// Decodes a reference object, checking its format version against [`FORMAT`] (doc-28, board
+    /// 10038).
+    pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
+        let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
+        let format = FORMAT.check(format).map_err(|_| crate::Error::BucketFormat(format))?;
+        match format {
+            31.. => decode(bytes),
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+        }
     }
 }
 
 /// cladefs: a mirror's marker's bytes ([`mirror`], TASK-633.8, board 6017): the format of the
 /// bucket's objects alone; the checkpoint epoch is carried directly in `Origin`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Mirror {
     pub format: u32,
 }
 
 impl Mirror {
-    pub const NOW: Self = Self { format: FORMAT };
+    pub const NOW: Self = Self { format: FORMAT.current };
+
+    /// Decodes a mirror marker object, checking its format version against [`FORMAT`] (doc-28,
+    /// board 10038).
+    pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
+        let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
+        let format = FORMAT.check(format).map_err(|_| crate::Error::BucketFormat(format))?;
+        match format {
+            31.. => decode(bytes),
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+        }
+    }
 }
 
 /// cladefs: a reference's mark's bytes ([`retired`]): the format of the bucket's objects alone, the
 /// same whoever writes it. What a pass deletes by is its key alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Retired {
     pub format: u32,
 }
 
 impl Retired {
-    pub const NOW: Self = Self { format: FORMAT };
+    pub const NOW: Self = Self { format: FORMAT.current };
+
+    /// Decodes a retired-reference mark, checking its format version against [`FORMAT`] (doc-28,
+    /// board 10038).
+    pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
+        let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
+        let format = FORMAT.check(format).map_err(|_| crate::Error::BucketFormat(format))?;
+        match format {
+            31.. => decode(bytes),
+            _ => unreachable!("FORMAT.check enforces oldest..=current"),
+        }
+    }
 }
 
 pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     bincode::serialize(value).expect("objects serialize")
 }
 
+/// Decodes a bincode-encoded bucket object, refusing trailing bytes (doc-28, board 10038).
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
-    bincode::deserialize(bytes).map_err(|error| crate::Error::Corrupt(error.to_string()))
+    let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+    options.deserialize(bytes).map_err(|error| crate::Error::Corrupt(error.to_string()))
+}
+
+/// Encodes `value` prefixed with the current bucket layout version ([`FORMAT`], doc-28, board
+/// 10038).
+pub fn encode_versioned<T: Serialize>(value: &T) -> Vec<u8> {
+    let mut bytes = FORMAT.current.to_le_bytes().to_vec();
+    bincode::serialize_into(&mut bytes, value).expect("objects serialize");
+    bytes
+}
+
+/// Splits and checks a leading [`FORMAT`] version prefix on `bytes`.
+pub(crate) fn check_version(bytes: &[u8]) -> Result<(u32, &[u8]), crate::Error> {
+    let (version, rest) =
+        bytes.split_first_chunk::<4>().ok_or_else(|| crate::Error::Corrupt("no version".into()))?;
+    let format = u32::from_le_bytes(*version);
+    let version = FORMAT.check(format).map_err(|_| crate::Error::BucketFormat(format))?;
+    Ok((version, rest))
+}
+
+/// Decodes a version-prefixed value written by [`encode_versioned`], checking its version against
+/// [`FORMAT`] and refusing trailing bytes (doc-28, board 10038).
+pub fn decode_versioned<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
+    let (version, rest) = check_version(bytes)?;
+    match version {
+        31.. => decode(rest),
+        _ => unreachable!("FORMAT.check enforces oldest..=current"),
+    }
 }
 
 pub use extent_frame::{Frame, PART, TRAILER, crc};
@@ -1085,10 +1180,34 @@ pub fn with_footer<T: Serialize>(
     extent_frame::framed(data, &encode(footer), encrypting)
 }
 
-/// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
-/// copied to another key, encrypted, is refused (TASK-411.3), encrypted as `encrypting` says.
+/// cladefs: the versioned footer of a segment's object (doc-28, board 10038).
+pub fn encode_segment_footer(footer: &Footer) -> Vec<u8> {
+    footer.encode(FORMAT.current)
+}
+
+/// cladefs: decodes a versioned segment footer, checking its version against [`FORMAT`] (doc-28,
+/// board 10038).
+pub fn decode_segment_footer(bytes: &[u8]) -> Result<Footer, crate::Error> {
+    Ok(Footer::decode(bytes, FORMAT)?)
+}
+
+/// cladefs: the versioned footer of an extent stored on its own: its version ([`FORMAT`]), then
+/// its [`ExtentId`] (TASK-411.3, doc-28, board 10038).
+pub fn own_extent_footer(extent: ExtentId) -> Vec<u8> {
+    encode_versioned(&extent)
+}
+
+/// cladefs: decodes the versioned footer of an extent stored on its own, checking its version
+/// against [`FORMAT`] (doc-28, board 10038).
+pub fn decode_own_extent_footer(bytes: &[u8]) -> Result<ExtentId, crate::Error> {
+    decode_versioned(bytes)
+}
+
+/// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it and its
+/// bucket layout version, so that one copied to another key, encrypted, is refused (TASK-411.3,
+/// doc-28, board 10038), encrypted as `encrypting` says.
 pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: EncryptionKey<'_>) -> Vec<u8> {
-    with_footer(data, &extent, encrypting)
+    extent_frame::framed(data, &own_extent_footer(extent), encrypting)
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs, by a reader holding
@@ -1098,30 +1217,24 @@ pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>
     Ok(extent_frame::data(bytes, keys)?)
 }
 
-/// The footer of a whole object [`with_footer`] made, checked against its CRC.
-pub fn footer<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
-    footer_under(bytes, &extent_frame::NoKeys)
-}
-
-/// cladefs: the footer of a whole object, as [`footer`], by a reader holding `keys`: checked
-/// against its MAC too, if it holds the object's key, and refused as `extent_frame` refuses it
-/// (TASK-411.3).
-pub fn footer_under<T: DeserializeOwned>(
-    bytes: &[u8],
-    keys: &dyn extent_frame::Keys,
-) -> Result<T, crate::Error> {
-    decode(extent_frame::footer(bytes, keys)?)
-}
-
 impl Segment {
-    /// Its object, cladefs: encrypted as `encrypting` says (TASK-411.3).
+    /// Its object, cladefs: encrypted as `encrypting` says (TASK-411.3), its footer versioned
+    /// (doc-28, board 10038).
     pub fn encode(&self, encrypting: EncryptionKey<'_>) -> Vec<u8> {
-        with_footer(&self.data, &self.footer, encrypting)
+        extent_frame::framed(&self.data, &encode_segment_footer(&self.footer), encrypting)
     }
 
-    /// The footer of a segment's object.
+    /// The footer of a segment's object, checked against its CRC and [`FORMAT`].
     pub fn footer(bytes: &[u8]) -> Result<Footer, crate::Error> {
-        footer(bytes)
+        Self::footer_under(bytes, &extent_frame::NoKeys)
+    }
+
+    /// The footer of a segment's object, checked against its MAC under `keys` and [`FORMAT`].
+    pub fn footer_under(
+        bytes: &[u8],
+        keys: &dyn extent_frame::Keys,
+    ) -> Result<Footer, crate::Error> {
+        decode_segment_footer(extent_frame::footer(bytes, keys)?)
     }
 }
 
@@ -1192,6 +1305,17 @@ mod tests {
         // cladefs: a mirror's pin, among its version's references, and its marker (TASK-633.8).
         assert_eq!(kind(&pin(cell, 7)), Kind::Pin { parent: cell, at: 7 });
         assert_eq!(kind(&hold(cell, 7, 3)), Kind::Hold { parent: cell, at: 7, bucket: 3 });
+        assert_eq!(hold(cell, 7, 0x1234), format!("{}mirror.{}", origin(cell, 7), Padded(0x1234)));
+        assert_eq!(
+            kind(&format!("{}mirror.0003", origin(cell, 7))),
+            Kind::Unknown,
+            "hex bucket numbers are refused after format 31"
+        );
+        assert_eq!(
+            kind(&format!("{}mirror.{}", origin(cell, 7), Padded(u64::from(u16::MAX) + 1))),
+            Kind::Unknown,
+            "bucket numbers past u16::MAX are refused"
+        );
         assert_eq!(owner(&hold(cell, 7, 3)), Some(cell));
         assert!(pin(cell, 7).starts_with(&origin(cell, 7)));
         assert_eq!(retired_of(&pin(cell, 7)), None);
@@ -1205,7 +1329,7 @@ mod tests {
         );
         assert_eq!((owner(&ephemeral), retired_of(&ephemeral)), (Some(cell), None));
         // Its index entry, in its parent's bucket, and its incarnation's tombstone beside the
-        // entries' prefix, never under it (boards 8517, 8519).
+        // entries' prefix, never under it (boards 8517, 8519), its bucket in base 32 (board 10038).
         let index = ephemeral_index(0x2a, cell, 7, child);
         assert!(index.starts_with(&ephemeral_indexes(ephemeral_bucket(cell), 0x2a)));
         assert_eq!(ephemeral_indexed(&index), Some((0x2a, cell, 7, child)));
@@ -1215,14 +1339,14 @@ mod tests {
         let there = ephemeral_index(0x2a, theirs, 7, child);
         assert_eq!(
             there,
-            "ephemeral/0003/000000000001a/0000000000001.000r000000005.0000000000007.0000000000001.0000000000005"
+            "ephemeral/0000000000003/000000000001a/0000000000001.000r000000005.0000000000007.0000000000001.0000000000005"
         );
         assert_eq!((routed_to(&there), routed_to(&ephemeral_hosts(3))), (Some(3), Some(3)));
         assert_eq!(routed_to(&index), None, "a named cell's stays in the bucket asked");
-        let forged = there.replacen("/0003/", "/0002/", 1);
+        let forged = there.replacen("/0000000000003/", "/0000000000002/", 1);
         assert_eq!((ephemeral_indexed(&forged), kind(&forged)), (None, Kind::Unknown));
         let tombstone = decommissioned(3, 0x2a);
-        assert_eq!(tombstone, "ephemeral/0003/000000000001a.decommissioned");
+        assert_eq!(tombstone, "ephemeral/0000000000003/000000000001a.decommissioned");
         assert!(!tombstone.starts_with(&ephemeral_indexes(3, 0x2a)));
         assert!(tombstone.starts_with(&ephemeral_hosts(3)));
         assert_eq!(decommissioned_of(&tombstone), Some((3, 0x2a)));
@@ -1230,9 +1354,11 @@ mod tests {
         assert_eq!((owner(&tombstone), routed_to(&tombstone)), (None, Some(3)));
         for malformed in [
             "ephemeral/3/000000000001a.decommissioned",
+            "ephemeral/0003/000000000001a.decommissioned",
             "ephemeral/+003/000000000001a.decommissioned",
-            "ephemeral/0003/1a.decommissioned",
-            "ephemeral/0003/000000000001a.decommissione",
+            "ephemeral/0000000002000/000000000001a.decommissioned",
+            "ephemeral/0000000000003/1a.decommissioned",
+            "ephemeral/0000000000003/000000000001a.decommissione",
         ] {
             assert_eq!(kind(malformed), Kind::Unknown, "{malformed}");
         }
