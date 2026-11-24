@@ -219,8 +219,24 @@ impl Filesystem {
     /// Closes the filesystem, writing back what is dirty, once no volume of it is mounted.
     pub async fn close(self) -> Result<(), Error> {
         // Release any held freeze guard and commit-hold task so closing cannot deadlock if a final
-        // emergency thaw failed before the last volume left.
-        *self.freeze_state.lock().unwrap() = FreezeState::Active;
+        // emergency thaw failed before the last volume left, and best-effort tell the host device
+        // it thawed before closing (hotbed reviews 91 and 92).
+        let state = std::mem::replace(&mut *self.freeze_state.lock().unwrap(), FreezeState::Active);
+        match state {
+            FreezeState::Frozen(Frozen::DeviceFrozen { device, commits }) => {
+                if let Err((device, error)) =
+                    device.unfreeze(|cell| self.filesystem.allocator().set_cell(cell)).await
+                {
+                    log::warn!("cladefs: unfreezing device during close failed: {error:#}");
+                    drop(device);
+                }
+                drop(commits);
+            }
+            FreezeState::Frozen(Frozen::JournalRotating { commits }) => {
+                drop(commits);
+            }
+            FreezeState::Active | FreezeState::Thawing => {}
+        }
         self.filesystem.close().await
     }
 
@@ -523,9 +539,14 @@ pub(crate) trait GuestFxfs: Sized {
 impl GuestFxfs for Fxfs {
     async fn unmount(self) {
         let (filesystem, volume) = (self.filesystem().clone(), self.volume_id());
+        let frozen = self.platform().filesystem.is_frozen();
         self.close().await;
         // One in use, or that a read-only filesystem can't flush, stays open: it holds memory, and
-        // nothing else.
+        // nothing else. While the filesystem is frozen, `commits` holds `commit_mutex`, so
+        // `close_volume` (which locks commits) would deadlock (hotbed review 91, finding 328).
+        if frozen {
+            return;
+        }
         if let Err(error) = filesystem.object_manager().close_volume(volume).await {
             log::info!("volume {volume} stays open as it unmounts: {error:#}");
         }

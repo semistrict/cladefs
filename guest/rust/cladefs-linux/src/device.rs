@@ -499,6 +499,14 @@ impl ExtentDevice {
             cell: Arc::new(AtomicU64::new(info.cell)),
             writes_nothing: false,
         };
+        // Synchronize the host's frozen state to unfrozen on open: if a previous unmount's final
+        // thaw failed and closed the filesystem anyway, the host may still consider the device
+        // frozen. Clearing it here (or failing open if the device refuses) ensures an active
+        // mounted filesystem can never coexist with a stale host frozen flag (hotbed review 92).
+        if this.info.flags & DEVICE_FREEZE != 0 {
+            let thawed = op(T_FREEZE, 0, None, 0, std::ptr::null_mut(), 0);
+            call(this.device, thawed, None).await?;
+        }
         let info = this.info().await?;
         this.capacity.store(info.capacity, Ordering::Release);
         // The cell, as the device says it now: the configuration the driver read as it bound
