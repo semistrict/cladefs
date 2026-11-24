@@ -650,6 +650,23 @@ impl Cladefsd for Control {
         reply(made.map(|made| ImportImageResponse { tenant: made.tenant, cell: made.id }))
     }
 
+    async fn import_memory(
+        &self,
+        request: Request<ImportMemoryRequest>,
+    ) -> Result<Response<ImportMemoryResponse>, Status> {
+        let ImportMemoryRequest { path: cell_dir, file, tenant, make_version } =
+            request.into_inner();
+        let (cell_dir, file) = (path(cell_dir)?, path(file)?);
+        room_for_a_cell(&self.daemon)?;
+        let tenant = self.new_cell_at(&cell_dir, tenant)?;
+        let made = cells::import_memory(&self.daemon, cell_dir, file, tenant, make_version).await;
+        reply(made.map(|(made, version)| ImportMemoryResponse {
+            tenant: made.tenant,
+            cell: made.id,
+            version: version.unwrap_or(0),
+        }))
+    }
+
     async fn fork_cell(
         &self,
         request: Request<ForkCellRequest>,

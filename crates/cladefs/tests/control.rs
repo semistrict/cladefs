@@ -980,3 +980,155 @@ fn stats_of_many_vms_are_taken_and_bounded() {
     fail::remove("cladefsd::most_answer");
     drop(vms);
 }
+
+/// board 11222: memory cells imported, versioned, synced and forked through the control API alone,
+/// without touching `MemoryCell::import` in Rust: zero pages stored as holes, contents read back
+/// intact through a fork, and bad files / existing paths / mismatched tenants refused.
+#[test]
+fn memory_cells_through_the_control_api() {
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///cells");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let ps = cladefs::pages::page_size() as usize;
+    let pages = 64usize;
+    let size = (pages * ps) as u64;
+
+    // Sparse memory image: mostly zero pages, with 4 non-zero pages scattered across it.
+    let mut expected = vec![0u8; size as usize];
+    for &(page, seed) in &[(0usize, 0x11u8), (3, 0x22), (31, 0x33), (63, 0x44)] {
+        for (i, byte) in expected[page * ps..(page + 1) * ps].iter_mut().enumerate() {
+            *byte = seed ^ (i % 251) as u8;
+        }
+    }
+    let mem_file = dir.path().join("snapshot.mem");
+    std::fs::write(&mem_file, &expected).unwrap();
+
+    // Import with `make_version: true` in one call.
+    let cell_dir = dir.path().join("mem-cell");
+    let imported = daemon
+        .runtime
+        .block_on(daemon.client.import_memory(ImportMemoryRequest {
+            path: name(&cell_dir),
+            file: name(&mem_file),
+            tenant: 0,
+            make_version: true,
+        }))
+        .unwrap()
+        .into_inner();
+    assert_eq!(imported.tenant, 0);
+    assert_ne!(imported.cell, 0);
+    assert_ne!(imported.version, 0);
+
+    // Zero pages are discarded as holes: used bytes are far smaller than the memory file size.
+    let stat = daemon.stat(&cell_dir).unwrap();
+    assert_eq!(stat.cell, imported.cell);
+    assert!(stat.used < size / 2, "expected zero pages discarded as holes, got used={}", stat.used);
+
+    // Sync to the bucket and fork the version through the control API, then read back every byte.
+    daemon.sync(&cell_dir).unwrap();
+    let fork_dir = dir.path().join("mem-fork");
+    let forked = daemon
+        .runtime
+        .block_on(daemon.client.fork_cell(ForkCellRequest {
+            to: name(&fork_dir),
+            tenant: imported.tenant,
+            cell: imported.cell,
+            version: imported.version,
+            ..Default::default()
+        }))
+        .unwrap()
+        .into_inner();
+    assert_ne!(forked.cell, imported.cell);
+    let opened = cladefs::memory_cell::MemoryCell::open(&daemon.vms, &fork_dir, size).unwrap();
+    let mut got = vec![0u8; size as usize];
+    opened.read(0, &mut got).unwrap();
+    assert!(got == expected, "forked memory cell contents differ from imported file");
+    opened.close().unwrap();
+
+    // Import without `make_version`, then call `MakeVersion` via the control API.
+    let cell_dir2 = dir.path().join("mem-cell-2");
+    let imported2 = daemon
+        .runtime
+        .block_on(daemon.client.import_memory(ImportMemoryRequest {
+            path: name(&cell_dir2),
+            file: name(&mem_file),
+            tenant: 0,
+            make_version: false,
+        }))
+        .unwrap()
+        .into_inner();
+    assert_eq!(imported2.version, 0);
+    let ver = daemon
+        .runtime
+        .block_on(
+            daemon.client.make_version(MakeVersionRequest { path: name(&cell_dir2), keep_last: 0 }),
+        )
+        .unwrap()
+        .into_inner()
+        .version;
+    assert_ne!(ver, 0);
+
+    // Error cases: existing target (EEXIST), missing file (ENOENT), unaligned/empty file (EINVAL),
+    // and mismatched tenant in a granted tenant directory (EPERM).
+    let exists = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
+        path: name(&cell_dir),
+        file: name(&mem_file),
+        tenant: 0,
+        make_version: false,
+    }));
+    assert_eq!(failure(exists), (Code::AlreadyExists, Errno::EEXIST));
+
+    let missing = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
+        path: name(&dir.path().join("missing-dst")),
+        file: name(&dir.path().join("no-such-file.mem")),
+        tenant: 0,
+        make_version: false,
+    }));
+    assert_eq!(failure(missing), (Code::NotFound, Errno::ENOENT));
+
+    let bad_file = dir.path().join("unaligned.mem");
+    std::fs::write(&bad_file, vec![1u8; 123]).unwrap();
+    let bad = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
+        path: name(&dir.path().join("bad-dst")),
+        file: name(&bad_file),
+        tenant: 0,
+        make_version: false,
+    }));
+    assert_eq!(failure(bad), (Code::InvalidArgument, Errno::EINVAL));
+
+    let tenant_dir = dir.path().join("tenant-7");
+    std::fs::create_dir_all(&tenant_dir).unwrap();
+    daemon
+        .runtime
+        .block_on(daemon.client.grant(GrantRequest {
+            tenant: 7,
+            dir: name(&tenant_dir),
+            uid: None,
+            gid: None,
+        }))
+        .unwrap();
+    let wrong_tenant = daemon.runtime.block_on(daemon.client.import_memory(ImportMemoryRequest {
+        path: name(&tenant_dir.join("mem")),
+        file: name(&mem_file),
+        tenant: 9,
+        make_version: false,
+    }));
+    assert_eq!(failure(wrong_tenant), (Code::PermissionDenied, Errno::EPERM));
+    let right_tenant = daemon
+        .runtime
+        .block_on(daemon.client.import_memory(ImportMemoryRequest {
+            path: name(&tenant_dir.join("mem")),
+            file: name(&mem_file),
+            tenant: 0,
+            make_version: true,
+        }))
+        .unwrap()
+        .into_inner();
+    assert_eq!(right_tenant.tenant, 7);
+    assert_ne!(right_tenant.version, 0);
+}

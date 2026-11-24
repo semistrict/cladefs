@@ -760,6 +760,39 @@ pub(super) async fn import(
     Ok(cell)
 }
 
+/// Makes a memory cell at `path` on `daemon`, which must not exist (`EEXIST`), holding the
+/// snapshot memory file at `file`, optionally making an initial version (board 11222).
+pub(super) async fn import_memory(
+    daemon: &Arc<Daemon>,
+    path: PathBuf,
+    file: PathBuf,
+    tenant: u64,
+    make_version: bool,
+) -> Result<(CellId, Option<u64>), Errno> {
+    let _held = hold(daemon, &path).await?;
+    let checked = path.clone();
+    let host = daemon.host.clone();
+    blocking(move || {
+        removed_if_unmade_on(&host, &checked)?;
+        if host_fs::exists(&checked) {
+            return Err(Errno::EEXIST);
+        }
+        Ok(())
+    })
+    .await?;
+    let keeping = keeping(daemon)?;
+    crate::import::import_memory_keeping_on(
+        &daemon.host,
+        &path,
+        &file,
+        tenant,
+        make_version,
+        keeping,
+    )
+    .await
+    .map_err(|err| errno_of(format_args!("importing memory {}", file.display()), err))
+}
+
 /// The cell at `path` on `daemon`, or, if it doesn't exist, one of `cell`, of `capacity` bytes,
 /// taken from the daemon's bucket.
 async fn take_cell(

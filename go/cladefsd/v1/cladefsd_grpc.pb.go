@@ -94,6 +94,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Cladefsd_CreateCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/CreateCell"
 	Cladefsd_ImportImage_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ImportImage"
+	Cladefsd_ImportMemory_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ImportMemory"
 	Cladefsd_ForkCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/ForkCell"
 	Cladefsd_DeleteCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/DeleteCell"
 	Cladefsd_DropCell_FullMethodName           = "/cladefs.cladefsd.v1.Cladefsd/DropCell"
@@ -143,6 +144,9 @@ type CladefsdClient interface {
 	CreateCell(ctx context.Context, in *CreateCellRequest, opts ...grpc.CallOption) (*CreateCellResponse, error)
 	// Makes a cell holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(ctx context.Context, in *ImportImageRequest, opts ...grpc.CallOption) (*ImportImageResponse, error)
+	// Makes a memory cell holding a VM snapshot's memory file (board 11222): its pages, those of
+	// zeros discarded as holes, committed at once, and optionally a version made of it.
+	ImportMemory(ctx context.Context, in *ImportMemoryRequest, opts ...grpc.CallOption) (*ImportMemoryResponse, error)
 	// Forks a cell to a new cell sharing its data: live, if a VM has it open, at a
 	// moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
 	// (EBUSY) otherwise. A fork of a cell with a writer is a commit of it, made where that
@@ -374,6 +378,16 @@ func (c *cladefsdClient) ImportImage(ctx context.Context, in *ImportImageRequest
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ImportImageResponse)
 	err := c.cc.Invoke(ctx, Cladefsd_ImportImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cladefsdClient) ImportMemory(ctx context.Context, in *ImportMemoryRequest, opts ...grpc.CallOption) (*ImportMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ImportMemoryResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ImportMemory_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -742,6 +756,9 @@ type CladefsdServer interface {
 	CreateCell(context.Context, *CreateCellRequest) (*CreateCellResponse, error)
 	// Makes a cell holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error)
+	// Makes a memory cell holding a VM snapshot's memory file (board 11222): its pages, those of
+	// zeros discarded as holes, committed at once, and optionally a version made of it.
+	ImportMemory(context.Context, *ImportMemoryRequest) (*ImportMemoryResponse, error)
 	// Forks a cell to a new cell sharing its data: live, if a VM has it open, at a
 	// moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
 	// (EBUSY) otherwise. A fork of a cell with a writer is a commit of it, made where that
@@ -965,6 +982,9 @@ func (UnimplementedCladefsdServer) CreateCell(context.Context, *CreateCellReques
 func (UnimplementedCladefsdServer) ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ImportImage not implemented")
 }
+func (UnimplementedCladefsdServer) ImportMemory(context.Context, *ImportMemoryRequest) (*ImportMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ImportMemory not implemented")
+}
 func (UnimplementedCladefsdServer) ForkCell(context.Context, *ForkCellRequest) (*ForkCellResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ForkCell not implemented")
 }
@@ -1123,6 +1143,24 @@ func _Cladefsd_ImportImage_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(CladefsdServer).ImportImage(ctx, req.(*ImportImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Cladefsd_ImportMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).ImportMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_ImportMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).ImportMemory(ctx, req.(*ImportMemoryRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1771,6 +1809,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ImportImage",
 			Handler:    _Cladefsd_ImportImage_Handler,
+		},
+		{
+			MethodName: "ImportMemory",
+			Handler:    _Cladefsd_ImportMemory_Handler,
 		},
 		{
 			MethodName: "ForkCell",

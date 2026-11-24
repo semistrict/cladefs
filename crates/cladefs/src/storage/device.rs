@@ -523,10 +523,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let keeping = crate::host_cell::keeping().unwrap();
-        let storage =
-            Storage::make_on(crate::Host::process(), &path, (64 * MIB as u64, 5), true, keeping)
-                .await
-                .unwrap();
+        let storage = Storage::make_on(
+            crate::Host::process(),
+            &path,
+            (64 * MIB as u64, 5),
+            bucket_cell::cell::Kind::Fxfs,
+            true,
+            keeping,
+        )
+        .await
+        .unwrap();
         assert!(storage.open_cell().local().keys().encrypts());
         let cell = storage.open_cell().cell().id;
         let (small, large) = (ExtentId::new(cell, 1), ExtentId::new(cell, 2));

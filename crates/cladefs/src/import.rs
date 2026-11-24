@@ -91,6 +91,171 @@ pub(crate) async fn make_base_keeping_on(
     make_base_dir_on(host, path.as_ref(), (capacity, tenant), keeping, filled).await
 }
 
+/// The bytes [`import_memory`] reads of a memory file at once.
+pub(crate) const MEMORY_IMPORT_BYTES: usize = 16 << 20;
+
+/// The cell capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
+/// node of 170 refs a page) and their owners (8 bytes a page), and room for a commit's worth of
+/// pages written again besides its compactions.
+pub fn memory_capacity(size: u64) -> u64 {
+    size + size / 128 + size / 512 + (64 << 20)
+}
+
+/// A run of pages of a buffer: all zeros, so many bytes of them, or not, these bytes.
+pub(crate) enum PageRun<'a> {
+    Zeros(usize),
+    Data(&'a [u8]),
+}
+
+/// The runs of `page`-byte pages of `bytes`, whole pages, by their offsets in it.
+pub(crate) fn runs_of_zeros(bytes: &[u8], page: usize) -> Vec<(usize, PageRun<'_>)> {
+    let mut runs: Vec<(usize, PageRun<'_>)> = Vec::new();
+    for (index, chunk) in bytes.chunks(page).enumerate() {
+        let at = index * page;
+        let zeros = chunk.iter().all(|byte| *byte == 0);
+        match (runs.last_mut(), zeros) {
+            (Some((_, PageRun::Zeros(len))), true) => *len += chunk.len(),
+            (Some((start, PageRun::Data(data))), false) => *data = &bytes[*start..at + chunk.len()],
+            (_, true) => runs.push((at, PageRun::Zeros(chunk.len()))),
+            (_, false) => runs.push((at, PageRun::Data(chunk))),
+        }
+    }
+    runs
+}
+
+/// Makes a memory cell at `path`, which must not exist, holding the snapshot memory file `file`
+/// (board 11222): non-empty, a whole number of 4 KiB pages, zero pages discarded as holes,
+/// committed at once, and optionally making an initial version. Returns the new cell's ID and
+/// its initial version if requested. A cell that cannot be made whole is deleted.
+#[cfg(not(madsim))]
+pub async fn import_memory(
+    path: impl AsRef<Path>,
+    file: &Path,
+    make_version: bool,
+) -> Result<(crate::CellId, Option<u64>), Error> {
+    let host = crate::Host::process();
+    let keeping = crate::host_cell::keeping_on(host).map_err(Error::new)?;
+    let tenant = crate::host_cell::DEFAULT_TENANT;
+    import_memory_keeping_on(host, path.as_ref(), file, tenant, make_version, keeping).await
+}
+
+/// cladefs: makes a memory cell at `path` on `host` as [`import_memory`] does, of `tenant`'s, kept
+/// as `keeping` says (board 11222).
+#[cfg_attr(not(any(target_os = "linux", madsim)), allow(dead_code))]
+pub(crate) async fn import_memory_keeping_on(
+    host: &std::sync::Arc<crate::Host>,
+    path: &Path,
+    file: &Path,
+    tenant: u64,
+    make_version: bool,
+    keeping: local_cell::upload::Options,
+) -> Result<(crate::CellId, Option<u64>), Error> {
+    let page = crate::OpenCell::BLOCK_SIZE as u64;
+    let source_path = file.to_owned();
+    let (mut source, size) = local_cell::upload::blocking(move || -> Result<_, Error> {
+        let opened = std::fs::File::open(&source_path).map_err(|err| {
+            let errno = match err.kind() {
+                std::io::ErrorKind::NotFound => Errno::ENOENT,
+                std::io::ErrorKind::PermissionDenied => Errno::EACCES,
+                _ => Errno::EIO,
+            };
+            Error::new(
+                anyhow::Error::new(errno).context(format!("{}: {err}", source_path.display())),
+            )
+        })?;
+        let metadata = opened.metadata().map_err(Error::new)?;
+        if !metadata.is_file() {
+            return Err(Error::new(Errno::EINVAL)
+                .context(format!("{} is not a regular file", source_path.display())));
+        }
+        let size = metadata.len();
+        if size == 0 || !size.is_multiple_of(page) {
+            return Err(Error::new(Errno::EINVAL).context(format!(
+                "memory file {} is {size} bytes, not a non-empty multiple of {page}",
+                source_path.display()
+            )));
+        }
+        Ok((opened, size))
+    })?;
+    if local_cell::upload::blocking(|| Storage::is_unmade_on(host, path)) {
+        Storage::delete_on(host, path).await?;
+    } else if local_cell::upload::blocking(|| host_fs::exists(path)) {
+        return Err(Error::new(Errno::EEXIST));
+    }
+    let capacity = memory_capacity(size);
+    let storage = Storage::create_unmade_kind_keeping_on(
+        host,
+        path,
+        (capacity, tenant),
+        bucket_cell::cell::Kind::Memory,
+        keeping,
+    )
+    .await?;
+    let unfinished = Unfinished { host: host.clone(), path: Some(path.to_owned()) };
+    let (device, kind) = storage.into_parts();
+    let open_cell = match kind {
+        crate::storage::Kind::Image { cell, .. } => {
+            cell.upgrade().expect("its device holds the open cell")
+        }
+        crate::storage::Kind::Memory => unreachable!("created on disk"),
+    };
+    let write_all = move || -> Result<(), Error> {
+        let blocks = block_device::BlockDevice::open(device, block_device::Options::default())
+            .map_err(Error::new)?;
+        blocks.resize(size).map_err(Error::new)?;
+        let page = blocks.block_size() as usize;
+        let mut buffer = vec![0u8; MEMORY_IMPORT_BYTES];
+        let mut offset = 0u64;
+        while offset < size {
+            let len = (size - offset).min(MEMORY_IMPORT_BYTES as u64) as usize;
+            let chunk = &mut buffer[..len];
+            source.read_exact(chunk).map_err(Error::new)?;
+            for (at, run) in runs_of_zeros(chunk, page) {
+                let at = offset + at as u64;
+                match run {
+                    PageRun::Zeros(len) => blocks.discard(at, len as u64).map_err(Error::new)?,
+                    PageRun::Data(bytes) => blocks.write(at, bytes).map_err(Error::new)?,
+                }
+            }
+            offset += len as u64;
+        }
+        blocks.flush().map_err(Error::new)?;
+        Ok(())
+    };
+    #[cfg(not(madsim))]
+    let written = tokio::task::spawn_blocking(move || host_fs::may_block(write_all))
+        .await
+        .map_err(Error::new)
+        .and_then(|res| res);
+    #[cfg(madsim)]
+    let written = host_fs::may_block(write_all);
+    if let Err(err) = written {
+        crate::open_cell::release(open_cell).await;
+        unfinished.delete().await;
+        return Err(err);
+    }
+    let cell = open_cell.cell();
+    let version = if make_version {
+        match open_cell.make_version(None).await {
+            Ok(version) => Some(version),
+            Err(err) => {
+                crate::open_cell::release(open_cell).await;
+                unfinished.delete().await;
+                return Err(err);
+            }
+        }
+    } else {
+        None
+    };
+    crate::open_cell::release(open_cell).await;
+    if let Err(err) = local_cell::upload::blocking(|| Storage::made_on(host, path)) {
+        unfinished.delete().await;
+        return Err(err);
+    }
+    unfinished.finish();
+    Ok((cell, version))
+}
+
 /// Makes a cell directory at `path` on `host`, of `capacity` bytes, a new cell of `tenant`'s.
 async fn make_base_dir_on<F: Future<Output = anyhow::Result<()>>>(
     host: &std::sync::Arc<crate::Host>,

@@ -112,6 +112,7 @@ impl Storage {
             host,
             path.as_ref(),
             (size, host_cell::DEFAULT_TENANT),
+            bucket_cell::cell::Kind::Fxfs,
             true,
             Self::keeping_on(host)?,
         )
@@ -220,6 +221,7 @@ impl Storage {
             host,
             path.as_ref(),
             (size, host_cell::DEFAULT_TENANT),
+            bucket_cell::cell::Kind::Fxfs,
             false,
             Self::keeping_on(host)?,
         )
@@ -233,7 +235,28 @@ impl Storage {
         (size, tenant): (u64, u64),
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
-        Self::make_on(host, path.as_ref(), (size, tenant), false, keeping).await
+        Self::make_on(
+            host,
+            path.as_ref(),
+            (size, tenant),
+            bucket_cell::cell::Kind::Fxfs,
+            false,
+            keeping,
+        )
+        .await
+    }
+
+    /// cladefs: a new unmade cell of `kind` at `path` on `host` of `size` bytes, a new cell of
+    /// `tenant`'s, kept as `keeping` says (board 11222): as [`Storage::create_unmade_keeping_on`]
+    /// does for Fxfs images, for memory cells too.
+    pub(crate) async fn create_unmade_kind_keeping_on(
+        host: &Arc<crate::Host>,
+        path: impl AsRef<Path>,
+        (size, tenant): (u64, u64),
+        kind: bucket_cell::cell::Kind,
+        keeping: local_cell::upload::Options,
+    ) -> Result<Self, Error> {
+        Self::make_on(host, path.as_ref(), (size, tenant), kind, false, keeping).await
     }
 
     /// How an image `host` makes keeps its cell.
@@ -264,11 +287,12 @@ impl Storage {
         Self::is_unmade_on(crate::Host::process(), path)
     }
 
-    /// A new image at `path` on `host`, a new cell of `tenant`'s, whole if `whole`.
+    /// A new image at `path` on `host`, a new cell of `tenant`'s of `kind`, whole if `whole`.
     pub(super) async fn make_on(
         host: &Arc<crate::Host>,
         path: &Path,
         (size, tenant): (u64, u64),
+        kind: bucket_cell::cell::Kind,
         whole: bool,
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
@@ -279,7 +303,6 @@ impl Storage {
         let task_host = host.clone();
         on_bucket_runtime_on(host, async move {
             let of = host_cell::CellOf::New(tenant);
-            let kind = bucket_cell::cell::Kind::Fxfs;
             let opened = host_cell::create_unmade_on(
                 &task_host,
                 &path,

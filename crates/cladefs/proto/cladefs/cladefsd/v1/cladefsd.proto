@@ -86,6 +86,9 @@ service Cladefsd {
   rpc CreateCell(CreateCellRequest) returns (CreateCellResponse);
   // Makes a cell holding an Fxfs filesystem of a container image: a base for VMs to fork.
   rpc ImportImage(ImportImageRequest) returns (ImportImageResponse);
+  // Makes a memory cell holding a VM snapshot's memory file (board 11222): its pages, those of
+  // zeros discarded as holes, committed at once, and optionally a version made of it.
+  rpc ImportMemory(ImportMemoryRequest) returns (ImportMemoryResponse);
   // Forks a cell to a new cell sharing its data: live, if a VM has it open, at a
   // moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
   // (EBUSY) otherwise. A fork of a cell with a writer is a commit of it, made where that
@@ -458,6 +461,29 @@ message ImportImageResponse {
   uint64 tenant = 2;
   // Its cell, a new one.
   uint64 cell = 3;
+}
+
+// Makes a memory cell of a snapshot's memory file (board 11222).
+message ImportMemoryRequest {
+  // Where to make it: a directory that must not exist (ALREADY_EXISTS).
+  string path = 1;
+  // The memory file, on the daemon's host: non-empty, a whole number of 4 KiB pages.
+  string file = 2;
+  // The tenant of the new cell. In a granted tenant's directory, that tenant's ID, or 0 for it;
+  // another is refused (PERMISSION_DENIED, EPERM).
+  uint64 tenant = 3;
+  // Whether to make an initial version of the memory cell as part of the import.
+  bool make_version = 4;
+}
+
+// The memory cell made.
+message ImportMemoryResponse {
+  // Its tenant.
+  uint64 tenant = 1;
+  // Its cell, a new one.
+  uint64 cell = 2;
+  // Its initial version, if `make_version` was set; 0 otherwise.
+  uint64 version = 3;
 }
 
 // Forks a cell.

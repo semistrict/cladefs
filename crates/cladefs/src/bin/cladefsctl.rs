@@ -12,6 +12,7 @@
 //! cladefsctl place [--force] DIR TOKEN
 //! cladefsctl sync DIR
 //! cladefsctl import DIR CAPACITY IMAGE [REF]
+//! cladefsctl import-memory [--version] DIR FILE
 //! cladefsctl fork SRC DST
 //! cladefsctl version DIR
 //! cladefsctl versions DIR
@@ -360,7 +361,8 @@ mod cli {
         anyhow::anyhow!(
             "usage: cladefsctl take [--force] DIR CAPACITY CELL [TOKEN] | cladefsctl create DIR CAPACITY | \
          cladefsctl place [--force] DIR TOKEN | \
-         cladefsctl sync DIR | cladefsctl import DIR CAPACITY IMAGE [REF] | cladefsctl fork SRC DST | \
+         cladefsctl sync DIR | cladefsctl import DIR CAPACITY IMAGE [REF] | \
+         cladefsctl import-memory [--version] DIR FILE | cladefsctl fork SRC DST | \
          cladefsctl version DIR | cladefsctl versions DIR | \
          cladefsctl drop-versions DIR VERSION... | cladefsctl share DIR VERSION | \
          cladefsctl unshare DIR VERSION | cladefsctl fork-version CELL VERSION DST | \
@@ -448,6 +450,12 @@ mod cli {
             capacity: u64,
             image: PathBuf,
             reference: Option<String>,
+        },
+        /// cladefs: a new memory cell holding a snapshot memory file (board 11222).
+        ImportMemory {
+            dir: PathBuf,
+            file: PathBuf,
+            make_version: bool,
         },
         Fork {
             src: PathBuf,
@@ -809,6 +817,12 @@ mod cli {
                     image: image.into(),
                     reference: rest.first().map(|reference| reference.to_string()),
                 },
+                ["import-memory", "--version", dir, file] => {
+                    Self::ImportMemory { dir: dir.into(), file: file.into(), make_version: true }
+                }
+                ["import-memory", dir, file] => {
+                    Self::ImportMemory { dir: dir.into(), file: file.into(), make_version: false }
+                }
                 ["fork", src, dst] => Self::Fork { src: src.into(), dst: dst.into() },
                 ["version", dir] => Self::Version { dir: dir.into() },
                 ["versions", dir] => Self::Versions { dir: dir.into() },
@@ -993,6 +1007,25 @@ mod cli {
                         tenant: bucket_cell::layout::DEFAULT_TENANT,
                     };
                     call!(format!("importing {}", image.display()), import_image, request);
+                }
+                Self::ImportMemory { dir, file, make_version } => {
+                    let request = ImportMemoryRequest {
+                        path: name(&dir)?,
+                        file: name(&file)?,
+                        tenant: bucket_cell::layout::DEFAULT_TENANT,
+                        make_version,
+                    };
+                    let imported = call!(
+                        format!("importing memory {}", file.display()),
+                        import_memory,
+                        request
+                    );
+                    let cell = cladefs::CellId { tenant: imported.tenant, id: imported.cell };
+                    if imported.version != 0 {
+                        println!("{cell} {:x}", imported.version);
+                    } else {
+                        println!("{cell}");
+                    }
                 }
                 Self::Fork { src, dst } => {
                     let request = ForkCellRequest {
@@ -1424,6 +1457,7 @@ mod cli {
                 Self::Create { .. }
                     | Self::Take { .. }
                     | Self::Import { .. }
+                    | Self::ImportMemory { .. }
                     | Self::Stat { .. }
                     | Self::Drop { .. }
             );
@@ -1441,6 +1475,17 @@ mod cli {
                 let made = cladefs::import::make_base(&dir, capacity, &image, reference.as_deref());
                 return futures::executor::block_on(made)
                     .with_context(|| format!("importing {}", image.display()));
+            }
+            if let Self::ImportMemory { dir, file, make_version } = self {
+                let made = cladefs::import::import_memory(&dir, &file, make_version);
+                let (cell, version) = futures::executor::block_on(made)
+                    .with_context(|| format!("importing memory {}", file.display()))?;
+                if let Some(version) = version {
+                    println!("{cell} {version:x}");
+                } else {
+                    println!("{cell}");
+                }
+                return Ok(());
             }
             local_cell::upload::wait_on(self.locally_async())
         }
@@ -1473,7 +1518,9 @@ mod cli {
                     cell.close().await;
                     synced?;
                 }
-                Self::Import { .. } => unreachable!("imported above, on no runtime's thread"),
+                Self::Import { .. } | Self::ImportMemory { .. } => {
+                    unreachable!("imported above, on no runtime's thread")
+                }
                 Self::Fork { src, dst } => {
                     let cell = OpenCell::open(&src).await?;
                     // A new cell of the cell's tenant's (TASK-364).
