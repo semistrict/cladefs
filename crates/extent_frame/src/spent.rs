@@ -13,12 +13,13 @@
 //! storage keeps it too, in a cell's state, so that another host taking the cell
 //! has it (TASK-150.6).
 
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Sequence numbers, as the runs they make: a cell frees most of what it wrote, sooner or later,
 /// so that the runs are few, the gaps the extents it holds.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Spent {
     /// Each run's end, past its last, by its first.
     runs: BTreeMap<u64, u64>,

@@ -167,6 +167,8 @@ pub use extents::{OWN_ENTRY_BYTES, Own, Sparse, own_held};
 mod framed;
 mod frames;
 mod framing;
+#[cfg(test)]
+mod golden;
 mod held;
 pub use held::{HeldCounts, HeldParts};
 mod cell;
@@ -226,7 +228,7 @@ pub use host::{
     deleting_host, host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token,
     host_version, left_unmade, made_host, place, place_host, remove_cell_dir, unmade_host,
 };
-pub use layout::{DESCRIPTION, Description, FORMAT, Format, Place};
+pub use layout::{DESCRIPTION, DESCRIPTION_HEADER, Description, FORMAT, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
 pub use on_disk::{CLEAR_LOG_MAGIC, ClearFile, OnDisk, on_disk};
 pub use raw::{RawFile, SECTOR};

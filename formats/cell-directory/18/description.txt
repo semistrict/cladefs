@@ -1,0 +1,31 @@
+CellFile {
+    block_size: 4096,
+    cell: CellId {
+        tenant: 47,
+        id: 7,
+    },
+    bucket: Some(
+        "gs://cladefs-golden/cells",
+    ),
+    capacity: 1073741824,
+    token: Some(
+        81,
+    ),
+    forced: Some(
+        81,
+    ),
+    forced_after: Some(
+        12,
+    ),
+    writer_copies: [
+        3,
+        4,
+    ],
+    kind: Some(
+        Sqlite,
+    ),
+    version: Some(
+        153,
+    ),
+    ephemeral: true,
+}

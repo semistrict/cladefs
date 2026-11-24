@@ -55,8 +55,9 @@
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::framed::{read_frame, read_whole};
 use crate::layout::{
-    FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, cell_dir, decode, encode, extent_path,
-    list_numbers, log_path, open_segment_path, segment_path,
+    FORMAT, FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, cell_dir, decode_with, extent_path,
+    frame_salted, list_numbers, log_path, open_segment_path, read_versioned, segment_path,
+    versioned,
 };
 use crate::raw::{RawEncryption, SECTOR};
 use crate::segments::{fold, footer_last, segment_footer};
@@ -65,6 +66,7 @@ use anyhow::{Context as _, Error, ensure};
 use extent_frame::segment::{CellId, Chain, Contents, Footer, epoch_of, writer_of};
 use extent_frame::{KeyId, Salt};
 use extent_keys::{MAC_LEN, SALT_LEN};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -77,10 +79,23 @@ const SLOT: u64 = 4096;
 
 /// A slot of the start file: the start, and the serial number of its writing, which the later
 /// writing's exceeds.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 struct Slot {
     serial: u64,
     start: Option<u64>,
+}
+
+/// The whole slots of `bytes`, the start file's. A slot whole, of a version this build doesn't
+/// read, is refused, never taken for one torn, which would leave the other's start (doc-28).
+fn slots(bytes: &[u8]) -> Result<Vec<Slot>, Error> {
+    let mut slots = Vec::new();
+    for slot in bytes.chunks(SLOT as usize) {
+        let (whole, _) = decode_with(slot, 0, |_, payload| Some(payload.to_vec()));
+        if let Some(payload) = whole.first() {
+            slots.push(read_versioned::<Slot>(payload)?);
+        }
+    }
+    Ok(slots)
 }
 
 /// The WAL's start, kept durably in two slots of [`START`]: each writing writes the slot the latest
@@ -102,8 +117,8 @@ impl StartFile {
             Err(err) => return Err(Error::new(err).context("opening the WAL's start")),
         };
         let bytes = read_file(&file).context("reading the WAL's start")?;
-        let slots = bytes.chunks(SLOT as usize).filter_map(|slot| decode::<Slot>(slot).0.pop());
-        let latest = slots.max_by_key(|slot| slot.serial);
+        let slots = slots(&bytes).context("reading the WAL's start")?;
+        let latest = slots.into_iter().max_by_key(|slot| slot.serial);
         let (serial, start) = latest.map_or((0, None), |slot| (slot.serial, slot.start));
         Ok((Self { made: true, serial }, start))
     }
@@ -128,7 +143,7 @@ impl StartFile {
                 .context("writing the WAL's start"))
         });
         let serial = self.serial + 1;
-        let record = encode(&Slot { serial, start });
+        let record = frame_salted(&versioned(&Slot { serial, start }), 0);
         assert!(record.len() as u64 <= SLOT, "a start's record fits its slot");
         file.write_at(&record, (serial % 2) * SLOT).context("writing the WAL's start")?;
         crate::written::wrote(crate::written::Kind::Log, record.len());
@@ -138,13 +153,75 @@ impl StartFile {
     }
 }
 
+/// cladefs: the corpus's segment log (doc-28): segment 3's of cell `0x2f/7`, salted `0x5a1d`,
+/// under the tests' DEK of the cell, a raw-file salt of `0x33`s, holding a record whose runs were
+/// synced, then one holding them.
+#[cfg(test)]
+pub(crate) mod golden {
+    use super::*;
+
+    const SEGMENT: SegmentId = SegmentId { cell: 7, number: 3 };
+
+    fn encryption() -> RawEncryption {
+        let (dek, key) = bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(7));
+        RawEncryption::of(dek, key, Salt([0x33; SALT_LEN]))
+    }
+
+    pub(crate) fn log() -> Vec<u8> {
+        let encryption = encryption();
+        let mut log = log_header(0x5a1d, SEGMENT, &encryption);
+        let contents = |epoch: u64, extent: u64| Contents {
+            commits: vec![epoch << 20 | 2],
+            extents: vec![(storage_device::ExtentId::new(7, extent), 0, 4096)],
+            next_sequence: extent + 1,
+            ..Contents::default()
+        };
+        let records = [
+            LogRecord { contents: contents(1, 1), runs: Runs::Checked(vec![0xc0ffee]) },
+            LogRecord { contents: contents(2, 2), runs: Runs::Held(Bytes(vec![0xab; 16])) },
+        ];
+        for record in &records {
+            let end = log.len() as u64;
+            log.extend(framed(record, end, 0x5a1d, &encryption));
+        }
+        log
+    }
+
+    /// `bytes`, the corpus's log, as this build reads it: its salt and records, as their `{:#?}`.
+    pub(crate) fn log_said(bytes: &[u8]) -> Result<String, Error> {
+        let salt = log_salt(bytes, SEGMENT).ok_or_else(|| anyhow::anyhow!("no header"))?;
+        let records = LogRecord::decode(bytes, SEGMENT, Some(&encryption()))?;
+        Ok(format!("salt {salt:#x}\n{records:#?}"))
+    }
+
+    /// The corpus's start file: its start written twice, 5, then 9.
+    pub(crate) fn start() -> Vec<u8> {
+        let dir = crate::MemDir::new();
+        let (mut file, _) = StartFile::read(&dir).expect("no start yet");
+        file.write(&dir, Some(5)).expect("writing a start");
+        file.write(&dir, Some(9)).expect("writing a start");
+        read_file(&dir.open(START, false).expect("the start file")).expect("reading it")
+    }
+
+    /// `bytes`, a start file, as this build reads its slots, as their `{:#?}`.
+    pub(crate) fn start_said(bytes: &[u8]) -> Result<String, Error> {
+        slots(bytes).map(|slots| format!("{slots:#?}"))
+    }
+
+    /// The layout of a start file's slots' types and a log's records'.
+    pub(crate) fn fingerprint() -> String {
+        [<Slot as TypeFingerprint>::fingerprint(), <LogRecord as TypeFingerprint>::fingerprint()]
+            .join("\n")
+    }
+}
+
 /// cladefs: a commit's record in its segment's log: its contents, and what makes the runs its
 /// extents were sealed in durable with it (TASK-301): the runs themselves, for a flush that seals
 /// little, which then syncs its log alone, as a database's write-ahead log holds its pages; or the
 /// CRC32C of each, which recovery checks against the segment's raw data, for one whose data it
 /// syncs beside its records. cladefs: a record authentic and whole that doesn't decode as one is
 /// refused, never read in another form (board 10062).
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub(crate) struct LogRecord {
     pub contents: Contents,
     pub runs: Runs,
@@ -152,7 +229,7 @@ pub(crate) struct LogRecord {
 
 /// What a [`LogRecord`] holds of the runs its commit sealed, in the order its contents name them
 /// (`Contents::runs`: cladefs: those of the commit it goes on with too, TASK-92.41).
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub(crate) enum Runs {
     /// Nothing: its data was synced before it.
     Synced,
@@ -166,6 +243,13 @@ pub(crate) enum Runs {
 /// value, as it would a `Vec<u8>`: a record holding a commit's runs encodes as fast as it copies.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Bytes(pub Vec<u8>);
+
+/// As bincode writes it: bytes, not a sequence.
+impl TypeFingerprint for Bytes {
+    fn fingerprint() -> String {
+        "bytes".to_owned()
+    }
+}
 
 impl Serialize for Bytes {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -272,24 +356,27 @@ impl LogRecord {
         }
         let Some(header) = LogHeader::of(bytes, segment) else { return Ok((Vec::new(), 0)) };
         let bytes = bytes.get(LOG_RECORDS as usize..).unwrap_or_default();
-        let refused = std::cell::Cell::new(None);
-        let (records, end) = crate::layout::decode_with(bytes, header.salt, |at, payload| {
+        let refused = std::cell::RefCell::new(None);
+        let (records, end) = decode_with(bytes, header.salt, |at, payload| {
             let (payload, mac) = payload.split_at_checked(payload.len().checked_sub(MAC_LEN)?)?;
             let at = LOG_RECORDS + at as u64;
             let mac = mac.try_into().expect("a MAC's bytes");
             if encryption.is_some_and(|encryption| !encryption.verify(at, payload, mac)) {
-                refused.set(Some((at, "is not authentic")));
+                refused.replace(Some((at, "is not authentic".to_owned())));
                 return None;
             }
-            // Hashed whole, and authentic where it is checked: a record of another form, never
-            // read as one, nor taken for the log's torn end (board 10062).
-            let record = bincode::deserialize::<Self>(payload).ok();
-            if record.is_none() {
-                refused.set(Some((at, "is not a record of this log's format")));
+            // Hashed whole, and authentic where it is checked: a record of another form or of a
+            // version this build doesn't read, never read as one, nor taken for the log's torn end
+            // (board 10062, doc-28).
+            match read_versioned::<Self>(payload) {
+                Ok(record) => Some(record),
+                Err(err) => {
+                    refused.replace(Some((at, format!("is not a record this build reads: {err}"))));
+                    None
+                }
             }
-            record
         });
-        match refused.get() {
+        match refused.into_inner() {
             Some((at, why)) => Err(anyhow::anyhow!("{segment:?}'s log: its record at {at} {why}")),
             None => Ok((records, LOG_RECORDS as usize + end)),
         }
@@ -314,14 +401,28 @@ impl LogRecord {
 /// MAC, of its offset in the log and its bytes (TASK-411.5). Its records hold of the runs of its
 /// commits what the raw file stores, encrypted. Every cell's are so (TASK-411.28): a log headed in
 /// the clear, `FXLOG\0\0\x02` as before, or `FXLOG\0\0\x03` without the header hash, is refused.
-pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x04";
+/// cladefs: `FXLG`, then the cell directory's version (doc-28, board 10044), where logs of 16 and
+/// 17 said `FXLOG\0\0\x04`; and each record says its version too, as a log may outlive the build
+/// that headed it ([`crate::layout::versioned`]).
+pub(crate) const LOG_MAGIC: &[u8; 8] = &{
+    let version = FORMAT.current.to_le_bytes();
+    [b'F', b'X', b'L', b'G', version[0], version[1], version[2], version[3]]
+};
 
-/// cladefs: whether `log` begins with an older or unknown `FXLOG\0\0*` magic other than
-/// [`LOG_MAGIC`]: refused rather than treated as empty and deleted by recovery (no migrations,
-/// ever; board 6902).
+/// What a log of 18 on begins with, its version after it.
+const LOG_KIND: &[u8; 4] = b"FXLG";
+
+/// cladefs: whether `log` begins as a log of a format this build doesn't read does: an older
+/// `FXLOG\0\0*`, or `FXLG` and a version outside [`FORMAT`]'s; its first bytes, if so. Refused
+/// rather than treated as empty and deleted by recovery (board 6902, doc-28).
 pub(crate) fn unsupported_log_magic(log: &[u8]) -> Option<[u8; 8]> {
     let (&magic, _) = log.split_first_chunk::<8>()?;
-    (magic[..7] == LOG_MAGIC[..7] && magic != *LOG_MAGIC).then_some(magic)
+    let (kind, version) = magic.split_at(4);
+    let refused = match kind == LOG_KIND {
+        true => FORMAT.check(u32::from_le_bytes(version.try_into().unwrap())).is_err(),
+        false => magic.starts_with(b"FXLOG\0\0"),
+    };
+    refused.then_some(magic)
 }
 
 /// cladefs: where a segment's log's records start, after its header.
@@ -380,7 +481,7 @@ impl LogHeader {
     pub fn of(log: &[u8], segment: SegmentId) -> Option<Self> {
         let (header, _) = log.split_first_chunk::<LOG_HEADER>()?;
         let mut fields = Cursor::new(header);
-        if fields.array()? != *LOG_MAGIC {
+        if fields.array()? != *LOG_KIND || FORMAT.check(fields.u32()?).is_err() {
             return None;
         }
         let (salt, cell, number) = (fields.u64()?, fields.u64()?, fields.u64()?);
@@ -507,10 +608,10 @@ pub(crate) fn framed(
     salt: u64,
     encryption: &RawEncryption,
 ) -> Vec<u8> {
-    let mut payload = bincode::serialize(record).expect("records serialize");
+    let mut payload = versioned(record);
     let mac = encryption.mac(at, &payload);
     payload.extend_from_slice(&mac);
-    crate::layout::frame_salted(&payload, salt)
+    frame_salted(&payload, salt)
 }
 
 /// The byte length of `contents` encoded as a [`Runs::Held`] record by [`framed`], without reading
@@ -519,7 +620,8 @@ pub(crate) fn held_framed_len(contents: &Contents) -> u64 {
     let empty = LogRecord { contents: contents.clone(), runs: Runs::Held(Bytes(Vec::new())) };
     let empty_len = bincode::serialized_size(&empty).expect("records serialize");
     let run_bytes = LogRecord::run_bytes(contents);
-    12 + empty_len + run_bytes + MAC_LEN as u64
+    // The frame's header, the version, the record, its MAC.
+    12 + 4 + empty_len + run_bytes + MAC_LEN as u64
 }
 
 /// Keyless recovery of a member's replica log end (board 6902): 0 if the 4 KiB header is absent or
@@ -1938,6 +2040,61 @@ mod tests {
         assert_eq!(dir.files(), before, "refused recovery must preserve every file byte-for-byte");
     }
 
+    /// Doc-28: a start file's slot, a log's header, or a log's record, whole, of a version this
+    /// build doesn't read, a newer build's, is refused by name, never taken for one torn: the
+    /// start's other slot read in its place, the log read as holding nothing, or its records
+    /// dropped from there.
+    #[test]
+    fn files_of_versions_not_read_are_refused() {
+        let refusal = "cell directory version 19: this build reads version 18 alone";
+        let newer = |mut payload: Vec<u8>| {
+            payload[..4].copy_from_slice(&19u32.to_le_bytes());
+            payload
+        };
+
+        let dir = MemDir::new();
+        let (mut start, _) = StartFile::read(&dir).unwrap();
+        start.write(&dir, Some(5)).unwrap();
+        let slot = newer(versioned(&Slot { serial: 2, start: Some(9) }));
+        let file = dir.open(START, false).unwrap();
+        file.write_at(&frame_salted(&slot, 0), 0).unwrap();
+        let err = StartFile::read(&dir).err().expect("a slot of 19 is refused");
+        assert_eq!(format!("{err:#}"), format!("reading the WAL's start: {refusal}"));
+
+        let (dir, seg, enc) = (MemDir::new(), segment(0), encryption());
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let raw = dir.create(&open_segment_path(seg), true).unwrap();
+        raw.write_at(&[0xab; 4096], 0).unwrap();
+        raw.sync().unwrap();
+        let record = LogRecord { contents: commit(1, 1, 0), runs: Runs::Synced };
+        let mut payload = newer(versioned(&record));
+        let mac = enc.mac(LOG_RECORDS, &payload);
+        payload.extend_from_slice(&mac);
+        let log = dir.create(&log_path(seg), false).unwrap();
+        log.write_at(&log_header(7, seg, &enc), 0).unwrap();
+        log.write_at(&frame_salted(&payload, 7), LOG_RECORDS).unwrap();
+        log.sync().unwrap();
+        let before = dir.files();
+        let err = recover(&dir, CELL, None).err().expect("a record of 19 is refused");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{seg:?}'s log: its record at {LOG_RECORDS} is not a record this build reads: \
+                 {refusal}"
+            )
+        );
+        assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
+
+        let mut header = log_header(7, seg, &enc);
+        header[4..8].copy_from_slice(&19u32.to_le_bytes());
+        log.write_at(&header, 0).unwrap();
+        log.sync().unwrap();
+        let before = dir.files();
+        let err = recover(&dir, CELL, None).err().expect("a log headed 19 is refused");
+        assert!(format!("{err:#}").contains("'s log has unsupported format"), "{err:#}");
+        assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");
+    }
+
     /// Board 10062: a record hashed whole and authentic that is not a `LogRecord`, such as the
     /// contents alone that logs held before runs were (TASK-301), is refused, never read as
     /// another form of record nor taken for the log's torn end, which would drop it and every
@@ -1951,7 +2108,7 @@ mod tests {
         raw.write_at(&[0xab; 4096], 0).unwrap();
         raw.sync().unwrap();
         let enc = encryption();
-        let mut payload = bincode::serialize(&commit(1, 1, 0)).unwrap();
+        let mut payload = versioned(&commit(1, 1, 0));
         let mac = enc.mac(LOG_RECORDS, &payload);
         payload.extend_from_slice(&mac);
         let log = dir.create(&log_path(seg), false).unwrap();
@@ -1963,7 +2120,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "{seg:?}'s log: its record at {LOG_RECORDS} is not a record of this log's format"
+                "{seg:?}'s log: its record at {LOG_RECORDS} is not a record this build reads: \
+                 io error: unexpected end of file"
             )
         );
         assert_eq!(dir.files(), before, "refused recovery keeps every file as it was");

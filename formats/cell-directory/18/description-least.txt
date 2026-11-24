@@ -1,0 +1,16 @@
+CellFile {
+    block_size: 4096,
+    cell: CellId {
+        tenant: 47,
+        id: 7,
+    },
+    bucket: None,
+    capacity: 1073741824,
+    token: None,
+    forced: None,
+    forced_after: None,
+    writer_copies: [],
+    kind: None,
+    version: None,
+    ephemeral: false,
+}

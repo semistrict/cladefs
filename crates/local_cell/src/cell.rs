@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use storage_device::{ExtentId, OtherCell, SealedExtent};
 
-mod ephemeral;
+pub(crate) mod ephemeral;
 pub use ephemeral::{EphemeralOpening, LocalCheckpoint, Parent};
 
 /// The error of a write the cell has no room for.

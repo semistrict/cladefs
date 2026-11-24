@@ -17,6 +17,7 @@
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use aws_lc_rs::key_wrap::{AES_256, KeyEncryptionKey, KeyWrap};
 use aws_lc_rs::{hkdf, hmac};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -172,7 +173,7 @@ impl Salt {
 
 /// A key wrapped by another ([`Secret::wrap`]) or by a KMS: what is kept of a key, in records and
 /// cells' objects. Its bytes say nothing of the key without the one that wrapped it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TypeFingerprint)]
 pub struct Wrapped(pub Vec<u8>);
 
 /// Which DEK an object's subkey came from: its cell's, of that generation (doc-16, Keys).

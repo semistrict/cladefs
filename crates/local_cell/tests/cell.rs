@@ -1493,8 +1493,9 @@ async fn framings_write_back_as_they_go() {
     let framed = dir.open(&format!("{}/{}", of("segments", CELL.id), Padded(0)), true).unwrap();
     let size = framed.size().unwrap();
     assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
-    // A commit's sync: its 16 extents of 16 KiB, and its record, MACed (TASK-411.5).
-    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 603 + 32);
+    // A commit's sync: its 16 extents of 16 KiB, and its record, its version and MAC (TASK-411.5,
+    // doc-28).
+    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 4 + 603 + 32);
     for sequence in 1..=1536 {
         assert_eq!(read(&cell, extent(sequence), 0, len), data(sequence));
     }

@@ -95,12 +95,60 @@ const PREPARE_TRIES: u32 = 3;
 
 /// What a cell given up to a migration says of it, in its marker: what asking the target again
 /// takes, after a restart too.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 struct Marker {
     migration: u64,
     peer: String,
     incarnation: u64,
     token: u64,
+}
+
+/// A marker as its file holds it, in JSON: its version, of cladefs's records in a cell directory
+/// (`cell_dir::FORMAT`, doc-28), then the marker's fields, none other.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkerFile {
+    version: u32,
+    migration: u64,
+    peer: String,
+    incarnation: u64,
+    token: u64,
+}
+
+impl Marker {
+    /// Its file's bytes.
+    fn bytes(&self) -> Vec<u8> {
+        let Marker { migration, ref peer, incarnation, token } = *self;
+        let version = crate::cell_dir::FORMAT.current;
+        let file = MarkerFile { version, migration, peer: peer.clone(), incarnation, token };
+        serde_json::to_vec(&file).expect("a marker serializes")
+    }
+
+    /// The marker `bytes`, its file's, say: refused if of a version this build doesn't read, its
+    /// version read first, whatever follows, or naming a field it doesn't know.
+    fn read(bytes: &[u8]) -> anyhow::Result<Self> {
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let Version { version } = serde_json::from_slice(bytes)?;
+        crate::cell_dir::FORMAT.check(version)?;
+        let MarkerFile { migration, peer, incarnation, token, .. } = serde_json::from_slice(bytes)?;
+        Ok(Marker { migration, peer, incarnation, token })
+    }
+}
+
+/// cladefs: the corpus's marker (doc-28): what [`Marker::bytes`] writes.
+#[cfg(test)]
+pub(crate) fn golden_marker() -> Vec<u8> {
+    let peer = "10.0.0.7:7777".to_owned();
+    Marker { migration: 0x51, peer, incarnation: 0xfedc_ba98, token: u64::MAX }.bytes()
+}
+
+/// cladefs: a marker's file, `bytes`, as this build reads it, as its `{:#?}`.
+#[cfg(test)]
+pub(crate) fn marker_said(bytes: &[u8]) -> Result<String, String> {
+    Marker::read(bytes).map(|marker| format!("{marker:#?}")).map_err(|err| format!("{err:#}"))
 }
 
 /// A migration from this host under way: its target, its prepare's answer, and what of each kept
@@ -602,9 +650,7 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let marked: Option<Marker> = match host_fs::read(&marker_path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         read => {
-            let marker = read
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(anyhow::Error::from));
+            let marker = read.map_err(anyhow::Error::from).and_then(|bytes| Marker::read(&bytes));
             Some(marker.map_err(|err| {
                 log::error!("cladefsd: {}: {err:#}", marker_path.display());
                 Errno::EIO
@@ -623,7 +669,7 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     }
     let outgoing = match (marked, under_way) {
         (None, Some(outgoing)) => {
-            let bytes = serde_json::to_vec(&outgoing.marker()).map_err(|_| Errno::EIO)?;
+            let bytes = outgoing.marker().bytes();
             write_durably(&marker_path, &bytes).map_err(|err| {
                 log::warn!("cladefsd: giving {} up: {err}", path.display());
                 Errno::EIO
@@ -1940,9 +1986,10 @@ pub(super) mod target {
             let other = b"cladefs extent store 15\nblock_size 4096\ncell 1/7\n".to_vec();
             let child = CellId { tenant: 1, id: 7 };
             let long = format!(
-                "{}\nblock_size 4096\ncell {child}\ncapacity 4096\nbucket memory:///cells\n\
+                "{}{}\nblock_size 4096\ncell {child}\ncapacity 4096\nbucket memory:///cells\n\
                  ephemeral yes\npadding {}\n",
-                local_cell::FORMAT,
+                local_cell::DESCRIPTION_HEADER,
+                local_cell::FORMAT.current,
                 "x".repeat(64 << 10)
             );
             for (migration, bytes) in [(0x21, other), (0x23, long.into_bytes())] {

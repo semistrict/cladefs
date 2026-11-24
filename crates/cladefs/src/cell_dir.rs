@@ -10,6 +10,11 @@
 //! by one rule ([`read`]): missing, it is none; unreadable, or not what it says, the cell's opening
 //! fails with `EIO`, logged, rather than going on as if there were none, as a public base opening
 //! private would (TASK-160.10).
+//!
+//! cladefs: the records are a family of formats of their own, frozen ([`FORMAT`], doc-28, board
+//! 10044): every later build reads every version from 1 on. Each record says its version, its
+//! first line [`HEADER`] and the version; the migration marker its `version` field
+//! (`cladefsd::migration`); a public mark is a name alone.
 
 use crate::error::{Errno, Result};
 use base32_id::{Padded, Short};
@@ -29,6 +34,50 @@ const ANCESTRY: &str = "ancestry";
 
 /// The prefix of the empty file marking a cell public, its cell in base 32 after it, padded.
 const PUBLIC: &str = "public-";
+
+/// cladefs's records in a cell directory, beside the cell's own (`local_cell::FORMAT`).
+pub(crate) const FORMAT: formats::Format = formats::Format::new("cell records", 1, 1);
+
+/// What a record of lines starts with, its version after it.
+const HEADER: &str = "cladefs cell records ";
+
+/// The first line of a record of lines this build writes.
+fn header() -> String {
+    format!("{HEADER}{}\n", FORMAT.current)
+}
+
+/// The version `line`, a record's first, says, if this build reads it.
+fn version_of(line: &str) -> Option<u32> {
+    let version = line.strip_prefix(HEADER)?;
+    // Digits alone: `u32::from_str` would take a sign too.
+    if version.is_empty() || !version.bytes().all(|digit| digit.is_ascii_digit()) {
+        return None;
+    }
+    FORMAT.check(version.parse().ok()?).ok()
+}
+
+/// The lines of `text`, a record of lines, after its header, each as `parse` reads it: none if its
+/// header says no version this build reads, or a line doesn't read; the line, or the header, that
+/// doesn't, its error.
+fn parse_lines<T>(text: &str, parse: impl Fn(&str) -> Option<T>) -> Result<Vec<T>, String> {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or_default();
+    version_of(first).ok_or_else(|| format!("{first:?}, of no version of {FORMAT:?}"))?;
+    lines.map(|line| parse(line).ok_or_else(|| format!("{line:?}"))).collect()
+}
+
+/// A line of what is attached: its cells, in base 32, comma-separated, and its path.
+fn attached_line(line: &str) -> Option<(Vec<u64>, PathBuf)> {
+    let (cells, base) = line.split_once(' ')?;
+    let cells = cells.split(',').map(base32_id::parse);
+    Some((cells.collect::<Option<_>>()?, base.into()))
+}
+
+/// A line of what a cell was forked from: its cell, in base 32, and its directory.
+fn ancestry_line(line: &str) -> Option<(u64, PathBuf)> {
+    let (cell, from) = line.split_once(' ')?;
+    Some((base32_id::parse(cell)?, from.into()))
+}
 
 /// Writes `text` as the record `name` in `dir`, durably: whole or not at all, by a file written
 /// and synced beside it, renamed over it, the directory synced after.
@@ -75,14 +124,10 @@ fn lines<T>(
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<Vec<T>> {
     let Some(text) = read(dir, name, what)? else { return Ok(Vec::new()) };
-    text.lines()
-        .map(|line| {
-            parse(line).ok_or_else(|| {
-                log::error!("cladefs: {} says {line:?} of {what}", dir.display());
-                Errno::EIO
-            })
-        })
-        .collect()
+    parse_lines(&text, parse).map_err(|said| {
+        log::error!("cladefs: {} says {said} of {what}", dir.display());
+        Errno::EIO
+    })
 }
 
 /// `EIO`, logged, for `err`, doing `what` to the cell in `dir`.
@@ -93,11 +138,7 @@ fn failed(dir: &Path, what: &str, err: io::Error) -> Errno {
 
 /// What is recorded as attached to the cell in `dir`: each's cells and path.
 pub(crate) fn attached(dir: &Path) -> Result<Vec<(Vec<u64>, PathBuf)>> {
-    lines(dir, ATTACHED, "what is attached", |line| {
-        let (cells, base) = line.split_once(' ')?;
-        let cells = cells.split(',').map(base32_id::parse);
-        Some((cells.collect::<Option<_>>()?, base.into()))
-    })
+    lines(dir, ATTACHED, "what is attached", attached_line)
 }
 
 /// Records `base`, of `cells`, as attached to the cell in `dir`, durably, unless it is.
@@ -118,7 +159,7 @@ fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
 
 /// The record of `attached`, as [`attached`] reads it.
 fn attached_text(attached: &[(Vec<u64>, PathBuf)]) -> String {
-    let mut text = String::new();
+    let mut text = header();
     for (cells, base) in attached {
         let cells: Vec<String> = cells.iter().map(|&cell| Short(cell).to_string()).collect();
         text += &format!("{} {}\n", cells.join(","), base.display());
@@ -128,10 +169,7 @@ fn attached_text(attached: &[(Vec<u64>, PathBuf)]) -> String {
 
 /// The cells the cell in `dir` was forked from, nearest first: none, if it is no fork.
 pub(crate) fn ancestry(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
-    lines(dir, ANCESTRY, "what it was forked from", |line| {
-        let (cell, from) = line.split_once(' ')?;
-        Some((base32_id::parse(cell)?, from.into()))
-    })
+    lines(dir, ANCESTRY, "what it was forked from", ancestry_line)
 }
 
 /// The cells of the cell in `dir` marked public; `EIO`, logged, if its directory can't be
@@ -195,11 +233,17 @@ pub(crate) fn inherit(
     }
     let from = host_fs::canonicalize(&from)
         .map_err(|err| failed(from, "finding the cell directory", err))?;
-    let mut text = format!("{} {}\n", Short(cell), from.display());
-    for &(cell, ref dir) in forked_from {
-        text += &format!("{} {}\n", Short(cell), dir.display());
+    let ancestry: Vec<_> = [(cell, from)].into_iter().chain(forked_from.iter().cloned()).collect();
+    write(ANCESTRY, &ancestry_text(&ancestry), "recording what it was forked from")
+}
+
+/// The record of `ancestry`, nearest first, as [`ancestry`] reads it.
+fn ancestry_text(ancestry: &[(u64, PathBuf)]) -> String {
+    let mut text = header();
+    for (cell, dir) in ancestry {
+        text += &format!("{} {}\n", Short(*cell), dir.display());
     }
-    write(ANCESTRY, &text, "recording what it was forked from")
+    text
 }
 
 /// What the cell in `to` inherits of the cell in `from` that its guest reads: what is attached
@@ -243,8 +287,16 @@ mod tests {
         let expected = ["attached-bases", "public-0000000000007", "public-0000000000009"];
         assert_eq!(names, expected.map(str::to_owned).into());
 
-        host_fs::write(dir.join(ANCESTRY), "1F /cells/base\n").unwrap();
+        host_fs::write(dir.join(ANCESTRY), format!("{}1F /cells/base\n", header())).unwrap();
         assert_eq!(ancestry(dir), Err(Errno::EIO));
+        // A record of a version this build doesn't read, or of none, as before records said
+        // theirs, is EIO, never read as another's (doc-28).
+        for first in ["cladefs cell records 2", "cladefs cell records 0", "1 /cells/base", ""] {
+            host_fs::write(dir.join(ANCESTRY), format!("{first}\n1 /cells/base\n")).unwrap();
+            assert_eq!(ancestry(dir), Err(Errno::EIO), "{first:?}");
+        }
+        host_fs::write(dir.join(ANCESTRY), format!("{}1 /cells/base\n", header())).unwrap();
+        assert_eq!(ancestry(dir), Ok(vec![(1, "/cells/base".into())]));
         host_fs::create_dir(dir.join("unreadable")).unwrap();
         assert_eq!(read(dir, "unreadable", "a directory"), Err(Errno::EIO));
     }
@@ -271,5 +323,52 @@ mod tests {
         assert_eq!(public_cells(to.path()), Ok(BTreeSet::from([5])));
         let parent = host_fs::canonicalize(&from.path()).unwrap();
         assert_eq!(ancestry(to.path()), Ok(vec![(4, parent), (3, "/cells/grandparent".into())]));
+    }
+
+    #[test]
+    fn every_frozen_version_is_read() {
+        formats::golden::check::<Records>(env!("CARGO_MANIFEST_DIR"));
+    }
+
+    /// cladefs's records in a cell directory: what is attached, what a cell was forked from, and
+    /// a migration's marker (`cladefsd::migration`).
+    struct Records;
+
+    impl formats::golden::Family for Records {
+        const FORMAT: formats::Format = FORMAT;
+
+        fn write() -> Vec<(&'static str, Vec<u8>)> {
+            let attached = [(vec![0x1a, 0x2b], "/cells/base".into()), (vec![0x3c], "/b".into())];
+            let ancestry = [(4, "/cells/parent".into()), (3, "/cells/grandparent".into())];
+            vec![
+                ("attached-bases", attached_text(&attached).into_bytes()),
+                ("ancestry", ancestry_text(&ancestry).into_bytes()),
+                ("migrating", crate::cladefsd::migration::golden_marker()),
+            ]
+        }
+
+        fn written(version: u32, case: &str, bytes: &[u8]) -> std::result::Result<String, String> {
+            // Version 1's readers are this build's.
+            if version != 1 {
+                return Err(format!("no reader of version {version}"));
+            }
+            Self::read_as(case, bytes)
+        }
+
+        fn read(case: &str, bytes: &[u8]) -> std::result::Result<(), String> {
+            Self::read_as(case, bytes).map(drop)
+        }
+    }
+
+    impl Records {
+        fn read_as(case: &str, bytes: &[u8]) -> std::result::Result<String, String> {
+            let text = || std::str::from_utf8(bytes).map_err(|err| err.to_string());
+            match case {
+                "attached-bases" => parse_lines(text()?, attached_line).map(|r| format!("{r:#?}")),
+                "ancestry" => parse_lines(text()?, ancestry_line).map(|r| format!("{r:#?}")),
+                "migrating" => crate::cladefsd::migration::marker_said(bytes),
+                _ => Err(format!("no record {case}")),
+            }
+        }
     }
 }

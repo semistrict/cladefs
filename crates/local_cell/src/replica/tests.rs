@@ -321,8 +321,9 @@ fn open_file_descriptors_stay_bounded_across_many_logs() {
 #[test]
 fn logs_of_other_formats_are_refused_as_sent_and_as_held() {
     let (header, _) = replica_chunks(1);
+    // Headed as the logs of cell directories 16 and 17 were (doc-28).
     let mut foreign = header.clone();
-    foreign[7] = 3;
+    foreign[..8].copy_from_slice(b"FXLOG\0\0\x04");
     let dir = MemDir::new();
     let replicas = Replicas::open(dir.clone(), MOST).unwrap();
     let me = (CELL, key(1, 4), replicas.incarnation());
@@ -331,12 +332,12 @@ fn logs_of_other_formats_are_refused_as_sent_and_as_held() {
     let at = |log: u64, offset: u64| format!("log {log} of {CELL} at {offset}");
     // Its first bytes another format's: refused, nothing written.
     let refusal = refused(replicas.append(me, log_of(1), 0, &foreign));
-    assert_eq!(refusal, format(&at(2, 0), "FXLOG\\x00\\x00\\x03"));
+    assert_eq!(refusal, format(&at(2, 0), "FXLOG\\x00\\x00\\x04"));
     assert_eq!(dir.list("").unwrap(), [INCARNATION]);
     // Split: its first byte taken, the rest refused as it is sent.
     assert_eq!(replicas.append(me, log_of(1), 0, &foreign[..1]).unwrap(), 1);
     let refusal = refused(replicas.append(me, log_of(1), 1, &foreign[1..]));
-    assert_eq!(refusal, format(&at(2, 1), "XLOG\\x00\\x00\\x03"));
+    assert_eq!(refusal, format(&at(2, 1), "XLOG\\x00\\x00\\x04"));
     let refusal = refused(replicas.append(me, log_of(2), 0, b"no magic"));
     assert_eq!(refusal, format(&at(4, 0), "no magic"));
     assert_eq!(replicas.fence(me, 4).unwrap(), [(log_of(1), 1)]);
@@ -349,7 +350,7 @@ fn logs_of_other_formats_are_refused_as_sent_and_as_held() {
     file.write_at(&foreign, 0).unwrap();
     file.sync().unwrap();
     let reopened = Replicas::open(dir.clone(), MOST).unwrap();
-    assert_eq!(refused(reopened.fence(me, 5)), format(&path, "FXLOG\\x00\\x00\\x03"));
+    assert_eq!(refused(reopened.fence(me, 5)), format(&path, "FXLOG\\x00\\x00\\x04"));
     let mut torn = header.clone();
     torn[crate::wal::LOG_HASHED] ^= 1;
     file.write_at(&torn, 0).unwrap();

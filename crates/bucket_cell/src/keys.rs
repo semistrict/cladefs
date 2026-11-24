@@ -70,6 +70,7 @@ use crate::layout::{self, CellId, Head, Kind as Key};
 use crate::lifecycle::{self, Start, Step};
 use extent_frame::{KeyId, Keys};
 use extent_keys::{SALT_LEN, Salt, Secret, Wrapped, kms};
+use fprint::TypeFingerprint;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -77,7 +78,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 /// A generation of a cell's KEK, wrapped by its tenant's KEK in the KMS: what the cell's object
 /// keeps of it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Kek {
     pub generation: u32,
     pub wrapped: Wrapped,
@@ -85,7 +86,7 @@ pub struct Kek {
 
 /// A generation of a cell's DEK, wrapped by its cell's KEK of generation `kek`: what its record
 /// keeps of it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Dek {
     pub generation: u32,
     pub kek: u32,
@@ -134,7 +135,7 @@ pub fn unwrap_dek(kek: &Secret, cell: CellId, dek: &Dek) -> Result<Secret, Error
 /// A generation of the DEK of `cell`, an ancestor of another cell, as the record of a cell
 /// that inherits from it keeps it: wrapped by that record's own cell's KEK of generation
 /// `dek.kek` (TASK-411.4).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct InheritedDek {
     pub cell: CellId,
     pub dek: Dek,

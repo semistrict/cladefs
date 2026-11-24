@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+fprint.workspace = true
 node_local.workspace = true
 host_fs.workspace = true
 base32_id.workspace = true

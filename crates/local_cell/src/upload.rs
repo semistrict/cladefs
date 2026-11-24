@@ -58,6 +58,7 @@ use bucket_cell::object_bucket::RoutedBucket;
 use bucket_cell::wal::TakenCell;
 use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
 use event_listener::Event;
+use fprint::TypeFingerprint;
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _, TryFutureExt as _};
 use futures::stream::FuturesOrdered;
@@ -592,13 +593,41 @@ pub async fn open_with_head<D: Dir>(
 
 /// cladefs: an ephemeral cell's keys, as its local checkpoint keeps them (doc-25, TASK-698.3): its
 /// owner, and what its fork gave it, wrapped, as a fork's head holds them: its cell's KEK under its
-/// tenant's, its first DEK and the keys it inherits under its cell's KEK.
-#[derive(serde::Serialize, serde::Deserialize)]
+/// tenant's, its first DEK and the keys it inherits under its cell's KEK. cladefs: they say the
+/// cell directory's version, of their own (doc-28, hotbed review 87).
+#[derive(Debug, serde::Serialize, serde::Deserialize, TypeFingerprint)]
 struct EphemeralKeys {
     owner: u64,
     kek: Option<keys::Kek>,
     deks: Vec<keys::Dek>,
     inherited: Vec<keys::InheritedDek>,
+}
+
+/// cladefs: the corpus's ephemeral keys (doc-28): a KEK, a DEK and a DEK inherited, wrapped bytes
+/// of no key's.
+#[cfg(test)]
+pub(crate) fn golden_keys() -> Vec<u8> {
+    let wrapped = |byte: u8| extent_keys::Wrapped(vec![byte; 40]);
+    let dek = keys::Dek { generation: 1, kek: 1, wrapped: wrapped(0xd1) };
+    let keys = EphemeralKeys {
+        owner: 0xfedc_ba98,
+        kek: Some(keys::Kek { generation: 1, wrapped: wrapped(0xc1) }),
+        deks: vec![dek.clone()],
+        inherited: vec![keys::InheritedDek { cell: CellId { tenant: 0x2f, id: 3 }, dek }],
+    };
+    crate::layout::versioned(&keys)
+}
+
+/// cladefs: an ephemeral cell's keys, `bytes`, as this build reads them, as their `{:#?}`.
+#[cfg(test)]
+pub(crate) fn keys_said(bytes: &[u8]) -> Result<String, anyhow::Error> {
+    crate::layout::read_versioned::<EphemeralKeys>(bytes).map(|keys| format!("{keys:#?}"))
+}
+
+/// cladefs: the layout of an ephemeral cell's keys' types.
+#[cfg(test)]
+pub(crate) fn keys_fingerprint() -> String {
+    <EphemeralKeys as TypeFingerprint>::fingerprint()
 }
 
 /// cladefs: opens the ephemeral cell `recovering` recovered (doc-25, TASK-698.3), with
@@ -618,7 +647,8 @@ pub async fn open_ephemeral<D: Dir>(
     let checkpoint = recovering.local_checkpoint()?;
     let (parent, cell) = (checkpoint.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
-        bucket_cell::layout::decode(checkpoint.keys()).map_err(Failure::from)?;
+        crate::layout::read_versioned(checkpoint.keys())
+            .map_err(|err| Failure::msg(format!("an ephemeral cell's keys: {err:#}")))?;
     let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
     let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
     head.keks.extend(kek);
@@ -1154,7 +1184,7 @@ impl<D: Dir> Uploader<D> {
             epoch: at.origin.epoch,
         };
         let checkpoint =
-            crate::LocalCheckpoint::fork(parent, &at.state, bucket_cell::layout::encode(&keys));
+            crate::LocalCheckpoint::fork(parent, &at.state, crate::layout::versioned(&keys));
         Ok((checkpoint, ring))
     }
 

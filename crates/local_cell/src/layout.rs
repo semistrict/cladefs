@@ -32,17 +32,37 @@ use storage_device::ExtentId;
 /// cell has one kind, of no cell's name (doc-20, TASK-508.1); 16's logs carry a keyless header
 /// hash (`FXLOG\0\0\x04`, board 6902) and ephemeral cells store closed segments in `segments/`
 /// with an authenticated `extent_frame::table` `local-checkpoint` (board 6905); 17's framed files
-/// are extent frames of version 3, their version a number (board 10040). A cell of another
-/// format is refused ([`Format`]): nothing reads, converts or upgrades it.
-pub const FORMAT: &str = "cladefs extent store 17";
+/// are extent frames of version 3, their version a number (board 10040).
+///
+/// 18, frozen (doc-28, board 10044): every file of a cell directory says its version: the
+/// description its first line, [`DESCRIPTION_HEADER`] and the version; the write-ahead log's start each slot;
+/// each segment's log its header (`wal::LOG_MAGIC`); an ephemeral cell's local checkpoint its rest.
+/// Every later build reads every version from 18 on. Its framed files are the extent frames' family
+/// and, within, the bucket layout's; its markers (`unmade`) are names alone.
+pub const FORMAT: formats::Format = formats::Format::new("cell directory", 18, 18);
 
-/// cladefs: the error of a cell whose description is of another format than [`FORMAT`], an older
-/// one included: refused, as nothing reads it.
+/// What a cell's description starts with, its version after it.
+pub const DESCRIPTION_HEADER: &str = "cladefs cell directory ";
+
+/// cladefs: the error of a cell whose description says a version this build doesn't read, or no
+/// version of [`FORMAT`] at all, as a description before 18 doesn't: refused, as nothing reads it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a cell of format {found:?}, not {FORMAT:?}: refused")]
+#[error("a cell directory saying {found:?}: this build reads {DESCRIPTION_HEADER}{} to {}", FORMAT.oldest, FORMAT.current)]
 pub struct Format {
     /// The description's first line.
     pub found: String,
+}
+
+/// The version a description's first line, `found`, says, if this build reads it.
+fn version_of(found: &str) -> Result<u32, Format> {
+    let refused = || Format { found: found.to_owned() };
+    let version = found.strip_prefix(DESCRIPTION_HEADER).ok_or_else(refused)?;
+    // Digits alone: `u32::from_str` would take a sign too.
+    if version.is_empty() || !version.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err(refused());
+    }
+    let version = version.parse().map_err(|_| refused())?;
+    FORMAT.check(version).map_err(|_| refused())
 }
 
 /// A cell, as its user sees it: the size of the blocks extents are read and written in, the most
@@ -92,14 +112,29 @@ pub(crate) struct CellFile {
     pub ephemeral: bool,
 }
 
-/// The fields of a text of lines of `key value`, after its first, which is `first`.
-fn fields(text: &str, first: &str) -> Result<HashMap<String, String>, Error> {
-    let mut lines = text.lines();
-    ensure!(lines.next() == Some(first), "not {first:?}");
+/// The keys a description may name: any other is refused, as a frozen format grows by a version,
+/// never by a key an older build would pass over (doc-28).
+const KEYS: [&str; 11] = [
+    "block_size",
+    "cell",
+    "capacity",
+    "bucket",
+    "token",
+    "forced",
+    "forced_after",
+    "writer_copies",
+    "kind",
+    "version",
+    "ephemeral",
+];
+
+/// The fields of a description's lines of `key value`, after its first: each of [`KEYS`], once.
+fn fields<'a>(lines: impl Iterator<Item = &'a str>) -> Result<HashMap<String, String>, Error> {
     let mut fields = HashMap::new();
     for line in lines {
         let (key, value) = line.split_once(' ').ok_or_else(|| anyhow!("bad line {line:?}"))?;
-        fields.insert(key.to_owned(), value.to_owned());
+        ensure!(KEYS.contains(&key), "a key of no description: {key:?}");
+        ensure!(fields.insert(key.to_owned(), value.to_owned()).is_none(), "{key} twice");
     }
     Ok(fields)
 }
@@ -111,11 +146,9 @@ fn number(fields: &HashMap<String, String>, key: &str) -> Result<u64, Error> {
 
 impl CellFile {
     pub(crate) fn parse(text: &str) -> Result<Self, Error> {
-        let found = text.lines().next().unwrap_or_default();
-        if found != FORMAT {
-            return Err(Format { found: found.to_owned() }.into());
-        }
-        let fields = fields(text, FORMAT)?;
+        let mut lines = text.lines();
+        version_of(lines.next().unwrap_or_default())?;
+        let fields = fields(lines)?;
         let token = fields.contains_key("token").then(|| number(&fields, "token")).transpose()?;
         let forced =
             fields.contains_key("forced").then(|| number(&fields, "forced")).transpose()?;
@@ -165,7 +198,10 @@ impl CellFile {
             version,
             ephemeral,
         } = self;
-        let mut text = format!("{FORMAT}\nblock_size {block_size}\ncell {cell}\n");
+        let mut text = format!(
+            "{DESCRIPTION_HEADER}{}\nblock_size {block_size}\ncell {cell}\n",
+            FORMAT.current
+        );
         text += &format!("capacity {capacity}\n");
         if let Some(url) = bucket {
             text += &format!("bucket {url}\n");
@@ -468,13 +504,36 @@ fn hash(payload: &[u8]) -> u64 {
     rapidhash::rapidhash_seeded(payload, SEED ^ payload.len() as u64)
 }
 
+/// cladefs: `record` as a file of a cell directory holds it: the version it is of, [`FORMAT`]'s
+/// current, then its bincode (doc-28): what [`read_versioned`] reads.
+pub(crate) fn versioned<R: Serialize>(record: &R) -> Vec<u8> {
+    let mut bytes = FORMAT.current.to_le_bytes().to_vec();
+    bincode::serialize_into(&mut bytes, record).expect("records serialize");
+    bytes
+}
+
+/// cladefs: the record `bytes` hold, as [`versioned`] wrote it: refused if its version is one this
+/// build doesn't read, or if it doesn't decode, as that version's, whole, with no bytes past it.
+/// What says the version is read first, whatever follows, so that a record of another version is
+/// named, never taken for one torn.
+pub(crate) fn read_versioned<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<R, Error> {
+    use bincode::Options as _;
+    let (version, record) = bytes.split_first_chunk::<4>().ok_or_else(|| anyhow!("no version"))?;
+    // 18's records are its types' alone: a version that changes one decodes its own here.
+    FORMAT.check(u32::from_le_bytes(*version))?;
+    let options = bincode::DefaultOptions::new().with_fixint_encoding().reject_trailing_bytes();
+    Ok(options.deserialize(record)?)
+}
+
 /// `record`, as a log holds it: its header, then its payload.
+#[cfg(test)]
 pub(crate) fn encode<R: Serialize>(record: &R) -> Vec<u8> {
     encode_salted(record, 0)
 }
 
 /// cladefs: `record`, encoded as [`encode`] does, its hash salted with `salt`: what reads it with
 /// another salt finds torn, as a log reused finds what it held before (TASK-301).
+#[cfg(test)]
 pub(crate) fn encode_salted<R: Serialize>(record: &R, salt: u64) -> Vec<u8> {
     frame_salted(&bincode::serialize(record).expect("records serialize"), salt)
 }
@@ -491,6 +550,7 @@ pub(crate) fn frame_salted(payload: &[u8], salt: u64) -> Vec<u8> {
 }
 
 /// The records at the start of `bytes` that are whole and intact, and how many bytes they take.
+#[cfg(test)]
 pub(crate) fn decode<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> (Vec<R>, usize) {
     // Not whole: the records before it are, as a log a crash cut short holds.
     decode_with(bytes, 0, |_, payload| bincode::deserialize(payload).ok())
@@ -635,18 +695,42 @@ mod tests {
             "cladefs extent store 14",
             "cladefs extent store 15",
             "cladefs extent store 16",
+            "cladefs extent store 17",
+            // cladefs: and versions of the frozen family this build doesn't read (doc-28), newer
+            // ones a rollback finds, and lines saying none.
+            "cladefs cell directory 17",
+            "cladefs cell directory 19",
+            "cladefs cell directory +18",
+            "cladefs cell directory 018x",
+            "cladefs cell directory ",
+            "cladefs cell directory 99999999999",
         ] {
             let refused = CellFile::parse(&format!("{older}\nblock_size 4096\ncell 1\n"));
-            let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
-            assert_eq!(found, older);
+            let found = refused.unwrap_err().downcast::<Format>().unwrap();
+            assert_eq!(found.found, older);
+            assert_eq!(
+                found.to_string(),
+                format!(
+                    "a cell directory saying {older:?}: this build reads cladefs cell directory 18 \
+                     to 18"
+                )
+            );
         }
+        let header = format!("{DESCRIPTION_HEADER}{}", FORMAT.current);
+        assert!(file.text().starts_with("cladefs cell directory 18\n"));
         let capacity = "capacity 4096\n";
-        assert!(CellFile::parse(&format!("{FORMAT}\nblock_size 4096\n{capacity}")).is_err());
-        assert!(CellFile::parse(&format!("{FORMAT}\nblock_size 4096\ncell 1\n")).is_err());
+        assert!(CellFile::parse(&format!("{header}\nblock_size 4096\n{capacity}")).is_err());
+        assert!(CellFile::parse(&format!("{header}\nblock_size 4096\ncell 1\n")).is_err());
+        // A key it doesn't know, or one twice, is refused, never passed over (doc-28).
+        let unknown = format!("{}spare yes\n", file.text());
+        let refused = CellFile::parse(&unknown).unwrap_err().to_string();
+        assert_eq!(refused, "a key of no description: \"spare\"");
+        let twice = format!("{}capacity 2\n", file.text());
+        assert_eq!(CellFile::parse(&twice).unwrap_err().to_string(), "capacity twice");
         // cladefs: its cell is named with its cell, as the bucket names it (TASK-364).
         let text = file.text();
         assert!(text.contains("\ncell a/fzzzzzzzzzzzz\n"), "{text}");
-        let bare = format!("{FORMAT}\nblock_size 4096\ncell 1\n{capacity}");
+        let bare = format!("{header}\nblock_size 4096\ncell 1\n{capacity}");
         let refused = CellFile::parse(&bare).unwrap_err().to_string();
         assert_eq!(refused, "bad cell: no cell, TENANT/CELL in base 32: 1");
         // cladefs: a cell kept in a bucket names its cell's kind (doc-20).

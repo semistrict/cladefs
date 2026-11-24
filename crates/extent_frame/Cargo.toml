@@ -13,6 +13,7 @@ bincode.workspace = true
 crc-fast.workspace = true
 extent_keys.workspace = true
 formats.workspace = true
+fprint.workspace = true
 serde.workspace = true
 storage_device.workspace = true
 thiserror.workspace = true

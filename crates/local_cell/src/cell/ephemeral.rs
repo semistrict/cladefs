@@ -36,11 +36,12 @@ mod tests;
 use super::*;
 use crate::layout::LOCAL_CHECKPOINT;
 use extent_frame::spent::Spent;
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 
 /// The version of a cell kept in the bucket an ephemeral cell was forked from: what its opener
 /// reads its parent's state of ([`EphemeralOpening::parent`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Parent {
     pub cell: CellId,
     pub version: u64,
@@ -51,7 +52,7 @@ pub struct Parent {
 }
 
 /// The non-extent state stored in `TableFooter::rest` of a [`LocalCheckpoint`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 struct Rest {
     parent: Parent,
     freed: Vec<ExtentId>,
@@ -63,6 +64,41 @@ struct Rest {
     punch: Vec<(u64, u64, u64)>,
     through: Option<u64>,
     keys: Vec<u8>,
+}
+
+/// cladefs: the corpus's local checkpoint's rest, as its file holds it (doc-28): the cell
+/// directory's part of the file, whose table is the bucket layout's checkpoints' and frame the
+/// extent frames', and whose salt is drawn at random.
+#[cfg(test)]
+pub(crate) fn golden_rest() -> Vec<u8> {
+    let mut spent = Spent::default();
+    spent.insert(3);
+    spent.insert(4);
+    let rest = Rest {
+        parent: Parent { cell: CellId { tenant: 0x2f, id: 7 }, version: 0x99, at: 12, epoch: 3 },
+        freed: vec![ExtentId::new(7, 2)],
+        root: Some(vec![1, 2, 3]),
+        next_sequence: 9,
+        last_commit: Some(0x1_0000_0002),
+        spent,
+        capacity: Some(1 << 30),
+        punch: vec![(1, 4096, 8192)],
+        through: Some(5),
+        keys: crate::upload::golden_keys(),
+    };
+    crate::layout::versioned(&rest)
+}
+
+/// cladefs: a local checkpoint's rest, `bytes`, read by this build, as its `{:#?}`.
+#[cfg(test)]
+pub(crate) fn rest_said(bytes: &[u8]) -> Result<String, Error> {
+    crate::layout::read_versioned::<Rest>(bytes).map(|rest| format!("{rest:#?}"))
+}
+
+/// cladefs: the layout of a local checkpoint's rest's types.
+#[cfg(test)]
+pub(crate) fn rest_fingerprint() -> String {
+    <Rest as TypeFingerprint>::fingerprint()
 }
 
 /// An ephemeral cell's local checkpoint (see the module's docs): its state, as of the last segment
@@ -135,7 +171,9 @@ impl LocalCheckpoint {
             keys: self.keys.clone(),
         };
         let entries = own.iter().map(|(id, at)| (*id, at.key.as_str(), at.offset, at.len));
-        extent_frame::table::encode(entries, bucket_cell::layout::encode(&rest), &[], encrypting)
+        // Its rest says the cell directory's version (doc-28): the table around it is the bucket
+        // layout's checkpoints', and its frame the extent frames'.
+        extent_frame::table::encode(entries, crate::layout::versioned(&rest), &[], encrypting)
     }
 
     fn decode(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Self, Error> {
@@ -153,7 +191,7 @@ impl LocalCheckpoint {
             punch,
             through,
             keys,
-        } = bucket_cell::layout::decode(&footer.rest)
+        } = crate::layout::read_versioned(&footer.rest)
             .context("decoding an ephemeral cell's local checkpoint state")?;
         let own = entries
             .into_iter()

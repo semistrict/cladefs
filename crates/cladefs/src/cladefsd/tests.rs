@@ -3450,7 +3450,7 @@ fn restores_fork_anew_over_forks_left_unmade() {
     // What a fork of the version there leaves, its host crashing before its cell's description.
     let restored = dir.path().join("restored");
     std::fs::create_dir_all(restored.join("segments")).unwrap();
-    std::fs::write(restored.join("ancestry"), "1 /elsewhere\n").unwrap();
+    std::fs::write(restored.join("ancestry"), "cladefs cell records 1\n1 /elsewhere\n").unwrap();
     let ours = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
     assert_eq!(ours.root(), Ok(b"root".to_vec()));
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(8, BLOCK)));

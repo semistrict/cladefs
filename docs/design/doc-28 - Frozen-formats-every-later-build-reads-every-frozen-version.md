@@ -109,7 +109,11 @@ incompatible change, where it lacks the means to grow (board 10033's subtasks):
 - **Extent frames name their version as a number**, not one ASCII digit, which reads frames of 10
   on as corrupt; the table's MAC covers it (board 10040).
 - **Unknown fields are refused, not ignored**: the `store` file's unknown keys, a migration
-  marker's unknown fields. Bincode reads of frozen types refuse trailing bytes.
+  marker's unknown fields. Bincode reads of frozen types refuse trailing bytes. Done for cell
+  directories (board 10044): their `store`'s keys, each once; the `wal` start's slots, each segment
+  log's records and a local checkpoint's rest say their version before their bincode and refuse
+  bytes past it; cladefs's records in a cell directory are a family of their own, `cell records`
+  (hotbed questions 528, 529).
 - **The peer service says each family's version**, not one opaque string compared whole, so that
   a member reads a writer's logs whenever it reads their versions.
 - **A snapshot's extent device state says its version before bitcode reads it.**

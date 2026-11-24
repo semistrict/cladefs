@@ -1151,7 +1151,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
         host_fs::create_dir_all(path.join("segments")).unwrap();
-        host_fs::write(path.join("ancestry"), "3 /elsewhere\n").unwrap();
+        host_fs::write(path.join("ancestry"), "cladefs cell records 1\n3 /elsewhere\n").unwrap();
         assert!(unmade(&path));
         delete(&path, None, token).await.unwrap();
         assert!(!host_fs::exists(&path));

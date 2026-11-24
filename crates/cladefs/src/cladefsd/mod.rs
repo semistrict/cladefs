@@ -107,7 +107,7 @@ mod http;
 pub mod logging;
 pub mod memory;
 pub mod metrics;
-mod migration;
+pub(crate) mod migration;
 pub mod mount;
 pub mod otel;
 pub mod peers;

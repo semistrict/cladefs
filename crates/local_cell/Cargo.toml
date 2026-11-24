@@ -14,6 +14,8 @@ anyhow.workspace = true
 bincode.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
+formats.workspace = true
+fprint.workspace = true
 # cladefs: AES-256-XTS, which an encrypted cell's raw files are encrypted with (TASK-411.5).
 extent_keys.workspace = true
 bucket_cell.workspace = true

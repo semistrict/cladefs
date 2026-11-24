@@ -9,6 +9,7 @@
 
 use crate::Corrupt;
 use base32_id::{Padded, Short};
+use fprint::TypeFingerprint;
 use serde::{Deserialize, Serialize};
 use storage_device::ExtentId;
 
@@ -24,7 +25,19 @@ pub struct Location {
 /// allocator gives under the bucket's number (doc-20, doc-23): what its keys are under, and what an
 /// extent's ID names as the cell that wrote it. Tenants are IDs alone; what they stand for, their
 /// callers keep.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    TypeFingerprint,
+)]
 pub struct CellId {
     pub tenant: u64,
     pub id: u64,
@@ -102,7 +115,7 @@ impl Footer {
 /// with the others, so that the cell has it wherever it is taken, its forks inherit it, and a
 /// version keeps it as it was (TASK-165.3). cladefs: and the runs in its data of the commit it ends
 /// inside of, if it does, which the next segment goes on with ([`Continued`], TASK-92.41).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Contents {
     pub commits: Vec<u64>,
     pub extents: Vec<(ExtentId, u64, u64)>,
@@ -124,7 +137,19 @@ pub struct Contents {
 /// unique to its making, as an owner is: the segment's number may change, as a WAL is put after the
 /// cell's end (its `Wal::rebase`), its ID never. The commit making it seals nothing, its
 /// cell quiescent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    TypeFingerprint,
+)]
 pub struct NewVersion {
     pub id: u64,
     /// The versions of its cell its maker asked to keep, itself among them, the newest: once
@@ -144,7 +169,7 @@ pub struct NewVersion {
 /// on with it nor ends it, as a fence a later writer put there, leaves it unsealed: the commit,
 /// never ended, never was. Before, the commit copied every such extent out, into a file of its own
 /// each (TASK-79.2, TASK-310).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Continued {
     pub commit: u64,
     pub extents: Vec<(ExtentId, u64, u64)>,

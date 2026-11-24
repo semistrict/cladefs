@@ -133,13 +133,15 @@ pub(crate) const PROTOCOL: u32 = 2;
 pub(crate) fn formats() -> String {
     let named = |cell: &str| {
         let (frames, layout) = (extent_frame::FORMAT.current, bucket_cell::layout::FORMAT);
+        let records = crate::cell_dir::FORMAT.current;
         format!(
-            "cell directories {cell:?}, extent frames {frames}, bucket layout {layout}, peers {PROTOCOL}"
+            "cell directories {cell:?}, cell records {records}, extent frames {frames}, bucket \
+             layout {layout}, peers {PROTOCOL}"
         )
     };
     // A test's daemon of another build's cell directories: `peers::formats=return(FORMAT)`.
     fail::fail_point!("peers::formats", |cell: Option<String>| named(&cell.unwrap_or_default()));
-    named(local_cell::FORMAT)
+    named(&format!("{}{}", local_cell::DESCRIPTION_HEADER, local_cell::FORMAT.current))
 }
 
 /// cladefs: whether `theirs`, the formats a replication call names, are this host's ([`formats`],
