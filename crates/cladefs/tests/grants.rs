@@ -498,11 +498,17 @@ fn tenants_restore_on_another_host() {
     assert_eq!(restored.root().unwrap(), b"restored");
 }
 
-/// TASK-154, TASK-395.7: a tenant's VM processes restore no version of another tenant's cell that
-/// isn't shared (EACCES), making nothing; the version's own tenant's do.
+/// TASK-154, TASK-395.7, TASK-544 (board 2484): a tenant's VM processes restore no version of
+/// another tenant's cell that isn't shared (EACCES), making nothing locally or in the bucket (no
+/// tenant 2 head holding tenant 1's DEKs); the version's own tenant's do.
 #[test]
 fn tenants_restore_no_unshared_version_of_another() {
     let dir = tempfile::tempdir().unwrap();
+    let bucket_dir = dir.path().join("bucket");
+    std::fs::create_dir(&bucket_dir).unwrap();
+    let bucket_url = url::Url::from_directory_path(&bucket_dir).unwrap().to_string();
+    // SAFETY: nextest runs each test in a process of its own, before any daemon starts.
+    unsafe { std::env::set_var("CLADEFSD_BUCKET", &bucket_url) };
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
     let globex = dir.path().join("there/globex");
@@ -511,6 +517,15 @@ fn tenants_restore_no_unshared_version_of_another() {
     let vm = globex.join("vm");
     assert_eq!(restore(&socket, &vm, snapshot.version).map(drop), Err(Some(Errno::EACCES)));
     assert!(!vm.exists(), "a refused restore made a store");
+
+    // TASK-544 (board 2484): verify the bucket contains no head (and no inherited DEKs) for
+    // tenant 2 after the refused cross-tenant fork.
+    let tenant2_dir = bucket_dir.join("cells/2");
+    assert!(
+        !tenant2_dir.exists(),
+        "refused cross-tenant fork wrote tenant 2 objects to the bucket: {:?}",
+        std::fs::read_dir(&tenant2_dir).ok().map(|d| d.collect::<Vec<_>>())
+    );
 
     let restored = restore(&there.socket, &there.acme.join("vm"), snapshot.version).unwrap();
     assert_eq!(restored.root().unwrap(), b"snapshotted");

@@ -1267,10 +1267,16 @@ pub async fn fork_version_given(
     let kms = crate::keys::testing::host_kms();
     let source = ring_of(bucket, origin.parent).await?;
     let forked = layout::Child { cell: child, owner };
-    let inheriting = crate::keys::inheriting(&kms, &source, forked).await?;
-    let (given, parents) = (Some(inheriting.given()), crate::keys::Parents::Kms(&kms, None));
-    let lifecycle =
-        crate::lifecycle::fork_version_keyed(bucket, child, id, origin, (owner, given), parents);
+    let mut inheriting = crate::keys::inheriting(&kms, &source, forked).await?;
+    let parents = crate::keys::Parents::Kms(&kms, None);
+    let lifecycle = crate::lifecycle::fork_version_keyed(
+        bucket,
+        child,
+        id,
+        origin,
+        (owner, Some(&mut inheriting)),
+        parents,
+    );
     lifecycle.await?;
     inheriting.made();
     Ok(())

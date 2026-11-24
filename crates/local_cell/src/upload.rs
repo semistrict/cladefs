@@ -989,17 +989,20 @@ impl<D: Dir> Uploader<D> {
     /// a KEK from the host's pool, its DEK and those it inherits, rewrapped under that KEK
     /// (TASK-411.4). Failing, the fork fails, which its host deletes. It says what it left of the
     /// child's head to the child's cell's first opening here ([`Learned`], TASK-449).
-    pub async fn forked(&self, child: Child, inheriting: keys::Inheriting) -> Result<(), Failure> {
+    pub async fn forked(
+        &self,
+        child: Child,
+        mut inheriting: keys::Inheriting,
+    ) -> Result<(), Failure> {
         failing!("upload::forked");
         let at = self.shared.at_version.get().expect("a fork is of a cell at a version");
         let keys = keys::Parents::Held(&at.sealing);
-        let given = (child.owner, Some(inheriting.given()));
         let forking = lifecycle::fork_version_keyed(
             &*self.bucket,
             child.cell,
             at.version,
             at.origin,
-            given,
+            (child.owner, Some(&mut inheriting)),
             keys,
         );
         match forking.await {
@@ -1020,7 +1023,7 @@ impl<D: Dir> Uploader<D> {
     pub async fn forked_ephemeral(
         &self,
         child: Child,
-        inheriting: keys::Inheriting,
+        mut inheriting: keys::Inheriting,
         incarnation: u64,
     ) -> Result<(crate::LocalCheckpoint, Arc<Ring>), Failure> {
         failing!("upload::forked_ephemeral");
@@ -1037,7 +1040,7 @@ impl<D: Dir> Uploader<D> {
             Err(err) => return Err(err.into()),
             Ok(()) => {}
         }
-        let given = inheriting.given();
+        let given = inheriting.spend();
         let (deks, inherited) = given.deks.unwrap_or_default();
         let keys = EphemeralKeys { owner: child.owner, kek: given.kek, deks, inherited };
         inheriting.made();

@@ -516,18 +516,41 @@ pub async fn fork_version(
     fork_version_keyed(bucket, child, version, origin, (owner, None), keys).await.map(drop)
 }
 
-/// cladefs: [`fork_version`], the child's head made with `given`, if any: a KEK for the child's
-/// cell, its first DEK and those it inherits, rewrapped under that KEK ([`crate::keys::giving`],
-/// TASK-411.4), so that its first taking gives it none.
+/// cladefs: [`fork_version`], the child's head made with `inheriting`, if any: a KEK for the
+/// child's cell, its first DEK and those it inherits, rewrapped under that KEK
+/// ([`crate::keys::Inheriting::spend`], TASK-411.4), so that its first taking gives it none.
 pub async fn fork_version_keyed(
     bucket: &impl Bucket,
     child: CellId,
     version: u64,
     origin: Origin,
-    (owner, given): (u64, Option<head::Given>),
+    (owner, inheriting): (u64, Option<&mut crate::keys::Inheriting>),
     keys: Parents<'_>,
 ) -> Result<(), Error> {
     failpoint!("version::record");
+    // cladefs: before creating a child head (which would embed parent DEKs wrapped under the
+    // child's KEK), verify that a cross-tenant fork targets an existing, unshredded, shared
+    // version (TASK-544, board 2484). Same-tenant forks still write `Made::Forking` before reading
+    // the parent head so they linearize with concurrent `drop_versions` (doc-18); `finish_fork`
+    // re-checks after the head and reference land.
+    let crosses =
+        origin.parent.tenant != child.tenant && origin.parent.tenant != layout::DEFAULT_TENANT;
+    if crosses {
+        let parent = head::get(bucket, origin.parent).await?;
+        if parent.as_ref().is_some_and(|head| head.shredded) {
+            return Err(crate::keys::shredded(origin.parent));
+        }
+        let named = parent
+            .as_ref()
+            .and_then(|head| head.version(version))
+            .filter(|named| named.at == origin.at && named.epoch == origin.epoch);
+        if rules().forks_check_versions && named.is_none() {
+            return Err(Error::Deleted);
+        }
+        if !named.is_some_and(|named| named.shared) {
+            return Err(Error::NotShared(origin.parent));
+        }
+    }
     let refers = rules().references && rules().clones_refer_first;
     // Without the rule, as a test shows it needed: the reference before the head.
     let refers_first = refers && !rules().clones_record_first;
@@ -541,7 +564,10 @@ pub async fn fork_version_keyed(
         false => Made::Clone(origin),
     };
     let mut head = Head::of(made, owner);
-    if let Some(given) = given {
+    // Spend the KEK right before attempting `Start::Create` so `Inheriting::drop` never returns a
+    // KEK that may have landed in the child's head (board 5396).
+    if let Some(inheriting) = inheriting {
+        let given = inheriting.spend();
         head.keks.extend(given.kek);
         (head.deks, head.inherited) = given.deks.unwrap_or_default();
     }
@@ -677,9 +703,22 @@ pub(crate) async fn abandon(bucket: &impl Bucket, child: CellId) -> Result<Head,
 /// `head`, ended: its final epoch, which no writer takes, as `holder` ended it. What it names, it
 /// keeps: the head the collector recovers the cell from, which nothing swaps after, so that every
 /// deletion of the cell finds the same forks (TASK-183); but its versions, which go with the cell
-/// (doc-18, TASK-476).
+/// (doc-18, TASK-476), and for a `Made::Forking` head that never became a clone, its DEKs and
+/// inherited DEKs (TASK-544, board 2484).
 fn ended(head: Head, holder: u64) -> Head {
-    Head { epoch: Head::FINAL, holder, token: u64::MAX, versions: Vec::new(), ..head }
+    let (deks, inherited) = match head.forking() {
+        Some(_) => (Vec::new(), Vec::new()),
+        None => (head.deks, head.inherited),
+    };
+    Head {
+        epoch: Head::FINAL,
+        holder,
+        token: u64::MAX,
+        versions: Vec::new(),
+        deks,
+        inherited,
+        ..head
+    }
 }
 
 /// Deletes `cell`, as `holder`, of the placement whose fencing token is `token`: one swap of its

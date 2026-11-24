@@ -2012,28 +2012,37 @@ impl Parents<'_> {
 /// What a fork into another cell gives its child (doc-16, Forks and shared versions; TASK-411.4),
 /// made before anything of the fork is ([`inheriting`]): the keys its parent's cell holds, which
 /// its child inherits, and a KEK for its child's cell from the host's pool, given back if no head
-/// is made with it.
+/// write is attempted with it ([`Inheriting::spend`], board 5396).
 pub struct Inheriting {
     kms: Arc<CachingKms>,
     child: CellId,
     source: Arc<Ring>,
+    /// Held until [`Self::spend`] consumes it for a head write; dropped while `Some`, it returns
+    /// cleanly to the tenant's pool.
     kek: Option<(Arc<Secret>, Kek)>,
+    /// Populated by [`Self::spend`] so [`Self::made`] can cache the KEK after a completed fork,
+    /// while [`Drop`] never returns a spent KEK to the pool.
+    spent: Option<(Arc<Secret>, Kek)>,
 }
 
 impl Inheriting {
-    /// What the child's head is made with ([`crate::lifecycle::fork_version_keyed`]): the KEK from
-    /// the pool, its first DEK wrapped under it, and the keys it inherits rewrapped under it.
-    pub fn given(&self) -> head::Given {
-        let (secret, kek) = self.kek.clone().expect("a KEK until a head is made with it");
+    /// Consumes the KEK from the give-back-on-drop slot and builds what the child's head is made
+    /// with ([`crate::lifecycle::fork_version_keyed`]): the KEK from the pool, its first DEK
+    /// wrapped under it, and the keys it inherits rewrapped under it. Once spent, dropping
+    /// [`Inheriting`] never returns the KEK to the tenant's pool (board 5396).
+    pub fn spend(&mut self) -> head::Given {
+        let (secret, kek) = self.kek.take().expect("a KEK until spent on a fork");
         let deks = vec![wrap_dek((&secret, kek.generation), self.child, FIRST, &Secret::random())];
         let inherited = inherit(&self.source, self.child, (&secret, kek.generation));
-        head::Given { kek: Some(kek), deks: Some((deks, inherited)) }
+        let given = head::Given { kek: Some(kek.clone()), deks: Some((deks, inherited)) };
+        self.spent = Some((secret, kek));
+        given
     }
 
     /// The child's head made with what it gave: the host keeps its KEK for the child's first
     /// taking here, which unwraps nothing then.
     pub fn made(mut self) {
-        if let Some((secret, kek)) = self.kek.take() {
+        if let Some((secret, kek)) = self.spent.take().or_else(|| self.kek.take()) {
             self.kms.made(self.child, None, &kek, secret);
         }
     }
@@ -2093,7 +2102,7 @@ pub async fn inheriting(
         }
     }
     let kek = Some(new_cell_kek(kms, child).await?);
-    Ok(Inheriting { kms: kms.clone(), child, source: source.clone(), kek })
+    Ok(Inheriting { kms: kms.clone(), child, source: source.clone(), kek, spent: None })
 }
 
 /// What a host gives its cells to encrypt and read under (TASK-411.3): its KMS, which every host
@@ -3072,5 +3081,93 @@ mod tests {
         kms.revoked(TEST_CELL.tenant, "destroyed");
         let destroyed_refused = block_on(inheriting(&kms, &source, local_child)).map(drop);
         assert!(matches!(destroyed_refused, Err(Error::Kms(_))), "{destroyed_refused:?}");
+    }
+
+    /// board 5396 & board 2484 (TASK-544): once a fork attempts to create a child head with its
+    /// KEK, failing or abandoning `fork_version_keyed` (e.g. parent version dropped, or a
+    /// concurrent opener finishing the fork) never returns that KEK to the tenant's pool; and a
+    /// cross-tenant fork of an unshared version is refused before creating any child head or
+    /// spending the KEK, returning the unused KEK cleanly to the pool.
+    #[test]
+    fn spent_fork_kek_is_never_returned_to_the_pool_and_abandoned_fork_clears_deks() {
+        let (_dir, counted, kms) = kms();
+        let bucket = Direct(SimBucket::new());
+        block_on(lifecycle::create(&bucket, TEST_CELL, 1)).unwrap();
+        let (held, keys) = taken(&bucket, &kms, TEST_CELL, 5, None);
+        let source = block_on(ring(&bucket, &keys, TEST_CELL, &held.head, true)).unwrap();
+        let origin = crate::layout::Origin { parent: TEST_CELL, at: 0, epoch: 1 };
+
+        // 1. Cross-tenant fork of an unshared version: pre-check refuses before creating a head or
+        // spending the KEK, so no child head exists in the bucket and the unused KEK returns to
+        // tenant 2's pool.
+        let unshared_child = CellId { tenant: TEST_CELL.tenant + 1, id: 101 };
+        counted.inner().create(unshared_child.tenant).unwrap();
+        let mut cross = block_on(inheriting(
+            &kms,
+            &source,
+            crate::layout::Child { cell: unshared_child, owner: 1 },
+        ))
+        .unwrap();
+        let cross_kek_wrapped = cross.kek.as_ref().unwrap().1.wrapped.clone();
+        let err = block_on(lifecycle::fork_version_keyed(
+            &bucket,
+            unshared_child,
+            42,
+            origin,
+            (1, Some(&mut cross)),
+            Parents::Held(&source),
+        ));
+        assert_eq!(err, Err(Error::Deleted));
+        assert_eq!(
+            block_on(head::get(&bucket, unshared_child)).unwrap(),
+            None,
+            "refused cross-tenant fork must write no child head"
+        );
+        drop(cross);
+        // The unused KEK went back to tenant 2's pool and is handed out to the next allocation.
+        let reused_unused =
+            block_on(kms.new_kek(CellId { tenant: unshared_child.tenant, id: 102 })).unwrap().1;
+        assert_eq!(reused_unused, cross_kek_wrapped);
+
+        // 2. Same-tenant fork whose version is missing: `Start::Create` writes a `Made::Forking`
+        // head holding the child's KEK, then `finish_fork` returns `Err(Error::Deleted)`. Dropping
+        // `Inheriting` must NOT return that spent KEK to tenant 1's pool.
+        let child_a = CellId { tenant: TEST_CELL.tenant, id: 103 };
+        let mut forking =
+            block_on(inheriting(&kms, &source, crate::layout::Child { cell: child_a, owner: 1 }))
+                .unwrap();
+        let spent_wrapped = forking.kek.as_ref().unwrap().1.wrapped.clone();
+        let err = block_on(lifecycle::fork_version_keyed(
+            &bucket,
+            child_a,
+            99,
+            origin,
+            (1, Some(&mut forking)),
+            Parents::Held(&source),
+        ));
+        assert_eq!(err, Err(Error::Deleted));
+        let written_head = block_on(head::get(&bucket, child_a)).unwrap().unwrap();
+        assert_eq!(written_head.keks[0].wrapped, spent_wrapped);
+        drop(forking);
+        // Next KEK allocated for the same tenant must NOT be `spent_wrapped`!
+        for next_id in 104..110 {
+            let next_wrapped =
+                block_on(kms.new_kek(CellId { tenant: TEST_CELL.tenant, id: next_id })).unwrap().1;
+            assert_ne!(
+                next_wrapped, spent_wrapped,
+                "spent KEK from a written Forking head must never be handed out to another cell"
+            );
+        }
+
+        // 3. Ending/abandoning that `Made::Forking` head clears its `deks` and `inherited` fields
+        // so no parent DEKs persist in a dead `Forking` head (TASK-544, board 2484).
+        assert!(!written_head.deks.is_empty());
+        let abandoned = block_on(lifecycle::abandon(&bucket, child_a)).unwrap();
+        assert!(abandoned.deleted());
+        assert!(abandoned.deks.is_empty(), "abandoned Forking head must keep no DEKs");
+        assert!(
+            abandoned.inherited.is_empty(),
+            "abandoned Forking head must keep no inherited DEKs"
+        );
     }
 }
