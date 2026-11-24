@@ -662,21 +662,31 @@ impl Importer {
     /// applied made: all of what it made new, and of a directory it keeps, what it made in it,
     /// the directory as the layer says, or as an implicit one, as it would be had the whiteout
     /// come before the layer's entries.
+    ///
+    /// Iterative so a whiteout over a deep kept directory chain never overflows the thread's stack
+    /// (TASK-541, board 2478).
     async fn remove_lower(&mut self, path: &[u8]) -> anyhow::Result<()> {
-        if self.made.contains(path) {
-            return Ok(());
-        }
-        let Some(said) = self.kept.get(path).cloned() else {
-            return self.remove(path).await;
-        };
-        let dir = self.directory(path).await?;
-        let metadata = said.unwrap_or_else(Metadata::implicit);
-        for xattr in dir.listxattr().await? {
-            dir.removexattr(&xattr).await?;
-        }
-        self.update_directory(&dir, path, metadata).await?;
-        for name in entries(&dir).await? {
-            Box::pin(self.remove_lower(&join(path, &name))).await?;
+        self.remove_lower_all(vec![path.to_vec()]).await
+    }
+
+    async fn remove_lower_all(&mut self, mut pending: Vec<Vec<u8>>) -> anyhow::Result<()> {
+        while let Some(path) = pending.pop() {
+            if self.made.contains(&path) {
+                continue;
+            }
+            let Some(said) = self.kept.get(&path).cloned() else {
+                self.remove(&path).await?;
+                continue;
+            };
+            let dir = self.directory(&path).await?;
+            let metadata = said.unwrap_or_else(Metadata::implicit);
+            for xattr in dir.listxattr().await? {
+                dir.removexattr(&xattr).await?;
+            }
+            self.update_directory(&dir, &path, metadata).await?;
+            for name in entries(&dir).await? {
+                pending.push(join(&path, &name));
+            }
         }
         Ok(())
     }
@@ -686,10 +696,8 @@ impl Importer {
         let Some(dir) = self.find_directory(path).await? else {
             return Ok(());
         };
-        for name in entries(&dir).await? {
-            self.remove_lower(&join(path, &name)).await?;
-        }
-        Ok(())
+        let pending = entries(&dir).await?.into_iter().map(|name| join(path, &name)).collect();
+        self.remove_lower_all(pending).await
     }
 
     /// Sets the times of the directories the layers made or passed through, which are final once

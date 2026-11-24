@@ -924,6 +924,66 @@ fn deep_images_make_cells_on_a_daemons_thread() {
     })
 }
 
+/// TASK-541 (board 2478): both a direct whiteout (`.wh.d`) and an opaque whiteout
+/// (`d/.wh..wh..opq`) over a deep kept directory chain (where the upper layer creates a file
+/// inside the deep chain before or alongside the whiteout) succeed on a 2 MiB daemon thread stack
+/// without overflowing the stack during `remove_lower` or `Mounted::let_go`.
+#[test]
+fn deep_whiteout_over_kept_chain_succeeds_on_a_daemons_thread() {
+    const DEPTH: usize = 512;
+    const STACK: usize = 2 << 20;
+    let deep = vec!["d"; DEPTH].join("/");
+    let base = layer(&[
+        Entry::new(&format!("{deep}/old"), Kind::File(b"old")),
+        Entry::new("d/sibling", Kind::File(b"sibling")),
+    ])
+    .unwrap();
+    // Upper layer creates a new file at the bottom of `deep` (marking every ancestor in `kept`)
+    // AND applies a whiteout over `d` (then in case 2, an opaque whiteout `d/.wh..wh..opq`).
+    let cases = [
+        (
+            "direct",
+            layer(&[
+                Entry::new(&format!("{deep}/new"), Kind::File(b"new")),
+                Entry::new(&whiteout("d"), Kind::File(b"")),
+            ])
+            .unwrap(),
+        ),
+        (
+            "opaque",
+            layer(&[
+                Entry::new(&format!("{deep}/new"), Kind::File(b"new")),
+                Entry::new("d/.wh..wh..opq", Kind::File(b"")),
+            ])
+            .unwrap(),
+        ),
+    ];
+    for (label, top) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = dir.path().join("image");
+        oci_layout(&layout, "wh:1", &[base.clone(), top]).unwrap();
+        let cell_dir = dir.path().join("store");
+        std::thread::scope(|scope| {
+            let made = std::thread::Builder::new().stack_size(STACK).spawn_scoped(scope, || {
+                block_on(cladefs::import::make_base(&cell_dir, STORAGE_SIZE, &layout, Some("wh:1")))
+            });
+            made.unwrap()
+                .join()
+                .unwrap()
+                .unwrap_or_else(|err| panic!("{label} deep whiteout failed: {err:#}"));
+        });
+        block_on(async {
+            let fs = Filesystem::mount(Storage::open(&cell_dir).await.unwrap()).await.unwrap();
+            let (file, _) = at(&fs, &format!("{deep}/new")).await.unwrap();
+            assert_eq!(contents(&file).await, b"new", "{label}");
+            drop(file);
+            assert_eq!(at(&fs, &format!("{deep}/old")).await.err(), Some(Errno::ENOENT), "{label}");
+            assert_eq!(at(&fs, "d/sibling").await.err(), Some(Errno::ENOENT), "{label}");
+            close(fs).await;
+        });
+    }
+}
+
 /// A cell made of an image where no extent daemon is, as `cladefsctl import` makes one, forks once
 /// opened there too, as fxfs-guest-import forks the base it imports for its guest: the fork is
 /// the bucket's alone (TASK-165.7), made by the cell's uploader, which keeps its cell in the

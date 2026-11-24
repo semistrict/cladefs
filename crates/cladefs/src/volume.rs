@@ -428,12 +428,18 @@ impl Mounted {
     }
 
     /// Lets go of the node `object_id`, which nothing holds any more, and of the directory it is
-    /// in, if that held it alone.
+    /// in, if that held it alone. Iterative so releasing a deep directory chain never overflows
+    /// the thread's stack (TASK-541, board 2478).
     fn let_go(&mut self, object_id: u64) {
-        let held = self.nodes.remove(&object_id).expect("a node let go of is held");
-        self.fxfs.evict(object_id, held.unlinked);
-        if let Some(parent) = held.parent {
-            self.release_child(parent);
+        let mut next = Some(object_id);
+        while let Some(id) = next {
+            let held = self.nodes.remove(&id).expect("a node let go of is held");
+            self.fxfs.evict(id, held.unlinked);
+            next = held.parent.and_then(|parent| {
+                let p = self.held(parent);
+                p.children -= 1;
+                (p.holds == 0 && p.children == 0).then_some(parent)
+            });
         }
     }
 }
