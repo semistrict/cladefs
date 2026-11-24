@@ -197,7 +197,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::num::Saturating;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use storage_device::{ExtentId, ExtentRange};
 use storage_units::BlockSize;
@@ -590,10 +590,10 @@ impl AllocatorValue {
 pub type AllocatorItem = Item<AllocatorKey, AllocatorValue>;
 
 /// Serialized information about the allocator.
-pub type AllocatorInfo = AllocatorInfoV60;
+pub type AllocatorInfo = AllocatorInfoV66;
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, TypeFingerprint)]
-pub struct AllocatorInfoV60 {
+pub struct AllocatorInfoV66 {
     /// Holds the set of layer file object_id for the LSM tree (newest first).
     pub layers: Vec<u64>,
     /// Maps from owner_object_id to bytes allocated.
@@ -602,9 +602,6 @@ pub struct AllocatorInfoV60 {
     /// here until a compaction of all the layers filters out its allocations, which waits for its
     /// extents to be freed (see "Compactions").
     pub marked_for_deletion: HashSet<u64>,
-    /// The limit for the number of allocates bytes per `owner_object_id` whereas the value. If
-    /// there is no limit present here for an `owner_object_id` assume it is max u64.
-    pub limit_bytes: BTreeMap<u64, u64>,
     /// cladefs: the current data owner of each store a snapshot gave a new one, by store object id.
     /// A store not here allocates under its own object id.
     pub data_owners: BTreeMap<u64, u64>,
@@ -622,7 +619,7 @@ pub struct AllocatorInfoV60 {
 
 /// cladefs: the info holds the extents dying, as many as freeing files leaves between compactions,
 /// which can take more than a record's usual limit: it has none, and is read whole.
-impl Versioned for AllocatorInfoV60 {
+impl Versioned for AllocatorInfoV66 {
     fn max_serialized_size() -> Option<u64> {
         None
     }
@@ -654,7 +651,6 @@ pub struct Allocator {
     max_extent_size_bytes: u64,
     tree: LSMTree<AllocatorKey, AllocatorValue>,
     inner: Mutex<Inner>,
-    allocations_allowed: AtomicBool,
     /// cladefs: the frees of the extents the last device flush let die, in progress
     /// (`did_flush_device`), and of those before them. Held while waiting for them, so that all
     /// who wait do.
@@ -701,14 +697,6 @@ struct ByteTracking {
 
     /// This value is the number of bytes allocated to reservations.
     reserved_bytes: u64,
-}
-
-impl ByteTracking {
-    // Returns the total number of bytes that are taken either from reservations, allocations or
-    // uncommitted allocations.
-    fn used_bytes(&self) -> Saturating<u64> {
-        self.allocated_bytes + Saturating(self.uncommitted_allocated_bytes + self.reserved_bytes)
-    }
 }
 
 /// cladefs: counts of an extent's ranges, which don't overlap, by where they start: a range not in
@@ -825,22 +813,6 @@ impl Inner {
     fn reserved_bytes(&self) -> u64 {
         self.owner_bytes.values().map(|x| &x.reserved_bytes).sum::<u64>()
             + self.unattributed_reserved_bytes
-    }
-
-    fn owner_id_limit_bytes(&self, owner_object_id: u64) -> u64 {
-        match self.info.limit_bytes.get(&owner_object_id) {
-            Some(v) => *v,
-            None => u64::MAX,
-        }
-    }
-
-    fn owner_id_bytes_left(&self, owner_object_id: u64) -> u64 {
-        let limit = self.owner_id_limit_bytes(owner_object_id);
-        let used = self
-            .owner_bytes
-            .get(&self.data_owner(owner_object_id))
-            .map_or(Saturating(0), |b| b.used_bytes());
-        (Saturating(limit) - used).0
     }
 
     /// cladefs: whether `range`'s extent is a frozen owner's, shared with stores a snapshot made.
@@ -988,19 +960,12 @@ impl Allocator {
                 unrecorded_reaches: Vec::new(),
                 allocation_size_histogram: [0; 64],
             }),
-            allocations_allowed: AtomicBool::new(!filesystem.options().image_builder_mode),
             freeing: futures::lock::Mutex::new(None),
         }
     }
 
     pub fn tree(&self) -> &LSMTree<AllocatorKey, AllocatorValue> {
         &self.tree
-    }
-
-    /// Enables allocations.
-    /// This is only valid to call if the allocator was created in image builder mode.
-    pub fn enable_allocations(&self) {
-        self.allocations_allowed.store(true, Ordering::SeqCst);
     }
 
     /// Returns an iterator that yields all allocations, filtering out tombstones and any
@@ -1263,20 +1228,6 @@ impl Allocator {
         self.inner.lock().info.layers.clone()
     }
 
-    /// Returns all the current owner byte limits (in pairs of `(owner_object_id, bytes)`).
-    pub fn owner_byte_limits(&self) -> Vec<(u64, u64)> {
-        self.inner.lock().info.limit_bytes.iter().map(|(k, v)| (*k, *v)).collect()
-    }
-
-    /// Returns (allocated_bytes, byte_limit) for the given owner.
-    pub fn owner_allocation_info(&self, owner_object_id: u64) -> (u64, Option<u64>) {
-        let inner = self.inner.lock();
-        (
-            inner.owner_bytes.get(&owner_object_id).map(|b| b.used_bytes().0).unwrap_or(0u64),
-            inner.info.limit_bytes.get(&owner_object_id).copied(),
-        )
-    }
-
     /// Returns owner bytes debug information.
     pub fn owner_bytes_debug(&self) -> String {
         format!("{:?}", self.inner.lock().owner_bytes)
@@ -1414,7 +1365,6 @@ impl Allocator {
         mut len: u64,
         shared: bool,
     ) -> Result<ExtentRange, Error> {
-        ensure!(self.allocations_allowed.load(Ordering::SeqCst), FxfsError::Unavailable);
         assert!(self.block_size.is_aligned(len));
         len = std::cmp::min(len, self.max_extent_size_bytes);
         debug_assert_ne!(owner_object_id, INVALID_OBJECT_ID);
@@ -1437,12 +1387,10 @@ impl Allocator {
             let system_bytes = self.system_bytes();
             let mut inner = self.inner.lock();
             assert!(inner.opened);
-            // Do not exceed the limit for the owner or the device.
+            // Do not exceed the device size.
             let device_used = inner.used_bytes() + system_bytes;
-            let owner_bytes_left = inner.owner_id_bytes_left(owner_object_id);
             // We must take care not to use up space that might be reserved.
-            let limit =
-                std::cmp::min(owner_bytes_left, self.device_size().saturating_sub(device_used));
+            let limit = self.device_size().saturating_sub(device_used);
             len = self.block_size.align_down(std::cmp::min(len, limit));
             let data_owner = inner.data_owner(owner_object_id);
             let owner_entry = inner.owner_bytes.entry(data_owner).or_default();
@@ -1462,11 +1410,9 @@ impl Allocator {
                 let system_bytes = self.system_bytes();
                 let inner = self.inner.lock();
                 bail!(anyhow!(FxfsError::NoSpace).context(format!(
-                    "Failed to allocate {} bytes for owner {} (owner_bytes_left: {}, device_used: \
-                    {}, device_size: {})",
+                    "Failed to allocate {} bytes for owner {} (device_used: {}, device_size: {})",
                     requested_len,
                     owner_object_id,
-                    inner.owner_id_bytes_left(owner_object_id),
                     inner.used_bytes() + system_bytes,
                     self.device_size()
                 )));
@@ -1562,20 +1508,17 @@ impl Allocator {
             let system_bytes = self.system_bytes();
             let mut inner = self.inner.lock();
             let device_used = inner.used_bytes() + system_bytes;
-            let owner_id_bytes_left = inner.owner_id_bytes_left(owner_object_id);
             let data_owner = inner.data_owner(owner_object_id);
             ensure!(
                 device_range.extent.cell == 0
                     && !inner.extents.is_alive(device_range.extent)
-                    && self.device_size().saturating_sub(device_used) >= len
-                    && owner_id_bytes_left >= len,
+                    && self.device_size().saturating_sub(device_used) >= len,
                 anyhow!(FxfsError::NoSpace).context(format!(
-                    "Failed to allocate {} bytes at {:?} for owner {} (owner_bytes_left: {}, \
-                    device_used: {}, device_size: {})",
+                    "Failed to allocate {} bytes at {:?} for owner {} (device_used: {}, \
+                    device_size: {})",
                     len,
                     device_range,
                     owner_object_id,
-                    owner_id_bytes_left,
                     device_used,
                     self.device_size()
                 ))
@@ -1646,35 +1589,6 @@ impl Allocator {
             }
             transaction.commit().await.context("recording what dropped allocations took")?;
         }
-    }
-
-    /// Sets the limits for an owner object in terms of usage.
-    pub fn set_bytes_limit(
-        &self,
-        transaction: &mut Transaction<'_>,
-        owner_object_id: u64,
-        bytes: u64,
-    ) -> Result<(), Error> {
-        // System stores cannot be given limits.
-        assert!(!self.is_system_store(owner_object_id));
-        transaction.add(
-            self.object_id(),
-            Mutation::Allocator(AllocatorMutation::SetLimit { owner_object_id, bytes }),
-        );
-        Ok(())
-    }
-
-    /// Gets the bytes limit for an owner object.
-    pub fn get_owner_bytes_limit(&self, owner_object_id: u64) -> Option<u64> {
-        self.inner.lock().info.limit_bytes.get(&owner_object_id).copied()
-    }
-
-    /// Gets the number of bytes currently used by allocations, reservations or uncommitted
-    /// allocations.
-    pub fn get_owner_bytes_used(&self, owner_object_id: u64) -> u64 {
-        let inner = self.inner.lock();
-        let owner = inner.data_owner(owner_object_id);
-        inner.owner_bytes.get(&owner).map_or(0, |info| info.used_bytes().0)
     }
 
     /// Deallocates the given range for the specified object. Its extent dies once the last of it is
@@ -1968,12 +1882,7 @@ impl Allocator {
             let mut inner = self.inner.lock();
 
             let device_free = self.device_size().saturating_sub(inner.used_bytes() + system_bytes);
-
-            let limit = match owner_object_id {
-                Some(id) => std::cmp::min(inner.owner_id_bytes_left(id), device_free),
-                None => device_free,
-            };
-            if limit < amount {
+            if device_free < amount {
                 return None;
             }
             inner.add_reservation(owner_object_id, amount);
@@ -1993,11 +1902,7 @@ impl Allocator {
             let mut inner = self.inner.lock();
 
             let device_free = self.device_size().saturating_sub(inner.used_bytes() + system_bytes);
-
-            let amount = amount(match owner_object_id {
-                Some(id) => std::cmp::min(inner.owner_id_bytes_left(id), device_free),
-                None => device_free,
-            });
+            let amount = amount(device_free);
 
             inner.add_reservation(owner_object_id, amount);
 
@@ -2175,8 +2080,6 @@ impl JournalingObject for Allocator {
                     inner.info.marked_for_deletion.insert(*owner);
                 }
                 inner.extents.kill_owners(&owners, Applied::of(context));
-
-                inner.info.limit_bytes.remove(&owner_object_id);
             }
             Mutation::Allocator(AllocatorMutation::Snapshot {
                 source_store_object_id,
@@ -2252,13 +2155,6 @@ impl JournalingObject for Allocator {
                 }
                 let records = inner.recount(&device_range, -1, context)?;
                 self.record(records);
-            }
-            Mutation::Allocator(AllocatorMutation::SetLimit { owner_object_id, bytes }) => {
-                // Journal replay is ordered and each of these calls is idempotent. So the last one
-                // will be respected, it doesn't matter if the value is already set, or gets changed
-                // multiple times during replay. When it gets opened it will be merged in with the
-                // snapshot.
-                self.inner.lock().info.limit_bytes.insert(owner_object_id, bytes);
             }
             Mutation::BeginFlush => {
                 self.tree.seal();
@@ -4015,34 +3911,6 @@ mod tests {
     }
 
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_persist_bytes_limit() {
-        const LIMIT: u64 = 12345;
-        const OWNER_ID: u64 = 12;
-
-        let (fs, allocator) = test_fs().await;
-        {
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(lock_keys![], Options::default())
-                .await
-                .expect("new_transaction failed");
-            allocator
-                .set_bytes_limit(&mut transaction, OWNER_ID, LIMIT)
-                .expect("Failed to set limit.");
-            assert!(allocator.inner.lock().info.limit_bytes.get(&OWNER_ID).is_none());
-            transaction.commit().await.expect("Failed to commit transaction");
-            let bytes: u64 = *allocator
-                .inner
-                .lock()
-                .info
-                .limit_bytes
-                .get(&OWNER_ID)
-                .expect("Failed to find limit");
-            assert_eq!(LIMIT, bytes);
-        }
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_allocation_with_reservation_not_multiple_of_block_size() {
         const STORE_OBJECT_ID: u64 = 99;
         let (fs, allocator) = test_fs().await;
@@ -4766,9 +4634,13 @@ mod tests {
             directory.create_child_file(&mut transaction, name).await.expect("create failed");
         transaction.commit().await.expect("commit failed");
         let extent_size = fs.allocator().max_extent_size_bytes;
-        for start in (0..extents).step_by(TIERED_EXTENTS as usize) {
-            let end = min(start + TIERED_EXTENTS, extents);
-            file.allocate(start * extent_size..end * extent_size).await.expect("allocate failed");
+        {
+            let buf = file.allocate_buffer(extent_size as usize).await;
+            for i in 0..extents {
+                file.write_or_append(Some(i * extent_size), buf.as_ref())
+                    .await
+                    .expect("write_or_append failed");
+            }
         }
         let bs = fs.block_size().get();
         let blocks = extents * extent_size / bs;

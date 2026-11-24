@@ -97,7 +97,7 @@ pub type Mutation = MutationV66;
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
 pub enum MutationV66 {
     ObjectStore(ObjectStoreMutationV66),
-    Allocator(AllocatorMutationV60),
+    Allocator(AllocatorMutationV66),
     /// Indicates the beginning of a flush. This would typically involve sealing a tree.
     BeginFlush,
     /// Indicates the end of a flush. This would typically involve replacing the immutable layers
@@ -199,11 +199,11 @@ impl PartialOrd for AllocatorItem {
     }
 }
 
-pub type AllocatorMutation = AllocatorMutationV60;
+pub type AllocatorMutation = AllocatorMutationV66;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum AllocatorMutationV60 {
+pub enum AllocatorMutationV66 {
     Allocate {
         device_range: ExtentRange,
         owner_object_id: u64,
@@ -211,10 +211,6 @@ pub enum AllocatorMutationV60 {
     Deallocate {
         device_range: ExtentRange,
         owner_object_id: u64,
-    },
-    SetLimit {
-        owner_object_id: u64,
-        bytes: u64,
     },
     /// Marks all extents with a given owner_object_id for deletion: a deleted volume's.
     /// Note that the actual deletion time is undefined so this should never be used where an

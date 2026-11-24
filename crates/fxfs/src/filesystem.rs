@@ -24,7 +24,7 @@ use crate::object_store::transaction::{
 };
 use crate::object_store::tree_cache::{TreeCache, TreeCacheBudget};
 use crate::object_store::volume::VOLUMES_DIRECTORY;
-use crate::serialized_types::{LATEST_VERSION, Version};
+use crate::serialized_types::Version;
 use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
 use event_listener::Event;
@@ -71,10 +71,6 @@ pub struct Options {
     /// testing.
     pub skip_initial_reap: bool,
 
-    // If set, journal will not be used for writes. The user must call 'close' when finished.
-    // The super-block will be written upon close().
-    pub image_builder_mode: bool,
-
     // Configures the filesystem to use barriers instead of checksums to ensure consistency.
     // Checksums may be computed and stored in extent records but will no longer be stored in the
     // journal. The journal will use barriers to enforce proper ordering between data and metadata
@@ -104,7 +100,6 @@ impl Default for Options {
             hooks: Arc::<HooksHandle>::default(),
             post_commit_hook: None,
             skip_initial_reap: false,
-            image_builder_mode: false,
             barriers_enabled: false,
             object_cache_items: crate::object_store::tree_cache::ITEM_LIMIT,
             graveyard_batch_delay: None,
@@ -223,9 +218,6 @@ impl From<Arc<FxFilesystem>> for OpenFxFilesystem {
 
 impl Drop for OpenFxFilesystem {
     fn drop(&mut self) {
-        if self.options.image_builder_mode && self.journal().image_builder_mode() {
-            error!("OpenFxFilesystem in image_builder_mode dropped without calling close().");
-        }
         if !self.options.read_only && !self.closed.load(Ordering::SeqCst) {
             error!("OpenFxFilesystem dropped without first being closed. Data loss may occur.");
         }
@@ -289,16 +281,6 @@ impl FxFilesystemBuilder {
     /// cladefs: opens volumes as they are asked for (`Options::lazy_volumes`).
     pub fn lazy_volumes(mut self, lazy: bool) -> Self {
         self.options.lazy_volumes = lazy;
-        self
-    }
-
-    /// For image building and in-place migration.
-    ///
-    /// This mode avoids the initial write of the super-block and skips the journal for all
-    /// transactions. The user *must* call `close()` before dropping the filesystem to trigger
-    /// a compaction of in-memory data structures, a minimal journal, and the super-block write.
-    pub fn image_builder_mode(mut self, enabled: bool) -> Self {
-        self.options.image_builder_mode = enabled;
         self
     }
 
@@ -376,8 +358,6 @@ impl FxFilesystemBuilder {
             self.options.hooks.clone(),
         ));
 
-        let image_builder_mode = self.options.image_builder_mode;
-
         let device_block_size =
             BlockSize::new(device.block_size()).expect("Device block size is not a power of 2");
         let block_size = std::cmp::max(device_block_size, MIN_BLOCK_SIZE);
@@ -416,19 +396,15 @@ impl FxFilesystemBuilder {
             transaction_limit_event: Event::new(),
         });
 
-        filesystem.journal().set_image_builder_mode(image_builder_mode);
-
         if self.format {
             let journal = filesystem.journal.clone();
             let fs = filesystem.clone();
             crate::offload(move || async move { journal.init_empty(fs).await }).await?;
-            if !image_builder_mode {
-                let journal = filesystem.journal.clone();
-                crate::offload(move || async move { journal.init_superblock().await }).await?;
+            let journal = filesystem.journal.clone();
+            crate::offload(move || async move { journal.init_superblock().await }).await?;
 
-                // Start the graveyard's background reaping task.
-                filesystem.graveyard.clone().reap_async();
-            }
+            // Start the graveyard's background reaping task.
+            filesystem.graveyard.clone().reap_async();
 
             // Create the root volume directory.
             let root_store = filesystem.root_store();
@@ -461,7 +437,7 @@ impl FxFilesystemBuilder {
                 .await
                 .context("Journal replay failed")?;
 
-            let compacts = !read_only && !image_builder_mode;
+            let compacts = !read_only;
             if compacts {
                 filesystem.journal.pause_compactions().await;
             }
@@ -503,7 +479,7 @@ impl FxFilesystemBuilder {
 
         filesystem.closed.store(false, Ordering::SeqCst);
 
-        if !read_only && !image_builder_mode {
+        if !read_only {
             // Start the background tasks.
             filesystem.graveyard.clone().reap_async();
         }
@@ -552,20 +528,15 @@ impl FxFilesystem {
     }
 
     pub async fn close(&self) -> Result<(), Error> {
-        if self.journal().image_builder_mode() {
-            self.journal().allocate_journal(self);
-            self.journal().set_image_builder_mode(false);
-            self.journal().force_compact().await?;
-        }
         assert_eq!(self.closed.swap(true, Ordering::SeqCst), false);
         debug_assert_not_too_long!(self.graveyard.wait_for_reap());
         debug_assert_not_too_long!(self.background_tasks.clone().cancel());
         // cladefs: what dropped allocations left in shared extents, which the next mount counts.
-        if !self.options().read_only && !self.journal().image_builder_mode() {
+        if !self.options().read_only {
             self.allocator().record_reaches().await?;
         }
         self.journal.stop_compactions().await;
-        let sync_status = if self.journal().image_builder_mode() || self.options().read_only {
+        let sync_status = if self.options().read_only {
             Ok(None)
         } else {
             match self.journal.sync(SyncOptions { flush_device: true, ..Default::default() }).await
@@ -620,13 +591,6 @@ impl FxFilesystem {
 
     pub fn allocator(&self) -> Arc<Allocator> {
         self.objects.allocator()
-    }
-
-    /// Enables allocations for the allocator.
-    /// This is only used in image_builder_mode where it *must*
-    /// be called before any allocations can take place.
-    pub fn enable_allocations(&self) {
-        self.allocator().enable_allocations();
     }
 
     pub fn object_manager(&self) -> &Arc<ObjectManager> {
@@ -769,24 +733,7 @@ impl FxFilesystem {
         self.hooks().on_before_commit();
 
         let _guard = debug_assert_not_too_long!(self.commit_mutex.lock());
-        let journal_offset = if self.journal().image_builder_mode() {
-            let journal_checkpoint =
-                JournalCheckpoint { file_offset: 0, checksum: 0, version: LATEST_VERSION };
-            let maybe_mutation = self
-                .object_manager()
-                .apply_transaction(transaction, &journal_checkpoint)
-                .expect("Transactions must not fail in image_builder_mode");
-            if let Some(mutation) = maybe_mutation {
-                assert!(matches!(mutation, Mutation::UpdateBorrowed { .. }));
-                // These are Mutation::UpdateBorrowed which are normally used to track borrowing of
-                // metadata reservations. As we are image-building and not using the journal,
-                // we don't track this.
-            }
-            self.object_manager().did_commit_transaction(transaction, &journal_checkpoint, 0);
-            0
-        } else {
-            self.journal.commit(transaction).await?
-        };
+        let journal_offset = self.journal.commit(transaction).await?;
 
         std::mem::drop(commits);
 
@@ -831,9 +778,6 @@ impl FxFilesystem {
     }
 
     fn maybe_start_flush_task(&self) {
-        if self.journal.image_builder_mode() {
-            return;
-        }
         let mut flush_task = self.flush_task.lock();
         if flush_task.is_none() {
             let journal = self.journal.clone();
@@ -853,11 +797,6 @@ impl FxFilesystem {
         self: &Arc<Self>,
         options: transaction::Options<'a>,
     ) -> Result<(MetadataReservation, Option<&'a Reservation>, Option<Hold<'a>>), Error> {
-        if self.options.image_builder_mode {
-            // Image builder mode avoids the journal so reservation tracking for metadata overheads
-            // doesn't make sense and so we essentially have 'all or nothing' semantics instead.
-            return Ok((MetadataReservation::Borrowed, None, None));
-        }
         if !options.skip_journal_checks {
             self.wait_for_journal_space().await?;
         }
@@ -1079,26 +1018,22 @@ mod tests {
     use crate::lsm_tree::Operation;
     use crate::lsm_tree::types::Item;
     use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, WriteObjectHandle};
-    use crate::object_store::allocator::TEST_EXTENT;
     use crate::object_store::directory::{Directory, replace_child};
     use crate::object_store::journal::JournalOptions;
-    use crate::object_store::journal::super_block::Root;
     use crate::object_store::transaction::{LockKey, Options, lock_keys};
     use crate::object_store::volume::root_volume;
-    use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectDescriptor, ObjectStore};
-    use crate::range::RangeExt;
+    use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectStore};
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::future::join_all;
     use futures::stream::{FuturesUnordered, TryStreamExt};
     use rustc_hash::FxHashMap as HashMap;
-    use std::ops::Range;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use storage_device::DeviceHolder;
+    use storage_device::ExtentId;
     use storage_device::fake_device::{self, FakeDevice};
-    use storage_device::{ExtentId, ExtentRange};
     use test_case::test_case;
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
@@ -1146,89 +1081,6 @@ mod tests {
 
         fsck(fs.clone()).await.expect("fsck failed");
         fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_enable_allocations() {
-        // 1. enable_allocations() has no impact if image_builder_mode is not used.
-        {
-            let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-            let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-            fs.enable_allocations();
-            let root_store = fs.root_store();
-            let root_directory =
-                Directory::open(&root_store, root_store.root_directory_object_id())
-                    .await
-                    .expect("open failed");
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        root_store.store_object_id(),
-                        root_directory.object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            root_directory
-                .create_child_file(&mut transaction, "test")
-                .await
-                .expect("create_child_file failed");
-            transaction.commit().await.expect("commit failed");
-            fs.close().await.expect("close failed");
-        }
-
-        // 2. Allocations blow up if done before this call (in image_builder_mode), but work after
-        {
-            let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-            let fs = FxFilesystemBuilder::new()
-                .format(true)
-                .image_builder_mode(true)
-                .open(device)
-                .await
-                .expect("open failed");
-            let root_store = fs.root_store();
-            let root_directory =
-                Directory::open(&root_store, root_store.root_directory_object_id())
-                    .await
-                    .expect("open failed");
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        root_store.store_object_id(),
-                        root_directory.object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new_transaction failed");
-            let handle = root_directory
-                .create_child_file(&mut transaction, "test_fail")
-                .await
-                .expect("create_child_file failed");
-            transaction.commit().await.expect("commit failed");
-
-            // Allocations should fail before enable_allocations()
-            assert!(
-                FxfsError::Unavailable
-                    .matches(&handle.allocate(0..4096).await.expect_err("allocate should fail"))
-            );
-
-            // Allocations should work after enable_allocations()
-            fs.enable_allocations();
-            handle.allocate(0..4096).await.expect("allocate should work after enable_allocations");
-
-            // 3. finalize() works regardless of whether enable_allocations() is called.
-            // (We already called it above, so this verifies it works after it was called).
-
-            fs.close().await.expect("close failed");
-        }
-        // TODO(https://fxbug.dev/467401079): Add a failure test where we close without
-        // enabling allocations. (Trivial to do, but causes error logs, which are interpreted as
-        // test failures and only seem controllable at the BUILD target level).
     }
 
     #[fuchsia_async::run(10, test)]
@@ -1666,8 +1518,6 @@ mod tests {
     #[test_case(false, false; "with checksums")]
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_crashes_at_random_barriers(barriers_enabled: bool, atomic_commits: bool) {
-        use crate::object_store::AttributeId;
-
         const ROUNDS: u64 = 24;
         const VOLUME: &str = "test";
         let crashes = fake_device::Crashes::new(26_3, 1);
@@ -2342,113 +2192,6 @@ mod tests {
     }
 
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_image_builder_mode_no_early_writes() {
-        const BLOCK_SIZE: u32 = 4096;
-        let device = DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE));
-        device.reopen(true);
-        let fs = FxFilesystemBuilder::new()
-            .format(true)
-            .image_builder_mode(true)
-            .open(device)
-            .await
-            .expect("open failed");
-        fs.enable_allocations();
-        // fs.close() now performs compaction (writing superblock), so device must be writable.
-        fs.device().reopen(false);
-        fs.close().await.expect("closed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_image_builder_mode() {
-        const BLOCK_SIZE: u32 = 4096;
-        const EXISTING_FILE_RANGE: Range<u64> = 4096 * 1024..4096 * 1025;
-        // cladefs: the data is an extent of the device's cell, which Fxfs mints past.
-        let device =
-            DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE).with_cell(TEST_EXTENT.cell));
-
-        // Write some fake file data at an offset in the image and confirm it as an fxfs file below.
-        {
-            let mut write_buf =
-                device.allocate_buffer(EXISTING_FILE_RANGE.length().unwrap() as usize).await;
-            write_buf.fill(0xf0);
-            device
-                .write(TEST_EXTENT, EXISTING_FILE_RANGE.start, write_buf.as_ref())
-                .await
-                .expect("write");
-        }
-
-        device.reopen(true);
-
-        let device = {
-            let fs = FxFilesystemBuilder::new()
-                .format(true)
-                .image_builder_mode(true)
-                .open(device)
-                .await
-                .expect("open failed");
-            fs.enable_allocations();
-            {
-                let root_store = fs.root_store();
-                let root_directory =
-                    Directory::open(&root_store, root_store.root_directory_object_id())
-                        .await
-                        .expect("open failed");
-                // Create a file referencing existing data on device.
-                let handle;
-                {
-                    let mut transaction = fs
-                        .root_store()
-                        .new_transaction(
-                            lock_keys![LockKey::object(
-                                root_directory.store().store_object_id(),
-                                root_directory.object_id()
-                            )],
-                            Options::default(),
-                        )
-                        .await
-                        .expect("new transaction");
-                    handle = root_directory
-                        .create_child_file(&mut transaction, "test")
-                        .await
-                        .expect("create file");
-                    handle
-                        .extend(
-                            &mut transaction,
-                            ExtentRange::new(TEST_EXTENT, EXISTING_FILE_RANGE),
-                        )
-                        .await
-                        .expect("extend");
-                    transaction.commit().await.expect("commit");
-                }
-            }
-            fs.device().reopen(false);
-            fs.close().await.expect("close");
-            fs.take_device().await
-        };
-        device.reopen(false);
-        let fs = FxFilesystem::open(device).await.expect("open failed");
-        fsck(fs.clone()).await.expect("fsck failed");
-
-        // Confirm that the test file points at the correct data.
-        let root_store = fs.root_store();
-        let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
-            .await
-            .expect("open failed");
-        let (object_id, descriptor) =
-            root_directory.lookup("test").await.expect("lookup failed").unwrap();
-        assert_eq!(descriptor, ObjectDescriptor::File);
-        let test_file = ObjectStore::open_object(&root_store, object_id, HandleOptions::default())
-            .await
-            .expect("open failed");
-        let mut read_buf =
-            test_file.allocate_buffer(EXISTING_FILE_RANGE.length().unwrap() as usize).await;
-        test_file.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
-        let data = read_buf.to_vec();
-        assert_eq!(data, [0xf0; 4096]);
-        fs.close().await.expect("closed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
     async fn test_read_only_mount_on_full_filesystem() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs =
@@ -2492,72 +2235,5 @@ mod tests {
         let fs =
             FxFilesystemBuilder::new().read_only(true).open(device).await.expect("open failed");
         fs.close().await.expect("Close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_image_builder_mode_flush_on_close() {
-        const BLOCK_SIZE: u32 = 4096;
-        let device = DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE));
-
-        // 1. Initialize in image_builder_mode
-        device.reopen(true);
-        let fs = FxFilesystemBuilder::new()
-            .format(true)
-            .image_builder_mode(true)
-            .open(device)
-            .await
-            .expect("open failed");
-
-        fs.enable_allocations();
-
-        // 2. Finalize logic (via close)
-        fs.device().reopen(false);
-
-        // 3. Write data
-        {
-            let root_store = fs.root_store();
-            let root_directory =
-                Directory::open(&root_store, root_store.root_directory_object_id())
-                    .await
-                    .expect("open failed");
-
-            let mut transaction = fs
-                .root_store()
-                .new_transaction(
-                    lock_keys![LockKey::object(
-                        root_directory.store().store_object_id(),
-                        root_directory.object_id()
-                    )],
-                    Options::default(),
-                )
-                .await
-                .expect("new transaction");
-            let handle = root_directory
-                .create_child_file(&mut transaction, "post_finalize_file")
-                .await
-                .expect("create file");
-            transaction.commit().await.expect("commit");
-
-            let mut buf = handle.allocate_buffer(BLOCK_SIZE as usize).await;
-            buf.fill(0xaa);
-            handle.write_or_append(None, buf.as_ref()).await.expect("write failed");
-        }
-
-        // 4. Close. Should flush and commit the single super-block in `Root`.
-        fs.close().await.expect("close failed");
-
-        // 5. Verify `Root::super_block` is valid.
-        let device = fs.take_device().await;
-        device.reopen(true);
-        let mut buf = device.allocate_buffer(BLOCK_SIZE as usize).await;
-
-        let root = Root::read(&**device).await.expect("read root");
-        let sb_extent = root.super_block.as_ref().expect("no super_block");
-        device
-            .read(sb_extent.extent, sb_extent.range.start, buf.as_mut())
-            .await
-            .expect("read super_block");
-        let data = buf.to_vec();
-        assert_eq!(&data[..8], b"FxfsSupr", "super_block should have magic bytes");
     }
 }

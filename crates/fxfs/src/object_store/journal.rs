@@ -77,7 +77,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Poll, Waker};
-use storage_device::{Device, ExtentId, ExtentRange};
+use storage_device::{ExtentId, ExtentRange};
 use storage_units::BlockSize;
 
 // The journal stream is written in blocks of this size, each a write-once extent of its own.
@@ -307,8 +307,6 @@ struct Inner {
     // amount is written to the journal.
     reclaim_size: u64,
 
-    image_builder_mode: bool,
-
     // If true and `needs_barrier`, issue a pre-barrier on the first device write of each journal
     // write (which happens in multiples of `BLOCK_SIZE`). This ensures that all the corresponding
     // data writes make it to disk before the journal gets written to.
@@ -493,7 +491,6 @@ impl Journal {
                 compaction_running: false,
                 sync_waker: None,
                 reclaim_size: options.reclaim_size,
-                image_builder_mode: false,
                 barriers_enabled: options.barriers_enabled,
                 needs_barrier: false,
                 forced_compaction: false,
@@ -507,14 +504,6 @@ impl Journal {
             stats: JournalStats::default(),
             writer_end_block: AtomicU64::new(0),
         }
-    }
-
-    pub fn set_image_builder_mode(&self, enabled: bool) {
-        self.inner.lock().image_builder_mode = enabled;
-    }
-
-    pub fn image_builder_mode(&self) -> bool {
-        self.inner.lock().image_builder_mode
     }
 
     /// cladefs: live and unfreed system extents (active/retired super-block + unfreed journal
@@ -572,14 +561,6 @@ impl Journal {
         self.handle.get().expect("No journal handle")
     }
 
-    pub(crate) async fn read_superblocks(
-        &self,
-        device: Arc<dyn Device>,
-        block_size: BlockSize,
-    ) -> Result<(SuperBlockHeader, Box<ObjectStore>), Error> {
-        self.super_block_manager.load(device, block_size).await
-    }
-
     /// Used during replay to validate a mutation.  This should return false if the mutation is not
     /// valid and should not be applied.  This could be for benign reasons: e.g. the device flushed
     /// data out-of-order, or because of a malicious actor.
@@ -615,9 +596,6 @@ impl Journal {
                     && *delta != 0;
             }
             Mutation::Allocator(AllocatorMutation::MarkForDeletion(owner_object_id)) => {
-                return *owner_object_id != INVALID_OBJECT_ID;
-            }
-            Mutation::Allocator(AllocatorMutation::SetLimit { owner_object_id, .. }) => {
                 return *owner_object_id != INVALID_OBJECT_ID;
             }
             Mutation::Allocator(AllocatorMutation::Snapshot {
@@ -1253,21 +1231,6 @@ impl Journal {
             ..self.inner.lock().writer.journal_file_checkpoint()
         };
 
-        let mut current_generation = 1;
-        if filesystem.options().image_builder_mode {
-            let block_size = filesystem.block_size();
-            match crate::boxed(|| self.read_superblocks(filesystem.device(), block_size)).await {
-                Ok((super_block, _)) => {
-                    log::info!(
-                        "Found existing superblock with generation {}. Bumping by 1.",
-                        super_block.generation
-                    );
-                    current_generation = super_block.generation.wrapping_add(1);
-                }
-                Err(_) => {}
-            }
-        }
-
         let root_parent = ObjectStore::new_empty(
             None,
             INIT_ROOT_PARENT_STORE_OBJECT_ID,
@@ -1312,7 +1275,7 @@ impl Journal {
         crate::boxed(|| transaction.commit()).await?;
 
         self.inner.lock().super_block_header = SuperBlockHeader::new(
-            current_generation,
+            1,
             root_parent.store_object_id(),
             root_parent.graveyard_directory_object_id(),
             root_store.store_object_id(),
@@ -1321,11 +1284,7 @@ impl Journal {
             /* earliest_version: */ LATEST_VERSION,
         );
 
-        // Initialize the initial position-derived journal span (deferred in image_builder_mode
-        // until `allocate_journal` runs on close).
-        if !self.inner.lock().image_builder_mode {
-            self.init_journal_handle(&filesystem);
-        }
+        self.init_journal_handle(&filesystem);
         Ok(())
     }
 
@@ -1339,11 +1298,6 @@ impl Journal {
         let initial = JournalSpan { start_offset: 0, block_count: blocks, cell, base_sequence };
         let handle = JournalExtentHandle::new(filesystem.device(), vec![initial]);
         let _ = self.handle.set(handle);
-    }
-
-    /// Initializes the position-derived journal span for `image_builder_mode` on close.
-    pub fn allocate_journal(&self, filesystem: &FxFilesystem) {
-        self.init_journal_handle(filesystem);
     }
 
     /// cladefs: fails unless the filesystem's blocks are the journal's, so that each journal block
@@ -1700,7 +1654,6 @@ impl Journal {
 
     /// Flushes the device, `always`, or if the journal has written more than was flushed.
     async fn flush_device(&self, checkpoint_offset: u64, always: bool) -> Result<(), Error> {
-        assert!(!self.inner.lock().image_builder_mode, "flush_device called in image builder mode");
         self.wait_for_flush(checkpoint_offset).await?;
         // cladefs: the frees the last flush let die are sealed by this one, as they would be if it
         // had waited for them; and a sync for room to allocate in waits for them here.
@@ -1815,9 +1768,6 @@ impl Journal {
                     - inner.super_block_header.journal_checkpoint.file_offset
                     < inner.reclaim_size
                 {
-                    break Ok(());
-                }
-                if inner.image_builder_mode {
                     break Ok(());
                 }
                 if inner.disable_compactions {
@@ -2010,7 +1960,6 @@ impl Journal {
                         && !inner.disable_compactions
                         && !inner.compactions_paused
                         && !inner.compaction_running
-                        && !inner.image_builder_mode
                         && self.should_compact(&inner, journal_bytes)
                     {
                         compact_fut = Some(crate::boxed(|| self.compact()));
@@ -2225,7 +2174,6 @@ impl Journal {
     }
 
     async fn compact(&self) -> Result<(), Error> {
-        assert!(!self.inner.lock().image_builder_mode, "compact called in image builder mode");
         let began = std::time::Instant::now();
         let _counted = scopeguard::guard((), |()| {
             self.stats.compactions.fetch_add(1, Ordering::Relaxed);
@@ -2520,9 +2468,9 @@ mod tests {
     #[test]
     fn test_mutations_of_extents_are_validated() {
         use super::Journal;
+        use crate::checksum::Checksums;
         use crate::object_store::transaction::AllocatorMutation;
         use crate::object_store::{AttributeId, ExtentMode, ExtentValue};
-        use crate::checksum::Checksums;
         use storage_device::ExtentId;
         use storage_units::BlockSize;
 
@@ -2927,88 +2875,6 @@ mod tests {
 
         let fs = FxFilesystem::open(device).await.expect("open failed");
         fsck(fs.clone()).await.expect("fsck failed");
-        fs.close().await.expect("close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_use_existing_generation() {
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
-
-        // First format should be generation 1.
-        let fs = FxFilesystemBuilder::new()
-            .format(true)
-            .image_builder_mode(true)
-            .open(device)
-            .await
-            .expect("open failed");
-        fs.enable_allocations();
-        let generation0 = fs.super_block_header().generation;
-        assert_eq!(generation0, 1);
-        fs.close().await.expect("close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-
-        // Format the device normally (again, generation 1).
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let generation1 = fs.super_block_header().generation;
-        {
-            let root_volume = crate::object_store::volume::root_volume(fs.clone())
-                .await
-                .expect("root_volume failed");
-            root_volume
-                .new_volume("test", crate::object_store::NewChildStoreOptions::default())
-                .await
-                .expect("new_volume failed");
-        }
-        fs.close().await.expect("close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-
-        // Format again with image_builder_mode.
-        let fs = FxFilesystemBuilder::new()
-            .format(true)
-            .image_builder_mode(true)
-            .open(device)
-            .await
-            .expect("open failed");
-        fs.enable_allocations();
-        let generation2 = fs.super_block_header().generation;
-        assert!(
-            generation2 > generation1,
-            "generation2 ({}) should be greater than generation1 ({})",
-            generation2,
-            generation1
-        );
-        fs.close().await.expect("close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_image_builder_mode_generation_bump_512_byte_block() {
-        let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-
-        // Format initial filesystem (generation 1)
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let generation1 = fs.super_block_header().generation;
-        fs.close().await.expect("close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
-
-        // Format again with image_builder_mode (should bump generation)
-        let fs = FxFilesystemBuilder::new()
-            .format(true)
-            .image_builder_mode(true)
-            .open(device)
-            .await
-            .expect("open failed");
-
-        fs.enable_allocations();
-        let generation2 = fs.super_block_header().generation;
-        assert!(
-            generation2 > generation1,
-            "Expected generation bump, got {} vs {}",
-            generation2,
-            generation1
-        );
         fs.close().await.expect("close failed");
     }
 

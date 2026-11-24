@@ -111,7 +111,6 @@ pub enum FsckWarning {
     ExtentForNonexistentObject(u64, u64),
     GraveyardRecordForAbsentObject(u64, u64),
     InvalidObjectIdInStore(u64, Key, Value),
-    LimitForNonExistentStore(u64, u64),
     OrphanedAttribute(u64, u64, AttributeId),
     OrphanedObject(u64, u64),
     OrphanedExtendedAttribute(u64, u64, AttributeId),
@@ -142,9 +141,6 @@ impl FsckWarning {
             }
             FsckWarning::InvalidObjectIdInStore(store_id, key, value) => {
                 format!("Store {} has an invalid object ID ({:?}, {:?})", store_id, key, value)
-            }
-            FsckWarning::LimitForNonExistentStore(store_id, limit) => {
-                format!("Bytes limit of {} found for nonexistent store id {}", limit, store_id)
             }
             FsckWarning::OrphanedAttribute(store_id, object_id, attribute_id) => {
                 format!(
@@ -184,9 +180,6 @@ impl FsckWarning {
             }
             FsckWarning::InvalidObjectIdInStore(store_id, key, value) => {
                 warn!(store_id, key:?, value:?; "Invalid object ID");
-            }
-            FsckWarning::LimitForNonExistentStore(store_id, limit) => {
-                warn!(store_id, limit; "Found limit for non-existent owner store.");
             }
             FsckWarning::OrphanedAttribute(store_id, oid, attribute_id) => {
                 warn!(store_id, oid, attribute_id; "Attribute for missing object");

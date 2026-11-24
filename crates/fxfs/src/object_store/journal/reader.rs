@@ -535,10 +535,10 @@ mod tests {
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_record_as_long_as_a_block() {
         use crate::errors::FxfsError;
+        use crate::object_store::ObjectDescriptor;
         use crate::object_store::journal::JournalRecord;
         use crate::object_store::object_record::{ObjectKey, ObjectValue};
         use crate::object_store::transaction::Mutation;
-        use crate::object_store::ObjectDescriptor;
         use crate::serialized_types::{DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Versioned as _};
 
         // A name as long as it takes.
@@ -607,10 +607,10 @@ mod tests {
     /// the checksum of the block it ends in (TASK-149.23).
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_record_crossing_two_block_ends() {
+        use crate::object_store::ObjectDescriptor;
         use crate::object_store::journal::JournalRecord;
         use crate::object_store::object_record::{ObjectKey, ObjectValue};
         use crate::object_store::transaction::Mutation;
-        use crate::object_store::ObjectDescriptor;
         use crate::serialized_types::Versioned as _;
 
         let bs = BLOCK_SIZE.get() as usize;

@@ -29,7 +29,7 @@ use crate::lsm_tree::{
     PersistentLayerHeader, PersistentLayerHeaderV39, PersistentLayerInfo, PersistentLayerInfoV39,
 };
 use crate::object_store::allocator::{
-    AllocatorInfo, AllocatorInfoV60, AllocatorKey, AllocatorKeyV60, AllocatorValue,
+    AllocatorInfo, AllocatorInfoV66, AllocatorKey, AllocatorKeyV60, AllocatorValue,
     AllocatorValueV32,
 };
 use crate::object_store::journal::super_block::{
@@ -118,7 +118,7 @@ macro_rules! versioned_types {
 
 versioned_types! {
     AllocatorInfo {
-        60.. => AllocatorInfoV60,
+        66.. => AllocatorInfoV66,
     }
     AllocatorKey {
         60.. => AllocatorKeyV60,

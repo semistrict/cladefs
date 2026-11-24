@@ -371,14 +371,7 @@ impl ObjectStore {
             buf
         };
 
-        if self.filesystem().options().image_builder_mode {
-            // If we're in image builder mode, we want to avoid writing to disk unless explicitly
-            // asked to. New object stores will have their StoreInfo written when we compact in
-            // FxFilesystem::finalize().
-            Ok(())
-        } else {
-            self.store_info_handle.get().unwrap().txn_write(transaction, 0u64, buf.as_ref()).await
-        }
+        self.store_info_handle.get().unwrap().txn_write(transaction, 0u64, buf.as_ref()).await
     }
 
     /// Sets a callback to be invoked each time the ObjectStore flushes.  The callback is invoked at

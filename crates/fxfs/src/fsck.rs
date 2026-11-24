@@ -652,11 +652,6 @@ impl<'a> Fsck<'a> {
                 owner_allocated_bytes.iter().map(|(k, v)| (*k, *v)).collect(),
             ))?;
         }
-        for (k, v) in allocator.owner_byte_limits() {
-            if !owner_allocated_bytes.contains_key(&k) {
-                self.warning(FsckWarning::LimitForNonExistentStore(k, v))?;
-            }
-        }
         self.verify_extents(&allocator).await
     }
 }
