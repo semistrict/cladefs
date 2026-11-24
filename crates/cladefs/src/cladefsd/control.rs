@@ -755,6 +755,15 @@ impl Cladefsd for Control {
                 bucket_cell::lifecycle::decommission(&*bucket, &buckets, incarnation, most);
             let done = decommissioning.await.map_err(|err| bucket_errno(&what, err))?;
             let bucket_cell::lifecycle::Decommissioned { retired, left } = done;
+            let auth = bucket_cell::events::authority(&bucket)
+                .await
+                .map_err(|err| bucket_errno(&what, err))?;
+            bucket_cell::events::publish(
+                &*auth,
+                bucket_cell::events::Publish::HostDecommissioned(incarnation),
+            )
+            .await
+            .map_err(|err| bucket_errno(&what, err))?;
             match retired + left {
                 0 => log::warn!("cladefsd: decommissioning host {said}: no references of its"),
                 _ => log::info!(
@@ -1151,7 +1160,7 @@ impl Cladefsd for Control {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::CellId { tenant, id: cell };
         let bucket = storage::daemon_bucket_on(&self.daemon).map_err(status)?;
-        let shredded = crate::bucket::shred_cell_on(&self.daemon.host, &*bucket, cell)
+        let shredded = crate::bucket::shred_cell_and_publish_on(&self.daemon.host, &bucket, cell)
             .await
             .map_err(|err| {
                 let failure = local_cell::upload::Failure::Bucket(err);
@@ -1193,11 +1202,17 @@ impl Cladefsd for Control {
         &self,
         request: Request<ShredTenantRequest>,
     ) -> Result<Response<ShredTenantResponse>, Status> {
+        use crate::bucket::ShredError;
         let ShredTenantRequest { tenant } = request.into_inner();
         let (destroyed, forgotten) =
-            crate::bucket::shred_tenant_on(&self.daemon.host, tenant).await.map_err(|why| {
-                log::error!("cladefsd: shredding tenant {tenant}: {why}");
-                saying(Errno::ENOTSUP, why)
+            crate::bucket::shred_tenant_on(&self.daemon.host, tenant).await.map_err(|err| {
+                let errno = match &err {
+                    ShredError::InvalidTenant(_) => Errno::EINVAL,
+                    ShredError::Unsupported(_) => Errno::ENOTSUP,
+                    ShredError::Failed(_) => Errno::EIO,
+                };
+                log::error!("cladefsd: shredding tenant {tenant}: {err}");
+                saying(errno, err.to_string())
             })?;
         let shredded_now = destroyed == bucket_cell::bucket_kms::Destroyed::Now;
         Ok(Response::new(ShredTenantResponse {

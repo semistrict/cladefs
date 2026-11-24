@@ -51,6 +51,8 @@ getrandom = "0.4.3"
 log = { version = "0.4.29", features = ["kv", "std"] }
 num = { version = "0.4.3", features = ["rand"] }
 proptest = "1.11.0"
+# cladefs: protobuf encoding for the global bucket control-plane events object (`bucket_cell::events`).
+prost = "0.14.4"
 rand = "0.10.2"
 object_store = { version = "0.14.2", features = ["aws", "azure", "gcp"] }
 crc-fast = "1.10.0"

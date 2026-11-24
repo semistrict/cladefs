@@ -99,6 +99,8 @@ mod daemon;
 mod device;
 pub mod disk;
 pub mod drain;
+#[cfg(any(target_os = "linux", madsim))]
+pub mod events;
 pub mod governor;
 mod grants;
 mod grpc;

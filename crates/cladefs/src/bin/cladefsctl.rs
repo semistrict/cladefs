@@ -371,7 +371,7 @@ mod cli {
          cladefsctl public-attach-only DIR | cladefsctl attach DIR BASE | cladefsctl stat DIR | \
          cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]... | \
          cladefsctl cells [--json] | cladefsctl counters [--json] | \
-         cladefsctl set-peers [ADDRESS...] | cladefsctl migrate DIR PEER TO | \
+         cladefsctl set-peers [--bucket URL] [ADDRESS...] | cladefsctl migrate DIR PEER TO | \
          cladefsctl hand-over DIR | cladefsctl abort-migration DIR | \
          cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
          cladefsctl memory-weight TENANT WEIGHT | \
@@ -380,8 +380,8 @@ mod cli {
          cladefsctl disk-limit [--tenant TENANT] BYTES|none | cladefsctl disk-weight TENANT WEIGHT | \
          cladefsctl tenant-disk [--tenant TENANT] [--json] | \
          cladefsctl grant TENANT DIR [UID [GID]] | \
-         cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
-         cladefsctl forget-tenant-keys TENANT | cladefsctl shred-tenant TENANT | \
+         cladefsctl revoke TENANT | cladefsctl shred-cell [--bucket URL] TENANT/CELL | \
+         cladefsctl forget-tenant-keys TENANT | cladefsctl shred-tenant [--bucket URL] TENANT | \
          cladefsctl kms reload | \
          cladefsctl decommission-host [--none-ok] INCARNATION | cladefsctl ephemeral-hosts | \
          cladefsctl mount attach TENANT CELL [TOKEN] | \
@@ -523,8 +523,10 @@ mod cli {
         Counters {
             json: bool,
         },
-        /// cladefs: the hosts sharing the daemon's bucket (board 8585).
+        /// cladefs: the hosts sharing the daemon's bucket (board 8585), or published cluster-wide
+        /// to `events` when `bucket` is given.
         SetPeers {
+            bucket: Option<String>,
             addresses: Vec<String>,
         },
         /// cladefs: an ephemeral cell's live migration begun, to `peer`, at `to` there (board 8585).
@@ -593,16 +595,19 @@ mod cli {
         Revoke {
             tenant: u64,
         },
-        /// cladefs: a cell shredded (TASK-411.7).
+        /// cladefs: a cell shredded (TASK-411.7), through the daemon or directly against `bucket`.
         ShredCell {
+            bucket: Option<String>,
             cell: cladefs::CellId,
         },
         /// cladefs: a tenant's keys forgotten, its KEK revoked or destroyed (TASK-411.7).
         ForgetTenantKeys {
             tenant: u64,
         },
-        /// cladefs: a tenant shredded under the bucket KMS (TASK-411.27).
+        /// cladefs: a tenant shredded under the bucket KMS (TASK-411.27), through the daemon or
+        /// keylessly against `bucket`.
         ShredTenant {
+            bucket: Option<String>,
             tenant: u64,
         },
         /// cladefs: the daemon's KMS configuration reloaded (board 8487).
@@ -859,7 +864,12 @@ mod cli {
                 ["cells", "--json"] => Self::Cells { json: true },
                 ["counters"] => Self::Counters { json: false },
                 ["counters", "--json"] => Self::Counters { json: true },
+                ["set-peers", "--bucket", url, ref addresses @ ..] => Self::SetPeers {
+                    bucket: Some((*url).to_owned()),
+                    addresses: addresses.iter().map(|&address| address.into()).collect(),
+                },
                 ["set-peers", ref addresses @ ..] => Self::SetPeers {
+                    bucket: None,
                     addresses: addresses.iter().map(|&address| address.into()).collect(),
                 },
                 ["migrate", dir, peer, to] => {
@@ -908,16 +918,29 @@ mod cli {
                     gid: ids.get(1).map(|gid| id(gid, "GID")).transpose()?,
                 },
                 ["revoke", given] => Self::Revoke { tenant: tenant(given)? },
+                ["shred-cell", "--bucket", url, cell] => {
+                    let (tenant, id) = cell.split_once('/').context("CELL must be TENANT/CELL")?;
+                    let cell = cladefs::CellId {
+                        tenant: self::id("TENANT", tenant)?,
+                        id: self::id("CELL", id)?,
+                    };
+                    Self::ShredCell { bucket: Some((*url).to_owned()), cell }
+                }
                 ["shred-cell", cell] => {
                     let (tenant, id) = cell.split_once('/').context("CELL must be TENANT/CELL")?;
                     let cell = cladefs::CellId {
                         tenant: self::id("TENANT", tenant)?,
                         id: self::id("CELL", id)?,
                     };
-                    Self::ShredCell { cell }
+                    Self::ShredCell { bucket: None, cell }
                 }
                 ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
-                ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
+                ["shred-tenant", "--bucket", url, given] => {
+                    Self::ShredTenant { bucket: Some((*url).to_owned()), tenant: tenant(given)? }
+                }
+                ["shred-tenant", given] => {
+                    Self::ShredTenant { bucket: None, tenant: tenant(given)? }
+                }
                 ["kms", "reload"] => Self::KmsReload,
                 ["decommission-host", given] => {
                     Self::DecommissionHost { incarnation: incarnation(given)?, none_ok: false }
@@ -1192,9 +1215,10 @@ mod cli {
                     );
                     print_value(&counters_json(&counters), json)?;
                 }
-                Self::SetPeers { addresses } => {
+                Self::SetPeers { addresses, bucket: None } => {
                     call!("setting the daemon's peers", set_peers, SetPeersRequest { addresses });
                 }
+                Self::SetPeers { bucket: Some(_), .. } => unreachable!("served above"),
                 Self::Migrate { dir, peer, to } => {
                     let what = format!("migrating the cell at {} to {peer}", dir.display());
                     let request = MigrateCellRequest { path: name(&dir)?, peer, to: name(&to)? };
@@ -1286,13 +1310,14 @@ mod cli {
                         RevokeRequest { tenant }
                     );
                 }
-                Self::ShredCell { cell } => {
+                Self::ShredCell { cell, bucket: None } => {
                     let request = ShredCellRequest { tenant: cell.tenant, cell: cell.id };
                     let answer = call!(format!("shredding cell {cell}"), shred_cell, request);
                     let removed = answer.keks_removed;
                     let forgotten = answer.forgotten.unwrap_or_default();
                     print!("keks_removed {removed}\n{}", forgotten_lines(&forgotten));
                 }
+                Self::ShredCell { bucket: Some(_), .. } => unreachable!("served above"),
                 Self::ForgetTenantKeys { tenant } => {
                     let why = format!(
                         "tenant {tenant}: its KEK is revoked or destroyed, cladefsctl says"
@@ -1305,7 +1330,7 @@ mod cli {
                     );
                     print!("{}", forgotten_lines(&answer.forgotten.unwrap_or_default()));
                 }
-                Self::ShredTenant { tenant } => {
+                Self::ShredTenant { tenant, bucket: None } => {
                     let answer = call!(
                         format!("shredding tenant {tenant}"),
                         shred_tenant,
@@ -1315,6 +1340,7 @@ mod cli {
                     let forgotten = answer.forgotten.unwrap_or_default();
                     print!("shredded_now {}\n{}", u8::from(now), forgotten_lines(&forgotten));
                 }
+                Self::ShredTenant { bucket: Some(_), .. } => unreachable!("served above"),
                 Self::KmsReload => {
                     let reloaded =
                         call!("reloading the daemon's KMS", reload_kms, ReloadKmsRequest {});
@@ -1383,7 +1409,12 @@ mod cli {
         fn is_on_buckets(&self) -> bool {
             matches!(
                 self,
-                Self::FormatBucket { .. } | Self::AddBucket { .. } | Self::Buckets { .. }
+                Self::FormatBucket { .. }
+                    | Self::AddBucket { .. }
+                    | Self::Buckets { .. }
+                    | Self::ShredTenant { bucket: Some(_), .. }
+                    | Self::ShredCell { bucket: Some(_), .. }
+                    | Self::SetPeers { bucket: Some(_), .. }
             )
         }
 
@@ -1408,6 +1439,22 @@ mod cli {
                     let registry = registry.with_context(|| format!("{url} records no buckets"))?;
                     print!("{}", buckets_lines(&registry));
                 }
+                Self::ShredTenant { bucket: Some(url), tenant } => {
+                    let destroyed =
+                        cladefs::bucket::shred_tenant_bucket(&url, tenant).map_err(printable)?;
+                    let now = destroyed == bucket_cell::bucket_kms::Destroyed::Now;
+                    println!("shredded_now {}", u8::from(now));
+                }
+                Self::ShredCell { bucket: Some(url), cell } => {
+                    let removed =
+                        cladefs::bucket::shred_cell_bucket(&url, cell).map_err(printable)?;
+                    println!("keks_removed {removed}");
+                }
+                Self::SetPeers { bucket: Some(url), addresses } => {
+                    let generation =
+                        cladefs::bucket::set_peers_bucket(&url, addresses).map_err(printable)?;
+                    println!("generation {generation}");
+                }
                 _ => unreachable!("acts on no bucket"),
             }
             Ok(())
@@ -1418,6 +1465,18 @@ mod cli {
         fn locally(self) -> anyhow::Result<()> {
             if self.is_on_buckets() {
                 return self.on_buckets();
+            }
+            // Standalone keyless fallback when CLADEFSD_GRPC is unset and CLADEFSD_BUCKET is set.
+            if let Some(url) = std::env::var("CLADEFSD_BUCKET").ok().filter(|v| !v.is_empty()) {
+                match self {
+                    Self::ShredTenant { bucket: None, tenant } => {
+                        return Self::ShredTenant { bucket: Some(url), tenant }.on_buckets();
+                    }
+                    Self::ShredCell { bucket: None, cell } => {
+                        return Self::ShredCell { bucket: Some(url), cell }.on_buckets();
+                    }
+                    _ => {}
+                }
             }
             let daemons = match self {
                 Self::Stats { .. } => Some("stats are"),

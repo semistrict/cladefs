@@ -1,0 +1,8 @@
+EventLog {
+    latest_seq: 0,
+    oldest_seq: 0,
+    events: [],
+    shredded_tenants: [],
+    decommissioned_hosts: [],
+    bucket_peers: [],
+}

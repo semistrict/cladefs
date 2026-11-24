@@ -76,6 +76,11 @@ impl<B: Bucket> RoutedBucket<B> {
         self.home.clone()
     }
 
+    /// Whether this bucket routes requests for other buckets' cells.
+    pub fn is_routed(&self) -> bool {
+        self.route.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn mirrors_idle(&self) -> bool {
         self.mirrors.idle()
@@ -306,6 +311,23 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         match self.member(key).await? {
             Some(member) => member.get(key).await,
             None => self.home.get(key).await,
+        }
+    }
+
+    async fn get_if_changed(
+        &self,
+        key: &str,
+        if_none_match: &Version,
+    ) -> Result<Option<Object>, Error> {
+        if self.read_here_first(key).await? {
+            match self.home.get_if_changed(key, if_none_match).await {
+                Err(Error::NotFound) => {}
+                answered => return answered,
+            }
+        }
+        match self.member(key).await? {
+            Some(member) => member.get_if_changed(key, if_none_match).await,
+            None => self.home.get_if_changed(key, if_none_match).await,
         }
     }
 

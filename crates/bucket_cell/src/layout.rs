@@ -148,6 +148,10 @@ pub const IDENTITY: &str = "identity";
 /// cladefs: the record of every bucket, the root bucket's own or a copy of it ([`crate::identity`],
 /// TASK-633.9). No cell's, and no candidate of any pass.
 pub const BUCKETS: &str = "buckets";
+/// cladefs: the global control-plane event log and durable state in the root bucket
+/// ([`crate::events`]): a single protobuf object polled via `If-None-Match` by extent daemons and
+/// read by the collector. No cell's, and no candidate of any pass.
+pub const EVENTS: &str = "events";
 
 pub fn segments(cell: CellId) -> String {
     format!("{}segments/", cell.prefix())

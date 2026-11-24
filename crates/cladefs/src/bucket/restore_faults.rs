@@ -480,6 +480,7 @@ impl Hosts {
                 | Kind::Buckets
                 | Kind::Kek { .. }
                 | Kind::Retired { .. } => false,
+                Kind::Unknown => key != bucket_cell::layout::EVENTS,
                 _ => true,
             })
             .collect();

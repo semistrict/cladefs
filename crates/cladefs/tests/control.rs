@@ -593,6 +593,68 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     // Once the daemon lets it go, which it does after its VM process's connection went (board 8282).
     drop(vms);
     assert_eq!(failure(daemon.stat_once_closed(&ours)), (Code::PermissionDenied, Errno::EACCES));
+
+    // Default tenant 0 is refused with INVALID_ARGUMENT / EINVAL.
+    let zero =
+        daemon.runtime.block_on(daemon.client.shred_tenant(ShredTenantRequest { tenant: 0 }));
+    assert_eq!(failure(zero.map(drop)), (Code::InvalidArgument, Errno::EINVAL));
+}
+
+/// Standalone keyless `shred_tenant_bucket` (without calling `ShredTenant` or `ForgetTenantKeys`
+/// on the daemon) tombstones the bucket KMS and publishes `TenantShredded` to the root bucket's
+/// `events` object; the running daemon's background poller detects it and halts open cells of
+/// that tenant (`EACCES`) while leaving other tenants' open cells healthy.
+#[test]
+fn standalone_shred_halts_open_cells_on_uncalled_daemon_via_events() {
+    let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+    // SAFETY: nextest runs each test in a process of its own before daemon threads start.
+    unsafe {
+        std::env::remove_var("CLADEFS_KMS");
+        std::env::set_var("CLADEFS_MASTER_KEY", &master);
+        std::env::set_var("CLADEFSD_EVENTS_POLL_MS", "50");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    cladefs::cladefsd::events::start().unwrap();
+    let bucket_url = std::env::var("CLADEFSD_BUCKET").unwrap();
+    let (victim, survivor) = (dir.path().join("victim"), dir.path().join("survivor"));
+    let of = |tenant| cladefs::CellId { tenant, id: 0 };
+    daemon.create(&victim, of(11), None).unwrap();
+    daemon.create(&survivor, of(12), None).unwrap();
+    let vms = [daemon.open(&victim, CAPACITY), daemon.open(&survivor, CAPACITY)];
+    for (seed, vm) in (1..).zip(&vms) {
+        write(vm, &pattern(seed), b"events");
+    }
+    let read = |vm: &cladefs::CellClient, seed: u64| {
+        let mut data = vec![0; 64 << 10];
+        let extent = cladefs::ExtentId { cell: vm.cell(), sequence: 1 };
+        let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
+        done.map(|()| data == pattern(seed))
+    };
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
+
+    // Shred tenant 11 directly at the bucket without calling the daemon and without needing
+    // CLADEFS_MASTER_KEY (unset it before calling the standalone API).
+    // SAFETY: single test process, daemon already read its env on boot.
+    unsafe {
+        std::env::remove_var("CLADEFS_MASTER_KEY");
+    }
+    let destroyed = cladefs::bucket::shred_tenant_bucket(&bucket_url, 11).unwrap();
+    assert_eq!(destroyed, bucket_cell::bucket_kms::Destroyed::Now);
+
+    // Wait up to 5 s for the daemon's events poller to detect TenantShredded(11) and halt victim.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if read(&vms[0], 1) == Err(Errno::EACCES) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon events poller did not halt shredded tenant 11 within 5s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(read(&vms[1], 2), Ok(true));
 }
 
 /// board 8487: a tenant added to the KMS's key overrides file (`keys=FILE`) while the daemon runs

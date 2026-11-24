@@ -479,7 +479,8 @@ impl World {
                 | Kind::Identity
                 | Kind::Buckets
                 | Kind::Kek { .. } => false,
-                Kind::Former { .. } | Kind::Unknown => true,
+                Kind::Former { .. } => true,
+                Kind::Unknown => key != bucket_cell::layout::EVENTS,
             })
             .collect();
         assert_eq!(leaked, Vec::<String>::new(), "{case}: left in the bucket");

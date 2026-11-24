@@ -597,8 +597,9 @@ fn without_a_bucket_prints_its_usage() {
                  [--max-requests-per-second N] [--max-refused-passes N] | cladefs-gc URL [--cell \
                  TENANT/CELL] --dry-run | cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] \
                  | cladefs-gc URL --delete-cell TENANT/CELL [--force-missing] | cladefs-gc URL \
-                 --usage [--tenant TENANT] | cladefs-gc URL --rotate-master-key (every cell, or the \
-                 one --cell names; SECONDS from a millisecond to a year; --dry-run writes nothing)";
+                 --delete-tenant TENANT | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc \
+                 URL --rotate-master-key (every cell, or the one --cell names; SECONDS from a \
+                 millisecond to a year; --dry-run writes nothing)";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {usage:?}\n"));
     assert_eq!(out.status.code(), Some(1));
 }

@@ -238,6 +238,23 @@ impl ByteRange {
 pub trait Bucket: Send + Sync + 'static {
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send;
 
+    /// cladefs: reads the object at `key` only if its version differs from `if_none_match`
+    /// (`If-None-Match` HTTP conditional GET). Returns `Ok(None)` when unchanged (304 Not
+    /// Modified), `Ok(Some(object))` when changed, or `Err(Error::NotFound)` when missing.
+    fn get_if_changed(
+        &self,
+        key: &str,
+        if_none_match: &Version,
+    ) -> impl Future<Output = Result<Option<Object>, Error>> + Send {
+        async move {
+            let object = self.get(key).await?;
+            if object.meta.version == *if_none_match {
+                return Ok(None);
+            }
+            Ok(Some(object))
+        }
+    }
+
     fn get_range(
         &self,
         key: &str,
@@ -360,6 +377,41 @@ pub async fn get(bucket: &impl Bucket, key: &str) -> Result<Option<Object>, Refu
         match bucket.get(key).await {
             Ok(object) => return Ok(Some(object)),
             Err(Error::NotFound) => return Ok(None),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
+    }
+}
+
+/// cladefs: what [`get_if_changed`] found at a key.
+#[derive(Clone, Debug)]
+pub enum IfChanged {
+    /// The object is present and differs from the caller's last-seen version (or none was given).
+    Changed(Object),
+    /// The object's version matches `if_none_match` (304 Not Modified).
+    Unchanged,
+    /// No object exists at the key.
+    Missing,
+}
+
+/// cladefs: reads `key` only if its version differs from `if_none_match`, retrying transient
+/// failures like [`get`].
+pub async fn get_if_changed(
+    bucket: &impl Bucket,
+    key: &str,
+    if_none_match: Option<&Version>,
+) -> Result<IfChanged, Refused> {
+    let Some(version) = if_none_match else {
+        return Ok(match get(bucket, key).await? {
+            Some(object) => IfChanged::Changed(object),
+            None => IfChanged::Missing,
+        });
+    };
+    let mut failures = 0;
+    loop {
+        match bucket.get_if_changed(key, version).await {
+            Ok(Some(object)) => return Ok(IfChanged::Changed(object)),
+            Ok(None) => return Ok(IfChanged::Unchanged),
+            Err(Error::NotFound) => return Ok(IfChanged::Missing),
             Err(error) => failed(bucket, &mut failures, error, key).await?,
         }
     }

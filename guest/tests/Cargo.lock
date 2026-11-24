@@ -850,6 +850,7 @@ dependencies = [
  "object_store",
  "opentelemetry",
  "percent-encoding",
+ "prost 0.14.4",
  "rand 0.10.3",
  "reqwest",
  "rustc-hash",

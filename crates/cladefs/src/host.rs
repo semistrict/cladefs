@@ -13,12 +13,13 @@
 //! share zero mutable host state and dropping a node's `Arc<Daemon>` releases its arenas and state
 //! deterministically.
 
-use std::sync::Arc;
 #[cfg(not(madsim))]
 use std::sync::OnceLock;
+use std::sync::{Arc, Weak};
 
 /// Per-host context for one `cladefs` host / extent daemon.
 pub struct Host {
+    weak: Weak<Self>,
     local: Arc<local_cell::Host>,
     pub(crate) ephemeral: crate::ephemeral_host::State,
     bucket: crate::bucket::HostState,
@@ -41,7 +42,8 @@ impl Host {
         let bucket = crate::bucket::HostState::new(local.bucket().parts().clone());
         let slabs = crate::slabs::HostSlabs::new();
         let cache = crate::cache::ExtentCache::new(slabs.clone());
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
             local,
             ephemeral: crate::ephemeral_host::State::new(),
             bucket,
@@ -52,6 +54,10 @@ impl Host {
             cache,
             collectors: crate::storage::collect::Registry::new(),
         })
+    }
+
+    pub(crate) fn weak(&self) -> Weak<Self> {
+        self.weak.clone()
     }
 
     /// The process's default host context (outside `madsim`), sharing
