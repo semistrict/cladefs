@@ -3746,7 +3746,6 @@ mod shuttle_tests {
 
     const BLOCK: usize = 4096;
     const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
-    /// The cell the writer forks.
 
     /// Small segments, so that commits close several, and extents of two blocks or more in
     /// objects of their own, which upload before the segments naming them (TASK-79.3); flushes of

@@ -1402,7 +1402,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     let passes = collector.as_ref().map(|collector| {
         let bucket = bucket.clone();
         collector.spawn(async move {
-            for holder in 1.. {
+            for holder in 1..=u64::MAX {
                 let after = madsim::rand::thread_rng().gen_range(100..1000);
                 madsim::time::sleep(Duration::from_millis(after)).await;
                 collect_pass(&bucket, holder).await;

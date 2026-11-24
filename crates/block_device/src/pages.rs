@@ -1534,7 +1534,7 @@ mod tests {
         model.commit();
         model.write(25 * BLOCK as u64, &vec![8; 10 * BLOCK]);
         model.discard(0..4096);
-        assert_eq!(model.pages.holes, [10..30]);
+        assert_eq!(model.pages.holes, std::slice::from_ref(&(10..30)));
         assert!(model.pages.dirty.is_empty());
         model.write(12 * BLOCK as u64 + 3, &[9; 5]);
         assert_eq!(model.pages.holes, [10..12, 13..30]);

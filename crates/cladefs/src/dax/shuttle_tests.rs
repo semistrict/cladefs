@@ -268,7 +268,7 @@ pub(super) fn writes_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
 
     let freeing = guest.clone();
     let freer = thread::spawn(move || {
-        assert_eq!(dax.map_zeros_over(&sealed), [0..2 * ps]);
+        assert_eq!(dax.map_zeros_over(&sealed), std::slice::from_ref(&(0..2 * ps)));
         let still: Vec<_> =
             freeing.mapped().into_iter().filter(|(_, at)| extent.contains(at)).collect();
         assert!(still.is_empty(), "the freed extent is mapped after its free: {still:#x?}");
