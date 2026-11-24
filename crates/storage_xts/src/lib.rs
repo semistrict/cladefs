@@ -233,7 +233,14 @@ impl BlockCipherEncClosure for XtsProcessor<'_, '_> {
         let Self { mut tweak, src, dst } = self;
         // SAFETY: `src` and `dst` are valid, 64-byte aligned slices of equal length % 64 == 0.
         unsafe {
-            xts_encrypt_buffer(backend, src.as_ptr(), dst.as_mut_ptr(), src.len(), &mut tweak, true);
+            xts_encrypt_buffer(
+                backend,
+                src.as_ptr(),
+                dst.as_mut_ptr(),
+                src.len(),
+                &mut tweak,
+                true,
+            );
         }
     }
 }
@@ -243,7 +250,14 @@ impl BlockCipherDecClosure for XtsProcessor<'_, '_> {
         let Self { mut tweak, src, dst } = self;
         // SAFETY: `src` and `dst` are valid, 64-byte aligned slices of equal length % 64 == 0.
         unsafe {
-            xts_decrypt_buffer(backend, src.as_ptr(), dst.as_mut_ptr(), src.len(), &mut tweak, true);
+            xts_decrypt_buffer(
+                backend,
+                src.as_ptr(),
+                dst.as_mut_ptr(),
+                src.len(),
+                &mut tweak,
+                true,
+            );
         }
     }
 }

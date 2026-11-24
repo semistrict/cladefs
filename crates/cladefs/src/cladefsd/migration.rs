@@ -1961,8 +1961,6 @@ pub(super) mod target {
         host_fs::File::open(dir)?.sync_all()
     }
 
-    /// Gives back the `len` bytes at `offset` of `file`, keeping its size.
-
     #[cfg(test)]
     mod tests {
         use super::*;

@@ -44,7 +44,6 @@ const MAX_ALIGN: usize = 4096;
 pub trait SliceRange: Clone + RangeBounds<usize> + SliceIndex<[u8], Output = [u8]> {}
 impl<T> SliceRange for T where T: Clone + RangeBounds<usize> + SliceIndex<[u8], Output = [u8]> {}
 
-
 /// A device's bound on the bytes of its buffers alive at once: an allocation waits while the
 /// others hold too many, as one of Fuchsia's transfer pool waited for room, so that I/O in flight
 /// can't take memory without bound (the guest kernel's 16 MiB). One larger than the whole budget is

@@ -62,16 +62,35 @@ if part clippy; then
     (cd "$root" && cargo fmt --check)
     UCD_ZIP="$zip" cargo clippy --locked --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
-    cargo clippy --locked --manifest-path "$root/Cargo.toml" -p local_cell -p cladefs \
-        --features shuttle --tests -- -A clippy::all -D warnings
-    cargo clippy --locked --manifest-path "$root/Cargo.toml" -p cladefs -p virtio_extent \
-        --features loom --tests -- -A clippy::all -D warnings
+    # cladefs's own crates (copied Fuchsia crates stay under `-A clippy::all` above): deny
+    # clippy's correctness and suspicious lints too (board 8607), across tests and examples,
+    # non-test lib and bin targets (without dev-dependencies unifying failpoints or testing:
+    # boards 10218, 10489), and the Shuttle, loom and madsim builds below. `--no-deps` keeps
+    # Fuchsia path dependencies under the workspace rule above.
+    cladefs_crates=(
+        -p base32_id -p block_device -p bucket_cell -p cladefs -p cladefs-examples
+        -p extent_frame -p extent_keys -p formats -p fxfs-automount -p fxfs-posix
+        -p fxfs-sim-diff -p host_fs -p local_cell -p node_local -p sqlite_cladefs
+        -p virtio_extent
+    )
+    cladefs_lints=(
+        -A clippy::all -D clippy::correctness -D clippy::suspicious
+        -D clippy::disallowed_methods -D warnings
+    )
+    UCD_ZIP="$zip" cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
+        "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps \
+        "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p local_cell -p cladefs \
+        --features shuttle --tests -- "${cladefs_lints[@]}"
+    cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p cladefs -p virtio_extent \
+        --features loom --tests -- "${cladefs_lints[@]}"
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
     env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
-        cargo clippy --locked --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- -A clippy::all -D warnings
+        cargo clippy --locked --manifest-path "$root/Cargo.toml" --no-deps -p node_local -p host_fs \
+        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule

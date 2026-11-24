@@ -510,7 +510,9 @@ fn endpoint(address: &str) -> Result<Endpoint, String> {
     }
     #[cfg(madsim)]
     {
-        drop(credentials);
+        // Under madsim `Credentials` is a non-Drop unit struct; `credentials()?` above still
+        // enforces `CLADEFSD_PEER_TLS`.
+        let _ = credentials;
         Endpoint::from_shared(format!("http://{address}"))
             .map_err(|err| format!("peer {address:?}: {err}"))
     }

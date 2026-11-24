@@ -2,10 +2,11 @@
 # Copyright 2026 The cladefs Authors.
 obj-$(CONFIG_CLADEFS_FS) += cladefs.o
 cladefs-y := rt.o super.o data.o device.o cladefs_rust.o
-cladefs-$(CONFIG_FS_DAX) += dax.o pages.o
+cladefs-$(CONFIG_FS_DAX) += dax.o dax_debug.o pages.o
 
 # cladefs: what a kernel with GCOV_KERNEL counts (CLADEFS_GUEST_KERNEL_COVERAGE, TASK-119.14).
 GCOV_PROFILE_dax.o := y
+GCOV_PROFILE_dax_debug.o := y
 GCOV_PROFILE_data.o := y
 GCOV_PROFILE_device.o := y
 GCOV_PROFILE_pages.o := y

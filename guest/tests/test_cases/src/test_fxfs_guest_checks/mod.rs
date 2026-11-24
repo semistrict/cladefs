@@ -177,6 +177,7 @@ macro_rules! checks {
             freeze: All, 3 => test_freeze;
             failed_thaw_thaws_on_retry: All, 3 => test_failed_thaw_thaws_on_retry;
             read_only_freezes: All, 3 => test_read_only_freezes;
+            unmount_after_failed_thaw: All, 5 => test_unmount_after_failed_thaw;
             show_options: All, 3 => test_show_options(dax);
             write_removes_privileges: All, 3 => test_write_removes_privileges;
             delayed_unlinks: All, 3 => test_delayed_unlinks, verify_delayed_unlinks;

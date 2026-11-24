@@ -92,6 +92,40 @@ class Ci(unittest.TestCase):
             for name in part.split():
                 self.assertIn(f"if part {name}; then", script, part)
 
+    def test_clippy_checks_every_cladefs_crate_and_non_test_targets(self):
+        """Board 8607: cladefs's own crates (not copied Fuchsia crates or generated Fuchsia tables)
+        all run with `-D clippy::correctness -D clippy::suspicious` across plain (tests, examples,
+        and non-test lib/bins — board 10489), shuttle, loom and madsim builds."""
+        script = TEST_SH.read_text()
+        body = re.search(r"^if part clippy; then\n(.*?)^fi$", script,
+                         re.MULTILINE | re.DOTALL).group(1)
+        crates_block = re.search(r"cladefs_crates=\(\n(.*?)\n    \)", body, re.DOTALL)
+        self.assertIsNotNone(crates_block, "scripts/test.sh clippy part missing cladefs_crates")
+        listed = re.findall(r"-p\s+([A-Za-z0-9_-]+)", crates_block.group(1))
+        expected = []
+        for path in sorted((ROOT / "crates").iterdir()):
+            manifest = path / "Cargo.toml"
+            if not manifest.is_file():
+                continue
+            head = "\n".join(manifest.read_text().splitlines()[:8])
+            if re.search(r"Fuchsia's `(?:src|zircon)/", head) or path.name == "fxfs-unicode-gen":
+                continue
+            expected.append(path.name)
+        self.assertEqual(sorted(listed), expected)
+        lints_block = re.search(r"cladefs_lints=\(\n(.*?)\n    \)", body, re.DOTALL)
+        self.assertIsNotNone(lints_block, "scripts/test.sh clippy part missing cladefs_lints")
+        lints = " ".join(lints_block.group(1).split())
+        self.assertIn("-A clippy::all -D clippy::correctness -D clippy::suspicious", lints)
+        self.assertIn("-D clippy::disallowed_methods -D warnings", lints)
+        for required in [
+            '--no-deps \\\n        "${cladefs_crates[@]}" --tests --examples -- "${cladefs_lints[@]}"',
+            '--no-deps \\\n        "${cladefs_crates[@]}" --lib --bins -- "${cladefs_lints[@]}"',
+            '--no-deps -p local_cell -p cladefs \\\n        --features shuttle --tests -- "${cladefs_lints[@]}"',
+            '--no-deps -p cladefs -p virtio_extent \\\n        --features loom --tests -- "${cladefs_lints[@]}"',
+            '--no-deps -p node_local -p host_fs \\\n        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- "${cladefs_lints[@]}"',
+        ]:
+            self.assertIn(required, body)
+
     def test_the_vmms_own_tests_run_with_a_bucket(self):
         """TASK-220: the firecracker part runs the VMM's extent device's tests and its vCPUs'
         exits', from vendor/firecracker as cladefs builds it (scripts/firecracker-cargo.sh, TASK-269),

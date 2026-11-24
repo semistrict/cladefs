@@ -1820,7 +1820,7 @@ pub(crate) mod tests {
         assert_eq!(stage.unmaps(), [(0, 1, End)], "the guest's UNMAP of a page an eviction left");
         dax.unmap(0, ps);
         assert_eq!(stage.unmaps(), [], "the guest's UNMAP of nothing");
-        assert_eq!(dax.map_zeros_over(&old), [ps..4 * ps]);
+        assert_eq!(dax.map_zeros_over(&old), std::slice::from_ref(&(ps..4 * ps)));
         assert_eq!(stage.unmaps(), [], "freed, nothing mapped");
         dax.map(ps, &new.source(), 0, 2 * ps);
         assert_eq!(stage.unmaps(), [(1, 2, End)], "the guest's MAP over zeros and what was left");

@@ -220,6 +220,11 @@ struct cladefs_device *cladefs_dax_device(struct cladefs_filesystem *filesystem)
 	return ((struct cladefs *)filesystem)->dev;
 }
 
+bool cladefs_is_frozen(struct cladefs_filesystem *filesystem)
+{
+	return false;
+}
+
 u64 cladefs_sim_new_file(struct cladefs *fs)
 {
 	struct stub_file *file = kzalloc(sizeof(*file), GFP_KERNEL);

@@ -96,8 +96,11 @@ pub fn serve_control(
             let _supervised = local_cell::shared::Awaited::new(HEALTH_REPORTER);
             loop {
                 // cladefs: a test's reporter gone once it reported SERVING, as no panic but its
-                // runtime's going leaves it, which a drain bounds (board 8503).
-                fail::fail_point!("cladefsd::health_reporter_gone", now, |_| ());
+                // runtime's going leaves it, which a drain bounds (board 8503). Guarding outside
+                // the macro reads `now` even when `failpoints` is off (boards 10218, 10489).
+                if now {
+                    fail::fail_point!("cladefsd::health_reporter_gone", |_| ());
+                }
                 // The sender lives as long as the process.
                 if serving.changed().await.is_err() {
                     return;

@@ -1740,7 +1740,8 @@ impl<P: Platform> View<'_, P> {
         places.push(data.size.saturating_sub(2 * PAGE));
         places.sort_unstable();
         // Holes too: a file's start, whole, for what should be a hole may hold what it did.
-        let mut runs = vec![0..data.size.min(WHOLLY_READ)];
+        let mut runs = Vec::new();
+        runs.push(0..data.size.min(WHOLLY_READ));
         for at in places {
             let end = at + 3 * PAGE;
             match runs.last_mut() {

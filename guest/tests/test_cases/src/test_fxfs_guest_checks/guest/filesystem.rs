@@ -142,6 +142,65 @@ pub(super) fn test_read_only_freezes() {
     fs::remove_file(&name).unwrap();
 }
 
+/// cladefs: unmounting a read-only (or remounted read-only) volume after a failed thaw neither
+/// deadlocks in `close_volume` while commits are held (hotbed review 91, finding 328) nor leaves
+/// the host device frozen across close and reopen (hotbed review 92, finding 327).
+pub(super) fn test_unmount_after_failed_thaw() {
+    let _writable = MountedWritable;
+    let name = path("failed-thaw-unmount");
+    fs::write(&name, b"before failed thaw").unwrap();
+
+    // Case 1: writable filesystem remounted read-only (holds `commits` task while frozen).
+    mount_with(libc::MS_REMOUNT | libc::MS_RDONLY).expect("remounting read-only");
+    let told = device_requests("freeze");
+    freeze_at(MNT, FIFREEZE).expect("FIFREEZE remounted ro");
+    assert_eq!(device_requests("freeze"), told + 1, "remounted ro: frozen");
+    {
+        let _fail = Param::set("fail_thaw_at", "1");
+        let failed = freeze_at(MNT, FITHAW).expect_err("FITHAW made to fail");
+        assert_eq!(failed.raw_os_error(), Some(libc::EIO), "remounted ro FITHAW: {failed}");
+        assert_injected("fail_thaw_at");
+    }
+    {
+        let _fail = Param::set("fail_thaw_at", "1");
+        unmount();
+        assert_injected("fail_thaw_at");
+    }
+    // `Filesystem::close` sent best-effort `T_FREEZE(0)` even though `cladefs_thaw` failed.
+    assert_eq!(device_requests("freeze"), told + 2, "remounted ro: close unfroze device");
+    mount();
+    // `ExtentDevice::open` also synchronizes the host device to unfrozen.
+    assert_eq!(device_requests("freeze"), told + 3, "remounted ro: reopen unfroze device");
+    assert_eq!(fs::read(&name).unwrap(), b"before failed thaw");
+    fs::write(&name, b"after remounted ro").unwrap();
+    fs::File::open(&name).unwrap().sync_all().unwrap();
+
+    // Case 2: filesystem opened read-only (`commits: None`).
+    unmount();
+    mount_with(libc::MS_RDONLY).expect("mounting read-only");
+    let told = device_requests("freeze");
+    freeze_at(MNT, FIFREEZE).expect("FIFREEZE mounted ro");
+    assert_eq!(device_requests("freeze"), told + 1, "mounted ro: frozen");
+    {
+        let _fail = Param::set("fail_thaw_at", "1");
+        let failed = freeze_at(MNT, FITHAW).expect_err("FITHAW made to fail");
+        assert_eq!(failed.raw_os_error(), Some(libc::EIO), "mounted ro FITHAW: {failed}");
+        assert_injected("fail_thaw_at");
+    }
+    {
+        let _fail = Param::set("fail_thaw_at", "1");
+        unmount();
+        assert_injected("fail_thaw_at");
+    }
+    assert_eq!(device_requests("freeze"), told + 2, "mounted ro: close unfroze device");
+    mount();
+    assert_eq!(device_requests("freeze"), told + 3, "mounted ro: reopen unfroze device");
+    assert_eq!(fs::read(&name).unwrap(), b"after remounted ro");
+    fs::write(&name, b"after mounted ro").unwrap();
+    fs::File::open(&name).unwrap().sync_all().unwrap();
+    fs::remove_file(&name).unwrap();
+}
+
 /// Unbinding the driver from a mounted device waits for it to unmount, the filesystem working
 /// meanwhile, rather than freeing what it uses; binding it again gives it back (TASK-79.48).
 pub(super) fn test_unbind_waits_for_unmount() {

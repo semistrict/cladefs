@@ -121,11 +121,13 @@ int cladefs_sync(struct cladefs *fs);
 int cladefs_freeze(struct cladefs_filesystem *filesystem);
 /*
  * A thaw that fails leaves the filesystem frozen, and the next goes on from the step it stopped at
- * (TASK-200). cladefs_set_fail_thaw_at, fault injection: the next thaw fails before its step `step`,
- * 1 telling the device, 2 rotating the journal's span, and cladefs_fail_thaw_at is 0 again; 0,
- * none.
+ * (TASK-200). cladefs_is_frozen reports the filesystem's single authoritative freeze state, which
+ * stays true until every thaw step succeeds. cladefs_set_fail_thaw_at, fault injection: the next
+ * thaw fails before its step `step`, 1 telling the device, 2 rotating the journal's span, and
+ * cladefs_fail_thaw_at is 0 again; 0, none.
  */
 int cladefs_thaw(struct cladefs_filesystem *filesystem);
+bool cladefs_is_frozen(struct cladefs_filesystem *filesystem);
 void cladefs_set_fail_thaw_at(u32 step);
 u32 cladefs_fail_thaw_at(void);
 /*
