@@ -815,14 +815,17 @@ fn cells_are_made_replicated_through_the_control_api() {
     assert_eq!(format!("{said:#}"), "making the cell: EINVAL (errno 22)");
     assert_eq!(said.errno(), Some(Errno::EINVAL));
     assert!(!first.exists());
+    // Deprecated FSYNC_LEVEL_LOCAL maps to FSYNC_LEVEL_ORDERED with a warning for backwards
+    // compatibility.
+    #[allow(deprecated)]
     let made = create(&mut daemon, request(&first, 0, Some(0), FsyncLevel::Local)).unwrap();
-    assert_eq!(replicated(&mut daemon, &first), (0, FsyncLevel::Local, 0));
+    assert_eq!(replicated(&mut daemon, &first), (0, FsyncLevel::Ordered, 0));
     daemon.sync(&first).unwrap();
 
     // Taken into another directory, asking for nothing: kept. Then asking for another: changed.
     let second = dir.path().join("second");
     create(&mut daemon, request(&second, made.cell, None, FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, &second), (0, FsyncLevel::Local, 0));
+    assert_eq!(replicated(&mut daemon, &second), (0, FsyncLevel::Ordered, 0));
     daemon.sync(&second).unwrap();
     let third = dir.path().join("third");
     create(&mut daemon, request(&third, made.cell, Some(0), FsyncLevel::Ordered)).unwrap();
@@ -835,11 +838,14 @@ fn cells_are_made_replicated_through_the_control_api() {
 
     // No f past 3, no fsync level without replicas, no fsync waiting for copies an f of 0 never
     // makes: refused, nothing made.
-    for (replicas, fsync) in [
+    #[allow(deprecated)]
+    let refused_cases = [
         (Some(4), FsyncLevel::Ordered),
         (None, FsyncLevel::Local),
+        (None, FsyncLevel::Replicated),
         (Some(0), FsyncLevel::Replicated),
-    ] {
+    ];
+    for (replicas, fsync) in refused_cases {
         let path = dir.path().join("refused");
         let refused = create(&mut daemon, request(&path, 0, replicas, fsync));
         assert_eq!(

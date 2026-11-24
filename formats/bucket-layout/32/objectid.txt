@@ -1,0 +1,4 @@
+BlockTaker {
+    format: 32,
+    taker: 136,
+}

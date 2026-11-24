@@ -1925,44 +1925,6 @@ async fn copying_windows_map_sealed_extents_alone() {
     assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
 }
 
-/// board 7409: on a replicated cell configured with `Fsync::Local`, `WRITE_BARRIER`
-/// (`barriers.before`) orders and seals prior extents without flushing to disk (leaving
-/// `flush_pending() == true`), while `barriers.after: Some(Commit::Ordered)` still honors
-/// `Fsync::Local` and flushes once.
-#[tokio::test(flavor = "multi_thread")]
-async fn pre_barrier_does_not_flush_local_replicated_cell() {
-    let dir = tempfile::tempdir().unwrap();
-    let url = format!("memory:///pre-barrier-local-{:016x}", rand::random::<u64>());
-    let mut keeping = Opening::here().unwrap().keeping;
-    keeping.replication = bucket_cell::layout::Wish::new(0, bucket_cell::layout::Fsync::Local);
-    let cell_id = CellId { tenant: 0, id: 1 };
-    let cell = Opening::here()
-        .unwrap()
-        .with_keeping(keeping)
-        .create_kept(dir.path().join("cell"), 1 << 20, CellOf::Named(cell_id), &url)
-        .await
-        .unwrap();
-    cell.flush().await.unwrap();
-    assert!(!cell.flush_pending());
-
-    let (ext1, ext2, ext3) = (id(&cell, 1), id(&cell, 2), id(&cell, 3));
-    write(&cell, ext1, 0, &pattern(1, BLOCK)).await.unwrap();
-    let before_only = WriteBarriers { before: true, after: None, root: None };
-    let data2 = pattern(2, BLOCK);
-    cell.write_with_barriers(ext2, 0, &[VolatileSlice::from(&data2[..])], before_only)
-        .await
-        .unwrap();
-    // Pre-barrier ordered & sealed ext1, but did NOT upgrade to Fsync::Local flush.
-    assert!(cell.flush_pending(), "pre-barrier flushed disk under Fsync::Local");
-    assert_eq!(write(&cell, ext1, 0, &pattern(1, BLOCK)).await, Err(Errno::EPERM));
-
-    // A post-barrier Commit::Ordered DOES upgrade to Fsync::Local and flushes once.
-    let both = WriteBarriers { before: true, after: Some(Commit::Ordered), root: None };
-    let data3 = pattern(3, BLOCK);
-    cell.write_with_barriers(ext3, 0, &[VolatileSlice::from(&data3[..])], both).await.unwrap();
-    assert!(!cell.flush_pending(), "post-barrier Commit::Ordered did not flush under Fsync::Local");
-}
-
 /// TASK-539.12: the host's disk full, as making an open cell's file finds it, is `ENOSPC` to
 /// the guest; an open cell failed for it says so, and is `EIO`.
 #[test]

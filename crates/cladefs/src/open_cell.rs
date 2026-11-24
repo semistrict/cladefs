@@ -1185,7 +1185,6 @@ impl OpenCell {
             }
             (CommitRequest::Commit(Commit::Ordered), Some(replicated)) => match replicated.fsync {
                 bucket_cell::layout::Fsync::Ordered => Waiting::Commit(Commit::Ordered),
-                bucket_cell::layout::Fsync::Local => Waiting::Commit(Commit::Local),
                 bucket_cell::layout::Fsync::Replicated => Waiting::Replicated,
             },
             (CommitRequest::Commit(commit), _) => Waiting::Commit(commit),

@@ -238,7 +238,7 @@ async fn write(
 ) -> Result<Held, Unwritten> {
     // One more than the head found's: bytes of its own ([`Head::swaps`]).
     let swaps = found.head.as_ref().ok().and_then(Option::as_ref).map_or(0, |head| head.swaps + 1);
-    let next = Head { swaps, ..next };
+    let next = Head { format: layout::FORMAT.current, swaps, ..next };
     let key = layout::head(cell);
     let bytes = layout::encode(&next);
     let version = match rules().head_swap {
@@ -263,7 +263,7 @@ pub(crate) async fn birth(
     cell: CellId,
     head: Head,
 ) -> Result<Held, Unwritten> {
-    let head = Head { swaps: 0, ..head };
+    let head = Head { format: layout::FORMAT.current, swaps: 0, ..head };
     match bucket::create(bucket, &layout::head(cell), layout::encode(&head)).await? {
         Created::Created(version) => Ok(Held { head, version }),
         Created::Exists(_) => Err(Unwritten::Changed),

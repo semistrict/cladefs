@@ -37,6 +37,50 @@ fn every_frozen_version_is_read() {
     formats::golden::check::<BucketLayout>(env!("CARGO_MANIFEST_DIR"));
 }
 
+/// Checks format 31 heads decode into format 32 heads, preserving `Ordered` and `Replicated` and
+/// mapping the removed `v31::Fsync::Local` to `Fsync::Ordered` (doc-28).
+#[test]
+fn v31_heads_convert_to_current_and_map_local_to_ordered() {
+    let cases = formats::golden::cases(FORMAT, env!("CARGO_MANIFEST_DIR"), 31);
+    for (name, bytes) in cases {
+        match name.as_str() {
+            "head-root" => {
+                assert_eq!(Head::decode(CELL, &bytes).unwrap(), head_root());
+            }
+            "head-forking" => {
+                assert_eq!(Head::decode(CELL, &bytes).unwrap(), head_forking());
+            }
+            "head-clone" => {
+                assert_eq!(Head::decode(CELL, &bytes).unwrap(), head_clone());
+            }
+            _ => {}
+        }
+    }
+
+    for (v31_fsync, expected) in [
+        (layout::v31::Fsync::Ordered, Fsync::Ordered),
+        (layout::v31::Fsync::Local, Fsync::Ordered),
+        (layout::v31::Fsync::Replicated, Fsync::Replicated),
+    ] {
+        let old = layout::v31::Head {
+            format: 31,
+            owner: 0x42,
+            replication: Some(layout::v31::Replication {
+                wish: layout::v31::Wish { f: 1, fsync: v31_fsync },
+                configuration: None,
+            }),
+            ..layout::v31::Head::default()
+        };
+        let bytes = layout::encode(&old);
+        let decoded = Head::decode(CELL, &bytes).unwrap();
+        assert_eq!(decoded.format, FORMAT.current);
+        assert_eq!(
+            decoded.replication,
+            Some(Replication { wish: Wish { f: 1, fsync: expected }, configuration: None })
+        );
+    }
+}
+
 /// Checks every versioned bucket object kind refuses versions outside [`FORMAT`] and trailing bytes
 /// (doc-28, board 10038).
 #[test]
@@ -304,10 +348,21 @@ impl formats::golden::Family for BucketLayout {
     }
 
     fn written(version: u32, case: &str, bytes: &[u8]) -> Result<String, String> {
-        if version != 31 {
-            return Err(format!("no decoder of version {version}"));
+        match version {
+            31 => match case {
+                "head-root" | "head-forking" | "head-clone" => {
+                    let head: layout::v31::Head =
+                        layout::decode(bytes).map_err(|err| err.to_string())?;
+                    if head.format != 31 {
+                        return Err(format!("expected format 31 head, got {}", head.format));
+                    }
+                    Ok(format!("{head:#?}"))
+                }
+                _ => Self::read_as(case, bytes),
+            },
+            32 => Self::read_as(case, bytes),
+            _ => Err(format!("no decoder of version {version}")),
         }
-        Self::read_as(case, bytes)
     }
 
     fn read(case: &str, bytes: &[u8]) -> Result<(), String> {
@@ -315,12 +370,14 @@ impl formats::golden::Family for BucketLayout {
     }
 
     fn fingerprint(version: u32) -> Option<String> {
-        if version != 31 {
-            return None;
-        }
+        let head = match version {
+            31 => layout::v31::Head::fingerprint(),
+            32 => Head::fingerprint(),
+            _ => return None,
+        };
         Some(
             [
-                format!("Head = {}", Head::fingerprint()),
+                format!("Head = {head}"),
                 format!("CollectorLease = {}", CollectorLease::fingerprint()),
                 format!("Identity = {}", Identity::fingerprint()),
                 format!("Registry = {}", Registry::fingerprint()),

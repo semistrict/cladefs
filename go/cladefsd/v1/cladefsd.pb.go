@@ -101,7 +101,9 @@ type FsyncLevel int32
 const (
 	// In the daemon's memory, in order: survives what leaves the daemon alive.
 	FsyncLevel_FSYNC_LEVEL_ORDERED FsyncLevel = 0
-	// On the writer's host's disk.
+	// Deprecated: mapped to FSYNC_LEVEL_ORDERED with a warning.
+	//
+	// Deprecated: Marked as deprecated in cladefs/cladefsd/v1/cladefsd.proto.
 	FsyncLevel_FSYNC_LEVEL_LOCAL FsyncLevel = 1
 	// On f+1 hosts' disks, or uploaded: survives the writer's host.
 	FsyncLevel_FSYNC_LEVEL_REPLICATED FsyncLevel = 2
@@ -5372,11 +5374,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*X\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*\\\n" +
 	"\n" +
 	"FsyncLevel\x12\x17\n" +
-	"\x13FSYNC_LEVEL_ORDERED\x10\x00\x12\x15\n" +
-	"\x11FSYNC_LEVEL_LOCAL\x10\x01\x12\x1a\n" +
+	"\x13FSYNC_LEVEL_ORDERED\x10\x00\x12\x19\n" +
+	"\x11FSYNC_LEVEL_LOCAL\x10\x01\x1a\x02\b\x01\x12\x1a\n" +
 	"\x16FSYNC_LEVEL_REPLICATED\x10\x02*J\n" +
 	"\bCellKind\x12\x12\n" +
 	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +

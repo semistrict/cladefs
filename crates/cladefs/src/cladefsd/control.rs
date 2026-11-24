@@ -467,27 +467,33 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
 /// of 0 never makes.
 fn wish(replicas: Option<u32>, fsync: i32) -> Result<Option<bucket_cell::layout::Wish>, Status> {
     use bucket_cell::layout::{Fsync, Wish};
-    let fsync = match FsyncLevel::try_from(fsync) {
-        Ok(FsyncLevel::Ordered) => Fsync::Ordered,
-        Ok(FsyncLevel::Local) => Fsync::Local,
-        Ok(FsyncLevel::Replicated) => Fsync::Replicated,
+    #[allow(deprecated)]
+    let (fsync, local) = match FsyncLevel::try_from(fsync) {
+        Ok(FsyncLevel::Ordered) => (Fsync::Ordered, false),
+        Ok(FsyncLevel::Local) => (Fsync::Ordered, true),
+        Ok(FsyncLevel::Replicated) => (Fsync::Replicated, false),
         Err(_) => return Err(status(Errno::EINVAL)),
     };
     let Some(replicas) = replicas else {
-        return match fsync {
-            Fsync::Ordered => Ok(None),
-            _ => Err(status(Errno::EINVAL)),
-        };
+        if !local && fsync == Fsync::Ordered {
+            return Ok(None);
+        }
+        return Err(status(Errno::EINVAL));
     };
     let f = u8::try_from(replicas).map_err(|_| status(Errno::EINVAL))?;
-    Wish::new(f, fsync).map(Some).ok_or_else(|| status(Errno::EINVAL))
+    let wish = Wish::new(f, fsync).ok_or_else(|| status(Errno::EINVAL))?;
+    if local {
+        log::warn!(
+            "cladefsd: FSYNC_LEVEL_LOCAL is deprecated and removed; using FSYNC_LEVEL_ORDERED"
+        );
+    }
+    Ok(Some(wish))
 }
 
 /// What StatCell's FsyncLevel is of `fsync`.
 fn fsync_level(fsync: bucket_cell::layout::Fsync) -> FsyncLevel {
     match fsync {
         bucket_cell::layout::Fsync::Ordered => FsyncLevel::Ordered,
-        bucket_cell::layout::Fsync::Local => FsyncLevel::Local,
         bucket_cell::layout::Fsync::Replicated => FsyncLevel::Replicated,
     }
 }

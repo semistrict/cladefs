@@ -2547,7 +2547,7 @@ mod tests {
             held.head.replication,
             Some(Replication { wish, configuration: Some(configuration.clone()) })
         );
-        let other = Wish::new(2, Fsync::Local).unwrap();
+        let other = Wish::new(2, Fsync::Ordered).unwrap();
         let held = take(7, Some(other));
         assert_eq!(
             held.head.replication,
@@ -2557,7 +2557,7 @@ mod tests {
         // No f past the most, and no fsync waiting for copies an f of 0 never makes.
         assert_eq!(Wish::new(crate::layout::MAX_F + 1, Fsync::Ordered), None);
         assert_eq!(Wish::new(0, Fsync::Replicated), None);
-        assert!(Wish::new(0, Fsync::Local).is_some());
+        assert!(Wish::new(0, Fsync::Ordered).is_some());
     }
 
     /// Takes `cell` as `holder`, of token 0, by `kms`, the host's, giving it `kind`: its head as

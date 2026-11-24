@@ -408,8 +408,8 @@ message CreateCellRequest {
 enum FsyncLevel {
   // In the daemon's memory, in order: survives what leaves the daemon alive.
   FSYNC_LEVEL_ORDERED = 0;
-  // On the writer's host's disk.
-  FSYNC_LEVEL_LOCAL = 1;
+  // Deprecated: mapped to FSYNC_LEVEL_ORDERED with a warning.
+  FSYNC_LEVEL_LOCAL = 1 [deprecated = true];
   // On f+1 hosts' disks, or uploaded: survives the writer's host.
   FSYNC_LEVEL_REPLICATED = 2;
 }
