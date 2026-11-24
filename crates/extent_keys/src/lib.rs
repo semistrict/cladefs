@@ -185,19 +185,23 @@ pub struct KeyId {
 
 /// AES-256-GCM under one key, which seals with nonces its user makes unique for it: a subkey's
 /// parts' indices, as each object has a subkey of its own.
-pub struct Aead(LessSafeKey);
+pub struct Aead {
+    sealing: LessSafeKey,
+    /// cladefs: its key, for [`Aead::tag`], which goes through aws-lc's EVP interface.
+    key: Secret,
+}
 
 impl Aead {
     pub fn new(key: &Secret) -> Self {
-        let key = UnboundKey::new(&AES_256_GCM, &key.0[..]).expect("a 256-bit AES-GCM key");
-        Self(LessSafeKey::new(key))
+        let unbound = UnboundKey::new(&AES_256_GCM, &key.0[..]).expect("a 256-bit AES-GCM key");
+        Self { sealing: LessSafeKey::new(unbound), key: Secret::from_bytes(key.expose()) }
     }
 
     /// Seals `in_out` in place under `nonce`, unique for this key, authenticating `aad` with it:
     /// its tag.
     pub fn seal(&self, nonce: u64, aad: &[u8], in_out: &mut [u8]) -> [u8; TAG_LEN] {
         let tag = self
-            .0
+            .sealing
             .seal_in_place_separate_tag(nonce_of(nonce), Aad::from(aad), in_out)
             .expect("AES-GCM seals what fits its limits");
         tag.as_ref().try_into().expect("an AES-GCM tag is 16 bytes")
@@ -213,16 +217,97 @@ impl Aead {
         tag: &[u8; TAG_LEN],
     ) -> Result<(), Unauthentic> {
         let opened =
-            self.0.open_in_place_separate_tag(nonce_of(nonce), Aad::from(aad), tag, in_out);
+            self.sealing.open_in_place_separate_tag(nonce_of(nonce), Aad::from(aad), tag, in_out);
         opened.map(|_| ()).map_err(|_| Unauthentic("sealed bytes, by their tag"))
+    }
+
+    /// cladefs: the tag [`Aead::seal`] gives under `nonce`, unique for this key, sealing nothing,
+    /// its associated data `pieces` one after another (AES-256-GCM's GMAC): without the copy of
+    /// them into one buffer it would take, as aws-lc-rs takes associated data whole, a part's 1 MiB
+    /// each time (board 10553). Through aws-lc's EVP interface, which takes it a piece at a time.
+    pub fn tag(&self, nonce: u64, pieces: &[&[u8]]) -> [u8; TAG_LEN] {
+        use aws_lc_sys::{
+            EVP_CIPHER_CTX, EVP_CIPHER_CTX_ctrl, EVP_CIPHER_CTX_free, EVP_CIPHER_CTX_new,
+            EVP_CTRL_GCM_GET_TAG, EVP_EncryptFinal_ex, EVP_EncryptInit_ex, EVP_EncryptUpdate,
+            EVP_aes_256_gcm,
+        };
+        use std::ffi::c_int;
+        /// The most bytes one update takes: its length is a C `int`.
+        const MOST: usize = 1 << 30;
+        /// A context of aws-lc's, freed when dropped.
+        struct Context(*mut EVP_CIPHER_CTX);
+        impl Drop for Context {
+            fn drop(&mut self) {
+                // SAFETY: a context `EVP_CIPHER_CTX_new` made, freed once, here.
+                unsafe { EVP_CIPHER_CTX_free(self.0) }
+            }
+        }
+        let iv = nonce_bytes(nonce);
+        let mut tag = [0; TAG_LEN];
+        // SAFETY: a context made here, alive for every call on it and freed after them; the key is
+        // AES-256's 32 bytes and the IV GCM's 12; each piece is read for its length alone, at most
+        // `MOST` bytes, which fits a C int; encrypting nothing, the final call writes no byte of
+        // `out`, and the tag is written into `tag`, `TAG_LEN` bytes long.
+        unsafe {
+            let context = Context(EVP_CIPHER_CTX_new());
+            assert!(!context.0.is_null(), "aws-lc made no cipher context");
+            let init = EVP_EncryptInit_ex(
+                context.0,
+                EVP_aes_256_gcm(),
+                std::ptr::null_mut(),
+                self.key.expose().as_ptr(),
+                iv.as_ptr(),
+            );
+            assert_eq!(init, 1, "AES-256-GCM takes a 256-bit key and a 96-bit nonce");
+            for piece in pieces.iter().flat_map(|piece| piece.chunks(MOST)) {
+                let mut len: c_int = 0;
+                let update = EVP_EncryptUpdate(
+                    context.0,
+                    std::ptr::null_mut(),
+                    &mut len,
+                    piece.as_ptr(),
+                    piece.len() as c_int,
+                );
+                assert_eq!(update, 1, "AES-256-GCM takes associated data a piece at a time");
+            }
+            let mut out = [0u8; TAG_LEN];
+            let mut len: c_int = 0;
+            let finished = EVP_EncryptFinal_ex(context.0, out.as_mut_ptr(), &mut len);
+            assert_eq!((finished, len), (1, 0), "AES-256-GCM tags what it sealed of nothing");
+            let got = EVP_CIPHER_CTX_ctrl(
+                context.0,
+                EVP_CTRL_GCM_GET_TAG,
+                TAG_LEN as c_int,
+                tag.as_mut_ptr().cast(),
+            );
+            assert_eq!(got, 1, "AES-256-GCM gives its tag");
+        }
+        tag
+    }
+
+    /// cladefs: checks `tag` is [`Aead::tag`]'s of `pieces` under `nonce`, in constant time, as
+    /// [`Aead::open`] checks one of what sealed nothing.
+    pub fn verify_tag(
+        &self,
+        nonce: u64,
+        pieces: &[&[u8]],
+        tag: &[u8; TAG_LEN],
+    ) -> Result<(), Unauthentic> {
+        aws_lc_rs::constant_time::verify_slices_are_equal(&self.tag(nonce, pieces), tag)
+            .map_err(|_| Unauthentic("sealed bytes, by their tag"))
     }
 }
 
 /// The 96-bit nonce of `nonce`: zeros, then `nonce` big-endian.
-fn nonce_of(nonce: u64) -> Nonce {
+fn nonce_bytes(nonce: u64) -> [u8; NONCE_LEN] {
     let mut bytes = [0; NONCE_LEN];
     bytes[NONCE_LEN - 8..].copy_from_slice(&nonce.to_be_bytes());
-    Nonce::assume_unique_for_key(bytes)
+    bytes
+}
+
+/// [`nonce_bytes`], as aws-lc-rs takes a nonce.
+fn nonce_of(nonce: u64) -> Nonce {
+    Nonce::assume_unique_for_key(nonce_bytes(nonce))
 }
 
 #[cfg(test)]
@@ -324,5 +409,42 @@ mod tests {
         let mut flipped = tag;
         flipped[15] ^= 1;
         assert_eq!(key(1).verify_tag(&[b"a raw part"], &flipped), refused);
+    }
+
+    /// cladefs: an AES-GCM tag of pieces is aws-lc-rs's seal of nothing, their concatenation its
+    /// associated data, however they are cut: at block boundaries and either side of them, empty
+    /// pieces among them, for nonces at their edges (board 10553). It verifies for those bytes,
+    /// that nonce and that key alone.
+    #[test]
+    fn aead_tags_of_pieces_are_seals_of_their_concatenation() {
+        let aead = Aead::new(&key(3));
+        let bytes: Vec<u8> =
+            (0..(1 << 20) + 41).map(|at: usize| (at * 31 + at / 251) as u8).collect();
+        let lens = [0, 1, 15, 16, 17, 25, 32, 4096, 1 << 20, (1 << 20) + 41];
+        for nonce in [0, 1, 7, u64::MAX - 1, u64::MAX] {
+            for len in lens {
+                let all = &bytes[..len];
+                let sealed = aead.seal(nonce, all, &mut []);
+                for cut in [0, 1, 7, 16, 25, len / 2, len.saturating_sub(1), len] {
+                    let (first, second) = all.split_at(cut.min(len));
+                    let pieces: [&[u8]; 4] = [first, &[], second, &[]];
+                    assert_eq!(
+                        aead.tag(nonce, &pieces),
+                        sealed,
+                        "nonce {nonce}, {len} cut at {cut}"
+                    );
+                    assert_eq!(aead.verify_tag(nonce, &pieces, &sealed), Ok(()));
+                }
+            }
+        }
+        let tag = aead.tag(9, &[b"a part's ", b"bytes"]);
+        assert_eq!(aead.open(9, b"a part's bytes", &mut [], &tag), Ok(()));
+        let refused = Err(Unauthentic("sealed bytes, by their tag"));
+        assert_eq!(aead.verify_tag(9, &[b"a part's bytes!"], &tag), refused);
+        assert_eq!(aead.verify_tag(10, &[b"a part's bytes"], &tag), refused);
+        assert_eq!(Aead::new(&key(4)).verify_tag(9, &[b"a part's bytes"], &tag), refused);
+        let mut flipped = tag;
+        flipped[0] ^= 0x80;
+        assert_eq!(aead.verify_tag(9, &[b"a part's bytes"], &flipped), refused);
     }
 }

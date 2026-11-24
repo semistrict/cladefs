@@ -482,10 +482,11 @@ impl ObjectKey {
 
     /// cladefs: the tag of `bytes`, part `index`, of `len` bytes, packed `encoding`, authenticated
     /// alone: AES-256-GCM's GMAC, of nothing encrypted, its associated data the part's and its
-    /// bytes (TASK-411.3).
+    /// bytes (TASK-411.3), fed one after the other rather than copied into one buffer
+    /// ([`Aead::tag`], board 10553).
     fn tag_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &[u8]) -> Tag {
-        let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
-        self.aead().seal(index, &aad, &mut [])
+        let aad = Self::aad(index, encoding, bytes.len(), len);
+        self.aead().tag(index, &[&aad, bytes])
     }
 
     /// cladefs: checks `bytes` against `tag`, what [`ObjectKey::tag_part`] gave them.
@@ -497,8 +498,9 @@ impl ObjectKey {
         bytes: &[u8],
         tag: &Tag,
     ) -> Result<(), Corrupt> {
-        let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
-        (self.aead().open(index, &aad, &mut [], tag)).map_err(|_| corrupt("part, by its tag"))
+        let aad = Self::aad(index, encoding, bytes.len(), len);
+        (self.aead().verify_tag(index, &[&aad, bytes], tag))
+            .map_err(|_| corrupt("part, by its tag"))
     }
 
     /// Opens in place what [`ObjectKey::encrypt_part`] encrypted, given its tag.

@@ -13,6 +13,9 @@ base32_id.workspace = true
 # (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
 aes = { workspace = true, features = ["zeroize"] }
 aws-lc-rs.workspace = true
+# cladefs: aws-lc's EVP interface, which aws-lc-rs builds on already, for AES-256-GCM's tag of
+# associated data given a piece at a time (`Aead::tag`, board 10553), which aws-lc-rs takes whole.
+aws-lc-sys.workspace = true
 # cladefs: atexit(3), which stops random draws as the process exits (src/random.rs, TASK-650).
 fprint.workspace = true
 libc.workspace = true
@@ -55,7 +58,6 @@ zeroize = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 assert_matches.workspace = true
-aws-lc-sys.workspace = true
 tempfile.workspace = true
 # The fake HTTP services of the HTTP backends' tests (kms/fake_http.rs) read and write their
 # sockets.
