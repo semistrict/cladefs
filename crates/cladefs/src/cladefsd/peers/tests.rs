@@ -276,13 +276,161 @@ fn of(incarnation: u64, number: u64, epoch: u64) -> Option<ReplicaOf> {
         cell: 9,
         configuration: Some(proto::Configuration { number, epoch }),
         incarnation,
-        formats: formats(),
+        #[allow(deprecated)]
+        formats: String::new(),
+        versions: Some(current_formats()),
     })
 }
 
 /// cladefs: what asks a member for its incarnation names: [`URL`], and this host's formats.
 fn asking() -> IncarnationRequest {
-    IncarnationRequest { bucket: URL.to_owned(), formats: formats() }
+    IncarnationRequest {
+        bucket: URL.to_owned(),
+        #[allow(deprecated)]
+        formats: String::new(),
+        versions: Some(current_formats()),
+    }
+}
+
+/// Doc-28 (board 10054, hotbed review 89 finding 325): rolling-upgrade format compatibility checks
+/// each call in the direction data flows:
+/// - `Write` (`Incarnation`, `Append`) and `MigratePrepare`: receiver reads sender's write versions.
+/// - `Read` (`Fence`, `ReadLog`): taker's readable range `[oldest..=current]` covers every version
+///   the member may hold (`member.oldest..=member.current`).
+/// - `Drop` (`DropLogs`): accepted when either the member reads the writer's versions (writer
+///   dropping uploaded logs on a newer member) or the taker covers the member's versions (newer
+///   taker dropping superseded logs on an older member).
+#[test]
+fn formats_within_supported_range_are_accepted_and_outside_refused() {
+    let build_a_member = SupportedFormats {
+        cell_directory: formats::Format { name: "cell directory", oldest: 18, current: 18 },
+        cell_records: formats::Format { name: "cell records", oldest: 1, current: 1 },
+        replica_directory: formats::Format { name: "replica directory", oldest: 4, current: 4 },
+        extent_frame: formats::Format { name: "extent frame", oldest: 3, current: 3 },
+        bucket_layout: 29,
+    };
+    let build_b_member = SupportedFormats {
+        cell_directory: formats::Format { name: "cell directory", oldest: 18, current: 19 },
+        cell_records: formats::Format { name: "cell records", oldest: 1, current: 2 },
+        replica_directory: formats::Format { name: "replica directory", oldest: 4, current: 5 },
+        extent_frame: formats::Format { name: "extent frame", oldest: 3, current: 4 },
+        bucket_layout: 29,
+    };
+    let build_a = proto::Formats {
+        cell_directory: 18,
+        cell_records: 1,
+        replica_directory: 4,
+        extent_frame: 3,
+        bucket_layout: 29,
+        cell_directory_oldest: 18,
+        cell_records_oldest: 1,
+        replica_directory_oldest: 4,
+        extent_frame_oldest: 3,
+        bucket_layout_oldest: 29,
+    };
+    let build_b = proto::Formats {
+        cell_directory: 19,
+        cell_records: 2,
+        replica_directory: 5,
+        extent_frame: 4,
+        bucket_layout: 29,
+        cell_directory_oldest: 18,
+        cell_records_oldest: 1,
+        replica_directory_oldest: 4,
+        extent_frame_oldest: 3,
+        bucket_layout_oldest: 29,
+    };
+
+    // Build A writer -> Build B member: accepted for Write, Drop, and Migration.
+    build_b_member.check_replication(Some(build_a), ReplicationCall::Write).unwrap();
+    build_b_member.check_replication(Some(build_a), ReplicationCall::Drop).unwrap();
+    build_b_member.check_migration(0x7, Some(build_a)).unwrap();
+
+    // Build B writer -> Build A member: refused for Write and Migration.
+    assert_eq!(
+        build_a_member.check_replication(Some(build_b), ReplicationCall::Write).unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        build_a_member.check_migration(0x7, Some(build_b)).unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+
+    // Build B taker -> Build A member (rolling-upgrade failover): accepted for Read and Drop!
+    build_a_member.check_replication(Some(build_b), ReplicationCall::Read).unwrap();
+    build_a_member.check_replication(Some(build_b), ReplicationCall::Drop).unwrap();
+
+    // Build A taker -> Build B member (older taker must not fence/read newer member's logs):
+    // refused for Read!
+    assert_eq!(
+        build_b_member.check_replication(Some(build_a), ReplicationCall::Read).unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+
+    // Same-build B <-> B: accepted for all calls.
+    build_b_member.check_replication(Some(build_b), ReplicationCall::Write).unwrap();
+    build_b_member.check_replication(Some(build_b), ReplicationCall::Read).unwrap();
+    build_b_member.check_replication(Some(build_b), ReplicationCall::Drop).unwrap();
+    build_b_member.check_migration(0x7, Some(build_b)).unwrap();
+
+    // Families a call does not depend on may be any version.
+    build_b_member
+        .check_replication(
+            Some(proto::Formats { cell_records: 99, ..build_a }),
+            ReplicationCall::Write,
+        )
+        .unwrap();
+    build_b_member
+        .check_migration(0x7, Some(proto::Formats { replica_directory: 99, ..build_a }))
+        .unwrap();
+
+    // Disjoint / out-of-range versions are refused for every call.
+    for bad in [
+        proto::Formats { cell_directory: 17, cell_directory_oldest: 17, ..build_a },
+        proto::Formats { cell_directory: 20, cell_directory_oldest: 20, ..build_b },
+        proto::Formats { replica_directory: 3, replica_directory_oldest: 3, ..build_a },
+        proto::Formats { replica_directory: 6, replica_directory_oldest: 6, ..build_b },
+        proto::Formats { extent_frame: 2, extent_frame_oldest: 2, ..build_a },
+        proto::Formats { extent_frame: 5, extent_frame_oldest: 5, ..build_b },
+        proto::Formats { bucket_layout: 28, bucket_layout_oldest: 28, ..build_a },
+    ] {
+        for call in [ReplicationCall::Write, ReplicationCall::Read, ReplicationCall::Drop] {
+            assert_eq!(
+                build_b_member.check_replication(Some(bad), call).unwrap_err().code(),
+                Code::FailedPrecondition,
+                "{call:?} {bad:?}"
+            );
+        }
+    }
+    // Invalid taker range (oldest == 0, oldest > current, or narrower than member) refused on Read.
+    for bad_range in [
+        proto::Formats { cell_directory_oldest: 0, ..build_b },
+        proto::Formats { cell_directory_oldest: 20, cell_directory: 19, ..build_b },
+        proto::Formats { extent_frame_oldest: 4, extent_frame: 4, ..build_b },
+    ] {
+        assert_eq!(
+            build_b_member
+                .check_replication(Some(bad_range), ReplicationCall::Read)
+                .unwrap_err()
+                .code(),
+            Code::FailedPrecondition,
+            "{bad_range:?}"
+        );
+    }
+    for bad in [
+        proto::Formats { cell_directory: 17, ..build_a },
+        proto::Formats { cell_directory: 20, ..build_b },
+        proto::Formats { cell_records: 0, ..build_a },
+        proto::Formats { cell_records: 3, ..build_b },
+        proto::Formats { extent_frame: 2, ..build_a },
+        proto::Formats { extent_frame: 5, ..build_b },
+        proto::Formats { bucket_layout: 30, ..build_b },
+    ] {
+        assert_eq!(
+            build_b_member.check_migration(0x7, Some(bad)).unwrap_err().code(),
+            Code::FailedPrecondition
+        );
+    }
 }
 
 /// cladefs: a writer streams appends to a member, each answered once synced; a take fences the
@@ -387,37 +535,52 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
         assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
         assert!(no.message().contains("CLADEFSD_REPLICAS"), "{no:?}");
 
-        let ours = formats();
-        let replica_part = format!("replica directory {}", replica::FORMAT.current);
-        assert!(ours.contains(&replica_part), "{ours:?}");
-        // Pre-10046 builds advertised no replica directory version, and wrote 24-byte unversioned
-        // own-log frames; a different replica directory version is likewise refused before any
-        // append is acknowledged (hotbed review 88 finding 322).
-        let without_replica = ours.replace(&format!("{replica_part}, "), "");
-        let older_replica = ours.replace(&replica_part, "replica directory 3");
-        for asked_as in [
-            "",
-            "cell directories \"cladefs extent store 15\"",
-            &ours[1..],
-            &without_replica,
-            &older_replica,
-        ] {
-            let refusal = format!(
-                "the asker's formats ({asked_as:?}) are not this host's ({ours:?}): refused"
-            );
-            let asked = IncarnationRequest { bucket: URL.to_owned(), formats: asked_as.to_owned() };
+        let ours = current_formats();
+        // Absent `versions` (as a pre-10054 build sending only the deprecated string sends) and
+        // any replication family outside this host's range are refused before any append is
+        // acknowledged (doc-28, board 10054; hotbed review 88 finding 322).
+        let cases: Vec<(Option<proto::Formats>, &str)> = vec![
+            (None, "the asker named no format versions (older build): refused"),
+            (
+                Some(proto::Formats { cell_directory: 15, cell_directory_oldest: 15, ..ours }),
+                "cell directory",
+            ),
+            (
+                Some(proto::Formats { replica_directory: 3, replica_directory_oldest: 3, ..ours }),
+                "replica directory",
+            ),
+            (
+                Some(proto::Formats { extent_frame: 2, extent_frame_oldest: 2, ..ours }),
+                "extent frame",
+            ),
+            (
+                Some(proto::Formats { bucket_layout: 1, bucket_layout_oldest: 1, ..ours }),
+                "bucket layout",
+            ),
+        ];
+        for (asked_versions, expected) in cases {
+            let asked = IncarnationRequest {
+                bucket: URL.to_owned(),
+                #[allow(deprecated)]
+                formats: "legacy string".to_owned(),
+                versions: asked_versions,
+            };
             let no = client.incarnation(asked).await.unwrap_err();
-            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+            assert!(no.message().contains(expected), "{expected:?} not in {:?}", no.message());
             let mut named = of(theirs, 1, 4);
-            named.as_mut().unwrap().formats = asked_as.to_owned();
+            named.as_mut().unwrap().versions = asked_versions;
             let no = client.fence(fence(named.clone())).await.unwrap_err();
-            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+            assert!(no.message().contains(expected), "{expected:?} not in {:?}", no.message());
             let read = ReadLogRequest { of: named.clone(), log: 1, offset: 0 };
             let no = client.read_log(read).await.unwrap_err();
-            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+            assert!(no.message().contains(expected), "{expected:?} not in {:?}", no.message());
             let dropped = DropLogsRequest { of: named.clone(), through: None };
             let no = client.drop_logs(dropped).await.unwrap_err();
-            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+            assert!(no.message().contains(expected), "{expected:?} not in {:?}", no.message());
             let (sending, sent) = tokio::sync::mpsc::channel(1);
             let mut answers = (client.append(tokio_stream::wrappers::ReceiverStream::new(sent)))
                 .await
@@ -431,9 +594,22 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
             };
             sending.send(first).await.unwrap();
             let no = answers.message().await.unwrap_err();
-            assert_eq!((no.code(), no.message()), (Code::FailedPrecondition, &*refusal));
+            assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+            assert!(no.message().contains(expected), "{expected:?} not in {:?}", no.message());
             assert!(matches!(link_error(&no), local_cell::replicate::LinkError::Refused(_)));
         }
+        // A different `cell_records` version does not affect replication calls (members hold logs,
+        // not cell records).
+        let other_records = IncarnationRequest {
+            bucket: URL.to_owned(),
+            #[allow(deprecated)]
+            formats: String::new(),
+            versions: Some(proto::Formats { cell_records: 99, ..ours }),
+        };
+        assert_eq!(
+            client.incarnation(other_records).await.unwrap().into_inner().incarnation,
+            theirs
+        );
 
         // A segment's log of another format, its first bytes the build before's.
         let (sending, sent) = tokio::sync::mpsc::channel(1);
@@ -450,6 +626,30 @@ fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
         assert!(matches!(link_error(&no), local_cell::replicate::LinkError::Refused(_)));
         let fenced = client.fence(fence(of(theirs, 1, 4))).await.unwrap().into_inner();
         assert_eq!(fenced.logs, []);
+
+        // Rolling-upgrade failover over gRPC (hotbed review 89 finding 325): a newer taker whose
+        // readable range covers this member's (`oldest == ours.oldest`, `current == ours.current + 1`)
+        // is refused on `Incarnation` (this member cannot hold its newer logs) but accepted on
+        // `Fence` and `DropLogs`.
+        let newer_taker = proto::Formats {
+            cell_directory: ours.cell_directory + 1,
+            cell_directory_oldest: ours.cell_directory_oldest,
+            ..ours
+        };
+        let no = client
+            .incarnation(IncarnationRequest {
+                bucket: URL.to_owned(),
+                #[allow(deprecated)]
+                formats: String::new(),
+                versions: Some(newer_taker),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+        let mut taker_of = of(theirs, 1, 4);
+        taker_of.as_mut().unwrap().versions = Some(newer_taker);
+        client.fence(fence(taker_of.clone())).await.unwrap();
+        client.drop_logs(DropLogsRequest { of: taker_of, through: None }).await.unwrap();
     }));
 }
 
@@ -999,7 +1199,7 @@ fn messages_past_what_their_calls_need_are_refused() {
     let mut client = super::member(&runtime, &served.address).unwrap();
     runtime.block_on(within(async move {
         let mut large = of(incarnation, 1, 4);
-        large.as_mut().unwrap().formats = "x".repeat(SMALL_MOST);
+        large.as_mut().unwrap().bucket = "x".repeat(SMALL_MOST);
         let refused = client.fence(FenceRequest { of: large, epoch: 5 }).await.unwrap_err();
         assert_eq!(refused.code(), Code::OutOfRange, "{refused:?}");
         let appends = |len: usize| {

@@ -15,23 +15,23 @@
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
 // the bucket on any failure.
 //
-// Formats (board 8455): two daemons of different builds may serve each other only where what they
-// hand each other means the same. A part is the bucket's bytes, the same to every build, checked
-// against the asker's own tail: GetPart names no format. A live migration hands over a cell
-// directory, whose format is its build's: its prepare names the source's formats
-// (MigratePrepareRequest.formats: the cell directory's, the extent frames', the bucket's layout's
-// and this protocol's version, cladefsd::peers::formats), which the target refuses
-// (FAILED_PRECONDITION, "the source's formats ... are not this host's ...") unless they are its
-// own, before it notes or stages anything, as it refuses a prepare naming none (a source of a
-// build before them); and its hand-over opens the cell it staged, as its opening would, before it
-// takes it into place, answering no (the source serving the cell again) if it does not open. The
-// replication calls name the asker's formats too (ReplicaOf.formats, IncarnationRequest.formats,
-// board 8457), which a member refuses (FAILED_PRECONDITION, "the asker's formats ... are not this
-// host's ...") unless they are its own, an asker naming none too: a writer of another build gets
-// no ack of a member's, nor a take of another build the logs it would misread. A member refuses a
-// segment's log not begun with its build's log format (FAILED_PRECONDITION, "... of another
-// format, refused") before it acks any of it, and its replica directory names the formats of the
-// logs it holds, refused by a daemon of others as it opens it.
+// Formats (doc-28, board 10054; boards 8455, 8457): two daemons of different builds serve each
+// other whenever the receiver reads the sender's format family versions. A part is the bucket's
+// bytes, the same to every build, checked against the asker's own tail: GetPart names no format. A
+// live migration hands over a cell directory: its prepare names the source's format versions
+// (MigratePrepareRequest.versions: cell_directory, cell_records, extent_frame, bucket_layout), each
+// checked against the target's readable range (`formats::Format::check`) before it notes or stages
+// anything (FAILED_PRECONDITION outside range, or when versions is absent as an older build sends);
+// and its hand-over opens the cell it staged, as its opening would, before taking it into place,
+// answering no (the source serving the cell again) if it does not open. Replication calls carry
+// per-family versions too (ReplicaOf.versions, IncarnationRequest.versions: cell_directory,
+// replica_directory, extent_frame, bucket_layout), refused (FAILED_PRECONDITION) only outside what
+// the member reads, or when absent: a rolling upgrade across a version bump keeps serving whenever
+// the receiver reads the sender's versions. A member refuses a segment's log not begun with a
+// readable log format (FAILED_PRECONDITION, "... of another format, refused") before it acks any of
+// it, and its replica directory is a frozen family read by range (board 10046).
+//
+// Wire compatibility: this proto only grows, enforced by `buf breaking` in CI (board 10054).
 
 syntax = "proto3";
 
@@ -121,6 +121,41 @@ service Peer {
   rpc MigrateRelease(MigrateReleaseRequest) returns (MigrateReleaseResponse);
 }
 
+// The versions of the format families a peer's calls carry (doc-28, board 10054): each family
+// names both the sender's current (write) version and its oldest readable version, so:
+// - for writer -> member calls (Incarnation, Append) and source -> target migration
+//   (MigratePrepare), the receiver checks that it reads the sender's write version;
+// - for member -> taker calls (Fence, ReadLog), the member checks that the taker's readable range
+//   [oldest..=current] covers every version this member may hold (its own oldest..=current);
+// - for DropLogs, the member accepts either a writer dropping uploaded logs on a newer member or a
+//   newer taker dropping superseded logs on an older member.
+// Zero means absent and is refused for every family the call checks.
+message Formats {
+  // Cell directory format (`local_cell::FORMAT`: store, WAL, segment logs, local checkpoints):
+  // the version the sender writes (and newest it reads).
+  uint32 cell_directory = 1;
+  // cladefs's records in a cell directory (`cladefs::cell_dir::FORMAT`). Checked by migration
+  // targets.
+  uint32 cell_records = 2;
+  // Replica directory format (`local_cell::replica::FORMAT`: own-log frames). Checked by
+  // replication members.
+  uint32 replica_directory = 3;
+  // Extent frame format (`extent_frame::FORMAT`).
+  uint32 extent_frame = 4;
+  // Bucket layout format (`bucket_cell::layout::FORMAT`).
+  uint32 bucket_layout = 5;
+  // Oldest cell directory format version the sender reads (board 10054, hotbed review 89 finding 325).
+  uint32 cell_directory_oldest = 6;
+  // Oldest cell records format version the sender reads.
+  uint32 cell_records_oldest = 7;
+  // Oldest replica directory format version the sender reads.
+  uint32 replica_directory_oldest = 8;
+  // Oldest extent frame format version the sender reads.
+  uint32 extent_frame_oldest = 9;
+  // Oldest bucket layout format version the sender reads.
+  uint32 bucket_layout_oldest = 10;
+}
+
 // A migration of an ephemeral cell to prepare.
 message MigratePrepareRequest {
   // The migration's ID, unique to it, the source's to give.
@@ -147,9 +182,11 @@ message MigratePrepareRequest {
   uint64 epoch = 9;
   // The epoch of the parent's writer that wrote segment `at` (board 6017).
   uint64 parent_epoch = 10;
-  // The source's formats, as cladefsd::peers::formats names them: the target's own, or refused
-  // (board 8455). Empty, as a source of a build before it sends, is refused too.
-  string formats = 11;
+  // Before board 10054: one opaque string compared whole. Unused now; replaced by `versions`.
+  string formats = 11 [deprecated = true];
+  // The source's format family versions (doc-28, board 10054): each checked against the target's
+  // readable range, refused (FAILED_PRECONDITION) if absent or outside range.
+  Formats versions = 12;
 }
 
 // A migration prepared.
@@ -264,17 +301,22 @@ message ReplicaOf {
   Configuration configuration = 4;
   // This host's incarnation, as the configuration names it.
   uint64 incarnation = 5;
-  // The asker's formats (cladefsd::peers::formats, board 8457): this host's, or the call is
-  // refused, FAILED_PRECONDITION.
-  string formats = 6;
+  // Before board 10054: one opaque string compared whole. Unused now; replaced by `versions`.
+  string formats = 6 [deprecated = true];
+  // The asker's format family versions (doc-28, board 10054): each checked against this host's
+  // readable range, refused (FAILED_PRECONDITION) if absent or outside range.
+  Formats versions = 7;
 }
 
 // Asks for this host's replica directory's incarnation.
 message IncarnationRequest {
   // The URL of the bucket, as the asker names it: this host's.
   string bucket = 1;
-  // The asker's formats, as ReplicaOf names them: this host's, or refused, FAILED_PRECONDITION.
-  string formats = 2;
+  // Before board 10054: one opaque string compared whole. Unused now; replaced by `versions`.
+  string formats = 2 [deprecated = true];
+  // The asker's format family versions, as ReplicaOf names them: refused (FAILED_PRECONDITION) if
+  // absent or outside this host's readable range.
+  Formats versions = 3;
 }
 
 // This host's replica directory's incarnation.

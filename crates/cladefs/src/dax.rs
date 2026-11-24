@@ -1295,6 +1295,124 @@ impl Dax {
     }
 }
 
+/// cladefs: the latest of a window's MAPs and UNMAPs, as [`WindowChanges::MOST`] of them: which
+/// mapped a page as it was refused, and what mapped it before (TASK-44.12).
+#[derive(Default)]
+pub(crate) struct WindowChanges {
+    changes: std::collections::VecDeque<WindowChange>,
+    /// cladefs: the pages whose accesses the window refused, until a change of the window covers
+    /// them, which is logged then, with what it did (TASK-44.12).
+    refused: Vec<Refused>,
+}
+
+/// A page whose access the window refused ([`WindowChanges::refused`]): when, and what the window
+/// mapped there then.
+struct Refused {
+    at: std::time::Instant,
+    window_offset: u64,
+    what: String,
+    mapped: String,
+}
+
+/// One of a window's changes: `len` bytes at `window_offset`, mapped or unmapped, when.
+struct WindowChange {
+    at: std::time::Instant,
+    window_offset: u64,
+    len: u64,
+    change: WindowChangeKind,
+}
+
+/// What a [`WindowChange`] did.
+pub(crate) enum WindowChangeKind {
+    /// A MAP of `extent`'s bytes from `offset`, and how it ended.
+    Map {
+        extent: ExtentId,
+        offset: u64,
+        result: std::result::Result<(), Errno>,
+    },
+    /// A MAP of zeros.
+    Zeros,
+    /// Zeros mapped in place of what a freed extent's memory, which they kept, mapped.
+    Freed,
+    Unmap,
+}
+
+impl WindowChangeKind {
+    /// What the change did, said for a log.
+    fn describe(&self) -> String {
+        match self {
+            WindowChangeKind::Map { extent, offset, result } => {
+                format!("MAP of {extent:?} from {offset:#x}, {result:?}")
+            }
+            WindowChangeKind::Zeros => "MAP of zeros".into(),
+            WindowChangeKind::Freed => "zeros in place of a freed extent's".into(),
+            WindowChangeKind::Unmap => "UNMAP".into(),
+        }
+    }
+}
+
+impl WindowChanges {
+    /// cladefs: enough that a refused access's page's history reaches back past the many MAPs of a
+    /// busy guest (TASK-121).
+    const MOST: usize = 1 << 16;
+
+    /// The most refused pages awaiting a change ([`WindowChanges::refused`]): the oldest go first.
+    const MOST_REFUSED: usize = 1024;
+
+    pub(crate) fn record(&mut self, window_offset: u64, len: u64, change: WindowChangeKind) {
+        if self.changes.len() == Self::MOST {
+            self.changes.pop_front();
+        }
+        let at = std::time::Instant::now();
+        if !self.refused.is_empty() {
+            // What a VM process asked, which may be refused yet: past the end of a u64.
+            let range = window_offset..window_offset.saturating_add(len);
+            self.refused.retain(|refused| {
+                if !range.contains(&refused.window_offset) {
+                    return true;
+                }
+                log::warn!(
+                    "cladefsd: {} refused at DAX window offset {:#x}, {:?} ago, mapping {}, \
+                     met: {}, {len:#x} bytes from {window_offset:#x}",
+                    refused.what,
+                    refused.window_offset,
+                    at.duration_since(refused.at),
+                    refused.mapped,
+                    change.describe(),
+                );
+                false
+            });
+        }
+        self.changes.push_back(WindowChange { at, window_offset, len, change });
+    }
+
+    /// Notes the page at `window_offset` refused `what`, the window mapping `mapped` there: the
+    /// next change covering it is logged.
+    pub(crate) fn refuse(&mut self, window_offset: u64, what: &str, mapped: String) {
+        if self.refused.len() == Self::MOST_REFUSED {
+            self.refused.remove(0);
+        }
+        let at = std::time::Instant::now();
+        self.refused.push(Refused { at, window_offset, what: what.to_owned(), mapped });
+    }
+
+    /// The changes of the page at `window_offset`, oldest first, with how long ago each was.
+    pub(crate) fn of(&self, window_offset: u64) -> Vec<String> {
+        let now = std::time::Instant::now();
+        (self.changes.iter())
+            .filter(|change| {
+                let end = change.window_offset.saturating_add(change.len);
+                (change.window_offset..end).contains(&window_offset)
+            })
+            .map(|change| {
+                let (at, len, ago) =
+                    (change.window_offset, change.len, now.duration_since(change.at));
+                format!("{}, {len:#x} bytes from {at:#x}, {ago:?} ago", change.change.describe())
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1832,5 +1950,34 @@ pub(crate) mod tests {
         let _ = plain.unmaps();
         dax.map(0, &new.source(), 0, 2 * ps);
         assert_eq!(plain.unmaps(), [], "a window that doesn't copy unmaps what it mapped alone");
+    }
+
+    /// TASK-44.12: a page refused waits for the next change of the window covering it, which
+    /// meets it (and is logged), whatever the changes of other pages meanwhile.
+    #[test]
+    fn refused_pages_meet_the_next_change_covering_them() {
+        let mut changes = WindowChanges::default();
+        changes.refuse(0x3000, "a write", "an extent, read-only".into());
+        changes.refuse(0x9000, "a write", "nothing mapped".into());
+        changes.record(0x4000, 0x4000, WindowChangeKind::Unmap);
+        let waiting = |changes: &WindowChanges| -> Vec<u64> {
+            changes.refused.iter().map(|refused| refused.window_offset).collect()
+        };
+        assert_eq!(waiting(&changes), [0x3000, 0x9000]);
+        changes.record(0x2000, 0x2000, WindowChangeKind::Zeros);
+        assert_eq!(waiting(&changes), [0x9000]);
+        changes.record(0x8000, 0x2000, WindowChangeKind::Unmap);
+        assert_eq!(waiting(&changes), Vec::<u64>::new());
+    }
+
+    /// TASK-77: what a VM process asked of the window, recorded before it is refused, may reach
+    /// past the end of a u64, with a page refused waiting.
+    #[test]
+    fn changes_past_the_end_of_a_u64_are_recorded() {
+        let mut changes = WindowChanges::default();
+        changes.refuse(0x3000, "a write", "an extent, read-only".into());
+        changes.record(u64::MAX - 0xfff, 0x2000, WindowChangeKind::Unmap);
+        assert_eq!(changes.refused.len(), 1);
+        assert_eq!(changes.of(u64::MAX - 0xfff).len(), 1);
     }
 }

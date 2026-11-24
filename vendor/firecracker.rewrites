@@ -38,3 +38,6 @@ d8022b23e3fad4a1ee258c4d87145cbbc5f301da 190406ee1b467c133314da1fcecea0dc00bd5c7
 # virtio_extent protocol v2; board 8237) into 190406ee1 so every commit in the series builds with
 # the cladefs feature (board 10811).
 99921a773063eebf0a9eff520e29c05532a81073 b6203780198d5f314c5a126523b6426da353ed14
+# cladefs-v1.18.0-r3 (branch cladefs-v1.18.0-r3): update devices::virtio::extent::persist for
+# versioned virtio_extent::persist::State (dax_private_max_bytes; board 10058).
+b6203780198d5f314c5a126523b6426da353ed14 a81a2449e85a9d2f1136a2d719e5f31423517687

@@ -20,7 +20,7 @@
 //! of the bucket's waits `CLADEFS_BUCKET_LATENCY_MS` more, if set, as a bucket elsewhere's round
 //! trips do.
 
-use cladefs::{ExtentId, OpenCell, VolatileSlice};
+use cladefs::{CellOf, ExtentId, OpenCell, Opening, VolatileSlice};
 use std::time::{Duration, Instant};
 
 const EXTENTS: u64 = 64;
@@ -57,7 +57,8 @@ fn main() {
 async fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     std::fs::create_dir(dir).unwrap();
     let capacity = 2 * EXTENTS * EXTENT as u64;
-    let parent = OpenCell::create_in(dir.join("parent"), capacity, tenant).await;
+    let parent =
+        Opening::here().unwrap().create(dir.join("parent"), capacity, CellOf::New(tenant)).await;
     let parent = parent.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {

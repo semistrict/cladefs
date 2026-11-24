@@ -64,12 +64,12 @@ pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedF
 }
 
 /// An arena of physical memory of its own (TASK-43), a tenant's, held by what allocates in it: its
-/// tenant, the cells opened in it ([`OpenCell::open_in`]), and what reads into the extent cache
+/// tenant, the cells opened in it ([`Opening::arena`]), and what reads into the extent cache
 /// for them (TASK-79.36). Once none of them holds it, the extents cached in it go, and it goes,
 /// its memory once its runs still allocated, those page-ins in flight hold, are freed: nothing
 /// allocates in it after, which would fail.
 ///
-/// [`OpenCell::open_in`]: crate::OpenCell::open_in
+/// [`Opening::arena`]: crate::Opening::arena
 pub struct Arena(ArenaId);
 
 impl Arena {

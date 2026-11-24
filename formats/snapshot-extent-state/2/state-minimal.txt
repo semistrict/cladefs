@@ -1,0 +1,20 @@
+StateV2 {
+    config: ConfigStateV2 {
+        id: "root",
+        tag: "data",
+        path_on_host: "/var/lib/cladefs/cell",
+        capacity: 16777216,
+        dax_window_size: None,
+        dax_private_max_bytes: None,
+        cladefsd_socket: "/run/cladefsd.sock",
+        cache_type: Writeback,
+    },
+    window_addr: None,
+    version: CellVersionV2 {
+        tenant: 0,
+        cell: 1,
+        version: 0,
+    },
+    mappings: [],
+    frozen: false,
+}

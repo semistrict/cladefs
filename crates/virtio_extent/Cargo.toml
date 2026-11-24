@@ -17,6 +17,9 @@ publish = false
 loom = ["dep:loom"]
 
 [dependencies]
+bincode.workspace = true
+formats.workspace = true
+fprint.workspace = true
 futures.workspace = true
 cladefs = { path = "../cladefs" }
 libc.workspace = true

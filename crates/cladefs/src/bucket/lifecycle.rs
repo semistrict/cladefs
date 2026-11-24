@@ -447,7 +447,7 @@ impl Made {
         let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
         OpenCell::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
-        OpenCell::take_with(self.at(name), (capacity, cell, None), opening()).await.unwrap()
+        opening().take(self.at(name), capacity, cell, None).await.unwrap()
     }
 
     /// The path of the open cell `name` on the host measured.
@@ -504,7 +504,7 @@ fn memory() -> Arc<dyn ObjectStore> {
 
 /// How the host measured opens open cells: uploading only as a commit waits.
 fn opening() -> Opening {
-    Opening { keeping: idle(), ..Opening::here().unwrap() }
+    Opening::here().unwrap().with_keeping(idle())
 }
 
 /// `objects`, its requests noted, each as late as the run says, of a base of `extents` extents:
@@ -855,7 +855,7 @@ async fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
     let kind = bucket_cell::cell::Kind::Fxfs;
     OpenCell::create_at_version(&at, (&url_of(&bucket_b), kind), description, version).unwrap();
-    let opened = OpenCell::take_with(&at, (capacity, cell, None), opening()).await.unwrap();
+    let opened = opening().take(&at, capacity, cell, None).await.unwrap();
     let child_path = dir.path().join("child");
     let child = opened.fork(&child_path, DEFAULT_TENANT).await.unwrap();
     assert_eq!(child.id >> 48, 2, "the child is not a cell of the host's bucket");

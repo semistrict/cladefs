@@ -91,7 +91,13 @@ async fn sigterm_closes_every_cell_durable_and_uploaded() {
     let full = local_cell::host_cell(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
-    OpenCell::take(&taken, 1 << 28, full, Some(2)).await.unwrap();
+    cladefs::Opening::here()
+        .unwrap()
+        .take(&taken, 1 << 28, full, Some(2))
+        .await
+        .unwrap()
+        .close()
+        .await;
     let taken = CellClient::connect(&second_socket, &taken, 1 << 28).unwrap();
     assert_eq!(taken.root().unwrap(), b"drained");
     assert_eq!(read(&taken, extent), [7; BLOCK]);

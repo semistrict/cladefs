@@ -238,7 +238,7 @@ impl Storage {
             let url = opened.local.bucket().unwrap_or_default().to_owned();
             collect::of(&url, &opened.bucket)
         });
-        let opening = Opening { arena: None, guest: false, keeping };
+        let opening = Opening::keeping(keeping).for_host();
         let cell = Arc::new(OpenCell::new(&dir, opened, opening).await?);
         let kind = Kind::Image {
             dir,

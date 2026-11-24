@@ -90,7 +90,13 @@ async fn public_bases_are_shared_read_only() {
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
     let base_in_one = dir.path().join("one/base");
     // Of a cell of its own (TASK-364), refused as public.
-    OpenCell::create_in(&base_in_one, 1 << 24, 1).await.unwrap().make_public().unwrap();
+    cladefs::Opening::here()
+        .unwrap()
+        .create(&base_in_one, 1 << 24, cladefs::CellOf::New(1))
+        .await
+        .unwrap()
+        .make_public()
+        .unwrap();
     let refused = CellClient::connect(&one, &base_in_one, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
 

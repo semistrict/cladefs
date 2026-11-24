@@ -1516,7 +1516,11 @@ async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
         // A cell of the tenant's (TASK-364).
-        let open_cell = OpenCell::create_in(&parent, 1 << 24, tenant.id()).await.unwrap();
+        let open_cell = crate::Opening::here()
+            .unwrap()
+            .create(&parent, 1 << 24, crate::CellOf::New(tenant.id()))
+            .await
+            .unwrap();
         let extent = ExtentId { cell: open_cell.cell().id, sequence: 1 };
         open_cell.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
         open_cell.commit(None).await.unwrap();
@@ -2391,7 +2395,13 @@ async fn fenced_cells_answer_ordered_commits_erofs() {
     let extent = |sequence| ExtentId { cell: cell.id, sequence };
     write(&first, extent(1), 0, &pattern(1, BLOCK)).unwrap();
     first.commit(None).unwrap();
-    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).await.unwrap();
+    crate::Opening::here()
+        .unwrap()
+        .take(path("second"), 1 << 24, cell, Some(6))
+        .await
+        .unwrap()
+        .close()
+        .await;
     // The first's uploader finds itself fenced at its next upload, which a durable commit waits
     // for, or has found it already.
     assert_eq!(first.commit(None), Err(Errno::EROFS));
@@ -2641,7 +2651,11 @@ async fn control_takes_cells_at_the_placements_given() {
     drop(first);
     assert_eq!(control(super::cells::sync(path("first"))), Ok(()));
     // A copy beside the daemon, as cladefsctl's without it, placed at 6.
-    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).await.unwrap();
+    crate::open_cell::Opening::here()
+        .unwrap()
+        .take(path("second"), 1 << 24, cell, Some(6))
+        .await
+        .unwrap();
     // One through the daemon, placed at 7.
     let taken =
         super::cells::create(path("third"), 1 << 24, cell, (Some(7), Kind::Fxfs, None, false));
@@ -7483,7 +7497,9 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         bucket: "memory:///cells".into(),
         to: path.display().to_string(),
         epoch,
-        formats: super::peers::formats(),
+        #[allow(deprecated)]
+        formats: String::new(),
+        versions: Some(super::peers::current_formats()),
     };
     let bucket = super::cells::daemon_bucket().unwrap();
     let buckets = control(bucket.ephemeral_buckets()).unwrap();
