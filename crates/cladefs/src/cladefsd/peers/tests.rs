@@ -1249,6 +1249,22 @@ fn peers_connections_past_their_most_are_closed() {
     assert_eq!(kept.kind(), std::io::ErrorKind::WouldBlock, "{kept}");
 }
 
+#[test]
+fn only_structured_fencing_refusals_fence_a_writer() {
+    use local_cell::replicate::LinkError;
+
+    let status = refused(replica::Error::Refused(Refused::Format {
+        log: "log".into(),
+        found: "fenced".into(),
+    }));
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(matches!(link_error(&status), LinkError::Refused(_)), "{status:?}");
+
+    let fenced = refused(replica::Error::Refused(Refused::Fenced { promise: 7 }));
+    assert_eq!(fenced.code(), Code::FailedPrecondition);
+    assert!(matches!(link_error(&fenced), LinkError::Fenced(_)), "{fenced:?}");
+}
+
 /// board 8445: a member admits a replication call only by its cell's head, read from the bucket
 /// for it: a fence at `u64::MAX`, or past the head's epoch, and a drop through `u64::MAX`, refused
 /// over gRPC, nothing promised or dropped, the writer appending still; a cell with no head refused
@@ -1267,7 +1283,7 @@ fn members_admit_calls_by_their_cells_heads() {
         let unasked = |status: Status| {
             assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
             assert!(status.message().ends_with(": refused"), "{status:?}");
-            assert!(!status.message().contains("fenced"), "{status:?}");
+            assert!(matches!(link_error(&status), local_cell::replicate::LinkError::Refused(_)));
         };
         // No head: every call refused.
         unasked(

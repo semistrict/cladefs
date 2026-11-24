@@ -1190,6 +1190,9 @@ async fn noted(
     blocking(move || noting.saw(cell, head)).await
 }
 
+/// Marks a replica's fencing refusal on the existing FailedPrecondition status (board 10575).
+const FENCED: &str = "cladefs-fenced";
+
 /// cladefs: the status a member's refusal, or failure, answers with (peer.proto).
 fn refused(err: replica::Error) -> Status {
     match err {
@@ -1197,7 +1200,9 @@ fn refused(err: replica::Error) -> Status {
             Status::aborted(refused.to_string())
         }
         replica::Error::Refused(refused @ Refused::Fenced { .. }) => {
-            Status::failed_precondition(refused.to_string())
+            let mut status = Status::failed_precondition(refused.to_string());
+            status.metadata_mut().insert(FENCED, tonic::metadata::MetadataValue::from_static("1"));
+            status
         }
         replica::Error::Refused(
             refused @ (Refused::Full { .. }
@@ -1846,7 +1851,11 @@ fn link_error(status: &Status) -> local_cell::replicate::LinkError {
     use local_cell::replicate::LinkError;
     let what = said(&status);
     match status.code() {
-        Code::FailedPrecondition if status.message().contains("fenced") => LinkError::Fenced(what),
+        Code::FailedPrecondition
+            if status.metadata().get(FENCED).is_some_and(|fenced| fenced == "1") =>
+        {
+            LinkError::Fenced(what)
+        }
         // A member full for the configuration refuses it until a replacement picks another
         // (doc-21, Choosing members; TASK-537.3.5), rather than be tried again.
         Code::Aborted | Code::FailedPrecondition | Code::ResourceExhausted => {
