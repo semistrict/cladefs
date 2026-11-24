@@ -3990,3 +3990,31 @@ fn cells_elsewhere_than_the_hosts_cache_are_refused() {
         )
     );
 }
+
+/// board 11380: a flush sealing more than `CHECKED_MOST` (8 MiB) without own-extent files takes
+/// the `Runs::Synced` path instead of `Runs::Checked`, avoiding multi-gigabyte `O_DIRECT`
+/// read-backs during bulk commits while preserving crash recovery on reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn large_flushes_use_runs_synced_without_reading_raw_segments_back() {
+    let dir = Counting::new();
+    let cell = create(dir.clone(), 64 << 20);
+    // Nine 1 MiB extents (> 8 MiB CHECKED_MOST, each < 4 MiB large_extent so none uses own files).
+    let chunk = 1 << 20;
+    for seq in 1..=9u64 {
+        cell.write(extent(seq), 0, &pattern(seq as u8, 0, chunk)).await.unwrap();
+    }
+    let before = dir.read().get("open-segments").copied().unwrap_or(0);
+    cell.commit(None).await.unwrap();
+    let after = dir.read().get("open-segments").copied().unwrap_or(0);
+    assert_eq!(
+        after - before,
+        0,
+        "large flush should use Runs::Synced with zero raw-segment read-back, read {} bytes",
+        after - before
+    );
+    drop(cell);
+    let reopened = LocalCell::open(dir.dir, OPTIONS).unwrap();
+    for seq in 1..=9u64 {
+        assert_eq!(read(&reopened, extent(seq), 0, BLOCK), pattern(seq as u8, 0, BLOCK));
+    }
+}

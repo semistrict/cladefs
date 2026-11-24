@@ -161,6 +161,12 @@ impl Default for Options {
     }
 }
 
+/// cladefs: the most bytes of runs a flush's commits seal for their records to check them with
+/// `Runs::Checked` (reading them back and CRCing them so raw-file sync and log append run at once,
+/// TASK-301); above this, reading gigabytes back from disk takes seconds to save one sequential
+/// `fsync`, so the flush takes the `Runs::Synced` path instead (board 11380).
+const CHECKED_MOST: u64 = 8 << 20;
+
 /// What a cell holds, as doc-4's `INFO` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Info {
@@ -3854,7 +3860,12 @@ impl<D: Dir> LocalCell<D> {
         for pending in commits.iter_mut() {
             syncs.extend(std::mem::take(&mut pending.syncs));
         }
-        let records = if syncs.holds_own() {
+        let sealed: u64 = commits
+            .iter()
+            .flat_map(|pending| &pending.records)
+            .map(|(_, contents)| LogRecord::run_bytes(contents))
+            .sum();
+        let records = if syncs.holds_own() || sealed > CHECKED_MOST.max(self.options.held_most) {
             syncs.extend(std::mem::take(&mut logs.unsynced));
             timed.synced = syncs.sync_files(&*self.dir)?;
             let synced = timed.phases.took(flush::DATA, started);
@@ -3867,8 +3878,6 @@ impl<D: Dir> LocalCell<D> {
             timed.phases.took(flush::LOGS, synced);
             records
         } else {
-            let records = commits.iter().flat_map(|pending| &pending.records);
-            let sealed: u64 = records.map(|(_, contents)| LogRecord::run_bytes(contents)).sum();
             let hold = sealed <= self.options.held_most;
             // The raw files it leaves unsynced, the next flush syncing data syncs.
             match hold {
