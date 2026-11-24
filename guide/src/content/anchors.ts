@@ -34,7 +34,7 @@ export const anchors = {
   cell_client: { path: "crates/cladefs/src/cladefsd/client.rs", snippet: "pub struct CellClient", note: "The VM process's handle on its cell, which the extent daemon serves." },
   daemon_commit: { path: "crates/cladefs/src/cladefsd/client.rs", snippet: "pub fn commit(&self, root: Option<&[u8]>) -> Result<()>", note: "COMMIT with COMMIT_UPLOADED, over the daemon socket." },
   server_serve: { path: "crates/cladefs/src/cladefsd/server.rs", snippet: "fn serve(&self, request: &Request<'_>, answer: Answer)", note: "cladefsd serving one request of a VM process." },
-  flush_behind: { path: "crates/cladefs/src/cladefsd/server.rs", snippet: "async fn flush_behind(open_cell: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::Receiver<()>)", note: "Every 50 ms: the commits ordered so far made local." },
+  flush_behind: { path: "crates/cladefs/src/cladefsd/server.rs", snippet: "async fn flush_behind(", note: "Every 50 ms: the commits ordered so far made local." },
   server_fault: { path: "crates/cladefs/src/cladefsd/server.rs", snippet: "async fn fault(self: Arc<Self>, fault: Fault, answer: Answer)", note: "A guest fault on the window, which userfaultfd reported, resolved by the daemon." },
   open_cell: { path: "crates/cladefs/src/open_cell.rs", snippet: "pub struct OpenCell", note: "A cell, open, as a VM's extent store device serves it." },
   es_write: { path: "crates/cladefs/src/open_cell.rs", snippet: "pub async fn write(", note: "WRITE: bytes into an open extent." },
