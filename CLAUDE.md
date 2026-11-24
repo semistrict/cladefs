@@ -18,4 +18,12 @@ to a frozen format requires **explicit user approval directly in conversation** 
 question), and **backwards compatibility with all stored data is required** — every later build must
 read all previously stored versions. Read AGENTS.md's **Frozen formats** before touching any format.
 
+## Never accidentally revert `vendor/firecracker`
+
+`vendor/firecracker` is a git submodule. After pulling, merging, or rebasing in an older worktree,
+its checkout stays at the old commit and `git add -A` / `git add .` / `git commit -a` will silently
+revert `vendor/firecracker` on `main` (`b781ff302`, `dc265368e`). **Stage explicit paths only**,
+check `git diff --cached -- vendor/firecracker` before committing, and run
+`git submodule update --init vendor/firecracker` if it shows modified unintentionally.
+
 </CRITICAL_INSTRUCTION>
