@@ -101,7 +101,7 @@ fn credentials_are_found_as_azures_libraries_find_them() {
 
 const ID: &str = "https://v.vault.azure.net/keys/t-9";
 
-fn mapped(op: Op, code: u16, body: &str) -> (String, bool, bool) {
+fn mapped(op: Op<'_>, code: u16, body: &str) -> (String, bool, bool) {
     let Failure { failed, unauthorized } = refusal(9, ID, op, code, body.as_bytes());
     (failed.error.to_string(), failed.transient, unauthorized)
 }
@@ -115,7 +115,7 @@ fn refusals_are_mapped_by_their_codes() {
     );
     let bad = r#"{"error":{"code":"BadParameter","message":"Error decrypting."}}"#;
     assert_eq!(
-        mapped(Op::Unwrap, 400, bad),
+        mapped(Op::Unwrap("v1"), 400, bad),
         ("tenant 9: not authentic: a wrapped key, refused by the KMS".into(), false, false)
     );
     assert_eq!(
@@ -154,7 +154,7 @@ fn refusals_are_mapped_by_their_codes() {
         )
     );
     assert_eq!(
-        mapped(Op::Unwrap, 503, "<html/>"),
+        mapped(Op::Unwrap("v1"), 503, "<html/>"),
         (
             format!(
                 "tenant 9: the KMS failed: Azure Key Vault, unwrapkey with {ID}: HTTP 503, no code: "
@@ -248,7 +248,10 @@ fn answer(fake: &Mutex<Fake>, base: &str, request: &Request) -> Response {
         _ => return Response::of(404, r#"{"error":{"code":"NotFound","message":"no such path"}}"#),
     };
     if name.starts_with("revoked-") {
-        return Response::of(403, r#"{"error":{"code":"Forbidden","message":"not allowed"}}"#);
+        return Response::of(
+            403,
+            r#"{"error":{"code":"Forbidden","innererror":{"code":"KeyDisabled"}}}"#,
+        );
     }
     if name.starts_with("firewalled-") {
         let body = r#"{"error":{"code":"Forbidden","message":"Client address is not authorized and caller is not a trusted service.","innererror":{"code":"ForbiddenByFirewall"}}}"#;
@@ -336,7 +339,7 @@ fn keys_wrapped_unwrap_for_their_tenant_alone() {
     assert_eq!(fake.lock().unwrap().tokens, 1);
 }
 
-/// The vault refusing: a key disabled or not granted is revoked, one missing none; a token the
+/// The vault refusing: a disabled current key is revoked, one missing none; a token the
 /// vault refuses is fetched again, once, and the call goes on. board 8481: the vault's firewall
 /// refusing the host is the host's, not the tenant's: no revocation, the vault and why named.
 #[test]
@@ -368,22 +371,23 @@ fn refusals_reach_their_tenants_and_tokens_are_fetched_again() {
     assert_eq!(fake.lock().unwrap().tokens, tokens + 2, "a token refused not fetched again");
 }
 
-/// board 8481: a 403 is revoked but for the vault's network refusing the host, by its code or its
-/// inner error's, at any depth; a 403 of no body is revoked, as before.
 #[test]
-fn only_network_refusals_of_403_are_not_revocations() {
-    let mapped = |body: &str| {
-        refusal(9, "https://v.vault.azure.net/keys/k", Op::Unwrap, 403, body.as_bytes())
-    };
+fn operational_forbidden_responses_are_io_errors() {
     for body in [
         r#"{"error":{"code":"Forbidden","message":"m","innererror":{"code":"ForbiddenByPolicy"}}}"#,
         r#"{"error":{"code":"Forbidden","message":"m","innererror":{"code":"ForbiddenByRbac"}}}"#,
         r#"{"error":{"code":"Forbidden","message":"Operation unwrapKey is not allowed on a disabled key."}}"#,
+        r#"{"error":{"code":"AccessDenied"}}"#,
+        r#"{"error":{"code":"Forbidden","innererror":{"code":"Unknown"}}}"#,
+        r#"{"error":{"code":"Forbidden","innererror":{"code":403}}}"#,
+        "<html/>",
         "",
     ] {
-        let Failure { failed, unauthorized } = mapped(body);
-        assert_eq!(failed.error.to_string(), "tenant 9: its KEK is revoked", "{body}");
-        assert!(!failed.transient && !unauthorized);
+        for op in [Op::Wrap, Op::Unwrap("v1")] {
+            let Failure { failed, unauthorized } = refusal(9, ID, op, 403, body.as_bytes());
+            assert!(matches!(failed.error, Error::Io { tenant: 9, .. }), "{body}");
+            assert!(!failed.transient && !unauthorized);
+        }
     }
     for (body, code) in [
         (
@@ -396,7 +400,7 @@ fn only_network_refusals_of_403_are_not_revocations() {
         ),
         (r#"{"error":{"code":"ForbiddenByFirewall","message":"m"}}"#, "ForbiddenByFirewall"),
     ] {
-        let Failure { failed, .. } = mapped(body);
+        let Failure { failed, .. } = refusal(9, ID, Op::Unwrap("v1"), 403, body.as_bytes());
         assert!(matches!(failed.error, Error::Io { tenant: 9, .. }), "{body}");
         assert!(
             failed
@@ -406,6 +410,32 @@ fn only_network_refusals_of_403_are_not_revocations() {
         );
         assert!(!failed.transient);
     }
+}
+
+#[test]
+fn explicit_key_state_refusals_are_scoped_to_the_requested_version() {
+    for code in ["KeyDisabled", "KeyRevoked", "KeyDeleted", "KeyPurged"] {
+        for body in [
+            format!(r#"{{"error":{{"code":"{code}"}}}}"#),
+            format!(r#"{{"error":{{"code":"Forbidden","innererror":{{"code":"{code}"}}}}}}"#),
+        ] {
+            let wrap = refusal(9, ID, Op::Wrap, 403, body.as_bytes()).failed;
+            assert!(matches!(wrap.error, Error::Revoked { tenant: 9 }), "{body}");
+            assert!(!wrap.transient);
+            let unwrap = refusal(9, ID, Op::Unwrap("old"), 403, body.as_bytes()).failed;
+            match (code, unwrap.error) {
+                ("KeyDisabled" | "KeyRevoked", Error::VersionDisabled { tenant: 9, version })
+                | ("KeyDeleted" | "KeyPurged", Error::VersionGone { tenant: 9, version }) => {
+                    assert_eq!(version, "old");
+                }
+                (_, err) => panic!("{body}: {err}"),
+            }
+            assert!(!unwrap.transient);
+        }
+    }
+    let missing =
+        refusal(9, ID, Op::Unwrap("old"), 404, br#"{"error":{"code":"KeyNotFound"}}"#).failed;
+    assert!(matches!(missing.error, Error::VersionGone { tenant: 9, version } if version == "old"));
 }
 
 /// TASK-633.6 (review): each vault's tokens are for its own audience: a Managed HSM's, a sovereign

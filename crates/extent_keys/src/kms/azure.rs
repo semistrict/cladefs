@@ -378,16 +378,16 @@ impl Held {
 
 /// What a call asks of the vault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op {
+enum Op<'a> {
     Wrap,
-    Unwrap,
+    Unwrap(&'a str),
 }
 
-impl Op {
+impl Op<'_> {
     fn method(self) -> &'static str {
         match self {
             Op::Wrap => "wrapkey",
-            Op::Unwrap => "unwrapkey",
+            Op::Unwrap(_) => "unwrapkey",
         }
     }
 }
@@ -448,7 +448,7 @@ impl Inner {
         let id = identifier(&self.vault, &self.names.of(tenant));
         let value = Zeroizing::new(BASE64URL.encode(bound(tenant, key)));
         let body = http::json(&KeyOperation { alg: self.alg, value: &value });
-        let answer = self.call(tenant, &id, &format!("{id}/wrapkey"), Op::Wrap, body).await?;
+        let answer = self.call(tenant, &id, Op::Wrap, body).await?;
         let corrupt = |why: &str| io_error(tenant, &id, Op::Wrap, format!("its answer {why}"));
         let response: KeyOperationResult = serde_json::from_slice(&answer)
             .map_err(|err| corrupt(&format!("is not a KeyOperationResult: {err}")))?;
@@ -483,9 +483,9 @@ impl Inner {
         }
         let value = BASE64URL.encode(ciphertext);
         let body = http::json(&KeyOperation { alg: self.alg, value: &value });
-        let url = format!("{id}/{version}/unwrapkey");
-        let answer = self.call(tenant, &id, &url, Op::Unwrap, body).await?;
-        let corrupt = |why: &str| io_error(tenant, &id, Op::Unwrap, format!("its answer {why}"));
+        let op = Op::Unwrap(version);
+        let answer = self.call(tenant, &id, op, body).await?;
+        let corrupt = |why: &str| io_error(tenant, &id, op, format!("its answer {why}"));
         let parsed = serde_json::from_slice::<KeyOperationResult>(&answer);
         drop(answer);
         let mut response =
@@ -512,17 +512,20 @@ impl Inner {
         self: &Arc<Self>,
         tenant: u64,
         id: &str,
-        url: &str,
-        op: Op,
+        op: Op<'_>,
         body: Bytes,
     ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let audience = self.audience(id);
+        let url = match op {
+            Op::Wrap => format!("{id}/wrapkey"),
+            Op::Unwrap(version) => format!("{id}/{version}/unwrapkey"),
+        };
         let (mut retries, mut refreshed) = (0, false);
         loop {
             let token = (self.tokens.token(audience).await)
                 .map_err(|why| io_error(tenant, id, op, format!("credentials: {why}")))?;
             let Failure { failed, unauthorized } =
-                match self.attempt(tenant, id, url, op, body.clone(), &token).await {
+                match self.attempt(tenant, id, &url, op, body.clone(), &token).await {
                     Ok(answer) => return Ok(answer),
                     Err(failure) => failure,
                 };
@@ -547,7 +550,7 @@ impl Inner {
         tenant: u64,
         id: &str,
         url: &str,
-        op: Op,
+        op: Op<'_>,
         body: Bytes,
         token: &str,
     ) -> Result<Zeroizing<Vec<u8>>, Failure> {
@@ -778,26 +781,21 @@ impl VaultError {
     }
 }
 
-/// The codes of a 403 that refuse the host's network, not the tenant's key: the vault's firewall
-/// and its private endpoints' (Key Vault's documentation, Troubleshooting firewall). Any other 403
-/// is the key's: its access policy or role taken away (`ForbiddenByPolicy`, `ForbiddenByRbac`), or
-/// the key disabled (hotbed question 459).
+/// The vault's firewall and private endpoint refusals (board 8481).
 const NETWORK_REFUSALS: [&str; 2] = ["ForbiddenByFirewall", "ForbiddenByConnection"];
 
 /// What the vault's refusal of `op` with key `id` for `tenant`, of HTTP status `code` and body
 /// `body`, means:
 ///
-/// - 404, `KeyNotFound`: the tenant has no KEK, [`Error::NoSuchTenant`] (a key deleted, purged or
-///   soft-deleted, reads as none, as a real KMS forgets a deleted key);
-/// - 403 of the vault's network ([`NETWORK_REFUSALS`]: its firewall, its private endpoints): the
-///   host's, not the tenant's, [`Error::Io`] naming the vault and why (board 8481);
-/// - any other 403: the tenant took cladefs's access to its key away, or disabled the key:
-///   [`Error::Revoked`];
+/// - 404 `KeyNotFound`: [`Error::NoSuchTenant`] on a wrap, [`Error::VersionGone`] on an unwrap;
+/// - 403 with a key-state code: [`Error::Revoked`] on a wrap, [`Error::VersionDisabled`] or
+///   [`Error::VersionGone`] on an unwrap, scoped to the version in the request;
+/// - other 403 responses, including access and network refusals: [`Error::Io`] (board 10577);
 /// - 400 of an unwrap: a ciphertext not the key's, [`Error::Unauthentic`];
 /// - 401: the vault refused the token, fetched again once ([`AzureKms::call`]), else
 ///   [`Error::Io`];
 /// - anything else: [`Error::Io`], transient if throttled (429) or the service's (5xx).
-fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
+fn refusal(tenant: u64, id: &str, op: Op<'_>, code: u16, body: &[u8]) -> Failure {
     // Not JSON, or not Key Vault's error: the default, the status alone saying what failed.
     let error = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
@@ -812,10 +810,20 @@ fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
         );
         return refused(io_error(tenant, id, op, why));
     }
-    match code {
-        404 if error.code == "KeyNotFound" => return refused(Error::NoSuchTenant { tenant }),
-        403 => return refused(Error::Revoked { tenant }),
-        400 if op == Op::Unwrap => {
+    let named = error.codes().filter(|code| !code.is_empty()).last().unwrap_or("no code");
+    match (code, named, op) {
+        (404, "KeyNotFound", Op::Wrap) => return refused(Error::NoSuchTenant { tenant }),
+        (404, "KeyNotFound", Op::Unwrap(version))
+        | (403, "KeyDeleted" | "KeyPurged", Op::Unwrap(version)) => {
+            return refused(Error::VersionGone { tenant, version: version.to_owned() });
+        }
+        (403, "KeyDisabled" | "KeyRevoked", Op::Unwrap(version)) => {
+            return refused(Error::VersionDisabled { tenant, version: version.to_owned() });
+        }
+        (403, "KeyDisabled" | "KeyRevoked" | "KeyDeleted" | "KeyPurged", Op::Wrap) => {
+            return refused(Error::Revoked { tenant });
+        }
+        (400, _, Op::Unwrap(_)) => {
             return refused(Error::Unauthentic {
                 tenant,
                 source: Unauthentic("a wrapped key, refused by the KMS"),
@@ -823,7 +831,6 @@ fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
         }
         _ => {}
     }
-    let named = if error.code.is_empty() { "no code" } else { &error.code[..] };
     let why = format!("HTTP {code}, {named}: {}", error.message);
     let error = io_error(tenant, id, op, why);
     Failure {
@@ -836,7 +843,7 @@ fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
 }
 
 /// The [`Error::Io`] of `op` with key `id` for `tenant`, failing as `why` says.
-fn io_error(tenant: u64, id: &str, op: Op, why: String) -> Error {
+fn io_error(tenant: u64, id: &str, op: Op<'_>, why: String) -> Error {
     let source = io::Error::other(format!("Azure Key Vault, {} with {id}: {why}", op.method()));
     Error::Io { tenant, source }
 }
