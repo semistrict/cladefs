@@ -52,7 +52,7 @@ use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use storage_device::DeviceHolder;
 
 /// The cell capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
@@ -68,7 +68,7 @@ pub struct MemoryCell {
     blocks: Arc<BlockDevice>,
     size: u64,
     /// Its window's tree nodes, once it has one ([`MemoryCell::window`]).
-    window: OnceLock<Arc<Nodes>>,
+    window: Mutex<Option<Arc<Nodes>>>,
 }
 
 impl MemoryCell {
@@ -108,7 +108,7 @@ impl MemoryCell {
                     .context(format!("a memory of {held} bytes, not {size}")));
             }
         }
-        Ok(Self { client, blocks, size, window: OnceLock::new() })
+        Ok(Self { client, blocks, size, window: Mutex::new(None) })
     }
 
     /// The bytes of the guest's memory.
@@ -235,15 +235,17 @@ impl MemoryCell {
                 .context(format!("a window of {size} bytes over a memory of {}", self.size)));
         }
         crate::pages::window_fits_host(self.page_size(), crate::pages::page_size())?;
+        let mut window = self.window.lock().unwrap();
+        if window.is_some() {
+            return Err(Error::new(Errno::EINVAL).context("the memory cell has a window already"));
+        }
         let node_bytes = self.blocks.node_bytes();
-        let nodes = size.div_ceil(node_bytes);
+        let words = size.div_ceil(node_bytes).div_ceil(64) as usize;
         let shared = Arc::new(Nodes {
             node_bytes,
             size,
-            state: Mutex::new(NodesState {
-                mapped: vec![0; nodes.div_ceil(64) as usize],
-                waiting: HashMap::new(),
-            }),
+            naming: Mutex::new(vec![0; words]),
+            state: Mutex::new(NodesState { mapped: vec![0; words], waiting: HashMap::new() }),
         });
         let (asks, asked) = mpsc::channel();
         let mapper = Mapper {
@@ -251,16 +253,17 @@ impl MemoryCell {
             blocks: Arc::downgrade(&self.blocks),
             client: Arc::downgrade(&self.client),
         };
-        if self.window.set(shared.clone()).is_err() {
-            return Err(Error::new(Errno::EINVAL).context("the memory cell has a window already"));
-        }
+        #[cfg(test)]
+        fail::fail_point!("memory_cell::spawn_mapper", |_| Err(Errno::EAGAIN.into()));
         std::thread::Builder::new()
             .name("cladefs-memory-nodes".into())
             .spawn(move || mapper.serve(asked))
             .map_err(Error::new)?;
-        let unmapped = Arc::new(Reach { nodes: shared, asks: Mutex::new(asks) });
+        let unmapped = Arc::new(Reach { nodes: shared.clone(), asks: Mutex::new(asks) });
         // SAFETY: As the caller promises.
-        unsafe { self.client.create_memory_window_in_host_memory(base, size, prefault, unmapped) }
+        unsafe { self.client.create_memory_window_in_host_memory(base, size, prefault, unmapped) }?;
+        *window = Some(shared);
+        Ok(())
     }
 
     /// Reclaims the `len` bytes of its window at `offset`, whole pages, which the guest gave back,
@@ -274,7 +277,7 @@ impl MemoryCell {
     /// it. `EINVAL` without a window, or for a range not whole pages within the memory.
     pub fn reclaim(&self, offset: u64, len: u64) -> Result<(), Error> {
         self.whole(offset, len)?;
-        let nodes = self.window.get().ok_or_else(|| {
+        let nodes = self.window.lock().unwrap().clone().ok_or_else(|| {
             Error::new(Errno::EINVAL).context("reclaiming memory of a memory cell with no window")
         })?;
         if len == 0 {
@@ -282,28 +285,28 @@ impl MemoryCell {
         }
         // Within the memory, as `whole` checked.
         let end = offset + len;
-        // The ranges of the nodes mapped, read under the nodes' lock and let go of before the
-        // daemon is asked, which a fault's reach of a node takes as the fault thread serves it.
+        // Order reclaim against naming, including a MAP_MANY that named only some of its runs.
+        // The fault thread uses the separate state lock to reach a node while the RPC is pending.
+        let naming = nodes.naming.lock().unwrap();
         let mut mapped: Vec<std::ops::Range<u64>> = Vec::new();
-        {
-            let state = nodes.state.lock().unwrap();
-            for node in offset / nodes.node_bytes..=(end - 1) / nodes.node_bytes {
-                if !state.is_mapped(node) {
-                    continue;
-                }
-                let start = (node * nodes.node_bytes).max(offset);
-                let stop = ((node + 1) * nodes.node_bytes).min(end);
-                match mapped.last_mut() {
-                    Some(range) if range.end == start => range.end = stop,
-                    _ => mapped.push(start..stop),
-                }
+        for node in offset / nodes.node_bytes..=(end - 1) / nodes.node_bytes {
+            if naming[(node / 64) as usize] & (1 << (node % 64)) == 0 {
+                continue;
+            }
+            let start = (node * nodes.node_bytes).max(offset);
+            let stop = ((node + 1) * nodes.node_bytes).min(end);
+            match mapped.last_mut() {
+                Some(range) if range.end == start => range.end = stop,
+                _ => mapped.push(start..stop),
             }
         }
         let mut mappings = Vec::new();
         for range in mapped {
             mappings.extend(image_mappings(&self.blocks, range.start, range.end - range.start)?);
         }
-        self.client.map_many(&mappings).map_err(Error::new)
+        let result = self.client.map_many(&mappings).map_err(Error::new);
+        drop(naming);
+        result
     }
 
     /// Fails with `EINVAL` unless `len` bytes at `offset` are whole pages within the memory.
@@ -350,6 +353,9 @@ fn runs_of_zeros(bytes: &[u8], page: usize) -> Vec<(usize, Run<'_>)> {
 struct Nodes {
     node_bytes: u64,
     size: u64,
+    /// A bit a node that might have named pages. Held across changes to the window by the
+    /// mapper and reclaim, since pages become accessible before MAP_MANY returns.
+    naming: Mutex<Vec<u64>>,
     state: Mutex<NodesState>,
 }
 
@@ -433,7 +439,12 @@ impl Mapper {
         let len = self.nodes.node_bytes.min(self.nodes.size - start);
         let mut read = vec![0; len as usize];
         blocks.read(start, &mut read).map_err(Error::new)?;
-        client.map_many(&image_mappings(&blocks, start, len)?).map_err(Error::new)?;
+        let mappings = image_mappings(&blocks, start, len)?;
+        {
+            let mut naming = self.nodes.naming.lock().unwrap();
+            naming[(node / 64) as usize] |= 1 << (node % 64);
+            client.map_many(&mappings).map_err(Error::new)?;
+        }
         client.prefault(start, len);
         Ok(())
     }
@@ -489,6 +500,22 @@ mod tests {
         held[0]
     }
 
+    /// Pauses the mapper after it names and installs a node's pages and before it wakes
+    /// the faults waiting for the node. A write fault can use an already named page meanwhile.
+    struct PausePrefault {
+        first: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    }
+
+    impl Prefault for PausePrefault {
+        fn prefault(&self, _: u64, _: u64) {
+            let first = self.first.lock().unwrap().take();
+            if let Some((entered, resume)) = first {
+                entered.send(()).unwrap();
+                resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            }
+        }
+    }
+
     // board 8497: a window's pages the guest gave back, a balloon's inflation's, reclaimed, are
     // private no more, their memory emptied, the host's again: the guest reads the image there
     // again, as of the cell's last commit, and its next write makes a page private anew. A node no
@@ -534,8 +561,26 @@ mod tests {
         };
         assert_ne!(base, libc::MAP_FAILED);
         let base = NonNull::new(base.cast::<u8>()).unwrap();
+        let (entered, named) = mpsc::channel();
+        let (finished, resume) = mpsc::channel();
+        let prefault = Arc::new(PausePrefault { first: Mutex::new(Some((entered, resume))) });
+        // A failure starting the mapper leaves the cell with no window and permits a retry.
+        fail::cfg("memory_cell::spawn_mapper", "1*return").unwrap();
+        // SAFETY: The memory is the test's and outlives the memory cell.
+        let failed = unsafe { memory_cell.window(base, size, None) };
         // SAFETY: The memory is the test's, and outlives the memory_cell (unmapped once it goes).
-        let window = unsafe { memory_cell.window(base, size, None) };
+        let window = unsafe {
+            if ps > page {
+                // This host cannot make any window, so the failure injection wasn't reached.
+                failed
+            } else {
+                assert_eq!(failed.unwrap_err().errno(), Some(Errno::EAGAIN));
+                let reclaimed = memory_cell.reclaim(0, ps);
+                assert_eq!(reclaimed.unwrap_err().errno(), Some(Errno::EINVAL));
+                memory_cell.window(base, size, Some(prefault))
+            }
+        };
+        fail::remove("memory_cell::spawn_mapper");
         // A host of pages larger than the cell's (arm64's 16 KiB) restores no window
         // (`window_fits_host`).
         if ps > page {
@@ -543,7 +588,8 @@ mod tests {
             return;
         }
         window.unwrap();
-        let at = |page: u64| base.as_ptr() as usize + (page * ps) as usize;
+        let address = base.as_ptr() as usize;
+        let at = |page: u64| address + (page * ps) as usize;
         // The window's bytes of pages `pages`, as the guest reads them.
         let read = |pages: std::ops::Range<u64>| -> Vec<u8> {
             // SAFETY: The window's memory, whose faults its memory_cell serves.
@@ -554,13 +600,27 @@ mod tests {
         let image_of = |pages: std::ops::Range<u64>| {
             image[(pages.start * ps) as usize..(pages.end * ps) as usize].to_vec()
         };
-        // The first two nodes reached, the last not.
-        assert!(read(0..340) == image_of(0..340), "the window holds the image");
         crate::guest_thread_started();
         let store = |page: u64, byte: u8| {
             // SAFETY: As above, a write of the guest's.
             unsafe { (at(page) as *mut u8).write_volatile(byte) }
         };
+        std::thread::scope(|threads| {
+            let first = threads.spawn(|| read(0..1));
+            named.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            // This store copies locally because the mapper has already named the page.
+            store(5, 0xee);
+            let private = memory_cell.private_runs();
+            let reclaimed = memory_cell.reclaim(5 * ps, ps);
+            let remaining = memory_cell.private_runs();
+            finished.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), image_of(0..1));
+            assert_eq!(private.unwrap(), vec![5 * ps..6 * ps]);
+            reclaimed.unwrap();
+            assert!(remaining.unwrap().is_empty(), "reclaim skipped a named page");
+        });
+        // The first two nodes reached, the last not.
+        assert!(read(0..340) == image_of(0..340), "the window holds the image");
         for page in [5, 6, 7, 300] {
             store(page, 0xee);
         }
