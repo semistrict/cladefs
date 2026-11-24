@@ -1943,8 +1943,8 @@ mod tests {
             TEST_DEVICE_BLOCK_SIZE as usize
         );
         assert_eq!(
-            buf.as_ptr_slice().subslice(0..TEST_DEVICE_BLOCK_SIZE as usize).to_vec(),
-            vec![0xaa; TEST_DEVICE_BLOCK_SIZE as usize]
+            &buf.as_slice()[0..TEST_DEVICE_BLOCK_SIZE as usize],
+            &vec![0xaa; TEST_DEVICE_BLOCK_SIZE as usize][..]
         );
         fs.close().await.expect("Close failed");
     }

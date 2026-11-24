@@ -14,8 +14,7 @@ use async_trait::async_trait;
 use fuchsia_sync::Mutex;
 use std::cmp::min;
 use std::sync::Arc;
-use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
-use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef, TransferBudget};
 use storage_units::BlockSize;
 
 pub struct FakeObject {
@@ -63,14 +62,13 @@ impl FakeObject {
 
 pub struct FakeObjectHandle {
     object: Arc<FakeObject>,
-    allocator: BufferAllocator,
+    allocator: TransferBudget,
     block_size: BlockSize,
 }
 
 impl FakeObjectHandle {
     pub fn new_with_block_size(object: Arc<FakeObject>, block_size: BlockSize) -> Self {
-        let allocator =
-            BufferAllocator::new(block_size.get() as usize, BufferSource::new(32 * 1024 * 1024));
+        let allocator = TransferBudget::new(block_size.get() as usize, 32 * 1024 * 1024);
         Self { object, allocator, block_size }
     }
     pub fn new(object: Arc<FakeObject>) -> Self {

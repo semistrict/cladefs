@@ -112,7 +112,6 @@ fuchsia-async = { path = "crates/fuchsia-async" }
 fuchsia-async-macro = { path = "crates/fuchsia-async-macro" }
 fuchsia-sync = { path = "crates/fuchsia-sync" }
 fxfs-unicode = { path = "crates/fxfs-unicode" }
-storage_ptr_slice = { path = "crates/storage_ptr_slice" }
 storage_units = { path = "crates/storage_units" }
 storage_xts = { path = "crates/storage_xts" }
 storage_device = { path = "crates/storage_device" }

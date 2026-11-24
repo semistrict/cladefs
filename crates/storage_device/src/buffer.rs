@@ -2,28 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/lib/storage_device/src/buffer.rs`, without buffers' VMOs and physical
-// addresses, which only Fuchsia has.
+// Fuchsia's `src/storage/lib/storage_device/src/buffer.rs`, without buffers' VMOs, physical
+// addresses and the pool they were carved from (`buffer_allocator.rs`), which only Fuchsia needs.
+// cladefs (board 10541): a buffer is memory of the heap's, aligned to the device's blocks, and its
+// views are plain slices: every buffer cladefs makes is its own, Fxfs's and its device's alone (on
+// the host, `OpenCellDevice` and `DaemonDevice` copy them to and from the cell; in the guest
+// kernel, the virtio driver maps `kmalloc` and `vmalloc` memory alike), so Fuchsia's untrusted
+// pointer slices (storage_ptr_slice) and its fixed transfer pool had nothing left to guard. What
+// the pool still gave, a bound on the bytes in flight, a device keeps with a [`TransferBudget`].
 
-use crate::buffer_allocator::BufferAllocator as PoolBufferAllocator;
-use std::borrow::Borrow;
-use std::marker::PhantomData;
-use std::ops::{Bound, Range, RangeBounds};
+use event_listener::{Event, EventListener};
+use fuchsia_sync::Mutex;
+use futures::FutureExt as _;
+use std::alloc::Layout;
+use std::future::Future;
+use std::ops::{Deref, DerefMut, RangeBounds};
+use std::pin::Pin;
+use std::ptr::NonNull;
 use std::slice::SliceIndex;
-use storage_ptr_slice::{MutPtrByteSlice, PtrByteSlice};
-
-pub use crate::buffer_allocator::{BufferFuture, TryAllocateBuffer};
-
-/// An entity capable of reclaiming a memory buffer range when dropped.
-pub trait BufferAllocator: Send + Sync + std::fmt::Debug + 'static {
-    /// Frees or reclaims the specified memory range.
-    fn free_buffer(&self, range: Range<usize>);
-
-    /// Returns true if buffers produced by this allocator are trusted (unshared).
-    fn is_trusted(&self) -> bool {
-        false
-    }
-}
+use std::task::{Context, Poll};
 
 pub(super) fn round_down<T>(value: T, granularity: T) -> T
 where
@@ -39,731 +36,385 @@ where
     round_down(value + granularity - T::one(), granularity)
 }
 
-// Returns a range within a range.
-// For example, subrange(100..200, 20..30) = 120..130.
-fn subrange<R: RangeBounds<usize>>(source: &Range<usize>, bounds: &R) -> Range<usize> {
-    let subrange = (match bounds.start_bound() {
-        Bound::Included(&s) => source.start + s,
-        Bound::Excluded(&s) => source.start + s + 1,
-        Bound::Unbounded => source.start,
-    })..(match bounds.end_bound() {
-        Bound::Included(&e) => source.start + e + 1,
-        Bound::Excluded(&e) => source.start + e,
-        Bound::Unbounded => source.end,
-    });
-    assert!(subrange.end <= source.end);
-    subrange
-}
+/// The most a buffer is aligned to: a page, as the guest kernel's allocator aligns no further
+/// (`cladefs_rt_alloc`), and as the host's `O_DIRECT` and the guest's DMA need no more.
+const MAX_ALIGN: usize = 4096;
 
-fn split_range(range: &Range<usize>, mid: usize) -> (Range<usize>, Range<usize>) {
-    let l = range.end - range.start;
-    let base = range.start;
-    (base..base + mid, base + mid..base + l)
-}
-
-/// Buffer is a read-write buffer that can be used for I/O with the block device. They are created
-/// by a BufferAllocator, and automatically deallocate themselves when they go out of scope.
-///
-/// Most usage will be on the unowned BufferRef and MutableBufferRef types, since these types are
-/// used for Device::read and Device::write.
-///
-/// Buffers are always block-aligned (both in offset and length), but unaligned slices can be made
-/// with the reference types. That said, the Device trait requires aligned BufferRef and
-/// MutableBufferRef objects, so alignment must be restored by the time a device read/write is
-/// requested.
-///
-/// For example, when writing an unaligned amount of data to the device, generally two Buffers
-/// would need to be involved; the input Buffer could be used to write everything up to the last
-/// block, and a second single-block alignment Buffer would be used to read-modify-update the last
-/// block.
-use std::sync::Arc;
-
-#[derive(Debug)]
-pub struct BufferImpl<'a, H: Borrow<A>, A: ?Sized + BufferAllocator> {
-    slice: MutPtrByteSlice<'a>,
-    range: Range<usize>,
-    pub(super) allocator: H,
-    _phantom: PhantomData<fn() -> &'a A>,
-}
-
-pub type Buffer<'a> = BufferImpl<'a, &'a PoolBufferAllocator, PoolBufferAllocator>;
-pub type OwnedBuffer = BufferImpl<'static, Arc<dyn BufferAllocator>, dyn BufferAllocator>;
-
-// Alias for the traits which need to be satisfied for `subslice` and friends.
-// This trait is automatically satisfied for most typical uses (a..b, a.., ..b, ..).
+/// A range of a slice's, as `[T]::get` takes them.
 pub trait SliceRange: Clone + RangeBounds<usize> + SliceIndex<[u8], Output = [u8]> {}
 impl<T> SliceRange for T where T: Clone + RangeBounds<usize> + SliceIndex<[u8], Output = [u8]> {}
 
-impl<'a, H: Borrow<A>, A: ?Sized + BufferAllocator> BufferImpl<'a, H, A> {
-    pub(super) fn new(slice: MutPtrByteSlice<'a>, range: Range<usize>, allocator: H) -> Self {
-        assert_eq!(slice.len(), range.end - range.start);
-        Self { slice, range, allocator, _phantom: PhantomData }
-    }
 
-    /// Takes a read-only reference to this buffer.
-    pub fn as_ref(&self) -> BufferRef<'_> {
-        self.subslice(..)
-    }
-
-    /// Takes a read-only reference to this buffer over `range` (which must be within the size of
-    /// the buffer).
-    pub fn subslice<R: SliceRange>(&self, range: R) -> BufferRef<'_> {
-        let new_range = subrange(&self.range, &range);
-        let relative_range =
-            (new_range.start - self.range.start)..(new_range.end - self.range.start);
-        let slice = self.slice.as_ptr_slice().subslice(relative_range);
-        BufferRef {
-            slice,
-            start: new_range.start,
-            end: new_range.end,
-            trusted: self.allocator.borrow().is_trusted(),
-        }
-    }
-
-    /// Takes a read-write reference to this buffer.
-    pub fn as_mut(&mut self) -> MutableBufferRef<'_> {
-        self.subslice_mut(..)
-    }
-
-    /// Returns an `io::Write` adapter for this buffer.
-    pub fn writer(&mut self) -> storage_ptr_slice::Writer<'_> {
-        self.slice.reborrow().writer()
-    }
-
-    /// Takes a read-write reference to this buffer over `range` (which must be within the size of
-    /// the buffer).
-    pub fn subslice_mut<R: SliceRange>(&mut self, range: R) -> MutableBufferRef<'_> {
-        let new_range = subrange(&self.range, &range);
-        let relative_range =
-            (new_range.start - self.range.start)..(new_range.end - self.range.start);
-        let slice = self.slice.reborrow().subslice_mut(relative_range);
-        MutableBufferRef { slice, range: new_range, trusted: self.allocator.borrow().is_trusted() }
-    }
-
-    /// Returns the buffer's capacity.
-    pub fn len(&self) -> usize {
-        self.range.end - self.range.start
-    }
-
-    /// Returns a reference to the underlying data if the buffer is trusted.
-    /// Returns None if the buffer is untrusted (shared with the driver).
-    pub fn try_as_slice(&self) -> Option<&[u8]> {
-        if self.allocator.borrow().is_trusted() {
-            // SAFETY: The buffer is trusted (not shared), so no concurrent mutation can occur.
-            Some(unsafe { std::slice::from_raw_parts(self.slice.as_ptr(), self.len()) })
-        } else {
-            None
-        }
-    }
-
-    /// Returns a mutable reference to the underlying data if the buffer is trusted.
-    /// Returns None if the buffer is untrusted (shared with the driver).
-    pub fn try_as_mut_slice(&mut self) -> Option<&mut [u8]> {
-        if self.allocator.borrow().is_trusted() {
-            // SAFETY: The buffer is trusted (not shared), so no concurrent mutation can occur.
-            Some(unsafe { std::slice::from_raw_parts_mut(self.slice.as_mut_ptr(), self.len()) })
-        } else {
-            None
-        }
-    }
-
-    /// Copies the contents of this buffer into `dest`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `dest.len() != self.len()`.
-    pub fn copy_to_slice(&self, dest: &mut [u8]) {
-        self.slice.as_ptr_slice().copy_to_slice(dest);
-    }
-
-    /// Copies the contents of `src` into this buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `src.len() != self.len()`.
-    pub fn copy_from_slice(&mut self, src: &[u8]) {
-        self.slice.copy_from_ptr_slice(src.into());
-    }
-
-    /// Copies the contents of `src` buffer into this buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `src.len() != self.len()`.
-    pub fn copy_from_buffer(&mut self, src: BufferRef<'_>) {
-        self.as_mut().copy_from_buffer(src);
-    }
-
-    /// Fills the buffer with `val`.
-    pub fn fill(&mut self, val: u8) {
-        self.slice.fill(val);
-    }
-
-    /// Returns the range in the underlying BufferSource that this buffer covers.
-    pub fn range(&self) -> Range<usize> {
-        self.range.clone()
-    }
-
-    /// Returns a reference to the allocator.
-    pub fn allocator(&self) -> &A {
-        self.allocator.borrow()
-    }
-
-    /// Returns the buffer's contents as a Vec.
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.as_ref().to_vec()
-    }
-
-    /// Appends the buffer's contents to `vec`.
-    pub fn append_to(&self, vec: &mut Vec<u8>) {
-        self.as_ref().append_to(vec)
-    }
-
-    /// Returns a raw pointer to the buffer's contents.
-    pub fn as_ptr(&self) -> *const u8 {
-        self.slice.as_ptr()
-    }
-
-    /// Returns a mutable raw pointer to the buffer's contents.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.slice.as_mut_ptr()
-    }
-
-    /// Returns a read-only pointer slice over the buffer.
-    pub fn as_ptr_slice(&self) -> PtrByteSlice<'_> {
-        self.slice.as_ptr_slice()
-    }
-
-    /// Returns a mutable pointer slice over the buffer.
-    pub fn as_mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
-        self.slice.reborrow()
-    }
-}
-
-impl<'a, H: Borrow<A>, A: ?Sized + BufferAllocator> Drop for BufferImpl<'a, H, A> {
-    fn drop(&mut self) {
-        self.allocator.borrow().free_buffer(self.range.clone());
-    }
-}
-
-/// BufferRef is an unowned, read-only view over a Buffer.
-#[derive(Clone, Copy, Debug)]
-pub struct BufferRef<'a> {
-    slice: PtrByteSlice<'a>,
-    start: usize, // Not range so that we get Copy.
-    end: usize,
-    trusted: bool,
-}
-
-impl<'a> BufferRef<'a> {
-    /// Returns the buffer's capacity.
-    pub fn len(&self) -> usize {
-        self.end - self.start
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.end == self.start
-    }
-
-    /// Returns a reference to the underlying data if the buffer is trusted.
-    /// Returns None if the buffer is untrusted (shared with the driver).
-    pub fn try_as_slice(&self) -> Option<&[u8]> {
-        if self.trusted {
-            // SAFETY: The buffer is trusted (not shared), so no concurrent mutation can occur.
-            Some(unsafe { std::slice::from_raw_parts(self.slice.as_ptr(), self.len()) })
-        } else {
-            None
-        }
-    }
-
-    /// Slices and consumes this reference. See Buffer::subslice.
-    pub fn subslice<R: SliceRange>(&self, range: R) -> BufferRef<'_> {
-        let new_range = subrange(&self.range(), &range);
-        let relative_range = (new_range.start - self.start)..(new_range.end - self.start);
-        let slice = self.slice.subslice(relative_range);
-        BufferRef { slice, start: new_range.start, end: new_range.end, trusted: self.trusted }
-    }
-
-    /// Splits at `mid` (included in the right child), yielding two BufferRefs.
-    pub fn split_at(&self, mid: usize) -> (BufferRef<'a>, BufferRef<'a>) {
-        let ranges = split_range(&self.range(), mid);
-        let (left_slice, right_slice) = self.slice.split_at(mid);
-        (
-            BufferRef {
-                slice: left_slice,
-                start: ranges.0.start,
-                end: ranges.0.end,
-                trusted: self.trusted,
-            },
-            BufferRef {
-                slice: right_slice,
-                start: ranges.1.start,
-                end: ranges.1.end,
-                trusted: self.trusted,
-            },
-        )
-    }
-
-    /// Returns an iterator over byte chunks of up to `chunk_size` bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `chunk_size` is 0.
-    pub fn chunks(self, chunk_size: usize) -> Chunks<'a> {
-        Chunks { inner: self.slice.chunks(chunk_size), start: self.start, trusted: self.trusted }
-    }
-
-    /// Returns the range in the underlying BufferSource that this BufferRef covers.
-    pub fn range(&self) -> Range<usize> {
-        self.start..self.end
-    }
-
-    /// Copies the contents of this buffer into `dest`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `dest.len() != self.len()`.
-    pub fn copy_to_slice(&self, dest: &mut [u8]) {
-        self.slice.copy_to_slice(dest);
-    }
-
-    /// Returns the buffer's contents as a Vec.
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.slice.to_vec()
-    }
-
-    /// Appends the buffer's contents to `vec`.
-    pub fn append_to(&self, vec: &mut Vec<u8>) {
-        self.slice.append_to(vec);
-    }
-
-    /// Returns a raw pointer to the buffer's contents.
-    pub fn as_ptr(&self) -> *const u8 {
-        self.slice.as_ptr()
-    }
-
-    /// Returns a read-only pointer slice over the buffer.
-    pub fn as_ptr_slice(&self) -> PtrByteSlice<'a> {
-        self.slice
-    }
-}
-
-/// MutableBufferRef is an unowned, read-write view of a Buffer.
+/// A device's bound on the bytes of its buffers alive at once: an allocation waits while the
+/// others hold too many, as one of Fuchsia's transfer pool waited for room, so that I/O in flight
+/// can't take memory without bound (the guest kernel's 16 MiB). One larger than the whole budget is
+/// let through once no other buffer is alive, rather than never.
 #[derive(Debug)]
-pub struct MutableBufferRef<'a> {
-    slice: MutPtrByteSlice<'a>,
-    range: Range<usize>,
-    trusted: bool,
+pub struct TransferBudget {
+    block_size: usize,
+    limit: usize,
+    used: Mutex<usize>,
+    freed: Event,
 }
 
-impl<'a> MutableBufferRef<'a> {
-    /// Returns the buffer's capacity.
-    pub fn len(&self) -> usize {
-        self.range.end - self.range.start
+impl TransferBudget {
+    /// A budget of `limit` bytes of buffers aligned to `block_size`, a power of two.
+    pub fn new(block_size: usize, limit: usize) -> Self {
+        assert!(block_size.is_power_of_two(), "a block size of {block_size}");
+        Self { block_size, limit, used: Mutex::new(0), freed: Event::new() }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.range.end == self.range.start
+    /// The device's block size, which buffers' sizes round up to.
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 
-    /// Returns a read-only view of the buffer.
+    /// The bytes of the buffers alive.
+    pub fn used(&self) -> usize {
+        *self.used.lock()
+    }
+
+    /// A buffer of `size` bytes, read as zeros, once the budget has room for it.
+    pub fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
+        BufferFuture { budget: self, size, listener: None }
+    }
+
+    /// A buffer of `size` bytes, or what to wait on before asking again.
+    fn try_allocate(&self, size: usize) -> Result<Buffer<'_>, EventListener> {
+        let charged = round_up(size.max(1), self.block_size);
+        {
+            let mut used = self.used.lock();
+            if *used != 0 && *used + charged > self.limit {
+                return Err(self.freed.listen());
+            }
+            *used += charged;
+        }
+        let bytes = AlignedBytes::zeroed(charged, self.block_size.min(MAX_ALIGN));
+        Ok(Buffer { bytes, len: size, charged, budget: self })
+    }
+
+    fn free(&self, charged: usize) {
+        *self.used.lock() -= charged;
+        self.freed.notify(usize::MAX);
+    }
+}
+
+/// A future which resolves to a buffer once its device's [`TransferBudget`] has room for it.
+#[must_use = "futures do nothing unless polled"]
+pub struct BufferFuture<'a> {
+    budget: &'a TransferBudget,
+    size: usize,
+    listener: Option<EventListener>,
+}
+
+impl<'a> Future for BufferFuture<'a> {
+    type Output = Buffer<'a>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Buffer<'a>> {
+        loop {
+            if let Some(listener) = self.listener.as_mut() {
+                futures::ready!(listener.poll_unpin(context));
+                self.listener = None;
+            }
+            match self.budget.try_allocate(self.size) {
+                Ok(buffer) => return Poll::Ready(buffer),
+                Err(listener) => self.listener = Some(listener),
+            }
+        }
+    }
+}
+
+/// Zeroed memory of the heap's, aligned.
+struct AlignedBytes {
+    ptr: NonNull<u8>,
+    layout: Layout,
+}
+
+// SAFETY: The memory is the value's alone, as a `Box<[u8]>`'s is.
+unsafe impl Send for AlignedBytes {}
+// SAFETY: As above: shared, it is only read.
+unsafe impl Sync for AlignedBytes {}
+
+impl AlignedBytes {
+    fn zeroed(size: usize, align: usize) -> Self {
+        let layout = Layout::from_size_align(size, align).expect("a buffer's layout");
+        assert!(layout.size() > 0);
+        // SAFETY: The layout is of more than no bytes.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
+        Self { ptr, layout }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `ptr` is valid for `layout.size()` bytes, initialized (zeroed at first), and
+        // borrowed with `self`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.layout.size()) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: As `as_slice`, borrowed exclusively with `self`.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.layout.size()) }
+    }
+}
+
+impl Drop for AlignedBytes {
+    fn drop(&mut self) {
+        // SAFETY: What `zeroed` allocated, with the same layout, which nothing borrows now.
+        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+    }
+}
+
+/// A buffer for I/O with a device: its own memory, block-aligned, which reads as zeros at first.
+/// It counts against its device's [`TransferBudget`] until dropped.
+pub struct Buffer<'a> {
+    bytes: AlignedBytes,
+    len: usize,
+    charged: usize,
+    budget: &'a TransferBudget,
+}
+
+impl std::fmt::Debug for Buffer<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffer").field("len", &self.len).finish()
+    }
+}
+
+impl Drop for Buffer<'_> {
+    fn drop(&mut self) {
+        self.budget.free(self.charged);
+    }
+}
+
+impl Deref for Buffer<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes.as_slice()[..self.len]
+    }
+}
+
+impl DerefMut for Buffer<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes.as_mut_slice()[..self.len]
+    }
+}
+
+impl<'a> Buffer<'a> {
+    /// The whole buffer, read-only.
     pub fn as_ref(&self) -> BufferRef<'_> {
-        BufferRef {
-            slice: self.slice.as_ptr_slice(),
-            start: self.range.start,
-            end: self.range.end,
-            trusted: self.trusted,
-        }
+        BufferRef(self)
     }
 
-    /// Consumes this reference and returns a read-only view.
-    pub fn into_ref(self) -> BufferRef<'a> {
-        BufferRef {
-            slice: self.slice.into(),
-            start: self.range.start,
-            end: self.range.end,
-            trusted: self.trusted,
-        }
+    /// The whole buffer.
+    pub fn as_mut(&mut self) -> MutableBufferRef<'_> {
+        MutableBufferRef(self)
     }
 
-    /// Returns a reference to the underlying data if the buffer is trusted.
-    /// Returns None if the buffer is untrusted (shared with the driver).
-    pub fn try_as_slice(&self) -> Option<&[u8]> {
-        if self.trusted {
-            // SAFETY: The buffer is trusted (not shared), so no concurrent mutation can occur.
-            Some(unsafe { std::slice::from_raw_parts(self.slice.as_ptr(), self.len()) })
-        } else {
-            None
-        }
-    }
-
-    /// Returns a mutable reference to the underlying data if the buffer is trusted.
-    /// Returns None if the buffer is untrusted (shared with the driver).
-    pub fn try_as_mut_slice(&mut self) -> Option<&mut [u8]> {
-        if self.trusted {
-            // SAFETY: The buffer is trusted (not shared), so no concurrent mutation can occur.
-            Some(unsafe { std::slice::from_raw_parts_mut(self.slice.as_mut_ptr(), self.len()) })
-        } else {
-            None
-        }
-    }
-
-    /// Reborrows this reference with a lesser lifetime. This mirrors the usual borrowing semantics
-    /// (i.e. the borrow ends when the new reference goes out of scope), and exists so that a
-    /// MutableBufferRef can be subsliced without consuming it.
-    ///
-    /// For example:
-    ///    let mut buf: MutableBufferRef<'_> = ...;
-    ///    {
-    ///        let sub = buf.reborrow().subslice_mut(a..b);
-    ///    }
-    pub fn reborrow(&mut self) -> MutableBufferRef<'_> {
-        MutableBufferRef {
-            slice: self.slice.reborrow(),
-            range: self.range.clone(),
-            trusted: self.trusted,
-        }
-    }
-
-    /// Returns an `io::Write` adapter for this buffer.
-    pub fn writer(&mut self) -> storage_ptr_slice::Writer<'_> {
-        self.slice.reborrow().writer()
-    }
-
-    /// Slices this reference. See Buffer::subslice.
+    /// The bytes of `range`, read-only.
     pub fn subslice<R: SliceRange>(&self, range: R) -> BufferRef<'_> {
-        let new_range = subrange(&self.range, &range);
-        let relative_range =
-            (new_range.start - self.range.start)..(new_range.end - self.range.start);
-        let slice = self.slice.as_ptr_slice().subslice(relative_range);
-        BufferRef { slice, start: new_range.start, end: new_range.end, trusted: self.trusted }
+        BufferRef(&self[range])
     }
 
-    /// Slices and consumes this reference. See Buffer::subslice_mut.
-    pub fn subslice_mut<R: SliceRange>(mut self, range: R) -> MutableBufferRef<'a> {
-        let new_range = subrange(&self.range, &range);
-        let relative_range =
-            (new_range.start - self.range.start)..(new_range.end - self.range.start);
-        self.slice = self.slice.subslice_mut(relative_range);
-        self.range = new_range;
+    /// The bytes of `range`.
+    pub fn subslice_mut<R: SliceRange>(&mut self, range: R) -> MutableBufferRef<'_> {
+        MutableBufferRef(&mut self[range])
+    }
+
+    /// The buffer's bytes.
+    pub fn as_slice(&self) -> &[u8] {
         self
     }
 
-    /// Splits at `mid` (included in the right child), yielding two BufferRefs.
-    pub fn split_at(&self, mid: usize) -> (BufferRef<'_>, BufferRef<'_>) {
-        let ranges = split_range(&self.range, mid);
-        let (left_slice, right_slice) = self.slice.as_ptr_slice().split_at(mid);
-        (
-            BufferRef {
-                slice: left_slice,
-                start: ranges.0.start,
-                end: ranges.0.end,
-                trusted: self.trusted,
-            },
-            BufferRef {
-                slice: right_slice,
-                start: ranges.1.start,
-                end: ranges.1.end,
-                trusted: self.trusted,
-            },
-        )
+    /// The buffer's bytes.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self
     }
 
-    /// Consumes the reference and splits it at `mid` (included in the right child), yielding two
-    /// MutableBufferRefs.
-    pub fn split_at_mut(self, mid: usize) -> (MutableBufferRef<'a>, MutableBufferRef<'a>) {
-        let ranges = split_range(&self.range, mid);
-        let (left_slice, right_slice) = self.slice.split_at_mut(mid);
-        (
-            MutableBufferRef { slice: left_slice, range: ranges.0, trusted: self.trusted },
-            MutableBufferRef { slice: right_slice, range: ranges.1, trusted: self.trusted },
-        )
-    }
-
-    /// Returns the range in the underlying BufferSource that this MutableBufferRef covers.
-    pub fn range(&self) -> Range<usize> {
-        self.range.clone()
-    }
-
-    /// Copies the contents of this buffer into `dest`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `dest.len() != self.len()`.
+    /// Copies the buffer into the start of `dest`, which is at least as long.
     pub fn copy_to_slice(&self, dest: &mut [u8]) {
-        self.slice.copy_to_slice(dest);
+        dest[..self.len].copy_from_slice(self);
     }
 
-    /// Copies the contents of `src` into this buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `src.len() != self.len()`.
-    pub fn copy_from_slice(&mut self, src: &[u8]) {
-        self.slice.copy_from_ptr_slice(src.into());
-    }
-
-    /// Copies the contents of `src` buffer into this buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `src.len() != self.len()`.
+    /// Copies `src`, as long as the buffer, into it.
     pub fn copy_from_buffer(&mut self, src: BufferRef<'_>) {
-        self.slice.copy_from_ptr_slice(src.as_ptr_slice());
+        self.copy_from_slice(&src);
     }
 
-    /// Fills the buffer with `val`.
-    pub fn fill(&mut self, val: u8) {
-        self.slice.fill(val);
-    }
-
-    /// Returns the buffer's contents as a Vec.
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.slice.to_vec()
-    }
-
-    /// Appends the buffer's contents to `vec`.
-    pub fn append_to(&self, vec: &mut Vec<u8>) {
-        self.slice.append_to(vec);
-    }
-
-    /// Returns a raw pointer to the buffer's contents.
-    pub fn as_ptr(&self) -> *const u8 {
-        self.slice.as_ptr()
-    }
-
-    /// Returns a mutable raw pointer to the buffer's contents.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.slice.as_mut_ptr()
-    }
-
-    /// Returns a read-only pointer slice over the buffer.
-    pub fn as_ptr_slice(&self) -> PtrByteSlice<'_> {
-        self.slice.as_ptr_slice()
-    }
-
-    /// Returns a mutable pointer slice over the buffer.
-    pub fn as_mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
-        self.slice.reborrow()
-    }
-
-    /// Returns an iterator over mutable byte chunks of up to `chunk_size` bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `chunk_size` is 0.
-    pub fn chunks_mut(self, chunk_size: usize) -> ChunksMut<'a> {
-        ChunksMut {
-            inner: self.slice.into_chunks_mut(chunk_size),
-            start: self.range.start,
-            trusted: self.trusted,
-        }
-    }
-
-    /// Consumes this reference and returns a mutable pointer slice.
-    pub fn into_mut_ptr_slice(self) -> MutPtrByteSlice<'a> {
-        self.slice
+    /// The budget the buffer counts against.
+    pub fn budget(&self) -> &'a TransferBudget {
+        self.budget
     }
 }
 
-/// An iterator over slice chunks of a `BufferRef`.
+/// A read-only view of a buffer's bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct BufferRef<'a>(&'a [u8]);
+
+impl<'a> From<&'a [u8]> for BufferRef<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl Deref for BufferRef<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.0
+    }
+}
+
+impl<'a> BufferRef<'a> {
+    /// The view's bytes, for as long as the buffer is borrowed.
+    pub fn as_slice(&self) -> &'a [u8] {
+        self.0
+    }
+
+    /// The bytes of `range`.
+    pub fn subslice<R: SliceRange>(&self, range: R) -> BufferRef<'a> {
+        BufferRef(&self.0[range])
+    }
+
+    /// The bytes before `mid`, and those from it.
+    pub fn split_at(&self, mid: usize) -> (BufferRef<'a>, BufferRef<'a>) {
+        let (left, right) = self.0.split_at(mid);
+        (BufferRef(left), BufferRef(right))
+    }
+
+    /// The view in chunks of `chunk_size` bytes, the last perhaps shorter.
+    pub fn chunks(self, chunk_size: usize) -> impl ExactSizeIterator<Item = BufferRef<'a>> {
+        self.0.chunks(chunk_size).map(BufferRef)
+    }
+
+    /// Copies the view into the start of `dest`, which is at least as long.
+    pub fn copy_to_slice(&self, dest: &mut [u8]) {
+        dest[..self.0.len()].copy_from_slice(self.0);
+    }
+
+}
+
+/// A view of a buffer's bytes.
 #[derive(Debug)]
-pub struct Chunks<'a> {
-    inner: storage_ptr_slice::Chunks<'a>,
-    start: usize,
-    trusted: bool,
-}
+pub struct MutableBufferRef<'a>(&'a mut [u8]);
 
-impl<'a> Iterator for Chunks<'a> {
-    type Item = BufferRef<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let slice = self.inner.next()?;
-        let len = slice.len();
-        let start = self.start;
-        self.start += len;
-        Some(BufferRef { slice, start, end: start + len, trusted: self.trusted })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+impl<'a> From<&'a mut [u8]> for MutableBufferRef<'a> {
+    fn from(bytes: &'a mut [u8]) -> Self {
+        Self(bytes)
     }
 }
 
-impl ExactSizeIterator for Chunks<'_> {
-    fn len(&self) -> usize {
-        self.inner.len()
+impl Deref for MutableBufferRef<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.0
     }
 }
 
-impl std::iter::FusedIterator for Chunks<'_> {}
-
-/// An iterator over mutable slice chunks of a `MutableBufferRef`.
-#[derive(Debug)]
-pub struct ChunksMut<'a> {
-    inner: storage_ptr_slice::ChunksMut<'a>,
-    start: usize,
-    trusted: bool,
-}
-
-impl<'a> Iterator for ChunksMut<'a> {
-    type Item = MutableBufferRef<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let slice = self.inner.next()?;
-        let len = slice.len();
-        let start = self.start;
-        self.start += len;
-        Some(MutableBufferRef { slice, range: start..start + len, trusted: self.trusted })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+impl DerefMut for MutableBufferRef<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.0
     }
 }
 
-impl ExactSizeIterator for ChunksMut<'_> {
-    fn len(&self) -> usize {
-        self.inner.len()
+impl<'a> MutableBufferRef<'a> {
+    /// The view, read-only.
+    pub fn as_ref(&self) -> BufferRef<'_> {
+        BufferRef(self.0)
+    }
+
+    /// The view, read-only, for as long as the buffer is borrowed.
+    pub fn into_ref(self) -> BufferRef<'a> {
+        BufferRef(self.0)
+    }
+
+    /// The view, borrowed again.
+    pub fn reborrow(&mut self) -> MutableBufferRef<'_> {
+        MutableBufferRef(self.0)
+    }
+
+    /// The view's bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0
+    }
+
+    /// The view's bytes.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.0
+    }
+
+    /// The view's bytes, for as long as the buffer is borrowed.
+    pub fn into_mut_slice(self) -> &'a mut [u8] {
+        self.0
+    }
+
+    /// The bytes of `range`, read-only.
+    pub fn subslice<R: SliceRange>(&self, range: R) -> BufferRef<'_> {
+        BufferRef(&self.0[range])
+    }
+
+    /// The bytes of `range`.
+    pub fn subslice_mut<R: SliceRange>(self, range: R) -> MutableBufferRef<'a> {
+        MutableBufferRef(&mut self.0[range])
+    }
+
+    /// The bytes before `mid`, and those from it, read-only.
+    pub fn split_at(&self, mid: usize) -> (BufferRef<'_>, BufferRef<'_>) {
+        let (left, right) = self.0.split_at(mid);
+        (BufferRef(left), BufferRef(right))
+    }
+
+    /// The bytes before `mid`, and those from it.
+    pub fn split_at_mut(self, mid: usize) -> (MutableBufferRef<'a>, MutableBufferRef<'a>) {
+        let (left, right) = self.0.split_at_mut(mid);
+        (MutableBufferRef(left), MutableBufferRef(right))
+    }
+
+    /// The view in chunks of `chunk_size` bytes, the last perhaps shorter.
+    pub fn chunks_mut(
+        self,
+        chunk_size: usize,
+    ) -> impl ExactSizeIterator<Item = MutableBufferRef<'a>> {
+        self.0.chunks_mut(chunk_size).map(MutableBufferRef)
+    }
+
+    /// Copies the view into the start of `dest`, which is at least as long.
+    pub fn copy_to_slice(&self, dest: &mut [u8]) {
+        dest[..self.0.len()].copy_from_slice(self.0);
+    }
+
+    /// Copies `src`, as long as the view, into it.
+    pub fn copy_from_buffer(&mut self, src: BufferRef<'_>) {
+        self.0.copy_from_slice(&src);
     }
 }
-
-impl std::iter::FusedIterator for ChunksMut<'_> {}
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer_allocator::{BufferAllocator, BufferSource};
+    use super::TransferBudget;
+    use futures::FutureExt as _;
 
-    #[test]
-    fn test_buffer_refs_are_send_and_sync() {
-        fn check<'a>() {
-            fn assert_send_sync<T: Send + Sync>() {}
-            assert_send_sync::<super::BufferRef<'a>>();
-            assert_send_sync::<super::MutableBufferRef<'a>>();
-        }
-        check();
-    }
-
+    /// An allocation past the budget waits for a buffer to go, and one larger than the whole
+    /// budget gets through once it is alone: the interleavings a device's transfers rely on.
     #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_chunks() {
-        let source = BufferSource::new(1024 * 1024);
-        let allocator = BufferAllocator::new(512, source);
-        let mut buf = allocator.allocate_buffer(1000).await;
-        let init_data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        buf.as_mut().copy_from_slice(&init_data);
+    async fn allocations_wait_for_room_in_the_budget() {
+        let budget = TransferBudget::new(512, 2048);
+        let first = budget.allocate_buffer(1500).await;
+        assert_eq!((first.len(), budget.used()), (1500, 1536));
+        assert!(first.as_ptr().align_offset(512) == 0 && first.iter().all(|&b| b == 0));
 
-        let bref = buf.as_ref();
-        let chunks: Vec<_> = bref.chunks(300).collect();
-        assert_eq!(chunks.len(), 4);
-        assert_eq!(chunks[0].len(), 300);
-        assert_eq!(chunks[1].len(), 300);
-        assert_eq!(chunks[2].len(), 300);
-        assert_eq!(chunks[3].len(), 100);
+        let mut second = Box::pin(budget.allocate_buffer(1024));
+        assert!((&mut second).now_or_never().is_none(), "allocated past the budget");
+        drop(first);
+        let second = second.await;
+        assert_eq!(budget.used(), 1024);
 
-        let mut data = vec![0u8; 300];
-        chunks[0].copy_to_slice(&mut data);
-        assert_eq!(data, (0..300).map(|i| (i % 256) as u8).collect::<Vec<u8>>());
-
-        let mut data_last = vec![0u8; 100];
-        chunks[3].copy_to_slice(&mut data_last);
-        assert_eq!(data_last, (900..1000).map(|i| (i % 256) as u8).collect::<Vec<u8>>());
-
-        // Test exact multiple
-        let bref_exact = buf.subslice(0..600);
-        let chunks_exact: Vec<_> = bref_exact.chunks(200).collect();
-        assert_eq!(chunks_exact.len(), 3);
-        assert_eq!(chunks_exact.iter().map(|c| c.len()).collect::<Vec<_>>(), vec![200, 200, 200]);
-
-        // Test empty buffer
-        let bref_empty = buf.subslice(0..0);
-        assert_eq!(bref_empty.chunks(100).count(), 0);
-        assert_eq!(bref_empty.chunks(100).len(), 0);
-
-        // Test chunk larger than buffer
-        let chunks_large: Vec<_> = bref.chunks(2000).collect();
-        assert_eq!(chunks_large.len(), 1);
-        assert_eq!(chunks_large[0].len(), 1000);
-
-        // Test ExactSizeIterator and size_hint
-        let mut iter = bref.chunks(300);
-        assert_eq!(iter.len(), 4);
-        assert_eq!(iter.size_hint(), (4, Some(4)));
-        assert_eq!(iter.next().unwrap().len(), 300);
-        assert_eq!(iter.len(), 3);
-        assert_eq!(iter.size_hint(), (3, Some(3)));
-        assert_eq!(iter.next().unwrap().len(), 300);
-        assert_eq!(iter.len(), 2);
-        assert_eq!(iter.size_hint(), (2, Some(2)));
-        assert_eq!(iter.next().unwrap().len(), 300);
-        assert_eq!(iter.len(), 1);
-        assert_eq!(iter.size_hint(), (1, Some(1)));
-        assert_eq!(iter.next().unwrap().len(), 100);
-        assert_eq!(iter.len(), 0);
-        assert_eq!(iter.size_hint(), (0, Some(0)));
-        assert!(iter.next().is_none());
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_chunks_mut() {
-        let source = BufferSource::new(1024 * 1024);
-        let allocator = BufferAllocator::new(512, source);
-        let mut buf = allocator.allocate_buffer(1000).await;
-
-        for (i, mut chunk) in buf.as_mut().chunks_mut(300).enumerate() {
-            chunk.fill(i as u8 + 1);
-        }
-
-        let mut data = vec![0u8; 1000];
-        buf.copy_to_slice(&mut data);
-        assert_eq!(&data[0..300], &[1u8; 300]);
-        assert_eq!(&data[300..600], &[2u8; 300]);
-        assert_eq!(&data[600..900], &[3u8; 300]);
-        assert_eq!(&data[900..1000], &[4u8; 100]);
-
-        // Test exact multiple
-        let mut buf_exact = allocator.allocate_buffer(600).await;
-        for (i, mut chunk) in buf_exact.as_mut().chunks_mut(200).enumerate() {
-            chunk.fill((i + 10) as u8);
-        }
-        let mut data_exact = vec![0u8; 600];
-        buf_exact.copy_to_slice(&mut data_exact);
-        assert_eq!(&data_exact[0..200], &[10u8; 200]);
-        assert_eq!(&data_exact[200..400], &[11u8; 200]);
-        assert_eq!(&data_exact[400..600], &[12u8; 200]);
-
-        // Test empty buffer
-        let mut buf_empty = allocator.allocate_buffer(512).await;
-        let empty_ref = buf_empty.subslice_mut(0..0);
-        assert_eq!(empty_ref.chunks_mut(100).count(), 0);
-
-        // Test ExactSizeIterator on chunks_mut
-        let mut buf_exact_iter = allocator.allocate_buffer(1000).await;
-        let mut iter = buf_exact_iter.as_mut().chunks_mut(300);
-        assert_eq!(iter.len(), 4);
-        assert_eq!(iter.size_hint(), (4, Some(4)));
-        let mut c1 = iter.next().unwrap();
-        c1.fill(0x11);
-        assert_eq!(iter.len(), 3);
-        assert_eq!(iter.size_hint(), (3, Some(3)));
-        let mut c2 = iter.next().unwrap();
-        c2.fill(0x22);
-        assert_eq!(iter.len(), 2);
-        assert_eq!(iter.size_hint(), (2, Some(2)));
-        let mut c3 = iter.next().unwrap();
-        c3.fill(0x33);
-        assert_eq!(iter.len(), 1);
-        assert_eq!(iter.size_hint(), (1, Some(1)));
-        let mut c4 = iter.next().unwrap();
-        c4.fill(0x44);
-        assert_eq!(iter.len(), 0);
-        assert_eq!(iter.size_hint(), (0, Some(0)));
-        assert!(iter.next().is_none());
-
-        let mut data_iter = vec![0u8; 1000];
-        buf_exact_iter.copy_to_slice(&mut data_iter);
-        assert_eq!(&data_iter[0..300], &[0x11; 300]);
-        assert_eq!(&data_iter[300..600], &[0x22; 300]);
-        assert_eq!(&data_iter[600..900], &[0x33; 300]);
-        assert_eq!(&data_iter[900..1000], &[0x44; 100]);
+        let mut whole = Box::pin(budget.allocate_buffer(4096));
+        assert!((&mut whole).now_or_never().is_none(), "allocated past the budget");
+        drop(second);
+        let whole = whole.await;
+        assert_eq!((whole.len(), budget.used()), (4096, 4096));
+        drop(whole);
+        assert_eq!(budget.used(), 0);
     }
 }

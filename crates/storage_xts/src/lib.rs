@@ -10,7 +10,6 @@ use cipher::{
     BlockCipherEncClosure, BlockSizeUser,
 };
 use static_assertions::assert_cfg;
-use storage_ptr_slice::{MutPtrByteSlice, PtrByteSlice};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // This assumes little-endianness which is likely to always be the case.
@@ -49,16 +48,15 @@ fn assert_dcz_block_size_is_64() {
 /// Conforms to IEEE 1619-2007.
 pub struct XtsProcessor<'a, 'b> {
     tweak: Tweak,
-    src: PtrByteSlice<'a>,
-    dst: MutPtrByteSlice<'b>,
+    src: &'a [u8],
+    dst: &'b mut [u8],
 }
 
 /// To be used with encrypt|decrypt_with_backend for in-place operation.
 /// Conforms to IEEE 1619-2007.
 pub struct XtsInPlaceProcessor<'a> {
     tweak: Tweak,
-    src: PtrByteSlice<'a>,
-    dst: MutPtrByteSlice<'a>,
+    buf: &'a mut [u8],
 }
 
 fn xts_encrypt_chunk<B: BlockCipherEncBackend<BlockSize = U16>>(
@@ -100,17 +98,21 @@ fn xts_decrypt_chunk<B: BlockCipherDecBackend<BlockSize = U16>>(
 /// lines zeroed ("DC ZVA") before their first block is written, on ARM64, as upstream did, so
 /// that they are not fetched from RAM only to be overwritten. In place, `src` and `dst` alias:
 /// each group of blocks is read whole before any of it is written.
-fn xts_buffer<N: ArraySize>(
-    src: PtrByteSlice<'_>,
-    mut dst: MutPtrByteSlice<'_>,
+/// SAFETY: `src` must be valid for reads of `len` bytes and 16-byte aligned; `dst` must be valid
+/// for writes of `len` bytes and 16-byte aligned; `src` and `dst` may either be disjoint or exact
+/// aliases (`src == dst`), and `len` must be a multiple of 16.
+unsafe fn xts_buffer<N: ArraySize>(
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
     tweak: &mut Tweak,
     zero_lines: bool,
     par: impl Fn(&mut Array<Array<u8, U16>, N>),
     one: impl Fn(u128, &Tweak) -> u128,
 ) {
-    debug_assert_eq!(src.len(), dst.len());
-    debug_assert!(src.as_ptr().cast::<u128>().is_aligned());
-    debug_assert!(dst.as_ptr().cast::<u128>().is_aligned());
+    debug_assert_eq!(len % size_of::<u128>(), 0);
+    debug_assert!(src.cast::<u128>().is_aligned());
+    debug_assert!(dst.cast::<u128>().is_aligned());
     #[cfg(not(target_arch = "aarch64"))]
     let _ = zero_lines;
     let zero_line = |block: *mut u128| {
@@ -125,70 +127,93 @@ fn xts_buffer<N: ArraySize>(
         let _ = block;
     };
 
-    let groups = src.len() / size_of::<u128>() / N::USIZE;
-    let mut src_chunks = src.iter_as::<u128>();
-    let mut dst_chunks = dst.iter_as_mut::<u128>();
+    let total_blocks = len / size_of::<u128>();
+    let groups = total_blocks / N::USIZE;
+    let src_u128 = src.cast::<u128>();
+    let dst_u128 = dst.cast::<u128>();
     let mut blocks = Array::<Array<u8, U16>, N>::default();
     let mut tweaks = Array::<u128, N>::default();
+    let mut idx = 0usize;
     for _ in 0..groups {
-        for (block, block_tweak) in blocks.iter_mut().zip(tweaks.iter_mut()) {
-            let val = src_chunks.next().expect("a whole group");
+        for (k, (block, block_tweak)) in blocks.iter_mut().zip(tweaks.iter_mut()).enumerate() {
+            // SAFETY: `idx + k < total_blocks`, and `src_u128` is valid and 16-byte aligned.
+            let val = unsafe { src_u128.add(idx + k).read() };
             *block_tweak = tweak.0;
             *block = Array((val ^ tweak.0).to_le_bytes());
             tweak.update();
         }
         par(&mut blocks);
-        for (block, block_tweak) in blocks.iter().zip(tweaks.iter()) {
-            let out = dst_chunks.next().expect("as long as src");
-            zero_line(out.as_ptr());
-            out.write(u128::from_le_bytes(block.0) ^ block_tweak);
+        for (k, (block, block_tweak)) in blocks.iter().zip(tweaks.iter()).enumerate() {
+            // SAFETY: `idx + k < total_blocks`, and `dst_u128` is valid and 16-byte aligned.
+            unsafe {
+                let out = dst_u128.add(idx + k);
+                zero_line(out);
+                out.write(u128::from_le_bytes(block.0) ^ block_tweak);
+            }
         }
+        idx += N::USIZE;
     }
-    for (val, out) in src_chunks.zip(dst_chunks) {
-        zero_line(out.as_ptr());
-        out.write(one(val, tweak));
+    while idx < total_blocks {
+        // SAFETY: `idx < total_blocks`, and pointers are valid and 16-byte aligned.
+        unsafe {
+            let val = src_u128.add(idx).read();
+            let out = dst_u128.add(idx);
+            zero_line(out);
+            out.write(one(val, tweak));
+        }
         tweak.update();
+        idx += 1;
     }
 }
 
-fn xts_encrypt_buffer<B: BlockCipherEncBackend<BlockSize = U16>>(
+unsafe fn xts_encrypt_buffer<B: BlockCipherEncBackend<BlockSize = U16>>(
     backend: &B,
-    src: PtrByteSlice<'_>,
-    dst: MutPtrByteSlice<'_>,
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
     tweak: &mut Tweak,
     zero_lines: bool,
 ) {
-    xts_buffer::<B::ParBlocksSize>(
-        src,
-        dst,
-        tweak,
-        zero_lines,
-        |blocks| backend.encrypt_par_blocks(InOut::from(blocks)),
-        |val, tweak| xts_encrypt_chunk(backend, val, tweak),
-    );
+    // SAFETY: forwarded from caller.
+    unsafe {
+        xts_buffer::<B::ParBlocksSize>(
+            src,
+            dst,
+            len,
+            tweak,
+            zero_lines,
+            |blocks| backend.encrypt_par_blocks(InOut::from(blocks)),
+            |val, tweak| xts_encrypt_chunk(backend, val, tweak),
+        );
+    }
 }
 
-fn xts_decrypt_buffer<B: BlockCipherDecBackend<BlockSize = U16>>(
+unsafe fn xts_decrypt_buffer<B: BlockCipherDecBackend<BlockSize = U16>>(
     backend: &B,
-    src: PtrByteSlice<'_>,
-    dst: MutPtrByteSlice<'_>,
+    src: *const u8,
+    dst: *mut u8,
+    len: usize,
     tweak: &mut Tweak,
     zero_lines: bool,
 ) {
-    xts_buffer::<B::ParBlocksSize>(
-        src,
-        dst,
-        tweak,
-        zero_lines,
-        |blocks| backend.decrypt_par_blocks(InOut::from(blocks)),
-        |val, tweak| xts_decrypt_chunk(backend, val, tweak),
-    );
+    // SAFETY: forwarded from caller.
+    unsafe {
+        xts_buffer::<B::ParBlocksSize>(
+            src,
+            dst,
+            len,
+            tweak,
+            zero_lines,
+            |blocks| backend.decrypt_par_blocks(InOut::from(blocks)),
+            |val, tweak| xts_decrypt_chunk(backend, val, tweak),
+        );
+    }
 }
 
 impl<'a, 'b> XtsProcessor<'a, 'b> {
     /// `tweak` should be encrypted. `src` and `dst` must have the same length, be 64-byte
     /// aligned, and length must be a multiple of 64 bytes.
-    pub fn new(tweak: Tweak, src: PtrByteSlice<'a>, dst: MutPtrByteSlice<'b>) -> Self {
+    pub fn new(tweak: Tweak, src: &'a [u8], dst: &'b mut [u8]) -> Self {
         assert_eq!(src.len(), dst.len(), "Source and destination lengths must match");
         assert_eq!(src.len() % 64, 0, "length must be a multiple of 64 bytes");
         assert_eq!(src.as_ptr() as usize % 64, 0, "src must be 64-byte aligned");
@@ -206,29 +231,29 @@ impl BlockSizeUser for XtsProcessor<'_, '_> {
 impl BlockCipherEncClosure for XtsProcessor<'_, '_> {
     fn call<B: BlockCipherEncBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
         let Self { mut tweak, src, dst } = self;
-        xts_encrypt_buffer(backend, src, dst, &mut tweak, true);
+        // SAFETY: `src` and `dst` are valid, 64-byte aligned slices of equal length % 64 == 0.
+        unsafe {
+            xts_encrypt_buffer(backend, src.as_ptr(), dst.as_mut_ptr(), src.len(), &mut tweak, true);
+        }
     }
 }
 
 impl BlockCipherDecClosure for XtsProcessor<'_, '_> {
     fn call<B: BlockCipherDecBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
         let Self { mut tweak, src, dst } = self;
-        xts_decrypt_buffer(backend, src, dst, &mut tweak, true);
+        // SAFETY: `src` and `dst` are valid, 64-byte aligned slices of equal length % 64 == 0.
+        unsafe {
+            xts_decrypt_buffer(backend, src.as_ptr(), dst.as_mut_ptr(), src.len(), &mut tweak, true);
+        }
     }
 }
 
 impl<'a> XtsInPlaceProcessor<'a> {
     /// Creates an XtsInPlaceProcessor for in-place operation on a single buffer.
-    pub fn new(tweak: Tweak, buf: MutPtrByteSlice<'a>) -> Self {
+    pub fn new(tweak: Tweak, buf: &'a mut [u8]) -> Self {
         assert!(buf.as_ptr().cast::<u128>().is_aligned(), "buf must be 16 byte aligned");
-        let len = buf.len();
-        let ptr = buf.as_ptr_slice().as_ptr();
-        // SAFETY: We are creating a PtrByteSlice that aliases with the MutPtrByteSlice.
-        // This is safe because PtrByteSlice only allows read access, and we control the
-        // execution in `call` to ensure we don't violate safety (we read a block, then write it,
-        // so we don't have concurrent read/write on the same sub-block).
-        let src = unsafe { PtrByteSlice::new(std::ptr::slice_from_raw_parts(ptr, len)) };
-        Self { tweak, src, dst: buf }
+        assert_eq!(buf.len() % size_of::<u128>(), 0, "buf length must be a multiple of 16 bytes");
+        Self { tweak, buf }
     }
 }
 
@@ -238,15 +263,50 @@ impl BlockSizeUser for XtsInPlaceProcessor<'_> {
 
 impl BlockCipherEncClosure for XtsInPlaceProcessor<'_> {
     fn call<B: BlockCipherEncBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
-        let Self { mut tweak, src, dst } = self;
-        xts_encrypt_buffer(backend, src, dst, &mut tweak, false);
+        let Self { mut tweak, buf } = self;
+        let len = buf.len();
+        let ptr = buf.as_mut_ptr();
+        // SAFETY: `ptr` is valid for `len` bytes, 16-byte aligned, and `len % 16 == 0`.
+        unsafe {
+            xts_encrypt_buffer(backend, ptr.cast_const(), ptr, len, &mut tweak, false);
+        }
     }
 }
 
 impl BlockCipherDecClosure for XtsInPlaceProcessor<'_> {
     fn call<B: BlockCipherDecBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
-        let Self { mut tweak, src, dst } = self;
-        xts_decrypt_buffer(backend, src, dst, &mut tweak, false);
+        let Self { mut tweak, buf } = self;
+        let len = buf.len();
+        let ptr = buf.as_mut_ptr();
+        // SAFETY: `ptr` is valid for `len` bytes, 16-byte aligned, and `len % 16 == 0`.
+        unsafe {
+            xts_decrypt_buffer(backend, ptr.cast_const(), ptr, len, &mut tweak, false);
+        }
+    }
+}
+
+enum CtsBuf<'a, 'b> {
+    Separate { src: &'a [u8], dst: &'b mut [u8] },
+    InPlace(&'a mut [u8]),
+}
+
+impl CtsBuf<'_, '_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Separate { src, .. } => src.len(),
+            Self::InPlace(buf) => buf.len(),
+        }
+    }
+
+    fn ptrs(&mut self) -> (*const u8, *mut u8, usize) {
+        match self {
+            Self::Separate { src, dst } => (src.as_ptr(), dst.as_mut_ptr(), src.len()),
+            Self::InPlace(buf) => {
+                let len = buf.len();
+                let ptr = buf.as_mut_ptr();
+                (ptr.cast_const(), ptr, len)
+            }
+        }
     }
 }
 
@@ -255,8 +315,7 @@ impl BlockCipherDecClosure for XtsInPlaceProcessor<'_> {
 /// in-place operation. Conforms to IEEE 1619-2007.
 pub struct XtsCtsProcessor<'a, 'b> {
     tweak: Tweak,
-    src: PtrByteSlice<'a>,
-    dst: MutPtrByteSlice<'b>,
+    buf: CtsBuf<'a, 'b>,
 }
 
 impl BlockSizeUser for XtsCtsProcessor<'_, '_> {
@@ -266,93 +325,98 @@ impl BlockSizeUser for XtsCtsProcessor<'_, '_> {
 impl<'a, 'b> XtsCtsProcessor<'a, 'b> {
     /// `tweak` should be encrypted. `src` and `dst` must have the same length and be 16 byte
     /// aligned.
-    pub fn new(tweak: Tweak, src: PtrByteSlice<'a>, dst: MutPtrByteSlice<'b>) -> Self {
+    pub fn new(tweak: Tweak, src: &'a [u8], dst: &'b mut [u8]) -> Self {
         assert_eq!(src.len(), dst.len(), "Source and destination lengths must match");
         assert!(src.len() >= size_of::<u128>());
         assert!(src.as_ptr().cast::<u128>().is_aligned(), "src must be 16 byte aligned");
         assert!(dst.as_ptr().cast::<u128>().is_aligned(), "dst must be 16 byte aligned");
-        Self { tweak, src, dst }
+        Self { tweak, buf: CtsBuf::Separate { src, dst } }
     }
 
     /// Creates an XtsCtsProcessor for in-place operation on a single buffer.
-    pub fn new_in_place(tweak: Tweak, buf: MutPtrByteSlice<'a>) -> XtsCtsProcessor<'a, 'a> {
+    pub fn new_in_place(tweak: Tweak, buf: &'a mut [u8]) -> XtsCtsProcessor<'a, 'a> {
         assert!(buf.len() >= size_of::<u128>());
         assert!(buf.as_ptr().cast::<u128>().is_aligned(), "buf must be 16 byte aligned");
-        let len = buf.len();
-        let ptr = buf.as_ptr_slice().as_ptr();
-        // SAFETY: We are creating a PtrByteSlice that aliases with the MutPtrByteSlice.
-        // This is safe because PtrByteSlice only allows read access, and we control the
-        // execution in `call` to ensure we don't violate safety.
-        let src = unsafe { PtrByteSlice::new(std::ptr::slice_from_raw_parts(ptr, len)) };
-        XtsCtsProcessor { tweak, src, dst: buf }
+        XtsCtsProcessor { tweak, buf: CtsBuf::InPlace(buf) }
     }
 }
 
 impl BlockCipherEncClosure for XtsCtsProcessor<'_, '_> {
     fn call<B: BlockCipherEncBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
-        let Self { mut tweak, src, mut dst } = self;
-        let len = src.len();
+        let Self { mut tweak, mut buf } = self;
+        let len = buf.len();
         let base_size = len & (!0x0F);
 
         // Fast path for non-CTS (len is an exact multiple of 16):
         if len == base_size {
-            xts_encrypt_buffer(backend, src, dst, &mut tweak, false);
+            let (src, dst, len) = buf.ptrs();
+            // SAFETY: validated in constructor (`len % 16 == 0`, 16-byte aligned).
+            unsafe { xts_encrypt_buffer(backend, src, dst, len, &mut tweak, false) };
             return;
         }
 
         // All but the last two blocks are normal.
         if base_size > 16 {
-            let src_base = src.subslice(0..(base_size - 16));
-            let dst_base = dst.subslice_mut(0..(base_size - 16));
-            xts_encrypt_buffer(backend, src_base, dst_base, &mut tweak, false);
+            let (src, dst, _) = buf.ptrs();
+            // SAFETY: `base_size - 16` is a multiple of 16 and <= `len`, pointers 16-byte aligned.
+            unsafe { xts_encrypt_buffer(backend, src, dst, base_size - 16, &mut tweak, false) };
         }
 
         let last_full_block_range = (base_size - 16)..base_size;
-        let last_full_block =
-            src.subslice(last_full_block_range.clone()).read().expect("Size validated above");
-        let intermediate_ciphertext = xts_encrypt_chunk(backend, last_full_block, &tweak);
-
         let extra = len & 0x0F;
+
+        let (src_last, src_tail): ([u8; 16], [u8; 16]) = {
+            let src_slice: &[u8] = match &buf {
+                CtsBuf::Separate { src, .. } => src,
+                CtsBuf::InPlace(b) => b,
+            };
+            let last: [u8; 16] =
+                src_slice[last_full_block_range.clone()].try_into().expect("Size validated above");
+            let mut tail = [0u8; 16];
+            tail[..extra].copy_from_slice(&src_slice[base_size..len]);
+            (last, tail)
+        };
+
+        let last_full_block = u128::from_le_bytes(src_last);
+        let intermediate_ciphertext = xts_encrypt_chunk(backend, last_full_block, &tweak);
         let intermediate_cipher_bytes = intermediate_ciphertext.to_le_bytes();
 
-        // Construct combined block: start with intermediate_cipher_bytes at the end and put the
-        // remaining plaintext at the beginning. Must read from second-to-last before writing to
-        // last block to support in-place operation.
         let mut combined_block_bytes = intermediate_cipher_bytes;
-        src.subslice(base_size..len).copy_to_slice(&mut combined_block_bytes[0..extra]);
-
-        // Write the first ciphertext bytes into the partial block slot.
-        dst.subslice_mut(base_size..len).copy_from_slice(&intermediate_cipher_bytes[0..extra]);
+        combined_block_bytes[0..extra].copy_from_slice(&src_tail[..extra]);
 
         tweak.update();
 
         let combined_block = u128::from_le_bytes(combined_block_bytes);
         let full_ciphertext = xts_encrypt_chunk(backend, combined_block, &tweak);
 
-        // Write the encrypted full ciphertext block into the second-to-last block slot.
-        dst.subslice_mut(last_full_block_range)
-            .write(full_ciphertext)
-            .expect("Size validated above");
+        let dst_slice: &mut [u8] = match &mut buf {
+            CtsBuf::Separate { dst, .. } => dst,
+            CtsBuf::InPlace(b) => b,
+        };
+        dst_slice[base_size..len].copy_from_slice(&intermediate_cipher_bytes[0..extra]);
+        dst_slice[last_full_block_range].copy_from_slice(&full_ciphertext.to_le_bytes());
     }
 }
 
 impl BlockCipherDecClosure for XtsCtsProcessor<'_, '_> {
     fn call<B: BlockCipherDecBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
-        let Self { mut tweak, src, mut dst } = self;
-        let len = src.len();
+        let Self { mut tweak, mut buf } = self;
+        let len = buf.len();
         let base_size = len & (!0x0F);
 
         // Fast path for non-CTS (len is an exact multiple of 16):
         if len == base_size {
-            xts_decrypt_buffer(backend, src, dst, &mut tweak, false);
+            let (src, dst, len) = buf.ptrs();
+            // SAFETY: validated in constructor (`len % 16 == 0`, 16-byte aligned).
+            unsafe { xts_decrypt_buffer(backend, src, dst, len, &mut tweak, false) };
             return;
         }
 
         // All but the last two blocks are normal.
         if base_size > 16 {
-            let src_base = src.subslice(0..(base_size - 16));
-            let dst_base = dst.subslice_mut(0..(base_size - 16));
-            xts_decrypt_buffer(backend, src_base, dst_base, &mut tweak, false);
+            let (src, dst, _) = buf.ptrs();
+            // SAFETY: `base_size - 16` is a multiple of 16 and <= `len`, pointers 16-byte aligned.
+            unsafe { xts_decrypt_buffer(backend, src, dst, base_size - 16, &mut tweak, false) };
         }
 
         let last_full_block_tweak = tweak;
@@ -361,24 +425,34 @@ impl BlockCipherDecClosure for XtsCtsProcessor<'_, '_> {
         tweak.update();
         let extra = len & 0x0F;
 
-        // Decrypt full ciphertext block at last_full_block_range using updated tweak:
-        let full_ciphertext =
-            src.subslice(last_full_block_range.clone()).read().expect("Size validated above");
+        let (src_last, src_tail): ([u8; 16], [u8; 16]) = {
+            let src_slice: &[u8] = match &buf {
+                CtsBuf::Separate { src, .. } => src,
+                CtsBuf::InPlace(b) => b,
+            };
+            let last: [u8; 16] =
+                src_slice[last_full_block_range.clone()].try_into().expect("Size validated above");
+            let mut tail = [0u8; 16];
+            tail[..extra].copy_from_slice(&src_slice[base_size..len]);
+            (last, tail)
+        };
+
+        let full_ciphertext = u128::from_le_bytes(src_last);
         let decrypted_combined_block = xts_decrypt_chunk(backend, full_ciphertext, &tweak);
         let combined_bytes = decrypted_combined_block.to_le_bytes();
 
-        // Reconstruct intermediate ciphertext for second-to-last block. Start with combined_bytes
-        // at the end and put the input ciphertext at the beginning. Must read from second-to-last
-        // before writing to last block to support in-place operation.
         let mut intermediate_bytes = combined_bytes;
-        src.subslice(base_size..len).copy_to_slice(&mut intermediate_bytes[0..extra]);
-
-        // Write recovered partial plaintext.
-        dst.subslice_mut(base_size..len).copy_from_slice(&combined_bytes[0..extra]);
+        intermediate_bytes[0..extra].copy_from_slice(&src_tail[..extra]);
 
         let last_block_ciphertext = u128::from_le_bytes(intermediate_bytes);
         let val = xts_decrypt_chunk(backend, last_block_ciphertext, &last_full_block_tweak);
-        dst.subslice_mut(last_full_block_range).write(val).expect("Size validated above");
+
+        let dst_slice: &mut [u8] = match &mut buf {
+            CtsBuf::Separate { dst, .. } => dst,
+            CtsBuf::InPlace(b) => b,
+        };
+        dst_slice[base_size..len].copy_from_slice(&combined_bytes[0..extra]);
+        dst_slice[last_full_block_range].copy_from_slice(&val.to_le_bytes());
     }
 }
 
@@ -645,8 +719,8 @@ mod tests {
         }
         let mut ciphertext: Aligned64<Blocks<4>> = Aligned64(Default::default());
 
-        let src = PtrByteSlice::from(plaintext.0.as_bytes());
-        let dst = MutPtrByteSlice::from(ciphertext.0.as_mut_bytes());
+        let src = plaintext.0.as_bytes();
+        let dst = ciphertext.0.as_mut_bytes();
 
         let tweak_val = 0x123456789abcdef0123456789abcdef0u128;
         let tweak = Tweak::new(tweak_val);
@@ -698,7 +772,7 @@ mod tests {
         let p0 = u128::from_le_bytes(buf.as_bytes()[0..16].try_into().unwrap());
         let p1 = u128::from_le_bytes(buf.as_bytes()[16..32].try_into().unwrap());
 
-        let slice = MutPtrByteSlice::from(buf.as_mut_bytes());
+        let slice = buf.as_mut_bytes();
         let processor = XtsInPlaceProcessor::new(tweak, slice);
         let cipher = MockCipher::new(key);
 
@@ -749,9 +823,7 @@ mod tests {
 
         // Encrypt out-of-place
         {
-            let src = PtrByteSlice::from(plaintext);
-            let dst = MutPtrByteSlice::from(&mut ciphertext_bytes[..len]);
-            let processor = XtsCtsProcessor::new(tweak, src, dst);
+            let processor = XtsCtsProcessor::new(tweak, plaintext, &mut ciphertext_bytes[..len]);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
@@ -770,9 +842,7 @@ mod tests {
 
         // Decrypt out-of-place
         {
-            let src = PtrByteSlice::from(ciphertext);
-            let dst = MutPtrByteSlice::from(&mut decrypted_bytes[..len]);
-            let processor = XtsCtsProcessor::new(tweak, src, dst);
+            let processor = XtsCtsProcessor::new(tweak, ciphertext, &mut decrypted_bytes[..len]);
             BlockCipherDecClosure::call(processor, &cipher);
         }
 
@@ -800,8 +870,7 @@ mod tests {
 
         // Encrypt in-place
         {
-            let slice = MutPtrByteSlice::from(&mut buf_bytes[..LEN]);
-            let processor = XtsCtsProcessor::new_in_place(tweak, slice);
+            let processor = XtsCtsProcessor::new_in_place(tweak, &mut buf_bytes[..LEN]);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
@@ -822,8 +891,7 @@ mod tests {
 
         // Decrypt in-place
         {
-            let slice = MutPtrByteSlice::from(&mut buf_bytes[..LEN]);
-            let processor = XtsCtsProcessor::new_in_place(tweak, slice);
+            let processor = XtsCtsProcessor::new_in_place(tweak, &mut buf_bytes[..LEN]);
             BlockCipherDecClosure::call(processor, &cipher);
         }
 
@@ -865,17 +933,13 @@ mod tests {
 
         // Normal XTS encryption
         {
-            let src = PtrByteSlice::from(&*plaintext_bytes);
-            let dst = MutPtrByteSlice::from(&mut *normal_cts_bytes);
-            let processor = XtsProcessor::new(tweak, src, dst);
+            let processor = XtsProcessor::new(tweak, &*plaintext_bytes, &mut *normal_cts_bytes);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
         // CTS XTS encryption
         {
-            let src = PtrByteSlice::from(&*plaintext_bytes);
-            let dst = MutPtrByteSlice::from(&mut *cts_bytes);
-            let processor = XtsCtsProcessor::new(tweak, src, dst);
+            let processor = XtsCtsProcessor::new(tweak, &*plaintext_bytes, &mut *cts_bytes);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
@@ -907,7 +971,7 @@ mod tests {
 
         // In-place XTS encryption
         {
-            let mut slice = MutPtrByteSlice::from(&mut normal_cts_vec.as_mut_bytes()[..len]);
+            let slice = &mut normal_cts_vec.as_mut_bytes()[..len];
             slice.copy_from_slice(plaintext);
             let processor = XtsInPlaceProcessor::new(tweak, slice);
             BlockCipherEncClosure::call(processor, &cipher);
@@ -915,9 +979,8 @@ mod tests {
 
         // CTS XTS encryption
         {
-            let src = PtrByteSlice::from(plaintext);
-            let dst = MutPtrByteSlice::from(&mut cts_vec.as_mut_bytes()[..len]);
-            let processor = XtsCtsProcessor::new(tweak, src, dst);
+            let processor =
+                XtsCtsProcessor::new(tweak, plaintext, &mut cts_vec.as_mut_bytes()[..len]);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
@@ -952,17 +1015,13 @@ mod tests {
 
         // Encrypt with tweak1
         {
-            let src = PtrByteSlice::from(plaintext);
-            let dst = MutPtrByteSlice::from(&mut ciphertext1_bytes[..LEN]);
-            let processor = XtsCtsProcessor::new(tweak1, src, dst);
+            let processor = XtsCtsProcessor::new(tweak1, plaintext, &mut ciphertext1_bytes[..LEN]);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
         // Encrypt with tweak2
         {
-            let src = PtrByteSlice::from(plaintext);
-            let dst = MutPtrByteSlice::from(&mut ciphertext2_bytes[..LEN]);
-            let processor = XtsCtsProcessor::new(tweak2, src, dst);
+            let processor = XtsCtsProcessor::new(tweak2, plaintext, &mut ciphertext2_bytes[..LEN]);
             BlockCipherEncClosure::call(processor, &cipher);
         }
 
@@ -979,9 +1038,7 @@ mod tests {
         let tweak = Tweak::new(0);
         let src_buf = vec![0u128; 2];
         let mut dst_buf = vec![0u128; 3];
-        let src = PtrByteSlice::from(src_buf.as_bytes());
-        let dst = MutPtrByteSlice::from(dst_buf.as_mut_bytes());
-        let _ = XtsCtsProcessor::new(tweak, src, dst);
+        let _ = XtsCtsProcessor::new(tweak, src_buf.as_bytes(), dst_buf.as_mut_bytes());
     }
 
     #[test]
@@ -990,9 +1047,11 @@ mod tests {
         let tweak = Tweak::new(0);
         let src_buf = vec![0u128; 2];
         let mut dst_buf = vec![0u128; 2];
-        let src = PtrByteSlice::from(&src_buf.as_bytes()[..15]);
-        let dst = MutPtrByteSlice::from(&mut dst_buf.as_mut_bytes()[..15]);
-        let _ = XtsCtsProcessor::new(tweak, src, dst);
+        let _ = XtsCtsProcessor::new(
+            tweak,
+            &src_buf.as_bytes()[..15],
+            &mut dst_buf.as_mut_bytes()[..15],
+        );
     }
 
     #[test]
@@ -1001,9 +1060,11 @@ mod tests {
         let tweak = Tweak::new(0);
         let src_buf = vec![0u128; 3];
         let mut dst_buf = vec![0u128; 2];
-        let src = PtrByteSlice::from(&src_buf.as_bytes()[1..17]);
-        let dst = MutPtrByteSlice::from(&mut dst_buf.as_mut_bytes()[..16]);
-        let _ = XtsCtsProcessor::new(tweak, src, dst);
+        let _ = XtsCtsProcessor::new(
+            tweak,
+            &src_buf.as_bytes()[1..17],
+            &mut dst_buf.as_mut_bytes()[..16],
+        );
     }
 
     #[test]
@@ -1012,8 +1073,10 @@ mod tests {
         let tweak = Tweak::new(0);
         let src_buf = vec![0u128; 2];
         let mut dst_buf = vec![0u128; 3];
-        let src = PtrByteSlice::from(&src_buf.as_bytes()[..16]);
-        let dst = MutPtrByteSlice::from(&mut dst_buf.as_mut_bytes()[1..17]);
-        let _ = XtsCtsProcessor::new(tweak, src, dst);
+        let _ = XtsCtsProcessor::new(
+            tweak,
+            &src_buf.as_bytes()[..16],
+            &mut dst_buf.as_mut_bytes()[1..17],
+        );
     }
 }

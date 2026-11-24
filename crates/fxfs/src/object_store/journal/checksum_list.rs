@@ -6,7 +6,7 @@
 // extents of the extent store (backlog doc-4), so entries are found by extent and offset, not by
 // device offset.
 
-use crate::checksum::{Checksum, fletcher64_ptr};
+use crate::checksum::{Checksum, fletcher64};
 use crate::errors::FxfsError;
 use crate::filesystem::MAX_BLOCK_SIZE;
 use crate::range::RangeExt;
@@ -307,7 +307,7 @@ impl ChecksumList {
                         if let Some(checksums) = block.state.checksum() {
                             device.read(e.extent, offset, buf.subslice_mut(0..chunk_size)).await?;
                             let found_checksum =
-                                fletcher64_ptr(buf.subslice(0..chunk_size).as_ptr_slice(), 0);
+                                fletcher64(buf.subslice(0..chunk_size).as_slice(), 0);
                             if checksums
                                 .iter()
                                 .find(|&&checksum| checksum == found_checksum)

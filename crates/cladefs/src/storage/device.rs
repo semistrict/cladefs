@@ -28,19 +28,18 @@ use crate::{Commit, Errno, OpenCell, VolatileSlice};
 use anyhow::{Context as _, Error, ensure};
 use async_trait::async_trait;
 use std::sync::Arc;
-use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
-use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef, TransferBudget};
 use storage_device::{Device, ExtentId, NoExtent, SealedExtent, WriteFlags, WriteOptions};
 
-/// The size of the transfer buffers' memory.
-const TRANSFER_HEAP_SIZE: usize = 32 << 20;
+/// The most bytes of transfer buffers alive at once.
+const TRANSFER_BUDGET: usize = 32 << 20;
 
 /// An open cell, as a device. See the module docs.
 pub(crate) struct OpenCellDevice {
     cell: Arc<OpenCell>,
     /// The collector of the image's own bucket in this process, if it keeps its cell in one.
     collecting: Option<Arc<Collecting>>,
-    allocator: BufferAllocator,
+    allocator: TransferBudget,
     block_count: u64,
 }
 
@@ -49,8 +48,7 @@ impl OpenCellDevice {
     pub fn new(cell: Arc<OpenCell>, collecting: Option<Arc<Collecting>>) -> Result<Self, Error> {
         let block_size = OpenCell::BLOCK_SIZE;
         let capacity = cell.info().map_err(Error::new).context("the cell's capacity")?.capacity;
-        let allocator =
-            BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
+        let allocator = TransferBudget::new(block_size as usize, TRANSFER_BUDGET);
         Ok(Self { cell, collecting, allocator, block_count: capacity / block_size as u64 })
     }
 
@@ -97,7 +95,7 @@ impl Device for OpenCellDevice {
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        let bytes = buffer.try_as_mut_slice().expect("a buffer of the heap's");
+        let bytes = buffer.as_mut_slice();
         match self.cell.read_uncached(extent, offset, bytes).await {
             Ok(()) => Ok(()),
             Err(Errno::ENOENT) => Err(NoExtent(extent).into()),
@@ -120,7 +118,7 @@ impl Device for OpenCellDevice {
         if flags.contains(WriteFlags::PRE_BARRIER) {
             self.commit(None, Commit::Ordered).await?;
         }
-        let bytes = buffer.try_as_slice().expect("a buffer of the heap's");
+        let bytes = buffer.as_slice();
         let written = match self.cell.write(extent, offset, &[VolatileSlice::from(bytes)]).await {
             Ok(()) => Ok(()),
             Err(Errno::EPERM) => Err(Error::new(SealedExtent(extent)).context(Errno::EPERM)),

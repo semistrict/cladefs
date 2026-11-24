@@ -49,10 +49,6 @@ pub const MAX_FILE_SIZE: u64 = i64::MAX as u64;
 // The maximum number of transactions that can be in-flight at any time.
 const MAX_IN_FLIGHT_TRANSACTIONS: u64 = 4;
 
-/// How often to clean the transfer buffer.
-// TODO(https://fxbug.dev/489725256) Configure the task to run when fxfs is idle.
-const CLEAN_TRANSFER_BUFFER_INTERVAL: Duration = Duration::from_secs(60);
-
 /// Holds information on an Fxfs Filesystem
 pub struct Info {
     pub total_bytes: u64,
@@ -511,8 +507,6 @@ impl FxFilesystemBuilder {
         if !read_only && !image_builder_mode {
             // Start the background tasks.
             filesystem.graveyard.clone().reap_async();
-
-            filesystem.start_clean_transfer_buffer_task();
         }
 
         Ok(filesystem.into())
@@ -856,15 +850,6 @@ impl FxFilesystem {
         self.journal.check_journal_space().await
     }
 
-    fn start_clean_transfer_buffer_task(self: &Arc<Self>) {
-        let this = self.clone();
-        self.background_tasks.spawn(async move {
-            loop {
-                fasync::Timer::new(CLEAN_TRANSFER_BUFFER_INTERVAL).await;
-                this.device().clean_transfer_buffer();
-            }
-        });
-    }
 
     pub(crate) async fn reservation_for_transaction<'a>(
         self: &Arc<Self>,

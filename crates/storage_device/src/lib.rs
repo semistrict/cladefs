@@ -12,8 +12,8 @@
 // names where the filesystem starts (`Device::root`, `Device::commit_root`).
 
 //! `storage_device` provides a higher-level portable API ([`Device`]) for interacting with block
-//! devices.  This library also provides the [`Buffer`] type which is a contiguous, splittable
-//! transfer buffer allocated out of a shared pool which can be used for I/O.
+//! devices.  This library also provides the [`buffer::Buffer`] type, a block-aligned transfer
+//! buffer of the heap's, which a device's [`buffer::TransferBudget`] bounds.
 //!
 //! The two main implementations are
 //!   - [`block_device::BlockDevice`], which is backed by a [`block_client::Device`] and used on
@@ -32,7 +32,6 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 pub mod buffer;
-pub mod buffer_allocator;
 mod extent;
 
 pub use extent::{ExtentId, ExtentRange, NoExtent, OpenExtents, OtherCell, SealedExtent};
@@ -75,9 +74,6 @@ pub trait Device: Send + Sync {
     /// The actual size of the buffer will be rounded up to a block-aligned size.
     /// Blocks until enough capacity is available in the buffer.
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_>;
-
-    /// Cleans up any transfer buffers that are no longer in use.
-    fn clean_transfer_buffer(&self) {}
 
     /// Returns the block size of the device. Buffers are aligned to block-aligned chunks.
     fn block_size(&self) -> u32;

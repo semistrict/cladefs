@@ -11,8 +11,7 @@
 // (`Awkward`): its numbers start large and its floor jumps, and its requests take turns of the
 // executor to answer, in no order but what barriers keep.
 
-use crate::buffer::{BufferFuture, BufferRef, MutableBufferRef};
-use crate::buffer_allocator::{BufferAllocator, BufferSource};
+use crate::buffer::{BufferFuture, BufferRef, MutableBufferRef, TransferBudget};
 use crate::{Device, DeviceHolder, ExtentId, NoExtent, OpenExtents, OtherCell, SealedExtent};
 use crate::{WriteFlags, WriteOptions};
 use anyhow::{Error, ensure};
@@ -578,7 +577,7 @@ impl Drop for InFlight<'_> {
 
 /// A Device backed by memory.
 pub struct FakeDevice {
-    allocator: BufferAllocator,
+    allocator: TransferBudget,
     inner: Mutex<Inner>,
     /// The most bytes the extents may hold.
     capacity: u64,
@@ -613,7 +612,8 @@ pub struct FakeDevice {
     pre_barriers: Arc<AtomicU64>,
 }
 
-const TRANSFER_HEAP_SIZE: usize = 64 * 1024 * 1024;
+/// The most bytes of buffers alive at once.
+const TRANSFER_BUDGET: usize = 64 * 1024 * 1024;
 
 /// cladefs: what a write to an extent waits for first (`FakeDevice::set_write_hook`).
 type WriteHook = Box<dyn Fn(ExtentId) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -627,8 +627,7 @@ impl FakeDevice {
     }
 
     fn with_inner(inner: Inner, capacity: u64, block_size: u32) -> Self {
-        let allocator =
-            BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
+        let allocator = TransferBudget::new(block_size as usize, TRANSFER_BUDGET);
         Self {
             allocator,
             inner: Mutex::new(inner),

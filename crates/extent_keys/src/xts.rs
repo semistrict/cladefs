@@ -11,7 +11,6 @@
 use crate::{Salt, Secret};
 use aes::Aes256;
 use aes::cipher::{BlockCipherDecrypt as _, BlockCipherEncrypt as _, KeyInit as _};
-use storage_ptr_slice::MutPtrByteSlice;
 use storage_xts::{Tweak, XtsInPlaceProcessor};
 use zerocopy::IntoBytes as _;
 
@@ -100,7 +99,7 @@ impl Xts {
         }
         let mut tweak = Tweak::new(number);
         self.tweak.encrypt_block(tweak.as_mut_bytes().try_into().expect("a tweak is a block"));
-        let processor = XtsInPlaceProcessor::new(tweak, MutPtrByteSlice::from(unit));
+        let processor = XtsInPlaceProcessor::new(tweak, unit);
         match encrypt {
             true => self.data.encrypt_with_backend(processor),
             false => self.data.decrypt_with_backend(processor),

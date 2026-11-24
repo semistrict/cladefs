@@ -15,17 +15,16 @@ use crate::{Commit, VolatileSlice, VolatileSliceMut, WriteBarriers};
 use anyhow::{Context as _, Error, ensure};
 use async_trait::async_trait;
 use std::sync::Arc;
-use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
-use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef, TransferBudget};
 use storage_device::{Device, ExtentId, WriteFlags, WriteOptions};
 
-/// The size of the transfer buffers' memory.
-const TRANSFER_HEAP_SIZE: usize = 32 << 20;
+/// The most bytes of transfer buffers alive at once.
+const TRANSFER_BUDGET: usize = 32 << 20;
 
 /// A cell the daemon serves, as a device. See the module docs.
 pub struct DaemonDevice {
     client: Arc<CellClient>,
-    allocator: BufferAllocator,
+    allocator: TransferBudget,
     block_count: u64,
 }
 
@@ -34,8 +33,7 @@ impl DaemonDevice {
     pub fn new(client: Arc<CellClient>) -> Result<Self, Error> {
         let block_size = crate::host_cell::BLOCK_SIZE;
         let capacity = client.info().map_err(Error::new).context("the cell's capacity")?.capacity;
-        let allocator =
-            BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
+        let allocator = TransferBudget::new(block_size as usize, TRANSFER_BUDGET);
         Ok(Self { client, allocator, block_count: capacity / block_size as u64 })
     }
 
@@ -65,7 +63,7 @@ impl Device for DaemonDevice {
         offset: u64,
         mut buffer: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        let bytes = buffer.try_as_mut_slice().expect("a buffer of the heap's");
+        let bytes = buffer.as_mut_slice();
         let mut slices = [VolatileSliceMut::from(bytes)];
         let read = self.client.read_async(extent, offset, &mut slices).await;
         read.map_err(Error::new).with_context(|| format!("reading {extent:?} at {offset}"))
@@ -88,7 +86,7 @@ impl Device for DaemonDevice {
             after: flags.contains(WriteFlags::POST_BARRIER).then_some(Commit::Local),
             root: write_opts.root,
         };
-        let bytes = buffer.try_as_slice().expect("a buffer of the heap's");
+        let bytes = buffer.as_slice();
         let slices = [VolatileSlice::from(bytes)];
         let written = self.client.write_with_barriers_async(extent, offset, &slices, barriers);
         written.await.map_err(Error::new).with_context(|| format!("writing {extent:?} at {offset}"))

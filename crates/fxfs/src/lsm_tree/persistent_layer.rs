@@ -619,8 +619,8 @@ async fn load_seek_table(
 
     let mut seek_table = Vec::with_capacity(num_data_blocks as usize);
     let mut prev = 0;
-    for chunk in buffer.subslice(0..seek_table_size).as_ptr_slice().iter_as::<[u8; 8]>() {
-        let next = u64::from_le_bytes(chunk);
+    for chunk in buffer.subslice(0..seek_table_size).as_slice().chunks_exact(8) {
+        let next = u64::from_le_bytes(chunk.try_into().unwrap());
         // Should be in strict ascending order, otherwise something's broken, or we've gone off
         // the end and we're reading zeroes.
         if prev > next {
@@ -663,7 +663,7 @@ async fn load_bloom_filter<K: FuzzyHash>(
     }
     reads.try_collect::<()>().await?;
     Ok(Some(BloomFilterReader::read(
-        buffer.subslice(0..layer_info.bloom_filter_size_bytes).as_ptr_slice(),
+        buffer.subslice(0..layer_info.bloom_filter_size_bytes).as_slice(),
         layer_info.bloom_filter_seed,
         layer_info.bloom_filter_num_hashes,
     )?))
@@ -753,7 +753,7 @@ impl<K: FuzzyHash> LayerData<K> {
         let handle_block_size = handle.block_size();
         let mut buffer = handle.allocate_buffer(handle_block_size.get() as usize).await;
         handle.read_aligned(0, buffer.as_mut()).await.context("Failed to read first block")?;
-        let mut reader = buffer.as_ptr_slice();
+        let mut reader = buffer.as_slice();
         let version = Version::deserialize_from(&mut reader)?;
 
         ensure!(version <= LATEST_VERSION, FxfsError::InvalidVersion);
@@ -790,14 +790,14 @@ impl<K: FuzzyHash> LayerData<K> {
                 .await
                 .context("Failed to read layer info")?;
             let layer_info_len =
-                u64::from_le_bytes(buffer.subslice(bs - 8..bs).as_ptr_slice().read().unwrap());
+                u64::from_le_bytes(buffer.subslice(bs - 8..bs).as_slice().try_into().unwrap());
             // cladefs: the length is what the image says, which may be anything.
             let layer_info_offset = (layer_info_len as usize)
                 .checked_add(std::mem::size_of::<u64>())
                 .and_then(|len| bs.checked_sub(len))
                 .ok_or(FxfsError::Inconsistent)
                 .context("Invalid layer info length")?;
-            let mut reader = buffer.subslice(layer_info_offset..).as_ptr_slice();
+            let mut reader = buffer.subslice(layer_info_offset..).as_slice();
             LayerInfo::deserialize_from_version(&mut reader, version)
                 .context("Failed to deserialize LayerInfo")?
         };
@@ -2988,7 +2988,7 @@ mod tests {
         // Write valid header/footer into the underlying FakeObjectHandle so LayerData::open
         // succeeds.
         let mut wbuf = zeroed_obj.handle.allocate_buffer(zeroed_obj.slice.len()).await;
-        wbuf.as_mut_ptr_slice().copy_from_slice(&zeroed_obj.slice);
+        wbuf.as_mut_slice().copy_from_slice(&zeroed_obj.slice);
         zeroed_obj.handle.write_or_append(Some(0), wbuf.as_ref()).await.unwrap();
         drop(wbuf);
         let zeroed_layer =

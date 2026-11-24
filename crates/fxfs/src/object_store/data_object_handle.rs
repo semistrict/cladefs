@@ -1765,7 +1765,7 @@ mod tests {
             object.read_aligned((offset - align) as u64, buf.as_mut()).await.expect("read failed"),
             align + len
         );
-        assert_eq!(&buf.as_ptr_slice().subslice(align..align + len).to_vec()[..], &vec![0u8; len]);
+        assert_eq!(&buf[align..align + len], &vec![0u8; len][..]);
 
         // Unaligned offset should fail.
         assert_matches!(
@@ -1814,7 +1814,7 @@ mod tests {
                 .expect("read failed"),
             align + len
         );
-        assert_eq!(&buf.as_ptr_slice().subslice(align..align + len).to_vec()[..], &vec![0u8; len]);
+        assert_eq!(&buf[align..align + len], &vec![0u8; len][..]);
 
         // Unaligned offset should fail.
         assert_matches!(
@@ -1863,8 +1863,8 @@ mod tests {
             .await
             .expect("read failed");
         assert_eq!(
-            &buf.as_ptr_slice().subslice(align..block_size).to_vec()[..],
-            &vec![0u8; block_size - align]
+            &buf[align..block_size],
+            &vec![0u8; block_size - align][..]
         );
 
         // Reading entirely past EOF with read_aligned_unchecked fills with zeros.
@@ -1899,7 +1899,7 @@ mod tests {
         let mut expected_aligned = vec![0; TEST_OBJECT_SIZE as usize];
         expected_aligned[offset..offset + TEST_DATA.len()].copy_from_slice(TEST_DATA);
         assert_eq!(
-            &buf.as_ptr_slice().subslice(0..TEST_OBJECT_SIZE as usize).to_vec()[..],
+            &buf[0..TEST_OBJECT_SIZE as usize],
             &expected_aligned[..]
         );
         fs.close().await.expect("Close failed");
@@ -2005,20 +2005,20 @@ mod tests {
             3 * block_size
         );
         assert_eq!(
-            &buffer.as_ptr_slice().subslice(0..2 * block_size).to_vec()[..],
-            &vec![0xaf; 2 * block_size]
+            &buffer[0..2 * block_size],
+            &vec![0xaf; 2 * block_size][..]
         );
         assert_eq!(
-            &buffer.as_ptr_slice().subslice(2 * block_size..3 * block_size).to_vec()[..],
-            &vec![0; block_size]
+            &buffer[2 * block_size..3 * block_size],
+            &vec![0; block_size][..]
         );
         assert_eq!(
             object2.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
             2 * block_size
         );
         assert_eq!(
-            &buffer.as_ptr_slice().subslice(0..2 * block_size).to_vec()[..],
-            &vec![0xef; 2 * block_size]
+            &buffer[0..2 * block_size],
+            &vec![0xef; 2 * block_size][..]
         );
         fs.close().await.expect("Close failed");
     }
@@ -2191,17 +2191,15 @@ mod tests {
         let mut buf = object.allocate_buffer(1048576).await;
         assert_eq!(object.read_aligned(0, buf.as_mut()).await.expect("read failed"), buf.len());
         assert_eq!(
-            &buf.as_ptr_slice().subslice(0..TEST_DATA_OFFSET as usize).to_vec()[..],
+            &buf[0..TEST_DATA_OFFSET as usize],
             &[47; TEST_DATA_OFFSET as usize]
         );
         assert_eq!(
-            &buf.as_ptr_slice()
-                .subslice(TEST_DATA_OFFSET as usize..TEST_DATA_OFFSET as usize + TEST_DATA.len())
-                .to_vec()[..],
+            &buf[TEST_DATA_OFFSET as usize..TEST_DATA_OFFSET as usize + TEST_DATA.len()],
             TEST_DATA
         );
         assert_eq!(
-            &buf.as_ptr_slice().subslice(offset as usize..offset as usize + 2048).to_vec()[..],
+            &buf[offset as usize..offset as usize + 2048],
             &[95; 2048]
         );
     }
@@ -2719,8 +2717,8 @@ mod tests {
         let mut expected = TEST_DATA.to_vec();
         expected[3..].fill(0);
         assert_eq!(
-            &buf.as_ptr_slice().subslice(offset..offset + expected.len()).to_vec()[..],
-            &expected
+            &buf[offset..offset + expected.len()],
+            &expected[..]
         );
     }
 
@@ -3156,7 +3154,7 @@ mod tests {
                 // that same transaction.
                 if amount != 0 {
                     assert_eq!(amount, 10);
-                    assert_eq!(&buf.as_ptr_slice().subslice(0..10).to_vec()[..], &[123; 10]);
+                    assert_eq!(&buf[0..10], &[123; 10]);
                 }
             });
             writer.await;
@@ -3228,7 +3226,7 @@ mod tests {
             expected_size
         );
         assert_eq!(
-            &buf.as_ptr_slice().subslice(0..expected_size as usize).to_vec()[..],
+            &buf[0..expected_size as usize],
             vec![0u8; expected_size as usize].as_slice()
         );
         fs.close().await.expect("Close failed");
@@ -3914,14 +3912,13 @@ mod tests {
                     object.read_aligned(0, expected_buf.as_mut()).await.unwrap(),
                     expected_buf.len()
                 );
-                let mut expected_buf_slice = expected_buf.as_mut_ptr_slice();
+                let expected_buf_slice = expected_buf.as_mut_slice();
                 let mut data_slice = data.as_slice();
                 for r in &overwrite {
                     let len = r.length().unwrap() as usize;
                     let (copy_from, rest) = data_slice.split_at(len);
-                    expected_buf_slice
-                        .subslice_mut(r.start as usize..r.end as usize)
-                        .copy_from_slice(&copy_from);
+                    expected_buf_slice[r.start as usize..r.end as usize]
+                        .copy_from_slice(copy_from);
                     data_slice = rest;
                 }
 

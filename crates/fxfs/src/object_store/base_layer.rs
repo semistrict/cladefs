@@ -171,7 +171,7 @@ mod tests {
         );
         let expected: Vec<u8> =
             [0, 0xa, 0, 0xb, 0].iter().flat_map(|byte| vec![*byte; BLOCK as usize]).collect();
-        assert_eq!(buffer.as_ptr_slice().to_vec()[..5 * BLOCK as usize], expected);
+        assert_eq!(buffer.as_slice()[..5 * BLOCK as usize], expected);
 
         assert_eq!(object.read_aligned(5 * BLOCK, buffer.as_mut()).await.expect("read failed"), 0);
     }

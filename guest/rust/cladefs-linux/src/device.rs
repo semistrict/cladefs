@@ -37,8 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
-use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
-use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef, TransferBudget};
 use storage_device::{
     Device, ExtentId, NoExtent, OpenExtents, OtherCell, SealedExtent, WriteFlags, WriteOptions,
 };
@@ -131,8 +130,9 @@ const ENOSPC: c_int = 28;
 const EROFS: c_int = 30;
 const ESTALE: c_int = 116;
 
-/// The transfer buffers' memory.
-const TRANSFER_HEAP_SIZE: usize = 16 << 20;
+/// The most bytes of transfer buffers alive at once: kvmalloc's, each its own (board 10541), as
+/// many as the 16 MiB pool they were carved from before held.
+const TRANSFER_BUDGET: usize = 16 << 20;
 
 /// `struct virtio_extent_info`: little-endian.
 #[repr(C)]
@@ -204,7 +204,7 @@ pub struct ExtentDevice {
     info: ffi::Info,
     /// cladefs: how many bytes the cell holds at most, as resizing changes it (`Resizer`).
     capacity: Arc<AtomicU64>,
-    allocator: BufferAllocator,
+    allocator: TransferBudget,
     /// What Fxfs may take for open, which `sealer` seals.
     open: Arc<OpenExtents>,
     /// What seals the extents open.
@@ -485,7 +485,7 @@ impl ExtentDevice {
             device,
             info,
             capacity: Arc::default(),
-            allocator: BufferAllocator::new(block_size, BufferSource::new(TRANSFER_HEAP_SIZE)),
+            allocator: TransferBudget::new(block_size, TRANSFER_BUDGET),
             open: open.clone(),
             sealer: Sealer {
                 device,

@@ -7,7 +7,6 @@ use crate::lsm_tree::types::{FuzzyHash, MaybeContainsKey};
 use anyhow::{Error, Result, ensure};
 use bit_vec::BitVec;
 use std::marker::PhantomData;
-use storage_ptr_slice::PtrByteSlice;
 
 /// A bloom filter provides a probabilistic means of determining if a layer file *might* contain
 /// records related to a given key.
@@ -90,10 +89,10 @@ const MAX_NUM_HASHES: usize = 64;
 impl<V: FuzzyHash> BloomFilterReader<V> {
     /// Creates a BloomFilterReader by reading the serialized contents from `buf`.
     /// `seed` and `num_hashes` must match the values passed into BloomFilterWriter.
-    pub fn read(buf: PtrByteSlice<'_>, seed: u64, num_hashes: usize) -> Result<Self, Error> {
+    pub fn read(buf: &[u8], seed: u64, num_hashes: usize) -> Result<Self, Error> {
         ensure!(num_hashes <= MAX_NUM_HASHES, FxfsError::Inconsistent);
         Ok(Self {
-            data: BitVec::from_bytes(&buf.to_vec()),
+            data: BitVec::from_bytes(buf),
             seed,
             num_hashes,
             _type: PhantomData::default(),
@@ -240,7 +239,6 @@ mod tests {
     use crate::lsm_tree::bloom_filter::{BloomFilterReader, BloomFilterWriter, estimate_params};
     use crate::lsm_tree::types::MaybeContainsKey;
     use crate::object_store::allocator::{AllocatorKey, TEST_EXTENT};
-    use storage_ptr_slice::PtrByteSlice;
 
     #[test]
     fn estimated_params() {
@@ -336,7 +334,7 @@ mod tests {
                 let mut cursor = std::io::Cursor::new(&mut buf);
                 filter.write(&mut cursor).expect("write failed");
             }
-            let filter = BloomFilterReader::read(PtrByteSlice::from(&buf[..]), 0, num_hashes)
+            let filter = BloomFilterReader::read(&buf[..], 0, num_hashes)
                 .expect("read failed");
             assert_eq!(filter.maybe_contains(key), MaybeContainsKey::Maybe);
         }
@@ -359,7 +357,7 @@ mod tests {
     #[test]
     fn test_hash_count_is_bounded() {
         let buf = [0u8; 16];
-        let read = BloomFilterReader::<u64>::read(PtrByteSlice::from(&buf[..]), 0, usize::MAX);
+        let read = BloomFilterReader::<u64>::read(&buf[..], 0, usize::MAX);
         assert!(read.is_err());
     }
 

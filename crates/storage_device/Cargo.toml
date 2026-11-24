@@ -18,13 +18,8 @@ log.workspace = true
 num.workspace = true
 rand.workspace = true
 serde.workspace = true
-storage_ptr_slice.workspace = true
 # cladefs: the errors of extent.rs.
 thiserror.workspace = true
-
-# cladefs: a host's buffers, anonymous memory (buffer_allocator.rs).
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
 
 # cladefs: what the fuzz targets (crates/fxfs/fuzz) make extents of.
 [target.'cfg(fuzz)'.dependencies]
@@ -32,13 +27,10 @@ arbitrary.workspace = true
 
 [dev-dependencies]
 fuchsia-async.workspace = true
-# cladefs: what a buffer source's mapping maps, for its tests.
-libc.workspace = true
 
 # The workspace's lints.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(detect_lock_cycles)',
     'cfg(fuzz)',
     'cfg(fuzzing)',
 ] }

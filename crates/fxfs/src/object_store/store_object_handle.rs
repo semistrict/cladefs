@@ -67,12 +67,12 @@ fn apply_bitmap_zeroing(
     bitmap: &bit_vec::BitVec,
     mut buffer: MutableBufferRef<'_>,
 ) {
-    let mut buf = buffer.as_mut_ptr_slice();
+    let buf = buffer.as_mut_slice();
     debug_assert_eq!(bitmap.len() as u64 * block_size, buf.len() as u64);
     for (i, block) in bitmap.iter().enumerate() {
         if !block {
             let start = (i as u64 * block_size) as usize;
-            buf.subslice_mut(start..start + block_size.get() as usize).fill(0);
+            buf[start..start + block_size.get() as usize].fill(0);
         }
     }
 }
@@ -321,8 +321,8 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             let mut checksums = Vec::new();
             try_join!(store.device.write_with_opts(extent, extent_offset, buf, options), async {
                 let block_size = self.block_size().get() as usize;
-                for chunk in buf.as_ptr_slice().chunks(block_size) {
-                    checksums.push(crate::checksum::fletcher64_ptr(chunk, 0));
+                for chunk in buf.as_slice().chunks(block_size) {
+                    checksums.push(crate::checksum::fletcher64(chunk, 0));
                 }
                 Ok(())
             })?;
@@ -1367,9 +1367,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         for (i, chunk) in chunks.enumerate() {
             let rounded_len = self.block_size().align_up(chunk.len() as u64).unwrap();
             let mut buffer = self.store().device.allocate_buffer(rounded_len as usize).await;
-            let mut slice = buffer.as_mut_ptr_slice();
-            slice.subslice_mut(0..chunk.len()).copy_from_slice(chunk);
-            slice.subslice_mut(chunk.len()..slice.len()).fill(0);
+            let slice = buffer.as_mut_slice();
+            slice[0..chunk.len()].copy_from_slice(chunk);
+            slice[chunk.len()..].fill(0);
             self.multi_write(
                 transaction,
                 attribute_id,
@@ -1416,9 +1416,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             .transpose()?
             .unwrap_or(false);
         let mut buffer = self.store().device.allocate_buffer(rounded_len as usize).await;
-        let mut slice = buffer.as_mut_ptr_slice();
-        slice.subslice_mut(0..data.len()).copy_from_slice(data);
-        slice.subslice_mut(data.len()..slice.len()).fill(0);
+        let slice = buffer.as_mut_slice();
+        slice[0..data.len()].copy_from_slice(data);
+        slice[data.len()..].fill(0);
         self.multi_write(transaction, attribute_id, &[0..rounded_len], buffer.as_mut()).await?;
         transaction.add(
             self.store().store_object_id,
@@ -1797,7 +1797,7 @@ mod tests {
 
         // Write 8KiB at offset 0 and 8KiB at offset 16KiB, leaving a hole in between.
         let mut buf = object.allocate_buffer(8192).await;
-        buf.as_mut_ptr_slice().fill(0xaa);
+        buf.as_mut_slice().fill(0xaa);
         object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
         object.write_or_append(Some(16384), buf.as_ref()).await.expect("write failed");
 
@@ -2576,7 +2576,7 @@ mod tests {
         // Write 5 MiB of data so that reading it spans > MAX_HASH_PARTITIONS (5 > 4 partitions).
         let size = 5 * 1024 * 1024;
         let mut buf = object.allocate_buffer(size).await;
-        buf.as_mut_ptr_slice().fill(0xab);
+        buf.as_mut_slice().fill(0xab);
         object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
 
         // Flush to create persistent layers with bloom filters.
@@ -2585,6 +2585,6 @@ mod tests {
         // Read the entire 5 MiB buffer back.
         let mut read_buf = object.allocate_buffer(size).await;
         assert_eq!(object.read_aligned(0, read_buf.as_mut()).await.expect("read failed"), size);
-        assert_eq!(&read_buf.as_ptr_slice().to_vec()[..], &buf.as_ptr_slice().to_vec()[..]);
+        assert_eq!(read_buf.as_slice(), buf.as_slice());
     }
 }

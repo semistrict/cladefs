@@ -9,7 +9,6 @@ license.workspace = true
 [dependencies]
 cipher.workspace = true
 static_assertions.workspace = true
-storage_ptr_slice.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
