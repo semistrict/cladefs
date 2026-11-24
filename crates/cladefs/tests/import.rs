@@ -534,23 +534,35 @@ fn a_layer_swapped_once_hashed_is_not_applied() {
 
 /// Hotbed review 57 (board 8541): a layer's blob written in place once hashed, the file the
 /// import holds open changed under it, is refused, `EINVAL`, never applied as if it were what was
-/// hashed.
+/// hashed: a write of the same size, within the clock tick the blob was opened in, too, which
+/// leaves its size and times as they were (board 9703), as what is applied is hashed as it is
+/// read.
 #[test]
 fn a_layer_written_in_place_once_hashed_is_refused() {
     use cladefs::import::testing::import_hashed;
+    use std::os::unix::fs::FileExt as _;
     let dir = tempfile::tempdir().unwrap();
     let layout = dir.path().join("image");
     let hashed = layer(&[Entry::new("hashed", Kind::File(b"as hashed"))]).unwrap();
-    oci_layout(&layout, "sample:1", &[hashed]).unwrap();
-    // Of another size than what was hashed: a change time is a clock tick's, which a write of
-    // the same size within the tick leaves as it was (board 9703).
-    let longer = vec![b'w'; 64 << 10];
-    let written = layer(&[Entry::new("written", Kind::File(&longer))]).unwrap();
+    oci_layout(&layout, "sample:1", &[hashed.clone()]).unwrap();
+    // A byte of the file it makes flipped in place, "as hashed" applied as "As hashed": its size
+    // and times kept, as a write within the tick keeps them.
+    let at = hashed.windows(9).position(|bytes| bytes == b"as hashed").unwrap();
+    let flipped = [b'A'];
+    let (at, len) = (at as u64, hashed.len() as u64);
     block_on(async {
         let image = OciImage::open(&layout, None).unwrap();
         let fs = Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap();
         let mut importer = Importer::new(&fs);
-        let write = |path: &Path| std::fs::write(path, &written).unwrap();
+        let write = |path: &Path| {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let times = file.metadata().unwrap();
+            file.write_all_at(&flipped, at).unwrap();
+            let times = (times.modified().unwrap(), times.accessed().unwrap());
+            file.set_times(std::fs::FileTimes::new().set_modified(times.0).set_accessed(times.1))
+                .unwrap();
+            assert_eq!(file.metadata().unwrap().len(), len);
+        };
         let error = import_hashed(&image, &mut importer, write).await.expect_err("imported");
         let said = format!("{error:#}");
         assert!(said.contains("changed as it was imported"), "{said}");

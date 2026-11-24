@@ -188,7 +188,7 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 Storage protocols fail on rare interleavings, crashes and degraded networks, so cladefs is tested
 at several layers ([docs/testing.md](docs/testing.md)):
 
-- **Formal specifications:** TLA+ models (`specs/`) cover the bucket protocol, head slots,
+- **Formal specifications:** TLA+ models (`specs/`) cover the bucket protocol,
   multi-bucket mirroring, replication, ephemeral hand-over, DAX copy-on-write and the journal—each
   paired with spec mutations that TLC must reject (`make check-tla`).
 - **Deterministic simulation:** single-threaded seeded simulations test both the storage engine

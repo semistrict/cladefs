@@ -107,7 +107,7 @@ impl Allocator {
             return Ok(number);
         }
         let details = identity::Details::default();
-        let number = identity::format(bucket, &details, identity::Asked::default()).await?.number;
+        let number = identity::format(bucket, &details).await?.number;
         *self.number.lock().unwrap() = Some(number);
         Ok(number)
     }
@@ -204,12 +204,7 @@ mod tests {
     fn a_bucket_of_another_format_gives_no_id() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let other = identity::Identity {
-                format: layout::FORMAT - 1,
-                number: 3,
-                id: 1,
-                settings: Default::default(),
-            };
+            let other = identity::Identity { format: layout::FORMAT - 1, number: 3, id: 1 };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
             let refused = Allocator::new().next(&bucket).await;
             assert_eq!(refused, Err(Error::BucketFormat(layout::FORMAT - 1)));

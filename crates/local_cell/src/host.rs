@@ -13,7 +13,8 @@ use crate::layout::{CellFile, DESCRIPTION, Description};
 use anyhow::{Context as _, Error};
 use bucket_cell::cell::Kind;
 use extent_frame::segment::CellId;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Makes a new cell at `path`, which must be a directory holding no cell, as `description`
 /// describes. cladefs: its description names `bucket`, the URL of the bucket its cell is kept in,
@@ -72,10 +73,30 @@ pub fn made_host(path: &Path) -> Result<(), Error> {
     made.and_then(|()| dir.sync_dir("")).with_context(|| format!("making {} whole", path.display()))
 }
 
+node_local::node_local! {
+    /// cladefs: the cell directories that makings which failed in this process left, and failed
+    /// to remove ([`left_unmade`]), by their canonical paths (`deferral::key`).
+    static LEFT: std::sync::Mutex<HashSet<PathBuf>> = std::sync::Mutex::new(HashSet::new());
+}
+
+/// cladefs: the directory at `path`, which a making that failed left, its removal failing too,
+/// is no cell in this process, whatever it looks like on the disk ([`unmade_host`]), until it
+/// goes ([`remove_cell_dir`]): its making's last step, `UNMADE`'s removal, may have left it
+/// looking made, undurably, and its maker's caller, told the making failed, makes it again
+/// there, which a cell there refuses (board 10506). A crash of the host or the process after
+/// leaves what made it look made undurable, as a crash after any making's last step.
+pub fn left_unmade(path: &Path) {
+    LEFT.get().lock().unwrap().insert(crate::deferral::key(path));
+}
+
 /// cladefs: whether `path` is a directory a cell's making left unmade, its maker stopping part
 /// way: no cell, which deleting finishes (TASK-79.84, TASK-196). Its description, made last of
-/// its directory, is not there; or it says it was never made whole ([`LocalCell::made`]).
+/// its directory, is not there; or it says it was never made whole ([`LocalCell::made`]); or a
+/// making in this process that failed left it ([`left_unmade`]).
 pub fn unmade_host(path: &Path) -> bool {
+    if LEFT.get().lock().unwrap().contains(&crate::deferral::key(path)) {
+        return host_fs::is_dir(path);
+    }
     // cladefs: whole here, its durability deferred (board 7420).
     if crate::deferral::made_here(path) {
         return false;
@@ -178,7 +199,13 @@ pub(crate) const DELETED: &str = "store.deleted";
 pub fn remove_cell_dir(cell_dir: &Path) -> Result<(), Error> {
     // cladefs: its durability deferred no more: gone (board 7420).
     crate::deferral::forget(cell_dir);
-    crate::footprint::removing(cell_dir, || remove_cell(cell_dir))
+    let removed = crate::footprint::removing(cell_dir, || remove_cell(cell_dir));
+    // cladefs: what a failed making left gone, its last step failing or not, what is made there
+    // next is what it is.
+    if !host_fs::exists(cell_dir) {
+        LEFT.get().lock().unwrap().remove(&crate::deferral::key(cell_dir));
+    }
+    removed
 }
 
 /// cladefs: whether the directory at `path` is a cell's going ([`remove_cell_dir`]): its

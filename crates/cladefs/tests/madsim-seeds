@@ -25,3 +25,4 @@
 29      board 5748: a read of an open cell's attached bases failing (EIO) dropped the cell open, unclosed, panicking
 90      board 5748: a host journal note unread (EIO) removed as torn, its cell then noted on no host
 34      board 5748: the same open cell dropped open, in the replicated disk-faults profile
+149     board 10506: board 5668's, its store's removal failing too, the description's rename (EIO): the store, looking made, refused every take after (EEXIST) (Linux)

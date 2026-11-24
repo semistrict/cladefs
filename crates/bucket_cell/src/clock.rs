@@ -4,8 +4,7 @@
 
 //! cladefs: a bucket's clock, as a host reads it ([`crate::bucket::Bucket::now`], board 8467): the
 //! backend's, which it dates objects by ([`crate::bucket::Meta::modified`]), never the host's own.
-//! Every window measured from when an object was written (the collector's grace period,
-//! [`crate::head::UNMADE_FOR`], [`crate::head::MARKS_KEPT`], a mirror's pin going stale, read
+//! Every window measured from when an object was written (a mirror's pin going stale, read
 //! evidence's [`crate::evidence::KEPT_FOR`]) and every time a collector lease holds
 //! ([`crate::passed::CollectorLease`], board 8471) is measured by it: a host whose own clock is off
 //! the backend's, or steps, measures each as every other host does, and as the backend dates.

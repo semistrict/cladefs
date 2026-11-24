@@ -1471,10 +1471,7 @@ async fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_read
         .iter()
         .map(|(open_cell, _)| reader.memory.keys().hold(open_cell.keys().clone()))
         .collect();
-    // cladefs: its head, every slot of it (TASK-691).
-    let slots: Vec<String> = (0..bucket_cell::identity::DEFAULT_HEAD_SLOTS)
-        .map(|slot| layout::head(ours, slot))
-        .collect();
+    let slots: Vec<String> = vec![layout::head(ours)];
     let before: Vec<Vec<u8>> =
         futures::future::join_all(slots.iter().map(|key| world.object(key))).await;
 

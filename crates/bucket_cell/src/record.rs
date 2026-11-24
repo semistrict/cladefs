@@ -132,11 +132,12 @@ mod tests {
         // (board 6017, board 6020); and 25's, whose checkpoints keep no lengths of their segments'
         // data (doc-27, board 6214); and 26's, whose ephemeral cells' index entries name no
         // bucket (board 8517); and 27's, whose cells hold the collector's moves (doc-27, board
-        // 6216).
-        assert_eq!(FORMAT, 28);
+        // 6216); and 28's, whose heads are in slots, and whose buckets have settings (doc-27,
+        // board 6220).
+        assert_eq!(FORMAT, 29);
         for format in [
             1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-            27,
+            27, 28,
         ] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());

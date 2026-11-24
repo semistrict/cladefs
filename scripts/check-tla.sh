@@ -21,9 +21,6 @@
 # - specs/buckets: forks across buckets and their mirrors (doc-23, TASK-633.2): children in one
 #   bucket of a parent's versions in another, the automatic mirror a host may die in, both buckets'
 #   collectors, buckets going down;
-# - specs/head-slots: a cell's head kept in N objects, written in turn (TASK-690), as GCS takes
-#   about one write a second of an object: a swap conditional on its slot, a read of every slot
-#   taking the newest, together the one head specs/bucket models;
 # - specs/ephemeral: ephemeral cells (doc-25, TASK-698.1): forks referring by incarnation, daemons
 #   retiring their references on start, decommissioning, and live migration's hand-over;
 # - specs/part-slabs: the extent cache in part slabs (doc-26, board 6124): slabs owned by a part's

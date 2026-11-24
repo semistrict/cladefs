@@ -955,14 +955,9 @@ impl World {
         let mut world = Self {
             rng: StdRng::seed_from_u64(seed),
             profile,
-            bucket: {
-                let bucket = match profile.regions {
-                    0 => SimBucket::new(),
-                    _ => SimBucket::new().at(1),
-                };
-                // cladefs: heads of two slots, as many cases in fewer requests (TASK-691).
-                bucket.keep_heads_in(2);
-                bucket
+            bucket: match profile.regions {
+                0 => SimBucket::new(),
+                _ => SimBucket::new().at(1),
             },
             pool,
             spawner,
@@ -1012,21 +1007,19 @@ impl World {
     /// cladefs: with regions, the first region's bucket formatted, the root, and each other's added
     /// to it in turn, numbered as its region, every one holding the root's registry, as an operator
     /// sets up a bucket a region (TASK-633.3): what a region's collector reads its number from.
-    /// Its heads' slots as the world's buckets keep them.
     fn format_regions(&self) {
-        use bucket_cell::identity::{self, Asked, Details};
+        use bucket_cell::identity::{self, Details};
         if self.profile.regions == 0 {
             return;
         }
         let details =
             |region: u16| Details { url: Some(format!("sim://{region}")), ..Details::default() };
-        let asked = Asked { head_slots: Some(self.bucket.slots()) };
         let (root, root_details) = (Direct(self.bucket.at(1)), details(1));
-        block_on(identity::format(&root, &root_details, asked)).unwrap();
+        block_on(identity::format(&root, &root_details)).unwrap();
         let mut registry = None;
         for region in 2..=self.profile.regions {
             let added = Direct(self.bucket.at(region));
-            let adding = identity::add(&root, &root_details, &added, details(region), asked);
+            let adding = identity::add(&root, &root_details, &added, details(region));
             let (identity, added) = block_on(adding).unwrap();
             assert_eq!(identity.number, region, "region {region}'s bucket's number");
             registry = Some(added);
@@ -2890,7 +2883,7 @@ impl World {
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
             // cladefs: the cells whose heads went, as only a dead cell's removal deletes them
-            // (TASK-455): every slot of each (TASK-691).
+            // (TASK-455).
             removed: gone()
                 .filter_map(|key| match kind(key) {
                     layout::Kind::Head { cell, .. } => Some(cell),

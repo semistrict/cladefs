@@ -281,8 +281,8 @@ async fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) 
     // The commits opening it made, the cell's capacity set, hold nothing.
     let first = cell.last_commit().unwrap() as usize;
     let mut epochs = vec![Model::default(); first + 1];
-    // cladefs: a pass's read of its cell's head, a GET of every slot (TASK-691), as many more.
-    let most = 400 + bucket_cell::identity::DEFAULT_HEAD_SLOTS;
+    // cladefs: a pass's read of its cell's head, a GET, one more.
+    let most = 401;
     let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..most).into() });
     let passes = Passes::start(cut.clone(), interval);
     dir.fail_after(Some(rng.random_range(0..600)));

@@ -675,7 +675,7 @@ fn key_overrides_reload_without_a_restart_openbao() {
 /// holding no key is refused (INVALID_ARGUMENT, EINVAL), the keys in use kept.
 #[test]
 fn master_keys_reload_without_a_restart_keeping_those_in_use() {
-    use bucket_cell::identity::{self, Asked, Details};
+    use bucket_cell::identity::{self, Details};
     use extent_keys::kms::master::MasterKeys;
     let hex = |byte: u8| format!("{byte:02x}").repeat(32);
     let (a, b, c) = (hex(0xa1), hex(0xb2), hex(0xc3));
@@ -688,7 +688,7 @@ fn master_keys_reload_without_a_restart_keeping_those_in_use() {
     let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let details = Details { master_key_id: Some(id(&a)), ..Details::default() };
-    runtime.block_on(identity::format(&bucket, &details, Asked::default())).unwrap();
+    runtime.block_on(identity::format(&bucket, &details)).unwrap();
     // SAFETY: as in tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api.
     unsafe {
         std::env::remove_var("CLADEFS_KMS");

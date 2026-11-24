@@ -144,8 +144,7 @@ The protocols whose bugs are rare interleavings have TLA+ specs, which TLC
 model-checks exhaustively over small bounds (`specs/`): the guest Fxfs's copy-on-write
 DAX (`specs/dax-cow`, backlog doc-13, `guest/linux/fs/cladefs/dax.c`),
 cells in the bucket with the host's write-ahead log (`specs/bucket`,
-backlog doc-7 and doc-14), a cell's head kept in slots written in turn, as
-one head (`specs/head-slots`, TASK-690), and Fxfs's super-block claiming only
+backlog doc-7 and doc-14), and Fxfs's super-block claiming only
 what its journal flushed (`specs/journal`). Each rule
 of a protocol has a mutation, the spec with that rule removed, which TLC must
 find the violation of: `specs/dax-cow`'s include a writeback leaving a fault's

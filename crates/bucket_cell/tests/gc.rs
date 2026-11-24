@@ -192,7 +192,7 @@ fn lists_and_deletes_cells() {
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert!(out.status.success());
     let missing: bucket_cell::layout::CellId = "1/ff".parse().unwrap();
-    let head = bucket_cell::layout::head(missing, 0);
+    let head = bucket_cell::layout::head(missing);
     assert!(objects(&url).contains_key(&head), "{head}: {:?}", objects(&url).keys());
 }
 
@@ -247,16 +247,14 @@ fn collects_a_file_bucket() {
     });
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
     let at = "tenants/0000000000001/cells/0000000000001";
-    // Its head, which names its checkpoint (TASK-407) and keeps its KEK, every slot of it
-    // (TASK-691); and its tenant's KEK object, the bucket KMS's (TASK-411.28).
+    // Its head, which names its checkpoint (TASK-407) and keeps its KEK; and its tenant's KEK
+    // object, the bucket KMS's (TASK-411.28).
     let cell = bucket_cell::layout::CellId { tenant: 1, id: 1 };
-    let heads = (0..bucket_cell::identity::DEFAULT_HEAD_SLOTS)
-        .map(|slot| bucket_cell::layout::head(cell, slot));
-    let kept: Vec<String> = [format!("{at}/checkpoints/0000000000001.0000000000001")]
-        .into_iter()
-        .chain(heads)
-        .chain(["tenants/0000000000001/kek".to_owned()])
-        .collect();
+    let kept: Vec<String> = vec![
+        format!("{at}/checkpoints/0000000000001.0000000000001"),
+        bucket_cell::layout::head(cell),
+        "tenants/0000000000001/kek".to_owned(),
+    ];
     assert_eq!(left, kept);
     let out = gc(&[&url, "--cells"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1\n");
@@ -353,21 +351,16 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         .map(|(name, _)| name)
         .filter(|name| !name.starts_with(bucket_cell::local::LOCK))
         .collect();
-    // cladefs: its head's slots, every one (TASK-691).
     let cell = bucket_cell::layout::CellId { tenant: 1, id: 1 };
-    let heads = (0..bucket_cell::identity::DEFAULT_HEAD_SLOTS)
-        .map(|slot| bucket_cell::layout::head(cell, slot));
-    let kept: Vec<String> = [
+    let kept: Vec<String> = vec![
         // The word that the bucket is marked, which an operator removes with the marks.
         bucket_cell::layout::MARKING.to_owned(),
         format!("{at}/checkpoints/0000000000001.0000000000001"),
         format!("{at}/gc/lease"),
         marks,
-    ]
-    .into_iter()
-    .chain(heads)
-    .chain(["tenants/0000000000001/kek".to_owned()])
-    .collect();
+        bucket_cell::layout::head(cell),
+        "tenants/0000000000001/kek".to_owned(),
+    ];
     assert_eq!(names, kept);
 }
 
@@ -519,9 +512,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     // What the pass deleted is gone from it: the first cell's segments the checkpoint covers, all
     // of them, its head naming none after it (TASK-407).
     assert_eq!(out[0]["kinds"]["segment"], Value::Null, "{}", out[0]);
-    // cladefs: every slot of its head (TASK-691).
-    let slots = bucket_cell::identity::DEFAULT_HEAD_SLOTS;
-    assert_eq!(out[0]["kinds"]["head"]["objects"], slots, "{}", out[0]);
+    assert_eq!(out[0]["kinds"]["head"]["objects"], 1, "{}", out[0]);
     assert_eq!(out[0]["kinds"]["gc-lease"]["objects"], 1, "{}", out[0]);
     assert_eq!(lines(&gc(&[&url, "--usage", "--tenant", "b"])), tenant_b);
     let after = futures::executor::block_on(bucket.list("")).unwrap();
@@ -656,7 +647,7 @@ fn sweeps_run_once_that_fail_fail_the_run() {
     let dir = tempfile::tempdir().unwrap();
     let url = file_bucket(&dir);
     let bucket = ObjectBucket::from_url(&url).unwrap();
-    let head = bucket_cell::layout::head(test_cell(1), 0);
+    let head = bucket_cell::layout::head(test_cell(1));
     let corrupt = bucket.put(&head, vec![0xff; 7].into(), PutMode::Create);
     futures::executor::block_on(corrupt).unwrap();
     let elsewhere = tempfile::tempdir().unwrap();

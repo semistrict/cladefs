@@ -383,8 +383,7 @@ mod tests {
         let home = s3(&ahead, "home", &Client::DEFAULT);
         let other = s3(&behind, "other", &Client::DEFAULT);
         let details = crate::identity::Details::default();
-        let asked = crate::identity::Asked::default();
-        serving.block_on(crate::identity::format(&*home, &details, asked)).unwrap();
+        serving.block_on(crate::identity::format(&*home, &details)).unwrap();
         let routed = RoutedBucket::new(home, Arc::new(Other(other.clone())));
         let cell = layout::test_cell(2 << 48 | 1);
         serving.block_on(lifecycle::create(&*other, cell, 0)).unwrap();
@@ -455,7 +454,7 @@ mod tests {
     /// was written, its version; and not with where one key ends and the next begins.
     #[test]
     fn digests_change_with_every_part_of_a_listing() {
-        let record = layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 }, 0);
+        let record = layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 });
         let base = [meta(&record, 10, 5, "1")];
         let changed = [
             vec![meta(&record, 11, 5, "1")],
@@ -479,7 +478,7 @@ mod tests {
     #[test]
     fn leases_count_themselves() {
         let mut usage = Usage { measured: 3, ..Usage::default() };
-        usage.add(&layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 }, 0), 40);
+        usage.add(&layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 }), 40);
         let passed = Some(Passed { listing: Some([7; 32]), usage });
         let lease =
             CollectorLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };

@@ -1457,9 +1457,7 @@ mod tests {
             let (ours, theirs) = ("11".repeat(32), "22".repeat(32));
             let parsed = |hex: &str| MasterKeys::parse(hex, "a test's").unwrap();
             let id = |hex: &str| parsed(hex).newest().id().to_string();
-            identity::format(&home, &Details::default(), crate::identity::Asked::default())
-                .await
-                .unwrap();
+            identity::format(&home, &Details::default()).await.unwrap();
             let recorded = |url: &str, kms: Option<&str>, key: Option<String>| Details {
                 url: Some(url.to_owned()),
                 kms: kms.map(str::to_owned),
@@ -1467,25 +1465,9 @@ mod tests {
                 ..Details::default()
             };
             let added = recorded(&urls[1], None, Some(id(&theirs)));
-            identity::add(
-                &home,
-                &Details::default(),
-                &other,
-                added,
-                crate::identity::Asked::default(),
-            )
-            .await
-            .unwrap();
+            identity::add(&home, &Details::default(), &other, added).await.unwrap();
             let added = recorded(&urls[2], Some(&local), None);
-            identity::add(
-                &home,
-                &Details::default(),
-                &third,
-                added,
-                crate::identity::Asked::default(),
-            )
-            .await
-            .unwrap();
+            identity::add(&home, &Details::default(), &third, added).await.unwrap();
             let by_bucket = |key: &str| {
                 let vars = vec![
                     ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned()),
@@ -1571,7 +1553,7 @@ mod tests {
     /// a rotation with a host of another bucket after the old key was gone.
     #[test]
     fn rotations_record_the_newest_master_key_for_hosts_of_other_buckets() {
-        use crate::identity::{Asked, Details};
+        use crate::identity::Details;
         use crate::keys::CachingKms;
         use crate::layout::CellId;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1592,25 +1574,14 @@ mod tests {
                 master_key_id: key,
                 ..Details::default()
             };
-            identity::format(&home, &at(&urls[0], None), Asked::default()).await.unwrap();
-            identity::add(
-                &home,
-                &Details::default(),
-                &other,
-                at(&urls[1], Some(id(&old))),
-                Asked::default(),
-            )
-            .await
-            .unwrap();
-            let (_, registry) = identity::add(
-                &home,
-                &Details::default(),
-                &plain,
-                at(&urls[2], None),
-                Asked::default(),
-            )
-            .await
-            .unwrap();
+            identity::format(&home, &at(&urls[0], None)).await.unwrap();
+            identity::add(&home, &Details::default(), &other, at(&urls[1], Some(id(&old))))
+                .await
+                .unwrap();
+            let (_, registry) =
+                identity::add(&home, &Details::default(), &plain, at(&urls[2], None))
+                    .await
+                    .unwrap();
             for bucket in [&home, &other, &plain] {
                 identity::spread(&registry, bucket).await.unwrap();
             }
@@ -1686,7 +1657,7 @@ mod tests {
     /// KMS read the process's environment, which named no token at all.
     #[test]
     fn buckets_call_their_own_openbao_with_their_own_tokens() {
-        use crate::identity::{Asked, Details};
+        use crate::identity::Details;
         use crate::keys::CachingKms;
         use crate::layout::CellId;
         use extent_keys::kms::openbao::TOKEN_ENV;
@@ -1710,20 +1681,14 @@ mod tests {
             };
             let urls = ["home", "two", "three", "four"].map(url);
             let buckets = urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
-            identity::format(&buckets[0], &Details::default(), Asked::default()).await.unwrap();
+            identity::format(&buckets[0], &Details::default()).await.unwrap();
             let kmses = [a.url("transit", query), b.url("transit", query), a.url("transit", query)];
             for (at, kms) in (1..).zip(kmses) {
                 let details =
                     Details { url: Some(urls[at].clone()), kms: Some(kms), ..Details::default() };
-                identity::add(
-                    &buckets[0],
-                    &Details::default(),
-                    &buckets[at],
-                    details,
-                    Asked::default(),
-                )
-                .await
-                .unwrap();
+                identity::add(&buckets[0], &Details::default(), &buckets[at], details)
+                    .await
+                    .unwrap();
             }
             let ours = "11".repeat(32);
             let vars: Vec<(String, String)> = [
@@ -1764,7 +1729,7 @@ mod tests {
     /// made; OpenBao in the clear, at a host none names, too, before the host's token goes there.
     #[test]
     fn registries_naming_kmses_the_host_allows_not_are_refused() {
-        use crate::identity::{Asked, Details};
+        use crate::identity::Details;
         use extent_keys::kms::openbao::TOKEN_ENV;
         futures::executor::block_on(async {
             let dir = tempfile::tempdir().unwrap();
@@ -1775,7 +1740,7 @@ mod tests {
             let urls = ["home", "two", "three"].map(url);
             let buckets = urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
             let local = dir.path().join("kms");
-            identity::format(&buckets[0], &Details::default(), Asked::default()).await.unwrap();
+            identity::format(&buckets[0], &Details::default()).await.unwrap();
             let kmses = [
                 format!("local://{}", local.display()),
                 "openbao://10.9.9.9:8200/transit?key=k{tenant}".to_owned(),
@@ -1783,15 +1748,9 @@ mod tests {
             for (at, kms) in (1..).zip(kmses) {
                 let details =
                     Details { url: Some(urls[at].clone()), kms: Some(kms), ..Details::default() };
-                identity::add(
-                    &buckets[0],
-                    &Details::default(),
-                    &buckets[at],
-                    details,
-                    Asked::default(),
-                )
-                .await
-                .unwrap();
+                identity::add(&buckets[0], &Details::default(), &buckets[at], details)
+                    .await
+                    .unwrap();
             }
             let vars = vec![(TOKEN_ENV.to_owned(), "s.the-hosts-own".to_owned())];
             let home = ObjectBucket::from_url(&urls[0]).unwrap();
@@ -1866,18 +1825,11 @@ mod tests {
                 kms: Some(home_kms_url.clone()),
                 ..Details::default()
             };
-            identity::format(&root_bucket, &root_details, identity::Asked::default())
-                .await
-                .unwrap();
-            let (_, registry) = identity::add(
-                &root_bucket,
-                &root_details,
-                &home_bucket,
-                home_details,
-                identity::Asked::default(),
-            )
-            .await
-            .unwrap();
+            identity::format(&root_bucket, &root_details).await.unwrap();
+            let (_, registry) =
+                identity::add(&root_bucket, &root_details, &home_bucket, home_details)
+                    .await
+                    .unwrap();
             identity::spread(&registry, &home_bucket).await.unwrap();
 
             let (key2, _) = kmses.of(2).await.unwrap();
@@ -1894,7 +1846,7 @@ mod tests {
     /// named, its bucket never asked (asked, it would have failed).
     #[test]
     fn shreds_go_on_past_buckets_out_of_reach() {
-        use crate::identity::{Asked, Details};
+        use crate::identity::Details;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let dir = tempfile::tempdir().unwrap();
@@ -1908,13 +1860,11 @@ mod tests {
             extent_keys::kms::LocalKms::open(&local).unwrap().create(7).unwrap();
             let local = format!("local://{}", local.display());
             let root = &buckets[0];
-            identity::format(root, &Details::default(), Asked::default()).await.unwrap();
+            identity::format(root, &Details::default()).await.unwrap();
             for (number, bucket) in (2..).zip(&buckets[1..]) {
                 let kms = (number == 4).then(|| local.clone());
                 let details = Details { url: Some(url(number)), kms, ..Details::default() };
-                identity::add(root, &Details::default(), bucket, details, Asked::default())
-                    .await
-                    .unwrap();
+                identity::add(root, &Details::default(), bucket, details).await.unwrap();
             }
             let master = "11".repeat(32);
             let vars = vec![

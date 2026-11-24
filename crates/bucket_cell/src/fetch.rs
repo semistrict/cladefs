@@ -1752,14 +1752,14 @@ mod tests {
         let (one, two) =
             (CellId { tenant: 1, id: 1 << 48 | 3 }, CellId { tenant: 1, id: 2 << 48 | 3 });
         let per = Budgets::per_bucket(limits);
-        let _full = enter(&per.of(&head(two, 0)), 1).ok().unwrap();
-        assert!(enter(&per.of(&head(one, 0)), 1).is_ok(), "bucket 1's GET waited for bucket 2's");
-        assert!(enter(&per.of(&head(two, 0)), 1).is_err(), "bucket 2's budget let two GETs go");
-        assert!(Arc::ptr_eq(&per.of(&head(two, 0)), &per.of(&crate::layout::segments(two))));
-        assert!(Arc::ptr_eq(&per.of("identity"), &per.of(&head(CellId { tenant: 1, id: 7 }, 0))));
+        let _full = enter(&per.of(&head(two)), 1).ok().unwrap();
+        assert!(enter(&per.of(&head(one)), 1).is_ok(), "bucket 1's GET waited for bucket 2's");
+        assert!(enter(&per.of(&head(two)), 1).is_err(), "bucket 2's budget let two GETs go");
+        assert!(Arc::ptr_eq(&per.of(&head(two)), &per.of(&crate::layout::segments(two))));
+        assert!(Arc::ptr_eq(&per.of("identity"), &per.of(&head(CellId { tenant: 1, id: 7 }))));
         let shared = Budgets::from(Budget::new(limits));
-        let _full = enter(&shared.of(&head(two, 0)), 1).ok().unwrap();
-        assert!(enter(&shared.of(&head(one, 0)), 1).is_err(), "one budget for all let two GETs go");
+        let _full = enter(&shared.of(&head(two)), 1).ok().unwrap();
+        assert!(enter(&shared.of(&head(one)), 1).is_err(), "one budget for all let two GETs go");
     }
 
     /// The GETs and bytes `budget` counts in flight.

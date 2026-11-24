@@ -23,13 +23,13 @@
 (* will be named, and the collector deletes it. No key is written twice,   *)
 (* so readers need no versions of a key (KeysWrittenOnce).                 *)
 (*                                                                         *)
-(* The head is one object: read whole, swapped in place with a condition  *)
+(* The head is one object: read whole, swapped in place with a condition   *)
 (* on the version its writer last saw (swapsInPlace), at most as often as  *)
 (* its bucket's store takes writes of one object (TASK-690: GCS's one a    *)
 (* second), each swap naming all that landed since, and a checkpoint       *)
 (* landed meanwhile: a group commit, which changes no step's effect here.  *)
-(* The bucket kept it in N slots for GCS (TASK-691, specs/head-slots), one *)
-(* again since doc-27; the head is never a create-only key per version,    *)
+(* The bucket kept it in N slots for GCS (TASK-691), one again since       *)
+(* doc-27; the head is never a create-only key per version,                *)
 (* which a writer of a cell removed would create anew.                     *)
 (*                                                                         *)
 (* The bucket holds, per cell: segments, at <<seq, epoch>>, each a footer  *)
@@ -111,8 +111,8 @@
 (*   create-only key of its own (head/<k>), which a create of the next     *)
 (*   finds free once the collector removed the cell whole, no tombstone    *)
 (*   left: a writer slow to swap brings the removed cell back              *)
-(*   (RemovedStayGone; specs/head-slots's slotsAtBirth found the same of   *)
-(*   slots created as their turns came).                                   *)
+(*   (RemovedStayGone; the retired specs/head-slots's slotsAtBirth found   *)
+(*   the same of slots created as their turns came).                       *)
 (* - epochKeys (NoEpochKeys): a segment's and a checkpoint's key names its *)
 (*   writer's epoch: without it, two writers' PUTs land at one key, the    *)
 (*   later over the earlier, which a head names (KeysWrittenOnce).         *)
@@ -229,14 +229,13 @@
 (* - doc-14 put the WAL after the cell by segments: WAL segments whose     *)
 (*   footers recovery read were acknowledged. Here by commits, as doc-7's  *)
 (*   recovery on the same host was.                                        *)
-(* - Ahead of the code (doc-27, Wave 2): an acknowledgement names a        *)
-(*   checkpoint landed, and the head is one object everywhere. Until       *)
-(*   doc-27's steps land, GCS buckets keep their head in slots             *)
-(*   (specs/head-slots). Writers relocate, and the collector compacts      *)
-(*   nothing and keeps no moves, as the code does since FORMAT 28.         *)
+(* - doc-27 (Wave 2), as the code does since FORMAT 29: an acknowledgement *)
+(*   names a checkpoint landed, a checkpoint swapping on its own only with *)
+(*   nothing to acknowledge after it; writers relocate, the collector      *)
+(*   compacts nothing and keeps no moves, and the head is one object.      *)
 (*                                                                         *)
 (* Steps are what the code does between two requests, or merged: a         *)
-(* writer's taking swaps the head, the one object saying whether its cell *)
+(* writer's taking swaps the head, the one object saying whether its cell  *)
 (* lives (TASK-515), in one step; it reads the head's checkpoint then, and *)
 (* the segments the head names in a step after. The collector's recoveries *)
 (* read the bucket at once. A checkpoint's PUT lands in a step of its own, *)
@@ -359,7 +358,7 @@ countVars == <<gen, takes, passes, places, crashes, mints>>
 vars == <<bucketVars, hostVars, gc, truthVars, countVars>>
 
 -----------------------------------------------------------------------------
-(* Values. *)
+(* Values.                                                                 *)
 
 Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
@@ -523,7 +522,7 @@ Readable(x, loc) ==
     ELSE Obj(loc) # None /\ Runs(Obj(loc), x)
 
 -----------------------------------------------------------------------------
-(* The truth. *)
+(* The truth.                                                              *)
 
 RECURSIVE Anc(_)
 \* The commits up to t.
@@ -560,7 +559,7 @@ RefOf(p, at, c) == [p |-> p, at |-> at, c |-> c]
 RefsUnder(c) == {r \in refs : r.p = c}
 
 -----------------------------------------------------------------------------
-(* Writers. *)
+(* Writers.                                                                *)
 
 Stopped(h, b) == ses' = [ses EXCEPT ![h][b].pc = "stopped"]
 
@@ -913,7 +912,7 @@ WriterNext ==
         \/ CheckpointSwap(h, b) \/ DropVersion(h, b)
 
 -----------------------------------------------------------------------------
-(* Hosts and placements. *)
+(* Hosts and placements.                                                   *)
 
 \* The lengths a crash may cut h's WAL of b to, with "cut": its commits to the last a flush made
 \* durable, at least those of every segment uploaded, which waited for theirs (uploads.rs's tag:
@@ -958,7 +957,7 @@ Place(h, b) ==
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, relocated, doomed, taken, errors>>
 
 -----------------------------------------------------------------------------
-(* Deletions and forks of versions: a host's work, one at a time. *)
+(* Deletions and forks of versions: a host's work, one at a time.          *)
 
 \* A deletion of b, asked on h: the head ended first. Asked by b's last placement, or one as
 \* late, it may delete b's making. With "deleteRoot" alone, of the root alone.
@@ -1073,7 +1072,7 @@ HostNext ==
     \/ \E m \in inflight : Land(m)
 
 -----------------------------------------------------------------------------
-(* The collector. *)
+(* The collector.                                                          *)
 
 \* A pass: its cell, what it listed, the record it read, the cell recovered, keyed by the cell (if
 \* it lives), the references it listed, and the origins' and versions' states it keeps, each
@@ -1302,7 +1301,7 @@ Spec == Init /\ [][Next]_vars
 HostPerms == Permutations(Hosts)
 
 -----------------------------------------------------------------------------
-(* What must hold. *)
+(* What must hold.                                                         *)
 
 \* The cells whose records say they live: roots, forks made.
 LiveRecs == {b \in Cells : LiveRec(b)}

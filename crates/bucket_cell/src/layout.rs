@@ -71,9 +71,9 @@ pub struct Child {
 /// 20's. 22: a version forked into another bucket is mirrored there (doc-23, Mirrors; TASK-633.8):
 /// its pin, a reference of the mirror's own ([`pin`]), and its marker ([`mirror`]), under the
 /// parent's prefix in that bucket; nothing reads 21's. 23: a cell's head is in its bucket's count
-/// of objects, its slots, each written in turn ([`head`], [`Head::swaps`], TASK-691), as GCS takes
-/// about one write a second of an object, and a bucket's identity holds its settings
-/// ([`crate::identity::Settings`]); nothing reads 22's, whose head was one object. 24: a version's
+/// of objects, its slots, each written in turn (TASK-691), as GCS takes
+/// about one write a second of an object, and a bucket's identity holds its settings;
+/// nothing reads 22's, whose head was one object. 24: a version's
 /// read evidence, what forks of it read of it as they opened, each tenant's under the version's
 /// cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2); nothing reads 23's. 25: an origin
 /// and a version name the epoch of their segment, whose checkpoint is read by its key, with no read
@@ -85,12 +85,10 @@ pub struct Child {
 /// nothing reads 26's, whose entries were by incarnation alone, in the bucket of the daemon that
 /// wrote them, which no decommissioning would find. 28: the collector compacts nothing, its writers
 /// relocating out of their sparse segments (doc-27 step 2): no moves, and a cell holding the moves
-/// of 27's is refused ([`Kind::Moves`]); nothing reads 27's.
-pub const FORMAT: u32 = 28;
-
-/// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
-/// TASK-691): keys past it are no head's.
-pub const MAX_HEAD_SLOTS: u64 = 64;
+/// of 27's is refused ([`Kind::Former`]); nothing reads 27's. 29: a cell's head is one object,
+/// swapped in place (doc-27 step 4): no slots, no marks, and a bucket's identity holds no settings;
+/// a cell holding the head slots of 28's is refused ([`Kind::Former`]); nothing reads 28's.
+pub const FORMAT: u32 = 29;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -99,8 +97,10 @@ pub const TENANTS: &str = "tenants/";
 const GC: &str = "gc/";
 const GC_LEASE: &str = "gc/lease";
 const GC_MARKS: &str = "gc/marks/";
-/// Under a cell's prefix, in formats before 28, the moves of its objects ([`Kind::Moves`]).
+/// Under a cell's prefix, in formats before 29, the moves of its objects ([`Kind::Former`]).
 const MOVES: &str = "moves/";
+/// Under a cell's prefix, in formats before 29, the slots of its head ([`Kind::Former`]).
+const HEAD_SLOTS: &str = "head/";
 /// cladefs: under a cell's prefix, the references of forks of its cells ([`reference`]).
 const REFS: &str = "refs/";
 /// cladefs: under a cell's prefix, the marks of the references retired or taken back ([`retired`]).
@@ -171,17 +171,11 @@ pub fn checkpoint(cell: CellId, segment: u64, epoch: u64) -> String {
     format!("{}{}.{}", checkpoints(cell), Padded(keyed(epoch)), Padded(segment))
 }
 
-/// The slot `slot` of the head of `cell` ([`Head`]): what made the cell, its keys, its writer's
-/// taking, the segments it holds, its newest checkpoint and its versions, swapped with a condition
-/// (TASK-407, TASK-515), in its bucket's count of objects, written in turn (TASK-691).
-pub fn head(cell: CellId, slot: u64) -> String {
-    debug_assert!(slot < MAX_HEAD_SLOTS, "slot {slot} of {MAX_HEAD_SLOTS} at most");
-    format!("{}{}", heads(cell), Padded(slot))
-}
-
-/// cladefs: the prefix of the slots of the head of `cell` ([`head`], TASK-691).
-pub fn heads(cell: CellId) -> String {
-    format!("{}head/", cell.prefix())
+/// The head of `cell` ([`Head`]): what made the cell, its keys, its writer's taking, the segments
+/// it holds, its newest checkpoint and its versions, one object swapped in place with a condition
+/// (TASK-407, TASK-515, doc-27).
+pub fn head(cell: CellId) -> String {
+    format!("{}head", cell.prefix())
 }
 
 /// cladefs: the block of object IDs `block` taken, by one allocator of one process's
@@ -481,10 +475,9 @@ pub enum Kind {
         segment: u64,
         epoch: u64,
     },
-    /// cladefs: a slot of a cell's head ([`head`], TASK-691).
+    /// cladefs: a cell's head ([`head`]).
     Head {
         cell: CellId,
-        slot: u64,
     },
     /// cladefs: a block of object IDs taken ([`objectid_block`]).
     ObjectIds {
@@ -511,11 +504,13 @@ pub enum Kind {
         cell: CellId,
         epoch: u64,
     },
-    /// cladefs: what the collector's compaction made of an object of the cell's, its moves, in
-    /// formats before 28 (doc-27): refused ([`crate::Error::Format`]), as no writer or collector of
-    /// this one makes or reads them.
-    Moves {
+    /// cladefs: a key of the cell's of a format before this one that nothing of this one makes or
+    /// reads (doc-27): the collector's moves of an object (27's), and the slots of a head kept in
+    /// many objects (28's), of `format`, the newest that wrote such a key. Refused
+    /// ([`crate::Error::Format`]) where found.
+    Former {
         cell: CellId,
+        format: u32,
     },
     /// cladefs: the reference of the fork of `parent`, of the cell it is under, at the end of its
     /// segment `at`, to `child` ([`reference`]): never a candidate.
@@ -594,7 +589,7 @@ impl Kind {
             Self::CollectorLease { .. } => "gc-lease",
             Self::Marks { .. } => "marks",
             Self::Marking => "marking",
-            Self::Moves { .. } => "moves",
+            Self::Former { .. } => "former",
             Self::Reference { .. } => "reference",
             Self::Retired { .. } => "retired",
             Self::Pin { .. } => "pin",
@@ -626,7 +621,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Evidence { parent: cell, .. }
         | Kind::Mirror { cell, .. } => Some(cell),
         Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
-        Kind::Moves { cell, .. } => Some(cell),
+        Kind::Former { cell, .. } => Some(cell),
         Kind::ObjectIds { .. }
         | Kind::EphemeralIndex { .. }
         | Kind::Decommissioned { .. }
@@ -670,7 +665,10 @@ pub fn kind(key: &str) -> Kind {
         }
         let (cell, rest) = in_cell(key)?;
         if rest.starts_with(MOVES) {
-            return Some(Kind::Moves { cell });
+            return Some(Kind::Former { cell, format: 27 });
+        }
+        if rest.starts_with(HEAD_SLOTS) {
+            return Some(Kind::Former { cell, format: 28 });
         }
         if let Some(rest) = rest.strip_prefix(GC) {
             if rest == GC_LEASE.strip_prefix(GC)? {
@@ -721,11 +719,8 @@ pub fn kind(key: &str) -> Kind {
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Retired { parent, at, child });
         }
-        if let Some(slot) = rest.strip_prefix("head/") {
-            return Some(Kind::Head {
-                cell,
-                slot: number(slot).filter(|&slot| slot < MAX_HEAD_SLOTS)?,
-            });
+        if rest == "head" {
+            return Some(Kind::Head { cell });
         }
         // A segment's or a checkpoint's key: its writer's epoch, then its number.
         let numbered = |rest: &str| -> Option<(u64, u64)> {
@@ -832,14 +827,12 @@ pub struct Head {
     pub token: u64,
     /// The number of segments the cell holds: 0 to `end`, without gaps.
     pub end: u64,
-    /// cladefs: the swaps of the head before this one (TASK-691): it is in slot `swaps % N`, N its
-    /// bucket's count of slots, each swap writing the slot after its predecessor's, conditional on
-    /// what was there. Its maker's head is version 0, then its copies, 1 to `N - 1`, its other
-    /// slots ([`crate::head`]).
+    /// cladefs: the swaps of the head before this one ([`crate::head`]): one more each swap, so
+    /// that every write of the head writes bytes of its own. A backend that conditions a write on
+    /// an ETag of the object's bytes (S3's MD5) then never takes a delayed write, conditional on a
+    /// version the head held, for one it holds again: a share then an unshare would bring back
+    /// the bytes, and the ETag, of before.
     pub swaps: u64,
-    /// cladefs: whether this is a mark of a head failed as it was made, in a slot its maker left
-    /// empty, no head ([`crate::head::fail`], TASK-691).
-    pub failed: bool,
     /// The epochs of the writers of those segments, in runs: from each run's first number on, to
     /// the next run's, the segments are of its epoch. A run a takeover, at most.
     pub runs: Vec<(u64, u64)>,
@@ -1226,10 +1219,7 @@ mod tests {
         let earlier = format!("{}extents/0000000000003/0000000000002.0000000000009", cell.prefix());
         assert_eq!(kind(&earlier), Kind::Unknown);
         assert_eq!(kind(&checkpoint(cell, 7, 2)), Kind::Checkpoint { cell, segment: 7, epoch: 2 });
-        assert_eq!(kind(&head(cell, 3)), Kind::Head { cell, slot: 3 });
-        // cladefs: a slot past the head's is no head's (TASK-691).
-        let past = format!("{}{}", heads(cell), Padded(MAX_HEAD_SLOTS));
-        assert_eq!(kind(&past), Kind::Unknown);
+        assert_eq!(kind(&head(cell)), Kind::Head { cell });
         assert_eq!(objectid_block(0x2a), "objectid/000000000001a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
@@ -1247,11 +1237,14 @@ mod tests {
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
-        // cladefs: the collector's moves, of formats before 28 (doc-27): refused where found.
+        // cladefs: the collector's moves and a head's slots, of formats before 29 (doc-27):
+        // refused where found.
         let from = segment(cell, 7, 2);
         let of = "segments/0000000000002.0000000000007";
         let moves = format!("{}moves/{of}/0000000000001", cell.prefix());
-        assert_eq!(kind(&moves), Kind::Moves { cell });
+        assert_eq!(kind(&moves), Kind::Former { cell, format: 27 });
+        let slot = format!("{}head/0000000000003", cell.prefix());
+        assert_eq!(kind(&slot), Kind::Former { cell, format: 28 });
         let child = CellId { tenant: 1, id: 5 };
         assert_eq!(
             kind(&reference(cell, 7, child)),
@@ -1341,12 +1334,12 @@ mod tests {
         assert_eq!(kind("gc/marks/000000000001a"), Kind::Unknown);
         assert_eq!(kind(&format!("moves/{from}")), Kind::Unknown);
         assert_eq!(cell_of_prefix(&cell.prefix()), Some(cell));
-        assert_eq!(cell_of_prefix(&head(cell, 0)), None);
+        assert_eq!(cell_of_prefix(&head(cell)), None);
         assert_eq!(cell_of_prefix(""), None);
     }
 
-    /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, the moves of formats
-    /// before 27 too, its collector's lease and marks, and the references under it, of forks of its
+    /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, the moves and head slots
+    /// of formats before 29 too, its collector's lease and marks, and the references under it, of forks of its
     /// cells to other cells; object-ID blocks and keys of no kind are no cell's.
     #[test]
     fn owners() {
@@ -1356,7 +1349,8 @@ mod tests {
             segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
-            head(cell, 0),
+            head(cell),
+            format!("{}head/0000000000003", cell.prefix()),
             format!("{}moves/segments/0000000000002.0000000000007/0000000000001", cell.prefix()),
             collector_lease(cell),
             marks(cell, 1),
