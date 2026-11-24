@@ -4667,6 +4667,38 @@ fn writers_wait_for_a_cell_its_writer_left_to_the_daemons_work() {
     assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 }
 
+/// A metadata reader can become the cell's last owner when its writer closes during inspection.
+#[test]
+fn inspections_close_the_last_cell_reference_away_from_the_reader() {
+    use futures::FutureExt as _;
+    use std::sync::Arc;
+
+    struct Closed(std::sync::mpsc::Sender<std::thread::ThreadId>);
+    impl Drop for Closed {
+        fn drop(&mut self) {
+            self.0.send(std::thread::current().id()).unwrap();
+        }
+    }
+
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let cell =
+        Arc::new(control(crate::OpenCell::create(dir.path().join("store"), 1 << 24)).unwrap());
+    let id = cell.cell();
+    let (closed, observed) = std::sync::mpsc::channel();
+    cell.keep_until_closed(Box::new(Closed(closed)));
+    let reader = std::thread::current().id();
+    let read = control(async {
+        super::cells::inspect(super::Daemon::process(), cell.clone(), |open| {
+            // The writer releases its reference while the reader is taking its snapshot.
+            crate::open_cell::release(cell).now_or_never().unwrap();
+            open.cell()
+        })
+    });
+    assert_eq!(read, id);
+    assert_ne!(observed.recv_timeout(std::time::Duration::from_secs(10)).unwrap(), reader);
+}
+
 /// TASK-644: a fork of a version made right after its writer's connection went, its cell closing
 /// on a blocking thread, its uploader uploading its last commits, the version's among them, waits
 /// for the close before it reads the bucket for the version. Before, it found no open cell

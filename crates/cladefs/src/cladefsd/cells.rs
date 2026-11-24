@@ -147,7 +147,8 @@ pub(super) async fn hold_cell_alone(daemon: &Arc<Daemon>, path: &Path) -> Result
 
 async fn hold_alone(daemon: &Arc<Daemon>, path: &Path) -> Result<Hold, Errno> {
     let hold = hold(daemon, path).await?;
-    if hold.instance().is_some() {
+    if let Some(cell) = hold.instance() {
+        inspect(daemon, cell, |_| ());
         return Err(Errno::EBUSY);
     }
     Ok(hold)
@@ -554,7 +555,7 @@ pub(super) async fn attach(
     })
     .await?;
     let (public, ancestry) = match daemon.table.instance(&cell_dir_key(&base)) {
-        Some(open_cell) => (open_cell.is_public(), open_cell.ancestry()),
+        Some(open_cell) => inspect(daemon, open_cell, |cell| (cell.is_public(), cell.ancestry())),
         None => {
             let here = Here::open(daemon, &base, hold(daemon, &base).await?).await?;
             let what = (here.held().open_cell.is_public(), here.held().open_cell.ancestry());
@@ -805,8 +806,9 @@ async fn opened_version(
     // Their paths alone: a reference to a cell kept across its sync would keep it from closing
     // (TASK-648).
     let writers: Vec<PathBuf> = (daemon.table.instances().into_iter())
-        .filter(|(_, open_cell)| open_cell.cell() == cell)
-        .map(|(path, _)| path)
+        .filter_map(|(path, open_cell)| {
+            inspect(daemon, open_cell, |open| (open.cell() == cell).then_some(path))
+        })
         .collect();
     for path in writers {
         sync(daemon, path).await?;
@@ -1323,16 +1325,41 @@ fn state_of(open_cell: &OpenCell, open: bool) -> Result<CellState, Errno> {
     })
 }
 
+/// Reads an open cell's metadata. If its owner let it go meanwhile, close it in a task of its
+/// own, like a connection's teardown does (board 10569).
+pub(super) fn inspect<T>(
+    daemon: &Daemon,
+    cell: Arc<OpenCell>,
+    read: impl FnOnce(&OpenCell) -> T,
+) -> T {
+    let result = read(&cell);
+    if let Some(cell) = Arc::into_inner(cell) {
+        drop(daemon.spawn(cell.close()));
+    }
+    result
+}
+
 /// The cells open on `daemon`, writers' and others', by their paths (TASK-50.5).
 pub(super) fn list(daemon: &Daemon) -> Result<Vec<(PathBuf, CellState)>, Errno> {
-    let cells = daemon.table.instances();
-    cells.into_iter().map(|(path, open_cell)| Ok((path, state_of(&open_cell, true)?))).collect()
+    let mut listed = Ok(Vec::new());
+    for (path, cell) in daemon.table.instances() {
+        // Even after an error, release every cell through inspect.
+        inspect(daemon, cell, |cell| {
+            if let Ok(cells) = &mut listed {
+                match state_of(cell, true) {
+                    Ok(state) => cells.push((path, state)),
+                    Err(err) => listed = Err(err),
+                }
+            }
+        });
+    }
+    listed
 }
 
 /// What the cell at `path` on `daemon` is, and holds.
 pub(super) async fn stat(daemon: &Arc<Daemon>, path: PathBuf) -> Result<CellState, Errno> {
     if let Some(open_cell) = open_by_connection(daemon, &path) {
-        return state_of(&open_cell, true);
+        return inspect(daemon, open_cell, |cell| state_of(cell, true));
     }
     let _held = hold(daemon, &path).await?;
     if !local_cell::upload::blocking(|| host_fs::exists(&path)) {
@@ -1349,17 +1376,16 @@ pub(super) fn open_count(daemon: &Daemon) -> usize {
     daemon.table.writers()
 }
 
-/// cladefs: the cells open on `daemon`, writers' and others'.
-fn open_instances(daemon: &Daemon) -> Vec<Arc<OpenCell>> {
-    daemon.table.instances().into_iter().map(|(_, open_cell)| open_cell).collect()
-}
-
 /// The cells open for connections on `daemon` whose commits upload now, and what their uploaders
 /// have left to do (`metrics`, TASK-91.3).
 pub(super) fn upload_statuses(daemon: &Daemon) -> Vec<(CellId, local_cell::upload::UploadStatus)> {
-    // Its uploader stopped, or none: no status to show.
-    (open_instances(daemon).iter())
-        .filter_map(|open_cell| Some((open_cell.cell(), open_cell.upload_status().ok()??)))
+    (daemon.table.instances().into_iter())
+        .filter_map(|(_, cell)| {
+            inspect(daemon, cell, |cell| {
+                // An uploader that stopped on error has no live status to show.
+                Some((cell.cell(), cell.upload_status().ok()??))
+            })
+        })
         .collect()
 }
 
