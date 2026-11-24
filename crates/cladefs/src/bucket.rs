@@ -136,7 +136,7 @@ pub fn add_bucket(root_url: &str, url: &str, details: Details) -> Result<Identit
     }
     for entry in &registry.buckets {
         if let Some(url) = &entry.details.url {
-            on_buckets(identity::spread(&registry, &*open(url, entry.number)?))?;
+            on_buckets(identity::spread_to(&registry, entry, &*open(url, entry.number)?))?;
         }
     }
     Ok(identity)
@@ -4045,6 +4045,43 @@ mod tests {
         let numbers: Vec<u16> = root.buckets.iter().map(|entry| entry.number).collect();
         assert_eq!(numbers, [1, 2, 3]);
         assert_eq!((registry("two"), registry("three")), (root.clone(), root));
+    }
+
+    /// board 8365: `add_bucket` verifies every target bucket's identity before spreading the
+    /// updated registry, so a registry entry pointing at an unrelated bucket (even an older root
+    /// bucket with a lower registry version) is refused and left untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_bucket_refuses_to_overwrite_an_unrelated_buckets_registry() {
+        use bucket_cell::identity::Details;
+        let dir = tempfile::tempdir().unwrap();
+        let url_of = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            url::Url::from_directory_path(&path).unwrap().to_string()
+        };
+        let (root_a, second, third, root_b) =
+            (url_of("root_a"), url_of("second"), url_of("third"), url_of("root_b"));
+
+        super::format_bucket(&root_a, Details::default()).unwrap();
+        super::format_bucket(&root_b, Details::default()).unwrap();
+        super::add_bucket(&root_a, &second, Details::default()).unwrap();
+
+        // Snapshot root_b's registry bytes before swapping it into `second`'s path.
+        let root_b_buckets = std::fs::read(dir.path().join("root_b/buckets")).unwrap();
+        let root_b_before = super::bucket_registry(&root_b).unwrap().unwrap();
+        assert_eq!(root_b_before.version, 1);
+
+        // Swap `second` out and place `root_b` at `second`'s URL so root_a's registry entry #2
+        // now points at the unrelated root bucket `root_b`.
+        std::fs::rename(dir.path().join("second"), dir.path().join("second_orig")).unwrap();
+        std::fs::rename(dir.path().join("root_b"), dir.path().join("second")).unwrap();
+
+        let err = super::add_bucket(&root_a, &third, Details::default()).unwrap_err();
+        assert_eq!(err.errno(), Some(crate::Errno::ESTALE), "unexpected error: {err:#}");
+
+        // The unrelated bucket's registry bytes must be completely intact.
+        let root_b_after = std::fs::read(dir.path().join("second/buckets")).unwrap();
+        assert_eq!(root_b_after, root_b_buckets);
     }
 
     /// Board 6908: a host whose bucket, `CLADEFSD_BUCKET`, can't be opened has no KMS: its own alone,

@@ -360,6 +360,18 @@ pub async fn spread(registry: &Registry, bucket: &impl Bucket) -> Result<(), Err
     }
 }
 
+/// cladefs: copies `registry` to `bucket`'s root only after verifying `bucket`'s identity matches
+/// `entry` ([`verified`], board 8365): so a stale or swapped URL in `registry` never overwrites an
+/// unrelated bucket's registry.
+pub async fn spread_to(
+    registry: &Registry,
+    entry: &Entry,
+    bucket: &impl Bucket,
+) -> Result<(), Error> {
+    verified(entry, get(bucket).await?)?;
+    spread(registry, bucket).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
