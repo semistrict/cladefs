@@ -37,8 +37,6 @@ syntax = "proto3";
 
 package cladefs.peer.v1;
 
-option go_package = "github.com/semistrict/cladefs/go/peer/v1;peerv1";
-
 service Peer {
   // The stored bytes of a part of an object of the bucket: from this host's memory or part cache,
   // or fetched from the bucket once, however many hosts ask at once, and kept. NOT_FOUND if this

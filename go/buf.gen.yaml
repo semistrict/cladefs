@@ -3,10 +3,13 @@
 # found in the LICENSE file.
 
 # What go/generate.sh generates from the extent daemon's .proto: the Go package cladefsdv1, its
-# messages and its gRPC client and server, with the generators go.mod pins (its `tool`s).
+# messages and its gRPC client and server, with the generators go.mod pins (its `tool`s). Not the
+# peers' service (cladefs/peer), which only Rust speaks, Rust to Rust (board 10608).
 version: v2
 inputs:
   - directory: ../crates/cladefs/proto
+    exclude_paths:
+      - ../crates/cladefs/proto/cladefs/peer
 plugins:
   - local: [go, tool, protoc-gen-go]
     out: .
