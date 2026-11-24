@@ -363,15 +363,6 @@ impl CellClient {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
 
-    /// Forks the cell, as of its last commit made uploaded, to a new cell, whose handle is a new
-    /// directory at `path`, which the daemon serves sharing the cell's pages (`FORK`), and returns
-    /// the cell's ID, the bucket's to give (TASK-364).
-    pub fn fork(&self, path: &Path) -> Result<u64> {
-        let fork = Request::Fork { path: path.to_owned() };
-        let reply = self.client.request_blocking(&fork)?;
-        Ok(Forked::decode(&reply.header).map_err(|_| Errno::EIO)?.cell)
-    }
-
     /// Makes a version of the cell, once nothing is open
     /// ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)), as with its guest's
     /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
@@ -384,9 +375,8 @@ impl CellClient {
             return Err(Errno::EBUSY);
         }
         let reply = self.client.request_blocking(&Request::Version)?;
-        let Forked { cell, version, tenant } =
-            Forked::decode(&reply.header).map_err(|_| Errno::EIO)?;
-        Ok(CellVersion { tenant, cell, version })
+        let Forked { version, tenant } = Forked::decode(&reply.header).map_err(|_| Errno::EIO)?;
+        Ok(CellVersion { tenant, cell: self.cell, version })
     }
 
     /// cladefs: drops the version `version`, which [`CellClient::make_version`] made on this

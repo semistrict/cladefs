@@ -1065,7 +1065,7 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
             span.set(trace::LEVEL, commit.level());
             (None, None)
         }
-        Request::Open { path, .. } | Request::Fork { path, .. } => {
+        Request::Open { path, .. } => {
             span.set_with(trace::STORE, || path.display().to_string());
             (None, None)
         }
@@ -1741,7 +1741,7 @@ impl Connection {
                 })?;
                 self.versions_made.with(Mutex::lock).insert(version);
                 let cell = open_cell.cell();
-                reply.set_body(&Forked { cell: cell.id, version, tenant: cell.tenant }.to_body());
+                reply.set_body(&Forked { version, tenant: cell.tenant }.to_body());
                 Ok(())
             }
             // cladefs: a version it made, which a VM snapshot failing past it names nowhere
@@ -1755,23 +1755,6 @@ impl Connection {
                     cells::errno_of(format_args!("dropping version {version:x}"), err)
                 })?;
                 self.versions_made.with(Mutex::lock).remove(version);
-                Ok(())
-            }
-            // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
-            Request::Fork { path } => {
-                // cladefs: a new cell of the cell's tenant's, its ID the bucket's (TASK-364).
-                let forked = Box::pin(open_cell.fork(path, open_cell.cell().tenant)).await;
-                if let Err(err) = &forked
-                    && err.errno() == Some(Errno::EBUSY)
-                {
-                    log::warn!("cladefsd: forking to {} refused: {err:#}", path.display());
-                }
-                let cell = forked.map_err(|err| {
-                    cells::errno_of(format_args!("forking to {}", path.display()), err)
-                })?;
-                // cladefs: the fork made, its reply lost: its guest takes it to have failed.
-                fail::fail_point!("cladefsd::forked", |_| Err(Errno::EIO));
-                reply.set_body(&Forked { cell: cell.id, version: 0, tenant: 0 }.to_body());
                 Ok(())
             }
             Request::Info => open_cell.info().map(|info| reply.set_body(&Info(info).to_body())),

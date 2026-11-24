@@ -183,11 +183,17 @@ impl Mounted {
 #[test]
 fn a_fork_of_a_cell_and_the_cell_go_their_own_ways() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let (_sockets, socket) = serve();
+    let (sockets, socket) = serve();
+    let control_socket = sockets.path().join("control.sock");
+    let listener = UnixListener::bind(&control_socket).unwrap();
+    let tenants = sockets.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
+    let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
     let (path, forked) = (dir.path().join("store"), dir.path().join("fork"));
     let parent = Mounted::new(&socket, &path, "cladefs-daemon-parent");
     let mut parent_rows = common::fill(&parent.connection);
-    parent.cell.fork(&forked).unwrap();
+    control.fork_cell(&path, &forked).unwrap();
     let fork = Mounted::new(&socket, &forked, "cladefs-daemon-fork");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.connection, &fork_rows);

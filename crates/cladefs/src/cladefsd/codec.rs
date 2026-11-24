@@ -68,8 +68,6 @@ pub(crate) enum Request<'a> {
     Window { size: u64, copying: bool, budget: u64 },
     /// [`FAULT`].
     Fault(Fault),
-    /// [`FORK`]: to `cell`, a new directory at `path`.
-    Fork { path: PathBuf },
     /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the cell, a VM snapshot's.
     Version,
     /// cladefs: [`FORK`] with [`FORK_DROP`]: drops the version `version`, one the connection made.
@@ -235,7 +233,7 @@ impl<'a> Request<'a> {
             Request::Info => INFO,
             Request::Window { .. } => WINDOW,
             Request::Fault(_) => FAULT,
-            Request::Fork { .. } | Request::Version | Request::DropVersion { .. } => FORK,
+            Request::Version | Request::DropVersion { .. } => FORK,
             Request::Resized { .. } => RESIZED,
             Request::Mappings => MAPPINGS,
             Request::Transfer { .. } => TRANSFER,
@@ -248,7 +246,7 @@ impl<'a> Request<'a> {
     /// it.
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
         match self {
-            Request::Open { path, .. } | Request::Fork { path, .. } => Some(path.as_path()),
+            Request::Open { path, .. } => Some(path.as_path()),
             _ => None,
         }
         .into_iter()
@@ -392,7 +390,6 @@ impl<'a> Request<'a> {
                 let flags = flag(*page, FAULT_PAGE) | flag(*probe, FAULT_PROBE);
                 Encoded::with_body(FAULT, flags, &FaultBody { offset: *offset })
             }
-            Request::Fork { path } => Encoded::empty(FORK, 0).carrying(path.as_os_str().as_bytes()),
             Request::Version => Encoded::empty(FORK, FORK_QUIESCENT),
             Request::DropVersion { version } => {
                 Encoded::with_body(FORK, FORK_DROP, &DropVersionBody { version: *version })
@@ -618,10 +615,7 @@ impl<'a> Request<'a> {
                 let body: DropVersionBody = header.decode_body()?;
                 Request::DropVersion { version: body.version }
             }
-            FORK => {
-                header.decode_empty()?;
-                Request::Fork { path: path(payload)? }
-            }
+            FORK => return Err(Errno::EINVAL),
             RESIZED => {
                 nothing()?;
                 let body: ResizedBody = header.decode_body()?;
@@ -698,8 +692,6 @@ pub(crate) fn most_payload(header: &Header) -> u64 {
     let has = |flag: u32| header.flags & flag != 0;
     let most = match header.kind {
         OPEN => PATH,
-        FORK if has(FORK_QUIESCENT) || has(FORK_DROP) => 0,
-        FORK => PATH,
         // Its data and its root after it; or, through the transfer area, its root alone.
         WRITE if has(WRITE_TRANSFER) => ROOT,
         WRITE => MAX_PAYLOAD.saturating_add(ROOT),
@@ -1102,25 +1094,23 @@ impl Info {
     }
 }
 
-/// cladefs: a [`FORK`]'s reply: the fork's cell's ID, the bucket's to give (TASK-364).
+/// cladefs: a quiescent [`FORK`]'s reply: the version of the cell made, a VM snapshot's, and
+/// the cell's tenant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Forked {
-    pub cell: u64,
-    /// cladefs: of a quiescent [`FORK`], the version of the cell made, a VM snapshot's, and
-    /// the cell's tenant; else 0.
     pub version: u64,
     pub tenant: u64,
 }
 
 impl Forked {
     pub fn to_body(self) -> ForkedBody {
-        ForkedBody { cell: self.cell, version: self.version, tenant: self.tenant }
+        ForkedBody { version: self.version, tenant: self.tenant }
     }
 
     #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(header: &Header) -> Result<Self, Errno> {
-        let ForkedBody { cell, version, tenant } = header.decode_body()?;
-        Ok(Self { cell, version, tenant })
+        let ForkedBody { version, tenant } = header.decode_body()?;
+        Ok(Self { version, tenant })
     }
 }
 
@@ -1345,7 +1335,6 @@ mod tests {
             Request::Window { size: MAX_WINDOW, copying: true, budget: d },
             Request::Fault(Fault { offset: a, page: one, probe: false }),
             Request::Fault(Fault { offset: a, page: true, probe: true }),
-            Request::Fork { path: path.clone() },
             Request::Version,
             Request::DropVersion { version: a },
             Request::Resized { capacity: a, took: one },
@@ -1589,9 +1578,8 @@ mod tests {
         let root = |flags| Header::new(COMMIT, 1).with_flags(flags);
         let stats =
             || Header::new(STATS, 1).with_flags(STATS_GUEST).with_body(&StatsBody::default());
-        let cases: [(Header, u8, usize); 5] = [
+        let cases: [(Header, u8, usize); 4] = [
             (open(), b'a', MOST_PATH as usize),
-            (Header::new(FORK, 1), b'a', MOST_PATH as usize),
             (root(COMMIT_ROOT), b'r', MAX_ROOT),
             (Header::new(BUILD, 1), b'b', MAX_BUILD),
             (stats(), b's', MAX_STATS),
@@ -1622,7 +1610,9 @@ mod tests {
             }
         }
         // Kinds that carry nothing: a byte is past their most, and refused decoded.
-        for kind in [READ, FREE, MAP, UNMAP, ROOT, INFO, WINDOW, FAULT, ACK, STAGE_COUNTS, 0xffff] {
+        for kind in
+            [READ, FREE, MAP, UNMAP, ROOT, INFO, WINDOW, FAULT, ACK, FORK, STAGE_COUNTS, 0xffff]
+        {
             let mut header = Header::new(kind, 1);
             header.len = 1;
             assert_eq!(most_payload(&header), 0, "kind {kind}");
@@ -1672,7 +1662,7 @@ mod tests {
                 COMMIT => 0b111,
                 FAULT => 0b10,
                 WINDOW => 0b1,
-                FORK => 0b1,
+                FORK => 0b11,
                 STATS => 0b1,
                 _ => 0,
             }
@@ -1721,6 +1711,9 @@ mod tests {
         refused(COMMIT, COMMIT_UPLOADED | COMMIT_LOCAL, b"");
         refused(FAULT, FAULT_PROBE, b"");
         refused(FAULT, 1 << 0, b"");
+        refused(FORK, 0, b"");
+        refused(FORK, 0, b"store");
+        refused(FORK, FORK_QUIESCENT | FORK_DROP, b"");
         let phys = PhysLocation { arena: ArenaId::DEFAULT, offset: 0 };
         let ops = [
             StageOp::Map { offset: 0, phys, len: 4096 },
@@ -1844,6 +1837,7 @@ mod tests {
             refused(Header::new(FORK, 1), path, vec![]);
             refused(open(OPEN_CREATE), path, vec![]);
         }
+        refused(Header::new(FORK, 1), b"s", vec![]);
         refused(open(OPEN_FORK), b"a\0b", vec![]);
         refused(
             Header::new(FORK, 1).with_flags(FORK_QUIESCENT),
@@ -2170,7 +2164,7 @@ mod tests {
             });
             let header = Header::new(REPLY, 1).with_body(&info.to_body());
             prop_assert_eq!(Info::decode(&header), Ok(info));
-            let forked = Forked { cell: a, version: b, tenant: c };
+            let forked = Forked { version: a, tenant: b };
             let header = Header::new(REPLY, 1).with_body(&forked.to_body());
             prop_assert_eq!(Forked::decode(&header), Ok(forked));
             let mapped: Vec<WindowMapping> = (mappings_of.into_iter())
@@ -2223,7 +2217,7 @@ mod tests {
         assert_eq!(Stage::decode(&bad_stage).err(), Some(Errno::EINVAL));
 
         let mut dirty_forked =
-            Header::new(REPLY, 1).with_body(&ForkedBody { cell: 1, version: 2, tenant: 3 });
+            Header::new(REPLY, 1).with_body(&ForkedBody { version: 2, tenant: 3 });
         dirty_forked.body.0[size_of::<ForkedBody>()] = 1;
         assert_eq!(Forked::decode(&dirty_forked).err(), Some(Errno::EINVAL));
 
@@ -2287,7 +2281,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (16, 0x3732a8e742a01b7e);
+        const WIRE: (u64, u64) = (17, 0x42af1ca606e2c7cf);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -2365,7 +2359,7 @@ mod tests {
             next_sequence: 12,
             sequence_floor: 1 << 40,
         };
-        let forked = Forked { cell: 3, version: 4, tenant: 5 };
+        let forked = Forked { version: 4, tenant: 5 };
         hashed(opened.to_body().as_bytes());
         hashed(Info(info).to_body().as_bytes());
         hashed(forked.to_body().as_bytes());

@@ -48,7 +48,7 @@
 // cladefs: the fork cases measure what a VM booted on a fork of a base image pays to start and run,
 // on the base's data, and what the extent daemon having that data in memory already saves it. A
 // base VM, on a cell of its own, copies the guest's /usr there and makes a PostgreSQL database
-// (pgbench -i), once. Then each iteration forks the base through the daemon (its FORK request)
+// (pgbench -i), once. Then each iteration forks the base through the daemon (its ForkCell RPC)
 // and boots a VM on the fork, which mounts it, reads the tree whole, and starts PostgreSQL on the
 // database and runs pgbench's read-only transactions. The fork is served by the daemon that served
 // the base, whose extent cache holds the base's data (warm), or by a daemon of its own, started
@@ -340,9 +340,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                         crate::common::control(&cladefsd)?.fork_version(version, fork)?;
                     }
                     None => drop(
-                        opened(&cladefsd, &base)?
-                            .fork(fork)
-                            .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?,
+                        crate::common::control(&cladefsd)?
+                            .fork_cell(&base, fork)
+                            .context("forking the base")?,
                     ),
                 }
                 Ok(())

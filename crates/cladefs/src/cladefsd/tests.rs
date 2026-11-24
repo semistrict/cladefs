@@ -1757,9 +1757,9 @@ fn the_daemon_forks_cells_it_serves() {
     let extent = ExtentId { cell: client.cell(), sequence: 1 };
     write(&client, extent, 0, &pattern(9, ps)).unwrap();
     client.commit(None).unwrap();
-    let cell = client.fork(&child).unwrap();
+    let cell = fork_cell(&parent, &child).unwrap().id;
     // A fork to a path that is there already fails, as making a cell there does (TASK-79.83).
-    assert_eq!(client.fork(&child), Err(Errno::EEXIST));
+    assert_eq!(fork_cell(&parent, &child).unwrap_err().errno(), Some(Errno::EEXIST));
     drop(client);
     let (ours, page) = map_first_page(&socket, &parent, extent);
     let ours_from = mapped_from(page);
@@ -2119,8 +2119,10 @@ fn daemons_with_roots_serve_no_cells_outside_them() {
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
     let client = CellClient::connect(&socket, ours.join("store"), 1 << 24).unwrap();
     client.commit(None).unwrap();
-    assert_eq!(client.fork(&theirs.join("fork")), Err(Errno::EACCES));
-    client.fork(&ours.join("fork")).unwrap();
+    let version = client.make_version().unwrap();
+    let refused = CellClient::connect_forked(&socket, theirs.join("fork"), version, 1 << 24);
+    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
+    CellClient::connect_forked(&socket, ours.join("fork"), version, 1 << 24).unwrap();
 }
 
 /// TASK-456.2: a memory cell's pages and holes, committed at once, read back once it is opened
@@ -2145,7 +2147,7 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     memory.commit().unwrap();
     let parent_extents = memory.extents().unwrap();
     let fork = dir.path().join("fork");
-    let forked = memory.fork(&fork).unwrap();
+    let forked = fork_cell(&path, &fork).unwrap().id;
     memory.close().unwrap();
 
     let mut expected = filled(1, PAGES);
@@ -2240,14 +2242,13 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
     image[(200 * ps) as usize..(230 * ps) as usize].fill(0);
     memory.commit().unwrap();
     let (one, two) = (dir.path().join("one"), dir.path().join("two"));
-    memory.fork(&one).unwrap();
-    memory.fork(&two).unwrap();
+    let version = memory.make_version().unwrap();
     let page = memory.page_size();
     memory.close().unwrap();
     // A host of pages larger than the cell's (arm64's 16 KiB) restores no window: refused as it is
     // made (memory_cell's window_fits_host), not at the guest's first fault (board 5230).
     if ps > page {
-        let memory_cell = MemoryCell::open(&socket, &one, size).unwrap();
+        let memory_cell = MemoryCell::open_forked(&socket, &one, version, size).unwrap();
         // SAFETY: As restore's below; the window is refused, mapping nothing.
         let refused = unsafe { memory_cell.window(memory_noreserve(PAGES as usize), size, None) };
         assert_eq!(refused.unwrap_err().errno(), Some(crate::Errno::EINVAL));
@@ -2255,7 +2256,7 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
     }
 
     let restore = |path: &Path| {
-        let memory_cell = MemoryCell::open(&socket, path, size).unwrap();
+        let memory_cell = MemoryCell::open_forked(&socket, path, version, size).unwrap();
         let base = memory_noreserve(PAGES as usize);
         // SAFETY: The memory is the test's, and outlives the memory_cell (unmapped once it goes).
         unsafe { memory_cell.window(base, size, None) }.unwrap();
@@ -4482,11 +4483,11 @@ fn guests_forks_failing_at_each_step_harm_nothing() {
         client.commit(Some(b"root")).unwrap();
         let child = dir.path().join(format!("child-{case}"));
         let failing = fail::FailGuard::new(step, "1*return").unwrap();
-        let forked = client.fork(&child);
+        let forked = fork_cell(&path, &child).map_err(|err| err.errno());
         drop(failing);
         // Failing, but at its version's drop, past its child made, which fails it no more
         // (TASK-609).
-        let failed = (step != "upload::drop_versions").then_some(Errno::EIO);
+        let failed = (step != "upload::drop_versions").then_some(Some(Errno::EIO));
         assert_eq!((forked.err(), child.exists()), (failed, failed.is_none()), "{step}");
         drop(client);
 
@@ -4494,7 +4495,11 @@ fn guests_forks_failing_at_each_step_harm_nothing() {
         assert_eq!(client.root(), Ok(b"root".to_vec()), "{step}");
         assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
         let retried = dir.path().join(format!("retried-{case}"));
-        assert_eq!(client.fork(&retried).map(drop), Ok(()), "{step}");
+        assert_eq!(
+            fork_cell(&path, &retried).map(drop).map_err(|err| err.errno()),
+            Ok(()),
+            "{step}"
+        );
         let forked = CellClient::connect(&socket, &retried, 1 << 24).unwrap();
         assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
         forked.commit(Some(b"fork")).unwrap();
@@ -4524,18 +4529,21 @@ fn forks_whose_answers_are_lost_stand() {
     client.commit(Some(b"root")).unwrap();
 
     let refused = dir.path().join("refused");
-    let failing = fail::FailGuard::new("cladefsd::fork", "1*return").unwrap();
-    assert_eq!(client.fork(&refused), Err(Errno::EIO));
+    let failing = fail::FailGuard::new("cladefsd::fork_uploaded", "1*return").unwrap();
+    assert_eq!(fork_cell(&path, &refused).map_err(|err| err.errno()), Err(Some(Errno::EIO)));
     drop(failing);
     assert!(!refused.exists(), "a request refused made a fork");
-    assert_eq!(client.fork(&refused).map(drop), Ok(()));
+    assert_eq!(fork_cell(&path, &refused).map(drop).map_err(|err| err.errno()), Ok(()));
 
     let child = dir.path().join("child");
     let failing = fail::FailGuard::new("cladefsd::forked", "1*return").unwrap();
-    assert_eq!(client.fork(&child), Err(Errno::EIO));
+    assert_eq!(fork_cell(&path, &child).map_err(|err| err.errno()), Err(Some(Errno::EIO)));
     drop(failing);
-    assert_eq!(client.fork(&child), Err(Errno::EEXIST));
-    assert_eq!(client.fork(&dir.path().join("again")).map(drop), Ok(()));
+    assert_eq!(fork_cell(&path, &child).map_err(|err| err.errno()), Err(Some(Errno::EEXIST)));
+    assert_eq!(
+        fork_cell(&path, &dir.path().join("again")).map(drop).map_err(|err| err.errno()),
+        Ok(())
+    );
     assert_eq!(client.commit(Some(b"later")), Ok(()));
     let forked = CellClient::connect(&socket, &child, 1 << 24).unwrap();
     assert_eq!(forked.root(), Ok(b"root".to_vec()));

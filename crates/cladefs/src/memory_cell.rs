@@ -6,8 +6,8 @@
 //! a memory cell (`OPEN_MEMORY`), kept as a block device (`block_device`) whose contents are the
 //! image of the guest's memory, a page a block. A snapshot writes the pages its guest wrote and
 //! discards the zero ones, holes, which store nothing, and commits them at once ([`MemoryCell`]); a
-//! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryCell::fork`]),
-//! which reads the parent's pages and stores only its own.
+//! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryCell::make_version`]
+//! and [`MemoryCell::open_forked`]), which reads the parent's pages and stores only its own.
 //!
 //! Its device is the daemon's extent store ([`DaemonDevice`]): its reads of sealed extents are the
 //! daemon's cache's, which every cell and VM it serves shares.
@@ -191,12 +191,6 @@ impl MemoryCell {
     /// of hosts restore at once ([`MemoryCell::open_forked`]), and none writes.
     pub fn make_version(&self) -> Result<CellVersion, Error> {
         self.client.make_version().map_err(Error::new)
-    }
-
-    /// Forks the cell, as of its last commit, to a new cell at `path`, a memory cell of a
-    /// new cell, which reads its pages until it writes its own: its cell.
-    pub fn fork(&self, path: &Path) -> Result<u64, Error> {
-        self.client.fork(path).map_err(Error::new)
     }
 
     /// The runs of its window's private pages, by offset in the memory, in order: those the
@@ -520,11 +514,11 @@ mod tests {
         let image: Vec<u8> = (0..PAGES).flat_map(|page| pattern(page as u8, ps as usize)).collect();
         memory.write(0, &image).unwrap();
         memory.commit().unwrap();
-        let fork = dir.path().join("fork");
-        memory.fork(&fork).unwrap();
+        let version = memory.make_version().unwrap();
         let page = memory.page_size();
         memory.close().unwrap();
-        let memory_cell = MemoryCell::open(&socket, &fork, size).unwrap();
+        let fork = dir.path().join("fork");
+        let memory_cell = MemoryCell::open_forked(&socket, &fork, version, size).unwrap();
         let reclaimed = memory_cell.reclaim(0, ps);
         assert_eq!(reclaimed.unwrap_err().errno(), Some(Errno::EINVAL), "with no window");
         // SAFETY: Anonymous memory, reserving none, the test's: the window's.

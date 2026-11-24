@@ -1061,7 +1061,11 @@ async fn fork_held(
             true => held.open_cell.fork_quiescent(&to, tenant).await,
             false => held.open_cell.fork(&to, tenant).await,
         };
-        forked.map_err(|err| errno_of(format_args!("forking to {}", to.display()), err))
+        let cell =
+            forked.map_err(|err| errno_of(format_args!("forking to {}", to.display()), err))?;
+        // cladefs: the fork made, its reply lost: its caller takes it to have failed.
+        fail::fail_point!("cladefsd::forked", |_| Err(Errno::EIO));
+        Ok(cell)
     }
     .await;
     release_held(held).await;

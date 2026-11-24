@@ -458,13 +458,12 @@ pub(crate) struct InfoBody {
     pub sequence_floor: u64,
 }
 
-/// Inline body of a reply to [`FORK`] (both fork and quiescent version).
+/// Inline body of a reply to [`FORK`] with [`FORK_QUIESCENT`].
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
 )]
 pub(crate) struct ForkedBody {
-    pub cell: u64,
     pub version: u64,
     pub tenant: u64,
 }
@@ -561,7 +560,9 @@ const _: () = {
 /// as it is admitted (board 8465).
 /// Version 16: no followers (board 8237): no `OPEN_READ_ONLY`, `ADVANCE`, `LET_GO`, `PIN`, `UNPIN`
 /// nor `COMMITTED`, and an [`OPEN`]'s reply says no commit.
-pub(crate) const VERSION: u64 = 16;
+/// Version 17: [`FORK`] takes no path (`ForkCell` covers it; board 10612): only [`FORK_QUIESCENT`]
+/// and [`FORK_DROP`], and its reply carries no cell ID.
+pub(crate) const VERSION: u64 = 17;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -624,16 +625,13 @@ pub(crate) const FAULT: u32 = 11;
 /// Acknowledges stage operation `id`, which the VM process has made; and says, as
 /// [`STAGE_COUNTS`] does, what its stage operations have cost it so far.
 pub(crate) const ACK: u32 = 12;
-/// Forks the cell, as of its last commit made uploaded, to a new cell, whose handle is a new
-/// directory at the path the payload holds, nothing there (`EEXIST`)
-/// ([`OpenCell::fork`](crate::OpenCell)): a fork the daemon serves, sharing its extents'
-/// pages with the cell's. cladefs: a new cell of the cell's tenant's, its ID the
-/// bucket's to give (`bucket_cell::objectid`, TASK-364), which the reply's `args[0]` is. With
-/// [`FORK_QUIESCENT`], no payload, it makes a version of the cell instead, a VM
-/// snapshot's, which any number of hosts fork at once and none writes: `EBUSY` unless nothing is
-/// open ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)); the reply's `args[1]`
-/// is its ID. cladefs: with [`FORK_DROP`], no payload, it drops the version `args[0]`, one this
+/// Makes or drops a version of the cell: with [`FORK_QUIESCENT`], no payload, it makes a version
+/// of the cell, a VM snapshot's, which any number of hosts fork at once and none writes: `EBUSY`
+/// unless nothing is open ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)); the
+/// reply's [`ForkedBody`] carries the version's ID and the cell's tenant. cladefs: with
+/// [`FORK_DROP`], no payload, it drops the version [`DropVersionBody::version`], one this
 /// connection made: what a VM snapshot that failed past making its versions made (TASK-575).
+/// Forking by path went in version 17 (`ForkCell` covers it; board 10612).
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it
 /// took that size, `args[1]` 1, or not, 0.
