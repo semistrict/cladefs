@@ -1483,6 +1483,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: the relocation round under way, if one is, with what it was allowed; what the
         // next may copy; and the keys the states the cell keeps read (doc-27, board 6214).
         let mut relocating: Option<(u64, Round)> = None;
+        let mut relocate_wanted = false;
         let mut credit = relocations::Credit::default();
         let pins = Arc::new(relocations::Pins::default());
         // Whether the next gather closes the cell's open segment: for a commit waiting for its
@@ -1560,6 +1561,19 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 let acknowledging = async move { writer.acknowledge().await };
                 head_work = Some(acknowledging.map_ok(HeadWork::Acknowledged).boxed());
             }
+            // cladefs: a relocation round after a checkpoint, once any earlier round is done, the
+            // uploader isn't stopping and the cell's disk has room (doc-27, board 10918).
+            if relocate_wanted && self.options.relocate && relocating.is_none() && !stop {
+                relocate_wanted = false;
+                let pressed = crate::dir::Dir::disk(self.cell().dir())
+                    .is_some_and(|disk| disk.under_pressure());
+                if !pressed {
+                    let allowance = credit.take();
+                    let round =
+                        self.relocating(writer.clone(), (bucket.clone(), pins.clone()), allowance);
+                    relocating = Some((allowance, round));
+                }
+            }
             let mut woken = std::pin::pin!(self.woken(interval));
             let happened = futures::future::poll_fn(|cx| {
                 if let Some(work) = head_work.as_mut()
@@ -1602,19 +1616,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                             acked.await
                         }
                         Ok(HeadWork::Checkpointed) => {
-                            // cladefs: then a relocation round, if none is under way, the
-                            // uploader isn't stopping and the cell's disk has room (doc-27).
-                            let pressed = crate::dir::Dir::disk(self.cell().dir())
-                                .is_some_and(|disk| disk.under_pressure());
-                            if self.options.relocate && relocating.is_none() && !stop && !pressed {
-                                let allowance = credit.take();
-                                let round = self.relocating(
-                                    writer.clone(),
-                                    (bucket.clone(), pins.clone()),
-                                    allowance,
-                                );
-                                relocating = Some((allowance, round));
-                            }
+                            // cladefs: queue a relocation round for after this checkpoint
+                            // (started at the top of the loop once any earlier round has ended,
+                            // doc-27, board 10918).
+                            relocate_wanted = true;
                             Ok(())
                         }
                         Err(err) => Err(err.into()),
