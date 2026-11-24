@@ -68,14 +68,16 @@ pub fn cell_path(cell: CellId) -> String {
 type Cells = Arc<Mutex<BTreeMap<CellId, Attaching>>>;
 
 /// A cell of the mount's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Attaching {
     /// Being attached.
     Busy,
-    /// Attached, taken at the placement of this token, if one was given.
-    Attached(Option<u64>),
+    /// Attached, taken at the placement of this token, if one was given, with the local cell
+    /// directory held for the mount (in `CLADEFSD_MOUNT_STORES` for bucket cells, or the cell's
+    /// own directory for ephemeral cells).
+    Attached(Option<u64>, PathBuf),
     /// Being detached: listed, its filesystem as it goes.
-    Detaching,
+    Detaching(PathBuf),
 }
 
 /// The API's calls, served by a server of many cells: the mount's, which the daemon's drain lets
@@ -114,16 +116,29 @@ async fn held_open(
     Ok(fs)
 }
 
-/// The cell `cell` of `cells` as `reserving` finds it: marked `marked` if it says so, else left be.
-fn reserve(
+/// The cell `cell` of `cells` as `reserving` finds it: marked as `reserving` says, else left be.
+fn reserve<R>(
     cells: &Cells,
-    (cell, marked): (CellId, Attaching),
-    reserving: impl FnOnce(Option<Attaching>) -> Result<(), Errno>,
-) -> Result<(), Errno> {
+    cell: CellId,
+    reserving: impl FnOnce(Option<&Attaching>) -> Result<(Attaching, R), Errno>,
+) -> Result<R, Errno> {
     let mut cells = cells.lock().unwrap();
-    reserving(cells.get(&cell).copied())?;
+    let (marked, result) = reserving(cells.get(&cell))?;
     cells.insert(cell, marked);
-    Ok(())
+    Ok(result)
+}
+
+/// Mounts an existing ephemeral Fxfs cell directory at `path` on `daemon`, with no uploader:
+/// reads inherited extents through `daemon`'s part cache and keeps writes host-local.
+async fn mount_ephemeral_cell(
+    daemon: &Arc<crate::cladefsd::Daemon>,
+    path: &Path,
+) -> Result<Filesystem, Error> {
+    let keeping = crate::cladefsd::cells::mount_keeping(daemon).map_err(Error::from)?;
+    let storage = Storage::open_on_keeping(&daemon.host, path, keeping).await?;
+    Filesystem::mount(storage)
+        .await
+        .map_err(|err| err.context(format!("mounting {}", path.display())))
 }
 
 /// Takes a cell's filesystem, the cell `of` says, into a cell directory at `path` in the bucket at
@@ -174,31 +189,55 @@ impl Control {
 
     /// Attaches `cell`'s filesystem at its path, as [`mount_cell`] takes and mounts it, placed at
     /// `token` if given: a new one of `capacity` bytes if `new`, else the one its head, of `kind`,
-    /// names, if an Fxfs one. Returns whether it shows it.
+    /// names, if an Fxfs one. Returns whether it shows it and the local cell directory held.
     async fn attach_cell(
         &self,
         cell: CellId,
         kind: Option<Kind>,
         (new, capacity): (bool, u64),
         token: Option<u64>,
-    ) -> Result<bool, Error> {
+    ) -> Result<(bool, PathBuf), Error> {
         let Some(server) = self.server.upgrade() else {
             return Err(Errno::ENOTCONN.into());
         };
+        let shown = cell_path(cell);
+        let path = self.source.dir.join(&shown);
         let of = match (new, kind) {
             (true, _) => (CellOf::Named(cell), capacity),
             (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),
-            (false, _) => return Ok(false),
+            (false, _) => return Ok((false, path)),
         };
-        let shown = cell_path(cell);
-        let path = self.source.dir.join(&shown);
         let mounting = mount_cell(&self.daemon, &path, &self.source.bucket, of, token);
         let open = held_open(Arc::clone(&self.daemon), self.holds.clone(), path.clone(), mounting);
         if let Err(err) = server.attach(&shown, open).await {
             self.holds.lock().unwrap().remove(&path);
             return Err(err);
         }
-        Ok(true)
+        Ok((true, path))
+    }
+
+    /// Attaches an existing host-local ephemeral `cell` at `path` (of `kind`) to the FUSE mount,
+    /// without touching the bucket's head or starting an uploader.
+    async fn attach_ephemeral_cell(
+        &self,
+        cell: CellId,
+        path: PathBuf,
+        kind: Option<Kind>,
+    ) -> Result<(bool, PathBuf), Error> {
+        let Some(server) = self.server.upgrade() else {
+            return Err(Errno::ENOTCONN.into());
+        };
+        if kind != Some(Kind::Fxfs) {
+            return Ok((false, path));
+        }
+        let shown = cell_path(cell);
+        let mounting = mount_ephemeral_cell(&self.daemon, &path);
+        let open = held_open(Arc::clone(&self.daemon), self.holds.clone(), path.clone(), mounting);
+        if let Err(err) = server.attach(&shown, open).await {
+            self.holds.lock().unwrap().remove(&path);
+            return Err(err);
+        }
+        Ok((true, path))
     }
 }
 
@@ -209,8 +248,8 @@ impl proto::mount_server::Mount for Control {
         request: Request<AttachRequest>,
     ) -> Result<Response<AttachResponse>, Status> {
         let AttachRequest { tenant, cell, token, capacity } = request.into_inner();
-        // A cell of 0 is a new one, made as it is held, its filesystem with it; any other is the
-        // bucket's, or none.
+        // A cell of 0 is a new one, made as it is held, its filesystem with it; any other is an
+        // ephemeral cell on this host, or a bucket cell, or none.
         let make = cell == 0;
         if make && capacity == 0 {
             return Err(failed(Errno::EINVAL.into()));
@@ -223,10 +262,10 @@ impl proto::mount_server::Mount for Control {
             }
             id => CellId { tenant, id },
         };
-        reserve(&self.cells, (cell, Attaching::Busy), |found| match found {
-            None => Ok(()),
-            Some(Attaching::Attached(_)) => Err(Errno::EEXIST),
-            Some(Attaching::Busy | Attaching::Detaching) => Err(Errno::EBUSY),
+        reserve(&self.cells, cell, |found| match found {
+            None => Ok((Attaching::Busy, ())),
+            Some(Attaching::Attached(..)) => Err(Errno::EEXIST),
+            Some(Attaching::Busy | Attaching::Detaching(_)) => Err(Errno::EBUSY),
         })
         .map_err(|errno| failed(errno.into()))?;
         let control = Control {
@@ -238,6 +277,9 @@ impl proto::mount_server::Mount for Control {
         };
         let attached = whole(async move {
             let attached = async {
+                if !make && let Some((path, kind)) = ephemeral_cell(&control.daemon, cell).await? {
+                    return control.attach_ephemeral_cell(cell, path, kind).await;
+                }
                 // A cell of the bucket's, its head read for its kind: its cell's opening takes it,
                 // as a new one's makes it, encrypted (TASK-411.28, TASK-515).
                 let kind = match make {
@@ -248,12 +290,17 @@ impl proto::mount_server::Mount for Control {
             }
             .await;
             let mut cells = control.cells.lock().unwrap();
-            match &attached {
-                Ok(_) => cells.insert(cell, Attaching::Attached(token)),
+            match attached {
+                Ok((shown, store_path)) => {
+                    cells.insert(cell, Attaching::Attached(token, store_path));
+                    Ok(shown)
+                }
                 // Not attached: forgotten here; the error is the caller's.
-                Err(_) => cells.remove(&cell),
-            };
-            attached
+                Err(err) => {
+                    cells.remove(&cell);
+                    Err(err)
+                }
+            }
         });
         let shown = attached.await?;
         Ok(Response::new(AttachResponse { cell: cell.id, shown }))
@@ -265,14 +312,15 @@ impl proto::mount_server::Mount for Control {
     ) -> Result<Response<DetachResponse>, Status> {
         let DetachRequest { tenant, cell, force } = request.into_inner();
         let cell = CellId { tenant, id: cell };
-        reserve(&self.cells, (cell, Attaching::Detaching), |found| match found {
-            Some(Attaching::Attached(_)) => Ok(()),
-            Some(Attaching::Busy | Attaching::Detaching) => Err(Errno::EBUSY),
+        let store_path = reserve(&self.cells, cell, |found| match found {
+            Some(Attaching::Attached(_, path)) => {
+                Ok((Attaching::Detaching(path.clone()), path.clone()))
+            }
+            Some(Attaching::Busy | Attaching::Detaching(_)) => Err(Errno::EBUSY),
             None => Err(Errno::ENOENT),
         })
         .map_err(|errno| failed(errno.into()))?;
         let (server, cells, holds) = (self.server()?, self.cells.clone(), self.holds.clone());
-        let dir = self.source.dir.clone();
         let path = cell_path(cell);
         let detached = whole(async move {
             let shown: Vec<String> = (server.attached().into_iter())
@@ -282,11 +330,7 @@ impl proto::mount_server::Mount for Control {
             let detaching = shown.iter().map(|name| server.detach(name, force));
             let detached = futures::future::join_all(detaching).await;
             // Their cells closed, or gone from the mount all the same: the daemon's again.
-            let mut held = holds.lock().unwrap();
-            for name in &shown {
-                held.remove(&dir.join(name));
-            }
-            drop(held);
+            holds.lock().unwrap().remove(&store_path);
             // A cell that failed to unmount is gone from the mount all the same
             // (`Server::detach`): the cell is no longer attached, and attaching it again opens its
             // cell anew.
@@ -321,6 +365,34 @@ impl proto::mount_server::Mount for Control {
             .collect();
         Ok(Response::new(ListResponse { cells }))
     }
+}
+
+/// Checks whether `cell` is an ephemeral cell recorded in `daemon`'s `CLADEFSD_EPHEMERAL` journal.
+/// Returns `Ok(None)` when `CLADEFSD_EPHEMERAL` is unset or `cell` has no entry (so the caller
+/// falls through to the bucket), `EBUSY` if it is migrating or handed over, and `ENOENT` if the
+/// journaled cell directory is no longer on disk.
+async fn ephemeral_cell(
+    daemon: &Arc<crate::cladefsd::Daemon>,
+    cell: CellId,
+) -> Result<Option<(PathBuf, Option<Kind>)>, Error> {
+    let host = match crate::ephemeral_host::host_on(&daemon.host) {
+        Ok(host) => host,
+        Err(Errno::ENOTSUP) => return Ok(None),
+        Err(errno) => return Err(errno.into()),
+    };
+    local_cell::upload::blocking(move || -> Result<Option<(PathBuf, Option<Kind>)>, Error> {
+        let Some(entry) = host.entry(cell).map_err(Error::new)? else {
+            return Ok(None);
+        };
+        if entry.migrating.is_some() {
+            return Err(Errno::EBUSY.into());
+        }
+        if !host_fs::exists(&entry.path) || !crate::host_cell::is_ephemeral(&entry.path) {
+            return Err(Errno::ENOENT.into());
+        }
+        let kind = local_cell::host_kind(&entry.path).map_err(Error::new)?;
+        Ok(Some((entry.path, kind)))
+    })
 }
 
 /// The kind of `cell`, a cell of the bucket at `url`, if its head says one: `ENOENT` if it has no

@@ -233,7 +233,7 @@ pub use framing::{
 };
 pub use host::{
     Host, create_host_at_version_on, create_host_ephemeral_on, create_host_on, create_host_with_on,
-    delete_host_on, deleting_host, host_bucket, host_cell, host_ephemeral,
+    delete_host_on, deleting_host, host_bucket, host_cell, host_ephemeral, host_kind,
     host_local_checkpoint_on, host_token, host_version, left_unmade_on, made_host_on, place,
     place_host_on, remove_cell_dir_on, unmade_host_on,
 };

@@ -516,6 +516,11 @@ pub fn host_ephemeral(path: &Path) -> Result<bool, Error> {
     Ok(cell_file(path)?.ephemeral)
 }
 
+/// cladefs: the kind of the cell at `path`, if its description names one (doc-20).
+pub fn host_kind(path: &Path) -> Result<Option<Kind>, Error> {
+    Ok(cell_file(path)?.kind)
+}
+
 /// cladefs: the local checkpoint of the ephemeral cell at `path` on `host`, if it is one (doc-25,
 /// TASK-698.3): what deleting it reads its reference of.
 pub fn host_local_checkpoint_on(

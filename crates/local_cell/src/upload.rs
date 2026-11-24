@@ -599,7 +599,7 @@ pub async fn open_ephemeral<D: Dir>(
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
 ) -> Result<(Arc<LocalCell<D>>, RingHold, Forked), Failure> {
-    let checkpoint = recovering.local_checkpoint()?;
+    let checkpoint = blocking(|| recovering.local_checkpoint())?;
     let (parent, cell) = (checkpoint.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
         crate::layout::read_versioned(checkpoint.keys())

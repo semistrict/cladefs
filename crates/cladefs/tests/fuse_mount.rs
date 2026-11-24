@@ -1003,3 +1003,117 @@ fn mounted_cells_read_through_the_daemons_part_cache() {
     );
     terminate(child, &m);
 }
+
+/// Host-FUSE `Mount::attach` mounts an ephemeral cell (recorded in `CLADEFSD_EPHEMERAL`) directly
+/// from its host-local cell directory with no uploader: inherited files read from the bucket,
+/// writes persist across detach/re-attach locally, and zero segments/heads are uploaded to the
+/// bucket for the ephemeral child.
+#[test]
+fn ephemeral_cells_attach_to_fuse_without_uploading_to_the_bucket() {
+    use cladefs::cladefsd::control::proto::{
+        DeleteCellRequest, MakeVersionRequest, SyncCellRequest,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let ephemeral = dir.path().join("ephemeral");
+    let cells_dir = dir.path().join("cells");
+    let ws_dir = dir.path().join("ws");
+    let m = dir.path().join(".gvfs");
+    let socket = dir.path().join("control");
+    std::fs::create_dir_all(&ephemeral).unwrap();
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+
+    let mut command = cladefsd(&dir.path().join("vm.sock"), &bucket, 1);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_MOUNT", &m)
+        .env("CLADEFSD_MOUNT_STORES", &cells_dir)
+        .env("CLADEFSD_EPHEMERAL", &ephemeral);
+    let child = serving(command, &socket);
+    let sock_s = socket.to_str().unwrap();
+
+    // 1. Create a base Fxfs cell via Mount, write a file, detach, version, and sync to the bucket.
+    let base_cell_b32 =
+        cladefsctl_mount(sock_s, &["create", "1", &CELL_SIZE.to_string()]).trim().to_owned();
+    let base_cell_id = base32_id::parse(&base_cell_b32).unwrap();
+    let base_mount = m.join("0000000000001").join(&base_cell_b32);
+    std::fs::write(base_mount.join("base.txt"), b"from-base").unwrap();
+    cladefsctl_mount(sock_s, &["detach", "1", &base_cell_b32]);
+
+    let base_store = cells_dir.join("0000000000001").join(&base_cell_b32);
+    let control = cladefs::testing::Control::connect(sock_s).unwrap();
+    let version = control
+        .call(async |client| {
+            client
+                .make_version(MakeVersionRequest {
+                    path: control_path(&base_store),
+                    ..Default::default()
+                })
+                .await
+        })
+        .unwrap()
+        .version;
+    control
+        .call(async |client| {
+            client.sync_cell(SyncCellRequest { path: control_path(&base_store) }).await
+        })
+        .unwrap();
+
+    // 2. Fork an ephemeral workspace cell from the base version.
+    let eph_path = ws_dir.join("ws-eph-1");
+    let forked = control
+        .call(async |client| {
+            client
+                .fork_cell(ForkCellRequest {
+                    to: control_path(&eph_path),
+                    tenant: 1,
+                    cell: base_cell_id,
+                    version,
+                    ephemeral: true,
+                    ..Default::default()
+                })
+                .await
+        })
+        .unwrap();
+    let eph_cell_b32 = base32_id::Padded(forked.cell).to_string();
+
+    // 3. Attach the ephemeral cell to the FUSE mount, read inherited data, and write new data.
+    cladefsctl_mount(sock_s, &["attach", "1", &eph_cell_b32]);
+    let eph_mount = m.join("0000000000001").join(&eph_cell_b32);
+    assert_eq!(std::fs::read(eph_mount.join("base.txt")).unwrap(), b"from-base");
+    std::fs::write(eph_mount.join("scratch.txt"), b"host-local-only").unwrap();
+
+    // While attached, DeleteCell on the ephemeral cell directory must fail EBUSY (held by mount).
+    let busy = control.call(async |client| {
+        client.delete_cell(DeleteCellRequest { path: control_path(&eph_path) }).await
+    });
+    assert_eq!(busy.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
+
+    // 4. Detach and re-attach: local ephemeral writes survive on disk, and the bucket has no cell
+    // prefix for the ephemeral child.
+    cladefsctl_mount(sock_s, &["detach", "1", &eph_cell_b32]);
+    let bucket_eph_prefix = bucket.join("tenants/0000000000001/cells").join(&eph_cell_b32);
+    assert!(
+        !bucket_eph_prefix.exists(),
+        "ephemeral FUSE cell must not upload any objects to the bucket: {}",
+        bucket_eph_prefix.display()
+    );
+
+    cladefsctl_mount(sock_s, &["attach", "1", &eph_cell_b32]);
+    assert_eq!(std::fs::read(eph_mount.join("base.txt")).unwrap(), b"from-base");
+    assert_eq!(std::fs::read(eph_mount.join("scratch.txt")).unwrap(), b"host-local-only");
+
+    // 5. Detach and delete the ephemeral cell cleanly (hold released).
+    cladefsctl_mount(sock_s, &["detach", "1", &eph_cell_b32]);
+    control
+        .call(async |client| {
+            client.delete_cell(DeleteCellRequest { path: control_path(&eph_path) }).await
+        })
+        .unwrap();
+    assert!(!eph_path.exists());
+    assert!(!bucket_eph_prefix.exists());
+
+    terminate(child, &m);
+}

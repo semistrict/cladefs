@@ -80,7 +80,9 @@ impl Storage {
     }
 
     /// The image at `path` opened on `host` with explicit `keeping` options (e.g. a daemon's
-    /// shared `CLADEFSD_PART_CACHE` and fetch budget, board 11363).
+    /// shared `CLADEFSD_PART_CACHE` and fetch budget, board 11363). Handles ephemeral cells as
+    /// [`Opening::open`] does: opened with no uploader, reading inherited extents through `keeping`'s
+    /// cache and fetch budgets.
     pub(crate) async fn open_on_keeping(
         host: &Arc<crate::Host>,
         path: impl AsRef<Path>,
@@ -89,8 +91,14 @@ impl Storage {
         let dir = path.as_ref().to_owned();
         let task_host = host.clone();
         on_bucket_runtime_on(host, async move {
-            let opened = host_cell::open_on(&task_host, &dir, keeping.clone()).await;
             let context = || format!("opening {}", dir.display());
+            if local_cell::upload::blocking(|| host_cell::is_ephemeral(&dir)) {
+                let opening = Opening::keeping_on(task_host.clone(), keeping).for_host();
+                let cell =
+                    Arc::new(opening.open(&dir).await.map_err(|err| err.context(context()))?);
+                return Self::wrap_cell(dir, cell, None).await;
+            }
+            let opened = host_cell::open_on(&task_host, &dir, keeping.clone()).await;
             let opened = opened.map_err(|err| Error::from(err).context(context()))?;
             Self::opened_on(&task_host, dir, opened, keeping).await
         })
@@ -358,6 +366,15 @@ impl Storage {
         });
         let opening = Opening::keeping_on(host.clone(), keeping).for_host();
         let cell = Arc::new(OpenCell::new(&dir, opened, opening).await?);
+        Self::wrap_cell(dir, cell, collecting).await
+    }
+
+    /// Wraps an already-opened [`OpenCell`] at `dir` as a [`Storage`] device.
+    async fn wrap_cell(
+        dir: PathBuf,
+        cell: Arc<OpenCell>,
+        collecting: Option<Arc<collect::Collecting>>,
+    ) -> Result<Self, Error> {
         let kind = Kind::Image {
             dir,
             cell: Arc::downgrade(&cell),
