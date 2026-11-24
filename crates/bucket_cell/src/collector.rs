@@ -352,9 +352,9 @@ impl Collector {
     ///
     /// It reads `cell`'s head first, then lists the copy (`copyRelists`), so that a mirror or fork
     /// it races either shows in the listing or reads the head this read. A reference whose child
-    /// has no head, or one naming another origin, is retired here; one of a child deleted stands,
-    /// as the child's cell may hold its own children's references still, until the child's own
-    /// pass, its cell dead, retires it here and in `cell`'s bucket (rule `references_held`). The
+    /// has no head, one naming another origin, or one deleted and holding no references of its own
+    /// (`copyChecksDead`, board 10446) is retired here; one of a deleted child that still holds
+    /// its own children's references stands until those are gone (rule `references_held`). The
     /// copy is kept whole while `cell` lives (`copiesKeptWhileAlive`), a mirror is under way (a
     /// pin), or a child refers here: a live cell cuts versions after this read, whose mirrors take
     /// the objects they share with the copy as copied, and once the cell is deleted it cuts none.
@@ -408,9 +408,13 @@ impl Collector {
         for (at, child, key) in referring {
             let marked = layout::retired_of(key).is_some_and(|mark| marks.contains(mark.as_str()));
             let lives = !marked
-                && crate::head::get(bucket, child).await?.is_some_and(|head| {
-                    head.origin().is_some_and(|o| (o.parent, o.at) == (cell, at))
-                });
+                && match crate::head::get(bucket, child).await? {
+                    Some(head) if head.origin().is_some_and(|o| (o.parent, o.at) == (cell, at)) => {
+                        !head.deleted()
+                            || (rules().references_held && has_references(bucket, child).await?)
+                    }
+                    _ => false,
+                };
             match lives {
                 true => standing = true,
                 false => gone.push(key),
@@ -1022,6 +1026,27 @@ async fn read_record(
     }
     let Some(object) = bucket::get(bucket, &meta.key).await? else { return Ok(None) };
     Ok(Some((object.meta.version.e_tag, Head::decode(cell, &object.bytes)?)))
+}
+
+/// cladefs: whether `child`'s cell holds any reference of its own under [`layout::references`]
+/// (children, ephemeral cells, mirror pins or holds): delimited pages, read after `child`'s head
+/// was read deleted (`forksReferFirst`, `mirrorHolds`, `copyChecksDead`, board 10446), stopping at
+/// the first non-empty page and following `next` across any empty page a cloud store returns
+/// (hotbed review 94). None: `child` is dead, and its reference in a mirror's copy is retired here
+/// even if its own pass already ran and this copy's marks were deleted before a late write of the
+/// reference landed.
+async fn has_references(bucket: &impl Bucket, child: CellId) -> Result<bool, bucket::Refused> {
+    let prefix = layout::references(child);
+    let mut after = None;
+    loop {
+        let page = bucket::Page { after: after.as_deref(), ..bucket::Page::FIRST };
+        let listing = bucket::list_delimited_page(bucket, &prefix, page).await?;
+        if !listing.prefixes.is_empty() || !listing.objects.is_empty() {
+            return Ok(true);
+        }
+        let Some(next) = listing.next else { return Ok(false) };
+        after = Some(next);
+    }
 }
 
 /// cladefs: the origins the references under `cell` name, by a delimiter listing: its origins,

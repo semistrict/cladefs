@@ -2659,6 +2659,17 @@ impl World {
             .then(|| sim_cell(cells[self.rng.random_range(0..cells.len())]));
         let handle = self.spawn(async move {
             let result = match cell {
+                // cladefs: a region's collector passes over copies of other buckets' cells as
+                // copies (`collect_copy`), never as cells of its own (board 10446).
+                Some(cell)
+                    if bucket.home() != 0
+                        && layout::routed_to(&cell.prefix())
+                            .is_some_and(|of| of != bucket.home()) =>
+                {
+                    collector::Collector::new()
+                        .collect_copy(&*bucket, &*bucket.own(), bucket.home(), cell)
+                        .await
+                }
                 Some(cell) => collector::collect_cell(&*bucket, cell, id).await,
                 None => sweep(&bucket, id).await,
             };

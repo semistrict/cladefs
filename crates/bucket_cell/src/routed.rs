@@ -143,6 +143,30 @@ impl<B: Bucket> RoutedBucket<B> {
         }
     }
 
+    async fn numbered_answered(&self, number: u16, key: &str) -> Result<Arc<B>, Refused> {
+        let mut failures = 0u32;
+        loop {
+            match self.numbered(number).await {
+                Ok(member) => return Ok(member),
+                Err(crate::Error::Refused(refusal)) => return Err(refusal),
+                // Out of reach while reading identity or the registry: asked again, as every
+                // request of a bucket is.
+                Err(crate::Error::Read(why))
+                    if why.starts_with(layout::IDENTITY) || why.starts_with(layout::BUCKETS) =>
+                {
+                    failures = failures.saturating_add(1);
+                    self.pause(failures).await;
+                }
+                // cladefs: unrecorded, mismatched, corrupt, wrong-format or malformed-URL buckets
+                // fail for good, never retried forever (board 10446, hotbed review 94).
+                Err(err) => {
+                    log::error!("bucket: reaching bucket {number}, for {key}: {err}");
+                    return Err(Refused::of(key, Refusal::Unreadable));
+                }
+            }
+        }
+    }
+
     /// Whether this bucket holds a mirror of any version of `cell`, a cell of another bucket. Its
     /// markers' listing failing fails it (board 5526).
     async fn mirrored(&self, cell: layout::CellId) -> Result<bool, Error> {
@@ -442,13 +466,31 @@ impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
             // cladefs: its identity asked until its bucket answers, as `marked` asks it (board
             // 8547): none only for a bucket never formatted, whose references are all its own.
             let Some(number) = self.own_number_answered(route).await? else { return Ok(0) };
-            let theirs: Vec<&str> = (keys.iter().copied())
-                .filter(|key| layout::routed_to(key).is_some_and(|of| of != number))
-                .collect();
-            if !theirs.is_empty() {
-                crate::lifecycle::retire(&*self.home, &theirs).await?;
+            // cladefs: each reference retired in its child's own bucket, where mirrors of its
+            // parent's versions for that child live, never in an unrelated home bucket if
+            // `collect_cell` was called through another bucket's router (board 10446).
+            let mut by_bucket: std::collections::BTreeMap<u16, Vec<&str>> =
+                std::collections::BTreeMap::new();
+            for &key in keys {
+                let layout::Kind::Reference { parent, child, .. } = layout::kind(key) else {
+                    continue;
+                };
+                let child_bucket = layout::routed_to(&child.prefix()).unwrap_or(number);
+                if layout::routed_to(&parent.prefix()).is_some_and(|of| of != child_bucket) {
+                    by_bucket.entry(child_bucket).or_default().push(key);
+                }
             }
-            Ok(theirs.len())
+            let mut retired = 0;
+            for (target, group) in by_bucket {
+                if target == number {
+                    crate::lifecycle::retire(&*self.home, &group).await?;
+                } else {
+                    let member = self.numbered_answered(target, group[0]).await?;
+                    crate::lifecycle::retire(&*member, &group).await?;
+                }
+                retired += group.len();
+            }
+            Ok(retired)
         })
     }
 }
@@ -641,6 +683,39 @@ mod tests {
         let routed = RoutedBucket::new(home.clone(), Arc::new(Opens(Arc::new(Scripted::new("")))));
         let refused = block_on(routed.retire(&[reference.as_str()]));
         assert_eq!(refused, Err(Refused::of(layout::IDENTITY, Refusal::Unreadable)));
+    }
+
+    /// board 10446 (hotbed review 94): `RoutedBucket::retire` routes a foreign child's reference
+    /// to the child's own bucket, never to `home`, and refuses permanent resolution errors
+    /// (`NoBucket`) rather than spinning forever.
+    #[test]
+    fn retiring_routes_to_child_bucket_and_refuses_permanent_errors() {
+        use crate::mirror::Here as _;
+        let home = Arc::new(Scripted::new(""));
+        let bucket3 = Arc::new(Scripted::new(""));
+        let child_in_3 = layout::CellId { tenant: 1, id: 3 << 48 | 5 };
+        let reference = layout::reference(PARENT, 3, child_in_3);
+        block_on(async {
+            let details = crate::identity::Details::default();
+            crate::identity::format(&home.objects, &details).await.unwrap();
+            let bytes = layout::encode(&layout::Reference::of(1));
+            bucket3.objects.put(&reference, bytes.into(), PutMode::Create).await.unwrap();
+        });
+        // Bucket 3 reachable: retired in bucket 3, home untouched.
+        let members = BTreeMap::from([(3, bucket3.clone())]);
+        let routed = RoutedBucket::new(home.clone(), Arc::new(Members(members)));
+        assert_eq!(block_on(routed.retire(&[reference.as_str()])), Ok(1));
+        assert_eq!(block_on(bucket3.objects.head(&reference)).map(drop), Err(Error::NotFound));
+        let mark = layout::retired(PARENT, 3, child_in_3);
+        assert!(block_on(bucket3.objects.head(&mark)).is_ok(), "marked in bucket 3");
+        assert_eq!(block_on(home.objects.head(&mark)).map(drop), Err(Error::NotFound));
+
+        // Bucket 3 unrecorded (`NoBucket`): refused immediately, never hangs.
+        let missing = RoutedBucket::new(home, Arc::new(Members(BTreeMap::new())));
+        assert_eq!(
+            block_on(missing.retire(&[reference.as_str()])),
+            Err(Refused::of(&reference, Refusal::Unreadable))
+        );
     }
 
     /// Opens each bucket of the numbers it holds as the one it holds.

@@ -638,14 +638,25 @@ impl crate::mirror::Here for SimBucket {
         &'a self,
         keys: &'a [&'a str],
     ) -> futures::future::BoxFuture<'a, Result<usize, crate::bucket::Refused>> {
-        let own = self.own();
-        let theirs: Vec<&str> =
-            keys.iter().copied().filter(|key| self.region_of(key) != self.home).collect();
-        Box::pin(async move {
-            if !theirs.is_empty() {
-                crate::lifecycle::retire(&*own, &theirs).await?;
+        // cladefs: each reference retired in its child's own bucket, as `RoutedBucket` does
+        // (board 10446).
+        let mut by_bucket: BTreeMap<u16, Vec<&str>> = BTreeMap::new();
+        for &key in keys {
+            let Kind::Reference { parent, child, .. } = layout::kind(key) else { continue };
+            let child_region = self.region_of(&child.prefix());
+            if self.region_of(&parent.prefix()) != child_region {
+                by_bucket.entry(child_region).or_default().push(key);
             }
-            Ok(theirs.len())
+        }
+        let targets: Vec<(Arc<SimBucket>, Vec<&str>)> =
+            by_bucket.into_iter().map(|(region, group)| (self.at(region).own(), group)).collect();
+        Box::pin(async move {
+            let mut retired = 0;
+            for (own, group) in targets {
+                crate::lifecycle::retire(&*own, &group).await?;
+                retired += group.len();
+            }
+            Ok(retired)
         })
     }
 }

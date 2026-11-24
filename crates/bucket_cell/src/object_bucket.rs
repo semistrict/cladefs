@@ -1818,12 +1818,20 @@ pub(crate) mod tests {
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 0), "the child referring here");
             lifecycle::delete(&*fresh, child, 1, u64::MAX).await.unwrap();
+            // While the deleted child still holds a grandchild's reference, the copy stands
+            // (`references_held`); once that goes, the child's pass retires its reference here.
+            let grandchild_ref = layout::reference(child, 1, test_cell(1 << 48 | 9));
+            two.home
+                .object_put(&grandchild_ref, b"ref".to_vec().into(), PutMode::Create)
+                .await
+                .unwrap();
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
             assert_eq!(
                 (report.deleted, report.retired),
                 (0, 0),
-                "the child's cell not passed over"
+                "the deleted child still holds a reference"
             );
+            two.home.object_delete(&grandchild_ref).await.unwrap();
             // The child's own passes: its cell dead, its reference retired here.
             for holder in [8, 9] {
                 crate::collector::collect_cell(&*fresh, child, holder).await.unwrap();
@@ -2537,14 +2545,16 @@ pub(crate) mod tests {
             put(home, &reference, b"ref".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 0), "referred");
-            // Deleted, its cell perhaps holding its own children's references still: the reference
-            // stands, until its own pass retires it, its cell dead (`references_held`).
+            // Deleted, its cell holding its own child's reference still: the reference stands
+            // (`references_held`), until its cell holds none (`copyChecksDead`, board 10446).
             let deleted = Head { epoch: Head::FINAL, ..Head::of(Made::Clone(origin), 4) };
             put_head(home, child, deleted).await;
+            let grandchild_ref = layout::reference(child, 1, test_cell(1 << 48 | 9));
+            put(home, &grandchild_ref, b"ref".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
-            assert_eq!((report.deleted, report.retired), (0, 0), "a deleted child's");
-            // Gone, its cell removed: retired here.
-            home.object_delete(&layout::head(child)).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 0), "a deleted child holding a ref");
+            // Its own child's reference gone: dead, though its head stays, so retired here.
+            home.object_delete(&grandchild_ref).await.unwrap();
             // cladefs: a pass past its sweep's budget, which would retire the reference and delete
             // the copy whole, deletes none of it, the reference neither: all it would delete taken
             // at once, or none (board 8529).
@@ -2575,6 +2585,254 @@ pub(crate) mod tests {
             order.extend(copied);
             order.push(mark);
             assert_eq!(*log.lock().unwrap(), order, "deleted in that order");
+        });
+    }
+
+    /// board 10446 (`copyChecksDead`): a dead child whose head stays in its bucket (a `Forking`
+    /// head never made, or a `Clone` kept by a `retired/` mark under its own prefix) is passed
+    /// over once by `collect_cell`, which retires its reference in both buckets and records its
+    /// dead digest so later passes skip it. Once the parent is deleted, `collect_copy` deletes the
+    /// copy and its `retired/` marks so the prefix goes empty; a late write of the child's
+    /// reference here (from a paused mirror or fork) then lands with no mark here. `collect_copy`
+    /// still retires it because the child is deleted and holds no references of its own, leaving
+    /// nothing behind.
+    #[test]
+    fn dead_childs_late_reference_after_marks_deleted_is_retired_by_collect_copy() {
+        use crate::collector::{Collector, collect_cell};
+        use crate::layout::{Head, Mirror, Retired};
+        use crate::record::Made;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let (routed, (home, other)) = (two.routed(), (&two.home, &two.other));
+            let own = routed.own();
+            let parent = test_cell(2 << 48 | 1);
+            let origin = Origin { parent, at: 3, epoch: 1 };
+            let ended_parent = Head { epoch: Head::FINAL, ..Head::of(Made::Root, 4) };
+            put_head(other, parent, ended_parent).await;
+
+            // Case 1: a deleted `Forking` child (not removable).
+            // Case 2: a deleted `Clone` child kept by a `retired/` mark under its own prefix.
+            let forking = test_cell(1 << 48 | 10);
+            let cloned = test_cell(1 << 48 | 11);
+            put_head(
+                home,
+                forking,
+                Head { epoch: Head::FINAL, ..Head::of(Made::Forking { origin, version: 1 }, 5) },
+            )
+            .await;
+            put_head(home, cloned, Head { epoch: Head::FINAL, ..Head::of(Made::Clone(origin), 6) })
+                .await;
+            home.object_put(
+                &layout::retired(cloned, 1, test_cell(1 << 48 | 99)),
+                layout::encode(&Retired::NOW).into(),
+                PutMode::Create,
+            )
+            .await
+            .unwrap();
+
+            for child in [forking, cloned] {
+                let reference = layout::reference(parent, 3, child);
+                other
+                    .object_put(&reference, b"ref".to_vec().into(), PutMode::Create)
+                    .await
+                    .unwrap();
+                // The child's own pass retires in both buckets and records its dead digest.
+                let report = collect_cell(&*routed, child, 1).await.unwrap();
+                assert_eq!(report.removed, 0, "head kept for {child}");
+                assert!(
+                    home.object_get(&layout::retired(parent, 3, child)).await.is_ok(),
+                    "retired mark written in home for {child}"
+                );
+                // A second pass skips the unchanged dead child.
+                let skipped = collect_cell(&*routed, child, 2).await.unwrap();
+                assert_eq!(skipped.skipped, 1, "dead child skipped for {child}");
+
+                // `collect_copy` cleans up the copy and its retired marks.
+                home.object_put(
+                    &layout::mirror(parent, 3),
+                    layout::encode(&Mirror::NOW).into(),
+                    PutMode::Overwrite,
+                )
+                .await
+                .unwrap();
+                let swept =
+                    Collector::new().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+                assert_eq!(swept.deleted, 1);
+                assert_eq!(home.object_list(&parent.prefix()).await.unwrap(), [], "marks cleared");
+
+                // Now a paused mirror or fork lands its late create of the reference in home,
+                // with no `retired/` mark there and the child skipped by `collect_cell`.
+                home.object_put(&reference, b"ref".to_vec().into(), PutMode::Create).await.unwrap();
+                let skipped_again = collect_cell(&*routed, child, 3).await.unwrap();
+                assert_eq!(skipped_again.skipped, 1, "still skipped for {child}");
+
+                let cleaned =
+                    Collector::new().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+                assert_eq!(cleaned.retired, 1, "late reference retired for {child}");
+                assert_eq!(
+                    home.object_list(&parent.prefix()).await.unwrap(),
+                    [],
+                    "nothing left in home for {child}"
+                );
+            }
+        });
+    }
+
+    /// board 10446: `collect_cell` called through a routed bucket whose home is `@2` on a dead
+    /// child of `@3` forked from `@1` must retire the child's mirror reference in `@3` (the
+    /// child's own bucket), never in `@2`.
+    #[test]
+    fn collect_cell_through_another_bucket_retires_mirror_reference_in_childs_bucket() {
+        use crate::collector::collect_cell;
+        use crate::layout::Head;
+        use crate::record::Made;
+        use crate::testing::{Direct, SimBucket, make_head};
+        futures::executor::block_on(async {
+            let sim = SimBucket::new();
+            let parent = test_cell(1 << 48 | 2);
+            let child = test_cell(3 << 48 | 5);
+            let origin = Origin { parent, at: 2, epoch: 1 };
+            let direct = Direct(sim.at(1));
+            make_head(
+                &direct,
+                child,
+                Head { epoch: Head::FINAL, ..Head::of(Made::Forking { origin, version: 1 }, 7) },
+            )
+            .await
+            .unwrap();
+            let reference = layout::reference(parent, 2, child);
+            Direct(sim.at(1).own())
+                .put(&reference, b"ref".to_vec().into(), PutMode::Create)
+                .await
+                .unwrap();
+            Direct(sim.at(3).own())
+                .put(&reference, b"ref".to_vec().into(), PutMode::Create)
+                .await
+                .unwrap();
+
+            // Collect `child` (home `@3`) through `@2`'s routed bucket.
+            let via_two = sim.at(2);
+            let (report, _) = sim.served(collect_cell(&*via_two, child, 9));
+            let report = report.unwrap();
+            assert_eq!(report.retired, 2, "retired in @1 and @3");
+
+            let stored = sim.stored();
+            assert!(!stored.contains(&format!("@1/{reference}")), "retired in @1");
+            assert!(!stored.contains(&format!("@3/{reference}")), "retired in @3");
+            let mark = layout::retired(parent, 2, child);
+            assert!(stored.contains(&format!("@3/{mark}")), "marked in @3");
+            assert!(!stored.contains(&format!("@2/{mark}")), "must not mark in @2");
+        });
+    }
+
+    /// board 10446 (hotbed review 94): cloud object stores (GCS, Azure) may return an empty first
+    /// delimited page with `next: Some(...)`. `collect_copy`'s `has_references` must follow `next`
+    /// so a deleted child with a live grandchild reference on a later page keeps the copy whole.
+    #[test]
+    fn collect_copy_follows_empty_first_page_when_checking_child_references() {
+        use crate::bucket::{ByteRange, Error as BucketError, Listing, Meta, Object, Page};
+        use crate::collector::Collector;
+        use crate::layout::{Head, Mirror};
+        use crate::record::Made;
+
+        struct EmptyFirstPage {
+            inner: Arc<RoutedBucket>,
+            target_prefix: String,
+        }
+
+        impl Bucket for EmptyFirstPage {
+            fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
+                self.inner.get(key)
+            }
+            fn get_range(
+                &self,
+                key: &str,
+                range: ByteRange,
+            ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
+                self.inner.get_range(key, range)
+            }
+            fn head(&self, key: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
+                self.inner.head(key)
+            }
+            fn list(
+                &self,
+                prefix: &str,
+            ) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
+                self.inner.list(prefix)
+            }
+            fn list_delimited(
+                &self,
+                prefix: &str,
+                page: Page<'_>,
+            ) -> impl Future<Output = Result<Listing, BucketError>> + Send {
+                let empty_first = prefix == self.target_prefix && page.after.is_none();
+                let next_page = if prefix == self.target_prefix && page.after == Some("empty-page")
+                {
+                    Page { after: None, ..page }
+                } else {
+                    page
+                };
+                async move {
+                    if empty_first {
+                        return Ok(Listing {
+                            prefixes: Vec::new(),
+                            objects: Vec::new(),
+                            next: Some("empty-page".to_owned()),
+                        });
+                    }
+                    self.inner.list_delimited(prefix, next_page).await
+                }
+            }
+            fn put(
+                &self,
+                key: &str,
+                bytes: crate::Bytes,
+                mode: PutMode,
+            ) -> impl Future<Output = Result<crate::bucket::Version, BucketError>> + Send
+            {
+                self.inner.put(key, bytes, mode)
+            }
+            fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
+                self.inner.delete(key)
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+        }
+
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let (routed, (home, other)) = (two.routed(), (&two.home, &two.other));
+            let own = routed.own();
+            let parent = test_cell(2 << 48 | 1);
+            let child = test_cell(1 << 48 | 5);
+            let origin = Origin { parent, at: 3, epoch: 1 };
+            put_head(other, parent, Head { epoch: Head::FINAL, ..Head::of(Made::Root, 4) }).await;
+            put_head(home, child, Head { epoch: Head::FINAL, ..Head::of(Made::Clone(origin), 4) })
+                .await;
+            let reference = layout::reference(parent, 3, child);
+            home.object_put(&reference, b"ref".to_vec().into(), PutMode::Create).await.unwrap();
+            let marker = layout::mirror(parent, 3);
+            home.object_put(&marker, layout::encode(&Mirror::NOW).into(), PutMode::Create)
+                .await
+                .unwrap();
+            let grandchild_ref = layout::reference(child, 1, test_cell(1 << 48 | 9));
+            home.object_put(&grandchild_ref, b"ref".to_vec().into(), PutMode::Create)
+                .await
+                .unwrap();
+
+            let wrapped =
+                EmptyFirstPage { inner: routed, target_prefix: layout::references(child) };
+            let report = Collector::new().collect_copy(&wrapped, &*own, 1, parent).await.unwrap();
+            assert_eq!(
+                (report.deleted, report.retired),
+                (0, 0),
+                "empty first page with continuation must not drop live grandchild's parent copy"
+            );
+            assert!(home.object_get(&reference).await.is_ok(), "child reference kept");
+            assert!(home.object_get(&marker).await.is_ok(), "mirror marker kept");
         });
     }
 

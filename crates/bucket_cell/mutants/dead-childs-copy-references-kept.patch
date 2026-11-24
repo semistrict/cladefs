@@ -1,10 +1,20 @@
-# A dead child's pass retires its origin's reference in its parent's bucket but not the one a
-# mirror moved into its own (TASK-633.8, references_held): the copy kept for ever by a reference
-# of a child gone, which the check at the end finds (TASK-633.10).
+# A dead child's mirror reference is retired by neither the child's pass (`here.retire`) nor the
+# copy's pass (`copyChecksDead`, TASK-633.8, board 10446): the copy kept for ever by a reference of
+# a child gone, which the check at the end finds (TASK-633.10).
 # Killer: sim::versions_mirrored_across_regions
 --- a/crates/bucket_cell/src/collector.rs
 +++ b/crates/bucket_cell/src/collector.rs
-@@ -795,7 +795,7 @@ impl Collector {
+@@ -427,8 +427,7 @@
+             let lives = !marked
+                 && match crate::head::get(bucket, child).await? {
+                     Some(head) if head.origin().is_some_and(|o| (o.parent, o.at) == (cell, at)) => {
+-                        !head.deleted()
+-                            || (rules().references_held && has_references(bucket, child).await?)
++                        true
+                     }
+                     _ => false,
+                 };
+@@ -652,7 +651,7 @@
          // apart from its original there.
          if let Some(here) = bucket.mirrors() {
              let all: Vec<&str> = marked.iter().chain(&unmarked).map(String::as_str).collect();
