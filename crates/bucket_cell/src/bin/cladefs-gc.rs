@@ -358,11 +358,28 @@ fn listed(cell: CellId, record: &Head) -> String {
     }
 }
 
+/// cladefs: the bucket number of `own`, if formatted (board 5532).
+async fn own_number(own: &impl Bucket) -> Result<Option<u16>, String> {
+    bucket_cell::identity::get(own)
+        .await
+        .map(|id| id.map(|id| id.number))
+        .map_err(|err| format!("reading the bucket's identity: {err}"))
+}
+
+/// cladefs: the bucket number `cell` belongs to, if it is another bucket's than `own`
+/// (board 5532).
+fn foreign_bucket(own: Option<u16>, cell: CellId) -> Option<u16> {
+    let own = own?;
+    layout::routed_to(&cell.prefix()).filter(|&of| of != own)
+}
+
 /// Writes to `out` the live cells of `bucket`, every cell's or `named`'s, but those `held`, a line
 /// each as it reads its head (`--cells`): holding a page of the cells listed at most, whatever the
-/// bucket holds (board 8513), in the order of their IDs.
+/// bucket holds (board 8513), in the order of their IDs. Skips mirrored copies of other buckets'
+/// cells (board 5532).
 async fn say_cells(
     bucket: &impl Bucket,
+    own_num: Option<u16>,
     named: Option<CellId>,
     held: &BTreeSet<CellId>,
     out: &mut impl std::io::Write,
@@ -370,7 +387,7 @@ async fn say_cells(
     let mut cells = std::pin::pin!(cells(bucket, named));
     while let Some(cell) = cells.next().await {
         let cell = cell?;
-        if held.contains(&cell) {
+        if held.contains(&cell) || foreign_bucket(own_num, cell).is_some() {
             continue;
         }
         let found = bucket_cell::head::live(bucket, cell).await;
@@ -450,9 +467,11 @@ impl Tenant {
 /// Writes to `out` what each cell of `bucket` takes, and each tenant, every tenant's or `named`'s,
 /// a line each as it reads them (`--usage`): reading each cell's collector lease, a few at once,
 /// the tenants and each one's cells listed a page at a time, so that it holds a page of each at
-/// most, whatever the bucket holds (TASK-395.8).
+/// most, whatever the bucket holds (TASK-395.8). Skips mirrored copies of other buckets' cells
+/// (board 5532).
 async fn say_usage(
     bucket: &impl Bucket,
+    own_num: Option<u16>,
     named: Option<u64>,
     out: &mut impl std::io::Write,
 ) -> Result<(), String> {
@@ -464,6 +483,12 @@ async fn say_usage(
     while let Some(tenant) = tenants.next().await {
         let tenant = tenant.map_err(|err| err.to_string())?;
         let reads = cell::of_tenant(bucket, tenant)
+            .filter_map(|cell| async move {
+                match cell {
+                    Ok(cell) if foreign_bucket(own_num, cell).is_some() => None,
+                    other => Some(other),
+                }
+            })
             .map(|cell| async move {
                 let cell = cell.map_err(|err| err.to_string())?;
                 let read = passed::read(bucket, cell).await;
@@ -478,7 +503,9 @@ async fn say_usage(
             writeln!(out, "{}", cell_line(cell, usage.as_ref())).map_err(|err| err.to_string())?;
             sum.add(usage.as_ref());
         }
-        writeln!(out, "{}", sum.line(tenant)).map_err(|err| err.to_string())?;
+        if named.is_some() || sum.cells > 0 {
+            writeln!(out, "{}", sum.line(tenant)).map_err(|err| err.to_string())?;
+        }
     }
     Ok(())
 }
@@ -511,9 +538,13 @@ async fn collect(
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
         Mode::DryRun => {
-            let shredded = shredded_tenants(bucket).await?;
+            let own = bucket.own();
+            let own_num = own_number(&*own).await?;
+            // cladefs: dry-run inspects this bucket alone and never contacts another bucket
+            // (board 5532). On the root bucket (or an unformatted bucket), `own` holds `events`.
+            let shredded = shredded_tenants_own(&*own).await?;
             let mut out = std::io::stdout().lock();
-            return dry_run_cells(&**bucket, named, shredded, &mut out).await;
+            return dry_run_cells(&*own, own_num, named, shredded, &mut out).await;
         }
     };
     let sweep = Sweep {
@@ -695,32 +726,47 @@ async fn rotate_master_key(bucket: &RoutedBucket) -> Result<(), String> {
     }
 }
 
+/// Reads the shredded tenant set from `own`'s `events` object without contacting another bucket
+/// (board 5532).
+async fn shredded_tenants_own(own: &impl Bucket) -> Result<Arc<BTreeSet<u64>>, String> {
+    let log =
+        bucket_cell::events::get(own).await.map_err(|err| format!("reading events: {err}"))?;
+    Ok(Arc::new(log.map(|l| l.shredded_set()).unwrap_or_default()))
+}
+
 /// Reads the shredded tenant set from the root bucket's `events` object.
 async fn shredded_tenants(bucket: &RoutedBucket) -> Result<Arc<BTreeSet<u64>>, String> {
     let auth = bucket_cell::events::authority(bucket)
         .await
         .map_err(|err| format!("events authority: {err}"))?;
-    let log =
-        bucket_cell::events::get(&*auth).await.map_err(|err| format!("reading events: {err}"))?;
-    Ok(Arc::new(log.map(|l| l.shredded_set()).unwrap_or_default()))
+    shredded_tenants_own(&*auth).await
 }
 
 /// Publishes `TenantShredded` to the root bucket's `events` object and ends every live cell head
-/// of `tenant` in `bucket` (without creating heads for missing cells).
-async fn delete_tenant(bucket: &RoutedBucket, tenant: u64) -> Result<(), String> {
+/// of `tenant` owned by this bucket (without creating heads for missing cells or routing deletes
+/// to another bucket, board 5532).
+async fn delete_tenant(
+    bucket: &RoutedBucket,
+    own_num: Option<u16>,
+    tenant: u64,
+) -> Result<(), String> {
     let auth = bucket_cell::events::authority(bucket)
         .await
         .map_err(|err| format!("--delete-tenant: events authority: {err}"))?;
     bucket_cell::events::publish(&*auth, bucket_cell::events::Publish::TenantShredded(tenant))
         .await
         .map_err(|err| format!("--delete-tenant: publishing events: {err}"))?;
+    let own = bucket.own();
     let holder = rand::random();
     let mut deleted = 0u64;
-    let mut listed = std::pin::pin!(cell::of_tenant(bucket, tenant));
+    let mut listed = std::pin::pin!(cell::of_tenant(&*own, tenant));
     while let Some(cell) = listed.next().await {
         let cell =
             cell.map_err(|err| format!("--delete-tenant: listing tenant {tenant}: {err}"))?;
-        if lifecycle::delete_existing(bucket, cell, holder, u64::MAX)
+        if foreign_bucket(own_num, cell).is_some() {
+            continue;
+        }
+        if lifecycle::delete_existing(&*own, cell, holder, u64::MAX)
             .await
             .map_err(|err| format!("--delete-tenant: deleting cell {cell}: {err}"))?
         {
@@ -758,9 +804,10 @@ async fn refuse_missing(bucket: &impl Bucket, cell: CellId) -> Result<(), String
 
 /// What a dry run over every cell of `bucket`, or the one `named`, finds, written to `out` a cell
 /// at a time as it goes, holding one cell's findings at most (board 8513), then counted on
-/// standard error.
+/// standard error. Skips mirrored copies of other buckets' cells (board 5532).
 async fn dry_run_cells(
     bucket: &impl Bucket,
+    own_num: Option<u16>,
     named: Option<CellId>,
     shredded: Arc<BTreeSet<u64>>,
     out: &mut impl std::io::Write,
@@ -770,6 +817,9 @@ async fn dry_run_cells(
     let mut cells = std::pin::pin!(cells(bucket, named));
     while let Some(cell) = cells.next().await {
         let cell = cell?;
+        if foreign_bucket(own_num, cell).is_some() {
+            continue;
+        }
         let found = collector.dry_run_cell(bucket, cell).await;
         let found = found.map_err(|err| format!("cell {cell}: {err}"))?;
         write!(out, "{}", dry_lines(&found)).map_err(|err| err.to_string())?;
@@ -1160,13 +1210,34 @@ fn main() -> Result<(), String> {
         .build()
         .map_err(|err| format!("a runtime: {err}"))?;
     runtime.block_on(async {
+        let own = bucket.own();
+        let own_num = match &command {
+            Command::Collect { .. } | Command::RotateMasterKey => None,
+            _ => own_number(&*own).await?,
+        };
+        // cladefs: refuse deleting another bucket's cell before reading or writing anything
+        // (board 5532).
+        if let Command::DeleteCell { cell, .. } = command
+            && let Some(home) = foreign_bucket(own_num, cell)
+        {
+            let ours = own_num.unwrap();
+            return Err(format!(
+                "--delete-cell: cell {cell} belongs to bucket {home}, not this bucket ({ours}): \
+                 run against bucket {home} instead"
+            ));
+        }
         // cladefs: before anything is written, the probe's object too (board 8511).
         if let Command::DeleteCell { cell, missing: false } = command {
-            refuse_missing(&*bucket, cell).await?;
+            refuse_missing(&*own, cell).await?;
         }
-        // A dry run and a sum write nothing, and rely on no condition of a write's.
-        if !matches!(command, Command::Collect { mode: Mode::DryRun, .. } | Command::Usage { .. }) {
-            probe(&*bucket, rand::random()).await?;
+        // Read-only commands write nothing, and rely on no condition of a write's (board 8367).
+        if !matches!(
+            command,
+            Command::Collect { mode: Mode::DryRun, .. }
+                | Command::Cells { .. }
+                | Command::Usage { .. }
+        ) {
+            probe(&*own, rand::random()).await?;
         }
         match command {
             Command::Collect { every, mode, cell, run } => {
@@ -1179,13 +1250,13 @@ fn main() -> Result<(), String> {
                     None => String::new(),
                 };
                 let held = held_cells(&held)?;
-                say_cells(&*bucket, cell, &held, &mut std::io::stdout().lock()).await
+                say_cells(&*own, own_num, cell, &held, &mut std::io::stdout().lock()).await
             }
-            Command::DeleteCell { cell, .. } => delete_cell(&*bucket, cell).await,
-            Command::DeleteTenant { tenant } => delete_tenant(&bucket, tenant).await,
+            Command::DeleteCell { cell, .. } => delete_cell(&*own, cell).await,
+            Command::DeleteTenant { tenant } => delete_tenant(&bucket, own_num, tenant).await,
             Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
-                say_usage(&*bucket, tenant, &mut std::io::stdout().lock()).await
+                say_usage(&*own, own_num, tenant, &mut std::io::stdout().lock()).await
             }
         }
     })
@@ -1247,7 +1318,7 @@ mod tests {
             }
         });
         let mut out = Lines { bucket: &bucket, lines: Vec::new(), line: Vec::new() };
-        tokio.block_on(say_usage(&bucket, None, &mut out)).unwrap();
+        tokio.block_on(say_usage(&bucket, None, None, &mut out)).unwrap();
         let cell_lines: Vec<String> = (out.lines.iter())
             .filter(|(line, _)| line.contains(r#""scope":"cell""#))
             .map(|(line, _)| line.clone())
@@ -1583,7 +1654,7 @@ cladefs_gc_peak_resident_bytes 67108864
         });
         let held: BTreeSet<CellId> = [cells[1], cells[LIST_PAGE + 1]].into();
         let mut out = Lines { bucket: &bucket, lines: Vec::new(), line: Vec::new() };
-        tokio.block_on(say_cells(&bucket, None, &held, &mut out)).unwrap();
+        tokio.block_on(say_cells(&bucket, None, None, &held, &mut out)).unwrap();
         let expected: Vec<(String, u64)> = (cells.iter().enumerate())
             .filter(|(_, cell)| !held.contains(*cell))
             .map(|(index, cell)| (format!("{cell}"), 1 + (index / LIST_PAGE) as u64 + 1))

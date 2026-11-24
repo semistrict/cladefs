@@ -711,3 +711,295 @@ fn sigterm_ends_sweeping() {
     let metrics = std::fs::read_to_string(&file).unwrap();
     assert!(metrics.lines().any(|line| line == "cladefs_gc_sweeps_total 1"), "{metrics}");
 }
+
+/// board 8367: `--cells` is read-only and succeeds against a bucket that allows no writes or
+/// deletes (no probe object is created or deleted).
+#[test]
+fn cells_listing_runs_against_a_read_only_bucket() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let url = file_bucket(&dir);
+    let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let cell = test_cell(7);
+    futures::executor::block_on(bucket_cell::lifecycle::create(&bucket, cell, 0)).unwrap();
+
+    // Remove write permissions from the bucket root and all subdirectories so any PUT/DELETE
+    // fails with EACCES. Restore permissions on drop so tempdir cleanup always succeeds.
+    struct Restore(Vec<std::path::PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for path in self.0.iter().rev() {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+    let mut dirs = vec![dir.path().to_path_buf()];
+    let mut i = 0;
+    while i < dirs.len() {
+        for entry in std::fs::read_dir(&dirs[i]).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+        i += 1;
+    }
+    let _restore = Restore(dirs.clone());
+    for path in dirs.iter().rev() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    let out = gc(&[&url, "--cells"]);
+    assert!(
+        out.status.success(),
+        "cladefs-gc --cells must succeed on a read-only bucket; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{cell}\n"));
+    assert!(!dir.path().join("probe").exists(), "--cells must not write a probe object");
+}
+
+/// board 5532: on bucket B with bucket A's live cell P mirrored in B:
+/// 1. `--cells`, `--usage`, and `--dry-run` finish with A offline and send A zero requests.
+/// 2. `--delete-cell P` on B refuses (naming P's bucket and B) and leaves P live in A.
+/// 3. `cladefs-gc B --cell P` collects P's copy in B via `collect_copy`, leaving P's head and
+///    objects in A untouched, while a B-owned child of P still routes to A to retire its reference.
+#[test]
+fn bucket_b_commands_stay_on_b_and_collect_copies_locally() {
+    use bucket_cell::Bucket as _;
+    use bucket_cell::Writer;
+    use bucket_cell::batch::{Commit, SegmentBuilder};
+    use bucket_cell::identity::{self, Details};
+    use bucket_cell::layout::{CellId, NewVersion, Origin};
+    use bucket_cell::object_bucket::{ObjectBucket, Registered};
+    use bucket_cell::s3_server::{BUCKET, S3Server};
+    use storage_device::ExtentId;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let (server_a, server_b, url_a, url_b, p, c_live, c_del, d_live, p_objects_before, ref_in_a) =
+        runtime.block_on(async {
+            let server_a = S3Server::start(None);
+            let server_b = S3Server::start(None);
+            let url_a = format!("s3://{BUCKET}/a");
+            let url_b = format!("s3://{BUCKET}/b");
+            let opts_for = |server: &S3Server| {
+                server
+                    .options()
+                    .into_iter()
+                    .map(|(k, v)| (k.to_ascii_uppercase(), v))
+                    .collect::<Vec<_>>()
+            };
+            let a_own = Arc::new(ObjectBucket::new(server_a.objects(), "a"));
+            let b_own = Arc::new(ObjectBucket::new(server_b.objects(), "b"));
+
+            let details = |url: &str| Details {
+                provider: Some("s3".into()),
+                url: Some(url.to_owned()),
+                ..Details::default()
+            };
+            identity::format(&*a_own, &details(&url_a)).await.unwrap();
+            let (_, registry) =
+                identity::add(&*a_own, &details(&url_a), &*b_own, details(&url_b)).await.unwrap();
+            identity::spread(&registry, &*a_own).await.unwrap();
+            identity::spread(&registry, &*b_own).await.unwrap();
+
+            // Build a routed client for B that resolves bucket 1 -> server_a and 2 -> server_b.
+            let mut env_pairs = Vec::new();
+            for (k, v) in opts_for(&server_a) {
+                env_pairs.push((format!("CLADEFSD_BUCKET_1_{k}"), v));
+            }
+            for (k, v) in opts_for(&server_b) {
+                env_pairs.push((format!("CLADEFSD_BUCKET_2_{k}"), v));
+            }
+            for (k, v) in &env_pairs {
+                // SAFETY: nextest runs each test in its own process, before spawning cladefs-gc.
+                unsafe { std::env::set_var(k, v) };
+            }
+            let resolve = Arc::new(Registered::from_env());
+            let b_routed = Arc::new(ObjectBucket::new(server_b.objects(), "b").routed(resolve));
+
+            // Create live cell P in bucket A (#1) with a freed segment (reclaimable in A) and two
+            // versions: v1 (mirrored into B) and v2 (unmirrored, referenced by B-owned child c_del
+            // in A).
+            let p = CellId { tenant: 1, id: (1u64 << 48) | 1 };
+            let kms_a = host_kms(&a_own);
+            bucket_cell::lifecycle::create(&*a_own, p, 0).await.unwrap();
+            let writer = Writer::open_under(a_own.clone(), p, (10, 1), &kms_a).await.unwrap();
+            let ext = ExtentId::new(p.id, writer.chain().next_sequence());
+            let mut at_v1 = 0;
+            let mut at_v2 = 0;
+            for (idx, commit) in [
+                Commit { tag: 1, extents: vec![(ext, vec![3; 4096])], ..Commit::default() },
+                Commit { tag: 2, frees: vec![ext], ..Commit::default() },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cut = NewVersion { id: (idx + 1) as u64, keep_last: None };
+                let framed = SegmentBuilder::from(commit)
+                    .cut(cut, &mut writer.chain())
+                    .frame(writer.keys().encrypting());
+                let seg = writer.add_segment(framed).unwrap();
+                writer.upload(seg).await.unwrap();
+                writer.acknowledge().await.unwrap();
+                if idx == 0 {
+                    at_v1 = seg;
+                } else {
+                    at_v2 = seg;
+                }
+            }
+            writer.checkpoint().await.unwrap();
+            let epoch_p = writer.epoch();
+            let p_ring = writer.keys().clone();
+            drop(writer);
+
+            // Fork v2 into B-owned child `c_del` BEFORE any mirror exists for v2, so its reference
+            // lives in bucket A under P's prefix, then delete `c_del` in B.
+            let c_del = CellId { tenant: 1, id: (2u64 << 48) | 2 };
+            let origin_v2 = Origin { parent: p, at: at_v2, epoch: epoch_p };
+            bucket_cell::lifecycle::fork_version(
+                &*b_routed,
+                c_del,
+                2,
+                origin_v2,
+                2,
+                bucket_cell::keys::Parents::Held(&p_ring),
+            )
+            .await
+            .unwrap();
+            let ref_in_a = bucket_cell::layout::reference(p, at_v2, c_del);
+            assert!(
+                a_own.get(&ref_in_a).await.is_ok(),
+                "expected B-owned child's reference to exist in A"
+            );
+            bucket_cell::lifecycle::delete(&*b_own, c_del, 99, u64::MAX).await.unwrap();
+
+            // Fork v1 into B-owned live child `c_live`, then mirror v1 into B so P has a mirrored
+            // copy in B.
+            let c_live = CellId { tenant: 1, id: (2u64 << 48) | 3 };
+            let origin_v1 = Origin { parent: p, at: at_v1, epoch: epoch_p };
+            bucket_cell::lifecycle::fork_version(
+                &*b_routed,
+                c_live,
+                1,
+                origin_v1,
+                3,
+                bucket_cell::keys::Parents::Held(&p_ring),
+            )
+            .await
+            .unwrap();
+            let mirrored =
+                bucket_cell::mirror::mirror(&*b_routed, &*b_own, 2, p, at_v1).await.unwrap();
+            assert!(matches!(mirrored, bucket_cell::mirror::Mirrored::Done { .. }), "{mirrored:?}");
+
+            // Create a standalone live B-owned cell `d_live`.
+            let d_live = CellId { tenant: 1, id: (2u64 << 48) | 4 };
+            bucket_cell::lifecycle::create(&*b_own, d_live, 0).await.unwrap();
+
+            // Record P's objects in A before running cladefs-gc on B.
+            let mut p_objects_before: Vec<String> =
+                a_own.list(&p.prefix()).await.unwrap().into_iter().map(|m| m.key).collect();
+            p_objects_before.sort();
+
+            (server_a, server_b, url_a, url_b, p, c_live, c_del, d_live, p_objects_before, ref_in_a)
+        });
+
+    let gc_b = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
+        command
+            .env_remove("CLADEFS_KMS")
+            .env_remove("CLADEFS_MASTER_KEY")
+            .env_remove("CLADEFS_MASTER_KEY_FILE");
+        for (k, v) in server_b.options() {
+            command.env(k.to_ascii_uppercase(), v);
+        }
+        for (k, v) in server_a.options() {
+            command.env(format!("CLADEFSD_BUCKET_1_{}", k.to_ascii_uppercase()), v);
+        }
+        for (k, v) in server_b.options() {
+            command.env(format!("CLADEFSD_BUCKET_2_{}", k.to_ascii_uppercase()), v);
+        }
+        command.args(args).output().unwrap()
+    };
+
+    // AC #1: With A offline (403 to every request), --cells, --usage, and --dry-run on B finish
+    // and send A zero requests.
+    server_a.answering(Some(403));
+    let a_reqs_before = server_a.requests();
+
+    let out = gc_b(&[&url_b, "--cells"]);
+    assert!(out.status.success(), "--cells failed: {}", String::from_utf8_lossy(&out.stderr));
+    let cells_out = String::from_utf8_lossy(&out.stdout);
+    let listed_cells: Vec<&str> =
+        cells_out.lines().map(|line| line.split_whitespace().next().unwrap()).collect();
+    assert_eq!(
+        listed_cells,
+        vec![c_live.to_string(), d_live.to_string()],
+        "--cells must list only B's live cells, not foreign P: {cells_out}"
+    );
+
+    let out = gc_b(&[&url_b, "--usage"]);
+    assert!(out.status.success(), "--usage failed: {}", String::from_utf8_lossy(&out.stderr));
+    let usage_out = String::from_utf8_lossy(&out.stdout);
+    assert!(!usage_out.contains(&p.to_string()), "--usage must not list foreign P: {usage_out}");
+    assert!(usage_out.contains(&d_live.to_string()), "{usage_out}");
+
+    let out = gc_b(&[&url_b, "--dry-run"]);
+    assert!(out.status.success(), "--dry-run failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    assert_eq!(
+        server_a.requests(),
+        a_reqs_before,
+        "read-only commands on B sent requests to offline A"
+    );
+
+    // AC #2: --delete-cell P on B refuses (naming P's bucket 1 and B's bucket 2), sends A no
+    // request, and leaves P live in A.
+    server_a.answering(None);
+    let a_reqs_before_del = server_a.requests();
+    let p_str = p.to_string();
+    let out = gc_b(&[&url_b, "--delete-cell", &p_str]);
+    assert!(!out.status.success(), "--delete-cell P on B must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bucket 1") && stderr.contains("2"),
+        "error should name P's bucket (1) and B (2): {stderr}"
+    );
+    assert_eq!(server_a.requests(), a_reqs_before_del, "--delete-cell P on B sent requests to A");
+    let a_own = ObjectBucket::new(server_a.objects(), "a");
+    assert!(
+        runtime.block_on(bucket_cell::head::live(&a_own, p)).unwrap().is_some(),
+        "P must remain live in A"
+    );
+
+    // AC #3: `cladefs-gc B --cell P` runs collect_copy on P's copy in B and leaves P's head and
+    // objects in A untouched; collecting deleted B-owned child `c_del` still routes to A to retire
+    // its reference there.
+    let out = gc_b(&[&url_b, "--cell", &p_str]);
+    assert!(
+        out.status.success(),
+        "cladefs-gc B --cell P failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut p_objects_after: Vec<String> =
+        runtime.block_on(a_own.list(&p.prefix())).unwrap().into_iter().map(|m| m.key).collect();
+    p_objects_after.sort();
+    assert_eq!(
+        p_objects_after, p_objects_before,
+        "cladefs-gc B --cell P modified P's objects in A"
+    );
+
+    let c_del_str = c_del.to_string();
+    let out = gc_b(&[&url_b, "--cell", &c_del_str]);
+    assert!(
+        out.status.success(),
+        "cladefs-gc B --cell c_del failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ref_after = runtime.block_on(a_own.get(&ref_in_a));
+    assert!(
+        ref_after.is_err(),
+        "collecting deleted B-owned child must route to A to retire its reference {ref_in_a}"
+    );
+    let _ = url_a;
+}

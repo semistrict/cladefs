@@ -376,12 +376,9 @@ impl Sweep {
     ) -> Swept {
         let bounds = Bounds::of(limits);
         let shredded = limits.shredded.clone().unwrap_or_default();
-        if let Some(cell) = named {
-            let cells = futures::stream::iter([Ok(cell)]);
-            return self
-                .over(bucket, None::<(Arc<B>, u16)>, shredded, cells, &bounds, observe)
-                .await;
-        }
+        // cladefs: resolve the bucket's own identity for both unnamed sweeps and `--cell` so a
+        // named pass over a mirrored foreign cell collects its local copy via `collect_copy`
+        // rather than routing to its home bucket (board 5532).
         let copies = match own {
             None => None,
             Some(own) => match crate::identity::get(&**own).await {
@@ -398,6 +395,10 @@ impl Sweep {
                 }
             },
         };
+        if let Some(cell) = named {
+            let cells = futures::stream::iter([Ok(cell)]);
+            return self.over(bucket, copies, shredded, cells, &bounds, observe).await;
+        }
         let listing = Counted::new(bucket.clone(), bounds.pacer.clone());
         let cells = crate::cell::listed(&listing);
         let mut swept = self.over(bucket, copies, shredded, cells, &bounds, observe).await;
