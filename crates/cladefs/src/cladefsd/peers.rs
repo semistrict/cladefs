@@ -449,11 +449,10 @@ pub(super) async fn start_on(
         }
     });
     serving.map_err(|err| failed(&err.to_string()))?;
-    // cladefs: the migrations to it their sources abandoned, given up (board 5734).
-    if crate::ephemeral_host::host_on(&daemon.host).is_ok() {
-        let idle = super::migration::idle().map_err(|err| failed(&err))?;
-        runtime.spawn(super::migration::target::reap(Arc::clone(daemon), idle));
-    }
+    // cladefs: the migrations to it their sources abandoned, given up (board 5734, board 11369):
+    // always spawned whenever peers are served, for both ephemeral and bucket-backed migrations.
+    let idle = super::migration::idle().map_err(|err| failed(&err))?;
+    runtime.spawn(super::migration::target::reap(Arc::clone(daemon), idle));
     Ok(())
 }
 

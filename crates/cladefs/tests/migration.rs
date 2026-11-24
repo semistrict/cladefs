@@ -98,7 +98,11 @@ impl Daemon {
     }
 
     fn hand_over(&self, path: &Path) -> Result<(), cladefs::Error> {
-        let request = HandOverCellRequest { path: control_path(path) };
+        self.hand_over_with_token(path, None)
+    }
+
+    fn hand_over_with_token(&self, path: &Path, token: Option<u64>) -> Result<(), cladefs::Error> {
+        let request = HandOverCellRequest { path: control_path(path), token };
         self.control.call(async |client| client.hand_over_cell(request).await).map(drop)
     }
 
@@ -784,4 +788,215 @@ fn hand_overs_failing_to_give_the_cell_up_leave_it_migrating() {
     drop(client);
     source.hand_over(&forked.here).unwrap();
     forked.assert_handed_over(&there, 6);
+}
+
+/// Starts a daemon configured for bucket-backed cells only (no `CLADEFSD_EPHEMERAL` and no
+/// `CLADEFSD_EPHEMERAL_CELLS`; destination paths bounded by `CLADEFSD_ROOTS`).
+fn daemon_bucket_only(dir: &Path, bucket: &Path, peers: &[String], env: &[(&str, &str)]) -> Daemon {
+    let (vms, control) = (dir.join("cladefsd.sock"), dir.join("control.sock"));
+    for socket in [&vms, &control] {
+        let _ = std::fs::remove_file(socket);
+    }
+    let process = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+        .arg(&vms)
+        .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
+        .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_PART_CACHE", dir.join("cache"))
+        .env("CLADEFSD_GRPC", &control)
+        .env("CLADEFSD_ROOTS", dir)
+        .env("CLADEFSD_PEER_ADDRESS", &peers[0])
+        .env("CLADEFSD_PEERS", peers.join(","))
+        .envs(env.iter().copied())
+        .spawn()
+        .unwrap();
+    let process = KillOnDrop(process);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while std::os::unix::net::UnixStream::connect(&vms).is_err() {
+        assert!(Instant::now() < deadline, "the daemon never served");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let control = Control::connect(&control).unwrap();
+    Daemon { process, vms, control, ephemeral: dir.join("ephemeral-unused") }
+}
+
+/// Board 11369: bucket-backed live migration transfers only the unuploaded tail over peer mTLS,
+/// works without `CLADEFSD_EPHEMERAL`, places the cell at the requested fencing token on hand-over,
+/// deletes only the source's local directory (leaving the bucket cell intact), and lets the target
+/// read both bucket-uploaded history and newly migrated unuploaded tail immediately.
+#[test]
+fn bucket_backed_cells_migrate_live_tail_only_without_ephemeral() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let hosts = [dir.path().join("source"), dir.path().join("target")];
+    for path in [&bucket, &hosts[0], &hosts[1]] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let [source_at, target_at] = addresses();
+    // Long upload interval on source so unuploaded segments stay local until we explicitly sync
+    // or migrate them, exercising tail-only hand-over without waiting on bucket PUTs.
+    let source = daemon_bucket_only(
+        &hosts[0],
+        &bucket,
+        &[source_at.clone(), target_at.clone()],
+        &[("CLADEFSD_UPLOAD_INTERVAL", "3600")],
+    );
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at],
+        &[("CLADEFSD_UPLOAD_INTERVAL", "1")],
+    );
+
+    let here = hosts[0].join("vm-cell");
+    let client = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    let cell = client.cell();
+    let own = |sequence| ExtentId { cell, sequence };
+
+    // Phase 1: write extents and sync them to the bucket so the bucket holds older history.
+    for sequence in 1..=8 {
+        write(&client, own(sequence));
+    }
+    source
+        .control
+        .call(async |c| c.sync_cell(SyncCellRequest { path: control_path(&here) }).await)
+        .unwrap();
+
+    // Phase 2: write more extents (past a 32 MiB segment boundary so finalized segments exist
+    // locally, unuploaded because CLADEFSD_UPLOAD_INTERVAL=3600).
+    for sequence in 9..=50 {
+        write(&client, own(sequence));
+    }
+    let tenant_dir = hosts[1].join("tenant-a");
+    std::fs::create_dir(&tenant_dir).unwrap();
+    let there = tenant_dir.join("vm-cell");
+    source.migrate(&here, &target_at, &there).unwrap();
+
+    // Phase 3: continue writing while pre-copy rounds run.
+    for sequence in 51..=60 {
+        write(&client, own(sequence));
+    }
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Hand-over while the VM still has the cell open must return EBUSY.
+    let busy = source.hand_over_with_token(&here, Some(2)).unwrap_err();
+    assert_eq!(busy.errno(), Some(cladefs::Errno::EBUSY), "{busy}");
+
+    // Zero token is refused with EINVAL.
+    let zero = source.hand_over_with_token(&here, Some(0)).unwrap_err();
+    assert_eq!(zero.errno(), Some(cladefs::Errno::EINVAL), "{zero}");
+
+    // Pause/disconnect VM and hand over with fencing token 2.
+    drop(client);
+    source.hand_over_with_token(&here, Some(2)).unwrap();
+    assert!(!here.exists(), "source cell dir removed after hand-over");
+    assert!(there.is_dir(), "target cell dir moved into place");
+
+    // Target serves all 60 extents immediately (both bucket-uploaded 1..=8 and migrated tail
+    // 9..=60), accepts new writes, and syncs everything to the bucket.
+    let target_client = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
+    assert_eq!(target_client.cell(), cell);
+    for sequence in 1..=60 {
+        assert!(read(&target_client, own(sequence)) == data(sequence), "extent {sequence}");
+    }
+    for sequence in 61..=65 {
+        write(&target_client, own(sequence));
+    }
+    drop(target_client);
+    target
+        .control
+        .call(async |c| c.sync_cell(SyncCellRequest { path: control_path(&there) }).await)
+        .unwrap();
+
+    // Re-taking the cell from the bucket on a fresh directory at token 3 verifies the bucket
+    // holds all 65 extents intact (source cleanup never deleted the cell from the bucket).
+    let stated = target
+        .control
+        .call(async |c| c.stat_cell(StatCellRequest { path: control_path(&there) }).await)
+        .unwrap();
+    let taken_path = hosts[1].join("re-taken");
+    target
+        .control
+        .call(async |c| {
+            c.create_cell(cladefs::cladefsd::control::proto::CreateCellRequest {
+                path: control_path(&taken_path),
+                capacity: CAPACITY,
+                tenant: stated.tenant,
+                cell: stated.cell,
+                token: Some(3),
+                ..Default::default()
+            })
+            .await
+        })
+        .unwrap();
+    let verify_client = CellClient::connect(&target.vms, &taken_path, CAPACITY).unwrap();
+    for sequence in 1..=65 {
+        assert!(
+            read(&verify_client, own(sequence)) == data(sequence),
+            "re-taken extent {sequence}"
+        );
+    }
+}
+
+/// Board 11369: a bucket-backed hand-over with a stale fencing token is refused by the target
+/// (`EAGAIN`), leaves nothing behind on the target, removes the source's `migrating` marker, and
+/// lets the source resume serving and later migrate with a higher token; `AbortMigration` before
+/// hand-over also leaves the live cell serving on the source.
+#[test]
+fn bucket_backed_stale_token_refusal_and_abort_resume_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let hosts = [dir.path().join("source"), dir.path().join("target")];
+    for path in [&bucket, &hosts[0], &hosts[1]] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let [source_at, target_at] = addresses();
+    let source = daemon_bucket_only(
+        &hosts[0],
+        &bucket,
+        &[source_at.clone(), target_at.clone()],
+        &[("CLADEFSD_TOKEN", "5"), ("CLADEFSD_UPLOAD_INTERVAL", "3600")],
+    );
+    let target = daemon_bucket_only(
+        &hosts[1],
+        &bucket,
+        &[target_at.clone(), source_at],
+        &[("CLADEFSD_TOKEN", "5")],
+    );
+
+    let here = hosts[0].join("vm-cell");
+    let there = hosts[1].join("vm-cell");
+    let client = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    let cell = client.cell();
+    let own = |sequence| ExtentId { cell, sequence };
+    for sequence in 1..=4 {
+        write(&client, own(sequence));
+    }
+
+    // Abort while running: source resumes normally and can migrate again.
+    source.migrate(&here, &target_at, &there).unwrap();
+    write(&client, own(5));
+    source.abort_migration(&here).unwrap();
+    assert_eq!(source.abort_migration(&here).unwrap_err().errno(), Some(cladefs::Errno::ENOENT));
+    write(&client, own(6));
+
+    // Migrate and attempt hand-over with stale token 4 (< head token 5).
+    source.migrate(&here, &target_at, &there).unwrap();
+    drop(client);
+    let refused = source.hand_over_with_token(&here, Some(4)).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN), "{refused}");
+    assert!(here.is_dir(), "source cell kept after target refusal");
+    assert!(!there.exists(), "target cleaned up after refusal");
+
+    // Source can open, read, write, and then migrate cleanly with token 6.
+    let resumed = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    write(&resumed, own(7));
+    source.migrate(&here, &target_at, &there).unwrap();
+    drop(resumed);
+    source.hand_over_with_token(&here, Some(6)).unwrap();
+    assert!(!here.exists());
+
+    let target_client = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
+    for sequence in 1..=7 {
+        assert!(read(&target_client, own(sequence)) == data(sequence), "extent {sequence}");
+    }
 }

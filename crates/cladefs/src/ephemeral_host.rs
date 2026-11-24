@@ -429,7 +429,7 @@ impl Host {
 }
 
 /// The largest description of a cell directory [`not_its`] reads: a description is a few lines.
-const DESCRIPTION_MOST: u64 = 64 << 10;
+pub(crate) const DESCRIPTION_MOST: u64 = 64 << 10;
 
 /// Why the cell directory at `dir` is not `entry`'s ephemeral cell, whole, if it is not: its
 /// description read as its opening reads it, its format checked (`local_cell::Format`), an

@@ -7658,6 +7658,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         #[allow(deprecated)]
         formats: String::new(),
         versions: Some(super::peers::current_formats()),
+        bucket_backed: false,
     };
     let bucket = super::cells::daemon_bucket().unwrap();
     let buckets = control(bucket.ephemeral_buckets()).unwrap();
@@ -7691,6 +7692,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
         incarnation,
         token,
         files: vec![FileDigest { path: "description".into(), len: 1, crc: None }],
+        placement_token: None,
     };
     let unknown =
         control(target::hand_over(daemon, hand_over(incarnation ^ 2, newer))).unwrap_err();

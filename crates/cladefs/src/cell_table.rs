@@ -198,6 +198,9 @@ pub(crate) type Wanted = Arc<dyn Fn() + Send + Sync>;
 enum Claim<C> {
     /// The daemon, to work on it.
     Daemon,
+    /// The daemon, hurrying a going writer's uploader to cut short and waiting for any closing
+    /// cell to finish (board 11369).
+    DaemonHurry,
     /// The daemon, unless a connection not going writes it, which the daemon then works through.
     DaemonOrWriter,
     /// A connection, to write it.
@@ -348,6 +351,7 @@ impl<C: Writer, S, P> Inner<C, S, P> {
         let (refuses_shared, waits_for_closing) = match claim {
             Claim::Writer(_) => (rules().writers_refuse_shared, rules().writers_wait_for_closing),
             Claim::Mount => (true, true),
+            Claim::DaemonHurry => (false, true),
             Claim::Daemon | Claim::DaemonOrWriter => (false, false),
         };
         let open = match self.entries.get(key) {
@@ -370,7 +374,9 @@ impl<C: Writer, S, P> Inner<C, S, P> {
                 };
                 (Entry::Writer { connection: connection.clone(), cell, wanted: None }, evicted)
             }
-            Claim::Daemon | Claim::DaemonOrWriter => (Entry::Daemon(open), None),
+            Claim::Daemon | Claim::DaemonHurry | Claim::DaemonOrWriter => {
+                (Entry::Daemon(open), None)
+            }
             Claim::Mount => match open {
                 Open::Kept(kept) => (Entry::Mounted, Some(kept)),
                 Open::Nothing | Open::Shared(_) | Open::Closing(_) => (Entry::Mounted, None),
@@ -529,6 +535,19 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         }
     }
 
+    /// Holds the cell `key` names, for the daemon, hurrying a going writer's uploader to cut short
+    /// and waiting for any closing cell to finish (board 11369).
+    pub async fn hold_hurry_async(
+        &self,
+        key: &Path,
+        wait: Duration,
+    ) -> Result<Hold<C, S, P>, Errno> {
+        match self.claim_async(key, Claim::DaemonHurry, wait).await? {
+            Claimed::Held { .. } => Ok(self.held(key)),
+            Claimed::Writer(_) => unreachable!("the daemon's claim got a writer"),
+        }
+    }
+
     /// Holds the cell `key` names, for `connection` to write it, as [`CellTable::hold_async`]
     /// does; with the cell kept open of it, if one was, which the connection closes before it
     /// opens the cell. `EBUSY` at once while others have the cell open.
@@ -619,9 +638,9 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
         };
         drop(inner);
         drop(refused);
-        // A writer waiting for a going connection has it hurry (TASK-216), without the lock, as
-        // what it calls may take it.
-        if let (Some(wanted), Claim::Writer(_)) = (wanted, claim) {
+        // A writer (or hurrying daemon hand-over) waiting for a going connection has it hurry
+        // (TASK-216, board 11369), without the lock, as what it calls may take it.
+        if let (Some(wanted), Claim::Writer(_) | Claim::DaemonHurry) = (wanted, claim) {
             wanted();
         }
         tried

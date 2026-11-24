@@ -329,20 +329,24 @@ type CladefsdClient interface {
 	// registry records, or that was decommissioned there, with its count of references (board
 	// 8521): for an operator to find a lost host's incarnation without its disk or its log.
 	ListEphemeralHosts(ctx context.Context, in *ListEphemeralHostsRequest, opts ...grpc.CallOption) (*ListEphemeralHostsResponse, error)
-	// Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
-	// address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
-	// refers to the cell's origin first, then takes the cell's kept segments as they come, while its
-	// guest runs. Returns the migration's ID. HandOverCell ends it, or AbortMigration. EBUSY while
-	// another migration of the cell is under way.
+	// Begins the live migration of the cell at `path` (ephemeral or bucket-backed) to the daemon
+	// whose peer address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4, board 11369):
+	// for an ephemeral cell, that daemon refers to the cell's origin first, then takes its kept
+	// segments as they come while its guest runs; for a bucket-backed cell, its uploader keeps
+	// uploading to the bucket in parallel while rounds stream only unacknowledged finalized segments
+	// and extents over peer mTLS. Returns the migration's ID. HandOverCell ends it, or
+	// AbortMigration. EBUSY while another migration of the cell is under way.
 	MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error)
-	// Hands the ephemeral cell at `path` over to the daemon its migration names, once
-	// nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
-	// the cell up, durably, then sends the rest of its cell, then asks the other to take it over.
-	// Accepted, the cell here goes, and this daemon's reference; refused, it serves the cell again
-	// (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
-	// it did.
+	// Hands the cell at `path` over to the daemon its migration names, once nothing has it open
+	// (EBUSY otherwise: its guest paused, its VM process gone): for a bucket-backed cell, the source
+	// cuts its uploader short without waiting on pending bucket uploads, gives the cell up durably,
+	// sends only the remaining unuploaded tail, and asks the target to take it over (placing it at
+	// `token` first if given, taking its head in the bucket with one CAS to fence the source).
+	// Accepted, the cell directory here goes (leaving a bucket-backed cell intact in the bucket, and
+	// retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
+	// again after a failure or a restart, it asks the other again, which answers as it did.
 	HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error)
-	// Ends the live migration of the ephemeral cell at `path` (board 8577). Its hand-over not
+	// Ends the live migration of the cell at `path` (board 8577, board 11369). Its hand-over not
 	// begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
 	// cell again, to another daemon too, while its guest runs on; so too a migration the other gave
 	// up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
@@ -351,8 +355,7 @@ type CladefsdClient interface {
 	// and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
 	// ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
 	// is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
-	// NOT_FOUND (ENOENT); one being prepared, EBUSY; a daemon keeping no ephemeral cells (started
-	// without CLADEFSD_EPHEMERAL), FAILED_PRECONDITION (ENOTSUP).
+	// NOT_FOUND (ENOENT); one being prepared, EBUSY.
 	AbortMigration(ctx context.Context, in *AbortMigrationRequest, opts ...grpc.CallOption) (*AbortMigrationResponse, error)
 }
 
@@ -941,20 +944,24 @@ type CladefsdServer interface {
 	// registry records, or that was decommissioned there, with its count of references (board
 	// 8521): for an operator to find a lost host's incarnation without its disk or its log.
 	ListEphemeralHosts(context.Context, *ListEphemeralHostsRequest) (*ListEphemeralHostsResponse, error)
-	// Begins the live migration of the ephemeral cell at `path` to the daemon whose peer
-	// address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4): that daemon
-	// refers to the cell's origin first, then takes the cell's kept segments as they come, while its
-	// guest runs. Returns the migration's ID. HandOverCell ends it, or AbortMigration. EBUSY while
-	// another migration of the cell is under way.
+	// Begins the live migration of the cell at `path` (ephemeral or bucket-backed) to the daemon
+	// whose peer address is `peer`, where it goes at `to` (backlog doc-25, TASK-698.4, board 11369):
+	// for an ephemeral cell, that daemon refers to the cell's origin first, then takes its kept
+	// segments as they come while its guest runs; for a bucket-backed cell, its uploader keeps
+	// uploading to the bucket in parallel while rounds stream only unacknowledged finalized segments
+	// and extents over peer mTLS. Returns the migration's ID. HandOverCell ends it, or
+	// AbortMigration. EBUSY while another migration of the cell is under way.
 	MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error)
-	// Hands the ephemeral cell at `path` over to the daemon its migration names, once
-	// nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
-	// the cell up, durably, then sends the rest of its cell, then asks the other to take it over.
-	// Accepted, the cell here goes, and this daemon's reference; refused, it serves the cell again
-	// (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
-	// it did.
+	// Hands the cell at `path` over to the daemon its migration names, once nothing has it open
+	// (EBUSY otherwise: its guest paused, its VM process gone): for a bucket-backed cell, the source
+	// cuts its uploader short without waiting on pending bucket uploads, gives the cell up durably,
+	// sends only the remaining unuploaded tail, and asks the target to take it over (placing it at
+	// `token` first if given, taking its head in the bucket with one CAS to fence the source).
+	// Accepted, the cell directory here goes (leaving a bucket-backed cell intact in the bucket, and
+	// retiring an ephemeral cell's reference); refused, it serves the cell again (EAGAIN). Asked
+	// again after a failure or a restart, it asks the other again, which answers as it did.
 	HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error)
-	// Ends the live migration of the ephemeral cell at `path` (board 8577). Its hand-over not
+	// Ends the live migration of the cell at `path` (board 8577, board 11369). Its hand-over not
 	// begun: its rounds stop, the other daemon is told to give it up, and MigrateCell may migrate the
 	// cell again, to another daemon too, while its guest runs on; so too a migration the other gave
 	// up (restarted, or hearing nothing of it for CLADEFSD_MIGRATION_IDLE). Its hand-over begun, the
@@ -963,8 +970,7 @@ type CladefsdServer interface {
 	// and this daemon serves the cell again, answering as HandOverCell does, EAGAIN; not answering,
 	// ENOTCONN, the cell given up still, to be asked again; or, having accepted it before, the cell
 	// is the other's, ALREADY_EXISTS (EEXIST), and goes here. No migration of the cell under way,
-	// NOT_FOUND (ENOENT); one being prepared, EBUSY; a daemon keeping no ephemeral cells (started
-	// without CLADEFSD_EPHEMERAL), FAILED_PRECONDITION (ENOTSUP).
+	// NOT_FOUND (ENOENT); one being prepared, EBUSY.
 	AbortMigration(context.Context, *AbortMigrationRequest) (*AbortMigrationResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }

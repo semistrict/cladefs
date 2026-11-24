@@ -1865,7 +1865,7 @@ async fn hand_overs_to_wedged_targets_end_within_their_bound() {
     madsim::time::sleep(Duration::from_secs(2)).await;
     let path = here.display().to_string();
     let hand_over = move || {
-        let request = HandOverCellRequest { path: path.clone() };
+        let request = HandOverCellRequest { path: path.clone(), token: None };
         async move { connect(1).await.hand_over_cell(request).await.map(drop) }
     };
     let timed = manager.spawn({
@@ -2008,7 +2008,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
                 let tried = match tried {
                     false => None,
                     true => {
-                        let request = HandOverCellRequest { path: from.clone() };
+                        let request = HandOverCellRequest { path: from.clone(), token: None };
                         let answered = connect(source).await.hand_over_cell(request).await;
                         Some(
                             answered
@@ -2048,7 +2048,7 @@ async fn ephemeral_attrition(disk: bool, aborts: bool) -> Result<(), String> {
         let from = at.display().to_string();
         let handing = manager.spawn(async move {
             calling(source, || {
-                let request = HandOverCellRequest { path: from.clone() };
+                let request = HandOverCellRequest { path: from.clone(), token: None };
                 async move { connect(source).await.hand_over_cell(request).await }
             })
             .await

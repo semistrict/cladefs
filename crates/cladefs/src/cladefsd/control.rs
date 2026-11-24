@@ -704,9 +704,10 @@ impl Cladefsd for Control {
         &self,
         request: Request<HandOverCellRequest>,
     ) -> Result<Response<HandOverCellResponse>, Status> {
-        let cell_dir = path(request.into_inner().path)?;
+        let HandOverCellRequest { path: cell_dir, token } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
         reply(
-            super::migration::hand_over_on(&self.daemon, cell_dir)
+            super::migration::hand_over_on(&self.daemon, cell_dir, token)
                 .await
                 .map(|()| HandOverCellResponse {}),
         )

@@ -145,6 +145,44 @@ pub(super) async fn hold_cell_alone(daemon: &Arc<Daemon>, path: &Path) -> Result
     hold_alone(daemon, path).await
 }
 
+/// cladefs: holds the cell at `path` on `daemon`, alone, hurrying a going writer's uploader to cut
+/// short and waiting for any closing cell to finish (board 11369): used by `HandOverCell` so a
+/// bucket-backed cell whose VM just disconnected closes in milliseconds without draining pending
+/// bucket uploads.
+pub(super) async fn hold_cell_alone_hurry(
+    daemon: &Arc<Daemon>,
+    path: &Path,
+) -> Result<Hold, Errno> {
+    let hold = daemon.table.hold_hurry_async(&cell_dir_key(path), CLOSING_WAIT).await?;
+    close_kept(daemon, hold.take_kept()).await;
+    if let Some(cell) = hold.instance() {
+        inspect(daemon, cell, |_| ());
+        return Err(Errno::EBUSY);
+    }
+    Ok(hold)
+}
+
+/// cladefs: tells an open bucket-backed cell at `path`, if one is open on `daemon`, to cut its
+/// uploader short when it closes (board 11369). Uploading continues in parallel while the cell
+/// stays open.
+pub(super) fn cut_short_open(daemon: &Daemon, path: &Path) {
+    if let Some(cell) = daemon.table.instance(&cell_dir_key(path)) {
+        inspect(daemon, cell, |cell| {
+            if let Some(cut) = cell.cut_short() {
+                cut();
+            }
+        });
+    }
+}
+
+/// cladefs: undoes [`cut_short_open`] on an open cell at `path` so its uploader drains normally on
+/// close (board 11369).
+pub(super) fn drain_open(daemon: &Daemon, path: &Path) {
+    if let Some(cell) = daemon.table.instance(&cell_dir_key(path)) {
+        inspect(daemon, cell, |cell| cell.drain_on_stop());
+    }
+}
+
 async fn hold_alone(daemon: &Arc<Daemon>, path: &Path) -> Result<Hold, Errno> {
     let hold = hold(daemon, path).await?;
     if let Some(cell) = hold.instance() {
@@ -653,7 +691,7 @@ pub fn replace_after() -> Result<std::time::Duration, String> {
 }
 
 /// The cell at `path` as `daemon` opens it to work on it, not a VM.
-async fn open_here(daemon: &Arc<Daemon>, path: &Path) -> Result<OpenCell, Errno> {
+pub(super) async fn open_here(daemon: &Arc<Daemon>, path: &Path) -> Result<OpenCell, Errno> {
     attached(daemon, path, async |keeping| {
         let opening = Opening::keeping_on(daemon.host.clone(), keeping).guest(false);
         OpenCell::open_with(path, opening).await

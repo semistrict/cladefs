@@ -30,7 +30,7 @@
 //! cladefsctl counters [--json]
 //! cladefsctl set-peers [ADDRESS...]
 //! cladefsctl migrate DIR PEER TO
-//! cladefsctl hand-over DIR
+//! cladefsctl hand-over [--token TOKEN] DIR
 //! cladefsctl abort-migration DIR
 //! cladefsctl memory-limit [--tenant TENANT] BYTES|none
 //! cladefsctl memory-weight TENANT WEIGHT
@@ -385,7 +385,7 @@ mod cli {
          cladefsctl stats [--json] [--wait SECONDS] [--leave-out histograms|guests|vms]... | \
          cladefsctl cells [--json] | cladefsctl counters [--json] | \
          cladefsctl set-peers [--bucket URL] [ADDRESS...] | cladefsctl migrate DIR PEER TO | \
-         cladefsctl hand-over DIR | cladefsctl abort-migration DIR | \
+         cladefsctl hand-over [--token TOKEN] DIR | cladefsctl abort-migration DIR | \
          cladefsctl memory-limit [--tenant TENANT] BYTES|none | \
          cladefsctl memory-weight TENANT WEIGHT | \
          cladefsctl in-flight [--tenant TENANT] BYTES|default | \
@@ -542,15 +542,17 @@ mod cli {
             bucket: Option<String>,
             addresses: Vec<String>,
         },
-        /// cladefs: an ephemeral cell's live migration begun, to `peer`, at `to` there (board 8585).
+        /// cladefs: a cell's live migration begun, to `peer`, at `to` there (board 8585, board 11369).
         Migrate {
             dir: PathBuf,
             peer: String,
             to: PathBuf,
         },
-        /// cladefs: an ephemeral cell migrating handed over to its target (board 8585).
+        /// cladefs: a cell migrating handed over to its target, placing a bucket-backed cell at
+        /// `token` if given (board 8585, board 11369).
         HandOver {
             dir: PathBuf,
+            token: Option<u64>,
         },
         /// cladefs: an ephemeral cell's migration ended (board 8577).
         AbortMigration {
@@ -888,7 +890,10 @@ mod cli {
                 ["migrate", dir, peer, to] => {
                     Self::Migrate { dir: dir.into(), peer: peer.to_owned(), to: to.into() }
                 }
-                ["hand-over", dir] => Self::HandOver { dir: dir.into() },
+                ["hand-over", dir] => Self::HandOver { dir: dir.into(), token: None },
+                ["hand-over", "--token", token, dir] => {
+                    Self::HandOver { dir: dir.into(), token: Some(number("TOKEN", token)?) }
+                }
                 ["abort-migration", dir] => Self::AbortMigration { dir: dir.into() },
                 ["memory-limit", ref rest @ ..] => {
                     let (tenant, bytes) = of_tenant(rest)?;
@@ -1237,8 +1242,8 @@ mod cli {
                     let request = MigrateCellRequest { path: name(&dir)?, peer, to: name(&to)? };
                     println!("migration {}", call!(what, migrate_cell, request).migration);
                 }
-                Self::HandOver { dir } => {
-                    let request = HandOverCellRequest { path: name(&dir)? };
+                Self::HandOver { dir, token } => {
+                    let request = HandOverCellRequest { path: name(&dir)?, token };
                     call!(
                         format!("handing the cell at {} over", dir.display()),
                         hand_over_cell,

@@ -204,10 +204,10 @@ func (CellKind) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
 }
 
-// A live migration of an ephemeral cell to begin.
+// A live migration of a cell to begin.
 type MigrateCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The directory of the ephemeral cell.
+	// The directory of the cell.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// The peer address of the daemon it goes to.
 	Peer string `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
@@ -317,8 +317,12 @@ func (x *MigrateCellResponse) GetMigration() uint64 {
 // A migration's hand-over.
 type HandOverCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The directory of the ephemeral cell being migrated.
-	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// The directory of the cell being migrated.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// For a bucket-backed cell: the fencing token to place the cell at on the target before taking
+	// its head in the bucket (board 11369). Unset keeps the cell's existing placement token (or the
+	// target's CLADEFSD_TOKEN). Refused (INVALID_ARGUMENT, EINVAL) if 0 or set on an ephemeral cell.
+	Token         *uint64 `protobuf:"varint,2,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -358,6 +362,13 @@ func (x *HandOverCellRequest) GetPath() string {
 		return x.Path
 	}
 	return ""
+}
+
+func (x *HandOverCellRequest) GetToken() uint64 {
+	if x != nil && x.Token != nil {
+		return *x.Token
+	}
+	return 0
 }
 
 // A migration handed over.
@@ -400,7 +411,7 @@ func (*HandOverCellResponse) Descriptor() ([]byte, []int) {
 // A migration to end.
 type AbortMigrationRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The directory of the ephemeral cell being migrated.
+	// The directory of the cell being migrated.
 	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5181,9 +5192,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04peer\x18\x02 \x01(\tR\x04peer\x12\x0e\n" +
 	"\x02to\x18\x03 \x01(\tR\x02to\"3\n" +
 	"\x13MigrateCellResponse\x12\x1c\n" +
-	"\tmigration\x18\x01 \x01(\x04R\tmigration\")\n" +
+	"\tmigration\x18\x01 \x01(\x04R\tmigration\"N\n" +
 	"\x13HandOverCellRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\x16\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x19\n" +
+	"\x05token\x18\x02 \x01(\x04H\x00R\x05token\x88\x01\x01B\b\n" +
+	"\x06_token\"\x16\n" +
 	"\x14HandOverCellResponse\"+\n" +
 	"\x15AbortMigrationRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x18\n" +
@@ -5803,6 +5816,7 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_init() {
 	if File_cladefs_cladefsd_v1_cladefsd_proto != nil {
 		return
 	}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[2].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[43].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[48].OneofWrappers = []any{}

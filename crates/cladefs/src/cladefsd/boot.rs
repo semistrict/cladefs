@@ -63,16 +63,19 @@ pub(super) async fn boot_daemon(
     // says (doc-22, TASK-539.9).
     let disks = super::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
     super::disk::start_on(daemon, disks).map_err(anyhow::Error::msg)?;
+    // cladefs: how long a migration to this host is kept, heard nothing of (board 5734, board
+    // 11369): validated whether or not CLADEFSD_EPHEMERAL is set, as bucket-backed cells migrate
+    // too.
+    super::migration::idle().map_err(anyhow::Error::msg)?;
     // cladefs: its ephemeral cells' directory, if it keeps any (doc-25, TASK-698.3): those it
     // handed over let go of (board 5730), and the references of those it holds no more retired,
-    // before it serves; and how long a migration to it is kept, heard nothing of (board 5734).
+    // before it serves.
     if let Some(dir) = set_os("CLADEFSD_EPHEMERAL") {
         let ephemeral = local_cell::upload::blocking(|| {
             crate::ephemeral_host::open_on(&daemon.host, Path::new(&dir))
         })?;
         let let_go = super::migration::let_go_handed_over_on(daemon, &ephemeral).await?;
         log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
-        super::migration::idle().map_err(anyhow::Error::msg)?;
         // cladefs: where ephemeral cells migrated to it go (board 8447): none named, it takes no
         // migrations; one named but not there, it refuses to start.
         if set_os("CLADEFSD_EPHEMERAL_CELLS").is_some() {

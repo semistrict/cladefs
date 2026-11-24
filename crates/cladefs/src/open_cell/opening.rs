@@ -106,15 +106,17 @@ impl Opening {
         let span = trace::Span::start("store.open");
         span.set_with(trace::STORE, || path.display().to_string());
         let opened = async {
-            // cladefs: an ephemeral cell's, with no uploader (doc-25, TASK-698.3).
+            // cladefs: an ephemeral cell's, with no uploader (doc-25, TASK-698.3); and any cell
+            // given up to a live migration opens here no more (TASK-698.4, board 11369).
             let (ephemeral, migrating) = local_cell::upload::blocking(|| {
                 let ephemeral = host_cell::is_ephemeral(path);
-                let migrating = ephemeral && host_fs::exists(&path.join("migrating"));
+                let migrating = host_fs::exists(&path.join("migrating"));
                 (ephemeral, migrating)
             });
+            if migrating {
+                return Err(Errno::EBUSY.into());
+            }
             let cell = match ephemeral {
-                // cladefs: given up to a live migration, it opens here no more (TASK-698.4).
-                true if migrating => return Err(Errno::EBUSY.into()),
                 true => {
                     let (local, bucket, keys, forked) =
                         host_cell::open_ephemeral_on(&self.host, path, &self.keeping).await?;
