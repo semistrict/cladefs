@@ -19,6 +19,8 @@
 use crate::error::{Errno, Result};
 use base32_id::{Padded, Short};
 use local_cell::{Dir as _, File as _};
+#[cfg(any(target_os = "linux", madsim, test))]
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -47,13 +49,15 @@ fn header() -> String {
 }
 
 /// The version `line`, a record's first, says, if this build reads it.
-fn version_of(line: &str) -> Option<u32> {
-    let version = line.strip_prefix(HEADER)?;
+fn version_of(line: &str) -> std::result::Result<u32, String> {
+    let refused = || format!("{line:?}, of no version of {FORMAT:?}");
+    let version = line.strip_prefix(HEADER).ok_or_else(refused)?;
     // Digits alone: `u32::from_str` would take a sign too.
     if version.is_empty() || !version.bytes().all(|digit| digit.is_ascii_digit()) {
-        return None;
+        return Err(refused());
     }
-    FORMAT.check(version.parse().ok()?).ok()
+    let version = version.parse().map_err(|_| refused())?;
+    FORMAT.check(version).map_err(|_| refused())
 }
 
 /// The lines of `text`, a record of lines, after its header, each as `parse` reads it: none if its
@@ -62,7 +66,7 @@ fn version_of(line: &str) -> Option<u32> {
 fn parse_lines<T>(text: &str, parse: impl Fn(&str) -> Option<T>) -> Result<Vec<T>, String> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or_default();
-    version_of(first).ok_or_else(|| format!("{first:?}, of no version of {FORMAT:?}"))?;
+    version_of(first)?;
     lines.map(|line| parse(line).ok_or_else(|| format!("{line:?}"))).collect()
 }
 
@@ -260,6 +264,54 @@ pub(crate) fn inherit_attached(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What a cell given up to a migration says of it, in its marker (`cladefsd::migration`): what
+/// asking the target again takes, after a restart too.
+#[cfg(any(target_os = "linux", madsim, test))]
+#[derive(Clone, Debug)]
+pub(crate) struct Marker {
+    pub(crate) migration: u64,
+    pub(crate) peer: String,
+    pub(crate) incarnation: u64,
+    pub(crate) token: u64,
+}
+
+/// A marker as its file holds it, in JSON: its version, of cladefs's records in a cell directory
+/// ([`FORMAT`], doc-28), then the marker's fields, none other.
+#[cfg(any(target_os = "linux", madsim, test))]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkerFile {
+    version: u32,
+    migration: u64,
+    peer: String,
+    incarnation: u64,
+    token: u64,
+}
+
+#[cfg(any(target_os = "linux", madsim, test))]
+impl Marker {
+    /// Its file's bytes.
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        let Marker { migration, ref peer, incarnation, token } = *self;
+        let version = FORMAT.current;
+        let file = MarkerFile { version, migration, peer: peer.clone(), incarnation, token };
+        serde_json::to_vec(&file).expect("a marker serializes")
+    }
+
+    /// The marker `bytes`, its file's, say: refused if of a version this build doesn't read, its
+    /// version read first, whatever follows, or naming a field it doesn't know.
+    pub(crate) fn read(bytes: &[u8]) -> anyhow::Result<Self> {
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let Version { version } = serde_json::from_slice(bytes)?;
+        FORMAT.check(version)?;
+        let MarkerFile { migration, peer, incarnation, token, .. } = serde_json::from_slice(bytes)?;
+        Ok(Marker { migration, peer, incarnation, token })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,10 +392,16 @@ mod tests {
         fn write() -> Vec<(&'static str, Vec<u8>)> {
             let attached = [(vec![0x1a, 0x2b], "/cells/base".into()), (vec![0x3c], "/b".into())];
             let ancestry = [(4, "/cells/parent".into()), (3, "/cells/grandparent".into())];
+            let marker = Marker {
+                migration: 0x51,
+                peer: "10.0.0.7:7777".to_owned(),
+                incarnation: 0xfedc_ba98,
+                token: u64::MAX,
+            };
             vec![
                 ("attached-bases", attached_text(&attached).into_bytes()),
                 ("ancestry", ancestry_text(&ancestry).into_bytes()),
-                ("migrating", crate::cladefsd::migration::golden_marker()),
+                ("migrating", marker.bytes()),
             ]
         }
 
@@ -366,7 +424,9 @@ mod tests {
             match case {
                 "attached-bases" => parse_lines(text()?, attached_line).map(|r| format!("{r:#?}")),
                 "ancestry" => parse_lines(text()?, ancestry_line).map(|r| format!("{r:#?}")),
-                "migrating" => crate::cladefsd::migration::marker_said(bytes),
+                "migrating" => Marker::read(bytes)
+                    .map(|marker| format!("{marker:#?}"))
+                    .map_err(|err| format!("{err:#}")),
                 _ => Err(format!("no record {case}")),
             }
         }

@@ -60,11 +60,11 @@ use super::peers::proto::{
     MigratePrepareRequest, MigratePrepareResponse, MigrateReleaseRequest, MigrateRenewRequest,
     Range,
 };
+use crate::cell_dir::Marker;
 use crate::ephemeral_host::{self, Entry, Migrating, staging};
 use crate::{CellId, Errno};
 use bucket_cell::layout::Origin;
 use host_fs::FileExt as _;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -129,64 +129,6 @@ const RENEW_BOUND: Duration = Duration::from_secs(5);
 /// How long a source waits for its target to give a migration up (`MigrateAbort`): as long as a
 /// prepare, the target retiring its reference within [`BUCKET_BOUND`].
 const ABORT_BOUND: Duration = PREPARE_BOUND;
-
-/// What a cell given up to a migration says of it, in its marker: what asking the target again
-/// takes, after a restart too.
-#[derive(Clone, Debug)]
-struct Marker {
-    migration: u64,
-    peer: String,
-    incarnation: u64,
-    token: u64,
-}
-
-/// A marker as its file holds it, in JSON: its version, of cladefs's records in a cell directory
-/// (`cell_dir::FORMAT`, doc-28), then the marker's fields, none other.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MarkerFile {
-    version: u32,
-    migration: u64,
-    peer: String,
-    incarnation: u64,
-    token: u64,
-}
-
-impl Marker {
-    /// Its file's bytes.
-    fn bytes(&self) -> Vec<u8> {
-        let Marker { migration, ref peer, incarnation, token } = *self;
-        let version = crate::cell_dir::FORMAT.current;
-        let file = MarkerFile { version, migration, peer: peer.clone(), incarnation, token };
-        serde_json::to_vec(&file).expect("a marker serializes")
-    }
-
-    /// The marker `bytes`, its file's, say: refused if of a version this build doesn't read, its
-    /// version read first, whatever follows, or naming a field it doesn't know.
-    fn read(bytes: &[u8]) -> anyhow::Result<Self> {
-        #[derive(Deserialize)]
-        struct Version {
-            version: u32,
-        }
-        let Version { version } = serde_json::from_slice(bytes)?;
-        crate::cell_dir::FORMAT.check(version)?;
-        let MarkerFile { migration, peer, incarnation, token, .. } = serde_json::from_slice(bytes)?;
-        Ok(Marker { migration, peer, incarnation, token })
-    }
-}
-
-/// cladefs: the corpus's marker (doc-28): what [`Marker::bytes`] writes.
-#[cfg(test)]
-pub(crate) fn golden_marker() -> Vec<u8> {
-    let peer = "10.0.0.7:7777".to_owned();
-    Marker { migration: 0x51, peer, incarnation: 0xfedc_ba98, token: u64::MAX }.bytes()
-}
-
-/// cladefs: a marker's file, `bytes`, as this build reads it, as its `{:#?}`.
-#[cfg(test)]
-pub(crate) fn marker_said(bytes: &[u8]) -> Result<String, String> {
-    Marker::read(bytes).map(|marker| format!("{marker:#?}")).map_err(|err| format!("{err:#}"))
-}
 
 /// A migration from this host under way: its target, its prepare's answer, what of each kept
 /// segment it sent, its length and the bytes it took of the disk then, and its rounds.
