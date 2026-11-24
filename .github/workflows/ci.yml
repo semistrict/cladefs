@@ -82,6 +82,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
+      # The root disk's room, which the runner's image takes as much as 102 of 145 GB of: the
+      # workspace's build and tests then left 4.7 GB, under the daemon's disk headroom (4 GiB at
+      # least, a twentieth of the disk), its allowance 0, and every test of a daemon refused
+      # ENOSPC (run 45303360819; board 10713). The SDKs no part builds with go, those the image has.
+      - name: Free the root disk of what no part uses
+        run: |
+          df -h /
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL; do
+            if [[ -e $dir ]]; then sudo rm -r -- "$dir"; fi
+          done
+          df -h /
       - name: Install the build's tools
         # elfutils' eu-stack and sqlite3, which tests run, as on hosts of guests
         # (scripts/lib/linux-host-setup.sh); fuse3's fusermount3, which mounts the FUSE tests'
