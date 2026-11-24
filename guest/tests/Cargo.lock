@@ -837,6 +837,7 @@ dependencies = [
  "extent_frame",
  "extent_keys",
  "fail",
+ "formats",
  "fprint",
  "futures",
  "host_fs",
@@ -1386,6 +1387,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "crc-fast",
+ "formats",
  "fprint",
  "futures",
  "libc",
@@ -1857,6 +1859,7 @@ dependencies = [
  "libc",
  "log",
  "madsim",
+ "madsim-tokio",
  "node_local",
 ]
 
