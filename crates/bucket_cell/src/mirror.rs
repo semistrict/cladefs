@@ -389,6 +389,16 @@ pub async fn mirror(
     parent: CellId,
     at: u64,
 ) -> Result<Mirrored, Error> {
+    // A backend that refuses conditional deletes (Azure through object_store) cannot safely
+    // release a pin or hold. Check both buckets before either reference is written. Nothing
+    // creates the probe's key, which routes as the hold does. GCS requires a nonzero generation
+    // on deletes.
+    let nonce = base32_id::Padded(rand::random());
+    let probe = format!("{}probe/mirror-cleanup-{nonce}", parent.prefix());
+    let unmatched =
+        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("1".to_owned()) };
+    bucket::delete_if(own, &probe, &unmatched).await?;
+    bucket::delete_if(bucket, &probe, &unmatched).await?;
     let Some(mut pin) = Pin::take(own, parent, at).await? else {
         return Ok(Mirrored::UnderWay);
     };
