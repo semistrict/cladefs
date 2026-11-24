@@ -65,9 +65,7 @@ impl ObjectStore {
         let earliest_version = self.tree.get_earliest_version();
         let needs_flush = object_manager.needs_flush(self.store_object_id);
         // If we don't need to do anything for the stated flush purpose, do nothing.
-        if (reason == FlushReason::Journal(ForceMajor::False) && !needs_flush)
-            || (reason == FlushReason::UpgradeVersion && earliest_version == LATEST_VERSION)
-        {
+        if reason == FlushReason::Journal(ForceMajor::False) && !needs_flush {
             // Early exit, but still return the earliest version used by a struct in the
             // tree.
             return Ok(earliest_version);
@@ -164,10 +162,7 @@ impl ObjectStore {
             .context("Failed to commit create layer transaction")?;
 
         // *Do* the actual compaction.
-        let full_compaction = match reason {
-            FlushReason::UpgradeVersion | FlushReason::Journal(ForceMajor::True) => true,
-            _ => false,
-        };
+        let full_compaction = matches!(reason, FlushReason::Journal(ForceMajor::True));
         let base_layers = new_store_info.base_layers.len();
         // cladefs: box `tree::flush` and `layer_from_written_handle` in non-inlined frames so
         // `flush_layers` fits in 16 KiB guest kernel stacks (TASK-26.9).

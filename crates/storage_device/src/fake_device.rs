@@ -819,6 +819,42 @@ impl FakeDevice {
         inner.stored = inner.extents.values().map(|data| data.len() as u64).sum();
     }
 
+    /// cladefs: snapshots this device's extents (sorted by ID) and root for golden corpus images
+    /// (doc-28, board 10050).
+    pub fn extents_snapshot(&self) -> (Vec<(ExtentId, Vec<u8>)>, Vec<u8>) {
+        let inner = self.inner.lock();
+        let mut extents: Vec<_> =
+            inner.extents.iter().map(|(&id, data)| (id, data.clone())).collect();
+        extents.sort_by_key(|(id, _)| *id);
+        (extents, inner.root.clone())
+    }
+
+    /// cladefs: builds a calm device of `cell` holding the exact `extents` and `root` captured by
+    /// [`FakeDevice::extents_snapshot`] (doc-28, board 10050).
+    pub fn from_extents(
+        cell: u64,
+        capacity: u64,
+        block_size: u32,
+        extents: Vec<(ExtentId, Vec<u8>)>,
+        root: Vec<u8>,
+    ) -> Self {
+        let stored = extents.iter().map(|(_, data)| data.len() as u64).sum();
+        let next_sequence = extents
+            .iter()
+            .filter(|(id, _)| id.cell == cell)
+            .map(|(id, _)| id.sequence.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        let inner = Inner {
+            extents: extents.into_iter().collect(),
+            stored,
+            next_sequence,
+            root,
+            ..Default::default()
+        };
+        Self::with_inner(inner, capacity, block_size).with_cell(cell)
+    }
+
     /// What a free checks before it frees anything.
     fn free_begins(&self) -> Result<(), Error> {
         ensure!(!self.closed.load(Ordering::Relaxed));

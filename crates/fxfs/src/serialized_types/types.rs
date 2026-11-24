@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/serialized_types/types.rs`. cladefs deviates from upstream here:
-// it never migrates (AGENTS.md), so every format change is breaking, and the only version a mount
-// reads is the latest (`EARLIEST_SUPPORTED_VERSION` is `LATEST_VERSION`); the table lists no type a
-// version before the latest used. Version 60 locates data in extents of an extent store rather
-// than at device offsets (backlog doc-4): the types that hold locations are V60. AllocatorInfoV60
+// Fxfs's format is frozen at version 66 (doc-28, board 10050): `EARLIEST_SUPPORTED_VERSION` is
+// pinned at 66 for good, and later format changes bump `LATEST_VERSION` and keep older versioned
+// types (`From<VOld> for VNew`) rather than migrating in place. Version 60 locates data in extents
+// of an extent store rather than at device offsets (backlog doc-4): the types that hold locations
+// are V60. AllocatorInfoV60
 // adds snapshots' owners, the sequence number the allocator mints extents from, and the extents
 // dying when the allocator's tree was compacted, which a mount frees again. Version 61 adds
 // StoreInfoV61: layers of a base, and the cells of its extents (backlog doc-10). Version 62's
@@ -62,8 +63,10 @@ pub const LATEST_VERSION: Version = Version { major: 66, minor: 0 };
 ///
 /// Also check the constant version numbers above for any code cleanup that can happen.
 ///
-/// cladefs: the latest, whatever it is: every change is breaking, as no format is migrated.
-pub const EARLIEST_SUPPORTED_VERSION: Version = LATEST_VERSION;
+/// cladefs: pinned at version 66 when Fxfs froze (doc-28, board 10050): every later build reads
+/// every version from 66 to `LATEST_VERSION`. Never raise this without a `Breaks-format:` hotbed
+/// question; `crates/fxfs-posix/src/golden.rs` and `scripts/format-freeze.py` enforce the pin.
+pub const EARLIEST_SUPPORTED_VERSION: Version = Version { major: 66, minor: 0 };
 
 /// This trait prevents types from showing up in `versioned_types` multiple times. `versioned_types`
 /// implements this trait for every type passed to it. If a type is listed multiple times then this

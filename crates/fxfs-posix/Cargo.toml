@@ -17,8 +17,13 @@ log.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
+bincode.workspace = true
+flate2.workspace = true
+formats.workspace = true
+fprint.workspace = true
 proptest.workspace = true
 rand.workspace = true
+serde.workspace = true
 storage_device.workspace = true
 storage_units.workspace = true
 

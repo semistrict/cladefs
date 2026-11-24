@@ -1919,7 +1919,11 @@ name = "fxfs-posix"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "event-listener",
+ "flate2",
+ "formats",
+ "fprint",
  "fuchsia-async",
  "futures",
  "fxfs",
@@ -1927,6 +1931,7 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rustc-hash",
+ "serde",
  "storage_device",
  "storage_units",
 ]

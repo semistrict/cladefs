@@ -59,9 +59,8 @@ impl RootVolume {
         let mut reader = manifest;
         // cladefs: a manifest that doesn't parse is an argument wrong, as one that names no base.
         let version = Version::deserialize_from(&mut reader).context(FxfsError::InvalidArgs)?;
-        // Of the latest version alone, as no other is read (`EARLIEST_SUPPORTED_VERSION`): nor,
-        // then, are its layers of another, a store of the latest version writing its own in it and
-        // refusing a base's of any other.
+        // cladefs: only manifests within `EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION` are read
+        // (doc-28, board 10050); layers outside that range are refused when opened.
         ensure!(
             (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
             anyhow!(FxfsError::InvalidVersion)
@@ -123,7 +122,9 @@ mod tests {
         DirectWriter, HandleOptions, LockKey, NewChildStoreOptions, ObjectKey, ObjectStore,
         ObjectValue, StoreInfo, tree,
     };
-    use crate::serialized_types::{LATEST_VERSION, Version, VersionedLatest};
+    use crate::serialized_types::{
+        EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, VersionedLatest,
+    };
     use std::sync::Arc;
     use std::sync::atomic::Ordering::Relaxed;
     use storage_device::DeviceHolder;
@@ -459,7 +460,7 @@ mod tests {
     /// mount checks only the versions of the filesystem's own layers.
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_base_layers_of_older_versions_refused() {
-        const OLDER: Version = Version { major: LATEST_VERSION.major - 1, minor: 0 };
+        const OLDER: Version = Version { major: EARLIEST_SUPPORTED_VERSION.major - 1, minor: 0 };
         let (base, _manifest) = published(0).await;
         let root = root_volume(base.clone()).await.expect("root_volume failed");
         let store = root.volume("repo").await.expect("volume failed");
@@ -564,7 +565,7 @@ mod tests {
         let (filesystem, _reads) = over(&base).await;
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
         // Of a later format, or an earlier one.
-        for major in [LATEST_VERSION.major + 1, LATEST_VERSION.major - 1] {
+        for major in [LATEST_VERSION.major + 1, EARLIEST_SUPPORTED_VERSION.major - 1] {
             let mut other = Vec::new();
             Version { major, minor: 0 }.serialize_into(&mut other).expect("serialize failed");
             other.extend_from_slice(&manifest[other.len()..]);

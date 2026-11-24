@@ -149,9 +149,8 @@
 //! - an owner marked for deletion has had its extents freed, so that its records, which may be much
 //!   of the tree, go at once.
 //!
-//! None merges all for a layer of an older version, which upstream's, merging all, write again in
-//! the latest: there is none, as a mount refuses a filesystem of any version but the latest
-//! (`EARLIEST_SUPPORTED_VERSION` is `LATEST_VERSION`, as nothing is migrated).
+//! None merges all for a layer of an older version (doc-28, board 10050: old frozen versions stay
+//! readable in place through `versioned_type!` without rewriting).
 //!
 //! The tree's layers are the allocator's own: snapshots share stores' layers, not these.
 mod extent_table;
@@ -177,7 +176,8 @@ use crate::object_store::{
 };
 use crate::range::RangeExt;
 use crate::serialized_types::{
-    DEFAULT_MAX_SERIALIZED_RECORD_SIZE, LATEST_VERSION, Version, Versioned, VersionedLatest,
+    DEFAULT_MAX_SERIALIZED_RECORD_SIZE, EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version,
+    Versioned, VersionedLatest,
 };
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use async_trait::async_trait;
@@ -1028,8 +1028,15 @@ impl Allocator {
                 .await
                 .context("Failed to read AllocatorInfo")?;
             let mut cursor = std::io::Cursor::new(serialized_info);
-            let (info, _version) = AllocatorInfo::deserialize_with_version(&mut cursor)
+            let (info, version) = AllocatorInfo::deserialize_with_version(&mut cursor)
                 .context("Failed to deserialize AllocatorInfo")?;
+            // cladefs: refuse AllocatorInfo outside EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION
+            // (doc-28, board 10050).
+            ensure!(
+                (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
+                anyhow!(FxfsError::InvalidVersion)
+                    .context(format!("Unsupported AllocatorInfo version: {version:?}"))
+            );
 
             let (layers, total_size) = open_layers(&root_store, info.layers.iter().cloned())
                 .await
@@ -2008,11 +2015,10 @@ impl Allocator {
         let filesystem = self.filesystem.upgrade().unwrap();
         let object_manager = filesystem.object_manager();
         let earliest_version = self.tree.get_earliest_version();
-        // cladefs: but for a major compaction, which merges all the layers whatever there is to flush
-        // (see "Compactions"), as an object store's does.
+        // cladefs: skip idle flushes even if older frozen layers are present (doc-28 rule 3, board
+        // 10050): only a major compaction merges all layers when nothing needs flushing.
         if reason != FlushReason::Journal(ForceMajor::True)
             && !object_manager.needs_flush(self.object_id())
-            && earliest_version == LATEST_VERSION
         {
             // Early exit, but still return the earliest version used by a struct in the tree
             return Ok(earliest_version);

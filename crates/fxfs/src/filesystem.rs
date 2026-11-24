@@ -143,10 +143,10 @@ pub enum ForceMajor {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FlushReason {
     /// Journal memory or space pressure.
+    ///
+    /// cladefs: `UpgradeVersion` is gone (doc-28, board 10050): frozen layers stay readable in
+    /// place through `versioned_type!` and are never rewritten on open to convert them.
     Journal(ForceMajor),
-
-    /// Upgrade old layer files to the latest version after mount. This performs a full compaction.
-    UpgradeVersion,
 }
 
 /// Objects that use journaling to track mutations (`Allocator` and `ObjectStore`) implement this.

@@ -741,7 +741,7 @@ impl<K: FuzzyHash> LayerData<K> {
         let version = Version::deserialize_from(&mut reader)?;
 
         // cladefs: refuse every layer version outside `EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION`
-        // (board 10527); before freezing, `EARLIEST_SUPPORTED_VERSION == LATEST_VERSION`.
+        // (board 10527, doc-28, board 10050).
         ensure!(
             (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
             anyhow!(FxfsError::InvalidVersion)

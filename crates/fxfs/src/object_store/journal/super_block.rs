@@ -35,7 +35,9 @@ use crate::object_store::object_record::ObjectItemV66;
 use crate::object_store::transaction::AssocObj;
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{Mutation, ObjectKey, ObjectStore, ObjectValue};
-use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, Version, Versioned, VersionedLatest};
+use crate::serialized_types::{
+    EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned, VersionedLatest,
+};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use fprint::TypeFingerprint;
 use fuchsia_sync::Mutex;
@@ -148,7 +150,7 @@ impl JournalSpan {
 /// cladefs: the extent store's root (backlog doc-4; boards 6923, 6926), which atomically names the
 /// active super-block extent, any retired super-block extents whose frees are not yet sealed, the
 /// active position-derived journal spans, and the synced journal end.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TypeFingerprint)]
 pub struct Root {
     /// The active super-block extent (`0..len`, block-aligned).
     pub super_block: Option<ExtentRange>,
@@ -861,9 +863,9 @@ impl SuperBlockHeader {
             }
             super_block_version = Version::deserialize_from(&mut cursor)?;
             // cladefs: each refusal is `FxfsError::InvalidVersion`, as a layer's of a later version
-            // is, so that a mount of a filesystem of any version but the latest says so. Nothing is
-            // migrated (AGENTS.md): `EARLIEST_SUPPORTED_VERSION` is the latest.
-            if super_block_version < EARLIEST_SUPPORTED_VERSION {
+            // is, so that a mount of a filesystem outside `EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION`
+            // says so (doc-28, board 10050).
+            if !(EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&super_block_version) {
                 bail!(
                     anyhow!(FxfsError::InvalidVersion).context(format!(
                         "Unsupported SuperBlock version: {:?}",
@@ -925,14 +927,18 @@ impl SuperBlockHeader {
                 anyhow!(FxfsError::Inconsistent).context("Bad journal checkpoint")
             );
 
-            if super_block_header.journal_checkpoint.version < EARLIEST_SUPPORTED_VERSION {
+            if !(EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION)
+                .contains(&super_block_header.journal_checkpoint.version)
+            {
                 bail!(anyhow!(FxfsError::InvalidVersion).context(format!(
                     "Unsupported JournalCheckpoint version: {:?}",
                     super_block_header.journal_checkpoint.version
                 )));
             }
 
-            if super_block_header.earliest_version < EARLIEST_SUPPORTED_VERSION {
+            if !(EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION)
+                .contains(&super_block_header.earliest_version)
+            {
                 bail!(anyhow!(FxfsError::InvalidVersion).context(format!(
                     "Filesystem contains struct with unsupported version: {:?}",
                     super_block_header.earliest_version
@@ -1102,7 +1108,9 @@ mod tests {
     use crate::object_store::{
         AttributeId, HandleOptions, ObjectHandle, ObjectKey, ObjectStore, ObjectValue,
     };
-    use crate::serialized_types::{LATEST_VERSION, Version, Versioned, VersionedLatest};
+    use crate::serialized_types::{
+        EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned, VersionedLatest,
+    };
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1629,74 +1637,80 @@ mod tests {
     #[test_case(Says::Layers; "of the layers")]
     #[fuchsia_async::run_singlethreaded(test)]
     async fn test_mount_of_the_previous_version_is_refused(says: Says) {
-        const PREVIOUS: Version = Version { major: LATEST_VERSION.major - 1, minor: 0 };
-        let armed = Arc::new(AtomicBool::new(false));
-        let written = Arc::new(AtomicU64::new(0));
-        let mut device = FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, 4096);
-        let (counting, counted) = (armed.clone(), written.clone());
-        device.set_op_callback(move |op| {
-            if counting.load(Ordering::Relaxed) && matches!(op, Op::Write | Op::Free) {
-                counted.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(())
-        });
-        let fs =
-            FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new_empty failed");
-        fs.close().await.expect("close failed");
-        let device = fs.take_device().await;
-        device.reopen(false);
+        let unsupported = [
+            Version { major: EARLIEST_SUPPORTED_VERSION.major - 1, minor: 0 },
+            Version { major: LATEST_VERSION.major + 1, minor: 0 },
+            Version { major: LATEST_VERSION.major, minor: LATEST_VERSION.minor + 1 },
+        ];
+        for bad_version in unsupported {
+            let armed = Arc::new(AtomicBool::new(false));
+            let written = Arc::new(AtomicU64::new(0));
+            let mut device = FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, 4096);
+            let (counting, counted) = (armed.clone(), written.clone());
+            device.set_op_callback(move |op| {
+                if counting.load(Ordering::Relaxed) && matches!(op, Op::Write | Op::Free) {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            });
+            let fs =
+                FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new_empty failed");
+            fs.close().await.expect("close failed");
+            let device = fs.take_device().await;
+            device.reopen(false);
 
-        let (mut header, mut reader) =
-            SuperBlockHeader::read_header((*device).clone()).await.expect("read failed");
-        let mut records = Vec::new();
-        loop {
-            match reader.next_item().await.expect("a record") {
-                SuperBlockRecord::End => break,
-                record => records.push(record),
+            let (mut header, mut reader) =
+                SuperBlockHeader::read_header((*device).clone()).await.expect("read failed");
+            let mut records = Vec::new();
+            loop {
+                match reader.next_item().await.expect("a record") {
+                    SuperBlockRecord::End => break,
+                    record => records.push(record),
+                }
             }
-        }
-        let mut bytes = SUPER_BLOCK_MAGIC.to_vec();
-        match says {
-            Says::SuperBlock => {
-                PREVIOUS.serialize_into(&mut bytes).unwrap();
-                header.serialize_into(&mut bytes).unwrap();
+            let mut bytes = SUPER_BLOCK_MAGIC.to_vec();
+            match says {
+                Says::SuperBlock => {
+                    bad_version.serialize_into(&mut bytes).unwrap();
+                    header.serialize_into(&mut bytes).unwrap();
+                }
+                Says::Journal => {
+                    header.journal_checkpoint.version = bad_version;
+                    header.serialize_with_version(&mut bytes).unwrap();
+                }
+                Says::Layers => {
+                    header.earliest_version = bad_version;
+                    header.serialize_with_version(&mut bytes).unwrap();
+                }
             }
-            Says::Journal => {
-                header.journal_checkpoint.version = PREVIOUS;
-                header.serialize_with_version(&mut bytes).unwrap();
+            for record in &records {
+                record.serialize_into(&mut bytes).unwrap();
             }
-            Says::Layers => {
-                header.earliest_version = PREVIOUS;
-                header.serialize_with_version(&mut bytes).unwrap();
+            SuperBlockRecord::End.serialize_into(&mut bytes).unwrap();
+            let mut writer = JournalWriter::new(BlockSize::SIZE_4KIB, 0);
+            writer.write_all(&bytes).unwrap();
+            writer.pad_to_block().unwrap();
+            {
+                let mut buf = device.allocate_buffer(writer.flushable_bytes()).await;
+                writer.take_flushable(buf.as_mut());
+                write_raw_super_block(&device, buf.as_ref()).await;
             }
-        }
-        for record in &records {
-            record.serialize_into(&mut bytes).unwrap();
-        }
-        SuperBlockRecord::End.serialize_into(&mut bytes).unwrap();
-        let mut writer = JournalWriter::new(BlockSize::SIZE_4KIB, 0);
-        writer.write_all(&bytes).unwrap();
-        writer.pad_to_block().unwrap();
-        {
-            let mut buf = device.allocate_buffer(writer.flushable_bytes()).await;
-            writer.take_flushable(buf.as_mut());
-            write_raw_super_block(&device, buf.as_ref()).await;
-        }
 
-        let raw = (*device).clone();
-        let root = raw.root().await.expect("root failed");
-        armed.store(true, Ordering::Relaxed);
-        let error = FxFilesystem::open(device).await.map(drop).expect_err("mounted");
-        assert!(FxfsError::InvalidVersion.matches(&error), "{error:?}");
-        let named = match says {
-            Says::SuperBlock => "Unsupported SuperBlock version",
-            Says::Journal => "Unsupported JournalCheckpoint version",
-            Says::Layers => "Filesystem contains struct with unsupported version",
-        };
-        let named = format!("{named}: {PREVIOUS:?}");
-        assert!(format!("{error:#}").contains(&named), "{error:#}");
-        assert_eq!(written.load(Ordering::Relaxed), 0);
-        raw.reopen(false);
-        assert_eq!(raw.root().await.expect("root failed"), root);
+            let raw = (*device).clone();
+            let root = raw.root().await.expect("root failed");
+            armed.store(true, Ordering::Relaxed);
+            let error = FxFilesystem::open(device).await.map(drop).expect_err("mounted");
+            assert!(FxfsError::InvalidVersion.matches(&error), "{bad_version:?}: {error:?}");
+            let named = match says {
+                Says::SuperBlock => "Unsupported SuperBlock version",
+                Says::Journal => "Unsupported JournalCheckpoint version",
+                Says::Layers => "Filesystem contains struct with unsupported version",
+            };
+            let named = format!("{named}: {bad_version:?}");
+            assert!(format!("{error:#}").contains(&named), "{error:#}");
+            assert_eq!(written.load(Ordering::Relaxed), 0);
+            raw.reopen(false);
+            assert_eq!(raw.root().await.expect("root failed"), root);
+        }
     }
 }

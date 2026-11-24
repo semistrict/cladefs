@@ -64,7 +64,9 @@ use crate::object_store::transaction::{
     AssocObj, AssociatedObject, LockKey, LockKeys, ObjectStoreMutation, Operation, Options,
     Transaction, lock_keys,
 };
-use crate::serialized_types::{Version, Versioned, VersionedLatest};
+use crate::serialized_types::{
+    EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned, VersionedLatest,
+};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use async_trait::async_trait;
 use fprint::TypeFingerprint;
@@ -1749,8 +1751,15 @@ async fn load_store_info_from_handle(
     Ok(if handle.get_size() > 0 {
         let serialized_info = handle.contents(MAX_STORE_INFO_SERIALIZED_SIZE).await?;
         let mut cursor = std::io::Cursor::new(serialized_info);
-        let (store_info, _) = StoreInfo::deserialize_with_version(&mut cursor)
+        let (store_info, version) = StoreInfo::deserialize_with_version(&mut cursor)
             .context("Failed to deserialize StoreInfo")?;
+        // cladefs: refuse StoreInfo outside EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION (doc-28,
+        // board 10050).
+        ensure!(
+            (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
+            anyhow!(FxfsError::InvalidVersion)
+                .context(format!("Unsupported StoreInfo version: {version:?}"))
+        );
         store_info
     } else {
         // The store_info will be absent for a newly created and empty object store.

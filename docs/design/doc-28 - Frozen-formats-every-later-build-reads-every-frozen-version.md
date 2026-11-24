@@ -109,7 +109,9 @@ incompatible change, where it lacks the means to grow (board 10033's subtasks):
   local checkpoints, ephemeral keys, migration markers and the cell directory's records say theirs
   (board 10044). A block device's nodes and owners' lists say theirs (board 10052). Every KMS
   backend's KEK objects and wrapped keys are frozen under `extent_keys::kms::*::FORMAT` (board
-  10042).
+  10042). Fxfs is frozen at version 66 (`EARLIEST_SUPPORTED_VERSION` pinned, golden image with
+  shared base layers, manifest, and `get_type_fingerprints` under `formats/fxfs/66/`, board
+  10050).
 - **Extent frames name their version as a number**, not one ASCII digit, which reads frames of 10
   on as corrupt; the table's MAC covers it (board 10040).
 - **Unknown fields are refused, not ignored**: the `store` file's unknown keys, a migration

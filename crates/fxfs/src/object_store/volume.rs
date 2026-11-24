@@ -12,16 +12,14 @@
 // doc-4). `RootVolume::volume` opens a volume left closed (`Options::lazy_volumes`).
 
 use crate::errors::FxfsError;
-use crate::filesystem::{FlushReason, FxFilesystem};
+use crate::filesystem::FxFilesystem;
 use crate::object_store::directory::Directory;
 use crate::object_store::transaction::{LockKeys, Options, Transaction, lock_keys};
 use crate::object_store::{
     INVALID_OBJECT_ID, LockKey, NewChildStoreOptions, ObjectDescriptor, ObjectStore,
     load_store_info,
 };
-use crate::serialized_types::LATEST_VERSION;
 use anyhow::{Context, Error, anyhow, bail, ensure};
-use log::error;
 use std::sync::Arc;
 
 // Volumes are a grouping of an object store and a root directory within this object store. They
@@ -131,32 +129,9 @@ impl RootVolume {
             .store(store_object_id)
             .ok_or(FxfsError::NotFound)
             .context("Missing volume store")?;
-        // If the layer files are out of date, kick off a full compaction in the background.
-        if let Some(scope_guard) = self.filesystem.scope().active_guard()
-            && !self.filesystem.options().read_only
-            && store.tree().get_earliest_version() != LATEST_VERSION
-        {
-            let keys = lock_keys![LockKey::flush(store_object_id)];
-            let guard = self
-                .filesystem
-                .lock_manager()
-                .write_lock(keys)
-                .await
-                .into_owned(self.filesystem.clone());
-            let store = store.clone();
-            self.filesystem.scope().spawn(async move {
-                // Taken outside the task and passed in, so that the flush starts holding it.
-                let _guard = guard;
-                // Takes a scope guard so that the store finishes its flush before the filesystem
-                // closes. Journal flushes are normally run on the filesystem's scope.
-                let _scope_guard = scope_guard;
-                if let Err(error) =
-                    store.flush_guarded_with_reason(FlushReason::UpgradeVersion).await
-                {
-                    error!(error:?; "Failed background flush");
-                }
-            });
-        }
+        // cladefs: do not kick off background `UpgradeVersion` compactions for older frozen layers
+        // (doc-28 rule 3, board 10050): older layers — including immutable `base_layers` — stay
+        // readable in place without rewriting.
         Ok(store)
     }
 

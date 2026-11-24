@@ -61,7 +61,7 @@ use crate::object_store::transaction::{
 use crate::object_store::{
     AssocObj, DataObjectHandle, HandleOwner, INVALID_OBJECT_ID, NewChildStoreOptions, ObjectStore,
 };
-use crate::serialized_types::{LATEST_VERSION, Version, Versioned};
+use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use core::iter::Iterator;
 use event_listener::Event;
@@ -1036,7 +1036,14 @@ impl Journal {
             let result =
                 reader.deserialize().await.context("Failed to deserialize journal record")?;
             match result {
-                ReadResult::Reset(_) => {
+                ReadResult::Reset(version) => {
+                    // cladefs: refuse journal reset records outside
+                    // EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION (doc-28, board 10050).
+                    ensure!(
+                        (EARLIEST_SUPPORTED_VERSION..=LATEST_VERSION).contains(&version),
+                        anyhow!(FxfsError::InvalidVersion)
+                            .context(format!("Unsupported Journal RESET version: {version:?}"))
+                    );
                     if current_transaction.is_some() {
                         current_transaction = None;
                         transactions.pop();
