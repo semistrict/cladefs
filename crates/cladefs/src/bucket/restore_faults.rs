@@ -165,7 +165,10 @@ impl Hosts {
                     cell: source.cell(),
                 };
                 let kind = bucket_cell::cell::Kind::Fxfs;
-                OpenCell::create_at_version(&path, (&url, kind), description, version).unwrap();
+                host_fs::may_block(|| {
+                    OpenCell::create_at_version(&path, (&url, kind), description, version)
+                })
+                .unwrap();
             }
             let copy = reopened(&path, options()).await.unwrap();
             assert_eq!(copy.access().role, CellRole::Version, "host {host} holds no copy");
