@@ -11,9 +11,9 @@
 # unmount. knobs_against_unmount writes them in a loop across 32 remounts, a delay where a knob
 # holds the filesystem: ASan's use after free, in a second.
 
---- a/guest/linux/fs/cladefs/dax.c
-+++ b/guest/linux/fs/cladefs/dax.c
-@@ -2109,18 +2109,16 @@
+--- a/guest/linux/fs/cladefs/dax_debug.c
++++ b/guest/linux/fs/cladefs/dax_debug.c
+@@ -267,18 +267,16 @@
   */
  static struct cladefs_dax *cladefs_dax_last_get(void)
  {

@@ -41,6 +41,7 @@ sim_prepare() {
 # The sources a build compiles, as `patch -p1` names them in `dir`, and where each is from.
 sim_sources() { # dir
     echo "../linux/fs/cladefs/dax.c $1/guest/linux/fs/cladefs/dax.c"
+    echo "../linux/fs/cladefs/dax_debug.c $1/guest/linux/fs/cladefs/dax_debug.c"
     echo "../linux/fs/cladefs/pages.c $1/guest/linux/fs/cladefs/pages.c"
     echo "../linux/fs/cladefs/data.c $1/guest/linux/fs/cladefs/data.c"
     echo "../linux/fs/cladefs/device.c $1/guest/linux/fs/cladefs/device.c"
@@ -83,13 +84,15 @@ sim_build() { # name, patches...
     sim_tree "$@" || return 1
     # shellcheck disable=SC2086
     "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/dax.c" -o "$dir/dax.o" &&
+        "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/dax_debug.c" -o "$dir/dax_debug.o" &&
         "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/pages.c" -o "$dir/pages.o" &&
         "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/data.c" -o "$dir/data.o" &&
         "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/device.c" -o "$dir/device.o" &&
         "$CC" $CFLAGS -c "$dir/guest/sim/cladefs/cladefs.c" -o "$dir/cladefs.o" &&
         "$CC" $CFLAGS -c "$dir/fs/dax.c" -o "$dir/fsdax.o" &&
         for test in "${sim_tests[@]}"; do
-            "$CC" $LDFLAGS "$BUILD/tests/$test.o" "$dir/dax.o" "$dir/pages.o" "$dir/data.o" "$dir/device.o" "$dir/cladefs.o" \
+            "$CC" $LDFLAGS "$BUILD/tests/$test.o" "$dir/dax.o" "$dir/dax_debug.o" "$dir/pages.o" \
+                "$dir/data.o" "$dir/device.o" "$dir/cladefs.o" \
                 "$dir/fsdax.o" ${OBJECTS//$BUILD\/fake\/cladefs\/cladefs.o/} -o "$dir/$test" || return 1
         done
 }

@@ -52,8 +52,8 @@ $(BUILD)/.headers: shim/ALIASES Makefile
 	touch $@
 
 # What is real, and what is the fake beneath it.
-REAL_OBJECTS := $(BUILD)/cladefs/dax.o $(BUILD)/cladefs/pages.o $(BUILD)/cladefs/data.o \
-	$(BUILD)/cladefs/device.o \
+REAL_OBJECTS := $(BUILD)/cladefs/dax.o $(BUILD)/cladefs/dax_debug.o $(BUILD)/cladefs/pages.o \
+	$(BUILD)/cladefs/data.o $(BUILD)/cladefs/device.o \
 	$(patsubst %.c,$(BUILD)/kernel-real/%.o,$(REAL_SOURCES))
 FAKE_SOURCES := $(wildcard kernel/*.c cladefs/*.c)
 FAKE_OBJECTS := $(patsubst %.c,$(BUILD)/fake/%.o,$(FAKE_SOURCES))
@@ -102,7 +102,7 @@ flags:
 	@echo "CC='$(CC)'"
 	@echo "CFLAGS='$(CFLAGS) -iquote $(abspath $(CLADEFS))'"
 	@echo "LDFLAGS='$(LDFLAGS)'"
-	@echo "OBJECTS='$(filter-out $(BUILD)/cladefs/dax.o $(BUILD)/cladefs/pages.o $(BUILD)/cladefs/data.o $(BUILD)/cladefs/device.o $(BUILD)/kernel-real/fs/dax.o,$(OBJECTS)) $(BUILD)/stubs.o'"
+	@echo "OBJECTS='$(filter-out $(BUILD)/cladefs/dax.o $(BUILD)/cladefs/dax_debug.o $(BUILD)/cladefs/pages.o $(BUILD)/cladefs/data.o $(BUILD)/cladefs/device.o $(BUILD)/kernel-real/fs/dax.o,$(OBJECTS)) $(BUILD)/stubs.o'"
 	@echo "KERNEL='$(KERNEL)'"
 	@echo "BUILD='$(BUILD)'"
 
