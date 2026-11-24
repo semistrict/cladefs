@@ -33,7 +33,6 @@ pub mod journal;
 pub(crate) mod merge;
 pub mod object_manager;
 pub mod object_record;
-pub mod project_id;
 mod store_object_handle;
 pub mod transaction;
 mod tree;
@@ -44,9 +43,7 @@ pub use data_object_handle::{
     DataObjectHandle, DirectWriter, ExtentAccess, FileExtent, FrozenPage,
 };
 pub use directory::Directory;
-pub use object_record::{
-    ChildValue, ObjectDescriptor, PosixAttributes, SpecialFile, Timestamp,
-};
+pub use object_record::{ChildValue, ObjectDescriptor, PosixAttributes, SpecialFile, Timestamp};
 pub use store_object_handle::{
     MAX_INLINE_XATTR_SIZE, MAX_XATTR_NAME_SIZE, MAX_XATTR_VALUE_SIZE, SetExtendedAttributeMode,
     StoreObjectHandle,
@@ -82,10 +79,9 @@ use uuid::Uuid;
 pub use extent::Extent;
 pub use extent_record::{ExtentMode, ExtentValue};
 pub use object_record::{
-    AttributeId, AttributeKey, BytesAndNodes, ExtendedAttributeValue, ObjectAttributes, ObjectKey,
-    ObjectKeyData, ObjectKind, ObjectValue, ProjectProperty,
+    AttributeId, AttributeKey, ExtendedAttributeValue, ObjectAttributes, ObjectKey, ObjectKeyData,
+    ObjectKind, ObjectValue,
 };
-pub use project_id::{ProjectId, ProjectIdExt};
 pub use transaction::Mutation;
 
 /// DataObjectHandle stores an owner that must implement this trait, which allows the handle to get
@@ -540,16 +536,7 @@ impl ObjectStore {
                     store.store_object_id(),
                     Mutation::insert_object(
                         ObjectKey::object(object_id),
-                        ObjectValue::file(
-                            1,
-                            0,
-                            now.clone(),
-                            now.clone(),
-                            now.clone(),
-                            now,
-                            None,
-                            None
-                        ),
+                        ObjectValue::file(1, 0, now.clone(), now.clone(), now.clone(), now, None,),
                     ),
                 )
                 .is_none()
@@ -1002,30 +989,16 @@ impl ObjectStore {
         let finished_tombstone_attribute =
             matches!(mode, TrimMode::Tombstone(TombstoneMode::Attribute))
                 && !matches!(result, TrimResult::Incomplete);
-        let mut object_mutation = None;
-        let nodes = if finished_tombstone_object { -1 } else { 0 };
-        if nodes != 0 || deallocated != 0 {
-            let mutation = self.txn_get_object_mutation(transaction, object_id).await?;
-            if let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } =
-                mutation.item.value
-            {
-                if let Some(project_id) = project_id {
-                    transaction.merge_bytes_and_nodes(
-                        self.store_object_id,
-                        ObjectKey::project_usage(self.root_directory_object_id(), project_id),
-                        BytesAndNodes { bytes: -i64::try_from(deallocated).unwrap(), nodes },
-                    );
-                }
-                object_mutation = Some(mutation);
-            } else {
-                // cladefs: not a panic: the graveyard's entry is what an image says.
-                bail!(anyhow!(FxfsError::Inconsistent).context("Inconsistent object type"));
-            }
-        }
 
         // Deletion marker records *must* be merged so as to consume all other records for the
         // object.
         if finished_tombstone_object {
+            // cladefs: not a panic: the graveyard's entry is what an image says.
+            let mutation = self.txn_get_object_mutation(transaction, object_id).await?;
+            ensure!(
+                matches!(mutation.item.value, ObjectValue::Object { .. }),
+                anyhow!(FxfsError::Inconsistent).context("Inconsistent object type")
+            );
             transaction.add(
                 self.store_object_id,
                 Mutation::merge_object(ObjectKey::object(object_id), ObjectValue::None),
@@ -1041,10 +1014,7 @@ impl ObjectStore {
                 );
             }
             if deallocated > 0 {
-                let mut mutation = match object_mutation {
-                    Some(mutation) => mutation,
-                    None => self.txn_get_object_mutation(transaction, object_id).await?,
-                };
+                let mut mutation = self.txn_get_object_mutation(transaction, object_id).await?;
                 transaction.add(
                     self.store_object_id,
                     Mutation::merge_object(
@@ -1142,22 +1112,13 @@ impl ObjectStore {
         object_id: u64,
     ) -> Result<bool, Error> {
         let mutation = self.txn_get_object_mutation(transaction, object_id).await?;
-        let ObjectValue::Object {
-            attributes: ObjectAttributes { allocated_size, project_id, .. },
-            ..
-        } = mutation.item.value
+        let ObjectValue::Object { attributes: ObjectAttributes { allocated_size, .. }, .. } =
+            mutation.item.value
         else {
             bail!(anyhow!(FxfsError::Inconsistent).context("tombstone: expected an object"));
         };
         if allocated_size != 0 {
             return Ok(false);
-        }
-        if let Some(project_id) = project_id {
-            transaction.merge_bytes_and_nodes(
-                self.store_object_id,
-                ObjectKey::project_usage(self.root_directory_object_id(), project_id),
-                BytesAndNodes { bytes: 0, nodes: -1 },
-            );
         }
         // Deletion marker records *must* be merged so as to consume all other records for the
         // object.

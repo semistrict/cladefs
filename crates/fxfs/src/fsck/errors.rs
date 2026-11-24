@@ -8,7 +8,7 @@
 use crate::log::*;
 use crate::lsm_tree::types::ItemRef;
 use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
-use crate::object_store::{AttributeId, ObjectDescriptor, ProjectId};
+use crate::object_store::{AttributeId, ObjectDescriptor};
 use std::ops::Range;
 use storage_device::ExtentId;
 
@@ -116,7 +116,6 @@ pub enum FsckWarning {
     OrphanedObject(u64, u64),
     OrphanedExtendedAttribute(u64, u64, AttributeId),
     OrphanedExtendedAttributeRecord(u64, u64),
-    ProjectUsageInconsistent(u64, ProjectId, (i64, i64), (i64, i64)),
 }
 
 impl FsckWarning {
@@ -169,12 +168,6 @@ impl FsckWarning {
                     object_id, store_id
                 )
             }
-            FsckWarning::ProjectUsageInconsistent(store_id, project_id, stored, used) => {
-                format!(
-                    "Project id {} in store {} expected usage ({}, {}) found ({}, {})",
-                    project_id, store_id, stored.0, stored.1, used.0, used.1
-                )
-            }
         }
     }
 
@@ -207,9 +200,6 @@ impl FsckWarning {
             FsckWarning::OrphanedExtendedAttributeRecord(store_id, oid) => {
                 warn!(oid, store_id; "Orphaned extended attribute record");
             }
-            FsckWarning::ProjectUsageInconsistent(store_id, project_id, stored, used) => {
-                warn!(project_id, store_id, stored:?, used:?; "Project Inconsistent");
-            }
         }
     }
 }
@@ -241,11 +231,8 @@ pub enum FsckError {
     MissingObjectInfo(u64, u64),
     MultipleLinksToDirectory(u64, u64),
     NextObjectIdInUse(u64, u64),
-    NonRootProjectIdMetadata(u64, u64, ProjectId),
     ObjectCountMismatch(u64, u64, u64),
     ObjectHasChildren(u64, u64),
-    ProjectOnGraveyard(u64, ProjectId, u64),
-    ProjectUsedWithNoUsageTracking(u64, ProjectId, u64),
     RefCountMismatch(u64, u64, u64),
     RootObjectHasParent(u64, u64, u64),
     SubDirCountMismatch(u64, u64, u64, u64),
@@ -368,26 +355,8 @@ impl FsckError {
             FsckError::MultipleLinksToDirectory(store_id, object_id) => {
                 format!("Directory {} in store {} has multiple links", store_id, object_id)
             }
-            FsckError::NonRootProjectIdMetadata(store_id, object_id, project_id) => {
-                format!(
-                    "Project Id {} metadata in store {} attached to object {}",
-                    project_id, store_id, object_id
-                )
-            }
             FsckError::ObjectCountMismatch(store_id, observed, stored) => {
                 format!("Store {} had {} objects, expected {}", store_id, observed, stored)
-            }
-            FsckError::ProjectOnGraveyard(store_id, project_id, object_id) => {
-                format!(
-                    "Store {} had graveyard object {} with project id {}",
-                    store_id, object_id, project_id
-                )
-            }
-            FsckError::ProjectUsedWithNoUsageTracking(store_id, project_id, node_id) => {
-                format!(
-                    "Store {} had node {} with project ids {} but no usage tracking metadata",
-                    store_id, node_id, project_id
-                )
             }
             FsckError::RefCountMismatch(oid, observed, stored) => {
                 format!("Object {} had {} references, expected {}", oid, observed, stored)
@@ -537,20 +506,8 @@ impl FsckError {
             FsckError::MultipleLinksToDirectory(store_id, oid) => {
                 error!(store_id, oid; "Directory with multiple links");
             }
-            FsckError::NonRootProjectIdMetadata(store_id, object_id, project_id) => {
-                error!(
-                    store_id,
-                    object_id, project_id; "Non root object in volume with project id metadata"
-                );
-            }
             FsckError::ObjectCountMismatch(store_id, observed, stored) => {
                 error!(store_id, observed, stored; "Object count mismatch");
-            }
-            FsckError::ProjectOnGraveyard(store_id, project_id, object_id) => {
-                error!(store_id, project_id, object_id; "Project was set on graveyard object");
-            }
-            FsckError::ProjectUsedWithNoUsageTracking(store_id, project_id, node_id) => {
-                error!(store_id, project_id, node_id; "Project used without tracking metadata");
             }
             FsckError::RefCountMismatch(oid, observed, stored) => {
                 error!(oid, observed, stored; "Reference count mismatch");

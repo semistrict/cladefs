@@ -3117,7 +3117,7 @@ mod read_cost {
         let mut items = Vec::new();
         let time = Timestamp::zero();
         for object_id in 1..=OBJECTS {
-            let file = ObjectValue::file(1, EXTENTS << 16, time, time, time, time, None, None);
+            let file = ObjectValue::file(1, EXTENTS << 16, time, time, time, time, None);
             items.push(Item::new(ObjectKey::object(object_id), file));
             let attribute =
                 ObjectKey::attribute(object_id, AttributeId::DATA, AttributeKey::Attribute);

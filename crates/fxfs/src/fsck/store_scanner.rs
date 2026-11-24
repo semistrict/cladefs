@@ -14,9 +14,8 @@ use crate::lsm_tree::types::{Item, ItemRef, LayerIterator};
 use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::graveyard::Graveyard;
 use crate::object_store::{
-    AttributeId, AttributeKey, ChildValue, ExtendedAttributeValue, ExtentMode, ExtentValue,
-    ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore,
-    ObjectValue, ProjectId, ProjectProperty,
+    AttributeId, AttributeKey, ChildValue, ExtendedAttributeValue, ExtentValue, ObjectAttributes,
+    ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue,
 };
 use crate::range::RangeExt;
 use anyhow::Error;
@@ -126,11 +125,6 @@ struct ScannedStore<'a> {
     // cladefs: the cells of the extents of the store's base, if it has one (backlog doc-10).
     base_cells: HashSet<u64>,
     is_root_store: bool,
-    root_dir_id: u64,
-    stored_project_usages: BTreeMap<ProjectId, (i64, i64)>,
-    total_project_usages: BTreeMap<ProjectId, (i64, i64)>,
-    /// Tracks project ids used and an example node to examine if it should not have been included.
-    used_project_ids: BTreeMap<ProjectId, u64>,
 }
 
 impl<'a> ScannedStore<'a> {
@@ -139,7 +133,6 @@ impl<'a> ScannedStore<'a> {
         root_objects: impl AsRef<[u64]>,
         store_id: u64,
         is_root_store: bool,
-        root_dir_id: u64,
     ) -> Self {
         Self {
             fsck,
@@ -149,10 +142,6 @@ impl<'a> ScannedStore<'a> {
             data_owner: store_id,
             base_cells: HashSet::default(),
             is_root_store,
-            root_dir_id,
-            stored_project_usages: BTreeMap::new(),
-            total_project_usages: BTreeMap::new(),
-            used_project_ids: BTreeMap::new(),
         }
     }
 
@@ -178,17 +167,8 @@ impl<'a> ScannedStore<'a> {
                     }
                     ObjectValue::Object {
                         kind: ObjectKind::File { refs },
-                        attributes:
-                            ObjectAttributes { project_id, allocated_size, posix_attributes, .. },
+                        attributes: ObjectAttributes { allocated_size, posix_attributes, .. },
                     } => {
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            // cladefs: the size is what an image says.
-                            let allocated = i64::try_from(*allocated_size).unwrap_or(i64::MAX);
-                            entry.0 = entry.0.saturating_add(allocated);
-                            entry.1 += 1;
-                        }
                         // cladefs: a root object is referenced once by each of the root objects
                         // listing it, as a layer file is by each store sharing it (snapshots).
                         let roots =
@@ -215,14 +195,8 @@ impl<'a> ScannedStore<'a> {
                     }
                     ObjectValue::Object {
                         kind: ObjectKind::Directory { sub_dirs },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
+                        attributes: ObjectAttributes { allocated_size, .. },
                     } => {
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            // Increment only nodes.
-                            entry.1 += 1;
-                        }
                         let parent = if self.root_objects.contains(&key.object_id) {
                             Some(INVALID_OBJECT_ID)
                         } else {
@@ -248,26 +222,13 @@ impl<'a> ScannedStore<'a> {
                             }),
                         );
                     }
-                    ObjectValue::Object { kind: ObjectKind::Graveyard, attributes } => {
+                    ObjectValue::Object { kind: ObjectKind::Graveyard, .. } => {
                         self.objects.insert(key.object_id, ScannedObject::Graveyard);
-                        if let Some(project_id) = attributes.project_id {
-                            self.fsck.error(FsckError::ProjectOnGraveyard(
-                                self.store_id,
-                                project_id,
-                                key.object_id,
-                            ))?;
-                        }
                     }
                     ObjectValue::Object {
                         kind: ObjectKind::Symlink { refs, .. },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
+                        attributes: ObjectAttributes { allocated_size, .. },
                     } => {
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            // Increment only nodes.
-                            entry.1 += 1;
-                        }
                         self.objects.insert(
                             key.object_id,
                             ScannedObject::Symlink(ScannedSymlink {
@@ -380,51 +341,6 @@ impl<'a> ScannedStore<'a> {
                     ))?;
                 }
             },
-            ObjectKeyData::Project { project_id, property: ProjectProperty::Limit } => {
-                // Should only be set on the root object store
-                if self.root_dir_id != key.object_id {
-                    self.fsck.error(FsckError::NonRootProjectIdMetadata(
-                        self.store_id,
-                        key.object_id,
-                        project_id,
-                    ))?;
-                }
-                match value {
-                    ObjectValue::None | ObjectValue::BytesAndNodes { .. } => {}
-                    _ => {
-                        self.fsck.error(FsckError::MalformedObjectRecord(
-                            self.store_id,
-                            key.into(),
-                            value.into(),
-                        ))?;
-                    }
-                }
-            }
-            ObjectKeyData::Project { project_id, property: ProjectProperty::Usage } => {
-                // Should only be set on the root object store
-                if self.root_dir_id != key.object_id {
-                    self.fsck.error(FsckError::NonRootProjectIdMetadata(
-                        self.store_id,
-                        key.object_id,
-                        project_id,
-                    ))?;
-                }
-                match value {
-                    ObjectValue::None => {
-                        self.stored_project_usages.remove(&project_id);
-                    }
-                    ObjectValue::BytesAndNodes { bytes, nodes } => {
-                        self.stored_project_usages.insert(project_id, (*bytes, *nodes));
-                    }
-                    _ => {
-                        self.fsck.error(FsckError::MalformedObjectRecord(
-                            self.store_id,
-                            key.into(),
-                            value.into(),
-                        ))?;
-                    }
-                }
-            }
             ObjectKeyData::ExtendedAttribute { .. } => match value {
                 ObjectValue::None => {}
                 ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(_)) => {
@@ -855,13 +771,7 @@ pub(super) async fn scan_store(
     let store_id = store.store_object_id();
     let next_object_id = store.query_next_object_id();
 
-    let mut scanned = ScannedStore::new(
-        fsck,
-        root_objects,
-        store_id,
-        store.is_root(),
-        store.root_directory_object_id(),
-    );
+    let mut scanned = ScannedStore::new(fsck, root_objects, store_id, store.is_root());
     scanned.data_owner = store.filesystem().allocator().data_owner(store_id);
     scanned.base_cells = store.store_info().base_cells.iter().copied().collect();
 
@@ -897,33 +807,6 @@ pub(super) async fn scan_store(
         scanned.process(item.key, item.value)?;
         last_item = Some(item.cloned());
         iter.advance().await?;
-    }
-
-    for (project_id, node_id) in scanned.used_project_ids.iter() {
-        if !scanned.stored_project_usages.contains_key(project_id) {
-            fsck.error(FsckError::ProjectUsedWithNoUsageTracking(store_id, *project_id, *node_id))?;
-        }
-    }
-    for (project_id, (bytes_stored, nodes_stored)) in scanned.stored_project_usages.iter() {
-        if let Some((bytes_used, nodes_used)) = scanned.total_project_usages.get(&project_id) {
-            if *bytes_stored != *bytes_used || *nodes_stored != *nodes_used {
-                fsck.warning(FsckWarning::ProjectUsageInconsistent(
-                    store_id,
-                    *project_id,
-                    (*bytes_stored, *nodes_stored),
-                    (*bytes_used, *nodes_used),
-                ))?;
-            }
-        } else {
-            if *bytes_stored > 0 || *nodes_stored > 0 {
-                fsck.warning(FsckWarning::ProjectUsageInconsistent(
-                    store_id,
-                    *project_id,
-                    (*bytes_stored, *nodes_stored),
-                    (0, 0),
-                ))?;
-            }
-        }
     }
 
     // Add a reference for files in the graveyard (which acts as the file's parent until it is

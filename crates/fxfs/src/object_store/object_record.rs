@@ -20,7 +20,6 @@ use crate::log::error;
 use crate::lsm_tree::types::{
     FuzzyHash, Item, ItemRef, LayerKey, MergeType, OrdLowerBound, OrdUpperBound, SortByU64, Value,
 };
-use crate::object_store::ProjectId;
 use crate::object_store::extent::{Extent, ExtentPartitionIterator};
 use crate::object_store::extent_record::{ExtentValue, ExtentValueV66};
 use crate::serialized_types::Versioned;
@@ -113,30 +112,6 @@ impl SpecialFile {
     }
 }
 
-/// For specifying what property of the project is being addressed.
-pub type ProjectProperty = ProjectPropertyV32;
-
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Serialize,
-    Deserialize,
-    TypeFingerprint,
-    SerializeKey,
-)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ProjectPropertyV32 {
-    /// The configured limit for the project.
-    Limit,
-    /// The currently tracked usage for the project.
-    Usage,
-}
-
 pub type ObjectKeyData = ObjectKeyDataV66;
 
 #[derive(
@@ -163,10 +138,6 @@ pub enum ObjectKeyDataV66 {
     Child { name: String },
     /// A graveyard entry for an entire object.
     GraveyardEntry { object_id: u64 },
-    /// Project ID info. This should only be attached to the volume's root node. Used to address the
-    /// configured limit and the usage tracking which are ordered after the `project_id` to provide
-    /// locality of the two related values.
-    Project { project_id: ProjectId, property: ProjectPropertyV32 },
     /// An extended attribute associated with an object. It stores the name used for the extended
     /// attribute, which has a maximum size of 255 bytes enforced by fuchsia.io.
     ExtendedAttribute {
@@ -279,22 +250,6 @@ impl ObjectKey {
         }
     }
 
-    /// Creates an ObjectKey for a ProjectLimit entry.
-    pub fn project_limit(object_id: u64, project_id: ProjectId) -> Self {
-        Self {
-            object_id,
-            data: ObjectKeyData::Project { project_id, property: ProjectProperty::Limit },
-        }
-    }
-
-    /// Creates an ObjectKey for a ProjectUsage entry.
-    pub fn project_usage(object_id: u64, project_id: ProjectId) -> Self {
-        Self {
-            object_id,
-            data: ObjectKeyData::Project { project_id, property: ProjectProperty::Usage },
-        }
-    }
-
     pub fn extended_attribute(object_id: u64, name: Vec<u8>) -> Self {
         Self { object_id, data: ObjectKeyData::ExtendedAttribute { name } }
     }
@@ -348,9 +303,7 @@ impl LayerKey for ObjectKey {
             | ObjectKeyData::Child { .. }
             | ObjectKeyData::GraveyardEntry { .. }
             | ObjectKeyData::GraveyardAttributeEntry { .. }
-            | ObjectKeyData::Project { property: ProjectProperty::Limit, .. }
             | ObjectKeyData::ExtendedAttribute { .. } => MergeType::OptimizedMerge,
-            ObjectKeyData::Project { property: ProjectProperty::Usage, .. } => MergeType::FullMerge,
         }
     }
 
@@ -591,18 +544,15 @@ pub struct PosixAttributesV32 {
 /// Object-level attributes.  Note that these are not the same as "attributes" in the
 /// ObjectValue::Attribute sense, which refers to an arbitrary data payload associated with an
 /// object.  This naming collision is unfortunate.
-pub type ObjectAttributes = ObjectAttributesV49;
+pub type ObjectAttributes = ObjectAttributesV66;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub struct ObjectAttributesV49 {
+pub struct ObjectAttributesV66 {
     /// The timestamp at which the object was created (i.e. crtime).
     pub creation_time: TimestampV49,
     /// The timestamp at which the object's data was last modified (i.e. mtime).
     pub modification_time: TimestampV49,
-    /// The project id to associate this object's resource usage with.
-    #[serde(with = "crate::object_store::project_id::optional_project_id")]
-    pub project_id: Option<ProjectId>,
     /// Mode, uid, gid, and rdev
     pub posix_attributes: Option<PosixAttributesV32>,
     /// The number of bytes allocated to all extents across all attributes for this object.
@@ -657,7 +607,7 @@ pub enum ObjectValueV66 {
     /// (None) i.e. their value is really a boolean: None => false, Some => true.
     Some,
     /// The value for an ObjectKey::Object record.
-    Object { kind: ObjectKindV66, attributes: ObjectAttributesV49 },
+    Object { kind: ObjectKindV66, attributes: ObjectAttributesV66 },
     /// An attribute associated with a file object. |size| is the size of the attribute in bytes.
     Attribute { size: u64 },
     /// An extent associated with an object.
@@ -668,56 +618,9 @@ pub enum ObjectValueV66 {
     /// EOF to be trimmed at mount time.  This is used in cases where shrinking a file can exceed
     /// the bounds of a single transaction.
     Trim,
-    /// Added to support tracking Project ID usage and limits.
-    BytesAndNodes { bytes: i64, nodes: i64 },
     /// A value for an extended attribute. Either inline or a redirection to an attribute with
     /// extents.
     ExtendedAttribute(ExtendedAttributeValueV32),
-}
-
-/// Storage for a pair of related byte and node values.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct BytesAndNodes {
-    pub bytes: i64,
-    pub nodes: i64,
-}
-
-impl BytesAndNodes {
-    pub fn is_zero(&self) -> bool {
-        self.bytes == 0 && self.nodes == 0
-    }
-}
-
-impl std::ops::Add for BytesAndNodes {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self {
-        Self { bytes: self.bytes + rhs.bytes, nodes: self.nodes + rhs.nodes }
-    }
-}
-
-impl std::ops::AddAssign for BytesAndNodes {
-    fn add_assign(&mut self, rhs: Self) {
-        self.bytes += rhs.bytes;
-        self.nodes += rhs.nodes;
-    }
-}
-
-impl From<BytesAndNodes> for ObjectValue {
-    fn from(value: BytesAndNodes) -> Self {
-        ObjectValue::BytesAndNodes { bytes: value.bytes, nodes: value.nodes }
-    }
-}
-
-impl From<(i64, i64)> for BytesAndNodes {
-    fn from((bytes, nodes): (i64, i64)) -> Self {
-        Self { bytes, nodes }
-    }
-}
-
-impl From<BytesAndNodes> for (i64, i64) {
-    fn from(value: BytesAndNodes) -> Self {
-        (value.bytes, value.nodes)
-    }
 }
 
 impl ObjectValue {
@@ -747,7 +650,6 @@ impl ObjectValue {
         modification_time: Timestamp,
         access_time: Timestamp,
         change_time: Timestamp,
-        project_id: Option<ProjectId>,
         posix_attributes: Option<PosixAttributes>,
     ) -> ObjectValue {
         ObjectValue::Object {
@@ -755,7 +657,6 @@ impl ObjectValue {
             attributes: ObjectAttributes {
                 creation_time,
                 modification_time,
-                project_id,
                 posix_attributes,
                 allocated_size,
                 access_time,
@@ -792,16 +693,10 @@ impl ObjectValue {
         link: impl Into<Box<[u8]>>,
         creation_time: Timestamp,
         modification_time: Timestamp,
-        project_id: Option<ProjectId>,
     ) -> ObjectValue {
         ObjectValue::Object {
             kind: ObjectKind::Symlink { refs: 1, link: link.into() },
-            attributes: ObjectAttributes {
-                creation_time,
-                modification_time,
-                project_id,
-                ..Default::default()
-            },
+            attributes: ObjectAttributes { creation_time, modification_time, ..Default::default() },
         }
     }
     pub fn inline_extended_attribute(value: impl Into<Vec<u8>>) -> ObjectValue {

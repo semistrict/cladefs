@@ -12,12 +12,12 @@ use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties};
 use crate::object_store::object_record::{
-    BytesAndNodes, ChildValue, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData,
-    ObjectKind, ObjectValue, Timestamp,
+    ChildValue, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind,
+    ObjectValue, Timestamp,
 };
 use crate::object_store::transaction::{LockKey, LockKeys, Mutation, Options, Transaction};
 use crate::object_store::{
-    DataObjectHandle, HandleOptions, HandleOwner, MutableNodeAttributes, ObjectStore, ProjectId,
+    DataObjectHandle, HandleOptions, HandleOwner, MutableNodeAttributes, ObjectStore,
     SetExtendedAttributeMode, StoreObjectHandle,
 };
 use anyhow::{Error, anyhow, bail, ensure};
@@ -136,7 +136,6 @@ impl<S: HandleOwner> Directory<S> {
                     attributes: ObjectAttributes {
                         creation_time: now.clone(),
                         modification_time: now.clone(),
-                        project_id: None,
                         posix_attributes: None,
                         allocated_size: 0,
                         access_time: now.clone(),
@@ -353,7 +352,6 @@ impl<S: HandleOwner> Directory<S> {
             },
         )
         .await?;
-        self.copy_project_id_to_object_in_txn(transaction, handle.object_id())?;
         Ok(handle)
     }
 
@@ -401,64 +399,6 @@ impl<S: HandleOwner> Directory<S> {
         .await
     }
 
-    // This applies the project id of this directory (if nonzero) to an object. The method assumes
-    // both this and child objects are already present in the mutations of the provided
-    // transactions and that the child is of of zero size. This is meant for use inside
-    // `create_child_file()` and `create_child_dir()` only, where such assumptions are safe.
-    fn copy_project_id_to_object_in_txn<'a>(
-        &self,
-        transaction: &mut Transaction<'a>,
-        object_id: u64,
-    ) -> Result<(), Error> {
-        let store_id = self.store().store_object_id();
-        // This mutation must already be in here as we've just modified the mtime.
-        let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } =
-            transaction
-                .get_object_mutation(store_id, ObjectKey::object(self.object_id()))
-                .unwrap()
-                .item
-                .value
-        else {
-            return Err(anyhow!(FxfsError::Inconsistent));
-        };
-        self.give_project_id_in_txn(transaction, object_id, project_id)
-    }
-
-    /// Applies `project_id`, this directory's, if it has one, to the object `object_id`, which
-    /// `transaction` creates, of zero size (`copy_project_id_to_object_in_txn`).
-    fn give_project_id_in_txn<'a>(
-        &self,
-        transaction: &mut Transaction<'a>,
-        object_id: u64,
-        project_id: Option<ProjectId>,
-    ) -> Result<(), Error> {
-        let store_id = self.store().store_object_id();
-        if let Some(project_id) = project_id {
-            // This mutation must be present as well since we've just created the object. So this
-            // replaces it.
-            let mut mutation = transaction
-                .get_object_mutation(store_id, ObjectKey::object(object_id))
-                .unwrap()
-                .clone();
-            if let ObjectValue::Object {
-                attributes: ObjectAttributes { project_id: child_project_id, .. },
-                ..
-            } = &mut mutation.item.value
-            {
-                *child_project_id = Some(project_id);
-            } else {
-                return Err(anyhow!(FxfsError::Inconsistent));
-            }
-            transaction.add(store_id, Mutation::ObjectStore(mutation));
-            transaction.merge_bytes_and_nodes(
-                store_id,
-                ObjectKey::project_usage(self.store().root_directory_object_id(), project_id),
-                BytesAndNodes { bytes: 0, nodes: 1 },
-            );
-        }
-        Ok(())
-    }
-
     pub async fn create_child_file<'a>(
         &self,
         transaction: &mut Transaction<'a>,
@@ -483,12 +423,6 @@ impl<S: HandleOwner> Directory<S> {
         let handle =
             ObjectStore::create_object(self.owner(), transaction, HandleOptions::default()).await?;
         self.add_child_file_and_time(transaction, name, &handle, descriptor, times).await?;
-        let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } =
-            self.store().txn_get_object_mutation(transaction, self.object_id()).await?.item.value
-        else {
-            bail!(anyhow!(FxfsError::Inconsistent).context("expected a directory object"));
-        };
-        self.give_project_id_in_txn(transaction, handle.object_id(), project_id)?;
         Ok(handle)
     }
 
@@ -501,7 +435,6 @@ impl<S: HandleOwner> Directory<S> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         let handle = ObjectStore::create_object(self.owner(), transaction, options).await?;
         self.add_child_file(transaction, name, &handle).await?;
-        self.copy_project_id_to_object_in_txn(transaction, handle.object_id())?;
         Ok(handle)
     }
 
@@ -512,43 +445,6 @@ impl<S: HandleOwner> Directory<S> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         let handle =
             ObjectStore::create_object(self.owner(), transaction, HandleOptions::default()).await?;
-
-        // Copy project ID from self to the created file object.
-        let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } = self
-            .store()
-            .txn_get_object_mutation(&transaction, self.object_id())
-            .await
-            .unwrap()
-            .item
-            .value
-        else {
-            bail!(
-                anyhow!(FxfsError::Inconsistent)
-                    .context("Directory.create_child_file_with_options: expected mutation object")
-            );
-        };
-
-        // Update the object mutation with parent's project ID.
-        let mut child_mutation = transaction
-            .get_object_mutation(
-                self.store().store_object_id(),
-                ObjectKey::object(handle.object_id()),
-            )
-            .unwrap()
-            .clone();
-        if let ObjectValue::Object {
-            attributes: ObjectAttributes { project_id: child_project_id, .. },
-            ..
-        } = &mut child_mutation.item.value
-        {
-            *child_project_id = project_id;
-        } else {
-            bail!(
-                anyhow!(FxfsError::Inconsistent)
-                    .context("Directory.create_child_file_with_options: expected file object")
-            );
-        }
-        transaction.add(self.store().store_object_id(), Mutation::ObjectStore(child_mutation));
 
         // Add object to graveyard - the object should be removed on remount.
         self.store().add_to_graveyard(transaction, handle.object_id());
@@ -579,7 +475,7 @@ impl<S: HandleOwner> Directory<S> {
             self.store().store_object_id(),
             Mutation::insert_object(
                 ObjectKey::object(symlink_id),
-                ObjectValue::symlink(inline, Timestamp::now(), Timestamp::now(), None),
+                ObjectValue::symlink(inline, Timestamp::now(), Timestamp::now()),
             ),
         );
         if long {

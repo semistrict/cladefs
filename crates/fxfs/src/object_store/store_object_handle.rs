@@ -21,8 +21,8 @@ use crate::object_handle::ObjectHandle;
 use crate::object_store::allocator::STAGED_MAX;
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
 use crate::object_store::object_record::{
-    AttributeKey, BytesAndNodes, ExtendedAttributeValue, ObjectAttributes, ObjectKey,
-    ObjectKeyData, ObjectValue, Timestamp,
+    AttributeKey, ExtendedAttributeValue, ObjectAttributes, ObjectKey, ObjectKeyData, ObjectValue,
+    Timestamp,
 };
 use crate::object_store::transaction::{
     LockKey, Mutation, ObjectStoreMutation, Options, ReadGuard, Transaction, lock_keys,
@@ -330,10 +330,8 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             return Ok(());
         }
         let mut mutation = self.txn_get_object_mutation(transaction).await?;
-        if let ObjectValue::Object {
-            attributes: ObjectAttributes { project_id, allocated_size, .. },
-            ..
-        } = &mut mutation.item.value
+        if let ObjectValue::Object { attributes: ObjectAttributes { allocated_size, .. }, .. } =
+            &mut mutation.item.value
         {
             // The only way for these to fail are if the volume is inconsistent.
             *allocated_size = allocated_size
@@ -343,17 +341,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 .ok_or_else(|| {
                     anyhow!(FxfsError::Inconsistent).context("Allocated size underflow")
                 })?;
-
-            if let Some(project_id) = project_id {
-                // The allocated and deallocated shouldn't exceed the max size of the file which is
-                // bound within i64.
-                let diff = i64::try_from(allocated).unwrap() - i64::try_from(deallocated).unwrap();
-                transaction.merge_bytes_and_nodes(
-                    self.store().store_object_id(),
-                    ObjectKey::project_usage(self.store().root_directory_object_id(), *project_id),
-                    BytesAndNodes { bytes: diff, nodes: 0 },
-                );
-            }
         } else {
             // This can occur when the object mutation is created from an object in the tree which
             // was corrupt.

@@ -18,10 +18,9 @@ use crate::object_store::allocator::{AllocatorItem, Reservation};
 use crate::object_store::journal::{checksums_record_bytes, mutation_record_bytes};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
-    BytesAndNodes, ObjectItem, ObjectItemV66, ObjectKey, ObjectKeyData, ObjectValue,
-    ProjectProperty,
+    ObjectItem, ObjectItemV66, ObjectKey, ObjectKeyData, ObjectValue,
 };
-use crate::object_store::{AttributeId, AttributeKey, ProjectId};
+use crate::object_store::{AttributeId, AttributeKey};
 use crate::serialized_types::Versioned;
 use anyhow::Error;
 use either::{Either, Left, Right};
@@ -262,46 +261,25 @@ pub enum AllocatorMutationV60 {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Copy)]
 pub enum LockKey {
     /// Used to lock flushing an object.
-    Flush {
-        object_id: u64,
-    },
+    Flush { object_id: u64 },
 
     /// Used to lock changes to a particular object attribute (e.g. writes).
-    ObjectAttribute {
-        store_object_id: u64,
-        object_id: u64,
-        attribute_id: AttributeId,
-    },
+    ObjectAttribute { store_object_id: u64, object_id: u64, attribute_id: AttributeId },
 
     /// Used to lock changes to a particular object (e.g. adding a child to a directory).
-    Object {
-        store_object_id: u64,
-        object_id: u64,
-    },
-
-    ProjectId {
-        store_object_id: u64,
-        project_id: ProjectId,
-    },
+    Object { store_object_id: u64, object_id: u64 },
 
     /// Used to lock any truncate operations for a file.
-    Truncate {
-        store_object_id: u64,
-        object_id: u64,
-    },
+    Truncate { store_object_id: u64, object_id: u64 },
 
     /// A lock used when getting or creating the internal directory.
-    InternalDirectory {
-        store_object_id: u64,
-    },
+    InternalDirectory { store_object_id: u64 },
 
     /// cladefs: a store's commits: each takes it to read, in `FxFilesystem::commit_transaction`,
     /// after its keys are promoted to write locks, for each store it changes; a snapshot of the
     /// store takes it to write, before its flush, and holds it until it commits, so that no commit
     /// of the store comes between the two (TASK-241).
-    Commits {
-        store_object_id: u64,
-    },
+    Commits { store_object_id: u64 },
 }
 
 impl LockKey {
@@ -704,33 +682,6 @@ impl<'a> Transaction<'a> {
         self.add_with_object(object_id, mutation, AssocObj::None)
     }
 
-    /// Adds `delta` to a `BytesAndNodes` merge mutation for `key`, folding into any delta already
-    /// staged in this transaction.  Mutations in a transaction are deduplicated by `ObjectKey`
-    /// alone, so adding a second delta for the same key would otherwise replace the first.
-    pub fn merge_bytes_and_nodes(
-        &mut self,
-        store_object_id: u64,
-        key: ObjectKey,
-        delta: BytesAndNodes,
-    ) {
-        let delta = match self.get_object_mutation(store_object_id, key.clone()) {
-            Some(ObjectStoreMutation {
-                item: Item { value: ObjectValue::BytesAndNodes { bytes, nodes }, .. },
-                ..
-            }) => delta + BytesAndNodes { bytes: *bytes, nodes: *nodes },
-            _ => delta,
-        };
-        if delta.is_zero() {
-            self.remove(store_object_id, Mutation::merge_object(key, ObjectValue::None));
-        } else {
-            self.add_with_object_internal(
-                store_object_id,
-                Mutation::merge_object(key, delta.into()),
-                AssocObj::None,
-            );
-        }
-    }
-
     /// Removes a mutation that matches `mutation`.
     pub fn remove(&mut self, object_id: u64, mutation: Mutation) {
         let txn_mutation = TxnMutation { object_id, mutation, associated_object: AssocObj::None };
@@ -759,33 +710,6 @@ impl<'a> Transaction<'a> {
     /// Adds a mutation with an associated object. If the mutation already exists, it is replaced
     /// and the old mutation is returned.
     pub fn add_with_object(
-        &mut self,
-        object_id: u64,
-        mutation: Mutation,
-        associated_object: AssocObj<'a>,
-    ) -> Option<Mutation> {
-        debug_assert!(
-            !matches!(
-                mutation,
-                Mutation::ObjectStore(ObjectStoreMutation {
-                    item: ObjectItem {
-                        key: ObjectKey {
-                            data: ObjectKeyData::Project { property: ProjectProperty::Usage, .. },
-                            ..
-                        },
-                        ..
-                    },
-                    ..
-                })
-            ),
-            "Use merge_bytes_and_nodes"
-        );
-        self.add_with_object_internal(object_id, mutation, associated_object)
-    }
-
-    /// Adds a mutation with an associated object. If the mutation already exists, it is replaced
-    /// and the old mutation is returned.
-    fn add_with_object_internal(
         &mut self,
         object_id: u64,
         mutation: Mutation,
@@ -939,32 +863,6 @@ impl<'a> Transaction<'a> {
                                 )
                             }
                         }
-                    },
-                    ObjectKeyData::Project { project_id, property: ProjectProperty::Limit } => {
-                        if !self.txn_locks.contains(&LockKey::ProjectId {
-                            store_object_id: *store_object_id,
-                            project_id: *project_id,
-                        }) {
-                            debug_assert!(
-                                false,
-                                "Not holding required lock for project limit id {project_id} \
-                                in store {store_object_id}"
-                            );
-                            error!(
-                                "Not holding required lock for project limit id {project_id} in \
-                                store {store_object_id}"
-                            )
-                        }
-                    }
-                    ObjectKeyData::Project { property: ProjectProperty::Usage, .. } => match op {
-                        Operation::Insert | Operation::ReplaceOrInsert => {
-                            panic!(
-                                "Project usage is all handled by merging deltas, no inserts or \
-                                replacements should be used"
-                            );
-                        }
-                        // Merges are all handled like atomic +/- and serialized by the tree locks.
-                        Operation::Merge => {}
                     },
                     ObjectKeyData::ExtendedAttribute { .. } => {
                         let id = key.object_id;
@@ -1702,7 +1600,7 @@ mod tests {
         ObjectMutationIterator, Options, TxnMutation,
     };
     use crate::filesystem::FxFilesystem;
-    use crate::object_store::{BytesAndNodes, ObjectKey, ObjectValue};
+    use crate::object_store::{ObjectKey, ObjectValue};
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::channel::oneshot::channel;
@@ -2288,10 +2186,7 @@ mod tests {
         t.change_names_unlocked(store_id, dir);
         t.add(
             store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::child(dir, "name"),
-                ObjectValue::None,
-            ),
+            Mutation::replace_or_insert_object(ObjectKey::child(dir, "name"), ObjectValue::None),
         );
         assert_eq!(t.mutations().len(), 1);
     }
@@ -2310,10 +2205,7 @@ mod tests {
         let dir = root_store.root_directory_object_id();
         t.add(
             store_id,
-            Mutation::replace_or_insert_object(
-                ObjectKey::child(dir, "name"),
-                ObjectValue::None,
-            ),
+            Mutation::replace_or_insert_object(ObjectKey::child(dir, "name"), ObjectValue::None),
         );
     }
 
@@ -2329,29 +2221,29 @@ mod tests {
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let root_store = fs.root_store();
         let store_id = root_store.store_object_id();
+        let root_id = root_store.root_directory_object_id();
         let allocator_id = fs.allocator().object_id();
         let mut t = root_store
-            .new_transaction(lock_keys![], Options::default())
+            .new_transaction(lock_keys![LockKey::object(store_id, root_id)], Options::default())
             .await
             .expect("new_transaction failed");
         assert_eq!(t.room(), TRANSACTION_ROOM);
 
-        let key = |project| {
-            ObjectKey::project_usage(
-                root_store.root_directory_object_id(),
-                crate::object_store::ProjectId::new(project).unwrap(),
+        let key = |i: u64| ObjectKey::extended_attribute(root_id, i.to_le_bytes().to_vec());
+        let xattr = |i: u64, len: usize| {
+            Mutation::replace_or_insert_object(
+                key(i),
+                ObjectValue::inline_extended_attribute(vec![7u8; len]),
             )
-        };
-        let usage = |project, bytes| {
-            Mutation::merge_object(key(project), BytesAndNodes { bytes, nodes: 1 }.into())
         };
 
         // A mutation replaced takes what the new one does.
-        t.merge_bytes_and_nodes(store_id, key(1), BytesAndNodes { bytes: 1, nodes: 1 });
-        assert_eq!(t.journal_bytes(), mutation_record_bytes(store_id, &usage(1, 1)));
-        t.merge_bytes_and_nodes(store_id, key(1), BytesAndNodes { bytes: 1 << 40, nodes: 0 });
-        let merged = usage(1, (1 << 40) + 1);
-        assert_eq!(t.journal_bytes(), mutation_record_bytes(store_id, &merged));
+        let small = xattr(1, 1);
+        t.add(store_id, small.clone());
+        assert_eq!(t.journal_bytes(), mutation_record_bytes(store_id, &small));
+        let large = xattr(1, 64);
+        t.add(store_id, large.clone());
+        assert_eq!(t.journal_bytes(), mutation_record_bytes(store_id, &large));
 
         // References fold, as they do.
         let range = ExtentRange::new(ExtentId::new(1, 2), 0..4096);
@@ -2362,32 +2254,32 @@ mod tests {
                 delta,
             })
         };
-        let usage_bytes = t.journal_bytes();
+        let xattr_bytes = t.journal_bytes();
         t.add_reference(allocator_id, range.clone(), store_id, 1);
         t.add_reference(allocator_id, range.clone(), store_id, 1 << 30);
         let folded = mutation_record_bytes(allocator_id, &reference(1 + (1 << 30)));
-        assert_eq!(t.journal_bytes(), usage_bytes + folded);
+        assert_eq!(t.journal_bytes(), xattr_bytes + folded);
         t.add_reference(allocator_id, range.clone(), store_id, -1 - (1 << 30));
-        assert_eq!(t.journal_bytes(), usage_bytes);
+        assert_eq!(t.journal_bytes(), xattr_bytes);
 
         // A checksums' record counts.
         t.add_checksum(range.clone(), vec![1, 2, 3], true);
         let checksums = checksums_record_bytes(&range, &[1, 2, 3], true);
-        assert_eq!(t.journal_bytes(), usage_bytes + checksums);
-        assert_eq!(t.room(), TRANSACTION_ROOM - usage_bytes - checksums);
+        assert_eq!(t.journal_bytes(), xattr_bytes + checksums);
+        assert_eq!(t.room(), TRANSACTION_ROOM - xattr_bytes - checksums);
 
         // What goes takes its record with it.
-        t.remove(store_id, merged);
+        t.remove(store_id, large);
         assert_eq!(t.journal_bytes(), checksums);
         t.take_checksums();
         assert_eq!(t.journal_bytes(), 0);
 
         // Full at the room, with what passed it, and empty again once committed.
-        let mut project = 1;
+        let mut i = 1u64;
         while !t.is_full() {
             assert!(t.room() > 0);
-            t.merge_bytes_and_nodes(store_id, key(project), BytesAndNodes { bytes: 1, nodes: 1 });
-            project += 1;
+            t.add(store_id, xattr(i, 8));
+            i += 1;
         }
         assert_eq!(t.room(), 0);
         assert!(t.journal_bytes() >= TRANSACTION_ROOM);
@@ -2396,57 +2288,5 @@ mod tests {
         assert_eq!(t.room(), TRANSACTION_ROOM);
         std::mem::drop(t);
         fs.close().await.expect("close failed");
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_merge_bytes_and_nodes() {
-        let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
-        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let root_store = fs.root_store();
-        let store_id = root_store.store_object_id();
-        let mut t = root_store
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-
-        let key = ObjectKey::project_usage(
-            root_store.root_directory_object_id(),
-            crate::object_store::ProjectId::new(1).unwrap(),
-        );
-
-        // Initial delta.
-        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 100, nodes: 2 });
-        let mutation = t.get_object_mutation(store_id, key.clone()).expect("mutation expected");
-        assert_eq!(mutation.op, super::Operation::Merge);
-        assert_eq!(
-            mutation.item.value,
-            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 100, nodes: 2 }
-        );
-
-        // Second delta for the same key folds into the first rather than replacing it.
-        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 50, nodes: 1 });
-        let mutation = t.get_object_mutation(store_id, key.clone()).expect("mutation expected");
-        assert_eq!(mutation.op, super::Operation::Merge);
-        assert_eq!(
-            mutation.item.value,
-            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 150, nodes: 3 }
-        );
-
-        // Negative delta brings it back down.
-        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: -50, nodes: -1 });
-        let mutation = t.get_object_mutation(store_id, key.clone()).expect("mutation expected");
-        assert_eq!(mutation.op, super::Operation::Merge);
-        assert_eq!(
-            mutation.item.value,
-            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 100, nodes: 2 }
-        );
-
-        // Folding to zero removes the mutation completely.
-        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: -100, nodes: -2 });
-        assert!(t.get_object_mutation(store_id, key.clone()).is_none());
-
-        // Calling with (0, 0) when no mutation exists is a no-op.
-        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 0, nodes: 0 });
-        assert!(t.get_object_mutation(store_id, key.clone()).is_none());
     }
 }

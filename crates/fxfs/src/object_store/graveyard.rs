@@ -1078,7 +1078,7 @@ mod tests {
                     store.store_object_id(),
                     Mutation::insert_object(
                         ObjectKey::object(oid),
-                        ObjectValue::file(1, 0, now, now, now, now, None, None),
+                        ObjectValue::file(1, 0, now, now, now, now, None),
                     ),
                 );
                 transaction.add(

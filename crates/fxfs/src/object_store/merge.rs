@@ -2,9 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::object_record::{
-    AttributeId, AttributeKey, ObjectKey, ObjectKeyData, ObjectValue, ProjectProperty,
-};
+use super::object_record::{AttributeId, AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use super::{Extent, ExtentValue};
 use crate::log::*;
 use crate::lsm_tree::merge::ItemOp::{Discard, Keep, Replace};
@@ -198,41 +196,6 @@ pub fn merge(
                 right_extent,
             );
         }
-        (
-            ObjectKey {
-                object_id: _,
-                data:
-                    ObjectKeyData::Project {
-                        project_id: left_project_id,
-                        property: ProjectProperty::Usage,
-                    },
-            },
-            ObjectKey {
-                object_id: _,
-                data:
-                    ObjectKeyData::Project {
-                        project_id: right_project_id,
-                        property: ProjectProperty::Usage,
-                    },
-            },
-            ObjectValue::BytesAndNodes { bytes: left_bytes, nodes: left_nodes },
-            ObjectValue::BytesAndNodes { bytes: right_bytes, nodes: right_nodes },
-        ) if left_project_id == right_project_id => {
-            let bytes = left_bytes + right_bytes;
-            let nodes = left_nodes + right_nodes;
-            // Tombstone the tracking when it goes to zero.
-            match (bytes, nodes) {
-                (0, 0) => MergeResult::Other { emit: None, left: Discard, right: Discard },
-                _ => MergeResult::Other {
-                    emit: None,
-                    left: Discard,
-                    right: Replace(
-                        Item::new(right.key().clone(), ObjectValue::BytesAndNodes { bytes, nodes })
-                            .boxed(),
-                    ),
-                },
-            }
-        }
         // Tombstones (ObjectKeyData::Object) compare before others, so always appear on left.
         (ObjectKey { data: ObjectKeyData::Object, .. }, _, ObjectValue::None, _) => {
             if left.layer_index > right.layer_index {
@@ -257,11 +220,11 @@ mod tests {
     use crate::checksum::Checksums;
     use crate::lsm_tree::types::{Item, LayerIterator, MergeableKey, Value};
     use crate::lsm_tree::{LSMTree, Query};
+    use crate::object_store::AttributeId;
     use crate::object_store::allocator::TEST_EXTENT;
     use crate::object_store::extent::MIN_BLOCK_SIZE;
     use crate::object_store::extent_record::ExtentValue;
     use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectValue, Timestamp};
-    use crate::object_store::{AttributeId, ProjectId};
     use anyhow::Error;
 
     async fn test_merge<K: MergeableKey, V: Value + PartialEq>(
@@ -1064,7 +1027,6 @@ mod tests {
                 Timestamp::default(),
                 Timestamp::default(),
                 None,
-                None,
             ),
         );
         let tree = LSMTree::new(merge, None);
@@ -1081,7 +1043,6 @@ mod tests {
                         Timestamp::default(),
                         Timestamp::default(),
                         Timestamp::default(),
-                        None,
                         None,
                     ),
                 ),
@@ -1335,179 +1296,5 @@ mod tests {
         assert!(iter.get().is_none());
 
         Ok(())
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_merge_project_usage() {
-        let tree = LSMTree::new(merge, None);
-        let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
-
-        tree.insert(Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 100, nodes: 1000 }))
-            .expect("insert error");
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 4, nodes: 8 }),
-            &key,
-        );
-        tree.seal();
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: -1, nodes: -2 }),
-            &key,
-        );
-        tree.seal();
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 16, nodes: 32 }),
-            &key,
-        );
-
-        let layer_set = tree.layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = merger.query(Query::FullScan).await.unwrap();
-        assert_eq!(iter.get().unwrap().key, &key);
-        assert_eq!(
-            iter.get().unwrap().value,
-            &ObjectValue::BytesAndNodes { bytes: 119, nodes: 1038 }
-        );
-        iter.advance().await.unwrap();
-        assert!(iter.get().is_none());
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_merge_project_usage_gap_layer() {
-        let tree = LSMTree::new(merge, None);
-        let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
-        let key2 = ObjectKey::project_usage(5, ProjectId::new(7).unwrap());
-
-        tree.insert(Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 100, nodes: 1000 }))
-            .expect("insert error");
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 4, nodes: 8 }),
-            &key,
-        );
-        tree.seal();
-
-        assert_eq!(
-            tree.find_value(&key).await.expect("Find").unwrap(),
-            ObjectValue::BytesAndNodes { bytes: 104, nodes: 1008 }
-        );
-
-        tree.merge_into(
-            Item::new(key2.clone(), ObjectValue::BytesAndNodes { bytes: 13, nodes: 17 }),
-            &key,
-        );
-        tree.seal();
-
-        assert_eq!(
-            tree.find_value(&key).await.expect("Find").unwrap(),
-            ObjectValue::BytesAndNodes { bytes: 104, nodes: 1008 }
-        );
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 16, nodes: 32 }),
-            &key,
-        );
-
-        let layer_set = tree.layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = merger.query(Query::FullScan).await.unwrap();
-        assert_eq!(iter.get().unwrap().key, &key);
-        assert_eq!(
-            iter.get().unwrap().value,
-            &ObjectValue::BytesAndNodes { bytes: 120, nodes: 1040 }
-        );
-        iter.advance().await.unwrap();
-        assert_eq!(iter.get().unwrap().key, &key2);
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::BytesAndNodes { bytes: 13, nodes: 17 });
-        iter.advance().await.unwrap();
-        assert!(iter.get().is_none());
-
-        assert_eq!(
-            tree.find_value(&key).await.expect("Find").unwrap(),
-            ObjectValue::BytesAndNodes { bytes: 120, nodes: 1040 }
-        );
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_merge_project_usage_to_zero() {
-        let tree = LSMTree::new(merge, None);
-        let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
-
-        tree.insert(Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 4, nodes: 8 }))
-            .expect("insert error");
-        tree.seal();
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: -4, nodes: -8 }),
-            &key,
-        );
-        tree.seal();
-
-        let layer_set = tree.layer_set();
-        let mut merger = layer_set.merger();
-        let iter = merger.query(Query::FullScan).await.unwrap();
-        assert!(iter.get().is_none());
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_merge_project_usage_recover_from_zero() {
-        let tree = LSMTree::new(merge, None);
-        let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
-
-        tree.insert(Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 4, nodes: 8 }))
-            .expect("insert error");
-        tree.seal();
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: -4, nodes: -8 }),
-            &key,
-        );
-        tree.seal();
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 20, nodes: 40 }),
-            &key,
-        );
-        tree.seal();
-
-        let layer_set = tree.layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = merger.query(Query::FullScan).await.unwrap();
-        assert_eq!(iter.get().unwrap().key, &key);
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::BytesAndNodes { bytes: 20, nodes: 40 });
-        iter.advance().await.unwrap();
-        assert!(iter.get().is_none());
-    }
-
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_merge_project_usage_layer_merge_to_negative() {
-        let tree = LSMTree::new(merge, None);
-        let key = ObjectKey::project_usage(5, ProjectId::new(6).unwrap());
-
-        tree.insert(Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 4, nodes: 8 }))
-            .expect("insert error");
-        tree.seal();
-
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: 16, nodes: 32 }),
-            &key,
-        );
-        tree.seal();
-
-        // As we merge from the newest layer down this will drop bytes below zero and nodes to
-        // exactly zero during the merge process.
-        tree.merge_into(
-            Item::new(key.clone(), ObjectValue::BytesAndNodes { bytes: -18, nodes: -32 }),
-            &key,
-        );
-        tree.seal();
-
-        let layer_set = tree.layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = merger.query(Query::FullScan).await.unwrap();
-        assert_eq!(iter.get().unwrap().key, &key);
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::BytesAndNodes { bytes: 2, nodes: 8 });
-        iter.advance().await.unwrap();
-        assert!(iter.get().is_none());
     }
 }
