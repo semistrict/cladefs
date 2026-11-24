@@ -43,8 +43,7 @@ pub(crate) struct ImageShared {
     pub block_size: u32,
     storage_kind: Kind,
     state: Mutex<State>,
-    /// Held while volumes are mounted, created, deleted or snapshotted, which the root volume's
-    /// directory lists, one at a time.
+    /// Holds volume creation and mounting to one at a time.
     volumes_lock: futures::lock::Mutex<()>,
 }
 
@@ -170,10 +169,15 @@ impl Image {
         format: bool,
     ) -> Result<Self, Error> {
         let (device, storage_kind) = storage.into_parts();
+        let barriers = matches!(storage_kind, Kind::Image { .. });
         let executor = Executor::new(options.threads());
         let open = executor
             .run(async move {
-                let filesystem = FxFilesystemBuilder::new().format(format).open(device).await?;
+                let filesystem = FxFilesystemBuilder::new()
+                    .format(format)
+                    .barriers_enabled(barriers)
+                    .open(device)
+                    .await?;
                 let root_volume = Arc::new(root_volume(filesystem.clone()).await?);
                 anyhow::Ok(Open { filesystem, root_volume })
             })
@@ -229,43 +233,6 @@ impl Image {
             .map_err(Error::new)
     }
 
-    /// Deletes the volume `name` and everything in it. Fails with `EBUSY` if it is mounted.
-    pub async fn delete_volume(&self, name: &str) -> Result<(), Error> {
-        let _volumes = self.shared.volumes_lock.lock().await;
-        let root_volume = self.shared.with_open(|open| open.root_volume.clone())?;
-        let (shared, name) = (self.shared.clone(), name.to_owned());
-        self.shared
-            .executor
-            .run(async move {
-                let (store_id, transaction) =
-                    root_volume.acquire_transaction_for_remove_volume(&name, [], false).await?;
-                // Cowardly refuse to delete a mounted volume.
-                anyhow::ensure!(!shared.is_mounted(store_id), FxfsError::AlreadyBound);
-                root_volume.delete_volume(&name, transaction, || {}).await
-            })
-            .await
-            .map_err(volume_error)
-    }
-
-    /// Snapshots the volume `source` into the new volume `name`: a volume of its own from then on,
-    /// which starts with everything the source held. Writes to the source while it snapshots may
-    /// be in the snapshot or not.
-    ///
-    /// It takes time and space independent of the source's size: the snapshot shares the source's
-    /// metadata and data, until either changes them, as Fxfs writes changes to new blocks. What
-    /// they share is freed once neither references it. Fails with `EEXIST` if `name` exists, and
-    /// `ENOENT` if `source` doesn't.
-    pub async fn snapshot_volume(&self, source: &str, name: &str) -> Result<(), Error> {
-        let _volumes = self.shared.volumes_lock.lock().await;
-        let root_volume = self.shared.with_open(|open| open.root_volume.clone())?;
-        let (source, name) = (source.to_owned(), name.to_owned());
-        self.shared
-            .executor
-            .run(async move { root_volume.snapshot_volume(&source, &name).await.map(|_| ()) })
-            .await
-            .map_err(volume_error)
-    }
-
     /// Unmounts the volumes still mounted, writing back what is dirty, closes the image, and gives
     /// its storage back.
     pub async fn close(self) -> Result<Storage, Error> {
@@ -318,11 +285,6 @@ impl ImageShared {
                     .fold(TreeCompactions::default(), std::ops::Add::add),
             }
         })
-    }
-
-    /// Whether the volume whose store is `store_id` is mounted, or its unmount is under way.
-    fn is_mounted(&self, store_id: u64) -> bool {
-        self.state.lock().unwrap().mounted.contains(&store_id)
     }
 
     /// Notes that the unmount of the volume whose store is `store_id` is done: it may be mounted
@@ -421,5 +383,48 @@ fn volume_error(error: anyhow::Error) -> Error {
             Error::new(error.context(errno))
         }
         false => Error::new(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_backed_image_uses_atomic_barriers() {
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("image");
+            let storage = Storage::create(&path, 32 << 20).await.unwrap();
+            let check_barriers = |image: &Image| {
+                image
+                    .shared
+                    .with_open(|open| {
+                        assert!(open.filesystem.options().barriers_enabled);
+                        assert!(open.filesystem.device().atomic_commits());
+                    })
+                    .unwrap();
+            };
+            let image = Image::format(storage).await.unwrap();
+            check_barriers(&image);
+            let volume = image.create_volume("data").await.unwrap();
+            let owner = crate::Owner { uid: 1000, gid: 100 };
+            let (file, _) = volume.root().create(b"file", 0o644, owner).await.unwrap();
+            let data: Vec<_> = (0..8192).map(|i| (i % 251) as u8).collect();
+            assert_eq!(file.write(0, &data).await, Ok(data.len()));
+            file.fsync().await.unwrap();
+            drop((file, volume));
+            drop(image.close().await.unwrap());
+
+            let image = Image::mount(Storage::open(&path).await.unwrap()).await.unwrap();
+            check_barriers(&image);
+            let volume = image.open_volume("data").await.unwrap();
+            let (file, _) = volume.root().lookup(b"file").await.unwrap();
+            let mut read = vec![0; data.len()];
+            assert_eq!(file.read(0, &mut read).await, Ok(data.len()));
+            assert_eq!(read, data);
+            drop((file, volume));
+            image.close().await.unwrap();
+        });
     }
 }

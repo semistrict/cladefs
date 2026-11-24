@@ -164,6 +164,12 @@ impl Device for OpenCellDevice {
         self.commit(None, Commit::Local).await.context("flushing the image")
     }
 
+    fn atomic_commits(&self) -> bool {
+        // Each ordered commit seals prior writes together. The cell's WAL recovers a prefix of
+        // whole commits, including the data, journal and root committed by a POST_BARRIER.
+        true
+    }
+
     fn is_read_only(&self) -> bool {
         self.cell.access().may_write().is_err()
     }
