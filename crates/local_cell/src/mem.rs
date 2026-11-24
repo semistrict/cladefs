@@ -534,11 +534,6 @@ impl File for MemDiskFile {
         Ok(())
     }
 
-    /// As [`MemDiskFile::sync`]: it caches nothing of its own.
-    fn sync_cached(&self) -> io::Result<()> {
-        self.sync()
-    }
-
     /// Written as zeros, as a crash keeps or loses a write, and its whole blocks given back.
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();

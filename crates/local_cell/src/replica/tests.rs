@@ -219,9 +219,6 @@ fn open_file_descriptors_stay_bounded_across_many_logs() {
         fn sync(&self) -> io::Result<()> {
             self.inner.sync()
         }
-        fn sync_cached(&self) -> io::Result<()> {
-            self.inner.sync_cached()
-        }
     }
     #[derive(Clone)]
     struct TrackedDir {

@@ -2416,12 +2416,9 @@ async fn closed_segments_keep_no_more_files_open_than_allowed() {
     assert_eq!(read(&cell, extent(40), 0, BLOCK), pattern(40, 0, BLOCK));
 }
 
-/// What a cell's files did, by the directory each is in: their syncs that let their pages go
-/// from the host's page cache, of those of extents' data, as a host's do, written through it
-/// (`HostFile::sync`); and the bytes read.
+/// What a cell's files did, by the directory each is in: the bytes read.
 #[derive(Default)]
 struct Counts {
-    drops: BTreeMap<String, u64>,
     read: BTreeMap<String, u64>,
 }
 
@@ -2434,9 +2431,8 @@ struct Counting {
 
 struct CountedFile {
     file: MemFile,
-    /// The directory it is in, and whether it holds extents' data.
+    /// The directory it is in.
     kind: String,
-    data: bool,
     counts: Arc<std::sync::Mutex<Counts>>,
 }
 
@@ -2445,14 +2441,9 @@ impl Counting {
         Self { dir: MemDir::new(), counts: Default::default() }
     }
 
-    fn file(&self, file: MemFile, path: &str, data: bool) -> CountedFile {
+    fn file(&self, file: MemFile, path: &str) -> CountedFile {
         let kind = path.split('/').next().unwrap().to_owned();
-        CountedFile { file, kind, data, counts: self.counts.clone() }
-    }
-
-    /// The syncs that let files' pages go, so far.
-    fn drops(&self) -> BTreeMap<String, u64> {
-        self.counts.lock().unwrap().drops.clone()
+        CountedFile { file, kind, counts: self.counts.clone() }
     }
 
     /// The bytes read so far.
@@ -2467,11 +2458,6 @@ impl local_cell::File for CountedFile {
         self.file.read_at(buf, offset)
     }
 
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-        *self.counts.lock().unwrap().read.entry(self.kind.clone()).or_default() += buf.len() as u64;
-        self.file.read_cached(buf, offset)
-    }
-
     fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
         self.file.write_at(buf, offset)
     }
@@ -2481,14 +2467,7 @@ impl local_cell::File for CountedFile {
     }
 
     fn sync(&self) -> std::io::Result<()> {
-        if self.data {
-            *self.counts.lock().unwrap().drops.entry(self.kind.clone()).or_default() += 1;
-        }
         self.file.sync()
-    }
-
-    fn sync_cached(&self) -> std::io::Result<()> {
-        self.file.sync_cached()
     }
 }
 
@@ -2496,11 +2475,11 @@ impl Dir for Counting {
     type File = CountedFile;
 
     fn create(&self, path: &str, data: bool) -> std::io::Result<CountedFile> {
-        Ok(self.file(self.dir.create(path, data)?, path, data))
+        Ok(self.file(self.dir.create(path, data)?, path))
     }
 
     fn open(&self, path: &str, data: bool) -> std::io::Result<CountedFile> {
-        Ok(self.file(self.dir.open(path, data)?, path, data))
+        Ok(self.file(self.dir.open(path, data)?, path))
     }
 
     fn remove(&self, path: &str) -> std::io::Result<()> {
@@ -2534,23 +2513,6 @@ impl Dir for Counting {
     fn barrier(&self) -> std::io::Result<()> {
         self.dir.barrier()
     }
-}
-
-/// cladefs: durable commits let none of the open segment's pages go from the host's page cache: its
-/// raw file, written and synced again and again, takes them with it once framed and removed; its
-/// framed file, written once, lets them go once synced (TASK-92.23).
-#[tokio::test(flavor = "multi_thread")]
-async fn durable_commits_keep_the_open_segments_pages_cached() {
-    let dir = Counting::new();
-    let cell = create(dir.clone(), 1 << 20);
-    for sequence in 1..=8 {
-        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-    }
-    cell.close_segment().unwrap();
-    cell.commit(None).await.unwrap();
-    settled(&cell).await;
-    assert_eq!(dir.drops(), BTreeMap::from([("segments".to_owned(), 1)]));
 }
 
 /// cladefs: a cell opening again reads of the segments of its write-ahead log their tails alone:

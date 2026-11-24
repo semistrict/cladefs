@@ -2437,7 +2437,7 @@ impl<D: Dir> LocalCell<D> {
             match part {
                 Located::Data { file, offset, len } => {
                     let mut data = Aligned::new(len as usize);
-                    file.read_cached(data.as_mut_slice(), offset)?;
+                    file.read_at(data.as_mut_slice(), offset)?;
                     out.copy_from_slice(data.as_slice());
                 }
                 Located::Packed { part, skip, .. } => {
@@ -3018,14 +3018,14 @@ impl<D: Dir> LocalCell<D> {
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
             if in_place && framed.is_none() {
-                raw.file().read_cached(buf, at)?;
+                raw.file().read_at(buf, at)?;
                 let parts =
                     (buf.chunks(extent_frame::PART as usize).zip(at / extent_frame::PART..))
                         .map(|(part, index)| extent_frame::RawPart::of(index, part, sectors));
                 raw_parts.extend(parts);
                 raw.decrypt(at, buf);
             } else {
-                raw.read_cached(buf, at)?;
+                raw.read_at(buf, at)?;
             }
             let end = packer.end();
             let packed = packer.push(buf);
@@ -3038,7 +3038,7 @@ impl<D: Dir> LocalCell<D> {
                 // Its raw parts before are no parts of a cell at a version's, encrypted with
                 // AES-GCM: framed anew, whole.
                 None if end > 0 => {
-                    self.write_own(state, extent, len, |at, buf| raw.read_cached(buf, at))?;
+                    self.write_own(state, extent, len, |at, buf| raw.read_at(buf, at))?;
                     state.unreferenced.doomed.push(raw_path);
                     return Ok(len);
                 }
@@ -3778,7 +3778,7 @@ impl<D: Dir> LocalCell<D> {
         if self.lock().segments.wants_spare()
             && let Ok(file) = self.dir.open(&log, false)
             && let mut header = [0; LOG_HEADER]
-            && file.read_cached(&mut header, 0).is_ok()
+            && file.read_at(&mut header, 0).is_ok()
             && log_salt(&header, segment).is_some()
         {
             match self.dir.rename(&log, &spare) {

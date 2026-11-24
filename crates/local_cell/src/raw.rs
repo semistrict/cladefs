@@ -180,10 +180,6 @@ impl<F: File> File for RawFile<F> {
         self.read_with(buf, offset, |file, buf, offset| file.read_at(buf, offset))
     }
 
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.read_with(buf, offset, |file, buf, offset| file.read_cached(buf, offset))
-    }
-
     /// Writes `buf` at `offset`, encrypted through a buffer of its own, whole sectors: of
     /// [`ENCRYPTING_MOST`] bytes at most, a write larger written a piece at a time, so that it
     /// holds that much more, not its own size again, outside what its caller bounds (the extent
@@ -214,10 +210,6 @@ impl<F: File> File for RawFile<F> {
 
     fn sync(&self) -> io::Result<()> {
         self.file.sync()
-    }
-
-    fn sync_cached(&self) -> io::Result<()> {
-        self.file.sync_cached()
     }
 
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
@@ -274,7 +266,7 @@ mod tests {
         }
         for (offset, len) in [(SECTOR, 3 * SECTOR), (SECTOR + 100, 5000), (2 * SECTOR - 1, 2)] {
             let mut read = vec![0; len as usize];
-            raw.read_cached(&mut read, offset).unwrap();
+            raw.read_at(&mut read, offset).unwrap();
             let from = (offset - SECTOR) as usize;
             assert_eq!(read, &data[from..from + len as usize], "{len} bytes at {offset}");
         }

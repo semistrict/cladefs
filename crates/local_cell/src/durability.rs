@@ -246,7 +246,7 @@ pub struct FileSyncs {
 pub(crate) struct Syncs<F> {
     files: Vec<Arc<F>>,
     /// cladefs: those of them written and synced again and again, as the open segment's raw file
-    /// is, which keep their pages in the host's page cache ([`File::sync_cached`]).
+    /// is: synced as the others are, and counted apart ([`FileSyncs::cached`]).
     cached: Vec<Arc<F>>,
     dirs: BTreeSet<String>,
 }
@@ -319,23 +319,21 @@ impl<F: File> Syncs<F> {
     /// cladefs: syncs the files, as [`Syncs::sync`] does first; returns how many of each kind, and
     /// how long the longest of each took (TASK-165.9).
     pub fn sync_files<D: Dir<File = F>>(&self, dir: &D) -> Result<FileSyncs, Error> {
-        let sync: fn(&F) -> io::Result<()> = F::sync;
-        let sync_cached: fn(&F) -> io::Result<()> = F::sync_cached;
         let mut seen = HashSet::new();
-        let files: Vec<_> = (self.files.iter().map(|file| (file, sync, false)))
-            .chain(self.cached.iter().map(|file| (file, sync_cached, true)))
-            .filter(|(file, _, _)| seen.insert(Arc::as_ptr(file)))
+        let files: Vec<_> = (self.files.iter().map(|file| (file, false)))
+            .chain(self.cached.iter().map(|file| (file, true)))
+            .filter(|(file, _)| seen.insert(Arc::as_ptr(file)))
             .collect();
         let longest = [AtomicU64::new(0), AtomicU64::new(0)];
         let most = if dir.concurrent() { AT_ONCE } else { 1 };
-        at_once(&files, most, |(file, sync, cached)| {
+        at_once(&files, most, |(file, cached)| {
             let started = std::time::Instant::now();
-            sync(file).context("syncing extents' data")?;
+            file.sync().context("syncing extents' data")?;
             let took = started.elapsed().as_micros() as u64;
             longest[usize::from(*cached)].fetch_max(took, Ordering::Relaxed);
             Ok(())
         })?;
-        let cached = files.iter().filter(|(_, _, cached)| *cached).count();
+        let cached = files.iter().filter(|(_, cached)| *cached).count();
         Ok(FileSyncs {
             files: files.len() - cached,
             cached,
@@ -502,8 +500,8 @@ mod tests {
         struct Seen {
             files: Syncing,
             dirs: Syncing,
-            /// How each file was synced, each time: keeping its pages in the page cache or not.
-            synced: BTreeMap<usize, Vec<bool>>,
+            /// How many times each file was synced.
+            synced: BTreeMap<usize, usize>,
         }
 
         /// A cell directory whose files' and directories' syncs say what they saw, and fail if
@@ -564,9 +562,9 @@ mod tests {
                 syncing.done += 1;
             }
 
-            /// File `number`'s sync, keeping its pages in the page cache if `cached`.
-            fn sync_file(&self, number: usize, cached: bool) -> io::Result<()> {
-                self.seen.0.lock().unwrap().synced.entry(number).or_default().push(cached);
+            /// File `number`'s sync.
+            fn sync_file(&self, number: usize) -> io::Result<()> {
+                *self.seen.0.lock().unwrap().synced.entry(number).or_default() += 1;
                 if self.failing == Some(number) {
                     return Err(io::Error::other(format!("file {number} fails")));
                 }
@@ -637,11 +635,7 @@ mod tests {
             }
 
             fn sync(&self) -> io::Result<()> {
-                self.probe.sync_file(self.number, false)
-            }
-
-            fn sync_cached(&self) -> io::Result<()> {
-                self.probe.sync_file(self.number, true)
+                self.probe.sync_file(self.number)
             }
         }
 
@@ -668,10 +662,9 @@ mod tests {
             syncs
         }
 
-        /// How each of [`syncs`]' files is to be synced: once, the last two keeping their pages in
-        /// the page cache.
-        fn synced_once() -> BTreeMap<usize, Vec<bool>> {
-            (0..FILES).map(|number| (number, vec![number >= FILES - 2])).collect()
+        /// How each of [`syncs`]' files is to be synced: once.
+        fn synced_once() -> BTreeMap<usize, usize> {
+            (0..FILES).map(|number| (number, 1)).collect()
         }
 
         fn config() -> Config {
@@ -737,8 +730,8 @@ mod tests {
                 );
                 let seen = probe.seen.0.lock().unwrap();
                 assert_eq!((seen.files.in_flight, seen.dirs.most, seen.dirs.done), (0, 0, 0));
-                assert_eq!(seen.synced[&(AT_ONCE + 1)], [false]);
-                assert!(seen.synced.values().all(|syncs| syncs.len() == 1), "a file synced twice");
+                assert_eq!(seen.synced[&(AT_ONCE + 1)], 1);
+                assert!(seen.synced.values().all(|syncs| *syncs == 1), "a file synced twice");
             });
         }
 

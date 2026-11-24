@@ -28,10 +28,6 @@ impl<F: File> File for WriteFault<F> {
     fn sync(&self) -> io::Result<()> {
         self.file.sync()
     }
-
-    fn sync_cached(&self) -> io::Result<()> {
-        self.file.sync_cached()
-    }
 }
 
 /// Board 8553: a write-back failing on one disk fails that disk's files' writers held at the

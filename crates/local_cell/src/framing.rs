@@ -237,10 +237,10 @@ fn read_seen<F: File>(
     let mut data = Buffer::of(len as usize);
     let at = part * PART;
     if !seen {
-        raw.read_cached(&mut data, at)?;
+        raw.read_at(&mut data, at)?;
         return Ok((data, Seen::default()));
     }
-    raw.file().read_cached(&mut data, at)?;
+    raw.file().read_at(&mut data, at)?;
     let stored = RawPart::of(part, &data, raw.sectors());
     raw.decrypt(at, &mut data);
     let look = Look::at(&data, packer);
@@ -583,7 +583,7 @@ pub(crate) fn fill<F: File>(raw: &RawFile<F>, len: u64, parts: &mut [Read]) -> i
 fn read_part<F: File>(raw: &RawFile<F>, len: u64, part: u64) -> io::Result<Buffer> {
     let at = part * PART;
     let mut data = Buffer::of((len - at).min(PART) as usize);
-    raw.read_cached(&mut data, at)?;
+    raw.read_at(&mut data, at)?;
     Ok(data)
 }
 
@@ -992,9 +992,6 @@ mod tests {
                 unreachable!()
             }
             fn sync(&self) -> io::Result<()> {
-                unreachable!()
-            }
-            fn sync_cached(&self) -> io::Result<()> {
                 unreachable!()
             }
         }

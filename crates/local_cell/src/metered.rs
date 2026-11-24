@@ -208,10 +208,6 @@ impl<F: File> File for MeteredFile<F> {
         self.file.read_at(buf, offset)
     }
 
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.file.read_cached(buf, offset)
-    }
-
     /// Counted as far as it went: one failing may have grown the file part way, as a partial
     /// write does, which its size says.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
@@ -242,10 +238,6 @@ impl<F: File> File for MeteredFile<F> {
 
     fn sync(&self) -> io::Result<()> {
         self.file.sync()
-    }
-
-    fn sync_cached(&self) -> io::Result<()> {
-        self.file.sync_cached()
     }
 
     /// cladefs: counted as the blocks it takes after (TASK-698.2).

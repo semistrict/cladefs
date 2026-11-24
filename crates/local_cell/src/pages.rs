@@ -1093,10 +1093,6 @@ impl<F: File> File for Cached<F> {
         Ok(())
     }
 
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.read_at(buf, offset)
-    }
-
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let shared = &*self.shared;
         shared.cache.throttle(|| shared.failing())?;
@@ -1197,10 +1193,6 @@ impl<F: File> File for Cached<F> {
         shared.file.sync()
     }
 
-    fn sync_cached(&self) -> io::Result<()> {
-        self.sync()
-    }
-
     /// cladefs: its pages in the range written back first, then let go, clean, so that none hides
     /// the hole (TASK-698.2).
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
@@ -1286,10 +1278,6 @@ mod tests {
 
         fn sync(&self) -> io::Result<()> {
             self.0.sync()
-        }
-
-        fn sync_cached(&self) -> io::Result<()> {
-            self.0.sync_cached()
         }
     }
 

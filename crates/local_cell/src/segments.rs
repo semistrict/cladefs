@@ -691,7 +691,7 @@ impl<F: File> Segments<F> {
             _ => {
                 let file = dir.open(&log_path(number), false)?;
                 let mut header = [0; crate::wal::LOG_HEADER];
-                file.read_cached(&mut header, 0)?;
+                file.read_at(&mut header, 0)?;
                 let header = LogHeader::of(&header, number)
                     .ok_or_else(|| anyhow!("{number:?}'s log has no header of its own"))?;
                 let encryption = header.encryption(number, &self.keys)?;
@@ -2155,7 +2155,7 @@ fn write_header<F: File>(
     let header = log_header(salt, segment, encryption);
     log.write_at(&header, 0)?;
     crate::written::wrote(crate::written::Kind::Log, header.len());
-    log.sync_cached()
+    log.sync()
 }
 
 /// cladefs: the phase of a new open segment, `segment`, whose raw file and log it makes in `dir`,
@@ -2656,7 +2656,7 @@ mod tests {
         let headed = |number: u64| {
             let log = dir.open(&log_path(segment(number)), false).unwrap();
             let mut header = [0; crate::wal::LOG_HEADER];
-            log.read_cached(&mut header, 0).unwrap();
+            log.read_at(&mut header, 0).unwrap();
             crate::wal::log_salt(&header, segment(number)).is_some()
         };
         // Made, then placed, its entries made durable, as the cell's opener does: what of the

@@ -285,7 +285,7 @@ impl LogRecord {
         for &(extent, offset, len) in contents.runs() {
             let start = bytes.len();
             bytes.resize(start + len as usize, 0);
-            raw.read_cached(&mut bytes[start..], offset)
+            raw.read_at(&mut bytes[start..], offset)
                 .with_context(|| format!("reading {extent:?}'s run back"))?;
             if !hold {
                 crcs.push(extent_frame::crc(&bytes[start..]));
@@ -571,7 +571,7 @@ impl<F: File> SegmentLog<F> {
     /// ([`ReplicaLog`], TASK-537.3.3).
     pub fn header(&self) -> std::io::Result<Vec<u8>> {
         let mut header = vec![0; LOG_RECORDS as usize];
-        self.file.read_cached(&mut header, 0)?;
+        self.file.read_at(&mut header, 0)?;
         Ok(header)
     }
 
@@ -602,7 +602,7 @@ impl<F: File> SegmentLog<F> {
             self.end += record.len() as u64;
         }
         if self.end > start {
-            self.file.sync_cached()?;
+            self.file.sync()?;
         }
         Ok(())
     }
@@ -1158,7 +1158,7 @@ fn own_log<D: Dir>(dir: &D, segment: SegmentId) -> Result<bool, Error> {
         return Ok(false);
     }
     let mut header = [0; LOG_HEADER];
-    log.read_cached(&mut header, 0)?;
+    log.read_at(&mut header, 0)?;
     if let Some(found) = unsupported_log_magic(&header) {
         anyhow::bail!(
             "{segment:?}'s log has unsupported format {found:?}, not {LOG_MAGIC:?}: refused"
@@ -1254,7 +1254,7 @@ fn log_records<D: Dir>(
     let records = LogRecord::decode(&bytes, segment, encryption.as_deref())?;
     let raw = dir.open(&open_segment_path(segment), true)?;
     let mut data = vec![0; raw.size()? as usize];
-    raw.read_cached(&mut data, 0)?;
+    raw.read_at(&mut data, 0)?;
     let whole = records.iter().take_while(|record| record.restore(&mut data)).count();
     let refused = whole < records.len();
     let records = records.into_iter().take(whole).map(|record| record.contents).collect();

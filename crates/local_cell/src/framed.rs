@@ -89,14 +89,14 @@ pub fn read_whole<F: File>(file: &F) -> io::Result<Vec<u8>> {
 
 /// cladefs: the whole of the framed file `file`, checked: its frame, and each part's stored bytes
 /// against its CRC ([`extent_frame::check`]). What a host sends on as it is, as its uploader does
-/// the segments its cell closed, goes so, or not at all (TASK-153.11). Read through the host's
-/// page cache ([`File::read_cached`]), which holds what a framing wrote, its writing back left to
+/// the segments its cell closed, goes so, or not at all (TASK-153.11). Read through the cell's
+/// page cache (`local_cell::pages`), which holds what a framing wrote, its writing back left to
 /// the making durable after (`segments::make_durable`): a read around the cache waited for the
 /// host's disk to write it first, behind a disk VMs share, and read back from the disk what the
 /// cache held (TASK-401).
 pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; file.size()? as usize];
-    file.read_cached(&mut bytes, 0)?;
+    file.read_at(&mut bytes, 0)?;
     extent_frame::check(&bytes)
         .map_err(|corrupt| io::Error::new(io::ErrorKind::InvalidData, corrupt))?;
     Ok(bytes)
@@ -353,7 +353,7 @@ fn push_data<F>(parts: &mut Vec<Located<F>>, file: &Arc<RawFile<F>>, offset: u64
 pub enum Located<F> {
     /// cladefs: bytes of a raw file, which the cell wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
-    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: an
+    /// through the cell's page cache (`local_cell::pages`). cladefs: an
     /// encrypted cell's are encrypted, a sector at a time: a reader of the file's stored bytes
     /// reads [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the
     /// [`RawFile`] itself does (TASK-411.5).

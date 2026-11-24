@@ -259,13 +259,6 @@ impl<F: File> File for CachedFile<F> {
         }
     }
 
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        match self {
-            Self::Raw(file) => file.read_cached(buf, offset),
-            Self::Cached(cached) => cached.read_cached(buf, offset),
-        }
-    }
-
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         match self {
             Self::Raw(file) => file.write_at(buf, offset),
@@ -298,13 +291,6 @@ impl<F: File> File for CachedFile<F> {
         match self {
             Self::Raw(file) => file.sync(),
             Self::Cached(cached) => cached.sync(),
-        }
-    }
-
-    fn sync_cached(&self) -> io::Result<()> {
-        match self {
-            Self::Raw(file) => file.sync_cached(),
-            Self::Cached(cached) => cached.sync_cached(),
         }
     }
 

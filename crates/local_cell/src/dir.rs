@@ -17,20 +17,6 @@ pub trait File: Send + Sync + 'static {
     /// Reads `buf.len()` bytes at `offset`. Bytes past the file's end read as zeros.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
 
-    /// cladefs: reads as [`File::read_at`] does, but, on Linux, through the host's page cache,
-    /// which `read_at` bypasses. The cell reads its raw files so: the open segment's, those of
-    /// segments being framed or filled, and open extents' own. It wrote them lately, through the
-    /// cache, which holds their pages still, dirty or not yet let go; a read bypassing the cache
-    /// writes back the dirty ones it reads first, waiting for the host's disk. Under pgbench's
-    /// load, a commit copying the extents written in pieces waited about 4 ms a MiB for it, up to
-    /// 400 ms, holding every write back; and a closed segment's framing, reading its 20-35 MiB,
-    /// took a median 100-190 ms to read them, 6-19 ms through the cache (TASK-91.17, TASK-79.93).
-    /// On macOS this reads around the cache as `read_at` does: a file's two descriptors there share
-    /// `F_NOCACHE`.
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.read_at(buf, offset)
-    }
-
     /// Writes `buf` at `offset`.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
 
@@ -58,12 +44,6 @@ pub trait File: Send + Sync + 'static {
 
     /// Makes what was written to the file durable.
     fn sync(&self) -> io::Result<()>;
-
-    /// cladefs: makes what was written to the file durable, as [`File::sync`] does, but leaves its
-    /// pages in the host's page cache, if they are there: for a file written and synced again and
-    /// again, as the open segment's raw file is, whose pages go with it once it is removed
-    /// (TASK-92.23).
-    fn sync_cached(&self) -> io::Result<()>;
 
     /// cladefs: gives the `len` bytes at `offset`, whole blocks, back to the host's disk, keeping
     /// the file's size: they read as zeros from now on (doc-25, TASK-698.2). An ephemeral cell's
@@ -742,10 +722,6 @@ impl File for DiskFile {
         {
             self.file.sync_data()
         }
-    }
-
-    fn sync_cached(&self) -> io::Result<()> {
-        self.sync()
     }
 
     /// Held as no write is in flight, as [`DiskFile::size`] is: a write of part of a block writes

@@ -585,7 +585,7 @@ impl<D: Dir> Replicas<D> {
             None => self.open_cached((cell, key, log), &path)?,
         };
         file.write_at(new, state.end).with_context(|| format!("writing {path}"))?;
-        file.sync_cached().with_context(|| format!("syncing {path}"))?;
+        file.sync().with_context(|| format!("syncing {path}"))?;
         state.end += new.len() as u64;
         Ok(state.end)
     }
