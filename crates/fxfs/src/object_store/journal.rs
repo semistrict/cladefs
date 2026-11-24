@@ -2522,7 +2522,7 @@ mod tests {
         use super::Journal;
         use crate::object_store::transaction::AllocatorMutation;
         use crate::object_store::{AttributeId, ExtentMode, ExtentValue};
-        use bit_vec::BitVec;
+        use crate::checksum::Checksums;
         use storage_device::ExtentId;
         use storage_units::BlockSize;
 
@@ -2536,13 +2536,13 @@ mod tests {
         assert!(!valid(0..0, ObjectValue::deleted_extent()));
 
         let extent = ExtentId::new(1, 1);
-        let bitmap = |blocks| {
-            let mode = ExtentMode::OverwritePartial(BitVec::from_elem(blocks, false));
+        let sums = |blocks| {
+            let mode = ExtentMode::Cow(Checksums::fletcher(vec![7; blocks]));
             ObjectValue::Extent(ExtentValue::new(extent, 0, mode))
         };
-        assert!(valid(0..8192, bitmap(2)));
-        assert!(!valid(0..8192, bitmap(1)));
-        assert!(!valid(0..8192, bitmap(0)));
+        assert!(valid(0..8192, sums(2)));
+        assert!(!valid(0..8192, sums(3)));
+        assert!(!valid(0..8192, sums(4)));
 
         let allocates = |range| {
             let device_range = storage_device::ExtentRange::new(extent, range);

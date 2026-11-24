@@ -611,11 +611,6 @@ impl<P: Platform> Fxfs<P> {
     /// guest's fallocate does (`cladefs_data_fallocate`): NoSpace if the filesystem hasn't room for
     /// the range beyond what the file holds already, but no blocks set aside, which an extent store
     /// can't do, each write taking new ones (copy-on-write); blocks not written read as zeros.
-    ///
-    /// cladefs: not Fxfs's preallocation (`DataObjectHandle::allocate`), whose overwrite extents the
-    /// first write to them replaced, copy-on-write, the attribute still saying it had some, which
-    /// fsck refuses (MissingOverwriteExtents): the host's fallocate alone made them, the guest's
-    /// never (TASK-149.39).
     pub async fn allocate(&self, ino: u64, range: Range<u64>) -> Result<(), Error> {
         self.begin(Op::Allocate, None).await?;
         ensure!(range.start < range.end, FxfsError::InvalidArgs);

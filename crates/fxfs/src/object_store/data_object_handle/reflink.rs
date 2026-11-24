@@ -10,11 +10,11 @@ use crate::errors::FxfsError;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::ObjectHandle;
-use crate::object_store::extent_record::{ExtentMode, ExtentValue};
+use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::transaction::{Mutation, Transaction};
 use crate::object_store::{Extent, HandleOwner};
-use anyhow::{Error, anyhow, ensure};
+use anyhow::{Error, ensure};
 use std::cmp::{max, min};
 use std::ops::Range;
 use storage_device::ExtentRange;
@@ -26,8 +26,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     /// (`Allocator::reference`), its holes holes there. Writes to either file afterwards move the
     /// blocks they change (`Allocator::is_shared`). Both files are this store's, and the caller
     /// locks them; `range` and `dst_offset` are block aligned, and if
-    /// `dst` is this file, the ranges don't overlap. The caller updates `dst`'s size. Extents
-    /// written in place (overwrite modes), which can't be shared, fail with NotSupported.
+    /// `dst` is this file, the ranges don't overlap. The caller updates `dst`'s size.
     pub async fn txn_clone_range(
         &self,
         transaction: &mut Transaction<'_>,
@@ -83,14 +82,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 && *attribute_id == self.attribute_id()
                 && key.start < range.end
             {
-                if let ExtentValue::Some { mode, .. } = value
+                if let ExtentValue::Some { .. } = value
                     && key.end > range.start
                 {
-                    ensure!(
-                        matches!(mode, ExtentMode::Raw | ExtentMode::Cow(_)),
-                        anyhow!(FxfsError::NotSupported)
-                            .context("sharing an extent written in place")
-                    );
                     let (start, end) = (max(key.start, range.start), min(key.end, range.end));
                     let extent_len = key.end - key.start;
                     let value = value
@@ -227,7 +221,7 @@ mod tests {
             let end = dst_offset + range.end - range.start;
             source.txn_clone_range(&mut transaction, range, dst, dst_offset).await.expect("clone");
             if end > dst.txn_get_size(&transaction) {
-                dst.txn_update_size(&mut transaction, end, None).await.expect("size failed");
+                dst.txn_update_size(&mut transaction, end).await.expect("size failed");
             }
             transaction.commit().await.expect("commit failed");
         }
@@ -262,7 +256,7 @@ mod tests {
             .clone_range_in_commits(&mut transaction, 0..end, &target, 0, end)
             .await
             .expect("clone failed");
-        target.txn_update_size(&mut transaction, end, None).await.expect("size failed");
+        target.txn_update_size(&mut transaction, end).await.expect("size failed");
         transaction.commit().await.expect("commit failed");
         let journaled = clones.fs.journal().file_offset() - before;
         assert!(journaled < 64 << 10, "{journaled} bytes of journal to cross a hole");

@@ -12,7 +12,7 @@ use crate::lsm_tree::Query;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::ObjectHandle;
 use crate::object_store::HandleOwner;
-use crate::object_store::extent_record::{ExtentMode, ExtentValue};
+use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::transaction::{LockKey, lock_keys};
 use anyhow::{Error, ensure};
@@ -82,14 +82,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             {
                 break;
             }
-            // Partially written extents read as zero where they were not written.
             if let ExtentValue::Some {
-                extent: store_extent,
-                extent_offset: device_offset,
-                mode,
-                ..
+                extent: store_extent, extent_offset: device_offset, ..
             } = value
-                && !matches!(mode, ExtentMode::OverwritePartial(_))
             {
                 // The whole pages of the extent within the range.
                 let start = std::cmp::max(extent.start, range.start).next_multiple_of(page_size);

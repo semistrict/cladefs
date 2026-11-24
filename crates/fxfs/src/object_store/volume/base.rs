@@ -356,7 +356,7 @@ mod tests {
             .txn_clone_range(&mut transaction, 0..8192, &copy, 0)
             .await
             .expect("txn_clone_range failed");
-        copy.txn_update_size(&mut transaction, 8192, None).await.expect("size failed");
+        copy.txn_update_size(&mut transaction, 8192).await.expect("size failed");
         transaction.commit().await.expect("commit failed");
         std::mem::drop((source, copy));
         assert_eq!(read_file(&store, "copy").await, [0xaa; 8192]);

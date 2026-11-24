@@ -1725,27 +1725,8 @@ mod tests {
                 let data = contents(round, i);
                 let byte = data[0];
                 let mut buffer = file.allocate_buffer(data.len()).await;
-                if i == 3 {
-                    // Preallocated, then written in overwrite mode, which is copy-on-write.
-                    let len = data.len() as u64;
-                    file.truncate(len).await.expect("truncate failed");
-                    file.allocate(0..len).await.expect("allocate failed");
-                    buffer.copy_from_slice(&data);
-                    let mut transaction =
-                        file.new_transaction().await.expect("new_transaction failed");
-                    file.multi_overwrite(
-                        &mut transaction,
-                        AttributeId::DATA,
-                        &[0..len],
-                        buffer.as_mut(),
-                    )
-                    .await
-                    .expect("multi_overwrite failed");
-                    transaction.commit().await.expect("commit failed");
-                } else {
-                    buffer.fill(byte);
-                    file.write_or_append(Some(0), buffer.as_ref()).await.expect("write failed");
-                }
+                buffer.copy_from_slice(&data);
+                file.write_or_append(Some(0), buffer.as_ref()).await.expect("write failed");
                 if i == 2 {
                     let mut buffer = file.allocate_buffer(block_size as usize).await;
                     buffer.fill(!byte);

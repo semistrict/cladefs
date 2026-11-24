@@ -41,7 +41,7 @@ pub(crate) mod tree_cache;
 pub mod volume;
 
 pub use data_object_handle::{
-    DataObjectHandle, DirectWriter, ExtentAccess, FileExtent, FrozenPage, RangeType,
+    DataObjectHandle, DirectWriter, ExtentAccess, FileExtent, FrozenPage,
 };
 pub use directory::Directory;
 pub use object_record::{
@@ -511,83 +511,19 @@ impl ObjectStore {
         options: HandleOptions,
     ) -> Result<DataObjectHandle<S>, Error> {
         let store = owner.as_ref().as_ref();
-        let mut overwrite_ranges = Vec::new();
         let value = store
             .tree
             .find_value(&ObjectKey::attribute(obj_id, AttributeId::DATA, AttributeKey::Attribute))
             .await?
             .ok_or(FxfsError::NotFound)?;
 
-        let ObjectValue::Attribute { size, has_overwrite_extents: track_overwrite_extents } = value
-        else {
+        let ObjectValue::Attribute { size } = value else {
             bail!(anyhow!(FxfsError::Inconsistent).context("open_object: Expected attibute"));
         };
 
         ensure!(size <= MAX_FILE_SIZE, FxfsError::Inconsistent);
 
-        if track_overwrite_extents {
-            let layer_set = store.tree.layer_set();
-            let mut merger = layer_set.merger();
-            let mut iter = merger
-                .query(Query::FullRange(&ObjectKey::attribute(
-                    obj_id,
-                    AttributeId::DATA,
-                    AttributeKey::Extent(Extent::search_key_from_offset(0)),
-                )))
-                .await?;
-            loop {
-                match iter.get() {
-                    Some(ItemRef {
-                        key:
-                            ObjectKey {
-                                object_id,
-                                data:
-                                    ObjectKeyData::Attribute(
-                                        AttributeId::DATA,
-                                        AttributeKey::Extent(extent),
-                                    ),
-                            },
-                        value,
-                        ..
-                    }) if *object_id == obj_id => {
-                        match value {
-                            ObjectValue::Extent(ExtentValue::None)
-                            | ObjectValue::Extent(ExtentValue::Some {
-                                mode: ExtentMode::Raw,
-                                ..
-                            })
-                            | ObjectValue::Extent(ExtentValue::Some {
-                                mode: ExtentMode::Cow(_),
-                                ..
-                            }) => (),
-                            ObjectValue::Extent(ExtentValue::Some {
-                                mode: ExtentMode::OverwritePartial(_),
-                                ..
-                            })
-                            | ObjectValue::Extent(ExtentValue::Some {
-                                mode: ExtentMode::Overwrite,
-                                ..
-                            }) => overwrite_ranges.push(extent.clone().into()),
-                            _ => bail!(
-                                anyhow!(FxfsError::Inconsistent)
-                                    .context("open_object: Expected extent")
-                            ),
-                        }
-                        iter.advance().await?;
-                    }
-                    _ => break,
-                }
-            }
-        }
-
-        Ok(DataObjectHandle::new(
-            owner.clone(),
-            obj_id,
-            AttributeId::DATA,
-            size,
-            options,
-            &overwrite_ranges,
-        ))
+        Ok(DataObjectHandle::new(owner.clone(), obj_id, AttributeId::DATA, size, options))
     }
 
     pub fn create_object_with_id<S: HandleOwner>(
@@ -622,11 +558,10 @@ impl ObjectStore {
             store.store_object_id(),
             Mutation::insert_object(
                 ObjectKey::attribute(object_id, AttributeId::DATA, AttributeKey::Attribute),
-                // This is a new object so nothing has pre-allocated overwrite extents yet.
-                ObjectValue::attribute(0, false),
+                ObjectValue::attribute(0),
             ),
         );
-        Ok(DataObjectHandle::new(owner.clone(), object_id, AttributeId::DATA, 0, options, &[]))
+        Ok(DataObjectHandle::new(owner.clone(), object_id, AttributeId::DATA, 0, options))
     }
 
     /// Creates an object in the store.

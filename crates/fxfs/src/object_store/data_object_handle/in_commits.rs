@@ -75,7 +75,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             self.txn_clone_range(transaction, start..end, dst, dst_of(start)).await?;
             let reached = if end == range.end { size } else { dst_of(end).min(size) };
             if reached > dst.txn_get_size(transaction) {
-                dst.txn_update_size(transaction, reached, None).await?;
+                dst.txn_update_size(transaction, reached).await?;
             }
             if end == range.end {
                 return Ok(());
@@ -238,7 +238,7 @@ mod tests {
                 from.clone_range_in_commits(&mut transaction, 0..end, to, 0, end)
                     .await
                     .expect("clone failed");
-                to.txn_update_size(&mut transaction, end, None).await.expect("size failed");
+                to.txn_update_size(&mut transaction, end).await.expect("size failed");
                 transaction.commit().await.expect("commit failed");
             };
             let punch = async |file: &DataObjectHandle<ObjectStore>, range: Range<u64>| {
@@ -274,28 +274,6 @@ mod tests {
         for (cost, before) in costs.into_iter().zip(before) {
             assert!(cost.0 <= before.0 && cost.1 <= before.1, "{cost:?}, of {before:?}");
         }
-    }
-
-    /// cladefs: `allocate` over thousands of fragments, whose extents it changes, and whose holes it
-    /// fills, in as many transactions as it takes, none more than one may take of the journal.
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_allocate_fills_transactions() {
-        use crate::object_store::transaction::TRANSACTION_MAX_JOURNAL_USAGE;
-
-        const FRAGMENTS: usize = 2048;
-        const BS: usize = 4096;
-        let (fs, _, _, commits, hooks) = counted_filesystem(u64::MAX >> 1).await;
-        let file = create_file(&fs).await;
-        let data = vec![7u8; BS];
-        file.write_many(&every(&data, 0, 2, FRAGMENTS, BS)).await.expect("write_many failed");
-        commits.take();
-        file.allocate(0..(2 * FRAGMENTS * BS) as u64).await.expect("allocate failed");
-        let taken = commits.take();
-        assert!(taken.len() > 1, "{taken:?}");
-        assert!(taken.iter().all(|bytes| *bytes <= TRANSACTION_MAX_JOURNAL_USAGE), "{taken:?}");
-        std::mem::drop(hooks);
-        fsck(fs.clone()).await.expect("fsck failed");
-        fs.close().await.expect("close failed");
     }
 
     /// cladefs: a truncate trims what it frees in transactions of its own, committed and continued,

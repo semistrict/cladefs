@@ -636,7 +636,7 @@ mod tests {
     async fn test_object_tombstone_takes_its_data_record() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
         let key = ObjectKey::attribute(1, AttributeId::DATA, AttributeKey::Attribute);
-        let value = ObjectValue::attribute(4096, false);
+        let value = ObjectValue::attribute(4096);
         let placeholder = match cache.lookup_or_reserve(&key) {
             ObjectCacheResult::Placeholder(placeholder) => placeholder,
             _ => panic!("Expected cache miss with placeholder returned."),

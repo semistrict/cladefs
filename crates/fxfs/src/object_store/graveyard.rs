@@ -1085,7 +1085,7 @@ mod tests {
                     store.store_object_id(),
                     Mutation::insert_object(
                         ObjectKey::attribute(oid, AttributeId::DATA, AttributeKey::Attribute),
-                        ObjectValue::attribute(0, false),
+                        ObjectValue::attribute(0),
                     ),
                 );
             }

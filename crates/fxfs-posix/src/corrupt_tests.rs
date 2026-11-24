@@ -745,8 +745,6 @@ enum Record {
     OffsetPastAnyEnd,
     /// An extent's checksums, of a block more than it has.
     SumsOverKey,
-    /// An overwrite extent's bitmap, a bit short of a bit a block.
-    BitsShortOfKey,
     /// A key before the one before it.
     OutOfOrder,
     /// An extent's key over the one before it.
@@ -759,12 +757,11 @@ enum Record {
 const RECORD_CASES: u64 = 8;
 
 impl Record {
-    const ALL: [Record; 8] = [
+    const ALL: [Record; 7] = [
         Record::KeyOffBlocks,
         Record::OffsetOffBlocks,
         Record::OffsetPastAnyEnd,
         Record::SumsOverKey,
-        Record::BitsShortOfKey,
         Record::OutOfOrder,
         Record::Overlapping,
         Record::AllocationOffBlocks,
@@ -813,17 +810,6 @@ impl Record {
                     return None;
                 }
                 extent_range(&mut items[at].key)?.end -= PAGE;
-            }
-            Record::BitsShortOfKey => {
-                let (.., range) = extent_of(&items[at].key)?;
-                let ObjectValue::Extent(ExtentValue::Some { extent, extent_offset, .. }) =
-                    &items[at].value
-                else {
-                    return None;
-                };
-                let bits = ((range.end - range.start) / PAGE - 1) as usize;
-                let value = ExtentValue::blank_overwrite_extent(*extent, *extent_offset, bits);
-                items[at].value = ObjectValue::Extent(value);
             }
             Record::OutOfOrder => {
                 if items.get(at + 1)?.key.object_id != items[at].key.object_id {

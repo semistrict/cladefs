@@ -274,8 +274,6 @@ suites' `unsupported` check pins deduplication's and `MAP_SYNC`'s):
 
 - Deduplication (`FIDEDUPERANGE`, `duperemove`) reports `EOPNOTSUPP` in each
   destination's status.
-- Extents written in place (Fxfs's overwrite modes, which nothing in the guest
-  makes) can't be shared: a reflink of them fails with `EOPNOTSUPP`.
 - `MAP_SYNC` mmaps fail with `EOPNOTSUPP`: the DAX window is the host's
   memory, not persistent memory, and what is stored through it is in a private
   page until writeback writes it to the cell, and ordered once an fsync

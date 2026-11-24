@@ -64,15 +64,12 @@ use super::*;
 use fxfs::filesystem::{FlushReason, ForceMajor, FxFilesystemBuilder};
 use fxfs::fsck::{FsckOptions, fsck_with_options};
 use fxfs::hooks::Hooks;
-use fxfs::lsm_tree::Query;
-use fxfs::lsm_tree::types::{ItemRef, LayerIterator};
+use fxfs::object_store::NewChildStoreOptions;
 use fxfs::object_store::directory::{MAX_INLINE_SYMLINK, MAX_LONG_SYMLINK};
 use fxfs::object_store::graveyard::Graveyard;
 use fxfs::object_store::journal::JournalOptions;
-use fxfs::object_store::object_record::ObjectKeyData;
 use fxfs::object_store::transaction::TRANSACTION_MAX_JOURNAL_USAGE;
 use fxfs::object_store::volume::root_volume;
-use fxfs::object_store::{Extent, ExtentMode, ExtentValue, NewChildStoreOptions};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestRunner};
 use rand::rngs::StdRng;
@@ -2053,60 +2050,10 @@ impl<const KEEPS: bool> World<KEEPS> {
         Ok(())
     }
 
-    /// The pages of file `ino` whose blocks Fxfs records as written in place, as its preallocation
-    /// made them: none, since nothing of cladefs's preallocates, its writes copy-on-write.
-    async fn written_in_place(&self, ino: u64) -> Result<BTreeSet<u64>, String> {
-        let failed = |e: Error| format!("the extents of {ino}: {e:#}");
-        let layer_set = self.fs.volume.tree().layer_set();
-        let mut merger = layer_set.merger();
-        let first = AttributeKey::Extent(Extent::search_key_from_offset(0));
-        let first = ObjectKey::attribute(ino, AttributeId::DATA, first);
-        let mut extents = merger.query(Query::FullRange(&first)).await.map_err(failed)?;
-        let mut pages = BTreeSet::new();
-        while let Some(ItemRef {
-            key:
-                ObjectKey {
-                    object_id,
-                    data: ObjectKeyData::Attribute(attribute, AttributeKey::Extent(extent)),
-                },
-            value: ObjectValue::Extent(value),
-            ..
-        }) = extents.get()
-            && *object_id == ino
-            && *attribute == AttributeId::DATA
-        {
-            if let ExtentValue::Some {
-                mode: ExtentMode::Overwrite | ExtentMode::OverwritePartial(_),
-                ..
-            } = value
-            {
-                pages.extend(extent.start / PAGE..extent.end.div_ceil(PAGE));
-            }
-            extents.advance().await.map_err(failed)?;
-        }
-        Ok(pages)
-    }
-
     /// Checks the extents of file `ino` against the model, after each operation, not only when
-    /// fsck runs: none written in place, nor its data's record saying it has any, which an
-    /// allocation made, fsck refusing the flag once copy-on-write writes replaced them all
-    /// (TASK-149.39); and what a DAX window would map, which is every page written, and nothing
-    /// else.
+    /// fsck runs: what a DAX window would map, which is every page written, and nothing else.
     async fn holds_extents(&self, ino: u64) -> Result<(), String> {
         let data = &self.model.files[&ino];
-        let in_place = self.written_in_place(ino).await?;
-        if let Some(page) = in_place.first() {
-            return Err(format!(
-                "{ino} has {} pages written in place, from {page}",
-                in_place.len()
-            ));
-        }
-        let record = self.fs.volume.tree().find(&data_key(ino)).await;
-        let record =
-            record.map_err(|e| format!("the data of {ino}: {e:#}"))?.map(|item| item.value);
-        if let Some(ObjectValue::Attribute { has_overwrite_extents: true, .. }) = record {
-            return Err(format!("{ino}'s data says it has extents written in place"));
-        }
         let mapped = self.mapped(ino, 0..data.size.div_ceil(PAGE)).await?;
         let written = data.pages.keys().copied().filter(|page| page * PAGE < data.size).collect();
         if mapped != written {

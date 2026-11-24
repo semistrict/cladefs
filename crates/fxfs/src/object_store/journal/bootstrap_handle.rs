@@ -156,7 +156,7 @@ impl JournalExtentHandle {
 
     /// Writes `buf` (block-aligned) starting at journal `start` offset directly to the
     /// position-derived block extents, optionally with `PRE_BARRIER` on block 0 and `POST_BARRIER`
-    /// + `root` on the final block (matching `DataObjectHandle::overwrite` ordering).
+    /// + `root` on the final block.
     pub async fn write_blocks(
         &self,
         start: u64,

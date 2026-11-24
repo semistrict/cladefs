@@ -15,7 +15,6 @@ use crate::lsm_tree::persistent_layer::PersistentLayerWriter;
 use crate::lsm_tree::types::{Item, ItemRef, Key, LayerIterator, LayerWriter, Value};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle, WriteObjectHandle};
 use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
-use crate::object_store::data_object_handle::OverwriteOptions;
 use crate::object_store::directory::{self, Directory, MutableAttributesInternal};
 use crate::object_store::transaction::{self, LockKey, Options, lock_keys};
 use crate::object_store::volume::root_volume;
@@ -242,7 +241,7 @@ async fn test_bad_graveyard_value() {
             root_store.store_object_id(),
             Mutation::replace_or_insert_object(
                 ObjectKey::graveyard_entry(graveyard_id, 1000),
-                ObjectValue::Attribute { size: 500, has_overwrite_extents: false },
+                ObjectValue::Attribute { size: 500 },
             ),
         );
         transaction.commit().await.expect("commit failed");
@@ -817,7 +816,7 @@ async fn test_mismatched_key_and_value() {
             store.as_ref(),
             vec![Item::new(
                 ObjectKey::object(10),
-                ObjectValue::Attribute { size: 100, has_overwrite_extents: false },
+                ObjectValue::Attribute { size: 100 },
             )],
         )
         .await;
@@ -1208,7 +1207,7 @@ async fn test_invalid_extended_attribute_id() {
                         invalid_attr_id,
                         AttributeKey::Attribute,
                     ),
-                    ObjectValue::attribute(0, false),
+                    ObjectValue::attribute(0),
                 ),
                 Item::new(
                     ObjectKey::extended_attribute(
@@ -1254,7 +1253,7 @@ async fn test_orphaned_extended_attribute() {
                     AttributeId::XATTR_RANGE_START,
                     AttributeKey::Attribute,
                 ),
-                ObjectValue::attribute(100, false),
+                ObjectValue::attribute(100),
             )],
         )
         .await;
@@ -1288,7 +1287,7 @@ async fn test_orphaned_attribute() {
             store.as_ref(),
             vec![Item::new(
                 ObjectKey::attribute(10, AttributeId::TEST_ID, AttributeKey::Attribute),
-                ObjectValue::attribute(100, false),
+                ObjectValue::attribute(100),
             )],
         )
         .await;
@@ -1324,7 +1323,7 @@ async fn test_records_for_tombstoned_object() {
                 Item::new(ObjectKey::object(10), ObjectValue::None),
                 Item::new(
                     ObjectKey::attribute(10, AttributeId::TEST_ID, AttributeKey::Attribute),
-                    ObjectValue::attribute(100, false),
+                    ObjectValue::attribute(100),
                 ),
             ],
         )
@@ -1377,7 +1376,7 @@ async fn test_invalid_value_graveyard_attribute_entry() {
                 ),
                 Item::new(
                     ObjectKey::attribute(10, AttributeId::TEST_ID, AttributeKey::Attribute),
-                    ObjectValue::attribute(100, false),
+                    ObjectValue::attribute(100),
                 ),
             ],
         )
@@ -1647,7 +1646,7 @@ async fn test_file_length_mismatch() {
                     handle.attribute_id(),
                     AttributeKey::Attribute,
                 ),
-                ObjectValue::attribute(123, false),
+                ObjectValue::attribute(123),
             ),
         );
         transaction.add(
@@ -1718,7 +1717,7 @@ async fn test_blocks_reserved_past_the_end() {
                     handle.attribute_id(),
                     AttributeKey::Attribute,
                 ),
-                ObjectValue::attribute(123, false),
+                ObjectValue::attribute(123),
             ),
         );
         transaction.commit().await.expect("commit transaction failed");
@@ -2339,17 +2338,9 @@ async fn test_full_disk(read_only: bool) {
         )
         .await
         .expect("open allocator handle failed");
-        handle
-            .overwrite(
-                0,
-                buf.as_mut(),
-                OverwriteOptions { allow_allocations: true, ..Default::default() },
-            )
-            .await
-            .expect("overwrite failed");
+        handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
 
-        // Add "layer_handle" to the layer stack for the allocator but be careful not to
-        // allocate anything in the process.
+        // Add "layer_handle" to the layer stack for the allocator.
         let mut allocator_info = fs.allocator().info();
         allocator_info.layers.push(layer_handle_object_id);
         let mut allocator_info_vec = vec![];
@@ -2365,14 +2356,7 @@ async fn test_full_disk(read_only: bool) {
         )
         .await
         .expect("open allocator handle failed");
-        handle
-            .overwrite(
-                0,
-                buf.as_mut(),
-                OverwriteOptions { allow_allocations: true, ..Default::default() },
-            )
-            .await
-            .expect("overwrite failed");
+        handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
     }
     if read_only {
         test.remount().await.expect("Remount failed");
@@ -2454,108 +2438,6 @@ async fn test_delete_volume() {
 
     test.remount().await.expect("Remount failed");
     test.run(TestOptions::default()).await.expect("Fsck should succeed");
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
-async fn test_missing_overwrite_extents() {
-    let mut test = FsckTest::new().await;
-
-    {
-        let fs = test.filesystem();
-        let store = fs.root_store();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let file = root_directory
-            .create_child_file(&mut transaction, "child_file")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), file.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    file.object_id(),
-                    AttributeId::TEST_ID,
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::attribute(0, true),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-    }
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    assert_matches!(
-        test.errors()[..],
-        [FsckIssue::Error(FsckError::MissingOverwriteExtents(..)), ..]
-    );
-}
-
-#[fuchsia_async::run_singlethreaded(test)]
-async fn test_overwrite_extent_flag_not_set() {
-    let mut test = FsckTest::new().await;
-
-    {
-        let fs = test.filesystem();
-        let store = fs.root_store();
-        let root_directory =
-            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
-        let mut transaction = store
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        let file = root_directory
-            .create_child_file(&mut transaction, "child_file")
-            .await
-            .expect("create_child_file failed");
-        transaction.commit().await.expect("commit failed");
-
-        file.allocate(0..fs.block_size().get()).await.expect("allocate failed");
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(
-                lock_keys![LockKey::object(store.store_object_id(), file.object_id())],
-                Options::default(),
-            )
-            .await
-            .expect("new_transaction failed");
-        transaction.add(
-            store.store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(file.object_id(), AttributeId::DATA, AttributeKey::Attribute),
-                ObjectValue::attribute(fs.block_size().get(), false),
-            ),
-        );
-        transaction.commit().await.expect("commit failed");
-    }
-
-    test.remount().await.expect("Remount failed");
-    test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    assert_matches!(
-        test.errors()[..],
-        [FsckIssue::Error(FsckError::OverwriteExtentFlagUnset(..)), ..]
-    );
 }
 
 #[fuchsia_async::run_singlethreaded(test)]

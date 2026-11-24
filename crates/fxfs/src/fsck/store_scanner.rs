@@ -47,11 +47,6 @@ struct ScannedAttribute {
     attribute_id: AttributeId,
     // The logical size of this attribute according to its metadata.
     size: u64,
-    // The attribute metadata claims to have at least one extents with an Overwrite or
-    // OverwritePartial ExtentMode.
-    has_overwrite_extents_flag: bool,
-    // An overwrite extent was found for this attribute.
-    observed_overwrite_extents: bool,
 }
 
 // Information for scanned objects about their allocated attributes.
@@ -300,19 +295,16 @@ impl<'a> ScannedStore<'a> {
             }
             ObjectKeyData::Attribute(attribute_id, AttributeKey::Attribute) => {
                 match value {
-                    ObjectValue::Attribute { size, has_overwrite_extents } => {
+                    ObjectValue::Attribute { size } => {
                         match self.objects.get_mut(&key.object_id) {
                             Some(
                                 ScannedObject::File(ScannedFile { attributes, .. })
                                 | ScannedObject::Directory(ScannedDir { attributes, .. })
                                 | ScannedObject::Symlink(ScannedSymlink { attributes, .. }),
                             ) => {
-                                attributes.attributes.push(ScannedAttribute {
-                                    attribute_id,
-                                    size: *size,
-                                    has_overwrite_extents_flag: *has_overwrite_extents,
-                                    observed_overwrite_extents: false,
-                                });
+                                attributes
+                                    .attributes
+                                    .push(ScannedAttribute { attribute_id, size: *size });
                             }
                             Some(ScannedObject::Graveyard) => { /* NOP */ }
                             Some(ScannedObject::Tombstone) => {
@@ -564,7 +556,6 @@ impl<'a> ScannedStore<'a> {
         store_extent: ExtentId,
         device_offset: u64,
         bs: BlockSize,
-        is_overwrite_extent: bool,
     ) -> Result<(), Error> {
         if !bs.is_aligned(range) {
             self.fsck.error(FsckError::MisalignedExtent(
@@ -612,8 +603,6 @@ impl<'a> ScannedStore<'a> {
                                 range.into(),
                             ))?;
                         }
-                        attribute.observed_overwrite_extents =
-                            attribute.observed_overwrite_extents || is_overwrite_extent;
                     }
                     None => {
                         self.fsck.warning(FsckWarning::ExtentForMissingAttribute(
@@ -729,8 +718,7 @@ async fn scan_extents_and_directory_children<'a>(
                 ..
             } => {
                 // Ignore deleted extents.
-                if let ExtentValue::Some { extent: store_extent, extent_offset, mode, .. } = extent
-                {
+                if let ExtentValue::Some { extent: store_extent, extent_offset, .. } = extent {
                     let size = extent_key.length().unwrap_or(0);
                     allocated_bytes += size;
 
@@ -748,9 +736,6 @@ async fn scan_extents_and_directory_children<'a>(
                         [FragmentationStats::get_histogram_bucket_for_size(size)] += 1;
                     extent_count += 1;
 
-                    let is_overwrite_extent =
-                        matches!(mode, ExtentMode::Overwrite | ExtentMode::OverwritePartial(_));
-
                     scanned.process_extent(
                         *object_id,
                         *attribute_id,
@@ -758,7 +743,6 @@ async fn scan_extents_and_directory_children<'a>(
                         *store_extent,
                         *extent_offset,
                         bs,
-                        is_overwrite_extent,
                     )?;
                 };
             }
@@ -854,21 +838,6 @@ fn validate_attributes(
                     attribute.attribute_id,
                 ))?;
             }
-        }
-
-        if attribute.has_overwrite_extents_flag && !attribute.observed_overwrite_extents {
-            fsck.error(FsckError::MissingOverwriteExtents(
-                store_id,
-                object_id,
-                attribute.attribute_id,
-            ))?;
-        }
-        if !attribute.has_overwrite_extents_flag && attribute.observed_overwrite_extents {
-            fsck.error(FsckError::OverwriteExtentFlagUnset(
-                store_id,
-                object_id,
-                attribute.attribute_id,
-            ))?;
         }
     }
 

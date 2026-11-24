@@ -3,14 +3,13 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/object_store/store_object_handle.rs`. cladefs deviates from upstream
-// here: data lives in extents of an extent store (backlog doc-4), which are written once, so
-// `multi_overwrite` writes to new blocks (`overwrite_with_new_blocks`) rather than in place, which
-// also keeps cladefs snapshots' shared blocks as they were. Reads of extents that may never have been
-// written (raw and preallocated, or overwrite extents none of whose blocks read is written) read
-// zeros if the store doesn't hold them. `multi_write_packed` packs small writes into the staging
-// extent, which other small writes share (`Allocator::allocate_shared`): a guest's writeback.
-// Extended attributes are set in a transaction of the caller's (`set_extended_attribute_impl`,
-// public), and removed with the room it chooses (`remove_extended_attribute_with_options`).
+// here: data lives in extents of an extent store (backlog doc-4), which are written once;
+// overwrite/preallocation mode (`multi_overwrite`) is deleted (board 10600). Reads of extents that
+// may never have been written (raw extents) read zeros if the store doesn't hold them.
+// `multi_write_packed` packs small writes into the staging extent, which other small writes share
+// (`Allocator::allocate_shared`): a guest's writeback. Extended attributes are set in a transaction
+// of the caller's (`set_extended_attribute_impl`, public), and removed with the room it chooses
+// (`remove_extended_attribute_with_options`).
 
 use crate::checksum::{Checksum, Checksums};
 use crate::errors::FxfsError;
@@ -59,22 +58,6 @@ pub const MAX_XATTR_VALUE_SIZE: usize = 64000;
 
 /// cladefs: the most `read_attr` reads: merkle trees and extended attributes are far shorter.
 const MAX_ATTRIBUTE_READ: u64 = 32 << 20;
-
-/// Zeroes blocks in 'buffer' based on `bitmap`, one bit per block from start of buffer.
-fn apply_bitmap_zeroing(
-    block_size: BlockSize,
-    bitmap: &bit_vec::BitVec,
-    mut buffer: MutableBufferRef<'_>,
-) {
-    let buf = buffer.as_mut_slice();
-    debug_assert_eq!(bitmap.len() as u64 * block_size, buf.len() as u64);
-    for (i, block) in bitmap.iter().enumerate() {
-        if !block {
-            let start = (i as u64 * block_size) as usize;
-            buf[start..start + block_size.get() as usize].fill(0);
-        }
-    }
-}
 
 /// When writing, often the logic should be generic over whether or not checksums are generated.
 /// This provides that and a handy way to convert to the more general ExtentMode that eventually
@@ -828,12 +811,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 offset = extent_key.start;
             }
 
-            let mut bitmap_offset = 0;
             if extent_key.start < offset {
                 let diff = offset - extent_key.start;
                 extent_key.start = offset;
                 extent_offset += diff;
-                bitmap_offset = diff;
             }
             if (extent_key.end - extent_key.start) > buf.len() as u64 {
                 extent_key.end = extent_key.start + buf.len() as u64;
@@ -841,23 +822,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             let (mut to_read, remaining) =
                 buf.split_at_mut((extent_key.end - extent_key.start) as usize);
             buf = remaining;
-            let maybe_bitmap = match mode {
-                ExtentMode::OverwritePartial(bitmap) => {
-                    let mut read_bitmap =
-                        bitmap.clone().split_off((bitmap_offset / block_size) as usize);
-                    read_bitmap.truncate(((to_read.len() as u64) / block_size) as usize);
-                    Some(read_bitmap)
-                }
-                _ => None,
-            };
-            // cladefs: an extent may never have been written, when it is raw, as preallocated ones
-            // are, or none of what is read of it is written yet. The store then doesn't hold it
+            // cladefs: a raw extent may never have been written; the store then doesn't hold it
             // (backlog doc-4), and it reads as zeros.
-            let may_be_unwritten = match (mode, &maybe_bitmap) {
-                (ExtentMode::Raw, _) => true,
-                (ExtentMode::OverwritePartial(_), Some(bitmap)) => bitmap.none(),
-                _ => false,
-            };
+            let may_be_unwritten = matches!(mode, ExtentMode::Raw);
             reads.push(async move {
                 let read = self.read_extent(extent, extent_offset, to_read.reborrow()).await;
                 match read {
@@ -868,9 +835,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     }
                     read => {
                         read?;
-                        if let Some(bitmap) = maybe_bitmap {
-                            apply_bitmap_zeroing(block_size, &bitmap, to_read);
-                        }
                     }
                 }
                 Ok::<(), Error>(())
@@ -1117,219 +1081,6 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         crate::boxed(|| self.update_allocated_size(transaction, allocated, deallocated)).await
     }
 
-    /// Write data to overwrite extents with the provided set of ranges. This makes a strong
-    /// assumption that the ranges are actually going to be already allocated overwrite extents and
-    /// will error out or do something wrong if they aren't. It also assumes the ranges passed to
-    /// it are sorted. cladefs: nothing is written in place, as extents are written once (backlog
-    /// doc-4): what is written goes to new blocks, which replace the ranges' in the extent records,
-    /// as overwrite extents, and the old blocks are deallocated, unless a snapshot shares them.
-    pub async fn multi_overwrite<'a>(
-        &'a self,
-        transaction: &mut Transaction<'a>,
-        attr_id: AttributeId,
-        ranges: &[Range<u64>],
-        mut buf: MutableBufferRef<'_>,
-    ) -> Result<(), Error> {
-        if buf.is_empty() {
-            return Ok(());
-        }
-        let store = self.store();
-        let tree = store.tree();
-        let store_id = store.store_object_id();
-
-        let mut range_iter = ranges.iter();
-        // There should be at least one range if the buffer has data in it
-        let mut target_range = range_iter.next().unwrap().clone();
-        let mut mutations = Vec::new();
-        let mut checksums = Vec::new();
-
-        let layer_set = tree.layer_set();
-        let mut merger = layer_set.merger();
-        let mut iter = merger
-            .query(Query::FullRange(&ObjectKey::attribute(
-                self.object_id(),
-                attr_id,
-                AttributeKey::Extent(Extent::search_key_from_offset(target_range.start)),
-            )))
-            .await?;
-
-        loop {
-            match iter.get() {
-                Some(ItemRef {
-                    key:
-                        ObjectKey {
-                            object_id,
-                            data:
-                                ObjectKeyData::Attribute(attribute_id, AttributeKey::Extent(extent)),
-                        },
-                    value: ObjectValue::Extent(extent_value),
-                    ..
-                }) if *object_id == self.object_id() && *attribute_id == attr_id => {
-                    // If this extent ends before the target range starts (not possible on the
-                    // first loop because of the query parameters but possible on further loops),
-                    // advance until we find a the next one we care about.
-                    if extent.end <= target_range.start {
-                        iter.advance().await?;
-                        continue;
-                    }
-                    let (store_extent, device_offset, mode) = match extent_value {
-                        ExtentValue::None => {
-                            return Err(anyhow!(FxfsError::Inconsistent)).with_context(|| {
-                                format!(
-                                    "multi_overwrite failed: target_range ({}, {}) overlaps with \
-                                deleted extent found at ({}, {})",
-                                    target_range.start, target_range.end, extent.start, extent.end,
-                                )
-                            });
-                        }
-                        ExtentValue::Some { extent: store_extent, extent_offset, mode, .. } => {
-                            (*store_extent, *extent_offset, mode)
-                        }
-                    };
-                    // The ranges passed to this function should already by allocated, so
-                    // extent records should exist for them.
-                    if extent.start > target_range.start {
-                        return Err(anyhow!(FxfsError::Inconsistent)).with_context(|| {
-                            format!(
-                                "multi_overwrite failed: target range ({}, {}) starts before first \
-                            extent found at ({}, {})",
-                                target_range.start, target_range.end, extent.start, extent.end,
-                            )
-                        });
-                    }
-                    if let ExtentMode::Raw | ExtentMode::Cow(_) = mode {
-                        return Err(anyhow!(FxfsError::Inconsistent)).with_context(|| {
-                            format!(
-                                "multi_overwrite failed: \
-                        extent from ({}, {}) which overlaps target range ({}, {}) had the \
-                        wrong extent mode",
-                                extent.start, extent.end, target_range.start, target_range.end,
-                            )
-                        });
-                    }
-                    let extent = extent.clone();
-                    loop {
-                        let offset_within_extent = target_range.start - extent.start;
-                        let write_end = min(extent.end, target_range.end);
-                        let write_len = write_end - target_range.start;
-                        let old_device_range = ExtentRange::new(
-                            store_extent,
-                            device_offset + offset_within_extent
-                                ..device_offset + offset_within_extent + write_len,
-                        );
-                        let (current_buf, remaining_buf) = buf.split_at_mut(write_len as usize);
-                        checksums.extend(
-                            self.overwrite_with_new_blocks(
-                                transaction,
-                                attr_id,
-                                target_range.start,
-                                old_device_range,
-                                current_buf,
-                                &mut mutations,
-                            )
-                            .await?,
-                        );
-                        buf = remaining_buf;
-                        target_range.start += write_len;
-                        if target_range.start == target_range.end {
-                            match range_iter.next() {
-                                None => break,
-                                Some(next_range) => target_range = next_range.clone(),
-                            }
-                        }
-                        if extent.end <= target_range.start {
-                            break;
-                        }
-                    }
-                    if target_range.start == target_range.end {
-                        break;
-                    }
-                    iter.advance().await?;
-                }
-                // We've either run past the end of the existing extents or something is wrong with
-                // the tree. The main section should break if it finishes the ranges, so either
-                // case, this is an error.
-                _ => bail!(anyhow!(FxfsError::Internal).context(
-                    "found a non-extent object record while there were still ranges to process"
-                )),
-            }
-        }
-
-        // Only store checksums in the journal if barriers are not enabled.
-        if !store.filesystem().options().barriers_enabled {
-            for (r, c, first_write) in checksums {
-                transaction.add_checksum(r, c, first_write);
-            }
-        }
-
-        for m in mutations {
-            transaction.add(store_id, m);
-        }
-
-        Ok(())
-    }
-
-    /// cladefs: writes `buf` to the attribute at `offset`, where its overwrite extent holds the range
-    /// `old_device_range` (see `multi_overwrite`): to new blocks, which replace that range in the
-    /// extent, fully written, and deallocates it, unless a snapshot shares it. Returns the
-    /// checksums of what it wrote, which are first writes.
-    async fn overwrite_with_new_blocks(
-        &self,
-        transaction: &mut Transaction<'_>,
-        attr_id: AttributeId,
-        mut offset: u64,
-        old_device_range: ExtentRange,
-        mut buf: MutableBufferRef<'_>,
-        mutations: &mut Vec<Mutation>,
-    ) -> Result<Vec<(ExtentRange, Vec<Checksum>, bool)>, Error> {
-        let store = self.store();
-        let store_id = store.store_object_id();
-        let allocator = store.allocator();
-        let mut checksums = Vec::new();
-        while !buf.is_empty() {
-            let remaining = buf.len() as u64;
-            // Overwriting is expected to need no space, so nothing reserved space for new blocks.
-            if let Some(reservation) = transaction.allocator_reservation {
-                let extra = allocator
-                    .clone()
-                    .reserve(Some(store_id), remaining)
-                    .ok_or(FxfsError::NoSpace)
-                    .context("reserving space for the blocks overwritten")?;
-                extra.move_to(reservation, remaining);
-            }
-            let device_range = allocator.allocate(transaction, store_id, remaining).await?;
-            let len = device_range.len();
-            let (current_buf, remaining_buf) = buf.split_at_mut(len as usize);
-            match self
-                .write_aligned(
-                    current_buf.as_ref(),
-                    device_range.extent,
-                    device_range.range.start,
-                    WriteOptions::default(),
-                )
-                .await?
-            {
-                MaybeChecksums::None => {}
-                MaybeChecksums::Fletcher(sums) => {
-                    checksums.push((device_range.clone(), sums, true))
-                }
-            }
-            mutations.push(Mutation::merge_object(
-                ObjectKey::extent(self.object_id(), attr_id, (offset..offset + len).into()),
-                ObjectValue::Extent(ExtentValue::new(
-                    device_range.extent,
-                    device_range.range.start,
-                    ExtentMode::Overwrite,
-                )),
-            ));
-            offset += len;
-            buf = remaining_buf;
-        }
-        // The shared blocks stay allocated while a snapshot shares them.
-        allocator.deallocate(transaction, store_id, old_device_range).await?;
-        Ok(checksums)
-    }
-
     /// Writes an attribute that should not already exist and therefore does not require trimming.
     /// Breaks up the write into multiple transactions if `data.len()` is larger than `batch_size`.
     /// If writing the attribute requires multiple transactions, adds the attribute to the
@@ -1346,7 +1097,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             self.store().store_object_id,
             Mutation::replace_or_insert_object(
                 ObjectKey::attribute(self.object_id(), attribute_id, AttributeKey::Attribute),
-                ObjectValue::attribute(data.len() as u64, false),
+                ObjectValue::attribute(data.len() as u64),
             ),
         );
         let chunks = data.chunks(batch_size);
@@ -1405,12 +1156,8 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             .find_map(
                 &ObjectKey::attribute(self.object_id(), attribute_id, AttributeKey::Attribute),
                 |item| match item.value {
-                    ObjectValue::Attribute { size: _, has_overwrite_extents: true } => {
-                        Err(anyhow!(FxfsError::Inconsistent)
-                            .context("write_attr on an attribute with overwrite extents"))
-                    }
-                    ObjectValue::Attribute { size, .. } => Ok((data.len() as u64) < *size),
-                    _ => Err(FxfsError::Inconsistent.into()),
+                    ObjectValue::Attribute { size } => Ok((data.len() as u64) < *size),
+                    _ => Err(anyhow!(FxfsError::Inconsistent)),
                 },
             )
             .await?
@@ -1425,7 +1172,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             self.store().store_object_id,
             Mutation::replace_or_insert_object(
                 ObjectKey::attribute(self.object_id(), attribute_id, AttributeKey::Attribute),
-                ObjectValue::attribute(data.len() as u64, false),
+                ObjectValue::attribute(data.len() as u64),
             ),
         );
         if should_trim {
@@ -1742,7 +1489,7 @@ mod tests {
             .expect("create_object failed");
         let key =
             ObjectKey::attribute(handle.object_id(), AttributeId::TEST_ID, AttributeKey::Attribute);
-        let value = ObjectValue::attribute(u64::MAX, false);
+        let value = ObjectValue::attribute(u64::MAX);
         transaction.add(store.store_object_id(), Mutation::replace_or_insert_object(key, value));
         transaction.commit().await.expect("commit failed");
 
@@ -2515,7 +2262,7 @@ mod tests {
             object.store().store_object_id,
             Mutation::replace_or_insert_object(
                 ObjectKey::attribute(object.object_id(), attribute_id, AttributeKey::Attribute),
-                ObjectValue::attribute(block_size * 2, false),
+                ObjectValue::attribute(block_size * 2),
             ),
         );
         transaction.commit().await.unwrap();

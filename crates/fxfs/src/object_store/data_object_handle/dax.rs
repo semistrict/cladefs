@@ -10,7 +10,7 @@ use super::{DataObjectHandle, FileExtent};
 use crate::lsm_tree::Query;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::ObjectHandle;
-use crate::object_store::extent_record::{ExtentMode, ExtentValue};
+use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::{Extent, HandleOwner};
 use anyhow::Error;
@@ -78,65 +78,26 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             && *attribute_id == self.attribute_id()
             && key.start < range.end
         {
-            if let ObjectValue::Extent(ExtentValue::Some { extent, extent_offset, mode, .. }) =
-                value
+            if let ObjectValue::Extent(ExtentValue::Some { extent, extent_offset, .. }) = value
                 && key.end > range.start
             {
                 let clipped = max(key.start, range.start)..min(key.end, range.end);
                 let access =
                     if device.is_open(*extent) { ExtentAccess::Open } else { ExtentAccess::Sealed };
-                for part in written(mode, key, clipped, self.block_size().get()) {
-                    let device_start = extent_offset + (part.start - key.start);
-                    let device_range = ExtentRange::new(
-                        *extent,
-                        device_start..device_start + (part.end - part.start),
-                    );
-                    extents.push((FileExtent::new(part.start, device_range)?, access));
-                    if extents.len() == limit {
-                        return Ok(extents);
-                    }
+                let device_start = extent_offset + (clipped.start - key.start);
+                let device_range = ExtentRange::new(
+                    *extent,
+                    device_start..device_start + (clipped.end - clipped.start),
+                );
+                extents.push((FileExtent::new(clipped.start, device_range)?, access));
+                if extents.len() == limit {
+                    return Ok(extents);
                 }
             }
             iter.advance().await?;
         }
         Ok(extents)
     }
-}
-
-/// cladefs: the parts of `range`, of an extent of `mode` holding a file's `key`, that hold what was
-/// written: all of it, but of an allocation's extent, whose bitmap says which of its blocks were,
-/// those written alone. The others the device doesn't hold, and they read as zeros, as holes do: a
-/// window mapping them would map what isn't there (TASK-149.36).
-fn written<'a>(
-    mode: &'a ExtentMode,
-    key: &Range<u64>,
-    range: Range<u64>,
-    block_size: u64,
-) -> impl Iterator<Item = Range<u64>> + 'a {
-    let key_start = key.start;
-    let mut at = range.start;
-    std::iter::from_fn(move || {
-        if at >= range.end {
-            return None;
-        }
-        let ExtentMode::OverwritePartial(bitmap) = mode else {
-            let start = at;
-            at = range.end;
-            return Some(start..at);
-        };
-        let mut start = None;
-        while at < range.end {
-            let block = (at - key_start) / block_size;
-            let from = at;
-            at = min(range.end, key_start + (block + 1) * block_size);
-            if bitmap.get(block as usize).unwrap_or(false) {
-                start.get_or_insert(from);
-            } else if let Some(start) = start {
-                return Some(start..from);
-            }
-        }
-        start.map(|start| start..at)
-    })
 }
 
 #[cfg(test)]
@@ -172,28 +133,6 @@ mod tests {
             .await
             .expect("sync failed");
         assert_eq!(extents_in(5..2 * bs - 1).await, vec![(5..2 * bs - 1, ExtentAccess::Sealed)]);
-        fs.close().await.expect("close failed");
-    }
-
-    /// cladefs: of what an allocation made, `extents_in` gives what was written since alone: the
-    /// device doesn't hold the rest, which reads as zeros, as holes do, and a window that mapped it
-    /// would map what isn't there (TASK-149.36).
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_extents_in_leaves_out_what_an_allocation_left_unwritten() {
-        let (fs, object) = test_filesystem_and_object_with(false).await;
-        let bs = fs.block_size().get();
-        object.allocate(0..4 * bs).await.expect("allocate failed");
-        let extents_in = async |range: Range<u64>| {
-            let extents = object.extents_in(range).await.expect("extents_in failed");
-            extents.into_iter().map(|(e, _)| e.logical_range()).collect::<Vec<_>>()
-        };
-        assert_eq!(extents_in(0..4 * bs).await, Vec::<Range<u64>>::new());
-
-        let mut buf = object.allocate_buffer(bs as usize).await;
-        buf.fill(3);
-        object.write_or_append(Some(bs), buf.as_ref()).await.expect("write failed");
-        assert_eq!(extents_in(0..4 * bs).await, vec![bs..2 * bs]);
-        assert_eq!(extents_in(bs + 5..3 * bs).await, vec![bs + 5..2 * bs]);
         fs.close().await.expect("close failed");
     }
 }

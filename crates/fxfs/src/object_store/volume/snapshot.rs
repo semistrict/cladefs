@@ -123,14 +123,12 @@ impl RootVolume {
 #[cfg(test)]
 mod tests {
     use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, SyncOptions};
-    use crate::object_handle::{ObjectHandle, WriteObjectHandle};
-    use crate::object_store::directory::Directory;
     use crate::object_store::journal::JournalOptions;
     use crate::object_store::transaction::{LockKey, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::volume::testing::{delete_volume, open_file, read_file, write_file};
     use crate::object_store::volume::tests::do_fsck;
-    use crate::object_store::{HandleOptions, NewChildStoreOptions, ObjectStore};
+    use crate::object_store::{NewChildStoreOptions, ObjectStore};
     use fuchsia_async as fasync;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -471,79 +469,6 @@ mod tests {
         let filesystem = FxFilesystem::open(device).await.expect("open failed");
         do_fsck(&filesystem, None).await;
         assert_eq!(nonzero(&filesystem.allocator()), baseline);
-        filesystem.close().await.expect("Close failed");
-    }
-
-    /// cladefs: overwriting a preallocated file's blocks that a snapshot shares writes new blocks,
-    /// leaving the snapshot's as they were.
-    #[fuchsia_async::run_singlethreaded(test)]
-    async fn test_snapshot_volume_overwrite_extents() {
-        let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-        let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
-        let block = filesystem.block_size().get() as usize;
-        {
-            let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let source = root
-                .new_volume("source", NewChildStoreOptions::default())
-                .await
-                .expect("new_volume failed");
-            write_file(&filesystem, &source, "file", &[]).await;
-            let root_directory = Directory::open(&source, source.root_directory_object_id())
-                .await
-                .expect("open failed");
-            let (object_id, _) =
-                root_directory.lookup("file").await.expect("lookup failed").expect("not found");
-            let handle = ObjectStore::open_object(&source, object_id, HandleOptions::default())
-                .await
-                .expect("open_object failed");
-            handle.truncate(10 * block as u64).await.expect("truncate failed");
-            handle.allocate(0..10 * block as u64).await.expect("allocate failed");
-            let overwrite = |range: std::ops::Range<usize>, byte: u8| {
-                let handle = &handle;
-                async move {
-                    let mut buf = handle.allocate_buffer(range.end - range.start).await;
-                    buf.as_mut().fill(byte);
-                    let mut transaction = handle.new_transaction().await.expect("transaction");
-                    handle
-                        .multi_overwrite(
-                            &mut transaction,
-                            crate::object_store::AttributeId::DATA,
-                            &[range.start as u64..range.end as u64],
-                            buf.as_mut(),
-                        )
-                        .await
-                        .expect("multi_overwrite failed");
-                    transaction.commit().await.expect("commit failed");
-                }
-            };
-            overwrite(0..2 * block, 0xaa).await;
-            let snapshot =
-                root.snapshot_volume("source", "snapshot").await.ok().expect("snapshot failed");
-            // A file open across the snapshot, and an unwritten block.
-            overwrite(0..block, 0xbb).await;
-            overwrite(5 * block..6 * block, 0xcc).await;
-
-            let mut expected_snapshot = vec![0; 10 * block];
-            expected_snapshot[..2 * block].fill(0xaa);
-            let mut expected_source = expected_snapshot.clone();
-            expected_source[..block].fill(0xbb);
-            expected_source[5 * block..6 * block].fill(0xcc);
-            assert_eq!(read_file(&snapshot, "file").await, expected_snapshot);
-            assert_eq!(read_file(&source, "file").await, expected_source);
-        }
-        filesystem.sync(SyncOptions::default()).await.expect("sync failed");
-        do_fsck(&filesystem, Some("source")).await;
-        do_fsck(&filesystem, Some("snapshot")).await;
-        delete_volume(&filesystem, "snapshot").await;
-        do_fsck(&filesystem, Some("source")).await;
-        {
-            let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
-            let source = root.volume("source").await.expect("volume failed");
-            let contents = read_file(&source, "file").await;
-            assert_eq!(&contents[..block], &vec![0xbb; block][..]);
-            assert_eq!(&contents[block..2 * block], &vec![0xaa; block][..]);
-            assert_eq!(&contents[5 * block..6 * block], &vec![0xcc; block][..]);
-        }
         filesystem.close().await.expect("Close failed");
     }
 

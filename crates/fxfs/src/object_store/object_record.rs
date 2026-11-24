@@ -22,7 +22,7 @@ use crate::lsm_tree::types::{
 };
 use crate::object_store::ProjectId;
 use crate::object_store::extent::{Extent, ExtentPartitionIterator};
-use crate::object_store::extent_record::{ExtentValue, ExtentValueV65};
+use crate::object_store::extent_record::{ExtentValue, ExtentValueV66};
 use crate::serialized_types::Versioned;
 use fprint::TypeFingerprint;
 use fxfs_macros::SerializeKey;
@@ -659,9 +659,9 @@ pub enum ObjectValueV66 {
     /// The value for an ObjectKey::Object record.
     Object { kind: ObjectKindV66, attributes: ObjectAttributesV49 },
     /// An attribute associated with a file object. |size| is the size of the attribute in bytes.
-    Attribute { size: u64, has_overwrite_extents: bool },
+    Attribute { size: u64 },
     /// An extent associated with an object.
-    Extent(ExtentValueV65),
+    Extent(ExtentValueV66),
     /// A child of an object.
     Child(ChildValue),
     /// Graveyard entries can contain these entries which will cause a file that has extents beyond
@@ -764,8 +764,8 @@ impl ObjectValue {
         }
     }
     /// Creates an ObjectValue for an object attribute.
-    pub fn attribute(size: u64, has_overwrite_extents: bool) -> ObjectValue {
-        ObjectValue::Attribute { size, has_overwrite_extents }
+    pub fn attribute(size: u64) -> ObjectValue {
+        ObjectValue::Attribute { size }
     }
     /// Creates an ObjectValue for an insertion/replacement of an object extent.
     pub fn extent(extent: ExtentId, extent_offset: u64) -> ObjectValue {

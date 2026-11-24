@@ -2129,7 +2129,6 @@ mod tests {
     async fn test_layer_items_are_checked_as_they_are_read() {
         use crate::checksum::Checksums;
         use crate::object_store::{ExtentMode, ExtentValue, ObjectValue};
-        use bit_vec::BitVec;
         use storage_device::ExtentId;
 
         let extent = ExtentId::new(1, 1);
@@ -2139,21 +2138,16 @@ mod tests {
             Item::new(key, ObjectValue::Extent(ExtentValue::new(extent, offset, mode)))
         };
         let sums = |count| ExtentMode::Cow(Checksums::fletcher(vec![7; count]));
-        let bits = |count| ExtentMode::OverwritePartial(BitVec::from_elem(count, true));
         let after = Item::new(ObjectKey::object(3), ObjectValue::Some);
 
-        let valid = [extent_item(0..8192, 4096, sums(2)), extent_item(0..8192, 0, bits(2))];
-        let mut items = vec![before.clone()];
-        items.push(valid[0].clone());
-        items.push(after.clone());
+        let valid = extent_item(0..8192, 4096, sums(2));
+        let items = vec![before.clone(), valid, after.clone()];
         let layer = layer_of(&items).await;
         let mut iterator = layer.seek(Bound::Unbounded).await.expect("seek failed");
         for item in &items {
             assert_eq!(iterator.get(), Some(item.as_item_ref()));
             iterator.advance().await.expect("advance failed");
         }
-        let layer = layer_of(&[before.clone(), valid[1].clone(), after.clone()]).await;
-        layer.seek(Bound::Included(&valid[1].key)).await.expect("seek failed");
 
         for invalid in [
             // Off the filesystem's blocks.
@@ -2164,10 +2158,6 @@ mod tests {
             // Checksums that don't divide it into blocks.
             extent_item(0..8192, 0, sums(3)),
             extent_item(0..8192, 0, sums(4)),
-            // Bitmaps short of a bit a block, or over.
-            extent_item(0..8192, 0, bits(1)),
-            extent_item(0..8192, 0, bits(3)),
-            extent_item(0..8192, 0, bits(0)),
         ] {
             read_until_refused(&[before.clone(), invalid, after.clone()], 1).await;
         }
@@ -3131,7 +3121,7 @@ mod read_cost {
             items.push(Item::new(ObjectKey::object(object_id), file));
             let attribute =
                 ObjectKey::attribute(object_id, AttributeId::DATA, AttributeKey::Attribute);
-            items.push(Item::new(attribute, ObjectValue::attribute(EXTENTS << 16, false)));
+            items.push(Item::new(attribute, ObjectValue::attribute(EXTENTS << 16)));
             let extent = ExtentId::new(object_id, 1);
             for index in 0..EXTENTS {
                 let range = index << 16..(index + 1) << 16;
