@@ -1395,8 +1395,7 @@ cladefs_gc_peak_resident_bytes 67108864
 
     /// board 8511's AC #1: `--lease` and `--every` take finite counts of seconds, from a
     /// millisecond to a year: anything else is a usage error, never a panic or a count cast into
-    /// range; and the counts and rates of the other flags likewise. doc-27: `--grace` and
-    /// `--compact-below` are gone, usage errors too.
+    /// range; and the counts and rates of the other flags likewise.
     #[test]
     fn counts_out_of_range_are_usage_errors() {
         let parsed = |flags: &[&str]| {
@@ -1414,8 +1413,6 @@ cladefs_gc_peak_resident_bytes 67108864
             &["--every", "0"],
             &["--lease", "0.0001"],
             &["--every", "0.0001"],
-            &["--grace", "0"],
-            &["--compact-below", "0.5"],
             &["--at-once", "0"],
             &["--max-delete-objects", "0"],
             &["--max-delete-objects", "-1"],

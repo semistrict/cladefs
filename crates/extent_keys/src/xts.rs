@@ -42,16 +42,6 @@ impl Xts {
         Self::new(&key.derive(salt, &[info, b"data"]), &key.derive(salt, &[info, b"tweak"]))
     }
 
-    /// Encrypts `unit` in place, a data unit of a multiple of 16 bytes, numbered `number`.
-    pub fn encrypt_unit(&self, number: u128, unit: &mut [u8]) {
-        self.unit(number, unit, true);
-    }
-
-    /// Decrypts `unit` in place, as [`Xts::encrypt_unit`] encrypted it.
-    pub fn decrypt_unit(&self, number: u128, unit: &mut [u8]) {
-        self.unit(number, unit, false);
-    }
-
     /// Encrypts `sectors` in place, whole sectors ([`SECTOR`]), the first of them numbered `first`
     /// and each after it one more: the place of each in its file, which a sector's tweak is.
     pub fn encrypt(&self, first: u64, sectors: &mut [u8]) {
@@ -168,9 +158,9 @@ mod tests {
         let plain: Vec<u8> = (0..512).map(|at| at as u8).collect();
         for (number, vector) in [(0xff, VECTOR_10), (0xffff, VECTOR_11)] {
             let mut unit = plain.clone();
-            xts.encrypt_unit(number, &mut unit);
+            xts.unit(number, &mut unit, true);
             assert_eq!(unit, bytes(vector), "vector of unit {number:#x}");
-            xts.decrypt_unit(number, &mut unit);
+            xts.unit(number, &mut unit, false);
             assert_eq!(unit, plain, "vector of unit {number:#x}, decrypted");
         }
     }

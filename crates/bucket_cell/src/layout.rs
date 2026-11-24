@@ -84,10 +84,10 @@ pub struct Child {
 /// host's incarnation's tombstone ([`ephemeral_index`], [`decommissioned`], boards 8517, 8519);
 /// nothing reads 26's, whose entries were by incarnation alone, in the bucket of the daemon that
 /// wrote them, which no decommissioning would find. 28: the collector compacts nothing, its writers
-/// relocating out of their sparse segments (doc-27 step 2): no moves, and a cell holding the moves
-/// of 27's is refused ([`Kind::Former`]); nothing reads 27's. 29: a cell's head is one object,
-/// swapped in place (doc-27 step 4): no slots, no marks, and a bucket's identity holds no settings;
-/// a cell holding the head slots of 28's is refused ([`Kind::Former`]); nothing reads 28's. 30: its
+/// relocating out of their sparse segments (doc-27 step 2): no moves; nothing reads 27's. 29: a
+/// cell's head is one object, swapped in place (doc-27 step 4): no slots, no marks, and a bucket's
+/// identity holds no settings; a cell holding the head slots of 28's is refused ([`Kind::Former`]);
+/// nothing reads 28's. 30: its
 /// framed objects are extent frames of version 3, their version a number (board 10040); nothing
 /// reads 29's, whose frames were of 2.
 pub const FORMAT: u32 = 30;
@@ -98,8 +98,6 @@ pub const TENANTS: &str = "tenants/";
 /// the cell keep there; never a pass's candidate (TASK-395.2).
 const GC: &str = "gc/";
 const GC_LEASE: &str = "gc/lease";
-/// Under a cell's prefix, in formats before 29, the moves of its objects ([`Kind::Former`]).
-const MOVES: &str = "moves/";
 /// Under a cell's prefix, in formats before 29, the slots of its head ([`Kind::Former`]).
 const HEAD_SLOTS: &str = "head/";
 /// cladefs: under a cell's prefix, the references of forks of its cells ([`reference`]).
@@ -482,9 +480,8 @@ pub enum Kind {
         cell: CellId,
     },
     /// cladefs: a key of the cell's of a format before this one that nothing of this one makes or
-    /// reads (doc-27): the collector's moves of an object (27's), and the slots of a head kept in
-    /// many objects (28's), of `format`, the newest that wrote such a key. Refused
-    /// ([`crate::Error::Format`]) where found.
+    /// reads (doc-27): the slots of a head kept in many objects (28's), of `format`, the newest
+    /// that wrote such a key. Refused ([`crate::Error::Format`]) where found.
     Former {
         cell: CellId,
         format: u32,
@@ -635,9 +632,6 @@ pub fn kind(key: &str) -> Kind {
             return Some(Kind::Kek { tenant: number(tenant)? });
         }
         let (cell, rest) = in_cell(key)?;
-        if rest.starts_with(MOVES) {
-            return Some(Kind::Former { cell, format: 27 });
-        }
         if rest.starts_with(HEAD_SLOTS) {
             return Some(Kind::Former { cell, format: 28 });
         }
@@ -1179,12 +1173,11 @@ mod tests {
         // cladefs: what mark-only passes marked, which went (board 10545): of no kind now.
         assert_eq!(kind(&format!("{}gc/marks/000000000001a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
-        // cladefs: the collector's moves and a head's slots, of formats before 29 (doc-27):
-        // refused where found.
-        let from = segment(cell, 7, 2);
+        // cladefs: format 27's moves are Kind::Unknown (board 10612); a head's slots of format 28
+        // are refused where found (doc-27).
         let of = "segments/0000000000002.0000000000007";
         let moves = format!("{}moves/{of}/0000000000001", cell.prefix());
-        assert_eq!(kind(&moves), Kind::Former { cell, format: 27 });
+        assert_eq!(kind(&moves), Kind::Unknown);
         let slot = format!("{}head/0000000000003", cell.prefix());
         assert_eq!(kind(&slot), Kind::Former { cell, format: 28 });
         let child = CellId { tenant: 1, id: 5 };
@@ -1274,14 +1267,14 @@ mod tests {
         assert_eq!(kind(&unwritten), Kind::Unknown);
         assert_eq!(kind("gc/lease"), Kind::Unknown);
         assert_eq!(kind("gc/marks/000000000001a"), Kind::Unknown);
-        assert_eq!(kind(&format!("moves/{from}")), Kind::Unknown);
+        assert_eq!(kind(&format!("moves/{}", segment(cell, 7, 2))), Kind::Unknown);
         assert_eq!(cell_of_prefix(&cell.prefix()), Some(cell));
         assert_eq!(cell_of_prefix(&head(cell)), None);
         assert_eq!(cell_of_prefix(""), None);
     }
 
-    /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, the moves and head slots
-    /// of formats before 29 too, its collector's lease, and the references under it, of forks of its
+    /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, the head slots of
+    /// formats before 29 too, its collector's lease, and the references under it, of forks of its
     /// cells to other cells; object-ID blocks and keys of no kind are no cell's.
     #[test]
     fn owners() {
@@ -1293,7 +1286,6 @@ mod tests {
             checkpoint(cell, 7, 2),
             head(cell),
             format!("{}head/0000000000003", cell.prefix()),
-            format!("{}moves/segments/0000000000002.0000000000007/0000000000001", cell.prefix()),
             collector_lease(cell),
             reference(cell, 7, child),
             retired(cell, 7, child),
@@ -1309,6 +1301,7 @@ mod tests {
             BUCKETS.to_owned(),
             "probe/0000000000001".to_owned(),
             "moves/probe/0000000000001".to_owned(),
+            format!("{}moves/segments/0000000000002.0000000000007/0000000000001", cell.prefix()),
             format!("{}heads/3", cell.prefix()),
         ];
         for key in keys {

@@ -3742,12 +3742,6 @@ impl<D: Dir> LocalCell<D> {
         Arc::new(CellLogSource { dir: self.dir.clone(), cell: self.cell, keys: self.keys.clone() })
     }
 
-    /// cladefs: its write-ahead log's start: the commit before its first segment, the last its
-    /// cell's head names as far as it knows (TASK-537.3.3).
-    pub fn wal_start(&self) -> Result<Option<u64>, Error> {
-        Ok(self.state()?.wal.start())
-    }
-
     /// cladefs: its replicator, if it replicates.
     pub fn replicator(&self) -> Option<Arc<Replicator>> {
         self.replicator.lock().unwrap().clone()

@@ -9,9 +9,7 @@
 
 use crate::Error;
 use crate::bucket::{self, Bucket, ByteRange};
-use crate::layout;
-use extent_frame::{Frame, Keys, NoKeys, Parts, TRAILER};
-use serde::de::DeserializeOwned;
+use extent_frame::{Frame, Keys, NoKeys, Parts};
 
 /// How many bytes of an object's end a read of its tail reads at first: its trailer, its table and
 /// its footer, if they fit, as they do for a segment naming up to about 2,000 extents, one of
@@ -82,27 +80,11 @@ pub async fn tail(bucket: &impl Bucket, key: &str) -> Result<Option<Tail>, Error
     Ok(Some(Tail::of(key, bytes)?))
 }
 
-/// The footer of the object at `key`, if there is one: a ranged read of its trailer, then one of
-/// its footer, checked against its CRC.
-pub async fn footer<T: DeserializeOwned>(
-    bucket: &impl Bucket,
-    key: &str,
-) -> Result<Option<T>, Error> {
-    let Some(trailer) = bucket::get_range(bucket, key, ByteRange::Suffix(TRAILER)).await? else {
-        return Ok(None);
-    };
-    let frame = Frame::of_trailer(&trailer)?;
-    let Some(footer) = bucket::get_range(bucket, key, ByteRange::Bounded(frame.footer())).await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(layout::decode(frame.check_footer(&footer, &NoKeys)?)?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bucket::PutMode;
+    use crate::layout;
     use crate::testing::{Direct, SimBucket};
     use futures::executor::block_on;
     use std::sync::Arc;

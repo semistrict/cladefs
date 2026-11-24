@@ -1483,7 +1483,7 @@ impl Pass {
                 }
                 // Once no segment will name it.
                 Kind::Extent { .. } => goes(!named && !self.ahead(kind)),
-                // cladefs: the moves of formats before 28, which nothing of this one reads.
+                // cladefs: the head slots of formats before 29, which nothing of this one reads.
                 Kind::Former { cell, format } => return Err(Error::Format { cell, format }),
                 // A head stays, a deleted cell's too, final, fencing its writers, which no swap of
                 // theirs passes (TASK-174); but with a dead cell that goes whole
@@ -3416,26 +3416,25 @@ mod tests {
         assert_eq!(leases, Vec::<String>::new());
     }
 
-    /// doc-27: a cell holding the collector's moves of format 27, which nothing of this format
+    /// doc-27: a cell holding the head slots of format 28, which nothing of this format
     /// reads, is refused, and nothing of it deleted.
     #[test]
-    fn cells_holding_moves_of_format_27_are_refused() {
+    fn cells_holding_head_slots_of_format_28_are_refused() {
         let bucket = memory_bucket();
         let cell = test_cell(1);
         block_on(async {
             lifecycle::create(&*bucket, cell, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
-            let extents = vec![(extent, b"moved".to_vec())];
+            let extents = vec![(extent, b"held".to_vec())];
             commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
-            let of = "segments/0000000000000.0000000000010";
-            let moves = format!("{}moves/{of}/0000000000001", cell.prefix());
-            assert_eq!(layout::kind(&moves), Kind::Former { cell, format: 27 });
-            let created = bucket::create(&*bucket, &moves, b"format 27's moves".to_vec());
+            let slot = format!("{}head/0000000000003", cell.prefix());
+            assert_eq!(layout::kind(&slot), Kind::Former { cell, format: 28 });
+            let created = bucket::create(&*bucket, &slot, b"format 28's head slot".to_vec());
             assert!(matches!(created.await.unwrap(), Created::Created(_)));
         });
         let before = block_on(keys(&*bucket));
-        assert_eq!(block_on(collect(&*bucket, 1)), Err(Error::Format { cell, format: 27 }));
+        assert_eq!(block_on(collect(&*bucket, 1)), Err(Error::Format { cell, format: 28 }));
         assert_eq!(block_on(keys(&*bucket)), before);
     }
 

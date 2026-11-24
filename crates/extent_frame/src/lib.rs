@@ -1018,19 +1018,6 @@ impl Packer {
         self.stored.iter().all(|stored| stored.encoding == Encoding::Raw)
     }
 
-    /// cladefs: packs `stored`, the object's first parts as stored, each raw, compressing none, as
-    /// [`Packer::push`] stores those that don't compress: the object's bytes are `stored` itself,
-    /// as it is, where it is, which this doesn't return (TASK-310). Whole parts, but for the last.
-    /// Of an object framed in place ([`Packer::in_place`]): a raw file's sectors, their
-    /// ciphertext, each part tagged (TASK-411.23).
-    pub fn push_raw(&mut self, stored: &[u8]) {
-        let first = self.next_part();
-        let parts = (stored.chunks(PART as usize).zip(first..))
-            .map(|(part, index)| RawPart::of(index, part, self.raw_key()))
-            .collect::<Vec<_>>();
-        self.push_raw_parts(parts);
-    }
-
     /// cladefs: its key, of an object framed in place, raw: a raw file's sectors key
     /// ([`Packer::in_place`]).
     fn raw_key(&self) -> &ObjectKey {
@@ -1038,8 +1025,10 @@ impl Packer {
         &self.key
     }
 
-    /// cladefs: [`Packer::push_raw`], of parts given by their lengths, CRCs and tags
-    /// ([`RawPart::of`]), as a cell reads and checksums them on threads of its own (TASK-336).
+    /// cladefs: packs the object's first parts as stored, each raw, compressing none, given by
+    /// their lengths, CRCs and tags ([`RawPart::of`]), as a cell reads and checksums them on
+    /// threads of its own (TASK-336): of an object framed in place ([`Packer::in_place`]), a raw
+    /// file's sectors, their ciphertext, each part tagged (TASK-411.23).
     pub fn push_raw_parts(&mut self, parts: impl IntoIterator<Item = RawPart>) {
         assert_eq!(self.end, 0, "raw parts first");
         self.raw_key();
@@ -1592,8 +1581,7 @@ mod tests {
     }
 
     /// cladefs: parts packed one at a time pack as `push` packs them all (TASK-336), encrypted and
-    /// authenticated (TASK-411.2, TASK-411.3); and raw parts of a raw file's sectors given one at a
-    /// time as all at once (TASK-411.23).
+    /// authenticated (TASK-411.2, TASK-411.3).
     #[test]
     fn parts_packed_one_at_a_time_pack_as_all_at_once() {
         let mut data: Vec<u8> = (0..5 * PART as usize).map(|i| (i / 4096 % 7) as u8).collect();
@@ -1623,14 +1611,6 @@ mod tests {
             assert!(!one.stored_raw(), "parts compressed");
             assert_eq!(one.finish(b"footer"), all.finish(b"footer"));
         }
-        let sectors = &data[..data.len() / SECTOR * SECTOR];
-        let mut raw = Packer::in_place(raw_file_key(salt));
-        raw.push_raw(sectors);
-        let mut given = Packer::in_place(raw_file_key(salt));
-        let parts = (sectors.chunks(PART as usize).zip(0..))
-            .map(|(part, index)| RawPart::of(index, part, &raw_file_key(salt)));
-        given.push_raw_parts(parts);
-        assert_eq!(given.finish(b"footer"), raw.finish(b"footer"));
     }
 
     /// TASK-411.2: a part packed for another index than its object's next, or compressed alone
@@ -1662,7 +1642,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "an encrypted object's bytes are not its data")]
     fn encrypted_objects_store_no_parts_as_they_are() {
-        encrypted_with(Salt([3; SALT_LEN])).push_raw(b"data");
+        encrypted_with(Salt([3; SALT_LEN])).push_raw_parts([]);
     }
 
     /// Objects hold their data in parts, compressed, each where the table says, and their footers;
@@ -2050,6 +2030,15 @@ mod tests {
         Arc::new(ObjectKey::sectors(&dek(), ID, salt))
     }
 
+    /// Packs encrypted raw file sectors into `packer` as raw parts.
+    fn push_raw_sectors(packer: &mut Packer, stored: &[u8]) {
+        let first = packer.next_part();
+        let parts: Vec<_> = (stored.chunks(PART as usize).zip(first..))
+            .map(|(part, index)| RawPart::of(index, part, packer.key()))
+            .collect();
+        packer.push_raw_parts(parts);
+    }
+
     /// The bytes of an encrypted raw file holding `data`, whole sectors, under `key`, then its
     /// tail, framed in place, as an encrypted cell frames a segment or a large extent
     /// (TASK-411.23).
@@ -2057,7 +2046,7 @@ mod tests {
         let mut bytes = data.to_vec();
         key.encrypt_sectors(0, &mut bytes);
         let mut packer = Packer::in_place(key.clone());
-        packer.push_raw(&bytes);
+        push_raw_sectors(&mut packer, &bytes);
         assert_eq!(packer.end(), bytes.len() as u64, "its data where it is");
         bytes.extend(packer.finish(footer));
         bytes
@@ -2112,7 +2101,7 @@ mod tests {
         assert_eq!(read.unwrap(), &data[PART as usize - 3..3 * PART as usize + 5]);
         // Its writer reads it as a reader holding its key does.
         let mut packer = Packer::in_place(key.clone());
-        packer.push_raw(&raw);
+        push_raw_sectors(&mut packer, &raw);
         assert_eq!(packer.finish_parts(b"footer").1, parts);
         // Restamped under its key, its parts as they are.
         let restamped = restamp(&bytes, b"another", &keys).unwrap();

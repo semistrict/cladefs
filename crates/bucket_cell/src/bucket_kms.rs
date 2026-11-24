@@ -611,18 +611,6 @@ impl ByBucket {
         }
     }
 
-    /// The bucket KMSes chosen so far, by their buckets' numbers: the host's own bucket's under its
-    /// number, or 0 if it has none.
-    pub fn bucket_kmses(&self) -> Vec<(u16, Arc<BucketKms<ObjectBucket>>)> {
-        let mut all: Vec<_> =
-            self.buckets.lock().unwrap().iter().map(|(n, kms)| (*n, kms.clone())).collect();
-        if let HostKms::Bucket(kms) = &self.own {
-            let own = self.own_number.lock().unwrap().unwrap_or(NAMED);
-            all.push((own, kms.clone()));
-        }
-        all
-    }
-
     /// Shreds `tenant` in every bucket it reaches (doc-16, Shredding; TASK-633.6): its KEK object
     /// replaced by a tombstone in each bucket under a bucket KMS ([`BucketKms::destroy`]), the
     /// host's own first, then each other bucket the registry records, its copy in the host's

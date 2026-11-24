@@ -1210,12 +1210,6 @@ impl CellKeys {
         Self::taken(cell, head, (head.epoch + 1, holder), kms)
     }
 
-    /// The keys of `cell`, which has no head: none, nothing writing it. Not a cell in the clear:
-    /// none is (TASK-411.28).
-    pub fn headless(cell: CellId, kms: Arc<CachingKms>) -> Self {
-        Self { cell, keks: Vec::new(), taking: (0, 0), kms, shredded: false }
-    }
-
     fn taken(cell: CellId, head: &Head, taking: (u64, u64), kms: Arc<CachingKms>) -> Self {
         Self { cell, keks: head.keks.clone(), taking, kms, shredded: head.shredded }
     }

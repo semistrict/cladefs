@@ -11,6 +11,6 @@
                  // Once no segment will name it.
 -                Kind::Extent { .. } => goes(!named && !self.ahead(kind)),
 +                Kind::Extent { .. } => goes(!named),
-                 // cladefs: the moves of formats before 28, which nothing of this one reads.
+                 // cladefs: the head slots of formats before 29, which nothing of this one reads.
                  Kind::Former { cell, format } => return Err(Error::Format { cell, format }),
                  // A head stays, a deleted cell's too, final, fencing its writers, which no swap of

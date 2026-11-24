@@ -6,15 +6,10 @@
 //! (doc-7, Layout), rather than take a segment a cell closed. Closed on the writer's chain, it is
 //! the writer's next segment, framed as the cell frames its own ([`Unframed::frame`]), which the
 //! writer takes as it takes a cell's ([`Writer::add_segment`](crate::Writer::add_segment)).
-//!
-//! What is too much to hold at once, what a local cell holds that the bucket's doesn't, goes in
-//! segments planned by the lengths of the extents they seal ([`Plan`]), whose objects read their
-//! data only as they upload ([`objects`]).
 
 use crate::layout::{self, CellId, Chain, Contents, Footer, NewVersion, Segment};
-use crate::writer::{Body, Objects};
+use crate::writer::Objects;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 use storage_device::ExtentId;
 
 /// A commit: the extents it seals, which it minted, stored in its segment or, `own`, by their
@@ -42,11 +37,11 @@ impl Commit {
 }
 
 /// What one segment's commits make, by the lengths of the extents they seal: the contents of its
-/// footer, once closed on its writer's chain ([`Plan::close`]); the extents in its data one after
-/// another, from where its data begins. cladefs: as a cell's segment does, its footer seals what
-/// its commits sealed that the cell holds as of its last, and frees what they freed that a commit
-/// held: one sealed by a commit and freed by a later is a free alone, which spends it; one a commit
-/// seals and frees itself no commit held, and is neither (TASK-160.15, TASK-165.3).
+/// footer, once closed on its writer's chain; the extents in its data one after another, from where
+/// its data begins. cladefs: as a cell's segment does, its footer seals what its commits sealed
+/// that the cell holds as of its last, and frees what they freed that a commit held: one sealed by
+/// a commit and freed by a later is a free alone, which spends it; one a commit seals and frees
+/// itself no commit held, and is neither (TASK-160.15, TASK-165.3).
 #[derive(Default)]
 pub struct Plan {
     /// Its commits' tags, root, capacity, and the next sequence number as of them: its footer's
@@ -60,8 +55,6 @@ pub struct Plan {
     frees: Vec<(ExtentId, usize)>,
     /// How long its data is: where the next extent sealed in it goes.
     data: u64,
-    /// The bytes of the extents it seals, in its data and on their own.
-    bytes: u64,
 }
 
 impl Plan {
@@ -70,14 +63,14 @@ impl Plan {
     pub fn seal(&mut self, extent: ExtentId, len: u64) {
         self.extents.push(((extent, self.data, len), self.committing()));
         self.data += len;
-        self.sealed(extent.sequence, len);
+        self.sealed(extent.sequence);
     }
 
     /// Seals the extent of the cell whose sequence number is `sequence`, of `len` bytes, on its
     /// own. The cell's next sequence number is past it.
     pub fn seal_own(&mut self, sequence: u64, len: u64) {
         self.own.push(((sequence, len), self.committing()));
-        self.sealed(sequence, len);
+        self.sealed(sequence);
     }
 
     /// The index of the commit being made.
@@ -85,15 +78,9 @@ impl Plan {
         self.contents.commits.len()
     }
 
-    /// An extent of `sequence`, of `len` bytes, is sealed.
-    fn sealed(&mut self, sequence: u64, len: u64) {
-        self.bytes += len;
+    /// An extent of `sequence` is sealed.
+    fn sealed(&mut self, sequence: u64) {
         self.contents.next_sequence = self.contents.next_sequence.max(sequence + 1);
-    }
-
-    /// The bytes of the extents it seals, in its data and on their own.
-    pub fn bytes(&self) -> u64 {
-        self.bytes
     }
 
     /// Commits what it seals, as commit `tag`, which frees `frees`, and sets `root` and the
@@ -153,73 +140,10 @@ impl Plan {
         contents
     }
 
-    /// Closes it on `chain`, as the writer's next segment, which the chain goes on after: its
-    /// footer, stamped, whose objects read their data as they upload ([`objects`]).
-    pub fn close(self, chain: &mut Chain) -> Footer {
-        self.close_ending(chain, Vec::new())
-    }
-
-    /// Closes it on `chain`, as [`Plan::close`] does, with the versions `versions` cut at its
-    /// end (TASK-476).
+    /// Closes it on `chain`, with the versions `versions` cut at its end (TASK-476).
     fn close_ending(self, chain: &mut Chain, versions: Vec<NewVersion>) -> Footer {
         chain.close(Contents { versions, ..self.contents(chain.cell()) })
     }
-}
-
-/// How the data of an extent a planned segment seals is read ([`objects`]): into a buffer of its
-/// length.
-pub type Read = Arc<dyn Fn(ExtentId, &mut [u8]) -> std::io::Result<()> + Send + Sync>;
-
-/// The objects of the segment `footer` stamps, a plan's ([`Plan::close`]), and of the extents it
-/// says are stored on their own, by their keys: each read, its extents' data by `read`, and framed,
-/// only as it uploads. cladefs: encrypted under `encrypting`, the writer's DEK and which it is
-/// (TASK-411.3). cladefs: refused as corrupt if an extent of it ends past a u64 (board 8545): a
-/// footer a WAL's replay may read off the host's disk; one whose extents a read reaches past the
-/// data fails that read.
-pub fn objects(
-    footer: Footer,
-    read: Read,
-    (dek, id): (Arc<extent_frame::Secret>, extent_frame::KeyId),
-) -> Result<Objects, crate::Error> {
-    let own = (footer.own())
-        .map(|(extent, location)| {
-            let (len, read, dek) = (location.len, read.clone(), dek.clone());
-            let body = Body::new(len, move || {
-                let mut data = vec![0; usize::try_from(len).map_err(std::io::Error::other)?];
-                read(extent, &mut data)?;
-                Ok(layout::own_extent(extent, &data, (&dek, id)))
-            });
-            (location.key.clone(), body)
-        })
-        .collect();
-    let len = data_len(&footer).ok_or_else(|| {
-        crate::Error::Corrupt(format!("segment {}: an extent past a u64", footer.segment))
-    })?;
-    let framed = footer.clone();
-    let segment = Body::new(len, move || {
-        let size = usize::try_from(len).map_err(std::io::Error::other)?;
-        let mut data = vec![0; size];
-        for &(extent, offset, len) in &framed.contents.extents {
-            // Past what this host addresses: no range, refused below.
-            let range = usize::try_from(offset).ok().zip(usize::try_from(len).ok());
-            let range = range.and_then(|(offset, len)| Some(offset..offset.checked_add(len)?));
-            let Some(into) = range.and_then(|range| data.get_mut(range)) else {
-                let past = format!("{extent:?} at {offset} of {len} bytes, past {size}");
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, past));
-            };
-            read(extent, into)?;
-        }
-        Ok(Segment { data, footer: framed.clone() }.encode((&dek, id)))
-    });
-    Ok(Objects { footer, segment, own, data_len: len })
-}
-
-/// cladefs: the length of the data of the segment `footer` stamps: where its last extent ends;
-/// none if one ends past a u64 (board 8545).
-#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-fn data_len(footer: &Footer) -> Option<u64> {
-    (footer.contents.extents.iter())
-        .try_fold(0u64, |most, &(_, offset, len)| Some(most.max(offset.checked_add(len)?)))
 }
 
 /// Commits for one segment, in order: what they make ([`Plan`]), its data, and that of the
@@ -441,69 +365,5 @@ mod tests {
         assert_eq!(footer.contents.frees, [small, large, inherited]);
         let own: Vec<_> = objects.own.iter().map(|(key, _)| key.clone()).collect();
         assert_eq!(own, [key]);
-    }
-
-    /// A segment planned by the lengths of the extents it seals frames what a batch of the same
-    /// commit frames, its footer, data and extents of their own: reading their data only as each
-    /// object is read.
-    #[test]
-    fn plans_frame_as_batches_do() {
-        let (small, other, large) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 5));
-        let data = std::collections::BTreeMap::from([
-            (small, b"small".to_vec()),
-            (other, b"other!".to_vec()),
-            (large, b"large".to_vec()),
-        ]);
-        let (freed, root) = (ExtentId::new(1, 1), Some(b"root".to_vec()));
-        let commit = Commit {
-            tag: 7,
-            extents: vec![(small, data[&small].clone()), (other, data[&other].clone())],
-            own: vec![(large.sequence, data[&large].clone())],
-            frees: vec![freed],
-            root: root.clone(),
-            capacity: Some(1 << 20),
-        };
-        let chain = Chain::new(test_cell(1), 2, 0, 0);
-        let batch = SegmentBuilder::from(commit)
-            .close(&mut chain.clone())
-            .frame(crate::testing::encrypting(test_cell(1)));
-        let mut plan = Plan::default();
-        for (extent, own) in [(small, false), (other, false), (large, true)] {
-            let len = data[&extent].len() as u64;
-            match own {
-                true => plan.seal_own(extent.sequence, len),
-                false => plan.seal(extent, len),
-            }
-        }
-        assert_eq!(plan.bytes(), 16);
-        plan.commit(7, vec![freed], root, Some(1 << 20));
-        let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let read: Read = {
-            let reads = reads.clone();
-            Arc::new(move |extent, into: &mut [u8]| {
-                reads.lock().unwrap().push(extent);
-                into.copy_from_slice(&data[&extent]);
-                Ok(())
-            })
-        };
-        let (dek, id) = crate::testing::encrypting(test_cell(1));
-        let encrypting = (Arc::new(extent_frame::Secret::from_bytes(dek.expose())), id);
-        let planned = objects(plan.close(&mut chain.clone()), read, encrypting).unwrap();
-        assert_eq!(planned.footer, batch.footer);
-        let read = || reads.lock().unwrap().clone();
-        assert_eq!(read(), []);
-        // Each encrypted under a salt of its own: alike once opened.
-        let keys = crate::testing::ring([test_cell(1)]);
-        let opened = |bytes: Vec<u8>| {
-            let footer: Footer = layout::footer(&bytes).unwrap();
-            (footer, layout::data_under(&bytes, &keys.of(1)).unwrap())
-        };
-        assert_eq!(opened(planned.segment.read().unwrap()), opened(batch.segment.read().unwrap()));
-        assert_eq!(read(), [small, other]);
-        let [(key, own)] = &planned.own[..] else { panic!("{} of their own", planned.own.len()) };
-        assert_eq!(key, &batch.own[0].0);
-        let opened = |bytes: Vec<u8>| layout::data_under(&bytes, &keys.of(1)).unwrap();
-        assert_eq!(opened(own.read().unwrap()), opened(batch.own[0].1.read().unwrap()));
-        assert_eq!(read(), [small, other, large]);
     }
 }

@@ -382,11 +382,6 @@ impl Memory {
         })
     }
 
-    /// The shared part cache backing `recent`.
-    pub fn recent_parts(&self) -> &Arc<PartMemory> {
-        &self.recent
-    }
-
     /// Bytes held in cached object tails.
     pub fn tails_bytes(&self) -> u64 {
         self.tails.lock().unwrap().bytes

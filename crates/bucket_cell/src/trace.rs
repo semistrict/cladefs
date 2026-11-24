@@ -248,14 +248,6 @@ impl Span {
     pub fn parent(&self) -> Parent {
         Parent(self.0.clone())
     }
-
-    /// `future`, around which it is ([`Span::around`]), ending as `future` does: a span of an
-    /// operation another task runs, as a page-in spawned.
-    pub async fn instrument<F: Future>(self, future: F) -> F::Output {
-        let output = self.around(future).await;
-        drop(self);
-        output
-    }
 }
 
 /// A span, as the parent of what another task does for it ([`Span::parent`]), which ends it not.
